@@ -18,11 +18,12 @@ description: >-
 
 ## Session protocol
 1. **Start the warm daemon.** `aua daemon start` — holds the device connection + loaded models warm so each later call is ~tens of ms instead of paying Python/connect startup. Optional; every command still works without it.
-2. **Load the app's known layout.** `aua map` (or `aua map --brief` to start) prints what the tool already knows about this app — its screens, their key elements, and the routes between them — so you navigate instead of rediscovering. `aua map --find "<goal>"` gives just the route to a target.
-3. **Drive by element ID.** `aua --format compact analyze` → a list of elements each with an integer `id` + bounds. Act on the id: `aua tap <id>`, `aua input <id> "text"`, `aua swipe up`, `aua key back`. Use `aua has "<text>"` (exit 0/1) to branch cheaply without parsing JSON.
-4. **Re-analyze after every action.** IDs are only valid until the screen changes. After any tap/input/swipe/key, run `analyze` again before acting — old ids are stale.
-5. **Wait on state, never sleep.** `aua wait --for "<text>"` waits for text to appear; `aua wait --for-stable` returns once the screen stops visually changing (cheap perceptual-hash over screenshots — ideal for image generation / loading / video, works on opaque screens). Prefer these to fixed sleeps.
-6. **Stop the daemon when done.** `aua daemon stop` releases the warm connection.
+2. **Use what memory already knows.** `aua map` (or `aua map --brief`) prints the app's known screens + routes — but you usually don't need to call it: every `analyze` already returns `meta.known_screen` plus inline `meta.known_routes` / `meta.suggested_gotos` / `meta.map_hint`. Act on those instead of re-exploring. `aua map --find "<goal>"` gives just the route to a target.
+3. **Jump to a known screen in one call.** `aua goto "<goal>"` drives the remembered route to a screen — it taps and verifies each hop for you, turning multi-step navigation into a single command (prefer it whenever `suggested_gotos` lists your target). `--plan` prints the route without acting; if the route diverges it stops and hands back the remaining steps + the current screen.
+4. **Drive by element ID.** `aua --format compact analyze` → a list of elements each with an integer `id` + bounds. Act on the id: `aua tap <id>`, `aua input <id> "text"`, `aua swipe up`, `aua key back`. Use `aua has "<text>"` (exit 0/1) to branch cheaply without parsing JSON.
+5. **Re-analyze after every action.** IDs are only valid until the screen changes. After any tap/input/swipe/key, run `analyze` again before acting — old ids are stale.
+6. **Wait on state, never sleep.** `aua wait --for "<text>"` waits for text to appear; `aua wait --for-stable` returns once the screen stops visually changing (cheap perceptual-hash over screenshots — ideal for image generation / loading / video, works on opaque screens). Prefer these to fixed sleeps.
+7. **Stop the daemon when done.** `aua daemon stop` releases the warm connection.
 
 ## Flag placement (this bites people)
 **Global** flags go BEFORE the subcommand; **command** flags after.
@@ -32,6 +33,7 @@ description: >-
 - _has_: `--match exact|contains|regex`, `--ignore-case`, `--ocr-fallback/--no-ocr-fallback`, `--timeout <ms>`
 - _wait_: `--for "<text>"`, `--idle`, `--for-stable`, `--interval`, `--settle`, `--timeout`
 - _map_: `--app <pkg>`, `--brief`, `--screen <name>`, `--depth N`, `--find "<goal>"`, `--json`
+- _goto_: `<goal>` (fuzzy), `--plan` (route only, no taps), `--max-steps N`
 
 ## The loop
 ```bash
@@ -62,7 +64,7 @@ aua --format compact analyze --source vision --annotate
 `meta.annotated_image` is a PNG with numbered boxes you can open.
 
 ## App memory (auto-recorded)
-The tool maintains a persistent, **local-only** map per app under `memory.dir` (default `~/.android-ui-analyser`). Every `analyze` records the current screen and every state-changing action records a route edge — no extra calls, and the daemon path records too. Read it back with `aua map` / `aua map --find "<goal>"`. On a revisit, `meta.known_screen` names the recognised screen; a changed signature or app version flags it `stale` so you re-verify. Only the **durable skeleton** is stored (screens, routes, stable elements); dynamic lists are stored as a *shape*, and `EditText` values / secrets / PII are redacted (`<filled>` / `<redacted>`). Manage with `aua memory show|path|update|forget`.
+The tool maintains a persistent, **local-only** map per app under `memory.dir` (default `~/.android-ui-analyser`). Every `analyze` records the current screen and every state-changing action records a route edge — no extra calls, and the daemon path records too. Read it back with `aua map` / `aua map --find "<goal>"`. On a revisit, `meta.known_screen` names the recognised screen; a changed signature or app version flags it `stale` so you re-verify. Only the **durable skeleton** is stored (screens, routes, stable elements); dynamic lists are stored as a *shape*, and `EditText` values / secrets / PII are redacted (`<filled>` / `<redacted>`). The map is pushed to you inline on every `analyze` (`meta.known_routes` / `meta.suggested_gotos` / `meta.map_hint`), ranked by your recent navigation so the screens you use most surface first; `aua goto "<goal>"` drives a remembered route in one call. Manage with `aua memory show|path|update|forget`.
 
 ## Output schema (read these fields)
 ```json
@@ -73,7 +75,8 @@ The tool maintains a persistent, **local-only** map per app under `memory.dir` (
                   "clickable", "enabled", "focused",
                   "source": "hierarchy|detection|ocr|grounding", "confidence" } ],
   "meta":     { "duration_ms", "tier_used", "path", "providers_used",
-                "known_screen", "annotated_image", "device_serial" } }
+                "known_screen", "known_routes", "suggested_gotos", "map_hint",
+                "annotated_image", "device_serial" } }
 ```
 `compact` drops null/default fields for the smallest token footprint.
 

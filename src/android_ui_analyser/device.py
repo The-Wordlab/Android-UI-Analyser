@@ -113,6 +113,10 @@ class Device(ABC):
     def wait_idle(self, timeout_ms: int = 5000) -> None:  # overridden by real device
         return None
 
+    def close(self) -> None:  # overridden by real device
+        """Release the device connection / on-device agent (no-op by default)."""
+        return None
+
     def scroll_to(
         self,
         query: str,
@@ -180,6 +184,18 @@ class Uiautomator2Device(Device):
                 f"could not connect to device '{self.serial}': {exc}",
                 hint="Run `aua devices` and check the emulator/phone is reachable via adb.",
             ) from exc
+
+    def close(self) -> None:
+        """Stop the on-device uiautomator2 server, releasing the UiAutomation slot.
+
+        Without this, the server (an ``app_process``) survives ``aua daemon stop`` and
+        blocks other tools (adb ``uiautomator dump``, Maestro) that need UiAutomation.
+        """
+        d = self._d
+        self._d = None
+        if d is not None:
+            with contextlib.suppress(Exception):
+                d.stop_uiautomator()
 
     def _call(self, name: str, *args: Any, **kwargs: Any) -> Any:
         """Invoke a uiautomator2 attribute (method OR property) with one auto-reconnect.

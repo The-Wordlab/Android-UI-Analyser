@@ -26,6 +26,7 @@ import contextlib
 import json
 import logging
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -155,6 +156,14 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
             # Returns a plain dict (not a pydantic model).
             return _result_ok(engine.memory_update(**args))
 
+        elif cmd == "goto":
+            # Memory autopilot — returns a plain dict (route/hops/handoff).
+            return _result_ok(engine.goto(**args))
+
+        elif cmd == "orient":
+            # What the tool already knows about the foreground app (plain dict).
+            return _result_ok(engine.orient())
+
         elif cmd == "list_devices":
             devices = engine.list_devices()
             return _result_ok(_serialize(devices))
@@ -216,6 +225,8 @@ def serve(
         srv.settimeout(0.5)  # non-blocking so we can check _stop_event
 
         logger.info("daemon listening on %s", sock_path)
+        with contextlib.suppress(OSError):  # pidfile so `daemon stop` can signal this process
+            Path(sock_path + ".pid").write_text(str(os.getpid()))
         if ready_event is not None:
             ready_event.set()
 
@@ -237,9 +248,15 @@ def serve(
                     conn.close()
 
     finally:
+        # Release the device + its on-device uiautomator2 server so the UiAutomation slot
+        # is free for adb/Maestro after the daemon exits (otherwise it leaks).
+        with contextlib.suppress(Exception):
+            engine.close()
         srv.close()
         with contextlib.suppress(FileNotFoundError):
             os.unlink(sock_path)
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(sock_path + ".pid")
         logger.info("daemon stopped, socket removed: %s", sock_path)
 
 
@@ -333,7 +350,9 @@ class DaemonClient:
         try:
             resp = self.call("ping")
             return bool(resp.get("ok")) and resp.get("result") == "pong"
-        except OSError:
+        except (OSError, json.JSONDecodeError):
+            # A daemon mid-shutdown may accept the connection but send nothing (empty line
+            # → JSONDecodeError); treat any non-response as "not running".
             return False
 
 
@@ -391,17 +410,33 @@ def start(config: Config, *, serial: str | None = None) -> dict[str, Any]:
 
 
 def stop(config: Config) -> dict[str, Any]:
-    """Ask the daemon to stop by sending a stop request (best-effort)."""
+    """Stop the daemon by signalling its process, so it runs cleanup on the way out.
+
+    SIGTERM is caught by the daemon and trips its stop-event; the accept loop exits and
+    ``serve``'s finally releases the device + on-device uiautomator2 server (freeing the
+    UiAutomation slot for adb/Maestro). Falls back to unlinking the socket if no pidfile.
+    """
     sock = socket_path(config)
+    pid_file = sock + ".pid"
     if not is_running(config):
+        for path in (sock, pid_file):
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(path)
         return {"running": False, "socket": sock, "status": "not_running"}
-    # We don't have a "shutdown" command wired into dispatch; just remove the socket
-    # so new connections fail, then wait briefly.
-    with contextlib.suppress(FileNotFoundError):
-        os.unlink(sock)
-    # Give the daemon's accept loop a moment to notice the socket is gone.
-    time.sleep(0.2)
-    return {"running": False, "socket": sock, "status": "stopped"}
+    try:
+        pid = int(Path(pid_file).read_text().strip())
+    except (OSError, ValueError):
+        pid = None
+    if pid is not None:
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.kill(pid, signal.SIGTERM)
+        deadline = time.monotonic() + 5.0  # let it run engine.close() on the way out
+        while time.monotonic() < deadline and is_running(config):
+            time.sleep(0.1)
+    for path in (sock, pid_file):
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(path)
+    return {"running": is_running(config), "socket": sock, "status": "stopped"}
 
 
 def status(config: Config) -> dict[str, Any]:
@@ -432,4 +467,9 @@ if __name__ == "__main__":
     from .engine import Engine
 
     eng = Engine(cfg)
-    serve(eng, ns.socket)
+    _stop = threading.Event()
+    # SIGTERM/SIGINT trip the accept loop's stop-event so serve()'s finally runs (which
+    # closes the device + on-device uiautomator2 server — releasing the UiAutomation slot).
+    signal.signal(signal.SIGTERM, lambda *_: _stop.set())
+    signal.signal(signal.SIGINT, lambda *_: _stop.set())
+    serve(eng, ns.socket, _stop_event=_stop)

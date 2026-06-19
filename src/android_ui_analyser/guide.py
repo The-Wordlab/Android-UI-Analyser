@@ -42,10 +42,18 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "still works without it.",
     ),
     (
-        "Load the app's known layout",
-        "`aua map` (or `aua map --brief` to start) prints what the tool already knows about this "
-        "app — its screens, their key elements, and the routes between them — so you navigate "
-        'instead of rediscovering. `aua map --find "<goal>"` gives just the route to a target.',
+        "Use what memory already knows",
+        "`aua map` (or `aua map --brief`) prints the app's known screens + routes — but you "
+        "usually don't need to call it: every `analyze` already returns `meta.known_screen` plus "
+        "inline `meta.known_routes` / `meta.suggested_gotos` / `meta.map_hint`. Act on those "
+        'instead of re-exploring. `aua map --find "<goal>"` gives just the route to a target.',
+    ),
+    (
+        "Jump to a known screen in one call",
+        '`aua goto "<goal>"` drives the remembered route to a screen — it taps and verifies each '
+        "hop for you, turning multi-step navigation into a single command (prefer it whenever "
+        "`suggested_gotos` lists your target). `--plan` prints the route without acting; if the "
+        "route diverges it stops and hands back the remaining steps + the current screen.",
     ),
     (
         "Drive by element ID",
@@ -108,6 +116,7 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "map",
         '`--app <pkg>`, `--brief`, `--screen <name>`, `--depth N`, `--find "<goal>"`, `--json`',
     ),
+    ("goto", "`<goal>` (fuzzy), `--plan` (route only, no taps), `--max-steps N`"),
 ]
 
 
@@ -212,7 +221,10 @@ def render_markdown(*, brief: bool = False) -> str:
         "`meta.known_screen` names the recognised screen; a changed signature or app version "
         "flags it `stale` so you re-verify. Only the **durable skeleton** is stored (screens, "
         "routes, stable elements); dynamic lists are stored as a *shape*, and `EditText` values / "
-        "secrets / PII are redacted (`<filled>` / `<redacted>`). Manage with "
+        "secrets / PII are redacted (`<filled>` / `<redacted>`). The map is pushed to you "
+        "inline on every `analyze` (`meta.known_routes` / `meta.suggested_gotos` / "
+        "`meta.map_hint`), ranked by your recent navigation so the screens you use most surface "
+        'first; `aua goto "<goal>"` drives a remembered route in one call. Manage with '
         "`aua memory show|path|update|forget`."
     )
 
@@ -228,7 +240,8 @@ def render_markdown(*, brief: bool = False) -> str:
     p.append('                  "clickable", "enabled", "focused",')
     p.append('                  "source": "hierarchy|detection|ocr|grounding", "confidence" } ],')
     p.append('  "meta":     { "duration_ms", "tier_used", "path", "providers_used",')
-    p.append('                "known_screen", "annotated_image", "device_serial" } }')
+    p.append('                "known_screen", "known_routes", "suggested_gotos", "map_hint",')
+    p.append('                "annotated_image", "device_serial" } }')
     p.append("```")
     p.append("`compact` drops null/default fields for the smallest token footprint.")
 
@@ -269,7 +282,9 @@ def render_json() -> dict[str, object]:
         ],
         "memory": (
             "Per-app map auto-recorded locally under memory.dir; read via `aua map`; "
-            "meta.known_screen on revisit; durable skeleton only; values/secrets redacted."
+            "meta.known_screen + inline meta.known_routes/suggested_gotos/map_hint on revisit "
+            '(ranked by recent navigation); `aua goto "<goal>"` drives a remembered route; '
+            "durable skeleton only; values/secrets redacted."
         ),
         "schema_fields": {
             "top": ["schema_version", "screen", "elements", "meta"],
@@ -293,6 +308,9 @@ def render_json() -> dict[str, object]:
                 "path",
                 "providers_used",
                 "known_screen",
+                "known_routes",
+                "suggested_gotos",
+                "map_hint",
                 "annotated_image",
                 "device_serial",
             ],

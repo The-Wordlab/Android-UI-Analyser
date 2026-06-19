@@ -615,6 +615,32 @@ def wait(
     _run(ctx, go)
 
 
+# --------------------------------------------------------------------------- navigate
+
+
+@app.command()
+def goto(
+    ctx: typer.Context,
+    goal: str = typer.Argument(..., help="Target screen/goal (fuzzy match against memory)."),
+    plan: bool = typer.Option(False, "--plan", help="Print the route only; do not act."),
+    max_steps: int = typer.Option(8, "--max-steps", help="Max hops before handing off."),
+) -> None:
+    """Navigate to a known screen using app memory — drives and verifies each hop (§6b).
+
+    Resolves the goal against the learned map, then taps along the shortest route from the
+    current screen, confirming ``known_screen`` after every hop. Stops and returns the
+    remaining route + current screen if anything diverges. ``--plan`` prints the route only.
+    """
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        result = _route(engine, "goto", goal=goal, plan=plan, max_steps=max_steps)
+        _emit(result, fmt)
+        if isinstance(result, dict) and result.get("ok") is False:
+            raise typer.Exit(1)
+
+    _run(ctx, go)
+
+
 # --------------------------------------------------------------------------- device/session
 
 
@@ -674,6 +700,13 @@ def daemon(
                 "action": "daemon-start",
                 "detail": daemon_mod.status(cfg),
             }
+            # Best-effort: surface what we already know about the foreground app, so an
+            # agent that starts the daemon first immediately sees the map + top gotos.
+            if daemon_mod.is_running(cfg):
+                try:
+                    out["orientation"] = _route(engine, "orient")
+                except Exception:  # noqa: BLE001 - orientation is purely advisory
+                    logger.debug("daemon-start orientation unavailable")
         elif a == "stop":
             daemon_mod.stop(cfg)
             out = {"ok": True, "action": "daemon-stop"}

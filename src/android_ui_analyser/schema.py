@@ -156,6 +156,11 @@ class Meta(BaseModel):
     path: PathKind
     providers_used: list[str] = Field(default_factory=list)
     known_screen: str | None = None  # recognised app-map screen name (PRD §6b, §8)
+    # Navigation affordances pushed inline from app memory (§6b) so an agent gets them on
+    # the analyze it already runs, instead of having to remember to call `aua map`.
+    known_routes: list[str] = Field(default_factory=list)  # ["tap 'Apps' → apps", ...]
+    suggested_gotos: list[str] = Field(default_factory=list)  # ["goto image_creator", ...]
+    map_hint: str | None = None  # e.g. "12 screens mapped — run `aua map`"
     annotated_image: str | None = None
     device_serial: str | None = None
 
