@@ -62,9 +62,12 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         'Use `aua has "<text>"` (exit 0/1) to branch cheaply without parsing JSON.',
     ),
     (
-        "Re-analyze after every action",
-        "IDs are only valid until the screen changes. After any tap/input/swipe/key, run "
-        "`analyze` again before acting — old ids are stale.",
+        "Re-analyze after every action — or fold it in with `--observe`",
+        "IDs are only valid until the screen changes. After any tap/input/swipe/key the old "
+        "ids are stale. Instead of a separate `analyze`, pass `--observe` to the action: it "
+        "returns the post-action screen inline (`observation.elements` with fresh ids), so "
+        "`type → tap send` is two calls, not three. (`goto` already returns the destination's "
+        "`elements`.) Use a plain `analyze` only when you also need to wait for the screen to settle.",
     ),
     (
         "Wait on state, never sleep",
@@ -117,6 +120,11 @@ KEY_FLAGS: list[tuple[str, str]] = [
         '`--app <pkg>`, `--brief`, `--screen <name>`, `--depth N`, `--find "<goal>"`, `--json`',
     ),
     ("goto", "`<goal>` (fuzzy), `--plan` (route only, no taps), `--max-steps N`"),
+    (
+        "actions (tap/input/swipe/scroll-to/key/…)",
+        "`--observe` — return the post-action screen inline (fresh element ids), skipping a "
+        "follow-up `analyze`",
+    ),
 ]
 
 

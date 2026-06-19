@@ -438,11 +438,14 @@ def has(
 def tap(
     ctx: typer.Context,
     element_id: int = typer.Argument(..., metavar="ID", help="Element id to tap."),
+    observe: bool = typer.Option(
+        False, "--observe", help="Also return the screen after the tap (skips a follow-up analyze)."
+    ),
 ) -> None:
     """Tap an element (by id from the last analyze)."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(_route(engine, "tap", element_id=element_id), fmt)
+        _emit(_route(engine, "tap", element_id=element_id, observe=observe), fmt)
 
     _run(ctx, go)
 
@@ -451,11 +454,12 @@ def tap(
 def click_cmd(
     ctx: typer.Context,
     element_id: int = typer.Argument(..., metavar="ID", help="Element id to tap (alias of tap)."),
+    observe: bool = typer.Option(False, "--observe", help="Also return the post-tap screen."),
 ) -> None:
     """Alias of ``tap``."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(_route(engine, "tap", element_id=element_id), fmt)
+        _emit(_route(engine, "tap", element_id=element_id, observe=observe), fmt)
 
     _run(ctx, go)
 
@@ -465,11 +469,12 @@ def long_press(
     ctx: typer.Context,
     element_id: int = typer.Argument(..., metavar="ID", help="Element id to long-press."),
     ms: int = typer.Option(600, "--ms", help="Press duration in milliseconds."),
+    observe: bool = typer.Option(False, "--observe", help="Also return the post-action screen."),
 ) -> None:
     """Long-press an element."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(_route(engine, "long_press", element_id=element_id, ms=ms), fmt)
+        _emit(_route(engine, "long_press", element_id=element_id, ms=ms, observe=observe), fmt)
 
     _run(ctx, go)
 
@@ -480,11 +485,24 @@ def input_cmd(
     element_id: int = typer.Argument(..., metavar="ID", help="Element id to type into."),
     text: str = typer.Argument(..., help="Text to type."),
     submit: bool = typer.Option(False, "--submit", help="Send the IME action after typing."),
+    observe: bool = typer.Option(
+        False, "--observe", help="Also return the screen after typing (skips a follow-up analyze)."
+    ),
 ) -> None:
     """Focus an element and type text; ``--submit`` sends the IME action."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(_route(engine, "input_text", element_id=element_id, text=text, submit=submit), fmt)
+        _emit(
+            _route(
+                engine,
+                "input_text",
+                element_id=element_id,
+                text=text,
+                submit=submit,
+                observe=observe,
+            ),
+            fmt,
+        )
 
     _run(ctx, go)
 
@@ -493,11 +511,12 @@ def input_cmd(
 def clear(
     ctx: typer.Context,
     element_id: int = typer.Argument(..., metavar="ID", help="Element id to clear."),
+    observe: bool = typer.Option(False, "--observe", help="Also return the post-action screen."),
 ) -> None:
     """Clear the text of an element."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(_route(engine, "clear", element_id=element_id), fmt)
+        _emit(_route(engine, "clear", element_id=element_id, observe=observe), fmt)
 
     _run(ctx, go)
 
@@ -513,6 +532,7 @@ def swipe(
         "--coords",
         help="Explicit x1 y1 x2 y2 (overrides direction).",
     ),
+    observe: bool = typer.Option(False, "--observe", help="Also return the post-swipe screen."),
 ) -> None:
     """Swipe in a direction (optionally from an element) or by explicit coordinates."""
 
@@ -526,6 +546,7 @@ def swipe(
                 from_id=from_id,
                 percent=percent,
                 coords=coord_tuple,
+                observe=observe,
             ),
             fmt,
         )
@@ -539,11 +560,26 @@ def scroll_to(
     text: str = typer.Argument(..., help="Text or resource-id to scroll to."),
     match: str = typer.Option("contains", "--match", help="exact|contains|regex."),
     ignore_case: bool = typer.Option(False, "--ignore-case", help="Case-insensitive match."),
+    observe: bool = typer.Option(
+        False,
+        "--observe",
+        help="Also return the screen after scrolling (skips a follow-up analyze).",
+    ),
 ) -> None:
     """Scroll the container until an element appears (or the swipe limit is hit)."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(_route(engine, "scroll_to", query=text, match=match, ignore_case=ignore_case), fmt)
+        _emit(
+            _route(
+                engine,
+                "scroll_to",
+                query=text,
+                match=match,
+                ignore_case=ignore_case,
+                observe=observe,
+            ),
+            fmt,
+        )
 
     _run(ctx, go)
 
@@ -552,11 +588,14 @@ def scroll_to(
 def key(
     ctx: typer.Context,
     name: str = typer.Argument(..., help="back|home|enter|recents|KEYCODE_*."),
+    observe: bool = typer.Option(
+        False, "--observe", help="Also return the screen after the key (skips a follow-up analyze)."
+    ),
 ) -> None:
     """Press a hardware/navigation key."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(_route(engine, "key", name=name), fmt)
+        _emit(_route(engine, "key", name=name, observe=observe), fmt)
 
     _run(ctx, go)
 

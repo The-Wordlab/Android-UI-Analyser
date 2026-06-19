@@ -177,13 +177,15 @@ class AnalyzeResult(BaseModel):
 
     # -- rendering ---------------------------------------------------------
 
-    def render(self, fmt: OutputFormat | str = OutputFormat.json) -> str:
-        """Serialise to one of the three output formats (PRD §8)."""
+    def as_dict(self, fmt: OutputFormat | str = OutputFormat.json) -> dict[str, Any]:
+        """The serialisable payload for *fmt* (``compact`` trims to the smallest footprint).
+
+        Shared by :meth:`render` and by :class:`ActionResult` so an embedded ``observation``
+        renders in the same format as a standalone ``analyze``.
+        """
         fmt = OutputFormat(fmt)
-        if fmt is OutputFormat.pretty:
-            return json.dumps(self.model_dump(mode="json"), indent=2, ensure_ascii=False)
         if fmt is OutputFormat.compact:
-            payload = {
+            return {
                 "schema_version": self.schema_version,
                 "screen": {
                     k: v for k, v in self.screen.model_dump(mode="json").items() if v is not None
@@ -195,9 +197,15 @@ class AnalyzeResult(BaseModel):
                     if v not in (None, [])
                 },
             }
-            return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
-        # json (single line)
-        return json.dumps(self.model_dump(mode="json"), separators=(",", ":"), ensure_ascii=False)
+        return self.model_dump(mode="json")
+
+    def render(self, fmt: OutputFormat | str = OutputFormat.json) -> str:
+        """Serialise to one of the three output formats (PRD §8)."""
+        fmt = OutputFormat(fmt)
+        data = self.as_dict(fmt)
+        indent = 2 if fmt is OutputFormat.pretty else None
+        sep = None if indent else (",", ":")
+        return json.dumps(data, indent=indent, separators=sep, ensure_ascii=False)
 
     def element_by_id(self, element_id: int) -> Element | None:
         for e in self.elements:
@@ -236,10 +244,20 @@ class ActionResult(BaseModel):
     id: int | None = None
     target: list[int] | None = None  # coords or bounds acted on
     detail: str | None = None
+    # The screen right after the action (when called with observe=True), so an agent gets
+    # fresh element ids without a separate `analyze` round-trip (act + observe in one call).
+    observation: AnalyzeResult | None = None
 
     def render(self, fmt: OutputFormat | str = OutputFormat.json) -> str:
-        data = {k: v for k, v in self.model_dump(mode="json").items() if v is not None}
-        indent = 2 if OutputFormat(fmt) is OutputFormat.pretty else None
+        fmt = OutputFormat(fmt)
+        data = {
+            k: v
+            for k, v in self.model_dump(mode="json").items()
+            if v is not None and k != "observation"
+        }
+        if self.observation is not None:
+            data["observation"] = self.observation.as_dict(fmt)
+        indent = 2 if fmt is OutputFormat.pretty else None
         sep = None if indent else (",", ":")
         return json.dumps(data, indent=indent, separators=sep, ensure_ascii=False)
 

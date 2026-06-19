@@ -295,6 +295,74 @@ def test_daemon_stop_when_not_running_is_clean(tmp_path: Path) -> None:
     assert out["running"] is False and out["status"] == "not_running"
 
 
+# --------------------------------------------------------------- actions return observation
+
+
+def test_action_observe_attaches_fresh_screen(tmp_path: Path) -> None:
+    dev = FakeDevice(hierarchy_xml=APPS, package=P, serial="emu-obs")
+    eng = _engine(tmp_path, dev)
+    r = eng.analyze(source="hierarchy")
+    img_id = next(e.id for e in r.elements if (e.text or "").startswith("Images"))
+    observed = eng.tap(img_id, observe=True)
+    assert observed.ok and observed.observation is not None and observed.observation.elements
+    assert eng.tap(img_id).observation is None  # default: no observation, no extra work
+
+
+def test_observe_repopulates_cache_for_type_then_send(tmp_path: Path) -> None:
+    # The flow the user flagged: type → tap send WITHOUT a separate analyze in between.
+    create = _hier(
+        _node("android.widget.TextView", text="Create", rid="x:id/h", b="[40,120][1040,210]"),
+        _node(
+            "android.widget.EditText",
+            rid="x:id/prompt",
+            desc="Prompt",
+            clk=True,
+            b="[40,400][1040,560]",
+        ),
+        _node(
+            "android.widget.Button", text="Send", rid="x:id/send", clk=True, b="[40,640][400,740]"
+        ),
+    )
+    dev = FakeDevice(hierarchy_xml=create, package=P, serial="emu-obs2")
+    eng = _engine(tmp_path, dev)
+    r = eng.analyze(source="hierarchy")
+    pid = next(e.id for e in r.elements if e.content_desc == "Prompt")
+    typed = eng.input_text(pid, "hello world", observe=True)
+    assert typed.observation is not None
+    send_id = next(e.id for e in typed.observation.elements if e.text == "Send")
+    # input() invalidated the cache, but observe's folded analyze re-populated it → tap resolves
+    # with NO manual analyze call between type and send.
+    assert eng.tap(send_id).ok
+    assert any(c[0] == "click" for c in dev.calls)
+
+
+def test_actionresult_render_embeds_then_drops_observation(tmp_path: Path) -> None:
+    dev = FakeDevice(hierarchy_xml=HOME, package=P, serial="emu-r")
+    eng = _engine(tmp_path, dev)
+    tid = next(e.id for e in eng.analyze(source="hierarchy").elements if e.text == "Apps")
+    with_obs = json.loads(eng.tap(tid, observe=True).render("compact"))["observation"]
+    assert "elements" in with_obs
+    assert "observation" not in json.loads(eng.tap(tid).render("compact"))
+
+
+def test_goto_returns_destination_elements(tmp_path: Path) -> None:
+    _build_three(tmp_path)
+    dev = ScriptedDevice([HOME, APPS, IMAGES], package=P, serial="emu-gel")
+    eng = _engine(tmp_path, dev)
+    out = eng.goto("images")
+    assert out["arrived"] and out.get("elements")  # destination marks returned inline
+
+
+def test_cli_tap_observe(monkeypatch) -> None:
+    dev = FakeDevice(hierarchy_xml=HOME, package=P, serial="emu-cli-obs")
+    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
+    a = runner.invoke(app, ["--format", "compact", "analyze", "--source", "hierarchy"])
+    tid = next(e["id"] for e in json.loads(a.stdout)["elements"] if e.get("text") == "Apps")
+    r = runner.invoke(app, ["--format", "compact", "tap", str(tid), "--observe"])
+    assert r.exit_code == 0, r.stderr
+    assert "observation" in json.loads(r.stdout)
+
+
 # --------------------------------------------------------------- schema + config contracts
 
 
