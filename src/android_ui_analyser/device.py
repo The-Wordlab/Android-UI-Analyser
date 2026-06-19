@@ -234,9 +234,24 @@ class Uiautomator2Device(Device):
         self._call("long_click", x, y, duration_ms / 1000.0)
 
     def send_text(self, text: str, *, clear: bool = True) -> None:
-        self._call("send_keys", text, clear=clear)
+        # Prefer accessibility ACTION_SET_TEXT on the focused field: it replaces the
+        # content in one shot with no input injection, so it works on Android 14+ where
+        # u2's injectKeyEvent-based clear hits NoSuchMethodException
+        # (InputManager.getInstance removed). Fall back to the IME send_keys path.
+        if clear:
+            try:
+                self._d(focused=True).set_text(text)
+                return
+            except Exception as exc:
+                logger.debug("set_text on focused field failed (%s); using send_keys", exc)
+        self._call("send_keys", text, clear=False)
 
     def clear_text(self) -> None:
+        try:
+            self._d(focused=True).set_text("")
+            return
+        except Exception as exc:
+            logger.debug("set_text('') clear failed (%s); using clear_text", exc)
         self._call("clear_text")
 
     def send_ime_action(self, action: str = "search") -> None:
