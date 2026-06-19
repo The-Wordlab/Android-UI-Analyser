@@ -22,7 +22,7 @@ from . import routing
 from .config import Config
 from .device import Device, connect, list_devices
 from .errors import ElementNotFoundError, ProviderError, StabilityTimeout, UsageError
-from .memory import AppMemoryStore, redact_label
+from .memory import AppMemoryStore, NavHints, _shortest_path, redact_label, resolve_goal
 from .providers.base import DetBox, Point, ScreenImage, TextBox
 from .providers.registry import ProviderFactory, registered_names, run_chain
 from .schema import (
@@ -61,6 +61,53 @@ def _package_from_xml(xml: str) -> str | None:
     if not counts:
         return pkgs[0]
     return counts.most_common(1)[0][0]
+
+
+def _parse_tap_label(action: str) -> str | None:
+    """Pull the label out of a route action like ``tap 'Apps'`` (None if not a tap)."""
+    m = re.match(r"tap '(.+)'$", action)
+    return m.group(1) if m else None
+
+
+def _match_element(elements: list[Element], label: str) -> Element | None:
+    """Find the on-screen element a route's ``tap '<label>'`` refers to."""
+    for e in elements:  # exact text / content-desc match first
+        if (e.text or e.content_desc or "") == label:
+            return e
+    low = label.lower()
+    for e in elements:  # tolerate truncation / case drift on long labels
+        t = (e.text or e.content_desc or "").lower()
+        if t and (t.startswith(low) or low in t):
+            return e
+    return None
+
+
+def _goto_handoff(
+    goal: str,
+    target: str,
+    code: str,
+    hops: list[dict[str, Any]],
+    remaining: list[dict[str, Any]],
+    res: AnalyzeResult,
+) -> dict[str, Any]:
+    """Stop driving and return enough state for the caller to continue manually."""
+    return {
+        "ok": False,
+        "code": code,
+        "goal": goal,
+        "target": target,
+        "arrived": False,
+        "hops": hops,
+        "remaining_route": remaining,
+        "current_screen": res.meta.known_screen,
+        "suggested_gotos": res.meta.suggested_gotos,
+        "elements": [
+            {"id": e.id, "label": e.text or e.content_desc, "clickable": e.clickable}
+            for e in res.elements
+            if (e.text or e.content_desc)
+        ][:20],
+        "hint": "route diverged — continue with `aua analyze` + `aua tap`",
+    }
 
 
 class Engine:
@@ -252,7 +299,9 @@ class Engine:
             tier_used = Tier.vision
             path = PathKind.vision
 
-        known_screen = self._record_screen_safe(device, package, activity, elements, tier_used, h)
+        known_screen, hints = self._record_screen_safe(
+            device, package, activity, elements, tier_used, h
+        )
         annotated = self._maybe_annotate(annotate, device, elements, img)
 
         result = AnalyzeResult(
@@ -266,6 +315,9 @@ class Engine:
                 path=path,
                 providers_used=providers_used,
                 known_screen=known_screen,
+                known_routes=hints.known_routes if hints else [],
+                suggested_gotos=hints.suggested_gotos if hints else [],
+                map_hint=hints.map_hint if hints else None,
                 annotated_image=annotated,
                 device_serial=device.serial,
             ),
@@ -301,12 +353,13 @@ class Engine:
         best: Element | None = None
         best_score = 0.0
         known_screen: str | None = None
+        hints: NavHints | None = None
 
         # --- T1/T2: satisfy from the hierarchy first (cheap-first) ---
         if not force_vision:
             pool, package = self._capture_hierarchy(device, w, h)
             tier_used = Tier.selector
-            known_screen = self._record_screen_safe(
+            known_screen, hints = self._record_screen_safe(
                 device, package, activity, pool, Tier.hierarchy, h
             )
             cand, score = self._match_query(query, pool)
@@ -329,6 +382,7 @@ class Engine:
                     no_cache,
                     t0,
                     known_screen,
+                    hints,
                 )
 
         # --- T3: vision, if allowed and useful ---
@@ -353,7 +407,7 @@ class Engine:
             tier_used = Tier.vision
             path = PathKind.vision
             if force_vision:  # hierarchy block was skipped → record the screen from vision
-                known_screen = self._record_screen_safe(
+                known_screen, hints = self._record_screen_safe(
                     device, package, activity, pool, Tier.vision, h
                 )
             cand, score = self._match_query(query, vis_elements)
@@ -376,6 +430,7 @@ class Engine:
                     no_cache,
                     t0,
                     known_screen,
+                    hints,
                 )
 
         # --- T4: grounding VLM, only if explicitly allowed (never silent/paid by default) ---
@@ -443,6 +498,7 @@ class Engine:
             no_cache,
             t0,
             known_screen,
+            hints,
         )
 
     def _finish_query(
@@ -462,6 +518,7 @@ class Engine:
         no_cache: bool,
         t0: float,
         known_screen: str | None = None,
+        hints: NavHints | None = None,
     ) -> AnalyzeResult:
         elements = [element] if element is not None else []
         annotated = self._maybe_annotate(annotate, device, elements, img)
@@ -476,6 +533,9 @@ class Engine:
                 path=path,
                 providers_used=providers_used,
                 known_screen=known_screen,
+                known_routes=hints.known_routes if hints else [],
+                suggested_gotos=hints.suggested_gotos if hints else [],
+                map_hint=hints.map_hint if hints else None,
                 annotated_image=annotated,
                 device_serial=device.serial,
             ),
@@ -593,13 +653,18 @@ class Engine:
         elements: list[Element],
         tier: Tier,
         height: int | None = None,
-    ) -> str | None:
-        """Auto-record the current screen; a memory error must never break analyze."""
+    ) -> tuple[str | None, NavHints | None]:
+        """Auto-record the current screen + derive navigation hints; never break analyze.
+
+        Returns ``(known_screen, hints)``. ``hints`` carries the inline affordances
+        (known_routes / suggested_gotos / map_hint) so the agent gets them on the analyze
+        it already runs, instead of having to remember to call ``aua map``.
+        """
         mem = self._memory
         if mem is None or not package:
-            return None
+            return None, None
         try:
-            return mem.observe_screen(
+            known = mem.observe_screen(
                 device.serial,
                 package=package,
                 elements=elements,
@@ -608,9 +673,21 @@ class Engine:
                 tier=tier.value,
                 screen_height=height,
             )
+            mcfg = self.config.memory
+            hints = (
+                mem.navigation_hints(
+                    device.serial,
+                    package,
+                    max_suggest=mcfg.suggest_max,
+                    half_life_days=mcfg.rank_half_life_days,
+                )
+                if mcfg.suggest
+                else None
+            )
+            return known, hints
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug("memory record_screen failed: %s", exc)
-            return None
+            return None, None
 
     def _record_action_safe(self, summary: str) -> None:
         mem = self._memory
@@ -674,6 +751,157 @@ class Engine:
             "stale": outcome.stale,
             "created": outcome.created,
         }
+
+    def goto(self, goal: str, *, plan: bool = False, max_steps: int = 8) -> dict[str, Any]:
+        """Drive to a remembered screen via the app map (PRD §6b).
+
+        Resolves *goal* to a known screen, then taps along the shortest route from the
+        current screen, re-analyzing and verifying ``known_screen`` after each hop. On any
+        mismatch it stops and hands back the remaining route + current screen, so the caller
+        can continue manually. ``plan=True`` returns the route without acting.
+        """
+        mem = self._memory
+        if mem is None:
+            raise UsageError("memory is disabled", hint="Set `memory.enabled: true` in config.")
+        res = self.analyze(source="hierarchy")  # perceive current screen (writes the id cache)
+        serial = res.meta.device_serial or self.device.serial
+        package = res.screen.package or self.current_package()
+        if not package:
+            return {
+                "ok": False,
+                "code": "no_package",
+                "goal": goal,
+                "hint": "could not determine the foreground app",
+            }
+        app = mem.load(package)
+        if app is None or not app.screens:
+            return {
+                "ok": False,
+                "code": "route_unknown",
+                "goal": goal,
+                "package": package,
+                "hint": "no map for this app yet — explore with `aua analyze`",
+            }
+        sess = mem.load_session(serial)
+        current = sess.current_screen
+        target = resolve_goal(
+            app,
+            goal,
+            start=current,
+            half_life_days=self.config.memory.rank_half_life_days,
+            last_goal=sess.last_goal,
+        )
+        if target is None:
+            return {
+                "ok": False,
+                "code": "route_unknown",
+                "goal": goal,
+                "package": package,
+                "known_screens": list(app.screens),
+                "hint": "no known screen matches; explore with `aua analyze`",
+            }
+        mem.set_last_goal(serial, goal)  # remember intent for ranking even if we divert
+        if current == target:
+            return {
+                "ok": True,
+                "goal": goal,
+                "target": target,
+                "arrived": True,
+                "already_there": True,
+                "package": package,
+                "route": [],
+                "hops": [],
+            }
+        path = _shortest_path(app, target, start=current)
+        route = [{"from": e.from_screen, "action": e.action, "to": e.to_screen} for e in path]
+        if not path:
+            return {
+                "ok": False,
+                "code": "route_unknown",
+                "goal": goal,
+                "target": target,
+                "package": package,
+                "current_screen": current,
+                "hint": "no known route from here — explore with `aua analyze`",
+            }
+        if plan:
+            return {
+                "ok": True,
+                "goal": goal,
+                "target": target,
+                "plan": True,
+                "package": package,
+                "route": route,
+                "note": "not executed (--plan)",
+            }
+        hops: list[dict[str, Any]] = []
+        for i, edge in enumerate(path):
+            if i >= max_steps:
+                return _goto_handoff(goal, target, "max_steps", hops, route[i:], res)
+            label = _parse_tap_label(edge.action)
+            if label is None:
+                return _goto_handoff(goal, target, "unsupported_action", hops, route[i:], res)
+            el = _match_element(res.elements, label)
+            if el is None:
+                return _goto_handoff(goal, target, "element_not_found", hops, route[i:], res)
+            self.tap(el.id)
+            with contextlib.suppress(StabilityTimeout):
+                self.wait_stable(settle_ms=500, timeout_ms=8000)
+            res = self.analyze(source="hierarchy")
+            reached = res.meta.known_screen
+            hops.append(
+                {
+                    "action": edge.action,
+                    "expected": edge.to_screen,
+                    "known_screen": reached,
+                    "ok": reached == edge.to_screen,
+                }
+            )
+            if reached != edge.to_screen:
+                return _goto_handoff(goal, target, "wrong_screen", hops, route[i + 1 :], res)
+        arrived = res.meta.known_screen == target
+        return {
+            "ok": arrived,
+            "goal": goal,
+            "target": target,
+            "arrived": arrived,
+            "package": package,
+            "final_screen": res.meta.known_screen,
+            "hops": hops,
+            "route": route,
+        }
+
+    def close(self) -> None:
+        """Release the device (and its on-device uiautomator2 server). Idempotent."""
+        dev = self._device
+        if dev is not None:
+            with contextlib.suppress(Exception):
+                dev.close()
+            self._device = None
+
+    def orient(self) -> dict[str, Any]:
+        """What the tool already knows about the foreground app (for ``daemon start``)."""
+        mem = self._memory
+        pkg = self.current_package()
+        out: dict[str, Any] = {"package": pkg, "known": False}
+        if mem is None or not pkg:
+            return out
+        app = mem.load(pkg)
+        if app is None or not app.screens:
+            return out
+        hints = mem.navigation_hints(
+            self.device.serial,
+            pkg,
+            max_suggest=self.config.memory.suggest_max,
+            half_life_days=self.config.memory.rank_half_life_days,
+        )
+        out.update(
+            known=True,
+            screens=len(app.screens),
+            routes=len(app.routes),
+            suggested_gotos=hints.suggested_gotos,
+        )
+        return out
 
     # ----------------------------------------------------------------- wait --for-stable
 

@@ -236,6 +236,50 @@ Key rules:
 
 ---
 
+## App memory & navigation
+
+`aua` remembers each app's layout **locally** as you use it — every `analyze` records the current screen and every state-changing action records a route between screens. No extra calls, and nothing leaves your machine (stored under `memory.dir`, default `~/.android-ui-analyser`).
+
+Because of that, `analyze` hands navigation affordances back to you **inline**, so you rarely need a separate `aua map` call:
+
+| `meta` field | What it gives you |
+|---|---|
+| `known_screen` | The recognised screen name on a revisit (flagged `stale` if its signature or the app version drifted, so you re-verify) |
+| `known_routes` | Outgoing routes from here, e.g. `["tap 'Apps' → apps"]` |
+| `suggested_gotos` | Ranked, ready-to-run targets, e.g. `["goto image_creator"]` — ordered by what you've navigated to recently |
+| `map_hint` | A nudge like `"12 screens mapped — run aua map"` when there's a map but nothing actionable from the current screen |
+
+### Jump to a known screen in one command
+
+```bash
+aua goto "image creator"      # drive the remembered route: taps + verifies each hop
+aua goto "settings" --plan    # print the route only, don't act
+aua goto "checkout" --max-steps 12
+```
+
+`goto` resolves the goal (fuzzy) against the map, walks the shortest route from the **current** screen, and re-checks `known_screen` after every hop. If the route diverges it stops and hands back the remaining steps + the current screen (exit `1`) so you can finish with `analyze` + `tap`; it exits `0` once it arrives. It runs through the warm daemon too.
+
+### Inspect and manage the map
+
+```bash
+aua map                       # learned screens + routes for the current app
+aua map --find "image"        # just the route to a target
+aua memory show|path|update|forget
+```
+
+**Privacy:** only the durable skeleton is stored (screen names, routes, stable elements). Dynamic lists are kept as a *shape*, and `EditText` values / secrets / PII are redacted (`<filled>` / `<redacted>`).
+
+### Tuning
+
+```yaml
+memory:
+  suggest: true             # push known_routes/suggested_gotos/map_hint into analyze
+  suggest_max: 4            # cap on suggested_gotos per analyze
+  rank_half_life_days: 3.0  # recency decay for usage-based ranking
+```
+
+---
+
 ## Configuration
 
 ### Precedence (highest to lowest)
@@ -453,6 +497,19 @@ aua analyze --query "the Submit button"      # tries hierarchy first, grounding 
 aua analyze --query "the blue icon top-right" --deep   # force grounding escalation
 ```
 
+### Navigating to known screens
+
+`aua` remembers each app's screens and routes. Every `analyze` returns
+`meta.suggested_gotos` (ranked, ready-to-run) and `meta.known_routes`. To jump to
+a screen the tool has seen before, in one command:
+
+```bash
+aua goto "image creator"   # taps + verifies each hop along the remembered route
+aua goto "settings" --plan # preview the route without acting
+```
+
+Prefer `goto` over manual tapping whenever your target is listed in `suggested_gotos`.
+
 ### Typical loop
 
 1. `aua --format compact analyze` → read element IDs from JSON output.
@@ -490,6 +547,10 @@ aua analyze --query "the blue icon top-right" --deep   # force grounding escalat
     "tier_used": "hierarchy",
     "path": "hierarchy",
     "providers_used": ["hierarchy"],
+    "known_screen": "home",
+    "known_routes": ["tap 'Apps' → apps"],
+    "suggested_gotos": ["goto image_creator"],
+    "map_hint": null,
     "annotated_image": null,
     "device_serial": "emulator-5554"
   }
@@ -503,6 +564,7 @@ aua analyze --query "the blue icon top-right" --deep   # force grounding escalat
 | Code | Meaning |
 |---|---|
 | `0` | Success |
+| `1` | Negative result — `has`: text absent, or `goto`: route could not complete |
 | `2` | Usage error (bad flags, missing argument) |
 | `3` | No device / device error |
 | `4` | Provider error — all fallbacks exhausted |
@@ -534,6 +596,7 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 | `aua inspect <id>` | Dump full details for one element |
 | `aua app <pkg>` | App control (launch/stop/current) |
 | `aua map` | Show the learned map of the current app (`--find "<goal>"` for a route) |
+| `aua goto "<goal>"` | Drive the remembered route to a known screen — taps + verifies each hop (`--plan` previews, `--max-steps N`) |
 | `aua memory show\|path\|update\|forget` | Manage the per-app learned layout |
 | `aua config init\|show\|path` | Manage configuration |
 | `aua daemon start\|status\|stop` | Manage the optional warm-state daemon |

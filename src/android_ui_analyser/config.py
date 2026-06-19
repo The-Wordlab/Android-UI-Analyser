@@ -124,6 +124,9 @@ class MemoryCfg(BaseModel):
     dir: str = "~/.android-ui-analyser"
     drift_threshold: float = 0.3  # signature divergence that flags a screen stale
     redact: bool = True  # never store secrets / PII / EditText values verbatim
+    suggest: bool = True  # push known_routes/suggested_gotos/map_hint inline into analyze
+    suggest_max: int = 4  # cap on suggested_gotos returned per analyze
+    rank_half_life_days: float = 3.0  # recency decay for usage-based ranking (days)
 
 
 def _default_models() -> dict[str, dict[str, Any]]:
@@ -448,6 +451,9 @@ memory:
   dir: "~/.android-ui-analyser"
   drift_threshold: 0.3     # signature divergence that flags a screen stale
   redact: true             # never store secrets / PII / EditText values verbatim
+  suggest: true            # push known_routes/suggested_gotos/map_hint inline into analyze
+  suggest_max: 4           # cap on suggested_gotos per analyze
+  rank_half_life_days: 3.0 # recency decay for usage-based ranking (days)
 
 # profiles:
 #   cloud:

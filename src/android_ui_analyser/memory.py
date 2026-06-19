@@ -45,6 +45,10 @@ MEMORY_SCHEMA_VERSION = 1
 # a known one rather than treated as new. Below the drift band it is a fresh screen.
 _RECOGNIZE_MIN = 0.34
 
+# A screen matching the session's last goto/find target is floated to the top of
+# suggestions regardless of frequency (a large additive boost, not a hard pin).
+_LAST_GOAL_BOOST = 1_000_000.0
+
 REDACT_TOKENS = {"<filled>", "<empty>", "<redacted>"}
 
 
@@ -108,6 +112,7 @@ class SessionState(BaseModel):
     package: str | None = None
     current_screen: str | None = None
     pending: list[str] = Field(default_factory=list)  # action summaries since last analyze
+    last_goal: str | None = None  # last `goto`/find target (boosts ranked suggestions)
 
 
 class RecordOutcome(NamedTuple):
@@ -115,6 +120,14 @@ class RecordOutcome(NamedTuple):
     was_known: bool
     stale: bool
     created: bool
+
+
+class NavHints(NamedTuple):
+    """Navigation affordances for the current screen, pushed inline into ``analyze`` meta."""
+
+    known_routes: list[str]  # outgoing edges: ["tap 'Apps' → apps", ...]
+    suggested_gotos: list[str]  # ranked ready-to-run: ["goto image_creator", ...]
+    map_hint: str | None  # nudge when there's a map but nothing actionable from here
 
 
 # --------------------------------------------------------------------------- redaction
@@ -619,6 +632,58 @@ class AppMemoryStore:
         self.save_session(serial, sess)
         return outcome.name if outcome.was_known else None
 
+    def navigation_hints(
+        self,
+        serial: str,
+        package: str,
+        *,
+        max_suggest: int = 4,
+        half_life_days: float = 3.0,
+        now: datetime | None = None,
+    ) -> NavHints:
+        """Affordances for the current screen (read-only): outgoing routes + ranked gotos.
+
+        Reads the session cursor (just updated by :meth:`observe_screen`) for the current
+        screen, then derives routes/suggestions from the stored map. Empty when no map.
+        """
+        empty = NavHints(known_routes=[], suggested_gotos=[], map_hint=None)
+        app = self.load(package)
+        if app is None or not app.screens:
+            return empty
+        sess = self.load_session(serial)
+        current = sess.current_screen
+        now = now or datetime.now().astimezone()
+        adj = _adjacency(app)
+        known_routes = [
+            f"{e.action} → {e.to_screen}"
+            for e in sorted(adj.get(current or "", []), key=lambda x: x.to_screen)
+        ]
+        # Rank destinations by usage; prefer ones reachable from here so `goto` will work,
+        # else fall back to the app's top screens (reachable from a root).
+        reachable = _reachable(app, current)
+        pool = [n for n in app.screens if n != current and (not reachable or n in reachable)]
+        if not pool:
+            pool = [n for n in app.screens if n != current]
+        ranked = sorted(
+            pool,
+            key=lambda n: _rank_score(
+                app.screens[n], now=now, half_life_days=half_life_days, last_goal=sess.last_goal
+            ),
+            reverse=True,
+        )
+        suggested = [f"goto {n}" for n in ranked[: max(0, max_suggest)]]
+        map_hint = None
+        if not known_routes and not suggested:
+            n = len(app.screens)
+            map_hint = f"{n} screen{'s' * (n != 1)} mapped — run `aua map`"
+        return NavHints(known_routes=known_routes, suggested_gotos=suggested, map_hint=map_hint)
+
+    def set_last_goal(self, serial: str, goal: str | None) -> None:
+        """Remember the last goto/find target on the session cursor (ranking boost)."""
+        sess = self.load_session(serial)
+        sess.last_goal = goal
+        self.save_session(serial, sess)
+
     # -- management -------------------------------------------------------
 
     def forget(self, package: str, screen: str | None = None) -> dict[str, str | None]:
@@ -668,6 +733,46 @@ def _roots(app: AppMap) -> list[str]:
         roots = ["home"] if "home" in app.screens else list(app.screens)[:1]
     roots.sort(key=lambda n: (0 if n == "home" else 1, app.screens[n].first_seen))
     return roots
+
+
+def _rank_score(
+    rec: ScreenRecord,
+    *,
+    now: datetime,
+    half_life_days: float,
+    last_goal: str | None = None,
+) -> float:
+    """Recency-decayed visit frequency (+last-goal boost) — 'what you're into' lately.
+
+    ``visit_count`` weighted by an exponential decay on time since ``last_seen``, so a
+    short half-life makes today's activity dominate without storing any history.
+    """
+    try:
+        last = datetime.fromisoformat(rec.last_seen)
+        age_days = max(0.0, (now.timestamp() - last.timestamp()) / 86400.0)
+    except (ValueError, TypeError):
+        age_days = 0.0  # missing/corrupt timestamp → treat as fresh, rank by raw frequency
+    hl = half_life_days if half_life_days > 0 else 1.0
+    score = rec.visit_count * (0.5 ** (age_days / hl))
+    if last_goal and rec.name == last_goal:
+        score += _LAST_GOAL_BOOST
+    return score
+
+
+def _reachable(app: AppMap, start: str | None) -> set[str]:
+    """Screens reachable from *start* via known routes (excluding *start* itself)."""
+    if not start or start not in app.screens:
+        return set()
+    adj = _adjacency(app)
+    seen: set[str] = set()
+    dq: deque[str] = deque([start])
+    while dq:
+        node = dq.popleft()
+        for e in adj.get(node, []):
+            if e.to_screen not in seen and e.to_screen != start:
+                seen.add(e.to_screen)
+                dq.append(e.to_screen)
+    return seen
 
 
 def _summarize_keys(rec: ScreenRecord) -> list[str]:
@@ -777,13 +882,22 @@ def render_map(
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _shortest_path(app: AppMap, target: str) -> list[RouteEdge]:
-    """Shortest route from a root (else any screen) to *target*; [] if it is a root."""
+def _shortest_path(app: AppMap, target: str, start: str | None = None) -> list[RouteEdge]:
+    """Shortest route to *target*; ``[]`` if already there / no path.
+
+    With *start* given, search only from that screen (used by ``goto`` from the agent's
+    current position); otherwise search from roots, then any screen (the original behaviour).
+    """
     adj = _adjacency(app)
-    roots = _roots(app)
-    if target in roots:
-        return []
-    starts = roots + [n for n in app.screens if n not in roots]
+    if start is not None:
+        if start == target or start not in app.screens:
+            return []
+        starts = [start]
+    else:
+        roots = _roots(app)
+        if target in roots:
+            return []
+        starts = roots + [n for n in app.screens if n not in roots]
     for start in starts:
         visited = {start}
         queue: deque[tuple[str, list[RouteEdge]]] = deque([(start, [])])
@@ -846,6 +960,41 @@ def find_result(app: AppMap, query: str) -> dict[str, object]:
             }
         )
     return {"query": query, "package": app.package, "results": results}
+
+
+def resolve_goal(
+    app: AppMap,
+    goal: str,
+    *,
+    start: str | None = None,
+    now: datetime | None = None,
+    half_life_days: float = 3.0,
+    last_goal: str | None = None,
+) -> str | None:
+    """Best screen name for a fuzzy *goal* (powers ``aua goto``).
+
+    Exact name wins; otherwise prefer a screen reachable from *start*, then higher rank
+    score, then a shorter route.
+    """
+    targets = _find_targets(app, goal)
+    if not targets:
+        return None
+    g = goal.lower().strip()
+    exact = [t for t in targets if t.lower() == g]
+    if exact:
+        return exact[0]
+    now = now or datetime.now().astimezone()
+
+    def key(name: str) -> tuple[bool, bool, float, int]:
+        path = _shortest_path(app, name, start=start)
+        reachable = bool(path) or name == start or (start is None and name in _roots(app))
+        score = _rank_score(
+            app.screens[name], now=now, half_life_days=half_life_days, last_goal=last_goal
+        )
+        # A screen *named* for the goal beats one that merely contains a matching element.
+        return (g in name.lower(), reachable, score, -(len(path) or 99))
+
+    return sorted(targets, key=key, reverse=True)[0]
 
 
 def _render_find(app: AppMap, query: str) -> str:
