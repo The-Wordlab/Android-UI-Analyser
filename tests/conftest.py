@@ -88,6 +88,8 @@ class FakeDevice(Device):
         activity: str = ".MainActivity",
         text_index: dict[str, Bounds] | None = None,
         screenshot_bytes: bytes | None = None,
+        screenshots: list[bytes] | None = None,
+        app_version: str | None = None,
         serial: str = "fake-emulator-5554",
     ) -> None:
         self.serial = serial
@@ -98,20 +100,36 @@ class FakeDevice(Device):
         self._act = activity
         self._text_index = text_index or {}
         self._png = screenshot_bytes or make_png(width, height)
+        # An optional stream of screenshots (for wait --for-stable tests); the last frame
+        # repeats once exhausted.
+        self._stream = list(screenshots) if screenshots else None
+        self._stream_i = 0
+        self._app_version = app_version
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
+        self.hierarchy_calls = 0
+        self.screenshot_calls = 0
 
     # capture
     def window_size(self) -> tuple[int, int]:
         return self._w, self._h
 
     def dump_hierarchy(self, compressed: bool = False) -> str:
+        self.hierarchy_calls += 1
         return self._xml
 
     def screenshot(self) -> ScreenImage:
+        self.screenshot_calls += 1
+        if self._stream:
+            png = self._stream[min(self._stream_i, len(self._stream) - 1)]
+            self._stream_i += 1
+            return ScreenImage(png, width=self._w, height=self._h)
         return ScreenImage(self._png, width=self._w, height=self._h)
 
     def current_app(self) -> dict[str, str]:
         return {"package": self._pkg, "activity": self._act}
+
+    def app_version(self, package: str) -> str | None:
+        return self._app_version
 
     # input primitives (recorded)
     def click(self, x: int, y: int) -> None:
@@ -160,12 +178,39 @@ class FakeDevice(Device):
 
 
 def make_config(**overrides: Any) -> Config:
-    """Config from defaults with shallow section overrides (dicts deep-merge)."""
+    """Config from defaults with shallow section overrides (dicts deep-merge).
+
+    When the autouse ``_aua_isolate_state`` fixture has set ``_AUA_TEST_STATE_DIR``, the
+    memory/cache dirs default there so the suite never writes to the real $HOME. Explicit
+    ``overrides`` still win (AC13 passes its own memory dir).
+    """
+    import os
+
     from android_ui_analyser.config import _deep_merge
 
     base = Config().model_dump(mode="python")
+    state = os.environ.get("_AUA_TEST_STATE_DIR")
+    if state:
+        base["memory"]["dir"] = str(Path(state) / "memory_home")
+        base["cache"]["dir"] = str(Path(state) / "cache")
     merged = _deep_merge(base, overrides) if overrides else base
     return Config.model_validate(merged)
+
+
+@pytest.fixture(autouse=True)
+def _aua_isolate_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Redirect ALL persistent state (memory + cache) to a per-test tmp dir.
+
+    Belt-and-suspenders for both config paths: ``make_config`` reads ``_AUA_TEST_STATE_DIR``
+    directly, and ``load_config`` (the CLI path) reads the ``AUA_*`` env overrides.
+    """
+    state = tmp_path / "_aua_state"
+    monkeypatch.setenv("_AUA_TEST_STATE_DIR", str(state))
+    monkeypatch.setenv("AUA_MEMORY__DIR", str(state / "memory_home"))
+    monkeypatch.setenv("AUA_CACHE__DIR", str(state / "cache"))
+    # CLI commands run in-process (never reach a stray dev-machine daemon socket).
+    monkeypatch.setenv("AUA_DAEMON__ENABLED", "false")
+    return state
 
 
 def make_engine(

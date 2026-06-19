@@ -21,7 +21,8 @@ from typing import Any
 from . import routing
 from .config import Config
 from .device import Device, connect, list_devices
-from .errors import ElementNotFoundError, ProviderError, UsageError
+from .errors import ElementNotFoundError, ProviderError, StabilityTimeout, UsageError
+from .memory import AppMemoryStore, redact_label
 from .providers.base import DetBox, Point, ScreenImage, TextBox
 from .providers.registry import ProviderFactory, registered_names, run_chain
 from .schema import (
@@ -73,6 +74,8 @@ class Engine:
         self.config = config
         self._device = device
         self.factory = factory or ProviderFactory(config)
+        self._mem: AppMemoryStore | None = None
+        self._version_cache: dict[str, str | None] = {}
 
     # ----------------------------------------------------------------- device
 
@@ -249,6 +252,7 @@ class Engine:
             tier_used = Tier.vision
             path = PathKind.vision
 
+        known_screen = self._record_screen_safe(device, package, activity, elements, tier_used, h)
         annotated = self._maybe_annotate(annotate, device, elements, img)
 
         result = AnalyzeResult(
@@ -261,6 +265,7 @@ class Engine:
                 tier_used=tier_used,
                 path=path,
                 providers_used=providers_used,
+                known_screen=known_screen,
                 annotated_image=annotated,
                 device_serial=device.serial,
             ),
@@ -295,11 +300,15 @@ class Engine:
         path = PathKind.hierarchy
         best: Element | None = None
         best_score = 0.0
+        known_screen: str | None = None
 
         # --- T1/T2: satisfy from the hierarchy first (cheap-first) ---
         if not force_vision:
             pool, package = self._capture_hierarchy(device, w, h)
             tier_used = Tier.selector
+            known_screen = self._record_screen_safe(
+                device, package, activity, pool, Tier.hierarchy, h
+            )
             cand, score = self._match_query(query, pool)
             if cand is not None and score > best_score:
                 best, best_score = cand, score
@@ -319,6 +328,7 @@ class Engine:
                     img,
                     no_cache,
                     t0,
+                    known_screen,
                 )
 
         # --- T3: vision, if allowed and useful ---
@@ -342,6 +352,10 @@ class Engine:
             screen_source = ScreenSource.mixed if pool and vis_elements else ScreenSource.vision
             tier_used = Tier.vision
             path = PathKind.vision
+            if force_vision:  # hierarchy block was skipped → record the screen from vision
+                known_screen = self._record_screen_safe(
+                    device, package, activity, pool, Tier.vision, h
+                )
             cand, score = self._match_query(query, vis_elements)
             if cand is not None and score > best_score:
                 best, best_score = cand, score
@@ -361,6 +375,7 @@ class Engine:
                     img,
                     no_cache,
                     t0,
+                    known_screen,
                 )
 
         # --- T4: grounding VLM, only if explicitly allowed (never silent/paid by default) ---
@@ -427,6 +442,7 @@ class Engine:
             img,
             no_cache,
             t0,
+            known_screen,
         )
 
     def _finish_query(
@@ -445,6 +461,7 @@ class Engine:
         img: ScreenImage | None,
         no_cache: bool,
         t0: float,
+        known_screen: str | None = None,
     ) -> AnalyzeResult:
         elements = [element] if element is not None else []
         annotated = self._maybe_annotate(annotate, device, elements, img)
@@ -458,6 +475,7 @@ class Engine:
                 tier_used=tier_used,
                 path=path,
                 providers_used=providers_used,
+                known_screen=known_screen,
                 annotated_image=annotated,
                 device_serial=device.serial,
             ),
@@ -547,6 +565,153 @@ class Engine:
             confidence=loc.confidence,
             clickable=loc.interactable,
         )
+
+    # ----------------------------------------------------------------- memory (§6b)
+
+    @property
+    def _memory(self) -> AppMemoryStore | None:
+        if not self.config.memory.enabled:
+            return None
+        if self._mem is None:
+            self._mem = AppMemoryStore(self.config.memory)
+        return self._mem
+
+    def _version_for(self, device: Device, package: str) -> str | None:
+        """App versionName, fetched at most once per package (kept off the hot path)."""
+        if package not in self._version_cache:
+            try:
+                self._version_cache[package] = device.app_version(package)
+            except Exception:  # pragma: no cover - best effort
+                self._version_cache[package] = None
+        return self._version_cache[package]
+
+    def _record_screen_safe(
+        self,
+        device: Device,
+        package: str | None,
+        activity: str | None,
+        elements: list[Element],
+        tier: Tier,
+        height: int | None = None,
+    ) -> str | None:
+        """Auto-record the current screen; a memory error must never break analyze."""
+        mem = self._memory
+        if mem is None or not package:
+            return None
+        try:
+            return mem.observe_screen(
+                device.serial,
+                package=package,
+                elements=elements,
+                activity=activity,
+                app_version=self._version_for(device, package),
+                tier=tier.value,
+                screen_height=height,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("memory record_screen failed: %s", exc)
+            return None
+
+    def _record_action_safe(self, summary: str) -> None:
+        mem = self._memory
+        if mem is None or self._device is None:
+            return
+        try:
+            mem.observe_action(self._device.serial, summary)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("memory record_action failed: %s", exc)
+
+    def _action_label(self, element: Element | None) -> str:
+        if element is None:
+            return ""
+        lab = redact_label(element, redact=self.config.memory.redact)
+        return f"'{lab}'" if lab else f"[{element.type}]"
+
+    def current_package(self) -> str | None:
+        """Best-effort foreground package (for ``aua map`` without ``--app``)."""
+        try:
+            pkg = self.device.current_app().get("package")
+        except Exception:  # pragma: no cover - device hiccup
+            pkg = None
+        if pkg:
+            return pkg
+        try:
+            return _package_from_xml(self.device.dump_hierarchy())
+        except Exception:  # pragma: no cover
+            return None
+
+    def memory_update(self, screen_name: str | None = None) -> dict[str, Any]:
+        """Force-record the current screen now (PRD §5 ``aua memory update``)."""
+        mem = self._memory
+        if mem is None:
+            raise UsageError("memory is disabled", hint="Set `memory.enabled: true` in config.")
+        device, w, h = self._context()
+        elements, package = self._capture_hierarchy(device, w, h)
+        app = device.current_app()
+        package = app.get("package") or package
+        if not package:
+            raise UsageError("could not determine the foreground package to record")
+        outcome = mem.record_screen(
+            package=package,
+            elements=elements,
+            activity=app.get("activity") or None,
+            app_version=self._version_for(device, package),
+            tier="hierarchy",
+            name_hint=screen_name,
+            screen_height=h,
+        )
+        sess = mem.load_session(device.serial)
+        sess.current_screen = outcome.name
+        sess.package = package
+        sess.pending = []
+        mem.save_session(device.serial, sess)
+        return {
+            "ok": True,
+            "action": "memory-update",
+            "package": package,
+            "screen": outcome.name,
+            "known": outcome.was_known,
+            "stale": outcome.stale,
+            "created": outcome.created,
+        }
+
+    # ----------------------------------------------------------------- wait --for-stable
+
+    def wait_stable(
+        self, *, interval_ms: int = 200, settle_ms: int = 600, timeout_ms: int = 30000
+    ) -> ActionResult:
+        """Return once the screen stops changing for ``settle_ms`` (PRD §5, AC14).
+
+        Cheap perceptual-hash over screenshots only — NO OCR, NO hierarchy parse. Works on
+        opaque/Compose/video screens; ideal for waiting on image generation / loading.
+        """
+        from . import imaging
+
+        device = self.device
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        last: int | None = None
+        stable_since: float | None = None
+        samples = 0
+        while True:
+            current = imaging.dhash(device.screenshot())
+            samples += 1
+            now = time.monotonic()
+            if last is not None and imaging.is_stable(current, last):
+                if stable_since is None:
+                    stable_since = now
+                if (now - stable_since) * 1000.0 >= settle_ms:
+                    return ActionResult(
+                        ok=True, action="wait-stable", detail=f"settled after {samples} samples"
+                    )
+            else:
+                stable_since = None
+            last = current
+            if now >= deadline:
+                raise StabilityTimeout(
+                    f"screen did not settle within {timeout_ms} ms ({samples} samples)",
+                    hint="Increase --timeout/--settle, or the screen is still animating.",
+                )
+            time.sleep(interval_ms / 1000.0)
 
     # ----------------------------------------------------------------- has (T0)
 
@@ -648,6 +813,7 @@ class Engine:
         cx, cy = el.center
         self.device.click(cx, cy)
         self._invalidate_cache()
+        self._record_action_safe(f"tap {self._action_label(el)}")
         return ActionResult(ok=True, action="tap", id=element_id, target=[cx, cy])
 
     def long_press(self, element_id: int, *, ms: int = 600) -> ActionResult:
@@ -655,6 +821,7 @@ class Engine:
         cx, cy = el.center
         self.device.long_click(cx, cy, ms)
         self._invalidate_cache()
+        self._record_action_safe(f"long-press {self._action_label(el)}")
         return ActionResult(ok=True, action="long-press", id=element_id, target=[cx, cy])
 
     def input_text(self, element_id: int, text: str, *, submit: bool = False) -> ActionResult:
@@ -662,6 +829,8 @@ class Engine:
         cx, cy = el.center
         self.device.input_text(cx, cy, text, clear=True, submit=submit)
         self._invalidate_cache()
+        # Record the action SHAPE only — the typed value is never persisted (PRD §6b privacy).
+        self._record_action_safe("input '<filled>'" + (" + send" if submit else ""))
         return ActionResult(ok=True, action="input", id=element_id, detail=text)
 
     def clear(self, element_id: int) -> ActionResult:
@@ -670,6 +839,7 @@ class Engine:
         self.device.click(cx, cy)
         self.device.clear_text()
         self._invalidate_cache()
+        self._record_action_safe(f"clear {self._action_label(el)}")
         return ActionResult(ok=True, action="clear", id=element_id)
 
     def swipe(
@@ -685,6 +855,7 @@ class Engine:
             x1, y1, x2, y2 = coords
             device.swipe(x1, y1, x2, y2)
             self._invalidate_cache()
+            self._record_action_safe("swipe coords")
             return ActionResult(ok=True, action="swipe", target=[x1, y1, x2, y2])
         if direction is None:
             raise UsageError("swipe needs a direction or --coords", hint="e.g. `aua swipe up`")
@@ -711,6 +882,7 @@ class Engine:
         y1, y2 = clamp(y1, 0, h - 1), clamp(y2, 0, h - 1)
         device.swipe(x1, y1, x2, y2)
         self._invalidate_cache()
+        self._record_action_safe(f"swipe {d}")
         return ActionResult(ok=True, action="swipe", target=[x1, y1, x2, y2])
 
     def scroll_to(
@@ -718,6 +890,7 @@ class Engine:
     ) -> ActionResult:
         found = self.device.scroll_to(query, match=MatchMode(match), ignore_case=ignore_case)
         self._invalidate_cache()
+        self._record_action_safe(f"scroll-to '{query}'")
         return ActionResult(
             ok=found is not None,
             action="scroll-to",
@@ -728,6 +901,7 @@ class Engine:
     def key(self, name: str) -> ActionResult:
         self.device.press(name)
         self._invalidate_cache()
+        self._record_action_safe(f"key '{name}'")
         return ActionResult(ok=True, action="key", detail=name)
 
     def wait(

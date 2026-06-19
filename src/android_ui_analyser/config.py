@@ -115,6 +115,17 @@ class CacheCfg(BaseModel):
     dir: str = "~/.cache/android-ui-analyser"
 
 
+class MemoryCfg(BaseModel):
+    """Persistent per-app map settings (PRD §6b, §9)."""
+
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = True
+    auto_record: bool = True  # record screens + route edges on every analyze/action
+    dir: str = "~/.android-ui-analyser"
+    drift_threshold: float = 0.3  # signature divergence that flags a screen stale
+    redact: bool = True  # never store secrets / PII / EditText values verbatim
+
+
 def _default_models() -> dict[str, dict[str, Any]]:
     """Shipped, commercially-licensable defaults (PRD §9, §17).
 
@@ -167,6 +178,7 @@ class Config(BaseModel):
     models: dict[str, dict[str, Any]] = Field(default_factory=_default_models)
     daemon: DaemonCfg = Field(default_factory=DaemonCfg)
     cache: CacheCfg = Field(default_factory=CacheCfg)
+    memory: MemoryCfg = Field(default_factory=MemoryCfg)
     profiles: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
     # -- views -------------------------------------------------------------
@@ -429,6 +441,13 @@ models:
 daemon:
   enabled: true
   socket: "~/.cache/android-ui-analyser/daemon.sock"
+
+memory:
+  enabled: true
+  auto_record: true        # record screens + route edges on every analyze/action
+  dir: "~/.android-ui-analyser"
+  drift_threshold: 0.3     # signature divergence that flags a screen stale
+  redact: true             # never store secrets / PII / EditText values verbatim
 
 # profiles:
 #   cloud:

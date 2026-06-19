@@ -123,7 +123,8 @@ Global options (apply to all commands; override config):
 - `aua swipe <up|down|left|right> [--from <id>] [--percent 50]` or `aua swipe --coords x1 y1 x2 y2`
 - `aua scroll-to "<text|resource-id>"` (scroll container until element appears or limit)
 - `aua key <back|home|enter|recents|KEYCODE_*>`
-- `aua wait --for "<text|resource-id>" [--timeout 5000]` / `aua wait --idle`
+- `aua wait --for "<text|resource-id>" [--timeout 5000]` / `aua wait --idle` / `aua wait --for-stable [--interval 200] [--settle 600] [--timeout 30000]`
+  - `--for-stable` polls cheap screenshots and returns once the screen stops changing for `--settle` ms (a perceptual-hash "screen settled" check — no OCR, no hierarchy parse; works on opaque screens). Ideal for waiting on image generation / loading. Pairs with the daemon for tight, low-cost polling.
 
 ### Device & session
 - `aua devices` → list attached devices (serial, model, android version, state)
@@ -137,6 +138,13 @@ Global options (apply to all commands; override config):
 - `aua doctor` → check environment: adb present, device reachable, uiautomator2 agent
   installed, which OCR/detection/grounding providers are available & why (missing dep,
   missing key, unreachable endpoint). **Must never print secret values.**
+
+### Memory / app map (§6b)
+- `aua map [--app <pkg>] [--brief] [--screen <name>] [--depth N] [--find "<goal>"] [--json]` → print the app's map. **With no query it prints the WHOLE app as a compact text tree** (every known screen, what's on it, routes between them) — not just a search result. `--brief` = skeleton only (screen tree + routes, smallest — load at session start); default = screens + key elements + routes; `--screen`/`--depth` drill into one screen; `--find "image"` returns just the screen(s) + route to a target. The agent reads this at session start to know the layout before navigating.
+- `aua memory show|path|update|forget [--app <pkg>] [--screen <name>]` → inspect / locate / force-record the current screen / clear. Recording is automatic by default (§6b).
+
+### Agent guide (self-documentation)
+- `aua guide` (aliases `skill`, `agent`) → print the **agent operating manual** to stdout (markdown; `--json` for structured, `--brief` for short). It tells an agent everything needed to use the tool: what it is; the recommended **session protocol** — (1) `aua daemon start` for speed, (2) `aua map` to load the app's known layout before navigating, (3) drive with `analyze`/`has`/`tap`/`input`/`swipe` acting on element **IDs**, (4) use `wait --for-stable`/`--for` instead of fixed sleeps, (5) `aua daemon stop` when done; how perception **self-routes** (the §6a escalation ladder — hierarchy→vision automatically; paid grounding only with `--deep`); how **memory** works (auto-recorded, read via `aua map`, `meta.known_screen`); the output schema; exit codes; and key global flags. This is the **single source of truth** that also generates `.claude/skills/android-ui-analyser/SKILL.md` (`aua guide --emit-skill [path]`), and the `aua --help` epilog points the agent to it.
 
 ### MCP
 - `aua mcp` → run the MCP server over stdio, exposing the same tools (§11)
@@ -231,6 +239,93 @@ rung, and `has --ocr-fallback` is the T0→T3 rung for a boolean check.
 
 ---
 
+## 6b. App memory — persistent app maps (the tool's long-term knowledge)
+
+The tool maintains a **persistent, per-app memory** on the local filesystem so an agent
+starts each session already knowing the app's layout — what screens exist, what's on each,
+and how to get from one to another (e.g. "the image-creation tool is Apps tab → Images,
+2 taps from home") — instead of re-discovering it every time. The tool builds and maintains
+this map **itself** as it navigates; the agent just reads it back. Memory is a *prior*,
+never a substitute for a live check when something may have changed.
+
+### Storage (mirrors the `~/.claude` pattern)
+A per-user directory, default `~/.android-ui-analyser/` (override `memory.dir`):
+```
+~/.android-ui-analyser/
+  memory/
+    <package>/                 # one folder per app, e.g. co.thewordlab.luzia/
+      MAP.md                   # human- + AI-readable app map (what the agent reads)
+      index.json               # machine index: screens, signatures, routes, freshness
+      screens/<screen>.json    # optional per-screen element detail
+```
+One app = one folder; the tool may write/update **one or several files** per app.
+
+### What a map contains
+- **Identity & freshness:** package, app label, app version last seen, last-verified
+  timestamp — so the agent knows how stale the map is.
+- **Screens / sections:** each known screen gets a stable name (`home`, `apps_grid`,
+  `image_create`, `image_result`, …) plus: its activity, a **signature** (fingerprint of
+  durable anchors — activity + a hash of stable resource-ids/labels) used to recognize the
+  screen on revisit, the **perception tier** it needs (e.g. `image_result` → vision/opaque),
+  the key elements (nav targets, inputs, buttons), and free-text notes.
+- **Routes (navigation graph):** directed edges `screen --action--> screen`, e.g.
+  `home --tap nav "Apps"--> apps_grid --tap "Images"--> image_create --input+send-->
+  image_result`. This yields "how many steps, and from where" for any target.
+- **Notes / gotchas:** e.g. "CleverTap promo can overlay Apps; dismiss via X (vision)."
+
+### How the tool maintains it (by itself)
+- **Auto-record (default on):** every `analyze` records/updates the current screen
+  (signature, tier, key elements); every successful action (`tap`/`input`/…) that changes
+  the screen records a **route edge** between the previous and new screen. The map grows
+  passively as the agent uses the tool — no extra calls.
+- **Screen recognition:** on each `analyze` the tool computes the signature and, if it
+  matches a known screen, sets `meta.known_screen` and can attach remembered routes — the
+  agent instantly knows where it is and what's reachable.
+- **Drift detection:** if the app version changed or a screen's signature diverges beyond
+  `memory.drift_threshold`, the screen is flagged `stale` so the agent re-verifies;
+  otherwise it trusts the map.
+
+### Map output & detail levels (the full picture, but token-aware) — CLI in §5
+`aua map` with no query prints the **whole app as a compact text tree** — every known
+screen, what's on it, and the routes between them. `--find` is the focused query on top.
+Detail is controlled so the agent loads only what it needs:
+- `--brief` → skeleton only (screen tree + routes); smallest, load at session start.
+- default → screens + their key/durable elements + routes.
+- `--screen <name>` / `--depth N` → drill into one screen's full element detail.
+- `--find "<goal>"` → just the screen(s) + route to a target. `--json` for any of these.
+Example shape:
+```
+home  (tier: hierarchy)
+├─ nav: Chat | World Cup | Ideas | Apps
+├─ recent-chats list (dynamic) -> chat_thread
+└─> Apps  (tap nav "Apps")
+    ├─ tools: Anima, Photoedit, Mathematics, Images, Summarize, Games, ...
+    └─> image_create  (tap "Images")
+        ├─ prompt field (EditText), send, aspect (9:16), tabs: Create|Edit
+        └─> image_result  (input + send; tier: vision) — Your image, Share
+```
+
+### Static skeleton vs. dynamic content (why it stays small and fresh)
+Memory stores the **durable skeleton** — screens, routes, and stable elements (tabs,
+buttons, tool names) — **not** volatile per-user data. A list such as recent chats is
+recorded as a *shape* ("home → recent-chats list (dynamic), each opens `chat_thread`"),
+**not** the literal "first chat, second chat…". Those items are live data: the agent
+fetches them on demand with `analyze` when it actually needs them. This keeps the map
+compact and always-fresh and avoids persisting user content (PII). So: the map gives the
+full **structural** picture; live **contents** come from `analyze`.
+
+### CLI (agent-facing) — see §5
+`aua map [--brief|--screen|--depth|--find]` loads the map / answers "where is X and how do
+I get there"; `aua memory show|path|update|forget` inspects and manages it.
+
+### Privacy
+Memory is **local-only**, never transmitted. The tool stores structure and durable labels,
+**not** volatile or sensitive content: text in password / `FLAG_SECURE` / likely-PII fields
+is redacted, and `EditText` *values* are stored as shape (e.g. `"<filled>"`) rather than
+verbatim. `memory.redact` (default on) controls this.
+
+---
+
 ## 7. Provider system (pluggable models + fallbacks)
 
 Three provider kinds, each an abstract base class in `providers/base.py`, each
@@ -291,8 +386,8 @@ Top-level: `{ "schema_version": 1, "screen": {...}, "elements": [...], "meta": {
   enabled:bool, focused:bool, source: hierarchy|detection|ocr|grounding,
   confidence:float|null }`.
 - `meta`: `{ duration_ms:int, tier_used: text|selector|hierarchy|vision|grounding,
-  path: hierarchy|vision, providers_used:[...], annotated_image:str|null,
-  device_serial:str }`.
+  path: hierarchy|vision, providers_used:[...], known_screen:str|null,
+  annotated_image:str|null, device_serial:str }`.
 
 Formats: `json` (single line), `pretty` (indented), `compact` (drop null fields and
 `enabled`/`focused`/`confidence` when default; smallest token footprint for agents).
@@ -356,6 +451,12 @@ models:
 daemon:
   enabled: true
   socket: "~/.cache/android-ui-analyser/daemon.sock"
+memory:
+  enabled: true
+  auto_record: true        # record screens + route edges on every analyze/action
+  dir: "~/.android-ui-analyser"
+  drift_threshold: 0.3     # signature divergence that flags a screen stale
+  redact: true             # never store secrets / PII / EditText values verbatim
 ```
 
 > Note: model identifiers above are examples; the implementer should not hard-code a
@@ -436,6 +537,19 @@ the engine — no perception logic of its own.
   "Submit" element resolves without calling the (mocked) grounding provider; and with
   `max_tier: vision`, a semantic query that misses the hierarchy does NOT call the paid
   grounding provider — it reports not-found with `tier_used` ≤ `vision`.
+- **AC13** App memory: after a scripted sequence of `analyze` + `tap` over fixture
+  screens, `aua map` lists the visited screens with signatures and the route edges between
+  them; revisiting a recorded screen sets `meta.known_screen`; a changed signature/version
+  marks the screen `stale`; secrets / `EditText` values are redacted (never stored
+  verbatim); all writes stay under `memory.dir`.
+- **AC14** `wait --for-stable` returns once a (stubbed) screenshot stream stops changing
+  for `--settle` ms, and times out with a clear error if it never stabilizes — without
+  running OCR or hierarchy parse.
+- **AC15** `aua guide` prints the agent manual covering the session protocol (daemon,
+  `aua map`, ID-based actions, `wait --for-stable`), the escalation ladder, memory, the
+  schema, and exit codes; `--json` / `--brief` work; `aua --help` references `aua guide`;
+  and the generated `.claude/skills/android-ui-analyser/SKILL.md` is produced from the
+  same source (no drift).
 
 ### 13.2 Device smoke test (documented for the human; runs when a device/emulator is attached)
 - `SMOKE.md` describes: start an emulator, `aua doctor`, `aua devices`, `aua analyze`
@@ -485,6 +599,7 @@ android-ui-analyser/
 │   ├── daemon.py           # unix-socket daemon + client transport
 │   ├── mcp_server.py       # optional MCP wrapper over the engine
 │   ├── errors.py           # typed errors + structured stderr emitter + exit codes
+│   ├── memory.py           # persistent per-app map: record/recognize/drift + MAP.md & index.json
 │   └── providers/
 │       ├── base.py         # OcrProvider / DetectionProvider / GroundingProvider ABCs
 │       ├── registry.py     # registration + ordered fallback-chain runner
@@ -523,7 +638,14 @@ Do all of these in a single run; later items depend on earlier ones:
     `max_tier` ceiling, never auto-escalating to a paid provider).
 15. `cli.py` — all commands (§5), formats, `doctor`, exit codes (AC1, AC9).
 16. `daemon.py` — socket daemon + client + auto-detect.
+16b. `memory.py` — persistent per-app app-map: auto-record screens + route edges on each
+    `analyze`/action, screen recognition (`meta.known_screen`) + drift detection +
+    redaction, generate `MAP.md`/`index.json`, and the `aua map` / `aua memory …` commands
+    (§6b). Also implement `wait --for-stable` (screenshot-settled detection).
 17. `mcp_server.py` + in-process MCP test (AC8).
+17b. `aua guide` — agent operating manual (markdown / `--json` / `--brief`) from a single
+    canonical source that also emits `.claude/skills/android-ui-analyser/SKILL.md`
+    (`--emit-skill`); reference it from the `aua --help` epilog (AC15).
 18. `README.md` (incl. CLAUDE.md snippet + provider/license matrix) and `SMOKE.md`.
 19. Run `ruff`, `mypy`, `pytest`; fix until **all** §13.1 acceptance criteria pass.
 20. Final self-review against §17 Definition of Done.

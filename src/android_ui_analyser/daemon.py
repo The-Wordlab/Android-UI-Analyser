@@ -147,6 +147,14 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
             result = engine.wait(**remapped)
             return _result_ok(result.model_dump(mode="json"))
 
+        elif cmd == "wait_stable":
+            result = engine.wait_stable(**args)
+            return _result_ok(result.model_dump(mode="json"))
+
+        elif cmd == "memory_update":
+            # Returns a plain dict (not a pydantic model).
+            return _result_ok(engine.memory_update(**args))
+
         elif cmd == "list_devices":
             devices = engine.list_devices()
             return _result_ok(_serialize(devices))

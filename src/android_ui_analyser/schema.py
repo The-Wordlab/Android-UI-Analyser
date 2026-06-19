@@ -155,6 +155,7 @@ class Meta(BaseModel):
     tier_used: Tier
     path: PathKind
     providers_used: list[str] = Field(default_factory=list)
+    known_screen: str | None = None  # recognised app-map screen name (PRD §6b, §8)
     annotated_image: str | None = None
     device_serial: str | None = None
 

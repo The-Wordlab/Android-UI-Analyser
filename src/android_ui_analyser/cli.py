@@ -30,14 +30,16 @@ from .config import (
 )
 from .engine import Engine
 from .errors import AuaError, ConfigError, DeviceError, ExitCode, UsageError, emit_error
+from .memory import AppMap, AppMemoryStore, find_result, render_map
 from .schema import OutputFormat
 
 logger = logging.getLogger("android_ui_analyser")
 
 T = TypeVar("T")
 
-# Sentinel produced by the optional-value ``--annotate`` flag when given with no value.
+# Sentinel produced by an optional-value flag (``--annotate``/``--emit-skill``) given bare.
 ANNOTATE_DEFAULT = "\x00aua_annotate_default"
+_OPTIONAL_VALUE_OPTS = {"--annotate", "--emit-skill"}
 
 _LOG_LEVELS = {
     "error": logging.ERROR,
@@ -49,7 +51,7 @@ _LOG_LEVELS = {
 
 
 class AnnotateCommand(TyperCommand):
-    """A Typer command whose ``--annotate`` option takes an *optional* value.
+    """A Typer command whose ``--annotate`` / ``--emit-skill`` option takes an *optional* value.
 
     Typer (0.26) drops Click's ``flag_value``, so a bare ``--annotate`` would error
     asking for a value. We rebuild the Click option's optional-value state after Typer
@@ -59,7 +61,7 @@ class AnnotateCommand(TyperCommand):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         for param in self.params:
-            if isinstance(param, click.Option) and "--annotate" in param.opts:
+            if isinstance(param, click.Option) and _OPTIONAL_VALUE_OPTS.intersection(param.opts):
                 param.is_flag = False
                 param.flag_value = ANNOTATE_DEFAULT
                 param._flag_needs_value = True
@@ -203,6 +205,10 @@ def _daemon_error(err: dict[str, Any]) -> AuaError:
         out = AuaError(message, hint=hint, code=code)
         out.exit_code = ExitCode.PROVIDER
         return out
+    if code == "wait_timeout":
+        out = AuaError(message, hint=hint, code=code)
+        out.exit_code = ExitCode.DEVICE
+        return out
     return AuaError(message, hint=hint, code=code)
 
 
@@ -236,9 +242,19 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
 # --------------------------------------------------------------------------- app
 
 
+_GUIDE_POINTER = (
+    "Run `aua guide` for the full agent operating manual (session protocol, escalation "
+    "ladder, memory, schema, exit codes); `aua guide --emit-skill` regenerates the Claude "
+    "Code skill from the same source."
+)
+
 app = typer.Typer(
     name="aua",
-    help="android-ui-analyser — structured Android UI perception + action for agents.",
+    help=(
+        "android-ui-analyser — structured Android UI perception + action for agents.\n\n"
+        + _GUIDE_POINTER
+    ),
+    epilog=_GUIDE_POINTER,
     no_args_is_help=True,
     add_completion=False,
     pretty_exceptions_enable=False,
@@ -550,20 +566,46 @@ def wait(
     ctx: typer.Context,
     for_: str | None = typer.Option(None, "--for", help="Text/resource-id to wait for."),
     idle: bool = typer.Option(False, "--idle", help="Wait for the UI to go idle."),
-    timeout: int = typer.Option(5000, "--timeout", help="Timeout in milliseconds."),
+    for_stable: bool = typer.Option(
+        False, "--for-stable", help="Wait until the screen stops visually changing."
+    ),
+    interval: int = typer.Option(200, "--interval", help="--for-stable: ms between screenshots."),
+    settle: int = typer.Option(600, "--settle", help="--for-stable: ms of no change to settle."),
+    timeout: int | None = typer.Option(
+        None, "--timeout", help="Timeout in ms (default 5000; 30000 for --for-stable)."
+    ),
     match: str = typer.Option("contains", "--match", help="exact|contains|regex."),
     ignore_case: bool = typer.Option(False, "--ignore-case", help="Case-insensitive match."),
 ) -> None:
-    """Wait for text to appear, or for the UI to become idle."""
+    """Wait for text to appear, for the UI to go idle, or for the screen to settle.
+
+    ``--for-stable`` polls cheap screenshots (a perceptual-hash "settled" check — no OCR,
+    no hierarchy parse; works on opaque screens) and returns once the screen stops changing
+    for ``--settle`` ms. Ideal for waiting on image generation / loading.
+    """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
+        if for_stable:
+            eff = timeout if timeout is not None else 30000
+            _emit(
+                _route(
+                    engine,
+                    "wait_stable",
+                    interval_ms=interval,
+                    settle_ms=settle,
+                    timeout_ms=eff,
+                ),
+                fmt,
+            )
+            return
+        eff = timeout if timeout is not None else 5000
         _emit(
             _route(
                 engine,
                 "wait",
                 for_=for_,
                 idle=idle,
-                timeout_ms=timeout,
+                timeout_ms=eff,
                 match=match,
                 ignore_case=ignore_case,
             ),
@@ -821,6 +863,198 @@ def _render_doctor_pretty(report: dict[str, Any]) -> str:
                 f"{item.get('name', '?'):<14} {item.get('reason', '')}"
             )
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- memory / map
+
+
+def _resolve_package(opts: GlobalOpts, app_pkg: str | None) -> str:
+    """Use ``--app`` if given, else detect the foreground package (needs a device)."""
+    if app_pkg:
+        return app_pkg
+    pkg = opts.engine().current_package()
+    if not pkg:
+        raise UsageError(
+            "could not determine the foreground app",
+            hint="Pass --app <package>, or attach a device so the current app can be detected.",
+        )
+    return pkg
+
+
+@app.command(name="map")
+def map_cmd(
+    ctx: typer.Context,
+    app_pkg: str | None = typer.Option(None, "--app", help="Package to map (default: current)."),
+    brief: bool = typer.Option(False, "--brief", help="Skeleton only (screens + routes)."),
+    screen: str | None = typer.Option(None, "--screen", help="Drill into one screen."),
+    depth: int | None = typer.Option(None, "--depth", help="Limit the route-tree depth."),
+    find: str | None = typer.Option(None, "--find", help="Just the route to a target goal."),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON instead of the text tree."),
+) -> None:
+    """Print the app's known layout from memory (screens, key elements, routes)."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        import json
+
+        opts = _opts(ctx)
+        store = AppMemoryStore(opts.load().memory)
+        pkg = _resolve_package(opts, app_pkg)
+        app_map = store.load(pkg) or AppMap(package=pkg)
+        compact = fmt is OutputFormat.compact
+        if as_json or compact:
+            if find:
+                payload: Any = find_result(app_map, find)
+            elif screen:
+                rec = app_map.screens.get(screen)
+                payload = rec.model_dump(mode="json") if rec else {}
+            else:
+                payload = app_map.model_dump(mode="json")
+            sep = (",", ":") if compact else None
+            indent = None if compact else 2
+            typer.echo(json.dumps(payload, indent=indent, separators=sep, ensure_ascii=False))
+            return
+        detail = "brief" if brief else "default"
+        typer.echo(render_map(app_map, detail=detail, find=find, screen=screen, depth=depth))
+
+    _run(ctx, go)
+
+
+memory_app = typer.Typer(
+    name="memory", help="Inspect / manage the persistent app map (§6b).", no_args_is_help=True
+)
+app.add_typer(memory_app, name="memory")
+
+
+@memory_app.command("show")
+def memory_show(
+    ctx: typer.Context,
+    app_pkg: str | None = typer.Option(None, "--app", help="Package (default: current)."),
+    screen: str | None = typer.Option(None, "--screen", help="Show one screen's full detail."),
+) -> None:
+    """Inspect the recorded map (whole app, or one ``--screen``)."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        import json
+
+        opts = _opts(ctx)
+        store = AppMemoryStore(opts.load().memory)
+        pkg = _resolve_package(opts, app_pkg)
+        app_map = store.load(pkg)
+        if app_map is None:
+            typer.echo(f"no memory recorded for {pkg} yet (run `aua analyze` while navigating)")
+            return
+        if fmt in (OutputFormat.json, OutputFormat.compact):
+            sep = (",", ":") if fmt is OutputFormat.compact else None
+            indent = None if fmt is OutputFormat.compact else 2
+            data = (
+                app_map.screens[screen].model_dump(mode="json")
+                if screen and screen in app_map.screens
+                else app_map.model_dump(mode="json")
+            )
+            typer.echo(json.dumps(data, indent=indent, separators=sep, ensure_ascii=False))
+        else:
+            typer.echo(render_map(app_map, detail="default", screen=screen))
+
+    _run(ctx, go)
+
+
+@memory_app.command("path")
+def memory_path(
+    ctx: typer.Context,
+    app_pkg: str | None = typer.Option(None, "--app", help="Package (default: current)."),
+) -> None:
+    """Print where this app's memory lives on disk."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        opts = _opts(ctx)
+        store = AppMemoryStore(opts.load().memory)
+        pkg = _resolve_package(opts, app_pkg)
+        typer.echo(str(store.app_dir(pkg)))
+
+    _run(ctx, go)
+
+
+@memory_app.command("update")
+def memory_update_cmd(
+    ctx: typer.Context,
+    screen: str | None = typer.Option(
+        None, "--screen", help="Name (or rename) the current screen."
+    ),
+) -> None:
+    """Force-record the current screen now (recording is automatic by default)."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(_route(engine, "memory_update", screen_name=screen), fmt)
+
+    _run(ctx, go)
+
+
+@memory_app.command("forget")
+def memory_forget(
+    ctx: typer.Context,
+    app_pkg: str | None = typer.Option(None, "--app", help="Package to forget (required)."),
+    screen: str | None = typer.Option(None, "--screen", help="Forget just this one screen."),
+) -> None:
+    """Clear an app's memory (or one ``--screen``). Requires ``--app`` for safety."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        import json
+
+        if not app_pkg:
+            raise UsageError(
+                "memory forget requires --app <package>",
+                hint="Scope the deletion explicitly, e.g. `aua memory forget --app com.x`.",
+            )
+        store = AppMemoryStore(_opts(ctx).load().memory)
+        result = store.forget(app_pkg, screen)
+        typer.echo(
+            json.dumps({"ok": True, "action": "memory-forget", **result}, ensure_ascii=False)
+        )
+
+    _run(ctx, go)
+
+
+# --------------------------------------------------------------------------- guide
+
+
+@app.command(cls=AnnotateCommand, name="guide")
+def guide_cmd(
+    ctx: typer.Context,
+    as_json: bool = typer.Option(False, "--json", help="Emit the manual as structured JSON."),
+    brief: bool = typer.Option(False, "--brief", help="Print the short session-protocol form."),
+    emit_skill: str | None = typer.Option(
+        None,
+        "--emit-skill",
+        metavar="[PATH]",
+        help="Regenerate the Claude Code SKILL.md from this manual (default skill path).",
+        show_default=False,
+    ),
+) -> None:
+    """Print the agent operating manual (the single source for the SKILL.md), §17b."""
+    from . import guide as guide_mod
+
+    opts = _opts(ctx)
+    if emit_skill is not None:
+        path = None if emit_skill == ANNOTATE_DEFAULT else emit_skill
+        target = guide_mod.emit_skill(path)
+        typer.echo(str(target))
+        return
+    if as_json:
+        import json
+
+        fmt = opts.fmt()
+        indent = None if fmt is OutputFormat.compact else 2
+        sep = (",", ":") if fmt is OutputFormat.compact else None
+        typer.echo(
+            json.dumps(guide_mod.render_json(), indent=indent, separators=sep, ensure_ascii=False)
+        )
+        return
+    typer.echo(guide_mod.render_brief() if brief else guide_mod.render_markdown())
+
+
+# Aliases for discoverability: `aua skill` / `aua agent` behave like `aua guide`.
+app.command(cls=AnnotateCommand, name="skill", hidden=True)(guide_cmd)
+app.command(cls=AnnotateCommand, name="agent", hidden=True)(guide_cmd)
 
 
 # --------------------------------------------------------------------------- mcp
