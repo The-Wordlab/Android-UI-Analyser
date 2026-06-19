@@ -1,0 +1,790 @@
+"""The interface-agnostic perception + action engine (PRD §6, §6a).
+
+The engine orchestrates the analyze pipeline and the cost-aware escalation ladder. It
+depends only on: the schema, the config, the device ABC, the provider *factory* +
+interfaces, and the routing helpers. It NEVER imports a concrete provider, and the
+hierarchy/gate/merge/annotate modules are imported lazily so a fresh checkout imports
+cleanly. The CLI, MCP server, and daemon are all thin adapters over this class.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import time
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+from . import routing
+from .config import Config
+from .device import Device, connect, list_devices
+from .errors import DeviceError, ElementNotFoundError, ProviderError, UsageError
+from .providers.base import DetBox, Point, ScreenImage, TextBox
+from .providers.registry import ProviderFactory, registered_names, run_chain
+from .routing import Intent
+from .schema import (
+    ActionResult,
+    AnalyzeResult,
+    DeviceInfo,
+    Element,
+    HasResult,
+    MatchMode,
+    Meta,
+    PathKind,
+    Screen,
+    ScreenSource,
+    Source,
+    Tier,
+    center_of,
+    tier_rank,
+)
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .providers.base import ChainSpec
+
+logger = logging.getLogger("android_ui_analyser.engine")
+
+QUERY_CONFIDENT = 1.0  # all salient tokens / exact phrase present
+QUERY_SOFT = 0.5  # best-effort threshold when escalation is exhausted
+
+
+class Engine:
+    def __init__(
+        self,
+        config: Config,
+        *,
+        device: Device | None = None,
+        factory: ProviderFactory | None = None,
+    ) -> None:
+        self.config = config
+        self._device = device
+        self.factory = factory or ProviderFactory(config)
+
+    # ----------------------------------------------------------------- device
+
+    @property
+    def device(self) -> Device:
+        """Lazily connect; doctor/devices/config work without ever touching this."""
+        if self._device is None:
+            self._device = connect(self.config.device.serial)
+        return self._device
+
+    def list_devices(self) -> list[DeviceInfo]:
+        return list_devices()
+
+    # ----------------------------------------------------------------- capture
+
+    def _context(self) -> tuple[Device, int, int, str | None, str | None]:
+        device = self.device
+        w, h = device.window_size()
+        app = device.current_app()
+        return device, w, h, app.get("package") or None, app.get("activity") or None
+
+    def _hierarchy_elements(self, device: Device, w: int, h: int) -> list[Element]:
+        from . import hierarchy
+
+        xml = device.dump_hierarchy()
+        return hierarchy.parse_hierarchy(xml, (w, h))
+
+    def _run_vision(
+        self, device: Device, *, with_ocr: bool | None, start_id: int = 0
+    ) -> tuple[list[Element], list[str], ScreenImage]:
+        from . import merge
+
+        img = device.screenshot()
+        providers_used: list[str] = []
+        detections: list[DetBox] = []
+        if self.factory.is_enabled("detection"):
+            chain = self.factory.build_chain("detection")
+            if chain.providers:
+                try:
+                    detections, name = run_chain(
+                        chain,
+                        lambda p: p.detect(img),  # type: ignore[attr-defined]
+                        timeout_s=self.config.timeouts.vision_ms / 1000.0,
+                    )
+                    providers_used.append(name)
+                except ProviderError as exc:
+                    logger.info("detection unavailable, continuing OCR-only: %s", exc)
+
+        texts: list[TextBox] = []
+        want_ocr = self.config.ocr.enabled if with_ocr is None else with_ocr
+        if want_ocr and self.factory.is_enabled("ocr"):
+            chain = self.factory.build_chain("ocr")
+            if chain.providers:
+                try:
+                    texts, name = run_chain(
+                        chain,
+                        lambda p: p.recognize(img),  # type: ignore[attr-defined]
+                        timeout_s=self.config.timeouts.vision_ms / 1000.0,
+                    )
+                    providers_used.append(name)
+                except ProviderError as exc:
+                    logger.info("ocr unavailable: %s", exc)
+
+        elements = merge.merge_vision(detections, texts, iou_threshold=0.5, start_id=start_id)
+        return elements, providers_used, img
+
+    # ----------------------------------------------------------------- analyze
+
+    def _resolve_pins(self, source: str | None, strategy: str | None) -> tuple[bool, bool, bool]:
+        """Return (force_hierarchy, force_vision, pin_grounding). strategy > source."""
+        s = (strategy or "").lower()
+        if s in ("text", "selector", "hierarchy"):
+            return True, False, False
+        if s == "vision":
+            return False, True, False
+        if s == "grounding":
+            return False, True, True
+        src = (source or "auto").lower()
+        if src == "hierarchy":
+            return True, False, False
+        if src == "vision":
+            return False, True, False
+        return False, False, False
+
+    def analyze(
+        self,
+        *,
+        source: str = "auto",
+        with_ocr: bool | None = None,
+        query: str | None = None,
+        annotate: bool | str | None = None,
+        strategy: str | None = None,
+        cheap: bool = False,
+        deep: bool = False,
+        no_cache: bool = False,
+    ) -> AnalyzeResult:
+        ceiling = routing.resolve_ceiling(self.config.routing.max_tier, cheap=cheap, deep=deep)
+        force_hier, force_vis, pin_grounding = self._resolve_pins(source, strategy)
+        if query:
+            return self._analyze_query(
+                query,
+                ceiling=ceiling,
+                force_hierarchy=force_hier,
+                force_vision=force_vis,
+                pin_grounding=pin_grounding,
+                with_ocr=with_ocr,
+                annotate=annotate,
+                no_cache=no_cache,
+            )
+        return self._analyze_screen(
+            ceiling=ceiling,
+            force_hierarchy=force_hier,
+            force_vision=force_vis,
+            with_ocr=with_ocr,
+            annotate=annotate,
+            no_cache=no_cache,
+        )
+
+    def _analyze_screen(
+        self,
+        *,
+        ceiling: Tier,
+        force_hierarchy: bool,
+        force_vision: bool,
+        with_ocr: bool | None,
+        annotate: bool | str | None,
+        no_cache: bool,
+    ) -> AnalyzeResult:
+        from . import gate
+
+        t0 = time.perf_counter()
+        device, w, h, package, activity = self._context()
+        providers_used: list[str] = []
+        img: ScreenImage | None = None
+
+        elements: list[Element] = []
+        screen_source = ScreenSource.hierarchy
+        tier_used = Tier.hierarchy
+        path = PathKind.hierarchy
+
+        if not force_vision:
+            elements = self._hierarchy_elements(device, w, h)
+
+        use_vision = force_vision
+        if not force_vision and not force_hierarchy:
+            decision = gate.decide(
+                elements, package=package, activity=activity, cfg=self.config.perception.gate
+            )
+            if decision.use_vision and routing.allows(Tier.vision, ceiling):
+                use_vision = True
+                logger.info("gate → vision: %s", decision.reason)
+            elif decision.use_vision:
+                logger.info("gate wants vision but ceiling=%s; staying hierarchy", ceiling.value)
+
+        if use_vision:
+            vis_elements, providers_used, img = self._run_vision(device, with_ocr=with_ocr)
+            if force_vision:
+                elements = vis_elements
+                screen_source = ScreenSource.vision
+            else:
+                # auto fell through to vision: vision is the authoritative set
+                elements = vis_elements
+                screen_source = ScreenSource.vision
+            tier_used = Tier.vision
+            path = PathKind.vision
+
+        annotated = self._maybe_annotate(annotate, device, elements, img)
+
+        result = AnalyzeResult(
+            screen=Screen(
+                width=w, height=h, package=package, activity=activity, source=screen_source
+            ),
+            elements=elements,
+            meta=Meta(
+                duration_ms=int((time.perf_counter() - t0) * 1000),
+                tier_used=tier_used,
+                path=path,
+                providers_used=providers_used,
+                annotated_image=annotated,
+                device_serial=device.serial,
+            ),
+        )
+        if not no_cache:
+            self._write_cache(result)
+        return result
+
+    def _analyze_query(
+        self,
+        query: str,
+        *,
+        ceiling: Tier,
+        force_hierarchy: bool,
+        force_vision: bool,
+        pin_grounding: bool,
+        with_ocr: bool | None,
+        annotate: bool | str | None,
+        no_cache: bool,
+    ) -> AnalyzeResult:
+        from . import gate
+
+        t0 = time.perf_counter()
+        device, w, h, package, activity = self._context()
+        providers_used: list[str] = []
+        pool: list[Element] = []
+        img: ScreenImage | None = None
+        tier_used = Tier.hierarchy
+        screen_source = ScreenSource.hierarchy
+        path = PathKind.hierarchy
+        best: Element | None = None
+        best_score = 0.0
+
+        # --- T1/T2: satisfy from the hierarchy first (cheap-first) ---
+        if not force_vision:
+            pool = self._hierarchy_elements(device, w, h)
+            tier_used = Tier.selector
+            cand, score = self._match_query(query, pool)
+            if cand is not None and score > best_score:
+                best, best_score = cand, score
+            if best_score >= QUERY_CONFIDENT and not pin_grounding:
+                return self._finish_query(
+                    best, w, h, package, activity, ScreenSource.hierarchy, Tier.selector,
+                    PathKind.hierarchy, providers_used, device, annotate, img, no_cache, t0,
+                )
+
+        # --- T3: vision, if allowed and useful ---
+        want_vision = force_vision
+        if not force_vision and routing.allows(Tier.vision, ceiling):
+            decision = gate.decide(
+                pool, package=package, activity=activity, cfg=self.config.perception.gate
+            )
+            kind = routing.classify_query(query)
+            want_vision = decision.use_vision or kind is routing.QueryKind.visual or pin_grounding
+
+        if want_vision and routing.allows(Tier.vision, ceiling):
+            vis_elements, vprov, img = self._run_vision(device, with_ocr=with_ocr, start_id=len(pool))
+            providers_used.extend(vprov)
+            pool = pool + vis_elements
+            screen_source = ScreenSource.mixed if pool and vis_elements else ScreenSource.vision
+            tier_used = Tier.vision
+            path = PathKind.vision
+            cand, score = self._match_query(query, vis_elements)
+            if cand is not None and score > best_score:
+                best, best_score = cand, score
+            if best_score >= QUERY_CONFIDENT and not pin_grounding:
+                return self._finish_query(
+                    best, w, h, package, activity, screen_source, Tier.vision, path,
+                    providers_used, device, annotate, img, no_cache, t0,
+                )
+
+        # --- T4: grounding VLM, only if explicitly allowed (never silent/paid by default) ---
+        grounding_ok = (
+            routing.allows(Tier.grounding, ceiling)
+            and self.factory.is_enabled("grounding")
+            and (pin_grounding or routing.classify_query(query) is not routing.QueryKind.resource_id)
+        )
+        if best_score < QUERY_CONFIDENT and grounding_ok:
+            chain = self.factory.build_chain("grounding")
+            if chain.providers:
+                if img is None:
+                    img = device.screenshot()
+                try:
+                    loc, name = run_chain(
+                        chain,
+                        lambda p: p.locate(img, query),  # type: ignore[attr-defined]
+                        is_empty=lambda r: r is None,
+                        timeout_s=self.config.timeouts.grounding_ms / 1000.0,
+                    )
+                    providers_used.append(name)
+                    grounded = self._map_grounding(loc, pool, w, h)
+                    if grounded is not None:
+                        return self._finish_query(
+                            grounded, w, h, package, activity, ScreenSource.mixed,
+                            Tier.grounding, PathKind.vision, providers_used, device,
+                            annotate, img, no_cache, t0,
+                        )
+                except ProviderError as exc:
+                    logger.info("grounding unavailable: %s", exc)
+        elif best_score < QUERY_CONFIDENT and self.factory.is_enabled("grounding"):
+            logger.info(
+                "not escalating to grounding: ceiling=%s (use --deep or raise routing.max_tier)",
+                ceiling.value,
+            )
+
+        # --- best-effort or not-found ---
+        chosen = best if best is not None and best_score >= QUERY_SOFT else None
+        return self._finish_query(
+            chosen, w, h, package, activity, screen_source, tier_used, path,
+            providers_used, device, annotate, img, no_cache, t0,
+        )
+
+    def _finish_query(
+        self,
+        element: Element | None,
+        w: int,
+        h: int,
+        package: str | None,
+        activity: str | None,
+        screen_source: ScreenSource,
+        tier_used: Tier,
+        path: PathKind,
+        providers_used: list[str],
+        device: Device,
+        annotate: bool | str | None,
+        img: ScreenImage | None,
+        no_cache: bool,
+        t0: float,
+    ) -> AnalyzeResult:
+        elements = [element] if element is not None else []
+        annotated = self._maybe_annotate(annotate, device, elements, img)
+        result = AnalyzeResult(
+            screen=Screen(
+                width=w, height=h, package=package, activity=activity, source=screen_source
+            ),
+            elements=elements,
+            meta=Meta(
+                duration_ms=int((time.perf_counter() - t0) * 1000),
+                tier_used=tier_used,
+                path=path,
+                providers_used=providers_used,
+                annotated_image=annotated,
+                device_serial=device.serial,
+            ),
+        )
+        if not no_cache:
+            self._write_cache(result)
+        return result
+
+    # ----------------------------------------------------------------- query match
+
+    def _match_query(self, query: str, elements: list[Element]) -> tuple[Element | None, float]:
+        tokens = routing.salient_tokens(query)
+        phrase = " ".join(tokens)
+        ql = query.strip().lower()
+        best: Element | None = None
+        best_score = -1.0
+        for el in elements:
+            parts: list[str] = []
+            if el.text:
+                parts.append(el.text)
+            if el.content_desc:
+                parts.append(el.content_desc)
+            if el.resource_id:
+                parts.append(el.resource_id.split("/")[-1].replace("_", " "))
+            hay = " ".join(parts).lower().strip()
+            if not hay:
+                continue
+            if el.text and el.text.strip().lower() == ql:
+                score = 1.0
+            elif phrase and phrase in hay:
+                score = 1.0
+            elif tokens:
+                score = sum(1 for t in tokens if t in hay) / len(tokens)
+            else:
+                score = 0.0
+            # tie-break: prefer clickable, then smaller area
+            adj = score + (0.001 if el.clickable else 0.0)
+            if adj > best_score:
+                best, best_score = el, adj
+        if best is None:
+            return None, 0.0
+        return best, min(1.0, best_score)
+
+    def _map_grounding(
+        self, loc: Point | DetBox | None, pool: list[Element], w: int, h: int
+    ) -> Element | None:
+        from . import merge
+
+        if loc is None:
+            return None
+        if isinstance(loc, Point):
+            px, py = loc.x, loc.y
+            # element containing the point, else nearest center
+            containing = [e for e in pool if e.bounds[0] <= px <= e.bounds[2] and e.bounds[1] <= py <= e.bounds[3]]
+            if containing:
+                return min(containing, key=lambda e: (e.bounds[2] - e.bounds[0]) * (e.bounds[3] - e.bounds[1]))
+            if pool:
+                return min(pool, key=lambda e: (e.center[0] - px) ** 2 + (e.center[1] - py) ** 2)
+            box = (max(0, px - 24), max(0, py - 24), min(w, px + 24), min(h, py + 24))
+            return Element(
+                id=0, type="GroundedPoint", bounds=box, center=(px, py),
+                source=Source.grounding, confidence=loc.confidence, clickable=True,
+            )
+        # DetBox
+        if pool:
+            scored = [(merge.iou(loc.bounds, e.bounds), e) for e in pool]
+            scored.sort(key=lambda t: t[0], reverse=True)
+            if scored and scored[0][0] > 0.1:
+                return scored[0][1]
+        return Element(
+            id=len(pool), type="GroundedBox", text=loc.label, bounds=loc.bounds,
+            center=center_of(loc.bounds), source=Source.grounding, confidence=loc.confidence,
+            clickable=loc.interactable,
+        )
+
+    # ----------------------------------------------------------------- has (T0)
+
+    def has(
+        self,
+        text: str,
+        *,
+        match: str = "contains",
+        ignore_case: bool = False,
+        ocr_fallback: bool = True,
+        source: str = "auto",
+        timeout_ms: int = 0,
+    ) -> HasResult:
+        """Quick presence check — NOT the full pipeline (PRD §5, §6a T0)."""
+        mode = MatchMode(match)
+        device = self.device
+        src = (source or "auto").lower()
+
+        # T0: hierarchy selector (short-circuits on first hit)
+        if src in ("auto", "hierarchy"):
+            if timeout_ms and timeout_ms > 0:
+                bounds = device.wait_for(
+                    text, match=mode, ignore_case=ignore_case, timeout_ms=timeout_ms
+                )
+            else:
+                bounds = device.find_text(text, match=mode, ignore_case=ignore_case)
+            if bounds is not None:
+                return HasResult(found=True, source="hierarchy", bounds=bounds, text=text)
+            if src == "hierarchy":
+                return HasResult(found=False, source="hierarchy")
+
+        # T0→T3: OCR fallback (only on a hierarchy miss)
+        if (src in ("auto", "vision")) and (ocr_fallback or src == "vision"):
+            hit = self._ocr_contains(device, text, mode, ignore_case)
+            if hit is not None:
+                return HasResult(found=True, source="ocr", bounds=hit, text=text)
+
+        return HasResult(found=False, source="hierarchy" if src != "vision" else "ocr")
+
+    def _ocr_contains(
+        self, device: Device, text: str, mode: MatchMode, ignore_case: bool
+    ) -> tuple[int, int, int, int] | None:
+        if not self.factory.is_enabled("ocr"):
+            return None
+        chain = self.factory.build_chain("ocr")
+        if not chain.providers:
+            return None
+        img = device.screenshot()
+        try:
+            boxes, _ = run_chain(
+                chain,
+                lambda p: p.recognize(img),  # type: ignore[attr-defined]
+                timeout_s=self.config.timeouts.vision_ms / 1000.0,
+            )
+        except ProviderError as exc:
+            logger.info("ocr fallback unavailable: %s", exc)
+            return None
+        import re as _re
+
+        needle = text if not ignore_case else text.lower()
+        for tb in boxes:
+            hay = tb.text if not ignore_case else tb.text.lower()
+            ok = False
+            if mode is MatchMode.exact:
+                ok = hay.strip() == needle.strip()
+            elif mode is MatchMode.regex:
+                flags = _re.IGNORECASE if ignore_case else 0
+                ok = _re.search(text, tb.text, flags) is not None
+            else:
+                ok = needle in hay
+            if ok:
+                return tb.bounds
+        return None
+
+    # ----------------------------------------------------------------- inspect
+
+    def inspect(self, element_id: int) -> Element:
+        return self._resolve(element_id)
+
+    def screenshot(self, path: str | None = None, *, annotate: bool = False) -> ActionResult:
+        device = self.device
+        img = device.screenshot()
+        if annotate:
+            cached = self._read_cache()
+            elements = cached.elements if cached else []
+            out = path or self._default_annotate_path(device.serial)
+            from . import annotate as annotate_mod
+
+            saved = annotate_mod.annotate(img, elements, out)
+            return ActionResult(ok=True, action="screenshot", detail=saved)
+        out = path or self._default_annotate_path(device.serial, suffix="screenshot")
+        img.save(out)
+        return ActionResult(ok=True, action="screenshot", detail=out)
+
+    # ----------------------------------------------------------------- actions
+
+    def tap(self, element_id: int) -> ActionResult:
+        el = self._resolve(element_id)
+        cx, cy = el.center
+        self.device.click(cx, cy)
+        self._invalidate_cache()
+        return ActionResult(ok=True, action="tap", id=element_id, target=[cx, cy])
+
+    def long_press(self, element_id: int, *, ms: int = 600) -> ActionResult:
+        el = self._resolve(element_id)
+        cx, cy = el.center
+        self.device.long_click(cx, cy, ms)
+        self._invalidate_cache()
+        return ActionResult(ok=True, action="long-press", id=element_id, target=[cx, cy])
+
+    def input_text(self, element_id: int, text: str, *, submit: bool = False) -> ActionResult:
+        el = self._resolve(element_id)
+        cx, cy = el.center
+        self.device.input_text(cx, cy, text, clear=True, submit=submit)
+        self._invalidate_cache()
+        return ActionResult(ok=True, action="input", id=element_id, detail=text)
+
+    def clear(self, element_id: int) -> ActionResult:
+        el = self._resolve(element_id)
+        cx, cy = el.center
+        self.device.click(cx, cy)
+        self.device.clear_text()
+        self._invalidate_cache()
+        return ActionResult(ok=True, action="clear", id=element_id)
+
+    def swipe(
+        self,
+        direction: str | None = None,
+        *,
+        from_id: int | None = None,
+        percent: int = 50,
+        coords: tuple[int, int, int, int] | None = None,
+    ) -> ActionResult:
+        device = self.device
+        if coords is not None:
+            x1, y1, x2, y2 = coords
+            device.swipe(x1, y1, x2, y2)
+            self._invalidate_cache()
+            return ActionResult(ok=True, action="swipe", target=[x1, y1, x2, y2])
+        if direction is None:
+            raise UsageError("swipe needs a direction or --coords", hint="e.g. `aua swipe up`")
+        w, h = device.window_size()
+        if from_id is not None:
+            cx, cy = self._resolve(from_id).center
+        else:
+            cx, cy = w // 2, h // 2
+        ax = int(w * percent / 200)
+        ay = int(h * percent / 200)
+        d = direction.lower()
+        if d == "up":
+            x1, y1, x2, y2 = cx, cy + ay, cx, cy - ay
+        elif d == "down":
+            x1, y1, x2, y2 = cx, cy - ay, cx, cy + ay
+        elif d == "left":
+            x1, y1, x2, y2 = cx + ax, cy, cx - ax, cy
+        elif d == "right":
+            x1, y1, x2, y2 = cx - ax, cy, cx + ax, cy
+        else:
+            raise UsageError(f"unknown swipe direction '{direction}'", hint="up|down|left|right")
+        clamp = lambda v, lo, hi: max(lo, min(hi, v))  # noqa: E731
+        x1, x2 = clamp(x1, 0, w - 1), clamp(x2, 0, w - 1)
+        y1, y2 = clamp(y1, 0, h - 1), clamp(y2, 0, h - 1)
+        device.swipe(x1, y1, x2, y2)
+        self._invalidate_cache()
+        return ActionResult(ok=True, action="swipe", target=[x1, y1, x2, y2])
+
+    def scroll_to(
+        self, query: str, *, match: str = "contains", ignore_case: bool = False
+    ) -> ActionResult:
+        found = self.device.scroll_to(query, match=MatchMode(match), ignore_case=ignore_case)
+        self._invalidate_cache()
+        return ActionResult(
+            ok=found is not None,
+            action="scroll-to",
+            detail=query,
+            target=list(found) if found else None,
+        )
+
+    def key(self, name: str) -> ActionResult:
+        self.device.press(name)
+        self._invalidate_cache()
+        return ActionResult(ok=True, action="key", detail=name)
+
+    def wait(
+        self,
+        *,
+        for_: str | None = None,
+        idle: bool = False,
+        timeout_ms: int = 5000,
+        match: str = "contains",
+        ignore_case: bool = False,
+    ) -> ActionResult:
+        device = self.device
+        if idle:
+            device.wait_idle(timeout_ms)
+            return ActionResult(ok=True, action="wait", detail="idle")
+        if not for_:
+            raise UsageError("wait needs --for <text> or --idle")
+        found = device.wait_for(
+            for_, match=MatchMode(match), ignore_case=ignore_case, timeout_ms=timeout_ms
+        )
+        return ActionResult(
+            ok=found is not None,
+            action="wait",
+            detail=for_,
+            target=list(found) if found else None,
+        )
+
+    def app(self, action: str, *, package: str | None = None) -> ActionResult:
+        device = self.device
+        d: Any = getattr(device, "_d", None)
+        a = action.lower()
+        if a in ("foreground", "current"):
+            info = device.current_app()
+            return ActionResult(ok=True, action=f"app-{a}", detail=json.dumps(info))
+        if d is None:
+            raise UsageError("app launch/stop requires a real device")
+        if a == "launch":
+            if not package:
+                raise UsageError("app launch needs a package name")
+            d.app_start(package)
+            return ActionResult(ok=True, action="app-launch", detail=package)
+        if a == "stop":
+            if not package:
+                raise UsageError("app stop needs a package name")
+            d.app_stop(package)
+            return ActionResult(ok=True, action="app-stop", detail=package)
+        raise UsageError(f"unknown app action '{action}'", hint="foreground|launch|stop|current")
+
+    # ----------------------------------------------------------------- doctor
+
+    def provider_status(self) -> dict[str, list[dict[str, Any]]]:
+        out: dict[str, list[dict[str, Any]]] = {}
+        for kind in ("ocr", "detection", "grounding"):
+            chain_names = self.factory.chain_names(kind)
+            enabled = self.factory.is_enabled(kind)
+            items: list[dict[str, Any]] = []
+            for name in registered_names(kind):
+                try:
+                    prov = self.factory.create(kind, name)
+                    avail = prov.is_available()
+                    items.append(
+                        {
+                            "name": name,
+                            "available": avail.ok,
+                            "reason": avail.reason,
+                            "in_chain": name in chain_names,
+                            "kind_enabled": enabled,
+                        }
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    items.append(
+                        {
+                            "name": name,
+                            "available": False,
+                            "reason": f"init error: {exc}",
+                            "in_chain": name in chain_names,
+                            "kind_enabled": enabled,
+                        }
+                    )
+            out[kind] = items
+        return out
+
+    # ----------------------------------------------------------------- annotate
+
+    def _maybe_annotate(
+        self,
+        annotate: bool | str | None,
+        device: Device,
+        elements: list[Element],
+        img: ScreenImage | None,
+    ) -> str | None:
+        if not annotate:
+            return None
+        from . import annotate as annotate_mod
+
+        if img is None:
+            img = device.screenshot()
+        out = annotate if isinstance(annotate, str) else self._default_annotate_path(device.serial)
+        return annotate_mod.annotate(img, elements, out)
+
+    def _default_annotate_path(self, serial: str, *, suffix: str = "annotated") -> str:
+        run_dir = Path(self.config.cache.dir).expanduser() / "runs"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        safe = serial.replace(":", "_")
+        return str(run_dir / f"{safe}_{suffix}.png")
+
+    # ----------------------------------------------------------------- cache
+
+    def _cache_path(self, serial: str | None = None) -> Path:
+        serial = serial or (self._device.serial if self._device else self.config.device.serial or "default")
+        cache_dir = Path(self.config.cache.dir).expanduser()
+        safe = str(serial).replace(":", "_")
+        return cache_dir / f"analyze_{safe}.json"
+
+    def _write_cache(self, result: AnalyzeResult) -> None:
+        if not self.config.cache.enabled:
+            return
+        path = self._cache_path(result.meta.device_serial)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(result.model_dump_json(), encoding="utf-8")
+        except OSError as exc:  # pragma: no cover - disk issues
+            logger.warning("could not write analyze cache: %s", exc)
+
+    def _read_cache(self) -> AnalyzeResult | None:
+        path = self._cache_path()
+        if not path.is_file():
+            return None
+        try:
+            return AnalyzeResult.model_validate_json(path.read_text(encoding="utf-8"))
+        except Exception as exc:  # pragma: no cover - corrupt cache
+            logger.warning("ignoring corrupt analyze cache: %s", exc)
+            return None
+
+    def _invalidate_cache(self) -> None:
+        path = self._cache_path()
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:  # pragma: no cover
+            pass
+
+    def _resolve(self, element_id: int) -> Element:
+        cached = self._read_cache()
+        if cached is None:
+            raise ElementNotFoundError(
+                "no cached analyze result", hint="Run `aua analyze` first to assign element ids."
+            )
+        el = cached.element_by_id(element_id)
+        if el is None:
+            valid = ", ".join(str(e.id) for e in cached.elements[:20]) or "(none)"
+            raise ElementNotFoundError(
+                f"element id {element_id} is not in the last analyze (valid: {valid})",
+                hint="Re-run `aua analyze`; ids change when the screen changes.",
+            )
+        return el
