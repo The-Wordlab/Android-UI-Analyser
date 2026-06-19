@@ -28,9 +28,15 @@ Requirements: **Python 3.11+**, **`adb` on PATH** (Android SDK platform-tools), 
 - Tests:       `.venv/bin/pytest` (or `uv run pytest`)
 - Lint/types:  `.venv/bin/ruff check .` · `.venv/bin/mypy`
 - **The SKILL.md is generated** — edit `src/android_ui_analyser/guide.py` (the single source),
-  never the SKILL.md directly, then regenerate: `aua guide --emit-skill`
-  (writes `.claude/skills/android-ui-analyser/SKILL.md`). This keeps the skill and the
-  `aua guide` manual from drifting.
+  never a SKILL.md directly. There are **two** committed copies; regenerate both after a change:
+  `aua guide --emit-skill` (project copy: `.claude/skills/android-ui-analyser/SKILL.md`) and
+  `aua guide --emit-skill skills/android-ui-analyser/SKILL.md` (the **plugin** copy). When
+  releasing a skill/CLI change, bump `version` in both `.claude-plugin/plugin.json` and
+  `.claude-plugin/marketplace.json` so `/plugin update` picks it up.
+- **Plugin/marketplace**: the repo is its own Claude Code plugin marketplace
+  (`.claude-plugin/marketplace.json`, name `the-wordlab`) exposing the `android-ui-analyser`
+  plugin (`.claude-plugin/plugin.json`). The MCP server (`aua mcp`) is intentionally not
+  bundled — it needs the `aua` binary on PATH.
 - Adding a perception provider: subclass in `providers/`, register with the decorator in
   `providers/registry.py`, add a `models.<name>` config block — no edits to `engine.py`/`cli.py`.
 - Design rationale: `docs/ARCHITECTURE.md`. Full product spec: `PRD.md`.

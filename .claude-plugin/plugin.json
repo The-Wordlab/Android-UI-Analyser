@@ -1,0 +1,14 @@
+{
+  "name": "android-ui-analyser",
+  "displayName": "Android UI Analyser",
+  "version": "0.1.0",
+  "description": "Drive and inspect an Android app's UI via the `aua` CLI — act on stable element IDs, not pixels. Hierarchy-first, with OCR/detection/grounding vision fallbacks.",
+  "author": {
+    "name": "The Wordlab",
+    "url": "https://github.com/The-Wordlab/Android-UI-Analyser"
+  },
+  "homepage": "https://github.com/The-Wordlab/Android-UI-Analyser",
+  "repository": "https://github.com/The-Wordlab/Android-UI-Analyser",
+  "license": "MIT",
+  "keywords": ["android", "ui-testing", "uiautomator2", "accessibility", "ocr", "agent", "automation"]
+}

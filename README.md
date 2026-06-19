@@ -160,11 +160,35 @@ The **analyze → act → analyze** loop is the core workflow:
 
 ## Use it from Claude Code (the `aua` skill)
 
-`aua` ships a **Claude Code skill** (`.claude/skills/android-ui-analyser/SKILL.md`) that teaches Claude Code how to drive the tool and **auto-activates whenever you ask it to test or inspect an Android app** — no prompt engineering, the skill's description carries the trigger.
+`aua` ships a **Claude Code skill** that teaches Claude Code how to drive the tool and **auto-activates whenever you ask it to test or inspect an Android app** — no prompt engineering, the skill's description carries the trigger.
 
-### One-command setup
+Two pieces make it work, and both must be available *outside* this repo:
+- the **skill** — installed via the **plugin** or at **user level**, so it activates in *every* project (a skill merely committed under a repo's `.claude/skills/` only activates while Claude Code is working *inside that repo*);
+- the **`aua` CLI** — on your `PATH` **globally** (not a project venv), because the skill shells out to it.
 
-Hand the repo to a fresh Claude Code session (or run it yourself):
+Pick either install path.
+
+### Option 1 — Install the plugin (recommended)
+
+This repo is its own Claude Code **plugin marketplace**. In Claude Code, run:
+
+```
+/plugin marketplace add The-Wordlab/Android-UI-Analyser
+/plugin install android-ui-analyser@the-wordlab
+```
+
+That installs the skill so it auto-activates in every project. The plugin can't install the Python CLI it drives, so also install the `aua` binary once, **globally**:
+
+```bash
+uv tool install "git+ssh://git@github.com/The-Wordlab/Android-UI-Analyser.git"
+# or:  pipx install "git+ssh://git@github.com/The-Wordlab/Android-UI-Analyser.git"
+```
+
+Core hierarchy analysis needs no extras; for the vision fallback on Compose/Flutter/WebView screens, add an OCR engine (see the [extras matrix](#optional-dependency-extras-matrix)). Pull plugin updates later with `/plugin update android-ui-analyser@the-wordlab`.
+
+### Option 2 — One-command bootstrap from a clone
+
+Prefer to do everything (binary **and** skill) in one shot? Clone and run the idempotent [`install.sh`](install.sh):
 
 ```bash
 git clone git@github.com:The-Wordlab/Android-UI-Analyser.git
@@ -172,44 +196,21 @@ cd Android-UI-Analyser
 ./install.sh
 ```
 
-[`install.sh`](install.sh) is idempotent and:
-1. Installs the `aua` CLI **globally** — via `uv tool` or `pipx` (or a project venv as a fallback) — so it's on `PATH` in every project.
-2. Installs the skill at **user level** (`~/.claude/skills/android-ui-analyser/`) so Claude Code auto-discovers it **in every project**, not just this repo.
-3. Runs `aua doctor` to report what's still missing (usually just: connect a device).
-
-Then [connect a device or emulator](#connect-a-device-or-emulator). From then on, in **any** project, just ask Claude Code things like *"tap Sign in and check the home screen loads"* — it invokes `aua` automatically.
-
-> **Why install globally + user-level?** A skill committed under a repo's `.claude/skills/` only activates while Claude Code works *inside that repo*. To use `aua` while testing some *other* app's project, the skill must live in `~/.claude/skills/` (user scope) and the `aua` binary must be on `PATH` globally (not in a project venv). `install.sh` handles both.
-
-### Hand it to another Claude Code
-
-Point a fresh session at the repo and let it bootstrap itself:
+It installs `aua` globally (via `uv tool`/`pipx`, with a venv fallback), installs the skill at **user level** (`~/.claude/skills/`), and runs `aua doctor`. The repo's [`CLAUDE.md`](CLAUDE.md) is auto-loaded when Claude Code opens the clone, so you can also just tell a fresh session:
 
 > "Clone `git@github.com:The-Wordlab/Android-UI-Analyser.git` and run its `install.sh` to set up the `aua` Android UI testing skill, then use it to &lt;your task&gt;."
 
-The repo's [`CLAUDE.md`](CLAUDE.md) is auto-loaded when Claude Code opens the clone, so the agent already knows these steps — clone, `./install.sh`, connect a device, drive the app.
+### Then: connect a device
 
-### Manual setup (no script)
-
-```bash
-uv tool install --with rapidocr-onnxruntime --with onnxruntime .   # global aua + OCR engine
-# or:  pipx install . && pipx inject android-ui-analyser rapidocr-onnxruntime onnxruntime
-
-aua guide --emit-skill ~/.claude/skills/android-ui-analyser/SKILL.md   # install the skill (user level)
-aua doctor
-```
+Either path leaves one thing to do: attach a [device or emulator](#connect-a-device-or-emulator). Run `aua doctor` until `adb` and `devices` show OK — after that, in **any** project, just ask Claude Code to test your app and the skill activates automatically.
 
 ### Keeping the skill current
 
-The SKILL.md is **generated** from the same source as `aua guide`, so they never drift. After upgrading `aua`, refresh the installed skill with:
-
-```bash
-aua guide --emit-skill ~/.claude/skills/android-ui-analyser/SKILL.md
-```
+The SKILL.md is **generated** from the same source as `aua guide`, so it never drifts from the CLI. After upgrading `aua`: plugin users get the refreshed skill via `/plugin update`; user-level installs re-run `aua guide --emit-skill ~/.claude/skills/android-ui-analyser/SKILL.md`.
 
 ### Prefer MCP?
 
-`aua mcp` exposes the same actions over MCP (see [MCP server](#mcp-server)) — use that for non–Claude-Code clients, or alongside the skill.
+`aua mcp` exposes the same actions over MCP (see [MCP server](#mcp-server)) — use it for non–Claude-Code clients, or alongside the skill. It's intentionally **not** bundled in the plugin: it needs the `aua` binary already installed, so bundling it would make every session fail to start the server until you've installed the CLI.
 
 ---
 
