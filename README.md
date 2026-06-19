@@ -156,7 +156,7 @@ aua analyze --query "the Submit button" --cheap   # forbid escalation beyond hie
 The **analyze → act → analyze** loop is the core workflow:
 1. `aua analyze` returns elements with IDs.
 2. The agent picks an ID and acts: `aua tap <id>` / `aua input <id> "text"`.
-3. Re-analyze — IDs may change after a state transition.
+3. Re-analyze — IDs may change after a state transition. Or add `--observe` to the action (e.g. `aua tap <id> --observe`) to get the post-action screen back inline, folding the re-analyze into the same call.
 
 ---
 
@@ -257,7 +257,7 @@ aua goto "settings" --plan    # print the route only, don't act
 aua goto "checkout" --max-steps 12
 ```
 
-`goto` resolves the goal (fuzzy) against the map, walks the shortest route from the **current** screen, and re-checks `known_screen` after every hop. If the route diverges it stops and hands back the remaining steps + the current screen (exit `1`) so you can finish with `analyze` + `tap`; it exits `0` once it arrives. It runs through the warm daemon too.
+`goto` resolves the goal (fuzzy) against the map, walks the shortest route from the **current** screen, and re-checks `known_screen` after every hop. If the route diverges it stops and hands back the remaining steps, the current screen, and the on-screen elements (exit `1`); it exits `0` once it arrives, returning the destination's `elements` (fresh ids). Either way you can keep going without a separate `analyze`. It runs through the warm daemon too.
 
 ### Inspect and manage the map
 
@@ -465,9 +465,13 @@ state-changing action — IDs may change after navigation or screen transitions.
 ```bash
 aua tap <id>              # tap / click an element
 aua input <id> "text"     # focus element and type; add --submit to send IME action
+aua tap <id> --observe    # act AND return the new screen inline (skips a follow-up analyze)
 aua swipe up              # swipe direction (up|down|left|right)
 aua swipe --from <id>     # scroll a specific container
 ```
+
+Any action accepts `--observe` to return the post-action screen (with fresh ids) in the
+same call, so `type → tap send` is two commands, not three.
 
 ### Quick checks (no full analyze needed)
 
@@ -602,6 +606,8 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 | `aua daemon start\|status\|stop` | Manage the optional warm-state daemon |
 | `aua guide` | Print the agent operating manual (`--emit-skill` writes the Claude Code skill) |
 | `aua mcp` | Run the MCP server over stdio |
+
+All action commands (`tap`, `long-press`, `input`, `clear`, `swipe`, `scroll-to`, `key`) accept **`--observe`** to return the post-action screen inline (an `observation` with fresh element IDs), skipping a follow-up `analyze`.
 
 ---
 

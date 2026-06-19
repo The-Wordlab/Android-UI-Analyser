@@ -869,6 +869,9 @@ class Engine:
             "final_screen": res.meta.known_screen,
             "hops": hops,
             "route": route,
+            # destination elements (ids) so the caller can act without a re-analyze;
+            # the id cache is already warm from goto's final analyze.
+            "elements": [e.compact() for e in res.elements],
         }
 
     def close(self) -> None:
@@ -1036,39 +1039,58 @@ class Engine:
 
     # ----------------------------------------------------------------- actions
 
-    def tap(self, element_id: int) -> ActionResult:
+    def _observe(self, result: ActionResult, observe: bool) -> ActionResult:
+        """Attach the post-action screen so callers skip a separate ``analyze`` round-trip.
+
+        The folded ``analyze`` also re-populates the id cache, so the agent can act on an id
+        from ``result.observation`` immediately (e.g. type → tap send) in one fewer call.
+        """
+        if observe:
+            with contextlib.suppress(Exception):  # observation is a bonus; never fail the action
+                result.observation = self.analyze(source="hierarchy")
+        return result
+
+    def tap(self, element_id: int, *, observe: bool = False) -> ActionResult:
         el = self._resolve(element_id)
         cx, cy = el.center
         self.device.click(cx, cy)
         self._invalidate_cache()
         self._record_action_safe(f"tap {self._action_label(el)}")
-        return ActionResult(ok=True, action="tap", id=element_id, target=[cx, cy])
+        return self._observe(
+            ActionResult(ok=True, action="tap", id=element_id, target=[cx, cy]), observe
+        )
 
-    def long_press(self, element_id: int, *, ms: int = 600) -> ActionResult:
+    def long_press(self, element_id: int, *, ms: int = 600, observe: bool = False) -> ActionResult:
         el = self._resolve(element_id)
         cx, cy = el.center
         self.device.long_click(cx, cy, ms)
         self._invalidate_cache()
         self._record_action_safe(f"long-press {self._action_label(el)}")
-        return ActionResult(ok=True, action="long-press", id=element_id, target=[cx, cy])
+        return self._observe(
+            ActionResult(ok=True, action="long-press", id=element_id, target=[cx, cy]), observe
+        )
 
-    def input_text(self, element_id: int, text: str, *, submit: bool = False) -> ActionResult:
+    def input_text(
+        self, element_id: int, text: str, *, submit: bool = False, observe: bool = False
+    ) -> ActionResult:
         el = self._resolve(element_id)
         cx, cy = el.center
         self.device.input_text(cx, cy, text, clear=True, submit=submit)
         self._invalidate_cache()
         # Record the action SHAPE only — the typed value is never persisted (PRD §6b privacy).
         self._record_action_safe("input '<filled>'" + (" + send" if submit else ""))
-        return ActionResult(ok=True, action="input", id=element_id, detail=text)
+        return self._observe(
+            ActionResult(ok=True, action="input", id=element_id, detail=text), observe
+        )
 
-    def clear(self, element_id: int) -> ActionResult:
+    def clear(self, element_id: int, *, observe: bool = False) -> ActionResult:
         el = self._resolve(element_id)
         cx, cy = el.center
         self.device.click(cx, cy)
         self.device.clear_text()
         self._invalidate_cache()
         self._record_action_safe(f"clear {self._action_label(el)}")
-        return ActionResult(ok=True, action="clear", id=element_id)
+        return self._observe(ActionResult(ok=True, action="clear", id=element_id), observe)
 
     def swipe(
         self,
@@ -1077,6 +1099,7 @@ class Engine:
         from_id: int | None = None,
         percent: int = 50,
         coords: tuple[int, int, int, int] | None = None,
+        observe: bool = False,
     ) -> ActionResult:
         device = self.device
         if coords is not None:
@@ -1084,7 +1107,9 @@ class Engine:
             device.swipe(x1, y1, x2, y2)
             self._invalidate_cache()
             self._record_action_safe("swipe coords")
-            return ActionResult(ok=True, action="swipe", target=[x1, y1, x2, y2])
+            return self._observe(
+                ActionResult(ok=True, action="swipe", target=[x1, y1, x2, y2]), observe
+            )
         if direction is None:
             raise UsageError("swipe needs a direction or --coords", hint="e.g. `aua swipe up`")
         w, h = device.window_size()
@@ -1111,26 +1136,36 @@ class Engine:
         device.swipe(x1, y1, x2, y2)
         self._invalidate_cache()
         self._record_action_safe(f"swipe {d}")
-        return ActionResult(ok=True, action="swipe", target=[x1, y1, x2, y2])
+        return self._observe(
+            ActionResult(ok=True, action="swipe", target=[x1, y1, x2, y2]), observe
+        )
 
     def scroll_to(
-        self, query: str, *, match: str = "contains", ignore_case: bool = False
+        self,
+        query: str,
+        *,
+        match: str = "contains",
+        ignore_case: bool = False,
+        observe: bool = False,
     ) -> ActionResult:
         found = self.device.scroll_to(query, match=MatchMode(match), ignore_case=ignore_case)
         self._invalidate_cache()
         self._record_action_safe(f"scroll-to '{query}'")
-        return ActionResult(
-            ok=found is not None,
-            action="scroll-to",
-            detail=query,
-            target=list(found) if found else None,
+        return self._observe(
+            ActionResult(
+                ok=found is not None,
+                action="scroll-to",
+                detail=query,
+                target=list(found) if found else None,
+            ),
+            observe,
         )
 
-    def key(self, name: str) -> ActionResult:
+    def key(self, name: str, *, observe: bool = False) -> ActionResult:
         self.device.press(name)
         self._invalidate_cache()
         self._record_action_safe(f"key '{name}'")
-        return ActionResult(ok=True, action="key", detail=name)
+        return self._observe(ActionResult(ok=True, action="key", detail=name), observe)
 
     def wait(
         self,

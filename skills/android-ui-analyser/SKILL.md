@@ -21,7 +21,7 @@ description: >-
 2. **Use what memory already knows.** `aua map` (or `aua map --brief`) prints the app's known screens + routes — but you usually don't need to call it: every `analyze` already returns `meta.known_screen` plus inline `meta.known_routes` / `meta.suggested_gotos` / `meta.map_hint`. Act on those instead of re-exploring. `aua map --find "<goal>"` gives just the route to a target.
 3. **Jump to a known screen in one call.** `aua goto "<goal>"` drives the remembered route to a screen — it taps and verifies each hop for you, turning multi-step navigation into a single command (prefer it whenever `suggested_gotos` lists your target). `--plan` prints the route without acting; if the route diverges it stops and hands back the remaining steps + the current screen.
 4. **Drive by element ID.** `aua --format compact analyze` → a list of elements each with an integer `id` + bounds. Act on the id: `aua tap <id>`, `aua input <id> "text"`, `aua swipe up`, `aua key back`. Use `aua has "<text>"` (exit 0/1) to branch cheaply without parsing JSON.
-5. **Re-analyze after every action.** IDs are only valid until the screen changes. After any tap/input/swipe/key, run `analyze` again before acting — old ids are stale.
+5. **Re-analyze after every action — or fold it in with `--observe`.** IDs are only valid until the screen changes. After any tap/input/swipe/key the old ids are stale. Instead of a separate `analyze`, pass `--observe` to the action: it returns the post-action screen inline (`observation.elements` with fresh ids), so `type → tap send` is two calls, not three. (`goto` already returns the destination's `elements`.) Use a plain `analyze` only when you also need to wait for the screen to settle.
 6. **Wait on state, never sleep.** `aua wait --for "<text>"` waits for text to appear; `aua wait --for-stable` returns once the screen stops visually changing (cheap perceptual-hash over screenshots — ideal for image generation / loading / video, works on opaque screens). Prefer these to fixed sleeps.
 7. **Stop the daemon when done.** `aua daemon stop` releases the warm connection.
 
@@ -34,6 +34,7 @@ description: >-
 - _wait_: `--for "<text>"`, `--idle`, `--for-stable`, `--interval`, `--settle`, `--timeout`
 - _map_: `--app <pkg>`, `--brief`, `--screen <name>`, `--depth N`, `--find "<goal>"`, `--json`
 - _goto_: `<goal>` (fuzzy), `--plan` (route only, no taps), `--max-steps N`
+- _actions (tap/input/swipe/scroll-to/key/…)_: `--observe` — return the post-action screen inline (fresh element ids), skipping a follow-up `analyze`
 
 ## The loop
 ```bash
