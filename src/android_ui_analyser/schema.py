@@ -179,9 +179,15 @@ class AnalyzeResult(BaseModel):
         if fmt is OutputFormat.compact:
             payload = {
                 "schema_version": self.schema_version,
-                "screen": {k: v for k, v in self.screen.model_dump(mode="json").items() if v is not None},
+                "screen": {
+                    k: v for k, v in self.screen.model_dump(mode="json").items() if v is not None
+                },
                 "elements": [e.compact() for e in self.elements],
-                "meta": {k: v for k, v in self.meta.model_dump(mode="json").items() if v not in (None, [])},
+                "meta": {
+                    k: v
+                    for k, v in self.meta.model_dump(mode="json").items()
+                    if v not in (None, [])
+                },
             }
             return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
         # json (single line)

@@ -1,0 +1,134 @@
+[
+  {
+    "id": 0,
+    "type": "TextView",
+    "text": "Sign in to your account",
+    "resource_id": "com.example.shop:id/title",
+    "content_desc": null,
+    "bounds": [
+      48,
+      180,
+      1032,
+      260
+    ],
+    "center": [
+      540,
+      220
+    ],
+    "clickable": false,
+    "enabled": true,
+    "focused": false,
+    "source": "hierarchy",
+    "confidence": null
+  },
+  {
+    "id": 1,
+    "type": "EditText",
+    "text": null,
+    "resource_id": "com.example.shop:id/email",
+    "content_desc": "Email address",
+    "bounds": [
+      48,
+      340,
+      1032,
+      480
+    ],
+    "center": [
+      540,
+      410
+    ],
+    "clickable": true,
+    "enabled": true,
+    "focused": true,
+    "source": "hierarchy",
+    "confidence": null
+  },
+  {
+    "id": 2,
+    "type": "EditText",
+    "text": null,
+    "resource_id": "com.example.shop:id/password",
+    "content_desc": "Password",
+    "bounds": [
+      48,
+      520,
+      1032,
+      660
+    ],
+    "center": [
+      540,
+      590
+    ],
+    "clickable": true,
+    "enabled": true,
+    "focused": false,
+    "source": "hierarchy",
+    "confidence": null
+  },
+  {
+    "id": 3,
+    "type": "CheckBox",
+    "text": "Remember me",
+    "resource_id": "com.example.shop:id/remember",
+    "content_desc": null,
+    "bounds": [
+      48,
+      700,
+      420,
+      780
+    ],
+    "center": [
+      234,
+      740
+    ],
+    "clickable": true,
+    "enabled": true,
+    "focused": false,
+    "source": "hierarchy",
+    "confidence": null
+  },
+  {
+    "id": 4,
+    "type": "Button",
+    "text": "Log in",
+    "resource_id": "com.example.shop:id/login_btn",
+    "content_desc": null,
+    "bounds": [
+      48,
+      840,
+      1032,
+      980
+    ],
+    "center": [
+      540,
+      910
+    ],
+    "clickable": true,
+    "enabled": true,
+    "focused": false,
+    "source": "hierarchy",
+    "confidence": null
+  },
+  {
+    "id": 5,
+    "type": "Button",
+    "text": "Forgot password?",
+    "resource_id": "com.example.shop:id/forgot",
+    "content_desc": null,
+    "bounds": [
+      48,
+      1020,
+      520,
+      1100
+    ],
+    "center": [
+      284,
+      1060
+    ],
+    "clickable": true,
+    "enabled": true,
+    "focused": false,
+    "source": "hierarchy",
+    "confidence": null
+  }
+]

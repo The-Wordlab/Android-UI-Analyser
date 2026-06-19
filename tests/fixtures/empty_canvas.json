@@ -1,0 +1,24 @@
+[
+  {
+    "id": 0,
+    "type": "SurfaceView",
+    "text": null,
+    "resource_id": "com.example.game:id/surface",
+    "content_desc": null,
+    "bounds": [
+      0,
+      0,
+      1080,
+      2400
+    ],
+    "center": [
+      540,
+      1200
+    ],
+    "clickable": false,
+    "enabled": true,
+    "focused": false,
+    "source": "hierarchy",
+    "confidence": null
+  }
+]

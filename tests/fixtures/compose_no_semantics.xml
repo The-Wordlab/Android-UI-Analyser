@@ -1,0 +1,13 @@
+<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
+<hierarchy rotation="0">
+  <node index="0" text="" resource-id="" class="android.widget.FrameLayout" package="com.example.compose" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[0,0][1080,2400]">
+    <node index="0" text="" resource-id="" class="androidx.compose.ui.platform.ComposeView" package="com.example.compose" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[0,84][1080,2400]">
+      <node index="0" text="" resource-id="" class="android.view.View" package="com.example.compose" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="true" long-clickable="false" password="false" selected="false" bounds="[0,84][1080,2400]">
+        <node index="0" text="" resource-id="" class="android.view.View" package="com.example.compose" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[48,160][1032,420]" />
+        <node index="1" text="" resource-id="" class="android.view.View" package="com.example.compose" content-desc="" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[48,460][520,720]" />
+        <node index="2" text="" resource-id="" class="android.view.View" package="com.example.compose" content-desc="" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[560,460][1032,720]" />
+        <node index="3" text="" resource-id="" class="android.view.View" package="com.example.compose" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[48,760][1032,900]" />
+      </node>
+    </node>
+  </node>
+</hierarchy>

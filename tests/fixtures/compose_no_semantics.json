@@ -1,0 +1,112 @@
+[
+  {
+    "id": 0,
+    "type": "View",
+    "text": null,
+    "resource_id": null,
+    "content_desc": null,
+    "bounds": [
+      0,
+      84,
+      1080,
+      2400
+    ],
+    "center": [
+      540,
+      1242
+    ],
+    "clickable": false,
+    "enabled": true,
+    "focused": false,
+    "source": "hierarchy",
+    "confidence": null
+  },
+  {
+    "id": 1,
+    "type": "View",
+    "text": null,
+    "resource_id": null,
+    "content_desc": null,
+    "bounds": [
+      48,
+      160,
+      1032,
+      420
+    ],
+    "center": [
+      540,
+      290
+    ],
+    "clickable": false,
+    "enabled": true,
+    "focused": false,
+    "source": "hierarchy",
+    "confidence": null
+  },
+  {
+    "id": 2,
+    "type": "View",
+    "text": null,
+    "resource_id": null,
+    "content_desc": null,
+    "bounds": [
+      48,
+      460,
+      520,
+      720
+    ],
+    "center": [
+      284,
+      590
+    ],
+    "clickable": true,
+    "enabled": true,
+    "focused": false,
+    "source": "hierarchy",
+    "confidence": null
+  },
+  {
+    "id": 3,
+    "type": "View",
+    "text": null,
+    "resource_id": null,
+    "content_desc": null,
+    "bounds": [
+      560,
+      460,
+      1032,
+      720
+    ],
+    "center": [
+      796,
+      590
+    ],
+    "clickable": true,
+    "enabled": true,
+    "focused": false,
+    "source": "hierarchy",
+    "confidence": null
+  },
+  {
+    "id": 4,
+    "type": "View",
+    "text": null,
+    "resource_id": null,
+    "content_desc": null,
+    "bounds": [
+      48,
+      760,
+      1032,
+      900
+    ],
+    "center": [
+      540,
+      830
+    ],
+    "clickable": false,
+    "enabled": true,
+    "focused": false,
+    "source": "hierarchy",
+    "confidence": null
+  }
+]

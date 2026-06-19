@@ -61,7 +61,10 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "W", "C4", "SIM"]
-ignore = ["E501"]  # line length handled by formatter; long strings/URLs allowed
+ignore = [
+    "E501",   # line length handled by formatter; long strings/URLs allowed
+    "UP042",  # `class X(str, Enum)` is intentional (explicit .value, pydantic-friendly)
+]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["B011"]

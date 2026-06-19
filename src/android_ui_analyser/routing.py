@@ -18,21 +18,96 @@ RESOURCE_ID_RE = re.compile(r"[\w.]+:id/[\w.]+")
 
 VISUAL_WORDS: frozenset[str] = frozenset(
     {
-        "icon", "image", "picture", "logo", "avatar", "thumbnail", "banner", "glyph",
-        "top", "bottom", "left", "right", "corner", "center", "centre", "middle",
-        "near", "above", "below", "beside", "leftmost", "rightmost", "upper", "lower",
-        "color", "colour", "red", "blue", "green", "yellow", "black", "white", "orange",
-        "purple", "pink", "gray", "grey", "circle", "square", "arrow", "hamburger",
-        "gear", "cog", "magnifier", "magnifying", "looks",
+        "icon",
+        "image",
+        "picture",
+        "logo",
+        "avatar",
+        "thumbnail",
+        "banner",
+        "glyph",
+        "top",
+        "bottom",
+        "left",
+        "right",
+        "corner",
+        "center",
+        "centre",
+        "middle",
+        "near",
+        "above",
+        "below",
+        "beside",
+        "leftmost",
+        "rightmost",
+        "upper",
+        "lower",
+        "color",
+        "colour",
+        "red",
+        "blue",
+        "green",
+        "yellow",
+        "black",
+        "white",
+        "orange",
+        "purple",
+        "pink",
+        "gray",
+        "grey",
+        "circle",
+        "square",
+        "arrow",
+        "hamburger",
+        "gear",
+        "cog",
+        "magnifier",
+        "magnifying",
+        "looks",
     }
 )
 
 _STOPWORDS: frozenset[str] = frozenset(
     {
-        "the", "a", "an", "button", "btn", "icon", "tab", "field", "input", "box",
-        "on", "screen", "please", "click", "tap", "press", "select", "choose", "that",
-        "says", "saying", "labeled", "labelled", "label", "with", "text", "to", "of",
-        "for", "my", "this", "in", "at", "is", "and", "or", "element", "item", "menu",
+        "the",
+        "a",
+        "an",
+        "button",
+        "btn",
+        "icon",
+        "tab",
+        "field",
+        "input",
+        "box",
+        "on",
+        "screen",
+        "please",
+        "click",
+        "tap",
+        "press",
+        "select",
+        "choose",
+        "that",
+        "says",
+        "saying",
+        "labeled",
+        "labelled",
+        "label",
+        "with",
+        "text",
+        "to",
+        "of",
+        "for",
+        "my",
+        "this",
+        "in",
+        "at",
+        "is",
+        "and",
+        "or",
+        "element",
+        "item",
+        "menu",
     }
 )
 
@@ -74,7 +149,9 @@ def salient_tokens(query: str) -> list[str]:
     return out or [t for t in toks if len(t) > 1]
 
 
-def entry_tier(intent: Intent, *, query: str | None = None, semantic_hierarchy_first: bool = True) -> Tier:
+def entry_tier(
+    intent: Intent, *, query: str | None = None, semantic_hierarchy_first: bool = True
+) -> Tier:
     """The cheapest tier that *could* answer this request."""
     if intent is Intent.has:
         return Tier.text

@@ -49,8 +49,12 @@ FIXTURES = Path(__file__).parent / "fixtures"
 # --------------------------------------------------------------------------- images
 
 
-def make_png(width: int = 200, height: int = 400, color: tuple[int, int, int] = (240, 240, 240),
-             boxes: list[tuple[Bounds, tuple[int, int, int]]] | None = None) -> bytes:
+def make_png(
+    width: int = 200,
+    height: int = 400,
+    color: tuple[int, int, int] = (240, 240, 240),
+    boxes: list[tuple[Bounds, tuple[int, int, int]]] | None = None,
+) -> bytes:
     """A solid-colour PNG with optional filled rectangles, as raw bytes."""
     from PIL import Image, ImageDraw
 
@@ -77,7 +81,7 @@ class FakeDevice(Device):
     def __init__(
         self,
         *,
-        hierarchy_xml: str = "<hierarchy rotation=\"0\"></hierarchy>",
+        hierarchy_xml: str = '<hierarchy rotation="0"></hierarchy>',
         width: int = 1080,
         height: int = 2400,
         package: str = "com.test.app",
@@ -197,8 +201,14 @@ def tmp_cache(tmp_path: Path) -> Path:
 class StubOcr(OcrProvider):
     name = "stub_ocr"
 
-    def __init__(self, *, available: bool = True, reason: str = "ok",
-                 result: list[TextBox] | None = None, raises: Exception | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        available: bool = True,
+        reason: str = "ok",
+        result: list[TextBox] | None = None,
+        raises: Exception | None = None,
+    ) -> None:
         super().__init__()
         self._available = available
         self._reason = reason
@@ -219,8 +229,14 @@ class StubOcr(OcrProvider):
 class StubDetection(DetectionProvider):
     name = "stub_detection"
 
-    def __init__(self, *, available: bool = True, reason: str = "ok",
-                 result: list[DetBox] | None = None, raises: Exception | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        available: bool = True,
+        reason: str = "ok",
+        result: list[DetBox] | None = None,
+        raises: Exception | None = None,
+    ) -> None:
         super().__init__()
         self._available = available
         self._reason = reason
@@ -241,8 +257,14 @@ class StubDetection(DetectionProvider):
 class StubGrounding(GroundingProvider):
     name = "stub_grounding"
 
-    def __init__(self, *, available: bool = True, reason: str = "ok",
-                 result: Point | DetBox | None = None, raises: Exception | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        available: bool = True,
+        reason: str = "ok",
+        result: Point | DetBox | None = None,
+        raises: Exception | None = None,
+    ) -> None:
         super().__init__()
         self._available = available
         self._reason = reason
