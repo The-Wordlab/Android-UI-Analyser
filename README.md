@@ -4,9 +4,44 @@
 
 ---
 
+## Requirements
+
+`aua` is a Python CLI that talks to an Android device or emulator over **adb**, using [`uiautomator2`](https://github.com/openatx/uiautomator2). You need three things on the host:
+
+| Requirement | Version | Why / how to get it |
+|---|---|---|
+| **Python** | **3.11 or newer** | Runs the CLI. Check with `python3 --version`. |
+| **Android platform-tools (`adb`)** | any recent | `aua` discovers devices and `uiautomator2` drives them through `adb`. Must be on your `PATH`. ([install](#installing-adb-platform-tools)) |
+| **An Android device or emulator** | Android 7.0 (API 24) or newer | The screen `aua` inspects — a running AVD emulator **or** a USB-attached phone with USB debugging enabled. ([setup](#connect-a-device-or-emulator)) |
+
+You do **not** need Android Studio's IDE, Gradle, or the app's source code — `aua` works against any app already installed on the device, including release builds. (Android Studio is just the easiest way to obtain `adb` and an emulator.)
+
+Optional, only for specific features:
+- **`tesseract`** system binary — only if you enable the `tesseract` OCR extra.
+- A **GPU** (CUDA / Apple Metal) — speeds up the `yolo`/`omniparser` detectors and local grounding, but everything also runs on CPU.
+- **API keys** (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY`) — only if you opt into a commercial grounding provider (off by default).
+
+### Installing `adb` (platform-tools)
+
+`adb` ships in the Android SDK **platform-tools**. Get it any of these ways:
+
+- **Android Studio** → *SDK Manager* installs it under `~/Library/Android/sdk/platform-tools` (macOS) or `~/Android/Sdk/platform-tools` (Linux).
+- **Standalone download**: grab [platform-tools](https://developer.android.com/tools/releases/platform-tools) and unzip.
+- **Homebrew (macOS)**: `brew install android-platform-tools`.
+- **Linux (Debian/Ubuntu)**: `sudo apt install android-tools-adb`.
+
+Then make sure it's on your `PATH` (macOS / Android Studio layout shown):
+
+```bash
+export PATH="$HOME/Library/Android/sdk/platform-tools:$PATH"   # add to ~/.zshrc or ~/.bashrc
+adb version   # confirm it resolves
+```
+
+---
+
 ## Install
 
-**Python 3.11+ required.** Base install (macOS / Apple Silicon, recommended extras):
+Base install (macOS / Apple Silicon, recommended extras — Python 3.11+ per [Requirements](#requirements)):
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
@@ -40,6 +75,46 @@ pipx install .
 | `all` | All of the above | Full install |
 
 Heavy deps are **lazy-imported** — a missing optional extra never breaks the core CLI.
+
+---
+
+## Connect a device or emulator
+
+`aua` drives whatever `adb` can see. Use an emulator or a physical device — either works.
+
+### Option A — Emulator (AVD)
+
+With Android Studio (or the standalone command-line tools) installed, you can create and boot an emulator from the terminal:
+
+```bash
+emulator -list-avds                 # list existing AVDs
+
+# No AVD yet? Create one. The system image is installed via Android Studio's SDK Manager
+# or:  sdkmanager "system-images;android-34;google_apis;arm64-v8a"
+avdmanager create avd -n pixel7 -k "system-images;android-34;google_apis;arm64-v8a" -d pixel_7
+
+emulator -avd pixel7                # boot it
+```
+
+`emulator`, `avdmanager`, and `sdkmanager` live under `~/Library/Android/sdk/emulator` and `~/Library/Android/sdk/cmdline-tools/latest/bin` (macOS) — add those to your `PATH` too if you want them globally.
+
+### Option B — Physical device
+
+1. On the phone, enable **Developer options** (tap *Settings → About phone → Build number* seven times), then turn on **USB debugging**.
+2. Connect over USB and accept the **"Allow USB debugging"** prompt.
+3. `adb devices` should now list it with state `device`.
+
+### First run
+
+On the first command against a device, `uiautomator2` automatically pushes a small helper agent (the uiautomator/ATX server) to it — there's nothing to install by hand, but that first call is slower while it sets up. Verify the whole chain end-to-end:
+
+```bash
+adb devices     # device appears as "device" (not "unauthorized" or "offline")
+aua doctor      # checks: adb on PATH · uiautomator2 importable · devices reachable · provider readiness
+aua devices     # aua's own device listing (serial, model, Android version)
+```
+
+`aua doctor` is the single command to run whenever something isn't working — it pinpoints which prerequisite is missing. See [Troubleshooting](#troubleshooting).
 
 ---
 
@@ -374,3 +449,59 @@ aua analyze --query "the blue icon top-right" --deep   # force grounding escalat
 | `5` | Config error (invalid YAML, unknown key, bad value) |
 
 Errors print a structured object to stderr: `{"error": {"code": ..., "message": ..., "hint": ...}}`.
+
+---
+
+## Command reference
+
+Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--format`, `--serial`, `--config`, `--profile`, `--timeout`, `--log-level`, `--no-cache`) go **before** the subcommand.
+
+| Command | What it does |
+|---|---|
+| `aua doctor` | Check environment: adb, uiautomator2, devices, provider readiness |
+| `aua devices` | List attached devices/emulators |
+| `aua analyze` | Capture the screen → element list with IDs (the core command) |
+| `aua has "<text>"` | Exit 0 if text is on screen, 1 if not — cheap branch check |
+| `aua wait --for "<text>"` | Poll until text appears (or `--idle` / `--for-stable`) |
+| `aua tap <id>` / `aua click <id>` | Tap an element by ID |
+| `aua long-press <id>` | Long-press an element by ID |
+| `aua input <id> "text"` | Focus an element and type (`--submit` fires the IME action) |
+| `aua clear <id>` | Clear a text field |
+| `aua swipe <up\|down\|left\|right>` | Swipe / scroll (`--from <id>` to scroll a container) |
+| `aua scroll-to "<text>"` | Scroll until text is found |
+| `aua key <back\|home\|enter\|…>` | Press a hardware/navigation key |
+| `aua screenshot [path]` | Save a raw screenshot |
+| `aua inspect <id>` | Dump full details for one element |
+| `aua app <pkg>` | App control (launch/stop/current) |
+| `aua map` | Show the learned map of the current app (`--find "<goal>"` for a route) |
+| `aua memory show\|path\|update\|forget` | Manage the per-app learned layout |
+| `aua config init\|show\|path` | Manage configuration |
+| `aua daemon start\|status\|stop` | Manage the optional warm-state daemon |
+| `aua guide` | Print the agent operating manual (`--emit-skill` writes the Claude Code skill) |
+| `aua mcp` | Run the MCP server over stdio |
+
+---
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `aua doctor` shows **adb: FAIL / not found on PATH** | Install platform-tools and add them to `PATH` — see [Installing adb](#installing-adb-platform-tools). |
+| `no device found` (exit 3) | Start an emulator or attach a phone; confirm with `adb devices`. |
+| Device shows as **`unauthorized`** | Accept the "Allow USB debugging" prompt on the device. If it never appears: `adb kill-server && adb start-server`, then reconnect. |
+| Device shows as **`offline`** | Re-plug the cable / cold-boot the emulator; `adb reconnect`. |
+| `multiple devices attached` | Pass `--serial <id>` (get the id from `aua devices`). |
+| First command is slow / times out | `uiautomator2` is pushing its helper agent on first connect — retry once it settles, then use `aua daemon start` to keep the connection warm. |
+| `uiautomator2 is not installed` | Reinstall the package — `uiautomator2` is a base dependency, not an extra. |
+| `analyze` returns few/no elements | The hierarchy is empty (Compose/Flutter/WebView/canvas). Force vision: `aua --format compact analyze --source vision --annotate`. |
+| Typing does nothing on Android 14+ | Handled automatically (accessibility `set_text` on the focused field); make sure the field is actually focused first. |
+
+---
+
+## Further reading
+
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — design decisions and the hierarchy-first thesis.
+- [`docs/RESEARCH.md`](docs/RESEARCH.md) — landscape research behind the approach.
+- [`PRD.md`](PRD.md) — the full product requirements document.
+- [`SMOKE.md`](SMOKE.md) — manual smoke-test checklist against a live device.
+- [`.claude/skills/android-ui-analyser/SKILL.md`](.claude/skills/android-ui-analyser/SKILL.md) — the operating manual an AI agent loads (also via `aua guide`).
