@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+#
+# Keep both SKILL.md copies regenerated from guide.py (the single source) so they never
+# drift: the project skill (.claude/skills/...) and the plugin skill (skills/...).
+#
+# Idempotent and NON-BLOCKING: if the dev env (`aua`) isn't available, it warns and skips
+# rather than failing the commit. Enable once per clone:
+#
+#     git config core.hooksPath .githooks
+#
+set -uo pipefail
+
+root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+cd "$root" || exit 0
+
+# Prefer the project venv; fall back to module invocation, then PATH.
+if [ -x ".venv/bin/aua" ]; then
+  run_aua() { ./.venv/bin/aua "$@"; }
+elif [ -x ".venv/bin/python" ]; then
+  run_aua() { ./.venv/bin/python -m android_ui_analyser.cli "$@"; }
+elif command -v aua >/dev/null 2>&1; then
+  run_aua() { command aua "$@"; }
+else
+  echo "pre-commit: 'aua' unavailable — skipping SKILL.md sync (install the dev env to enable)." >&2
+  exit 0
+fi
+
+project=".claude/skills/android-ui-analyser/SKILL.md"
+plugin="skills/android-ui-analyser/SKILL.md"
+
+for path in "$project" "$plugin"; do
+  if ! run_aua guide --emit-skill "$path" >/dev/null 2>&1; then
+    echo "pre-commit: 'aua guide --emit-skill $path' failed — skipping SKILL.md sync." >&2
+    exit 0
+  fi
+done
+
+git add -- "$project" "$plugin"
+if ! git diff --cached --quiet -- "$project" "$plugin"; then
+  echo "pre-commit: re-synced SKILL.md from guide.py (staged project + plugin copies)." >&2
+fi
+exit 0
