@@ -305,7 +305,7 @@ def test_action_observe_attaches_fresh_screen(tmp_path: Path) -> None:
     img_id = next(e.id for e in r.elements if (e.text or "").startswith("Images"))
     observed = eng.tap(img_id, observe=True)
     assert observed.ok and observed.observation is not None and observed.observation.elements
-    assert eng.tap(img_id).observation is None  # default: no observation, no extra work
+    assert eng.tap(img_id, observe=False).observation is None  # opt out → no observation
 
 
 def test_observe_repopulates_cache_for_type_then_send(tmp_path: Path) -> None:
@@ -342,7 +342,7 @@ def test_actionresult_render_embeds_then_drops_observation(tmp_path: Path) -> No
     tid = next(e.id for e in eng.analyze(source="hierarchy").elements if e.text == "Apps")
     with_obs = json.loads(eng.tap(tid, observe=True).render("compact"))["observation"]
     assert "elements" in with_obs
-    assert "observation" not in json.loads(eng.tap(tid).render("compact"))
+    assert "observation" not in json.loads(eng.tap(tid, observe=False).render("compact"))
 
 
 def test_goto_returns_destination_elements(tmp_path: Path) -> None:
@@ -351,6 +351,30 @@ def test_goto_returns_destination_elements(tmp_path: Path) -> None:
     eng = _engine(tmp_path, dev)
     out = eng.goto("images")
     assert out["arrived"] and out.get("elements")  # destination marks returned inline
+
+
+def test_committed_project_skill_is_current() -> None:
+    # Guard against forgetting to regenerate: the committed SKILL.md must equal the guide.
+    from android_ui_analyser import guide
+
+    skill = Path(__file__).resolve().parent.parent / ".claude/skills/android-ui-analyser/SKILL.md"
+    assert skill.read_text() == guide.render_skill(), (
+        "Project SKILL.md is stale — regenerate with `aua guide --emit-skill`."
+    )
+
+
+def test_observe_snapshot_does_not_pollute_memory(tmp_path: Path) -> None:
+    # A tap that transitions to an unmapped screen: the observe snapshot must NOT record it
+    # (it can be mid-render). Otherwise we'd get spurious screens like the live `apps_2`.
+    store = _build_three(tmp_path)
+    dev = ScriptedDevice([APPS, OTHER], package=P, serial="emu-norec")
+    eng = _engine(tmp_path, dev)
+    r = eng.analyze(source="hierarchy")  # recognises 'apps' (normal recording)
+    before = set(store.load(P).screens)
+    img_id = next(e.id for e in r.elements if (e.text or "").startswith("Images"))
+    res = eng.tap(img_id, observe=True)  # click → OTHER; observe snapshots it but must not record
+    assert res.observation is not None and res.observation.elements
+    assert set(store.load(P).screens) == before  # no new screen written by the snapshot
 
 
 def test_cli_tap_observe(monkeypatch) -> None:

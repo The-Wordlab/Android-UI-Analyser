@@ -156,7 +156,7 @@ aua analyze --query "the Submit button" --cheap   # forbid escalation beyond hie
 The **analyze → act → analyze** loop is the core workflow:
 1. `aua analyze` returns elements with IDs.
 2. The agent picks an ID and acts: `aua tap <id>` / `aua input <id> "text"`.
-3. Re-analyze — IDs may change after a state transition. Or add `--observe` to the action (e.g. `aua tap <id> --observe`) to get the post-action screen back inline, folding the re-analyze into the same call.
+3. No manual re-analyze needed — by default each action returns the next screen inline (`observation`, with fresh IDs), folding step 1 into step 2. Use `--no-observe` to skip it on action-only sequences, or a plain `analyze` (after `aua wait --for-stable`) when the screen is still animating.
 
 ---
 
@@ -463,15 +463,15 @@ state-changing action — IDs may change after navigation or screen transitions.
 ### Acting on elements
 
 ```bash
-aua tap <id>              # tap / click an element
+aua tap <id>              # tap / click an element (returns the next screen by default)
 aua input <id> "text"     # focus element and type; add --submit to send IME action
-aua tap <id> --observe    # act AND return the new screen inline (skips a follow-up analyze)
+aua tap <id> --no-observe # act WITHOUT returning the new screen (skip the folded analyze)
 aua swipe up              # swipe direction (up|down|left|right)
 aua swipe --from <id>     # scroll a specific container
 ```
 
-Any action accepts `--observe` to return the post-action screen (with fresh ids) in the
-same call, so `type → tap send` is two commands, not three.
+By default every action returns the post-action screen inline (`observation`, with fresh
+ids), so `type → tap send` is two commands, not three. Add `--no-observe` to skip it.
 
 ### Quick checks (no full analyze needed)
 
@@ -607,7 +607,7 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 | `aua guide` | Print the agent operating manual (`--emit-skill` writes the Claude Code skill) |
 | `aua mcp` | Run the MCP server over stdio |
 
-All action commands (`tap`, `long-press`, `input`, `clear`, `swipe`, `scroll-to`, `key`) accept **`--observe`** to return the post-action screen inline (an `observation` with fresh element IDs), skipping a follow-up `analyze`.
+All action commands (`tap`, `long-press`, `input`, `clear`, `swipe`, `scroll-to`, `key`) **return the post-action screen inline by default** (an `observation` with fresh element IDs), so you rarely need a follow-up `analyze`. Pass **`--no-observe`** to skip it.
 
 ---
 

@@ -220,6 +220,7 @@ class Engine:
         cheap: bool = False,
         deep: bool = False,
         no_cache: bool = False,
+        record: bool = True,
     ) -> AnalyzeResult:
         ceiling = routing.resolve_ceiling(self.config.routing.max_tier, cheap=cheap, deep=deep)
         force_hier, force_vis, pin_grounding = self._resolve_pins(source, strategy)
@@ -248,6 +249,7 @@ class Engine:
             with_ocr=with_ocr,
             annotate=annotate,
             no_cache=no_cache,
+            record=record,
         )
 
     def _analyze_screen(
@@ -259,6 +261,7 @@ class Engine:
         with_ocr: bool | None,
         annotate: bool | str | None,
         no_cache: bool,
+        record: bool = True,
     ) -> AnalyzeResult:
         from . import gate
 
@@ -299,9 +302,14 @@ class Engine:
             tier_used = Tier.vision
             path = PathKind.vision
 
-        known_screen, hints = self._record_screen_safe(
-            device, package, activity, elements, tier_used, h
-        )
+        if record:
+            known_screen, hints = self._record_screen_safe(
+                device, package, activity, elements, tier_used, h
+            )
+        else:
+            # An observe snapshot taken right after an action can be mid-transition; never
+            # let it pollute memory with a transient screen (it's just fresh ids for the agent).
+            known_screen, hints = None, None
         annotated = self._maybe_annotate(annotate, device, elements, img)
 
         result = AnalyzeResult(
@@ -844,7 +852,7 @@ class Engine:
             el = _match_element(res.elements, label)
             if el is None:
                 return _goto_handoff(goal, target, "element_not_found", hops, route[i:], res)
-            self.tap(el.id)
+            self.tap(el.id, observe=False)  # goto does its own post-hop analyze; skip the extra
             with contextlib.suppress(StabilityTimeout):
                 self.wait_stable(settle_ms=500, timeout_ms=8000)
             res = self.analyze(source="hierarchy")
@@ -1047,10 +1055,10 @@ class Engine:
         """
         if observe:
             with contextlib.suppress(Exception):  # observation is a bonus; never fail the action
-                result.observation = self.analyze(source="hierarchy")
+                result.observation = self.analyze(source="hierarchy", record=False)
         return result
 
-    def tap(self, element_id: int, *, observe: bool = False) -> ActionResult:
+    def tap(self, element_id: int, *, observe: bool = True) -> ActionResult:
         el = self._resolve(element_id)
         cx, cy = el.center
         self.device.click(cx, cy)
@@ -1060,7 +1068,7 @@ class Engine:
             ActionResult(ok=True, action="tap", id=element_id, target=[cx, cy]), observe
         )
 
-    def long_press(self, element_id: int, *, ms: int = 600, observe: bool = False) -> ActionResult:
+    def long_press(self, element_id: int, *, ms: int = 600, observe: bool = True) -> ActionResult:
         el = self._resolve(element_id)
         cx, cy = el.center
         self.device.long_click(cx, cy, ms)
@@ -1071,7 +1079,7 @@ class Engine:
         )
 
     def input_text(
-        self, element_id: int, text: str, *, submit: bool = False, observe: bool = False
+        self, element_id: int, text: str, *, submit: bool = False, observe: bool = True
     ) -> ActionResult:
         el = self._resolve(element_id)
         cx, cy = el.center
@@ -1083,7 +1091,7 @@ class Engine:
             ActionResult(ok=True, action="input", id=element_id, detail=text), observe
         )
 
-    def clear(self, element_id: int, *, observe: bool = False) -> ActionResult:
+    def clear(self, element_id: int, *, observe: bool = True) -> ActionResult:
         el = self._resolve(element_id)
         cx, cy = el.center
         self.device.click(cx, cy)
@@ -1099,7 +1107,7 @@ class Engine:
         from_id: int | None = None,
         percent: int = 50,
         coords: tuple[int, int, int, int] | None = None,
-        observe: bool = False,
+        observe: bool = True,
     ) -> ActionResult:
         device = self.device
         if coords is not None:
@@ -1146,7 +1154,7 @@ class Engine:
         *,
         match: str = "contains",
         ignore_case: bool = False,
-        observe: bool = False,
+        observe: bool = True,
     ) -> ActionResult:
         found = self.device.scroll_to(query, match=MatchMode(match), ignore_case=ignore_case)
         self._invalidate_cache()
@@ -1161,7 +1169,7 @@ class Engine:
             observe,
         )
 
-    def key(self, name: str, *, observe: bool = False) -> ActionResult:
+    def key(self, name: str, *, observe: bool = True) -> ActionResult:
         self.device.press(name)
         self._invalidate_cache()
         self._record_action_safe(f"key '{name}'")
