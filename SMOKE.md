@@ -70,7 +70,7 @@ Expected: one row showing serial (e.g. `emulator-5554`), model, Android version,
 Navigate to the home/launcher screen on the emulator, then:
 
 ```bash
-aua analyze --format pretty
+aua --format pretty analyze
 ```
 
 Expected:
@@ -82,7 +82,7 @@ Expected:
 Also confirm compact format:
 
 ```bash
-aua analyze --format compact
+aua --format compact analyze
 ```
 
 The output should be smaller — no null fields, no `enabled`/`focused`/`confidence` at default values.
@@ -95,7 +95,7 @@ Launch any installed app (e.g. the Settings app):
 
 ```bash
 aua app launch com.android.settings
-aua analyze --format pretty
+aua --format pretty analyze
 ```
 
 Confirm elements appear with meaningful `text` or `content_desc` values and `clickable: true` on interactive items.
@@ -126,7 +126,7 @@ Expected:
 
 ```bash
 # Get element list
-aua analyze --format compact
+aua --format compact analyze
 
 # Identify an ID for a tappable element (e.g. "Network & internet" in Settings)
 # Suppose it is ID 3:
@@ -142,7 +142,7 @@ Expected: the element is tapped; the screen navigates. Confirm with another `aua
 Navigate to a screen with a text input (e.g. the search bar in Settings):
 
 ```bash
-aua analyze --format compact
+aua --format compact analyze
 # Identify the search input element ID, e.g. ID 1
 aua input 1 "wifi"
 ```
@@ -221,7 +221,7 @@ aua analyze --query "the Settings search bar" --deep
 aua key home
 
 # Get elements
-aua analyze --format compact
+aua --format compact analyze
 
 # Open Settings by tapping its icon (find the ID from analyze output)
 aua tap <settings-icon-id>
@@ -230,7 +230,7 @@ aua tap <settings-icon-id>
 aua has "Search settings"
 
 # Analyze the new screen
-aua analyze --format compact
+aua --format compact analyze
 ```
 
 ---

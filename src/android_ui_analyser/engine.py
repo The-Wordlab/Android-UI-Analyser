@@ -173,6 +173,13 @@ class Engine:
     ) -> AnalyzeResult:
         ceiling = routing.resolve_ceiling(self.config.routing.max_tier, cheap=cheap, deep=deep)
         force_hier, force_vis, pin_grounding = self._resolve_pins(source, strategy)
+        # An explicit --strategy pin is a per-call opt-in: raise the ceiling so the pinned
+        # tier is actually reachable even if routing.max_tier is lower (still never an
+        # *implicit* paid escalation — the user named the tier).
+        if pin_grounding:
+            ceiling = Tier.grounding
+        elif force_vis and not routing.allows(Tier.vision, ceiling):
+            ceiling = Tier.vision
         if query:
             return self._analyze_query(
                 query,
@@ -830,9 +837,11 @@ class Engine:
     # ----------------------------------------------------------------- cache
 
     def _cache_path(self, serial: str | None = None) -> Path:
-        serial = serial or (
-            self._device.serial if self._device else self.config.device.serial or "default"
-        )
+        # Resolve the real connected serial on reads (config serial may be null =
+        # auto-detected) so a `tap`/`inspect` process keys the same file `analyze`
+        # wrote. Writes pass the serial explicitly and never trigger a connect here.
+        if serial is None:
+            serial = self._device.serial if self._device else self.device.serial
         cache_dir = Path(self.config.cache.dir).expanduser()
         safe = str(serial).replace(":", "_")
         return cache_dir / f"analyze_{safe}.json"

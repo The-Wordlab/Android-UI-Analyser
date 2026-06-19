@@ -56,7 +56,7 @@ aua devices
 aua analyze
 
 # Compact format (fewer tokens, drops null/default fields — best for agents)
-aua analyze --format compact
+aua --format compact analyze
 
 # Is "Sign in" visible right now? Exit 0 = yes, 1 = no
 aua has "Sign in"
@@ -274,7 +274,7 @@ Use `aua` to inspect and drive the connected Android device.
 ### Getting elements on screen
 
 ```bash
-aua analyze --format compact   # get element IDs (smaller token footprint)
+aua --format compact analyze   # get element IDs (smaller token footprint)
 aua analyze                    # full JSON with all fields
 ```
 
@@ -320,10 +320,10 @@ aua analyze --query "the blue icon top-right" --deep   # force grounding escalat
 
 ### Typical loop
 
-1. `aua analyze --format compact` → read element IDs from JSON output.
+1. `aua --format compact analyze` → read element IDs from JSON output.
 2. `aua tap <id>` or `aua input <id> "text"`.
 3. `aua has "<expected text>"` to confirm the transition.
-4. `aua analyze --format compact` again for the new screen.
+4. `aua --format compact analyze` again for the new screen.
 ```
 
 ---
