@@ -79,6 +79,11 @@ class Device(ABC):
     ) -> Bounds | None:
         """Cheap selector locate — return the box of the first match, or None."""
 
+    # -- optional metadata (best-effort; default unknown) -----------------
+    def app_version(self, package: str) -> str | None:
+        """Best-effort app versionName for memory freshness; ``None`` if unknown."""
+        return None
+
     # -- composed helpers (built on the primitives; usually not overridden)-
     def input_text(
         self, x: int, y: int, text: str, *, clear: bool = True, submit: bool = False
@@ -224,6 +229,15 @@ class Uiautomator2Device(Device):
             "package": info.get("package", ""),
             "activity": info.get("activity", "") or "",
         }
+
+    def app_version(self, package: str) -> str | None:
+        try:
+            info = self._d.app_info(package)
+        except Exception:  # pragma: no cover - best effort / app not installed
+            return None
+        if isinstance(info, dict) and info.get("versionName"):
+            return str(info["versionName"])
+        return None
 
     # -- input -------------------------------------------------------------
 

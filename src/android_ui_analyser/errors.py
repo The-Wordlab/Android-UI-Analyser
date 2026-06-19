@@ -100,6 +100,13 @@ class ElementNotFoundError(AuaError):
     code = "element_not_found"
 
 
+class StabilityTimeout(AuaError):
+    """``wait --for-stable`` never settled within the timeout (PRD §5, AC14)."""
+
+    exit_code = ExitCode.DEVICE
+    code = "wait_timeout"
+
+
 def emit_error(err: AuaError, *, stream: IO[str] | None = None) -> int:
     """Write the structured error object to stderr and return its exit code."""
     stream = stream if stream is not None else sys.stderr
