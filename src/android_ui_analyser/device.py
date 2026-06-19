@@ -8,6 +8,7 @@ before failing. Tests supply a fake conforming to the same ABC — no device req
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 import time
@@ -151,6 +152,7 @@ class Uiautomator2Device(Device):
         self.serial = serial
         self._settle = settle_wait
         self._d: Any = None
+        self._winsize: tuple[int, int] | None = None
         self._connect()
 
     # -- connection --------------------------------------------------------
@@ -166,49 +168,58 @@ class Uiautomator2Device(Device):
         try:
             self._d = u2.connect(self.serial)
             # Don't block on idle for our reads; we manage waits explicitly.
-            try:
+            with contextlib.suppress(Exception):  # pragma: no cover - older u2
                 self._d.settings["wait_timeout"] = 5.0
-            except Exception:  # pragma: no cover - older u2
-                pass
         except Exception as exc:
             raise DeviceError(
                 f"could not connect to device '{self.serial}': {exc}",
                 hint="Run `aua devices` and check the emulator/phone is reachable via adb.",
             ) from exc
 
-    def _guard(self, fn: Any, *args: Any, **kwargs: Any) -> Any:
-        """Run a uiautomator2 op; reconnect once on a transient failure (PRD §14)."""
+    def _call(self, name: str, *args: Any, **kwargs: Any) -> Any:
+        """Invoke a uiautomator2 attribute (method OR property) with one auto-reconnect.
+
+        Name-based dispatch (so the reconnect rebind is correct) plus a callable check
+        (so it tolerates u2 versions exposing ``window_size``/``app_current`` as either a
+        method or a property — the source of the ``'dict' object is not callable`` error).
+        """
+
+        def invoke() -> Any:
+            attr = getattr(self._d, name)
+            return attr(*args, **kwargs) if callable(attr) else attr
+
         try:
-            return fn(*args, **kwargs)
+            return invoke()
         except Exception as exc:
-            logger.warning("device op failed (%s); reconnecting once", exc)
+            logger.warning("device op '%s' failed (%s); reconnecting once", name, exc)
             try:
                 self._connect()
-                # rebind the bound method to the fresh connection
-                if hasattr(fn, "__name__") and fn.__self__ is not None:  # type: ignore[attr-defined]
-                    fn = getattr(self._d, fn.__name__)
-                return fn(*args, **kwargs)
+                return invoke()
             except Exception as exc2:
                 raise DeviceError(
-                    f"device operation failed after reconnect: {exc2}",
+                    f"device operation '{name}' failed after reconnect: {exc2}",
                     hint="Check the device is still attached (`aua devices`).",
                 ) from exc2
 
     # -- capture -----------------------------------------------------------
 
     def window_size(self) -> tuple[int, int]:
-        w, h = self._guard(self._d.window_size)
-        return int(w), int(h)
+        # Screen size is effectively static within a session; memoize to save an RPC
+        # on the warm hierarchy hot path (PRD G1 < 150 ms).
+        if self._winsize is None:
+            ws = self._call("window_size")
+            self._winsize = (int(ws[0]), int(ws[1]))
+        return self._winsize
 
     def dump_hierarchy(self, compressed: bool = False) -> str:
-        return str(self._guard(self._d.dump_hierarchy, compressed=compressed))
+        return str(self._call("dump_hierarchy", compressed=compressed))
 
     def screenshot(self) -> ScreenImage:
-        img = self._guard(self._d.screenshot)  # PIL.Image by default
+        img = self._call("screenshot")  # PIL.Image by default
         return ScreenImage.from_pil(img)
 
     def current_app(self) -> dict[str, str]:
-        info = self._guard(self._d.app_current) or {}
+        info = self._call("app_current") or {}
         return {
             "package": info.get("package", ""),
             "activity": info.get("activity", "") or "",
@@ -217,37 +228,33 @@ class Uiautomator2Device(Device):
     # -- input -------------------------------------------------------------
 
     def click(self, x: int, y: int) -> None:
-        self._guard(self._d.click, x, y)
+        self._call("click", x, y)
 
     def long_click(self, x: int, y: int, duration_ms: int = 600) -> None:
-        self._guard(self._d.long_click, x, y, duration_ms / 1000.0)
+        self._call("long_click", x, y, duration_ms / 1000.0)
 
     def send_text(self, text: str, *, clear: bool = True) -> None:
-        self._guard(self._d.send_keys, text, clear=clear)
+        self._call("send_keys", text, clear=clear)
 
     def clear_text(self) -> None:
-        self._guard(self._d.clear_text)
+        self._call("clear_text")
 
     def send_ime_action(self, action: str = "search") -> None:
         try:
-            self._guard(self._d.send_action, action)
+            self._call("send_action", action)
         except Exception:  # pragma: no cover - fall back to ENTER
-            self._guard(self._d.press, "enter")
+            self._call("press", "enter")
 
     def swipe(self, x1: int, y1: int, x2: int, y2: int, duration_ms: int = 300) -> None:
-        self._guard(self._d.swipe, x1, y1, x2, y2, duration_ms / 1000.0)
+        self._call("swipe", x1, y1, x2, y2, duration_ms / 1000.0)
 
     def press(self, key: str) -> None:
         k = key.strip()
         if k.upper().startswith("KEYCODE_"):
-            self._guard(self._d.press, k.upper())
+            self._call("press", k.upper())
             return
         mapped = _PRESS_ALIASES.get(k.lower())
-        if mapped is None:
-            # allow raw keycode names/numbers
-            self._guard(self._d.press, k)
-        else:
-            self._guard(self._d.press, mapped)
+        self._call("press", mapped if mapped is not None else k)
 
     # -- selectors ---------------------------------------------------------
 
@@ -271,9 +278,10 @@ class Uiautomator2Device(Device):
             kwargs = self._selector_kwargs(text, match, ignore_case, field)
             try:
                 el = self._d(**kwargs)
-                if self._guard(el.exists):
-                    info = self._guard(el.info)
-                    bounds = _bounds_from_info(info)
+                exists = el.exists
+                if exists() if callable(exists) else exists:
+                    info = el.info
+                    bounds = _bounds_from_info(info() if callable(info) else info)
                     if bounds is not None:
                         return bounds
             except Exception as exc:  # pragma: no cover - bad regex etc.

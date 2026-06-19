@@ -9,19 +9,21 @@ cleanly. The CLI, MCP server, and daemon are all thin adapters over this class.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
+import re
 import time
+from collections import Counter
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from . import routing
 from .config import Config
 from .device import Device, connect, list_devices
-from .errors import DeviceError, ElementNotFoundError, ProviderError, UsageError
+from .errors import ElementNotFoundError, ProviderError, UsageError
 from .providers.base import DetBox, Point, ScreenImage, TextBox
 from .providers.registry import ProviderFactory, registered_names, run_chain
-from .routing import Intent
 from .schema import (
     ActionResult,
     AnalyzeResult,
@@ -36,16 +38,28 @@ from .schema import (
     Source,
     Tier,
     center_of,
-    tier_rank,
 )
-
-if TYPE_CHECKING:  # pragma: no cover
-    from .providers.base import ChainSpec
 
 logger = logging.getLogger("android_ui_analyser.engine")
 
 QUERY_CONFIDENT = 1.0  # all salient tokens / exact phrase present
 QUERY_SOFT = 0.5  # best-effort threshold when escalation is exhausted
+
+_PACKAGE_RE = re.compile(r'package="([^"]+)"')
+
+
+def _package_from_xml(xml: str) -> str | None:
+    """Cheap foreground-package guess from a hierarchy dump (avoids an app_current RPC).
+
+    Picks the most common ``package=`` among nodes, ignoring the system UI overlay.
+    """
+    pkgs = _PACKAGE_RE.findall(xml)
+    if not pkgs:
+        return None
+    counts = Counter(p for p in pkgs if p and p != "com.android.systemui")
+    if not counts:
+        return pkgs[0]
+    return counts.most_common(1)[0][0]
 
 
 class Engine:
@@ -74,17 +88,19 @@ class Engine:
 
     # ----------------------------------------------------------------- capture
 
-    def _context(self) -> tuple[Device, int, int, str | None, str | None]:
+    def _context(self) -> tuple[Device, int, int]:
+        # window_size is memoized on the device; no app_current RPC on the hot path.
         device = self.device
         w, h = device.window_size()
-        app = device.current_app()
-        return device, w, h, app.get("package") or None, app.get("activity") or None
+        return device, w, h
 
-    def _hierarchy_elements(self, device: Device, w: int, h: int) -> list[Element]:
+    def _capture_hierarchy(
+        self, device: Device, w: int, h: int
+    ) -> tuple[list[Element], str | None]:
         from . import hierarchy
 
         xml = device.dump_hierarchy()
-        return hierarchy.parse_hierarchy(xml, (w, h))
+        return hierarchy.parse_hierarchy(xml, (w, h)), _package_from_xml(xml)
 
     def _run_vision(
         self, device: Device, *, with_ocr: bool | None, start_id: int = 0
@@ -101,7 +117,7 @@ class Engine:
                     detections, name = run_chain(
                         chain,
                         lambda p: p.detect(img),  # type: ignore[attr-defined]
-                        timeout_s=self.config.timeouts.vision_ms / 1000.0,
+                        timeout_s=self.config.timeouts.detection_ms / 1000.0,
                     )
                     providers_used.append(name)
                 except ProviderError as exc:
@@ -190,9 +206,11 @@ class Engine:
         from . import gate
 
         t0 = time.perf_counter()
-        device, w, h, package, activity = self._context()
+        device, w, h = self._context()
         providers_used: list[str] = []
         img: ScreenImage | None = None
+        package: str | None = None
+        activity: str | None = None
 
         elements: list[Element] = []
         screen_source = ScreenSource.hierarchy
@@ -200,7 +218,7 @@ class Engine:
         path = PathKind.hierarchy
 
         if not force_vision:
-            elements = self._hierarchy_elements(device, w, h)
+            elements, package = self._capture_hierarchy(device, w, h)
 
         use_vision = force_vision
         if not force_vision and not force_hierarchy:
@@ -214,14 +232,13 @@ class Engine:
                 logger.info("gate wants vision but ceiling=%s; staying hierarchy", ceiling.value)
 
         if use_vision:
+            # slow fallback path: fetch full app context (incl. activity)
+            app = device.current_app()
+            package = app.get("package") or package
+            activity = app.get("activity") or None
             vis_elements, providers_used, img = self._run_vision(device, with_ocr=with_ocr)
-            if force_vision:
-                elements = vis_elements
-                screen_source = ScreenSource.vision
-            else:
-                # auto fell through to vision: vision is the authoritative set
-                elements = vis_elements
-                screen_source = ScreenSource.vision
+            elements = vis_elements
+            screen_source = ScreenSource.vision
             tier_used = Tier.vision
             path = PathKind.vision
 
@@ -260,7 +277,9 @@ class Engine:
         from . import gate
 
         t0 = time.perf_counter()
-        device, w, h, package, activity = self._context()
+        device, w, h = self._context()
+        package: str | None = None
+        activity: str | None = None
         providers_used: list[str] = []
         pool: list[Element] = []
         img: ScreenImage | None = None
@@ -272,15 +291,27 @@ class Engine:
 
         # --- T1/T2: satisfy from the hierarchy first (cheap-first) ---
         if not force_vision:
-            pool = self._hierarchy_elements(device, w, h)
+            pool, package = self._capture_hierarchy(device, w, h)
             tier_used = Tier.selector
             cand, score = self._match_query(query, pool)
             if cand is not None and score > best_score:
                 best, best_score = cand, score
             if best_score >= QUERY_CONFIDENT and not pin_grounding:
                 return self._finish_query(
-                    best, w, h, package, activity, ScreenSource.hierarchy, Tier.selector,
-                    PathKind.hierarchy, providers_used, device, annotate, img, no_cache, t0,
+                    best,
+                    w,
+                    h,
+                    package,
+                    activity,
+                    ScreenSource.hierarchy,
+                    Tier.selector,
+                    PathKind.hierarchy,
+                    providers_used,
+                    device,
+                    annotate,
+                    img,
+                    no_cache,
+                    t0,
                 )
 
         # --- T3: vision, if allowed and useful ---
@@ -293,7 +324,12 @@ class Engine:
             want_vision = decision.use_vision or kind is routing.QueryKind.visual or pin_grounding
 
         if want_vision and routing.allows(Tier.vision, ceiling):
-            vis_elements, vprov, img = self._run_vision(device, with_ocr=with_ocr, start_id=len(pool))
+            app = device.current_app()
+            package = app.get("package") or package
+            activity = app.get("activity") or None
+            vis_elements, vprov, img = self._run_vision(
+                device, with_ocr=with_ocr, start_id=len(pool)
+            )
             providers_used.extend(vprov)
             pool = pool + vis_elements
             screen_source = ScreenSource.mixed if pool and vis_elements else ScreenSource.vision
@@ -304,15 +340,29 @@ class Engine:
                 best, best_score = cand, score
             if best_score >= QUERY_CONFIDENT and not pin_grounding:
                 return self._finish_query(
-                    best, w, h, package, activity, screen_source, Tier.vision, path,
-                    providers_used, device, annotate, img, no_cache, t0,
+                    best,
+                    w,
+                    h,
+                    package,
+                    activity,
+                    screen_source,
+                    Tier.vision,
+                    path,
+                    providers_used,
+                    device,
+                    annotate,
+                    img,
+                    no_cache,
+                    t0,
                 )
 
         # --- T4: grounding VLM, only if explicitly allowed (never silent/paid by default) ---
         grounding_ok = (
             routing.allows(Tier.grounding, ceiling)
             and self.factory.is_enabled("grounding")
-            and (pin_grounding or routing.classify_query(query) is not routing.QueryKind.resource_id)
+            and (
+                pin_grounding or routing.classify_query(query) is not routing.QueryKind.resource_id
+            )
         )
         if best_score < QUERY_CONFIDENT and grounding_ok:
             chain = self.factory.build_chain("grounding")
@@ -330,9 +380,20 @@ class Engine:
                     grounded = self._map_grounding(loc, pool, w, h)
                     if grounded is not None:
                         return self._finish_query(
-                            grounded, w, h, package, activity, ScreenSource.mixed,
-                            Tier.grounding, PathKind.vision, providers_used, device,
-                            annotate, img, no_cache, t0,
+                            grounded,
+                            w,
+                            h,
+                            package,
+                            activity,
+                            ScreenSource.mixed,
+                            Tier.grounding,
+                            PathKind.vision,
+                            providers_used,
+                            device,
+                            annotate,
+                            img,
+                            no_cache,
+                            t0,
                         )
                 except ProviderError as exc:
                     logger.info("grounding unavailable: %s", exc)
@@ -345,8 +406,20 @@ class Engine:
         # --- best-effort or not-found ---
         chosen = best if best is not None and best_score >= QUERY_SOFT else None
         return self._finish_query(
-            chosen, w, h, package, activity, screen_source, tier_used, path,
-            providers_used, device, annotate, img, no_cache, t0,
+            chosen,
+            w,
+            h,
+            package,
+            activity,
+            screen_source,
+            tier_used,
+            path,
+            providers_used,
+            device,
+            annotate,
+            img,
+            no_cache,
+            t0,
         )
 
     def _finish_query(
@@ -405,9 +478,7 @@ class Engine:
             hay = " ".join(parts).lower().strip()
             if not hay:
                 continue
-            if el.text and el.text.strip().lower() == ql:
-                score = 1.0
-            elif phrase and phrase in hay:
+            if el.text and el.text.strip().lower() == ql or phrase and phrase in hay:
                 score = 1.0
             elif tokens:
                 score = sum(1 for t in tokens if t in hay) / len(tokens)
@@ -431,15 +502,27 @@ class Engine:
         if isinstance(loc, Point):
             px, py = loc.x, loc.y
             # element containing the point, else nearest center
-            containing = [e for e in pool if e.bounds[0] <= px <= e.bounds[2] and e.bounds[1] <= py <= e.bounds[3]]
+            containing = [
+                e
+                for e in pool
+                if e.bounds[0] <= px <= e.bounds[2] and e.bounds[1] <= py <= e.bounds[3]
+            ]
             if containing:
-                return min(containing, key=lambda e: (e.bounds[2] - e.bounds[0]) * (e.bounds[3] - e.bounds[1]))
+                return min(
+                    containing,
+                    key=lambda e: (e.bounds[2] - e.bounds[0]) * (e.bounds[3] - e.bounds[1]),
+                )
             if pool:
                 return min(pool, key=lambda e: (e.center[0] - px) ** 2 + (e.center[1] - py) ** 2)
             box = (max(0, px - 24), max(0, py - 24), min(w, px + 24), min(h, py + 24))
             return Element(
-                id=0, type="GroundedPoint", bounds=box, center=(px, py),
-                source=Source.grounding, confidence=loc.confidence, clickable=True,
+                id=0,
+                type="GroundedPoint",
+                bounds=box,
+                center=(px, py),
+                source=Source.grounding,
+                confidence=loc.confidence,
+                clickable=True,
             )
         # DetBox
         if pool:
@@ -448,8 +531,13 @@ class Engine:
             if scored and scored[0][0] > 0.1:
                 return scored[0][1]
         return Element(
-            id=len(pool), type="GroundedBox", text=loc.label, bounds=loc.bounds,
-            center=center_of(loc.bounds), source=Source.grounding, confidence=loc.confidence,
+            id=len(pool),
+            type="GroundedBox",
+            text=loc.label,
+            bounds=loc.bounds,
+            center=center_of(loc.bounds),
+            source=Source.grounding,
+            confidence=loc.confidence,
             clickable=loc.interactable,
         )
 
@@ -742,7 +830,9 @@ class Engine:
     # ----------------------------------------------------------------- cache
 
     def _cache_path(self, serial: str | None = None) -> Path:
-        serial = serial or (self._device.serial if self._device else self.config.device.serial or "default")
+        serial = serial or (
+            self._device.serial if self._device else self.config.device.serial or "default"
+        )
         cache_dir = Path(self.config.cache.dir).expanduser()
         safe = str(serial).replace(":", "_")
         return cache_dir / f"analyze_{safe}.json"
@@ -769,10 +859,8 @@ class Engine:
 
     def _invalidate_cache(self) -> None:
         path = self._cache_path()
-        try:
+        with contextlib.suppress(OSError):  # pragma: no cover
             path.unlink(missing_ok=True)
-        except OSError:  # pragma: no cover
-            pass
 
     def _resolve(self, element_id: int) -> Element:
         cached = self._read_cache()

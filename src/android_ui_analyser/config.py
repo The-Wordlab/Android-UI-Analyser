@@ -97,7 +97,8 @@ class GroundingCfg(_ChainCfg):
 
 class TimeoutsCfg(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    vision_ms: int = 8000
+    vision_ms: int = 8000  # OCR chain (fast)
+    detection_ms: int = 20000  # detection chain (cold model load on per-call CLI can be slow)
     grounding_ms: int = 30000
     action_ms: int = 5000
 
