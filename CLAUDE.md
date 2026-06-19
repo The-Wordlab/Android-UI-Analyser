@@ -27,11 +27,13 @@ Requirements: **Python 3.11+**, **`adb` on PATH** (Android SDK platform-tools), 
 - Dev install: `uv pip install -e ".[dev,apple,rapidocr]"` (or `pip`)
 - Tests:       `.venv/bin/pytest` (or `uv run pytest`)
 - Lint/types:  `.venv/bin/ruff check .` · `.venv/bin/mypy`
+- Enable git hooks (once per clone): `git config core.hooksPath .githooks` — keeps the SKILL.md copies in sync on every commit
 - **The SKILL.md is generated** — edit `src/android_ui_analyser/guide.py` (the single source),
-  never a SKILL.md directly. There are **two** committed copies; regenerate both after a change:
-  `aua guide --emit-skill` (project copy: `.claude/skills/android-ui-analyser/SKILL.md`) and
-  `aua guide --emit-skill skills/android-ui-analyser/SKILL.md` (the **plugin** copy). When
-  releasing a skill/CLI change, bump `version` in both `.claude-plugin/plugin.json` and
+  never a SKILL.md directly. There are **two** committed copies (project
+  `.claude/skills/android-ui-analyser/SKILL.md` + plugin `skills/android-ui-analyser/SKILL.md`);
+  the pre-commit hook (`.githooks/pre-commit`) regenerates and stages **both** from `guide.py`
+  on every commit, so they can't drift. To regenerate by hand: `aua guide --emit-skill <path>`.
+  When releasing a skill/CLI change, bump `version` in both `.claude-plugin/plugin.json` and
   `.claude-plugin/marketplace.json` so `/plugin update` picks it up.
 - **Plugin/marketplace**: the repo is its own Claude Code plugin marketplace
   (`.claude-plugin/marketplace.json`, name `the-wordlab`) exposing the `android-ui-analyser`
