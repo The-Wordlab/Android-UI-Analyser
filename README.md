@@ -2,6 +2,8 @@
 
 `aua` is a fast, configurable CLI that gives an AI agent structured "what's on screen and where" for Android UI testing. It reads the accessibility/view hierarchy first — returning every element with a stable integer ID, type, text, and bounding box in tens of milliseconds — and falls back to image-based detection and OCR (and optionally a grounding VLM) only on screens the hierarchy cannot see (Compose without semantics, Flutter, WebViews, canvas, games). The agent acts on **integer IDs, not pixels**: `aua tap 4` and `aua input 2 "hello"` compute coordinates internally, eliminating coordinate hallucination and shrinking the token footprint to a compact JSON list.
 
+> **Using Claude Code?** Install `aua` as a plugin in two lines — `/plugin marketplace add The-Wordlab/Android-UI-Analyser` then `/plugin install android-ui-analyser@the-wordlab` (plus a one-time CLI install). The skill then auto-activates on Android tasks in every project. Full details: [Use it from Claude Code](#use-it-from-claude-code-the-aua-skill).
+
 ---
 
 ## Requirements
