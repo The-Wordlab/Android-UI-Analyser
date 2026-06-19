@@ -62,12 +62,14 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         'Use `aua has "<text>"` (exit 0/1) to branch cheaply without parsing JSON.',
     ),
     (
-        "Re-analyze after every action — or fold it in with `--observe`",
-        "IDs are only valid until the screen changes. After any tap/input/swipe/key the old "
-        "ids are stale. Instead of a separate `analyze`, pass `--observe` to the action: it "
-        "returns the post-action screen inline (`observation.elements` with fresh ids), so "
-        "`type → tap send` is two calls, not three. (`goto` already returns the destination's "
-        "`elements`.) Use a plain `analyze` only when you also need to wait for the screen to settle.",
+        "Act, then read the screen the action gives back",
+        "IDs are only valid until the screen changes. By default every state-changing action "
+        "(tap/input/swipe/scroll-to/key) returns the next screen inline in `observation` "
+        "(elements with fresh ids) — so you rarely need a separate `analyze`: `type → tap "
+        "send` is two calls, not three, and `goto` returns the destination's `elements` too. "
+        "Pass `--no-observe` to skip it on action-only sequences. `observation` is a no-wait "
+        "snapshot taken right after the action — use a plain `analyze` (after `wait --for-stable`) "
+        "when the screen is still animating.",
     ),
     (
         "Wait on state, never sleep",
@@ -122,8 +124,8 @@ KEY_FLAGS: list[tuple[str, str]] = [
     ("goto", "`<goal>` (fuzzy), `--plan` (route only, no taps), `--max-steps N`"),
     (
         "actions (tap/input/swipe/scroll-to/key/…)",
-        "`--observe` — return the post-action screen inline (fresh element ids), skipping a "
-        "follow-up `analyze`",
+        "return the post-action screen inline by default (`observation`, fresh ids); "
+        "`--no-observe` to skip it",
     ),
 ]
 
@@ -235,6 +237,34 @@ def render_markdown(*, brief: bool = False) -> str:
         'first; `aua goto "<goal>"` drives a remembered route in one call. Manage with '
         "`aua memory show|path|update|forget`."
     )
+
+    p.append("")
+    p.append("## Worked examples")
+    p.append("```bash")
+    p.append("# Optional: warm daemon so every later call is ~tens of ms.")
+    p.append("aua daemon start")
+    p.append("")
+    p.append("# See the screen. When the app is mapped the response already carries")
+    p.append("# meta.known_screen + meta.known_routes + meta.suggested_gotos — act on those.")
+    p.append("aua --format compact analyze")
+    p.append("")
+    p.append("# Jump straight to a remembered screen (drives + verifies each hop):")
+    p.append('aua goto "image creator"')
+    p.append('aua goto "settings" --plan          # just print the route, take no action')
+    p.append("")
+    p.append("# Act by id. Every action returns the post-action screen by default, so the")
+    p.append("# result already carries observation.elements with fresh ids — type → send is")
+    p.append("# two calls, not three:")
+    p.append('aua input 24 "a neon koala surfing a wave"   # result.observation has the send id')
+    p.append("aua tap 25                          # send-button id, taken from that observation")
+    p.append("aua wait --for-stable               # wait out image generation / loading")
+    p.append("")
+    p.append("# Reach an off-screen target; the scroll already returns what came into view:")
+    p.append('aua scroll-to "Translate"')
+    p.append("")
+    p.append("# Cheap branch with no JSON parsing (exit 0 present / 1 absent):")
+    p.append('aua has "Done" && echo present')
+    p.append("```")
 
     p.append("")
     p.append("## Output schema (read these fields)")

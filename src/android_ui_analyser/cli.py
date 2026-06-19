@@ -439,7 +439,9 @@ def tap(
     ctx: typer.Context,
     element_id: int = typer.Argument(..., metavar="ID", help="Element id to tap."),
     observe: bool = typer.Option(
-        False, "--observe", help="Also return the screen after the tap (skips a follow-up analyze)."
+        True,
+        "--observe/--no-observe",
+        help="Also return the screen after the tap (skips a follow-up analyze).",
     ),
 ) -> None:
     """Tap an element (by id from the last analyze)."""
@@ -454,7 +456,9 @@ def tap(
 def click_cmd(
     ctx: typer.Context,
     element_id: int = typer.Argument(..., metavar="ID", help="Element id to tap (alias of tap)."),
-    observe: bool = typer.Option(False, "--observe", help="Also return the post-tap screen."),
+    observe: bool = typer.Option(
+        True, "--observe/--no-observe", help="Also return the post-tap screen."
+    ),
 ) -> None:
     """Alias of ``tap``."""
 
@@ -469,7 +473,9 @@ def long_press(
     ctx: typer.Context,
     element_id: int = typer.Argument(..., metavar="ID", help="Element id to long-press."),
     ms: int = typer.Option(600, "--ms", help="Press duration in milliseconds."),
-    observe: bool = typer.Option(False, "--observe", help="Also return the post-action screen."),
+    observe: bool = typer.Option(
+        True, "--observe/--no-observe", help="Also return the post-action screen."
+    ),
 ) -> None:
     """Long-press an element."""
 
@@ -486,7 +492,9 @@ def input_cmd(
     text: str = typer.Argument(..., help="Text to type."),
     submit: bool = typer.Option(False, "--submit", help="Send the IME action after typing."),
     observe: bool = typer.Option(
-        False, "--observe", help="Also return the screen after typing (skips a follow-up analyze)."
+        True,
+        "--observe/--no-observe",
+        help="Also return the screen after typing (skips a follow-up analyze).",
     ),
 ) -> None:
     """Focus an element and type text; ``--submit`` sends the IME action."""
@@ -511,7 +519,9 @@ def input_cmd(
 def clear(
     ctx: typer.Context,
     element_id: int = typer.Argument(..., metavar="ID", help="Element id to clear."),
-    observe: bool = typer.Option(False, "--observe", help="Also return the post-action screen."),
+    observe: bool = typer.Option(
+        True, "--observe/--no-observe", help="Also return the post-action screen."
+    ),
 ) -> None:
     """Clear the text of an element."""
 
@@ -532,7 +542,9 @@ def swipe(
         "--coords",
         help="Explicit x1 y1 x2 y2 (overrides direction).",
     ),
-    observe: bool = typer.Option(False, "--observe", help="Also return the post-swipe screen."),
+    observe: bool = typer.Option(
+        True, "--observe/--no-observe", help="Also return the post-swipe screen."
+    ),
 ) -> None:
     """Swipe in a direction (optionally from an element) or by explicit coordinates."""
 
@@ -561,8 +573,8 @@ def scroll_to(
     match: str = typer.Option("contains", "--match", help="exact|contains|regex."),
     ignore_case: bool = typer.Option(False, "--ignore-case", help="Case-insensitive match."),
     observe: bool = typer.Option(
-        False,
-        "--observe",
+        True,
+        "--observe/--no-observe",
         help="Also return the screen after scrolling (skips a follow-up analyze).",
     ),
 ) -> None:
@@ -589,7 +601,9 @@ def key(
     ctx: typer.Context,
     name: str = typer.Argument(..., help="back|home|enter|recents|KEYCODE_*."),
     observe: bool = typer.Option(
-        False, "--observe", help="Also return the screen after the key (skips a follow-up analyze)."
+        True,
+        "--observe/--no-observe",
+        help="Also return the screen after the key (skips a follow-up analyze).",
     ),
 ) -> None:
     """Press a hardware/navigation key."""
