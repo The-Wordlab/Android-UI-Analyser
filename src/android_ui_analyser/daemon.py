@@ -17,7 +17,8 @@ Errors::
 Supported commands
 ------------------
 ping, analyze, has, inspect, screenshot, tap, long_press, input, clear,
-swipe, scroll_to, key, wait, list_devices, app
+swipe, scroll_to, key, wait, wait_stable, memory_update, goto, flow_run,
+flow_save, orient, list_devices, app
 """
 
 from __future__ import annotations
@@ -160,6 +161,13 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
             # Memory autopilot — returns a plain dict (route/hops/handoff).
             return _result_ok(engine.goto(**args))
 
+        elif cmd == "flow_run":
+            # Whole-journey replay — returns a plain dict (steps_run/handoff).
+            return _result_ok(engine.flow_run(**args))
+
+        elif cmd == "flow_save":
+            return _result_ok(engine.flow_save(**args))
+
         elif cmd == "orient":
             # What the tool already knows about the foreground app (plain dict).
             return _result_ok(engine.orient())
@@ -178,6 +186,7 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
                 f"unknown command: {cmd!r}",
                 hint="Valid commands: ping, analyze, has, inspect, screenshot, "
                 "tap, long_press, input, clear, swipe, scroll_to, key, wait, "
+                "wait_stable, memory_update, goto, flow_run, flow_save, orient, "
                 "list_devices, app",
             )
 

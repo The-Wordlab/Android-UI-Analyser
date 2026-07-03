@@ -153,6 +153,12 @@ class FakeDevice(Device):
     def press(self, key: str) -> None:
         self.calls.append(("press", (key,)))
 
+    def launch_app(self, package: str) -> None:
+        self.calls.append(("launch_app", (package,)))
+
+    def stop_app(self, package: str) -> None:
+        self.calls.append(("stop_app", (package,)))
+
     def find_text(
         self, text: str, *, match: MatchMode | str = MatchMode.contains, ignore_case: bool = False
     ) -> Bounds | None:
