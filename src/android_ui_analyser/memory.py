@@ -796,14 +796,32 @@ class AppMemoryStore:
         tier: str = "hierarchy",
         screen_height: int | None = None,
     ) -> str | None:
-        """Record the current screen + any pending route edge. Returns ``known_screen``."""
+        """Record the current screen + any pending route edge. Returns ``known_screen``.
+
+        The journey cursor follows a small state machine (all state lives in the
+        session file, so daemon + CLI processes agree):
+
+        - **ignored** package (IME/system chrome) → nothing recorded, session untouched.
+        - **transit** package (Google auth, permission dialogs — ``transit_packages``)
+          while a different origin app owns the journey → the screen still records into
+          the transit app's OWN map, but the cursor/pending stay on the origin app, so
+          the eventual return records the whole excursion as ONE replayable edge.
+        - **same package** → the classic case: draw the pending edge (unless it
+          overflowed or went stale) and advance the cursor.
+        - **foreign non-transit package** → a genuine app switch: reset the cursor,
+          drop pending cleanly (never a cross-app edge).
+        """
         if not (self.cfg.enabled and self.cfg.auto_record):
             return None
         if matches_any(package, self.cfg.ignore_packages):
             return None  # keyboards / system chrome never get a map of their own
         sess = self.load_session(serial)
-        prev, prev_pkg, pending = sess.current_screen, sess.package, list(sess.pending)
-        inbound_label, inbound_kind = _parse_inbound(pending)
+        in_transit = (
+            sess.package is not None
+            and package != sess.package
+            and matches_any(package, self.cfg.transit_packages)
+        )
+        inbound_label, inbound_kind = _parse_inbound(list(sess.pending))
         outcome = self.record_screen(
             package=package,
             elements=elements,
@@ -815,6 +833,10 @@ class AppMemoryStore:
             inbound_kind=inbound_kind,
             screen_height=screen_height,
         )
+        if in_transit:
+            # The origin journey continues through this screen — session untouched.
+            return outcome.name if outcome.was_known else None
+        prev, prev_pkg, pending = sess.current_screen, sess.package, list(sess.pending)
         if (
             pending
             and prev
