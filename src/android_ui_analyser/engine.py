@@ -1129,6 +1129,138 @@ class Engine:
             "elements": [e.compact() for e in res.elements],
         }
 
+    # ----------------------------------------------------------------- flows (§6b)
+
+    def flow_run(
+        self,
+        name: str | None = None,
+        *,
+        file: str | None = None,
+        params: dict[str, str] | None = None,
+        dry_run: bool = False,
+        from_step: int = 0,
+        allow_destructive: bool = True,
+    ) -> dict[str, Any]:
+        """Replay a named (or ``--file``) flow in one call — the whole journey.
+
+        Runs through the same executor as ``goto``; on divergence returns the failing
+        step's index + the remaining steps so the caller can fix or finish manually and
+        resume with ``from_step``. Authored flows are deliberate intent, so destructive
+        steps are ALLOWED by default (unlike goto's auto-learned replay).
+        """
+        from .flows import FlowStore, parse_flow_yaml, resolve_params
+
+        if file:
+            path = Path(file).expanduser()
+            if not path.is_file():
+                raise UsageError(f"no flow file at {path}")
+            flow = parse_flow_yaml(path.read_text(encoding="utf-8"), name=path.stem)
+        elif name:
+            flow = FlowStore(self.config.memory).load(name)
+        else:
+            raise UsageError("flow run needs a NAME or --file", hint="see `aua flow list`")
+        steps = resolve_params(flow, params or {})
+        if not 0 <= from_step < len(steps):
+            raise UsageError(
+                f"--from-step {from_step} out of range (flow has {len(steps)} steps)"
+            )
+        steps_slice = steps[from_step:]
+        lexicon = self.config.memory.destructive_labels
+        if dry_run:
+            return {
+                "ok": True,
+                "flow": flow.name,
+                "dry_run": True,
+                "app": flow.app,
+                "params_declared": sorted(flow.params),
+                "steps": [
+                    {
+                        "index": from_step + i,
+                        "step": step_display(s),
+                        "destructive": is_destructive_step(s, lexicon),
+                    }
+                    for i, s in enumerate(steps_slice)
+                ],
+                "note": "not executed (--dry-run)",
+            }
+        executed: list[dict[str, Any]] = []
+        fail, res = self._run_steps(
+            steps_slice,
+            origin_package=flow.app,
+            allow_destructive=allow_destructive,
+            allow_goto_steps=True,
+            scroll_fallback=True,
+            executed=executed,
+        )
+        for e in executed:
+            e["index"] += from_step  # report absolute flow indices
+        if fail is not None:
+            idx = from_step + fail.at
+            return {
+                "ok": False,
+                "code": fail.code,
+                "flow": flow.name,
+                "step_index": idx,
+                "failed_step": {"display": step_display(fail.step), **fail.step.model_dump()},
+                "steps_run": executed,
+                "remaining_steps": [step_display(s) for s in steps[idx:]],
+                "current_screen": res.meta.known_screen,
+                "elements": [
+                    {"id": e.id, "label": e.text or e.content_desc, "clickable": e.clickable}
+                    for e in res.elements
+                    if (e.text or e.content_desc)
+                ][:20],
+                "hint": (
+                    "fix the flow or finish the step manually, then resume with "
+                    f"`aua flow run {flow.name} --from-step {idx}`"
+                ),
+            }
+        return {
+            "ok": True,
+            "flow": flow.name,
+            "steps_run": executed,
+            "final_screen": res.meta.known_screen,
+            # destination elements (ids) so the caller can act without a re-analyze
+            "elements": [e.compact() for e in res.elements],
+        }
+
+    def flow_save(self, name: str, *, last: int = 12, force: bool = False) -> dict[str, Any]:
+        """Materialize the session's recent recorded actions into an editable flow file.
+
+        Redacted inputs/labels become required ``${PARAM_n}`` placeholders — typed
+        values are never recorded, so the agent fills them in the saved YAML.
+        """
+        from .flows import Flow, FlowStore, steps_from_recent
+
+        mem = self._memory
+        if mem is None:
+            raise UsageError("memory is disabled", hint="Set `memory.enabled: true` in config.")
+        sess = mem.load_session(self.device.serial)
+        recent = sess.recent[-max(1, last) :]
+        if not recent:
+            raise UsageError(
+                "no recorded actions to save",
+                hint="drive the app first (tap/input/…), then `aua flow save <name>`",
+            )
+        steps, params = steps_from_recent(recent)
+        flow = Flow(
+            name=name,
+            app=sess.package,
+            description=f"Recorded from the last {len(steps)} session actions",
+            params=params,
+            steps=steps,
+        )
+        path = FlowStore(self.config.memory).save(flow, force=force)
+        return {
+            "ok": True,
+            "action": "flow-save",
+            "flow": name,
+            "path": str(path),
+            "steps": len(steps),
+            "params_needed": sorted(params),
+            "hint": "edit the YAML to fill ${PARAM_n} values / trim steps, then `aua flow run`",
+        }
+
     def close(self) -> None:
         """Release the device (and its on-device uiautomator2 server). Idempotent."""
         dev = self._device
@@ -1458,22 +1590,21 @@ class Engine:
 
     def app(self, action: str, *, package: str | None = None) -> ActionResult:
         device = self.device
-        d: Any = getattr(device, "_d", None)
         a = action.lower()
         if a in ("foreground", "current"):
             info = device.current_app()
             return ActionResult(ok=True, action=f"app-{a}", detail=json.dumps(info))
-        if d is None:
-            raise UsageError("app launch/stop requires a real device")
         if a == "launch":
             if not package:
                 raise UsageError("app launch needs a package name")
-            d.app_start(package)
+            device.launch_app(package)
+            self._invalidate_cache()
             return ActionResult(ok=True, action="app-launch", detail=package)
         if a == "stop":
             if not package:
                 raise UsageError("app stop needs a package name")
-            d.app_stop(package)
+            device.stop_app(package)
+            self._invalidate_cache()
             return ActionResult(ok=True, action="app-stop", detail=package)
         raise UsageError(f"unknown app action '{action}'", hint="foreground|launch|stop|current")
 

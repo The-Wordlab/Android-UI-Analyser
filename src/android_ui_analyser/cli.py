@@ -1114,6 +1114,131 @@ def memory_forget(
     _run(ctx, go)
 
 
+# --------------------------------------------------------------------------- flows
+
+
+flow_app = typer.Typer(
+    name="flow",
+    help="Author, save, and replay whole journeys in one call (Maestro-style flows, §6b).",
+    no_args_is_help=True,
+)
+app.add_typer(flow_app, name="flow")
+
+
+def _parse_params(pairs: list[str]) -> dict[str, str]:
+    params: dict[str, str] = {}
+    for pair in pairs:
+        if "=" not in pair:
+            raise UsageError(f"bad --param '{pair}'", hint="use --param NAME=value")
+        k, v = pair.split("=", 1)
+        params[k.strip()] = v
+    return params
+
+
+@flow_app.command("run")
+def flow_run_cmd(
+    ctx: typer.Context,
+    name: str | None = typer.Argument(None, help="Saved flow name (see `aua flow list`)."),
+    param: list[str] = typer.Option(  # noqa: B008 - typer option factory
+        [], "--param", "-p", help="Substitute ${NAME} placeholders: --param NAME=value."
+    ),
+    file: str | None = typer.Option(None, "--file", help="Run a flow YAML file directly."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print resolved steps; do not act."),
+    from_step: int = typer.Option(0, "--from-step", help="Resume from this step index."),
+    allow_destructive: bool = typer.Option(
+        True,
+        "--allow-destructive/--no-allow-destructive",
+        help="Authored flows may take destructive steps by default.",
+    ),
+) -> None:
+    """Replay a whole journey in one call; on divergence returns a resumable step index."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        result = _route(
+            engine,
+            "flow_run",
+            name=name,
+            file=file,
+            params=_parse_params(param),
+            dry_run=dry_run,
+            from_step=from_step,
+            allow_destructive=allow_destructive,
+        )
+        _emit(result, fmt)
+        if isinstance(result, dict) and result.get("ok") is False:
+            raise typer.Exit(1)
+
+    _run(ctx, go)
+
+
+@flow_app.command("save")
+def flow_save_cmd(
+    ctx: typer.Context,
+    name: str = typer.Argument(..., help="Name for the saved flow."),
+    last: int = typer.Option(12, "--last", help="How many recent actions to materialize."),
+    force: bool = typer.Option(False, "--force", help="Overwrite an existing flow."),
+) -> None:
+    """Materialize the session's recent actions into an editable flow YAML."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(_route(engine, "flow_save", name=name, last=last, force=force), fmt)
+
+    _run(ctx, go)
+
+
+@flow_app.command("list")
+def flow_list_cmd(ctx: typer.Context) -> None:
+    """List saved flows (name, app, steps, params)."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        import json
+
+        from .flows import FlowStore
+
+        flows = FlowStore(_opts(ctx).load().memory).list()
+        typer.echo(json.dumps({"flows": flows}, indent=2, ensure_ascii=False))
+
+    _run(ctx, go)
+
+
+@flow_app.command("show")
+def flow_show_cmd(
+    ctx: typer.Context,
+    name: str = typer.Argument(..., help="Flow name."),
+) -> None:
+    """Print a saved flow's YAML (edit it in place under memory.dir/flows/)."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        from .flows import FlowStore
+
+        store = FlowStore(_opts(ctx).load().memory)
+        typer.echo(store.path(name).read_text(encoding="utf-8") if store.path(name).is_file() else "")
+        if not store.path(name).is_file():
+            raise UsageError(f"no flow named '{name}'", hint="see `aua flow list`")
+
+    _run(ctx, go)
+
+
+@flow_app.command("delete")
+def flow_delete_cmd(
+    ctx: typer.Context,
+    name: str = typer.Argument(..., help="Flow name to delete."),
+) -> None:
+    """Delete a saved flow."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        import json
+
+        from .flows import FlowStore
+
+        deleted = FlowStore(_opts(ctx).load().memory).delete(name)
+        typer.echo(json.dumps({"ok": deleted, "action": "flow-delete", "flow": name}))
+        if not deleted:
+            raise typer.Exit(1)
+
+    _run(ctx, go)
+
+
 # --------------------------------------------------------------------------- guide
 
 

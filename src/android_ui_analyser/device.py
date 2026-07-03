@@ -113,6 +113,12 @@ class Device(ABC):
     def wait_idle(self, timeout_ms: int = 5000) -> None:  # overridden by real device
         return None
 
+    def launch_app(self, package: str) -> None:  # overridden by real device
+        raise DeviceError("app launch requires a real device")
+
+    def stop_app(self, package: str) -> None:  # overridden by real device
+        raise DeviceError("app stop requires a real device")
+
     def close(self) -> None:  # overridden by real device
         """Release the device connection / on-device agent (no-op by default)."""
         return None
@@ -338,6 +344,12 @@ class Uiautomator2Device(Device):
             self._d.jsonrpc.waitForIdle(timeout_ms)
         except Exception:  # pragma: no cover - best effort
             time.sleep(0.1)
+
+    def launch_app(self, package: str) -> None:
+        self._call("app_start", package)
+
+    def stop_app(self, package: str) -> None:
+        self._call("app_stop", package)
 
 
 # --------------------------------------------------------------------------- factory
