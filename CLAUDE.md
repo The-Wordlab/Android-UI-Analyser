@@ -15,6 +15,15 @@ this one:
 ./install.sh        # idempotent — installs aua + the skill, then runs `aua doctor`
 ```
 
+Then verify `aua` resolves from **anywhere** (it must work from any project directory, like `adb`):
+
+```bash
+cd ~ && command -v aua || { uv tool update-shell 2>/dev/null || pipx ensurepath; }  # then open a new shell
+```
+
+If it still doesn't resolve, `install.sh` fell back to the project venv — use
+`<repo>/.venv/bin/aua` by absolute path (or install `uv`/`pipx` and re-run `./install.sh`).
+
 Then connect an Android device or emulator (README → "Connect a device or emulator") and run
 `aua doctor` until `adb` and `devices` are OK. After that, in **any** project, just drive the
 app — the skill is active. The operating manual is `aua guide`.

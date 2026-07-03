@@ -19,11 +19,12 @@ description: >-
 ## Session protocol
 1. **Start the warm daemon.** `aua daemon start` — holds the device connection + loaded models warm so each later call is ~tens of ms instead of paying Python/connect startup. Optional; every command still works without it.
 2. **Use what memory already knows.** `aua map` (or `aua map --brief`) prints the app's known screens + routes — but you usually don't need to call it: every `analyze` already returns `meta.known_screen` plus inline `meta.known_routes` / `meta.suggested_gotos` / `meta.map_hint`. Act on those instead of re-exploring. `aua map --find "<goal>"` gives just the route to a target.
-3. **Jump to a known screen in one call.** `aua goto "<goal>"` drives the remembered route to a screen — it taps and verifies each hop for you, turning multi-step navigation into a single command (prefer it whenever `suggested_gotos` lists your target). `--plan` prints the route without acting; if the route diverges it stops and hands back the remaining steps + the current screen.
-4. **Drive by element ID.** `aua --format compact analyze` → a list of elements each with an integer `id` + bounds. Act on the id: `aua tap <id>`, `aua input <id> "text"`, `aua swipe up`, `aua key back`. Use `aua has "<text>"` (exit 0/1) to branch cheaply without parsing JSON.
-5. **Act, then read the screen the action gives back.** IDs are only valid until the screen changes. By default every state-changing action (tap/input/swipe/scroll-to/key) returns the next screen inline in `observation` (elements with fresh ids) — so you rarely need a separate `analyze`: `type → tap send` is two calls, not three, and `goto` returns the destination's `elements` too. Pass `--no-observe` to skip it on action-only sequences. `observation` is a no-wait snapshot taken right after the action — use a plain `analyze` (after `wait --for-stable`) when the screen is still animating.
-6. **Wait on state, never sleep.** `aua wait --for "<text>"` waits for text to appear; `aua wait --for-stable` returns once the screen stops visually changing (cheap perceptual-hash over screenshots — ideal for image generation / loading / video, works on opaque screens). Prefer these to fixed sleeps.
-7. **Stop the daemon when done.** `aua daemon stop` releases the warm connection.
+3. **Jump to a known screen in one call.** `aua goto "<goal>"` replays the remembered steps of each route edge — by resource-id first, then label — verifying every hop, including cross-app auth legs (Google sign-in through Chrome/GMS is folded into one edge). Prefer it whenever `suggested_gotos` lists your target. `--plan` prints the annotated route (steps, replayable, destructive) without acting. Steps matching `memory.destructive_labels` (delete/sign out/pay/…) are refused without `--allow-destructive`. On divergence it hands back the failing step, the remaining steps, and the current elements — finish that one step manually, then just re-run `aua goto`: it resumes mid-route, even mid-auth.
+4. **Replay whole journeys in one call (flows).** A flow is a Maestro-style YAML journey you can AUTHOR directly (no walking needed) or record: `aua flow save <name> --last N` materializes your recent actions (typed values become required `${PARAM_n}` placeholders — fill them in the file). `aua flow run <name> --param K=V` drives the whole journey — launch, taps, waits, asserts, cross-app auth, even `goto:` steps — and on divergence returns the failing step index + remaining steps; fix and resume with `--from-step N`. Flows live under `<memory.dir>/flows/*.yaml` (`aua flow list|show|delete`); `--dry-run` previews. Use a flow for any setup you repeat (reset account, log in, reach the screen under test) — one call instead of a dozen.
+5. **Drive by element ID.** `aua --format compact analyze` → a list of elements each with an integer `id` + bounds. Act on the id: `aua tap <id>`, `aua input <id> "text"`, `aua swipe up`, `aua key back`. Use `aua has "<text>"` (exit 0/1) to branch cheaply without parsing JSON.
+6. **Act, then read the screen the action gives back.** IDs are only valid until the screen changes. By default every state-changing action (tap/input/swipe/scroll-to/key) returns the next screen inline in `observation` (elements with fresh ids) — so you rarely need a separate `analyze`: `type → tap send` is two calls, not three, and `goto` returns the destination's `elements` too. Pass `--no-observe` to skip it on action-only sequences. `observation` is a no-wait snapshot taken right after the action — use a plain `analyze` (after `wait --for-stable`) when the screen is still animating.
+7. **Wait on state, never sleep.** `aua wait --for "<text>"` waits for text to appear; `aua wait --for-stable` returns once the screen stops visually changing (cheap perceptual-hash over screenshots — ideal for image generation / loading / video, works on opaque screens). Prefer these to fixed sleeps.
+8. **Stop the daemon when done.** `aua daemon stop` releases the warm connection.
 
 ## Flag placement (this bites people)
 **Global** flags go BEFORE the subcommand; **command** flags after.
@@ -33,7 +34,8 @@ description: >-
 - _has_: `--match exact|contains|regex`, `--ignore-case`, `--ocr-fallback/--no-ocr-fallback`, `--timeout <ms>`
 - _wait_: `--for "<text>"`, `--idle`, `--for-stable`, `--interval`, `--settle`, `--timeout`
 - _map_: `--app <pkg>`, `--brief`, `--screen <name>`, `--depth N`, `--find "<goal>"`, `--json`
-- _goto_: `<goal>` (fuzzy), `--plan` (route only, no taps), `--max-steps N`
+- _goto_: `<goal>` (fuzzy), `--plan` (annotated route, no taps), `--max-steps N`, `--allow-destructive`
+- _flow_: `run <name> [--param K=V] [--file PATH] [--dry-run] [--from-step N] [--no-allow-destructive]`, `save <name> [--last N] [--force]`, `list|show|delete`
 - _actions (tap/input/swipe/scroll-to/key/…)_: return the post-action screen inline by default (`observation`, fresh ids); `--no-observe` to skip it
 
 ## The loop
@@ -52,20 +54,20 @@ No LLM decides the route; the engine starts at the cheapest tier that could answ
 | T0 text | hierarchy text match (`has`) | is this text/element present? |
 | T1 selector | hierarchy selector locate | give me THIS known element to act on |
 | T2 hierarchy | full hierarchy parse → element list | what's on screen? (`analyze`) |
-| T3 vision | detection + OCR (local) | Compose/WebView/canvas/game the tree can't see |
+| T3 vision | detection + OCR (local) | Compose/canvas/game (and weak WebView) trees |
 | T4 grounding | grounding VLM (local or paid) | fuzzy/visual targets not resolvable above |
 
 `analyze --query "the gear icon"` resolves from the hierarchy first (free) and only escalates. The default ceiling is **local vision**; reaching the (paid) grounding VLM requires `--deep`. `--cheap` forbids escalation; `--strategy <tier>` pins one. `meta.tier_used` reports which rung actually ran.
 
-## Hard screens (Compose / Flutter / WebView / games)
-When the accessibility tree is empty/useless, force vision:
+## Hard screens (Compose / Flutter / canvas / games)
+Compose-without-semantics, Flutter, canvas, and games need vision — the gate escalates automatically. **WebView pages (Google sign-in, web content) usually expose a rich tree and stay on the fast hierarchy path**; only weak/hollow WebView trees escalate. If `analyze` visibly misses content, force it:
 ```bash
 aua --format compact analyze --source vision --annotate
 ```
 `meta.annotated_image` is a PNG with numbered boxes you can open.
 
 ## App memory (auto-recorded)
-The tool maintains a persistent, **local-only** map per app under `memory.dir` (default `~/.android-ui-analyser`). Every `analyze` records the current screen and every state-changing action records a route edge — no extra calls, and the daemon path records too. Read it back with `aua map` / `aua map --find "<goal>"`. On a revisit, `meta.known_screen` names the recognised screen; a changed signature or app version flags it `stale` so you re-verify. Only the **durable skeleton** is stored (screens, routes, stable elements); dynamic lists are stored as a *shape*, and `EditText` values / secrets / PII are redacted (`<filled>` / `<redacted>`). The map is pushed to you inline on every `analyze` (`meta.known_routes` / `meta.suggested_gotos` / `meta.map_hint`), ranked by your recent navigation so the screens you use most surface first; `aua goto "<goal>"` drives a remembered route in one call. Manage with `aua memory show|path|update|forget`.
+The tool maintains a persistent, **local-only** map per app under `memory.dir` (default `~/.android-ui-analyser`). Every `analyze` records the current screen and every state-changing action records a route edge — no extra calls, and the daemon path records too. Read it back with `aua map` / `aua map --find "<goal>"`. On a revisit, `meta.known_screen` names the recognised screen; a changed signature or app version flags it `stale` so you re-verify. Only the **durable skeleton** is stored (screens, routes, stable elements); dynamic lists are stored as a *shape*, and `EditText` values / secrets / PII are redacted (`<filled>` / `<redacted>`). The map is pushed to you inline on every `analyze` (`meta.known_routes` / `meta.suggested_gotos` / `meta.map_hint`), ranked by your recent navigation so the screens you use most surface first; `aua goto "<goal>"` drives a remembered route in one call. **Cross-app auth legs (Google sign-in via Chrome/GMS, permission dialogs) fold into the origin app's route** and replay step by step — a redacted account row hands off for one manual tap, then re-running `goto` resumes. Replay refuses destructive steps (delete/sign out/…) without `--allow-destructive`; the map improves with every walk (legacy edges upgrade in place when re-driven). Manage with `aua memory show|path|update|forget` (`memory update --screen <name>` renames a badly-auto-named screen so `goto <name>` reads naturally).
 
 ## Worked examples
 ```bash
@@ -76,9 +78,14 @@ aua daemon start
 # meta.known_screen + meta.known_routes + meta.suggested_gotos — act on those.
 aua --format compact analyze
 
-# Jump straight to a remembered screen (drives + verifies each hop):
+# Jump straight to a remembered screen (drives + verifies each hop,
+# including cross-app auth legs):
 aua goto "image creator"
 aua goto "settings" --plan          # just print the route, take no action
+
+# Replay a whole journey (authored or recorded) in ONE call:
+aua flow run reset_account_google_login --param ACCOUNT="Engineering Team"
+aua flow save reach_checkout --last 8   # materialize what you just did
 
 # Act by id. Every action returns the post-action screen by default, so the
 # result already carries observation.elements with fresh ids — type → send is
