@@ -1434,7 +1434,22 @@ class Engine:
         """
         if observe:
             with contextlib.suppress(Exception):  # observation is a bonus; never fail the action
-                result.observation = self.analyze(source="hierarchy", record=False)
+                obs = self.analyze(source="hierarchy", record=False)
+                result.observation = obs
+                mem = self._memory
+                if mem is not None and self._device is not None:
+                    # Recognition-only pass: draws the single-action edge when the
+                    # snapshot lands on a known screen; never creates screens.
+                    with contextlib.suppress(Exception):
+                        known = mem.observe_screen_passive(
+                            self._device.serial,
+                            package=obs.screen.package,
+                            elements=obs.elements,
+                            activity=obs.screen.activity,
+                            screen_height=obs.screen.height,
+                        )
+                        if known:
+                            obs.meta.known_screen = known
         return result
 
     def tap(self, element_id: int, *, observe: bool = True) -> ActionResult:

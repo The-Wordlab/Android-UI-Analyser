@@ -638,3 +638,77 @@ def test_cli_goto_accepts_allow_destructive(tmp_path: Path, monkeypatch) -> None
     ok = runner.invoke(app, ["--format", "compact", "goto", "prefs", "--allow-destructive"])
     assert ok.exit_code == 0, ok.stderr
     assert json.loads(ok.stdout)["arrived"] is True
+
+
+# --------------------------------------------------------------- observation recording
+
+FORM = _hier(
+    _node("android.widget.TextView", text="Form", rid="x:id/header", b="[40,120][1040,210]"),
+    _node(
+        "android.widget.EditText",
+        rid="x:id/prompt",
+        desc="Prompt",
+        clk=True,
+        b="[40,300][1040,400]",
+    ),
+    _node("android.widget.Button", text="Send", rid="x:id/send", clk=True, b="[40,440][400,540]"),
+)
+
+
+def test_observation_records_single_step_edge_on_known_screen(tmp_path: Path) -> None:
+    """Acting on observation ids must yield replayable single-action edges."""
+    store = _store(tmp_path)
+    store.record_screen(package=P, elements=_elements(HOME), name_hint="home")
+    store.record_screen(package=P, elements=_elements(APPS), name_hint="apps")
+    dev = ScriptedDevice([HOME, APPS], package=P, serial="emu-obs")
+    eng = _engine(tmp_path, dev)
+    res = eng.analyze(source="hierarchy")
+    apps_id = next(e.id for e in res.elements if e.text == "Apps")
+    out = eng.tap(apps_id, observe=True)  # observation recognises "apps" and records
+    assert out.observation is not None
+    assert out.observation.meta.known_screen == "apps"
+
+    am = store.load(P)
+    edge = next(e for e in am.routes if e.to_screen == "apps")
+    assert edge.action == "tap 'Apps'" and len(edge.steps) == 1
+    sess = store.load_session("emu-obs")
+    assert sess.current_screen == "apps" and sess.pending == []  # cursor advanced
+
+
+def test_observation_on_unknown_screen_defers(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.record_screen(package=P, elements=_elements(HOME), name_hint="home")
+    dev = ScriptedDevice([HOME, OTHER], package=P, serial="emu-obs-unk")
+    eng = _engine(tmp_path, dev)
+    res = eng.analyze(source="hierarchy")
+    eng.tap(res.elements[1].id, observe=True)  # lands on an UNRECORDED screen
+    am = store.load(P)
+    assert am.routes == []  # nothing recorded from a possibly mid-transition frame
+    sess = store.load_session("emu-obs-unk")
+    assert sess.current_screen == "home" and len(sess.pending) == 1  # deferred
+
+    eng.analyze(source="hierarchy")  # the next plain analyze records screen + edge
+    am = store.load(P)
+    assert len(am.routes) == 1 and am.routes[0].steps
+
+
+def test_observation_same_screen_keeps_pending_for_compound_edge(tmp_path: Path) -> None:
+    """input (same screen) + tap Send must record as ONE honest two-step edge."""
+    store = _store(tmp_path)
+    store.record_screen(package=P, elements=_elements(FORM), name_hint="form")
+    store.record_screen(package=P, elements=_elements(APPS), name_hint="apps")
+    dev = ScriptedDevice([FORM, FORM, APPS], package=P, serial="emu-obs-same")
+    eng = _engine(tmp_path, dev)
+    res = eng.analyze(source="hierarchy")
+    field = next(e.id for e in res.elements if e.resource_id == "x:id/prompt")
+    out = eng.input_text(field, "hello", observe=True)  # stays on the form
+    assert out.observation is not None and out.observation.meta.known_screen == "form"
+    sess = store.load_session("emu-obs-same")
+    assert len(sess.pending) == 1  # kept, not clobbered
+
+    send = next(e.id for e in out.observation.elements if e.text == "Send")
+    eng.tap(send, observe=True)  # now lands on apps → compound edge
+    am = store.load(P)
+    edge = next(e for e in am.routes if e.to_screen == "apps")
+    assert [s.kind for s in edge.steps] == ["input", "tap"]
+    assert "input '<filled>'" in edge.action and "tap 'Send'" in edge.action

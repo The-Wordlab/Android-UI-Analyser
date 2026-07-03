@@ -836,6 +836,55 @@ class AppMemoryStore:
         self.save_session(serial, sess)
         return outcome.name if outcome.was_known else None
 
+    def observe_screen_passive(
+        self,
+        serial: str,
+        *,
+        package: str | None,
+        elements: list[Element],
+        activity: str | None = None,
+        screen_height: int | None = None,
+    ) -> str | None:
+        """Recognition-only recording for post-action observation snapshots.
+
+        A snapshot may be mid-transition, so this NEVER creates screens or mutates
+        records — it only recognises against the existing map. Landing on a *different*
+        known screen draws the pending edge immediately (so agents that act on
+        observation ids produce single-action edges, not compound monsters) and advances
+        the cursor. The *same* screen keeps pending — ``input`` then ``tap Send`` must
+        record as one honest two-step edge. Anything unrecognised defers to the next
+        plain analyze. Returns the recognised name, if any.
+        """
+        if not (self.cfg.enabled and self.cfg.auto_record):
+            return None
+        if not package or matches_any(package, self.cfg.ignore_packages):
+            return None
+        sess = self.load_session(serial)
+        if sess.package != package:
+            return None  # foreign/transit observation — leave the journey state alone
+        app = self.load(package)
+        if app is None or not app.screens:
+            return None
+        anchors = screen_anchors(elements, redact=self.cfg.redact, height=screen_height)
+        sig = signature(activity, anchors)
+        name, _sim = self._recognize(app, anchors, activity, sig)
+        if name is None:
+            return None
+        prev = sess.current_screen
+        if prev and name != prev:
+            if sess.pending and not sess.pending_overflow and _pending_fresh(sess.pending_since):
+                steps = [
+                    s.model_copy(update={"package": None}) if s.package == package else s
+                    for s in sess.pending
+                ]
+                self.record_route(package, prev, name, steps=steps)
+            sess.current_screen = name
+            sess.pending = []
+            sess.pending_since = None
+            sess.pending_overflow = False
+            self.save_session(serial, sess)
+        return name
+
     def navigation_hints(
         self,
         serial: str,
