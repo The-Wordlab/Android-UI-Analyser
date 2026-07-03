@@ -234,3 +234,30 @@ def test_goto_resume_hands_off_when_nothing_matches(tmp_path: Path) -> None:
     assert out["ok"] is False and out["code"] == "element_not_found"
     assert "manually" in out["hint"] and out["remaining_steps"]
     assert not any(c[0] == "click" for c in dev.calls)
+
+
+def test_transitional_same_screen_frame_does_not_eat_the_edge(tmp_path: Path) -> None:
+    """Auth returns often flash a frame recognised as the screen we LEFT — pending must
+    survive it so the eventual different-screen analyze still records the transit edge."""
+    dev = TransitScriptedDevice(
+        [LOGIN, CHROME_PICKER, LOGIN, ONBOARDING], package=P, serial="emu-flash"
+    )
+    eng = _engine(tmp_path, dev)
+    res = eng.analyze(source="hierarchy")  # login
+    gid = next(e.id for e in res.elements if e.text == "Continue with Google")
+    eng.tap(gid, observe=False)
+    eng.analyze(source="hierarchy")  # chrome picker (transit, pending kept)
+    res = eng.analyze(source="hierarchy")  # ScriptedDevice held → still picker; harmless
+    row = next(e.id for e in res.elements if e.text == "Engineering Team")
+    eng.tap(row, observe=False)  # → transitional LOGIN frame
+    eng.analyze(source="hierarchy")  # recognised as "welcome" (same as cursor) → KEEP pending
+    eng.key("enter", observe=False)  # any action; ScriptedDevice advances → ONBOARDING
+    eng.analyze(source="hierarchy")
+    store = _store(tmp_path)
+    luzia = store.load(P)
+    edge = next(e for e in luzia.routes if e.from_screen == "welcome")
+    assert edge.to_screen != "welcome"
+    labels = [s.label for s in edge.steps]
+    assert "Continue with Google" in labels  # survived the transitional same-screen frame
+    assert "Engineering Team" in labels
+    assert edge.steps[-1].kind == "key"
