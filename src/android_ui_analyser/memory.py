@@ -837,6 +837,12 @@ class AppMemoryStore:
             # The origin journey continues through this screen — session untouched.
             return outcome.name if outcome.was_known else None
         prev, prev_pkg, pending = sess.current_screen, sess.package, list(sess.pending)
+        if prev == outcome.name and prev_pkg == package:
+            # Same screen: keep pending. An input (or a transitional frame recognised as
+            # the screen we left — auth returns often flash one) must not eat the steps
+            # of a journey still in flight; the cap/TTL bound any accumulation.
+            self.save_session(serial, sess)
+            return outcome.name if outcome.was_known else None
         if (
             pending
             and prev
