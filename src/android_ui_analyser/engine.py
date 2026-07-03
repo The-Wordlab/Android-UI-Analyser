@@ -17,21 +17,24 @@ import time
 from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from . import routing
 from .config import Config
 from .device import Device, connect, list_devices
 from .errors import ElementNotFoundError, ProviderError, StabilityTimeout, UsageError
 from .memory import (
+    REDACT_TOKENS,
     AppMemoryStore,
     NavHints,
     RouteStep,
     _id_tail,
     _shortest_path,
+    is_destructive_step,
     matches_any,
     redact_label,
     resolve_goal,
+    step_display,
 )
 from .providers.base import DetBox, Point, ScreenImage, TextBox
 from .providers.registry import ProviderFactory, registered_names, run_chain
@@ -77,14 +80,43 @@ def _package_from_xml(
     return counts.most_common(1)[0][0]
 
 
-def _parse_tap_label(action: str) -> str | None:
-    """Pull the label out of a route action like ``tap 'Apps'`` (None if not a tap)."""
-    m = re.match(r"tap '(.+)'$", action)
-    return m.group(1) if m else None
+def _parse_legacy_steps(action: str) -> list[RouteStep] | None:
+    """Replay steps for a pre-v2 string-only edge: strictly a single ``tap 'X'``.
+
+    Anything else — compound joins, ``tap [View]``, key/input/swipe — is unreplayable
+    and returns ``None`` (a clean ``unsupported_action``, never a garbage label).
+    """
+    m = re.fullmatch(r"tap '([^']+)'", action)
+    if m is None:
+        return None
+    return [RouteStep(kind="tap", label=m.group(1))]
 
 
-def _match_element(elements: list[Element], label: str) -> Element | None:
-    """Find the on-screen element a route's ``tap '<label>'`` refers to."""
+def _match_step(elements: list[Element], step: RouteStep) -> Element | None:
+    """Resolve a step's target element: resource-id tail first, then label.
+
+    Redacted labels never match — a step whose only identity was PII hands off rather
+    than guessing. Label matching keeps the legacy tolerance (exact, then
+    prefix/substring for truncation drift).
+    """
+    rid = (step.resource_id or "").lower()
+    if rid:
+        matches = [
+            e
+            for e in elements
+            if e.resource_id and e.resource_id.split("/")[-1].strip().lower() == rid
+        ]
+        if matches:
+            matches.sort(
+                key=lambda e: (
+                    not e.clickable,
+                    (e.bounds[2] - e.bounds[0]) * (e.bounds[3] - e.bounds[1]),
+                )
+            )
+            return matches[0]
+    label = (step.label or "").strip()
+    if not label or label in REDACT_TOKENS:
+        return None
     for e in elements:  # exact text / content-desc match first
         if (e.text or e.content_desc or "") == label:
             return e
@@ -96,6 +128,15 @@ def _match_element(elements: list[Element], label: str) -> Element | None:
     return None
 
 
+class StepFailure(NamedTuple):
+    """Why (and where) a step sequence stopped — the executor's divergence signal."""
+
+    code: str  # destructive_step | input_required | element_not_found |
+    #            unsupported_action | wait_timeout | assert_failed
+    at: int  # failing step index within the executed list
+    step: RouteStep
+
+
 def _goto_handoff(
     goal: str,
     target: str,
@@ -103,9 +144,13 @@ def _goto_handoff(
     hops: list[dict[str, Any]],
     remaining: list[dict[str, Any]],
     res: AnalyzeResult,
+    *,
+    failed_step: RouteStep | None = None,
+    remaining_steps: list[RouteStep] | None = None,
+    hint: str | None = None,
 ) -> dict[str, Any]:
     """Stop driving and return enough state for the caller to continue manually."""
-    return {
+    out = {
         "ok": False,
         "code": code,
         "goal": goal,
@@ -120,8 +165,16 @@ def _goto_handoff(
             for e in res.elements
             if (e.text or e.content_desc)
         ][:20],
-        "hint": "route diverged — continue with `aua analyze` + `aua tap`",
+        "hint": hint or "route diverged — continue with `aua analyze` + `aua tap`",
     }
+    if failed_step is not None:
+        out["step"] = {"display": step_display(failed_step), **failed_step.model_dump()}
+    if remaining_steps:
+        out["remaining_steps"] = [step_display(s) for s in remaining_steps]
+        pkg = next((s.package for s in remaining_steps if s.package), None)
+        if pkg:
+            out["expected_package"] = pkg
+    return out
 
 
 class Engine:
@@ -795,13 +848,136 @@ class Engine:
             "created": outcome.created,
         }
 
-    def goto(self, goal: str, *, plan: bool = False, max_steps: int = 8) -> dict[str, Any]:
+    # ----------------------------------------------------------------- step executor
+
+    def _source_for(
+        self, steps: list[RouteStep], index: int, origin_package: str | None
+    ) -> str:
+        """Analyze source between steps: ``auto`` when the NEXT step runs in a foreign
+        (transit) package — its screen may be vision-tier — else the fast hierarchy path."""
+        nxt = steps[index] if index < len(steps) else None
+        if nxt is not None and nxt.package and nxt.package != origin_package:
+            return "auto"
+        return "hierarchy"
+
+    def _run_steps(
+        self,
+        steps: list[RouteStep],
+        *,
+        origin_package: str | None,
+        allow_destructive: bool,
+        allow_goto_steps: bool = False,
+        scroll_fallback: bool = False,
+        res: AnalyzeResult | None = None,
+        executed: list[dict[str, Any]] | None = None,
+    ) -> tuple[StepFailure | None, AnalyzeResult]:
+        """Execute *steps* with selector matching, settle waits, and re-perception.
+
+        The single replay engine behind ``goto`` edge replay and ``flow run``. Between
+        state-changing steps it settles (suppressed ``wait_stable``) and re-analyzes with
+        a package-aware source (:meth:`_source_for`). Verification is lazy — a wrong
+        screen surfaces as the next step's ``element_not_found`` — terminal verification
+        (``known_screen`` / asserts) is the caller's job. Returns
+        ``(failure | None, last analyze result)``.
+        """
+        if res is None:
+            res = self.analyze(source=self._source_for(steps, 0, origin_package))
+        lexicon = self.config.memory.destructive_labels
+        for i, s in enumerate(steps):
+            if is_destructive_step(s, lexicon) and not allow_destructive:
+                return StepFailure("destructive_step", i, s), res
+            kind = s.kind
+            reanalyze = True  # most kinds change state → settle + re-perceive
+            settle = True
+            if kind in ("tap", "long-press", "clear", "input"):
+                if kind == "input" and s.text is None:
+                    # auto-recorded inputs never store the value — the caller supplies it
+                    return StepFailure("input_required", i, s), res
+                el = _match_step(res.elements, s)
+                if el is None and scroll_fallback and (s.label or s.resource_id):
+                    self.scroll_to(s.label or s.resource_id or "", observe=False)
+                    res = self.analyze(source=self._source_for(steps, i, origin_package))
+                    el = _match_step(res.elements, s)
+                if el is None:
+                    return StepFailure("element_not_found", i, s), res
+                if kind == "tap":
+                    self.tap(el.id, observe=False)
+                elif kind == "long-press":
+                    self.long_press(el.id, observe=False)
+                elif kind == "clear":
+                    self.clear(el.id, observe=False)
+                else:
+                    self.input_text(el.id, s.text or "", submit=s.submit, observe=False)
+            elif kind == "key":
+                if not s.arg:
+                    return StepFailure("unsupported_action", i, s), res
+                self.key(s.arg, observe=False)
+            elif kind == "swipe":
+                if s.arg not in ("up", "down", "left", "right"):
+                    return StepFailure("unsupported_action", i, s), res
+                self.swipe(s.arg, observe=False)
+            elif kind == "scroll-to":
+                if not s.arg:
+                    return StepFailure("unsupported_action", i, s), res
+                if not self.scroll_to(s.arg, observe=False).ok:
+                    return StepFailure("element_not_found", i, s), res
+            elif kind == "launch-app":
+                if not s.arg:
+                    return StepFailure("unsupported_action", i, s), res
+                self.app("launch", package=s.arg)
+            elif kind == "wait-for":
+                if not s.arg:
+                    return StepFailure("unsupported_action", i, s), res
+                if not self.wait(for_=s.arg, timeout_ms=s.timeout_ms or 10000).ok:
+                    return StepFailure("wait_timeout", i, s), res
+                settle = False  # the wait already absorbed the transition
+            elif kind == "wait-stable":
+                try:
+                    self.wait_stable(settle_ms=600, timeout_ms=s.timeout_ms or 15000)
+                except StabilityTimeout:
+                    return StepFailure("wait_timeout", i, s), res
+                settle = False
+            elif kind == "assert-visible":
+                if not s.arg:
+                    return StepFailure("unsupported_action", i, s), res
+                if not self.has(s.arg, timeout_ms=s.timeout_ms or 0).found:
+                    return StepFailure("assert_failed", i, s), res
+                reanalyze = False  # pure check, screen unchanged
+            elif kind == "goto":
+                if not allow_goto_steps or not s.arg:
+                    return StepFailure("unsupported_action", i, s), res
+                out = self.goto(s.arg, allow_destructive=allow_destructive)
+                if not out.get("ok"):
+                    return StepFailure(str(out.get("code") or "route_unknown"), i, s), res
+                settle = False  # goto verified arrival; just refresh our view
+            else:
+                return StepFailure("unsupported_action", i, s), res
+
+            if executed is not None:
+                executed.append({"index": i, "step": step_display(s)})
+            if reanalyze:
+                if settle:
+                    with contextlib.suppress(StabilityTimeout):
+                        self.wait_stable(settle_ms=500, timeout_ms=8000)
+                res = self.analyze(source=self._source_for(steps, i + 1, origin_package))
+        return None, res
+
+    def goto(
+        self,
+        goal: str,
+        *,
+        plan: bool = False,
+        max_steps: int = 8,
+        allow_destructive: bool = False,
+    ) -> dict[str, Any]:
         """Drive to a remembered screen via the app map (PRD §6b).
 
-        Resolves *goal* to a known screen, then taps along the shortest route from the
-        current screen, re-analyzing and verifying ``known_screen`` after each hop. On any
-        mismatch it stops and hands back the remaining route + current screen, so the caller
-        can continue manually. ``plan=True`` returns the route without acting.
+        Resolves *goal* to a known screen, then replays the recorded steps of each edge
+        on the shortest route, re-analyzing and verifying ``known_screen`` after each hop.
+        On any mismatch it stops and hands back the remaining route/steps + the current
+        screen, so the caller can continue manually. ``plan=True`` returns the annotated
+        route without acting. Destructive steps (config ``memory.destructive_labels``)
+        are refused unless *allow_destructive*.
         """
         mem = self._memory
         if mem is None:
@@ -867,30 +1043,66 @@ class Engine:
                 "current_screen": current,
                 "hint": "no known route from here — explore with `aua analyze`",
             }
+        lexicon = self.config.memory.destructive_labels
         if plan:
+            annotated = []
+            for e in path:
+                steps = e.steps or _parse_legacy_steps(e.action)
+                annotated.append(
+                    {
+                        "from": e.from_screen,
+                        "action": e.action,
+                        "to": e.to_screen,
+                        "steps": [step_display(s) for s in (steps or [])],
+                        "replayable": steps is not None,
+                        "legacy": not e.steps,
+                        "destructive": [
+                            s.label for s in (steps or []) if is_destructive_step(s, lexicon)
+                        ],
+                    }
+                )
             return {
                 "ok": True,
                 "goal": goal,
                 "target": target,
                 "plan": True,
                 "package": package,
-                "route": route,
+                "route": annotated,
                 "note": "not executed (--plan)",
             }
         hops: list[dict[str, Any]] = []
         for i, edge in enumerate(path):
             if i >= max_steps:
                 return _goto_handoff(goal, target, "max_steps", hops, route[i:], res)
-            label = _parse_tap_label(edge.action)
-            if label is None:
-                return _goto_handoff(goal, target, "unsupported_action", hops, route[i:], res)
-            el = _match_element(res.elements, label)
-            if el is None:
-                return _goto_handoff(goal, target, "element_not_found", hops, route[i:], res)
-            self.tap(el.id, observe=False)  # goto does its own post-hop analyze; skip the extra
-            with contextlib.suppress(StabilityTimeout):
-                self.wait_stable(settle_ms=500, timeout_ms=8000)
-            res = self.analyze(source="hierarchy")
+            steps = edge.steps or _parse_legacy_steps(edge.action)
+            if steps is None:
+                return _goto_handoff(
+                    goal,
+                    target,
+                    "unsupported_action",
+                    hops,
+                    route[i:],
+                    res,
+                    hint="edge recorded before v2 — walk it once to re-record it "
+                    "(or author a flow), then goto can replay it",
+                )
+            fail, res = self._run_steps(
+                steps,
+                origin_package=package,
+                allow_destructive=allow_destructive,
+                res=res,
+            )
+            if fail is not None:
+                return _goto_handoff(
+                    goal,
+                    target,
+                    fail.code,
+                    hops,
+                    route[i:],
+                    res,
+                    failed_step=fail.step,
+                    remaining_steps=steps[fail.at :],
+                )
             reached = res.meta.known_screen
             hops.append(
                 {

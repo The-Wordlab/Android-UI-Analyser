@@ -677,16 +677,30 @@ def goto(
     goal: str = typer.Argument(..., help="Target screen/goal (fuzzy match against memory)."),
     plan: bool = typer.Option(False, "--plan", help="Print the route only; do not act."),
     max_steps: int = typer.Option(8, "--max-steps", help="Max hops before handing off."),
+    allow_destructive: bool = typer.Option(
+        False,
+        "--allow-destructive",
+        help="Replay steps whose label matches memory.destructive_labels (delete/sign out/…).",
+    ),
 ) -> None:
     """Navigate to a known screen using app memory — drives and verifies each hop (§6b).
 
-    Resolves the goal against the learned map, then taps along the shortest route from the
-    current screen, confirming ``known_screen`` after every hop. Stops and returns the
-    remaining route + current screen if anything diverges. ``--plan`` prints the route only.
+    Resolves the goal against the learned map, then replays each edge's recorded steps
+    along the shortest route from the current screen, confirming ``known_screen`` after
+    every hop. Stops and returns the remaining route/steps + current screen if anything
+    diverges. ``--plan`` prints the annotated route only; destructive steps are refused
+    without ``--allow-destructive``.
     """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        result = _route(engine, "goto", goal=goal, plan=plan, max_steps=max_steps)
+        result = _route(
+            engine,
+            "goto",
+            goal=goal,
+            plan=plan,
+            max_steps=max_steps,
+            allow_destructive=allow_destructive,
+        )
         _emit(result, fmt)
         if isinstance(result, dict) and result.get("ok") is False:
             raise typer.Exit(1)
