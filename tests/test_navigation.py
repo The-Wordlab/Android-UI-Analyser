@@ -64,17 +64,24 @@ OTHER = _hier(
 
 
 class ScriptedDevice(FakeDevice):
-    """A FakeDevice that advances through an ordered list of screens on each tap."""
+    """A FakeDevice that advances through an ordered list of screens on each tap/key."""
 
     def __init__(self, screens: list[str], **kw: object) -> None:
         super().__init__(hierarchy_xml=screens[0], **kw)  # type: ignore[arg-type]
         self._screens = screens
         self._idx = 0
 
-    def click(self, x: int, y: int) -> None:
-        super().click(x, y)
+    def _advance(self) -> None:
         self._idx = min(self._idx + 1, len(self._screens) - 1)
         self._xml = self._screens[self._idx]
+
+    def click(self, x: int, y: int) -> None:
+        super().click(x, y)
+        self._advance()
+
+    def press(self, key: str) -> None:
+        super().press(key)
+        self._advance()
 
 
 def _build_three(tmp_path: Path) -> AppMemoryStore:
@@ -449,3 +456,185 @@ def test_cli_goto_drives_and_unknown(tmp_path: Path, monkeypatch) -> None:
     miss = runner.invoke(app, ["--format", "compact", "goto", "no-such-goal"])
     assert miss.exit_code == 1  # not arrived → non-zero
     assert json.loads(miss.stdout)["code"] == "route_unknown"
+
+
+# --------------------------------------------------------------- step-based replay (v2)
+
+GEAR_HOME = _hier(
+    _node("android.widget.TextView", text="Home", rid="x:id/header", b="[40,120][1040,210]"),
+    _node("android.view.View", rid="x:id/buttonSettings", clk=True, b="[900,300][1040,400]"),
+    _node(
+        "android.widget.Button", text="Chat", rid="x:id/nav_chat", clk=True, b="[40,440][1040,540]"
+    ),
+)
+PREFS = _hier(
+    _node("android.widget.TextView", text="Preferences", rid="x:id/header", b="[40,120][1040,210]"),
+    _node(
+        "android.widget.Button",
+        text="Account &amp; Data",  # raw & is invalid in XML attributes
+        rid="x:id/account",
+        clk=True,
+        b="[40,300][1040,400]",
+    ),
+)
+DANGER_HOME = _hier(
+    _node("android.widget.TextView", text="Confirm", rid="x:id/header", b="[40,120][1040,210]"),
+    _node(
+        "android.widget.Button",
+        text="Delete my account",
+        rid="x:id/del",
+        clk=True,
+        b="[40,300][1040,400]",
+    ),
+)
+
+
+def test_goto_replays_id_only_edge(tmp_path: Path) -> None:
+    """The live failure: an unlabeled settings gear is replayable via its resource-id."""
+    from android_ui_analyser.memory import RouteStep
+
+    store = _store(tmp_path)
+    store.record_screen(package=P, elements=_elements(GEAR_HOME), name_hint="home")
+    store.record_screen(package=P, elements=_elements(PREFS), name_hint="prefs")
+    store.record_route(
+        P, "home", "prefs", steps=[RouteStep(kind="tap", resource_id="buttonSettings")]
+    )
+    dev = ScriptedDevice([GEAR_HOME, PREFS], package=P, serial="emu-id")
+    eng = _engine(tmp_path, dev)
+    out = eng.goto("prefs")
+    assert out["ok"] and out["arrived"]
+    assert sum(1 for c in dev.calls if c[0] == "click") == 1
+
+
+def test_goto_replays_key_step_edge(tmp_path: Path) -> None:
+    from android_ui_analyser.memory import RouteStep
+
+    store = _store(tmp_path)
+    store.record_screen(package=P, elements=_elements(PREFS), name_hint="prefs")
+    store.record_screen(package=P, elements=_elements(GEAR_HOME), name_hint="home")
+    store.record_route(P, "prefs", "home", steps=[RouteStep(kind="key", arg="back")])
+    dev = ScriptedDevice([PREFS, GEAR_HOME], package=P, serial="emu-key")
+    eng = _engine(tmp_path, dev)
+    out = eng.goto("home")
+    assert out["ok"] and out["arrived"]
+    assert any(c[0] == "press" for c in dev.calls)
+
+
+def test_goto_compound_legacy_action_is_clean_unsupported(tmp_path: Path) -> None:
+    """Regression: `tap 'A' + tap 'B'` used to parse into a garbage label."""
+    store = _store(tmp_path)
+    store.record_screen(package=P, elements=_elements(HOME), name_hint="home")
+    store.record_screen(package=P, elements=_elements(APPS), name_hint="apps")
+    store.record_route(P, "home", "apps", "tap 'A' + tap 'B'")
+    dev = ScriptedDevice([HOME, APPS], package=P, serial="emu-compound")
+    eng = _engine(tmp_path, dev)
+    out = eng.goto("apps")
+    assert out["ok"] is False and out["code"] == "unsupported_action"
+    assert out["hops"] == [] and "re-record" in out["hint"]
+    assert not any(c[0] == "click" for c in dev.calls)  # nothing blindly tapped
+
+
+def test_goto_refuses_destructive_step_without_flag(tmp_path: Path) -> None:
+    from android_ui_analyser.memory import RouteStep
+
+    store = _store(tmp_path)
+    store.record_screen(package=P, elements=_elements(DANGER_HOME), name_hint="confirm")
+    store.record_screen(package=P, elements=_elements(PREFS), name_hint="prefs")
+    store.record_route(
+        P,
+        "confirm",
+        "prefs",
+        steps=[RouteStep(kind="tap", label="Delete my account", resource_id="del")],
+    )
+    dev = ScriptedDevice([DANGER_HOME, PREFS], package=P, serial="emu-guard")
+    eng = _engine(tmp_path, dev)
+    out = eng.goto("prefs")
+    assert out["ok"] is False and out["code"] == "destructive_step"
+    assert out["step"]["display"] == "tap 'Delete my account'"
+    assert not any(c[0] == "click" for c in dev.calls)
+
+    out2 = eng.goto("prefs", allow_destructive=True)
+    assert out2["ok"] and out2["arrived"]
+    assert sum(1 for c in dev.calls if c[0] == "click") == 1
+
+
+def test_goto_plan_flags_destructive_and_legacy(tmp_path: Path) -> None:
+    from android_ui_analyser.memory import RouteStep
+
+    store = _store(tmp_path)
+    store.record_screen(package=P, elements=_elements(HOME), name_hint="home")
+    store.record_screen(package=P, elements=_elements(DANGER_HOME), name_hint="confirm")
+    store.record_screen(package=P, elements=_elements(PREFS), name_hint="prefs")
+    store.record_route(P, "home", "confirm", "tap 'Apps'")  # legacy but replayable
+    store.record_route(
+        P, "confirm", "prefs", steps=[RouteStep(kind="tap", label="Delete my account")]
+    )
+    dev = ScriptedDevice([HOME], package=P, serial="emu-plan2")
+    eng = _engine(tmp_path, dev)
+    out = eng.goto("prefs", plan=True)
+    assert out["ok"] and out["plan"]
+    legacy_edge, steps_edge = out["route"]
+    assert legacy_edge["legacy"] is True and legacy_edge["replayable"] is True
+    assert steps_edge["legacy"] is False
+    assert steps_edge["destructive"] == ["Delete my account"]
+    assert not any(c[0] == "click" for c in dev.calls)
+
+
+def test_goto_handoff_includes_remaining_steps(tmp_path: Path) -> None:
+    from android_ui_analyser.memory import RouteStep
+
+    store = _store(tmp_path)
+    store.record_screen(package=P, elements=_elements(HOME), name_hint="home")
+    store.record_screen(package=P, elements=_elements(IMAGES), name_hint="images")
+    store.record_route(
+        P,
+        "home",
+        "images",
+        steps=[
+            RouteStep(kind="tap", label="Apps", resource_id="nav_apps"),
+            RouteStep(kind="tap", label="No Such Button"),
+        ],
+    )
+    dev = ScriptedDevice([HOME, APPS], package=P, serial="emu-remain")
+    eng = _engine(tmp_path, dev)
+    out = eng.goto("images")
+    assert out["ok"] is False and out["code"] == "element_not_found"
+    assert out["step"]["display"] == "tap 'No Such Button'"
+    assert out["remaining_steps"] == ["tap 'No Such Button'"]
+
+
+def test_shortest_path_prefers_steps_edge_over_legacy(tmp_path: Path) -> None:
+    from android_ui_analyser.memory import RouteStep
+
+    store = _store(tmp_path)
+    store.record_screen(package=P, elements=_elements(HOME), name_hint="home")
+    store.record_screen(package=P, elements=_elements(APPS), name_hint="apps")
+    store.record_route(P, "home", "apps", "tap [View]")  # legacy, unreplayable
+    store.record_route(
+        P, "home", "apps", steps=[RouteStep(kind="tap", label="Apps", resource_id="nav_apps")]
+    )
+    am = store.load(P)
+    assert am is not None and len(am.routes) == 2  # genuinely parallel edges
+    path = _shortest_path(am, "apps", start="home")
+    assert path[0].steps, "the replayable edge must win the tie-break"
+
+
+def test_cli_goto_accepts_allow_destructive(tmp_path: Path, monkeypatch) -> None:
+    from android_ui_analyser.memory import RouteStep
+
+    store = AppMemoryStore(make_config().memory)
+    store.record_screen(package=P, elements=_elements(DANGER_HOME), activity=".C", name_hint="c")
+    store.record_screen(package=P, elements=_elements(PREFS), activity=".P", name_hint="prefs")
+    store.record_route(
+        P, "c", "prefs", steps=[RouteStep(kind="tap", label="Delete my account")]
+    )
+    dev = ScriptedDevice([DANGER_HOME, PREFS], package=P, serial="emu-cli-guard")
+    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
+
+    refused = runner.invoke(app, ["--format", "compact", "goto", "prefs"])
+    assert refused.exit_code == 1
+    assert json.loads(refused.stdout)["code"] == "destructive_step"
+
+    ok = runner.invoke(app, ["--format", "compact", "goto", "prefs", "--allow-destructive"])
+    assert ok.exit_code == 0, ok.stderr
+    assert json.loads(ok.stdout)["arrived"] is True
