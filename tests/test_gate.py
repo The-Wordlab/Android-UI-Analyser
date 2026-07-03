@@ -72,6 +72,30 @@ def test_compose_no_semantics_uses_vision() -> None:
     assert d.use_vision is True
 
 
+def test_webview_rich_stays_on_hierarchy() -> None:
+    """A WebView with a rich a11y tree (Google sign-in style) must NOT pay for vision."""
+    d = decide(
+        _els("webview_rich"),
+        package="com.android.chrome",
+        activity="org.chromium.chrome.browser.customtabs.CustomTabActivity",
+        cfg=GateCfg(),
+    )
+    assert d.use_vision is False
+    assert "rich" in d.reason
+
+
+def test_webview_hollow_uses_vision() -> None:
+    """A WebView shell with almost no semantics still escalates (soft rule)."""
+    d = decide(
+        _els("webview_hollow"),
+        package="com.android.chrome",
+        activity="org.chromium.chrome.browser.customtabs.CustomTabActivity",
+        cfg=GateCfg(),
+    )
+    assert d.use_vision is True
+    assert "soft_min" in d.reason
+
+
 # --------------------------------------------------------------------------- rule 1: count
 
 
@@ -126,14 +150,6 @@ def test_rule_vision_package_glob_against_activity() -> None:
     assert d.use_vision is True
 
 
-def test_rule_vision_package_glob_against_element_class() -> None:
-    cfg = GateCfg(min_elements=1, vision_packages=["*.WebView"])
-    els = [_el(0, text="a"), _el(1, type="WebView", text="page")]
-    d = decide(els, package="com.normal.app", activity=".Main", cfg=cfg)
-    assert d.use_vision is True
-    assert "WebView" in d.reason
-
-
 def test_rule_vision_package_no_match_passes() -> None:
     cfg = GateCfg(min_elements=1, vision_packages=["io.flutter", "com.unity3d"])
     els = [_el(0, text="a"), _el(1, text="b")]
@@ -176,6 +192,59 @@ def test_rule_labeled_ratio_no_clickables_does_not_divide_by_zero() -> None:
     els = [_el(0, text="a"), _el(1, text="b")]
     d = decide(els, package="com.x", activity=".A", cfg=cfg)
     assert d.use_vision is False
+
+
+# ------------------------------------------------------------- rule 5: soft class match
+
+
+def test_soft_class_match_thin_tree_uses_vision() -> None:
+    cfg = GateCfg(min_elements=1, vision_packages=["*.WebView"])
+    els = [_el(0, text="a"), _el(1, type="WebView", text="page")]
+    d = decide(els, package="com.normal.app", activity=".Main", cfg=cfg)
+    assert d.use_vision is True
+    assert "WebView" in d.reason
+    assert "soft_min_elements" in d.reason
+
+
+def test_soft_class_match_rich_tree_stays_hierarchy() -> None:
+    cfg = GateCfg(min_elements=1, vision_packages=["*.WebView"], soft_min_elements=8)
+    els = [_el(0, type="WebView")] + [_el(i, text=f"item {i}") for i in range(1, 9)]
+    d = decide(els, package="com.normal.app", activity=".Main", cfg=cfg)
+    assert d.use_vision is False
+    assert "rich" in d.reason
+
+
+def test_soft_class_match_boundary_count_passes() -> None:
+    cfg = GateCfg(min_elements=1, vision_packages=["*.WebView"], soft_min_elements=4)
+    # exactly soft_min_elements elements, well labeled -> not weak
+    els = [_el(0, type="WebView", text="w")] + [_el(i, text=f"t{i}") for i in range(1, 4)]
+    d = decide(els, package="com.normal.app", activity=".Main", cfg=cfg)
+    assert d.use_vision is False
+
+
+def test_soft_class_match_low_overall_ratio_fires() -> None:
+    """Rule 5 catches trees rule 4 can't: clickables all labeled, everything else bare."""
+    cfg = GateCfg(min_elements=1, vision_packages=["*.WebView"], soft_min_elements=4)
+    els = [
+        _el(0, type="WebView"),
+        _el(1, clickable=True, text="ok"),  # 1/1 clickables labeled -> rule 4 passes
+        _el(2),
+        _el(3),
+        _el(4),
+        _el(5),
+    ]
+    d = decide(els, package="com.normal.app", activity=".Main", cfg=cfg)
+    assert d.use_vision is True
+    assert "soft_min_labeled_ratio" in d.reason
+
+
+def test_webview_mid_load_hits_min_elements_first() -> None:
+    """A barely-loaded WebView page escalates via rule 1 before the soft rule is reached."""
+    cfg = GateCfg(vision_packages=["*.WebView"])  # min_elements=3 default
+    els = [_el(0, type="WebView"), _el(1, text="Sign in")]
+    d = decide(els, package="com.android.chrome", activity=".CustomTabActivity", cfg=cfg)
+    assert d.use_vision is True
+    assert "min_elements" in d.reason
 
 
 def test_decision_unpacks_as_tuple() -> None:

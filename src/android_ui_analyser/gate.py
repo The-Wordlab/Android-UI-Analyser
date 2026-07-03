@@ -11,13 +11,19 @@ The rules, in order (first match wins, all thresholds from :class:`GateCfg`):
 1. **Too few elements** — ``len(elements) < cfg.min_elements`` → vision.
 2. **No semantics** — not a single element carries ``text`` or ``content_desc``
    (likely a custom-drawn / canvas / game surface) → vision.
-3. **Known-opaque package/class** — the package, activity, or any element's type
-   matches one of ``cfg.vision_packages`` (Flutter, Unity, SDL, WebView, …). Patterns
-   are matched both as a glob (``*.WebView``) and as a plain substring (``io.flutter``)
-   → vision.
+3. **Known-opaque package/activity (hard)** — the *package or activity* matches one of
+   ``cfg.vision_packages`` (Flutter, Unity, SDL, …). Patterns are matched both as a
+   glob (``*.WebView``) and as a plain substring (``io.flutter``) → vision.
 4. **Poorly-labeled controls** — of the *clickable* elements, the fraction that carry a
    text/content-desc label is below ``cfg.min_labeled_ratio`` → vision. Skipped (never
    fires) when there are no clickable elements, to avoid divide-by-zero.
+5. **Embedded opaque surface (soft)** — an *element's class* matches ``vision_packages``
+   (e.g. a ``WebView`` node), which only escalates when the tree is ALSO weak:
+   ``len(elements) < cfg.soft_min_elements`` or the labeled fraction over *all* elements
+   is below ``cfg.soft_min_labeled_ratio`` (WebView a11y trees often mark nothing
+   clickable, so rule 4's clickable-only ratio can miss them). A *rich* tree containing
+   a WebView — Google sign-in pages, most web content — stays on the fast hierarchy
+   path instead of paying seconds of OCR/detection.
 
 If none fire, the hierarchy is trusted (``use_vision=False``).
 """
@@ -77,20 +83,19 @@ def _pattern_matches_class(pattern: str, short_type: str | None) -> bool:
     return bool(trailing and trailing != pattern and fnmatch(short_type.lower(), trailing.lower()))
 
 
-def _matched_vision_package(
-    patterns: list[str], package: str | None, activity: str | None, elements: list[Element]
-) -> str | None:
-    """Return the first ``(pattern -> matched-value)`` description, or ``None``.
-
-    Patterns are checked against the package, the activity, and each element's ``type``
-    (its short class name) — so ``*.WebView`` catches a ``WebView`` element even when the
-    host package looks ordinary.
-    """
+def _matched_hard(patterns: list[str], package: str | None, activity: str | None) -> str | None:
+    """First pattern matching the *package or activity* (a hard vision trigger), or None."""
     for pattern in patterns:
         if _pattern_matches(pattern, package):
             return f"package {package!r} matches vision pattern {pattern!r}"
         if _pattern_matches(pattern, activity):
             return f"activity {activity!r} matches vision pattern {pattern!r}"
+    return None
+
+
+def _matched_class(patterns: list[str], elements: list[Element]) -> str | None:
+    """First pattern matching an *element's* short class name (a soft trigger), or None."""
+    for pattern in patterns:
         for el in elements:
             if _pattern_matches_class(pattern, el.type):
                 return f"element class {el.type!r} matches vision pattern {pattern!r}"
@@ -119,8 +124,8 @@ def decide(
             "no element carries text or content-desc (likely custom-drawn)",
         )
 
-    # 3. known-opaque package/activity/class
-    matched = _matched_vision_package(cfg.vision_packages, package, activity, elements)
+    # 3. known-opaque package/activity (hard)
+    matched = _matched_hard(cfg.vision_packages, package, activity)
     if matched is not None:
         return GateDecision(True, matched)
 
@@ -135,6 +140,29 @@ def decide(
                 f"labeled-clickable ratio {ratio:.2f} < min_labeled_ratio={cfg.min_labeled_ratio} "
                 f"({labeled}/{len(clickables)} clickables labeled)",
             )
+
+    # 5. embedded opaque surface (soft): a class match escalates only on a weak tree
+    class_match = _matched_class(cfg.vision_packages, elements)
+    if class_match is not None:
+        if len(elements) < cfg.soft_min_elements:
+            return GateDecision(
+                True,
+                f"{class_match} and tree is weak: "
+                f"{len(elements)} element(s) < soft_min_elements={cfg.soft_min_elements}",
+            )
+        labeled_all = sum(1 for el in elements if _has_label(el))
+        ratio_all = labeled_all / len(elements)
+        if ratio_all < cfg.soft_min_labeled_ratio:
+            return GateDecision(
+                True,
+                f"{class_match} and tree is weak: labeled ratio {ratio_all:.2f} "
+                f"< soft_min_labeled_ratio={cfg.soft_min_labeled_ratio}",
+            )
+        return GateDecision(
+            False,
+            f"hierarchy sufficient: {len(elements)} elements, semantics present "
+            "(vision-class element present but tree is rich)",
+        )
 
     return GateDecision(
         False,

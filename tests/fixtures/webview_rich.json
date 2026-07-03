@@ -1,0 +1,266 @@
+[
+  {
+    "id": 0,
+    "type": "ImageButton",
+    "text": null,
+    "resource_id": "com.android.chrome:id/close_button",
+    "content_desc": "Close tab",
+    "bounds": [
+      0,
+      84,
+      132,
+      216
+    ],
+    "center": [
+      66,
+      150
+    ],
+    "clickable": true,
+    "enabled": true,
+    "focused": false,
+    "source": "hierarchy",
+    "confidence": null
+  },
+  {
+    "id": 1,
+    "type": "TextView",
+    "text": "accounts.google.com",
+    "resource_id": "com.android.chrome:id/title_url_bar",
+    "content_desc": null,
+    "bounds": [
+      148,
+      110,
+      900,
+      190
+    ],
+    "center": [
+      524,
+      150
+    ],
+    "clickable": false,
+    "enabled": true,
+    "focused": false,
+    "source": "hierarchy",
+    "confidence": null
+  },
+  {
+    "id": 2,
+    "type": "WebView",
+    "text": null,
+    "resource_id": null,
+    "content_desc": null,
+    "bounds": [
+      0,
+      216,
+      1080,
+      2400
+    ],
+    "center": [
+      540,
+      1308
+    ],
+    "clickable": false,
+    "enabled": true,
+    "focused": false,
+    "source": "hierarchy",
+    "confidence": null
+  },
+  {
+    "id": 3,
+    "type": "View",
+    "text": "Choose an account",
+    "resource_id": null,
+    "content_desc": null,
+    "bounds": [
+      80,
+      420,
+      1000,
+      510
+    ],
+    "center": [
+      540,
+      465
+    ],
+    "clickable": false,
+    "enabled": true,
+    "focused": false,
+    "source": "hierarchy",
+    "confidence": null
+  },
+  {
+    "id": 4,
+    "type": "View",
+    "text": "to continue to Luzia-dev",
+    "resource_id": null,
+    "content_desc": null,
+    "bounds": [
+      80,
+      530,
+      1000,
+      600
+    ],
+    "center": [
+      540,
+      565
+    ],
+    "clickable": false,
+    "enabled": true,
+    "focused": false,
+    "source": "hierarchy",
+    "confidence": null
+  },
+  {
+    "id": 5,
+    "type": "View",
+    "text": "Engineering Team engineering-ci@example.com",
+    "resource_id": null,
+    "content_desc": null,
+    "bounds": [
+      80,
+      700,
+      1000,
+      860
+    ],
+    "center": [
+      540,
+      780
+    ],
+    "clickable": true,
+    "enabled": true,
+    "focused": false,
+    "source": "hierarchy",
+    "confidence": null
+  },
+  {
+    "id": 6,
+    "type": "View",
+    "text": "Use another account",
+    "resource_id": null,
+    "content_desc": null,
+    "bounds": [
+      80,
+      880,
+      1000,
+      1020
+    ],
+    "center": [
+      540,
+      950
+    ],
+    "clickable": true,
+    "enabled": true,
+    "focused": false,
+    "source": "hierarchy",
+    "confidence": null
+  },
+  {
+    "id": 7,
+    "type": "View",
+    "text": "To continue, Google will share your name, email address, and profile picture with Luzia-dev.",
+    "resource_id": null,
+    "content_desc": null,
+    "bounds": [
+      80,
+      1080,
+      1000,
+      1240
+    ],
+    "center": [
+      540,
+      1160
+    ],
+    "clickable": false,
+    "enabled": true,
+    "focused": false,
+    "source": "hierarchy",
+    "confidence": null
+  },
+  {
+    "id": 8,
+    "type": "View",
+    "text": "English (United States)",
+    "resource_id": null,
+    "content_desc": null,
+    "bounds": [
+      80,
+      2200,
+      420,
+      2280
+    ],
+    "center": [
+      250,
+      2240
+    ],
+    "clickable": true,
+    "enabled": true,
+    "focused": false,
+    "source": "hierarchy",
+    "confidence": null
+  },
+  {
+    "id": 9,
+    "type": "View",
+    "text": "Help",
+    "resource_id": null,
+    "content_desc": null,
+    "bounds": [
+      600,
+      2200,
+      720,
+      2280
+    ],
+    "center": [
+      660,
+      2240
+    ],
+    "clickable": true,
+    "enabled": true,
+    "focused": false,
+    "source": "hierarchy",
+    "confidence": null
+  },
+  {
+    "id": 10,
+    "type": "View",
+    "text": "Privacy",
+    "resource_id": null,
+    "content_desc": null,
+    "bounds": [
+      740,
+      2200,
+      900,
+      2280
+    ],
+    "center": [
+      820,
+      2240
+    ],
+    "clickable": true,
+    "enabled": true,
+    "focused": false,
+    "source": "hierarchy",
+    "confidence": null
+  },
+  {
+    "id": 11,
+    "type": "View",
+    "text": "Terms",
+    "resource_id": null,
+    "content_desc": null,
+    "bounds": [
+      920,
+      2200,
+      1040,
+      2280
+    ],
+    "center": [
+      980,
+      2240
+    ],
+    "clickable": true,
+    "enabled": true,
+    "focused": false,
+    "source": "hierarchy",
+    "confidence": null
+  }
+]
