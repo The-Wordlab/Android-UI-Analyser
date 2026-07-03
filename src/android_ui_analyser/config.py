@@ -47,6 +47,11 @@ class GateCfg(BaseModel):
     vision_packages: list[str] = Field(
         default_factory=lambda: ["io.flutter", "com.unity3d", "org.libsdl", "*.WebView"]
     )
+    # Soft gate for element-CLASS matches (e.g. `*.WebView` matching a WebView node): a
+    # class match escalates to vision only when the tree is ALSO weak by these stricter
+    # thresholds. Package/activity matches remain hard triggers.
+    soft_min_elements: int = 8
+    soft_min_labeled_ratio: float = 0.3
 
 
 class PerceptionCfg(BaseModel):
@@ -409,6 +414,10 @@ perception:
     min_elements: 3
     min_labeled_ratio: 0.15
     vision_packages: ["io.flutter", "com.unity3d", "org.libsdl", "*.WebView"]
+    # Element-class matches (e.g. a WebView node) escalate to vision only when the
+    # tree is also weak; package/activity matches always escalate.
+    soft_min_elements: 8
+    soft_min_labeled_ratio: 0.3
 
 routing:
   auto_escalate: true
