@@ -992,6 +992,19 @@ class Engine:
                 "goal": goal,
                 "hint": "could not determine the foreground app",
             }
+        # Transit resume: stranded mid-auth (foreground is a transit package while the
+        # session journey belongs to another app) → resolve the goal against the ORIGIN
+        # app's map and continue its transit edge from the first step that matches here.
+        transit_resume = False
+        sess_probe = mem.load_session(serial)
+        if (
+            sess_probe.package
+            and package != sess_probe.package
+            and matches_any(package, self.config.memory.transit_packages)
+            and mem.load(sess_probe.package) is not None
+        ):
+            package = sess_probe.package
+            transit_resume = True
         app = mem.load(package)
         if app is None or not app.screens:
             return {
@@ -1020,7 +1033,7 @@ class Engine:
                 "hint": "no known screen matches; explore with `aua analyze`",
             }
         mem.set_last_goal(serial, goal)  # remember intent for ranking even if we divert
-        if current == target:
+        if current == target and not transit_resume:  # mid-transit we are NOT on target
             return {
                 "ok": True,
                 "goal": goal,
@@ -1070,12 +1083,43 @@ class Engine:
                 "route": annotated,
                 "note": "not executed (--plan)",
             }
+        resume_from = 0
+        if transit_resume:
+            first_steps = path[0].steps or _parse_legacy_steps(path[0].action)
+            if first_steps is None:
+                return _goto_handoff(
+                    goal,
+                    target,
+                    "unsupported_action",
+                    [],
+                    route,
+                    res,
+                    hint="mid-transit on a pre-v2 edge — finish manually, then re-run goto",
+                )
+            res = self.analyze(source="auto")  # transit screens may be vision-tier
+            matched = next(
+                (j for j, s in enumerate(first_steps) if _match_step(res.elements, s)),
+                None,
+            )
+            if matched is None:
+                return _goto_handoff(
+                    goal,
+                    target,
+                    "element_not_found",
+                    [],
+                    route,
+                    res,
+                    remaining_steps=first_steps,
+                    hint="mid-transit, but no remembered step matches this screen — "
+                    "finish it manually (`aua analyze` + `aua tap`), then re-run `aua goto`",
+                )
+            resume_from = matched
         hops: list[dict[str, Any]] = []
         for i, edge in enumerate(path):
             if i >= max_steps:
                 return _goto_handoff(goal, target, "max_steps", hops, route[i:], res)
-            steps = edge.steps or _parse_legacy_steps(edge.action)
-            if steps is None:
+            all_steps = edge.steps or _parse_legacy_steps(edge.action)
+            if all_steps is None:
                 return _goto_handoff(
                     goal,
                     target,
@@ -1086,6 +1130,7 @@ class Engine:
                     hint="edge recorded before v2 — walk it once to re-record it "
                     "(or author a flow), then goto can replay it",
                 )
+            steps = all_steps[resume_from:] if i == 0 else all_steps
             fail, res = self._run_steps(
                 steps,
                 origin_package=package,
