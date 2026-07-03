@@ -401,3 +401,190 @@ def test_ignored_package_records_no_map(tmp_path: Path) -> None:
     assert known is None
     assert not (tmp_path / "home" / "memory" / ime).exists()
     assert store.list_apps() == []
+
+
+# --------------------------------------------------------------- structured steps (v2)
+
+
+SETTINGS_XML = _hier(
+    _node("android.widget.TextView", text="Preferences", rid="x:id/header", b="[40,120][1040,210]"),
+    _node(
+        "android.widget.Button",
+        text="Account",
+        rid="x:id/account",
+        clk=True,
+        b="[40,300][1040,400]",
+    ),
+)
+HOME_WITH_GEAR = _hier(
+    _node("android.widget.TextView", text="Home", rid="x:id/header", b="[40,120][1040,210]"),
+    _node("android.view.View", rid="x:id/buttonSettings", clk=True, b="[900,300][1040,400]"),
+    _node(
+        "android.widget.Button", text="Chat", rid="x:id/nav_chat", clk=True, b="[40,440][1040,540]"
+    ),
+)
+
+
+def test_edge_records_structured_steps(tmp_path: Path) -> None:
+    dev = FakeDevice(hierarchy_xml=HOME)
+    eng = _engine(tmp_path, dev)
+    res = eng.analyze(source="hierarchy")
+    apps_id = next(e.id for e in res.elements if e.text == "Apps")
+    eng.tap(apps_id, observe=False)
+    dev._xml = APPS
+    eng.analyze(source="hierarchy")
+
+    am = AppMemoryStore(eng.config.memory).load(P)
+    assert am is not None and am.schema_version == 2
+    edge = next(e for e in am.routes if e.to_screen == "apps")
+    assert edge.action == "tap 'Apps'"  # display string unchanged from v1
+    assert len(edge.steps) == 1
+    s = edge.steps[0]
+    assert (s.kind, s.label, s.resource_id) == ("tap", "Apps", "nav_apps")
+    assert s.package is None  # origin-package steps are normalized to None
+    assert s.text is None
+
+
+def test_unlabeled_id_tap_is_displayable_and_findable(tmp_path: Path) -> None:
+    """The exact live failure: an unlabeled settings gear recorded as `tap [View]`."""
+    from android_ui_analyser.memory import _find_targets
+
+    dev = FakeDevice(hierarchy_xml=HOME_WITH_GEAR)
+    eng = _engine(tmp_path, dev)
+    res = eng.analyze(source="hierarchy")
+    gear_id = next(e.id for e in res.elements if e.resource_id == "x:id/buttonSettings")
+    eng.tap(gear_id, observe=False)
+    dev._xml = SETTINGS_XML
+    eng.analyze(source="hierarchy")
+
+    am = AppMemoryStore(eng.config.memory).load(P)
+    edge = next(e for e in am.routes if e.to_screen == "preferences")
+    assert edge.action == "tap [#buttonSettings]"
+    assert edge.steps[0].resource_id == "buttonSettings"
+    assert "preferences" in _find_targets(am, "settings")  # findable via the id tail
+
+
+def test_record_route_upgrades_legacy_edge_in_place(tmp_path: Path) -> None:
+    from android_ui_analyser.memory import RouteStep
+
+    store = _store(tmp_path)
+    store.record_screen(package=P, elements=_elements(HOME), name_hint="home")
+    store.record_screen(package=P, elements=_elements(APPS), name_hint="apps")
+    store.record_route(P, "home", "apps", "tap 'Apps'")  # legacy positional string
+    am = store.load(P)
+    assert am.routes[0].steps == []
+    store.record_route(
+        P, "home", "apps", steps=[RouteStep(kind="tap", label="Apps", resource_id="nav_apps")]
+    )
+    am = store.load(P)
+    assert len(am.routes) == 1  # same derived action -> same edge
+    assert am.routes[0].count == 2
+    assert am.routes[0].steps and am.routes[0].steps[0].resource_id == "nav_apps"
+
+
+def test_pending_overflow_drops_edge(tmp_path: Path) -> None:
+    from android_ui_analyser.memory import RouteStep
+
+    store = _store(tmp_path)
+    serial = "s1"
+    store.observe_screen(serial, package=P, elements=_elements(HOME), screen_height=800)
+    for i in range(13):
+        store.observe_action(serial, RouteStep(kind="tap", label=f"B{i}"))
+    sess = store.load_session(serial)
+    assert len(sess.pending) == 12 and sess.pending_overflow is True
+    store.observe_screen(serial, package=P, elements=_elements(APPS), screen_height=800)
+    am = store.load(P)
+    assert am.routes == []  # truncated sequences never become edges
+    sess = store.load_session(serial)
+    assert sess.pending == [] and sess.pending_overflow is False
+
+
+def test_pending_ttl_drops_stale_edge(tmp_path: Path) -> None:
+    from datetime import datetime, timedelta
+
+    from android_ui_analyser.memory import RouteStep
+
+    store = _store(tmp_path)
+    serial = "s1"
+    store.observe_screen(serial, package=P, elements=_elements(HOME), screen_height=800)
+    store.observe_action(serial, RouteStep(kind="tap", label="Apps"))
+    sess = store.load_session(serial)
+    stale = (datetime.now().astimezone() - timedelta(seconds=700)).isoformat(timespec="seconds")
+    sess.pending_since = stale
+    store.save_session(serial, sess)
+    store.observe_screen(serial, package=P, elements=_elements(APPS), screen_height=800)
+    assert store.load(P).routes == []  # abandoned journeys don't smear edges
+
+
+def test_recent_journal_survives_analyze(tmp_path: Path) -> None:
+    from android_ui_analyser.memory import RouteStep
+
+    store = _store(tmp_path)
+    serial = "s1"
+    store.observe_screen(serial, package=P, elements=_elements(HOME), screen_height=800)
+    store.observe_action(serial, RouteStep(kind="tap", label="Apps"))
+    store.observe_action(serial, RouteStep(kind="key", arg="back"))
+    store.observe_screen(serial, package=P, elements=_elements(APPS), screen_height=800)
+    sess = store.load_session(serial)
+    assert sess.pending == []  # consumed by the analyze
+    assert [s.kind for s in sess.recent] == ["tap", "key"]  # journal untouched
+
+
+def test_legacy_string_pending_is_dropped_on_load(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    path = store.session_path("s1")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        '{"package": "p", "current_screen": "home", "pending": ["tap \'x\'"], '
+        '"last_goal": null}',
+        encoding="utf-8",
+    )
+    sess = store.load_session("s1")
+    assert sess.pending == [] and sess.current_screen == "home"
+
+
+def test_v1_map_loads_and_saves_as_v2(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.record_screen(package=P, elements=_elements(HOME), name_hint="home")
+    idx = store.index_path(P)
+    data = json.loads(idx.read_text())
+    data["schema_version"] = 1
+    idx.write_text(json.dumps(data))
+    am = store.load(P)
+    assert am is not None  # loads version-agnostically
+    store.record_screen(package=P, elements=_elements(HOME))
+    assert json.loads(idx.read_text())["schema_version"] == 2
+
+
+def test_generic_inbound_label_defers_to_title(tmp_path: Path) -> None:
+    """A screen reached via tap 'Delete' is named from its title, not 'delete'."""
+    from android_ui_analyser.memory import RouteStep
+
+    store = _store(tmp_path)
+    serial = "s1"
+    store.observe_screen(serial, package=P, elements=_elements(HOME), screen_height=800)
+    store.observe_action(serial, RouteStep(kind="tap", label="Delete"))
+    store.observe_screen(serial, package=P, elements=_elements(SETTINGS_XML), screen_height=800)
+    am = store.load(P)
+    assert "preferences" in am.screens
+    assert "delete" not in am.screens
+
+
+def test_observe_action_strips_typed_text(tmp_path: Path) -> None:
+    from android_ui_analyser.memory import RouteStep
+
+    store = _store(tmp_path)
+    store.observe_action("s1", RouteStep(kind="input", label="Prompt", text="my secret prompt"))
+    sess = store.load_session("s1")
+    assert sess.pending[0].text is None and sess.recent[0].text is None
+
+
+def test_is_destructive_step_word_boundaries() -> None:
+    from android_ui_analyser.memory import RouteStep, is_destructive_step
+
+    lex = ["delete", "sign out"]
+    assert is_destructive_step(RouteStep(kind="tap", label="Delete my account"), lex)
+    assert is_destructive_step(RouteStep(kind="long-press", label="Sign out"), lex)
+    assert not is_destructive_step(RouteStep(kind="tap", label="Deleted files"), lex)
+    assert not is_destructive_step(RouteStep(kind="scroll-to", arg="Delete"), lex)
+    assert not is_destructive_step(RouteStep(kind="tap", label="<redacted>"), lex)

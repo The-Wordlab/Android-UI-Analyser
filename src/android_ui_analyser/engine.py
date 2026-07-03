@@ -26,6 +26,8 @@ from .errors import ElementNotFoundError, ProviderError, StabilityTimeout, Usage
 from .memory import (
     AppMemoryStore,
     NavHints,
+    RouteStep,
+    _id_tail,
     _shortest_path,
     matches_any,
     redact_label,
@@ -710,20 +712,38 @@ class Engine:
             logger.debug("memory record_screen failed: %s", exc)
             return None, None
 
-    def _record_action_safe(self, summary: str) -> None:
+    def _record_action_safe(self, step: RouteStep) -> None:
         mem = self._memory
         if mem is None or self._device is None:
             return
         try:
-            mem.observe_action(self._device.serial, summary)
+            mem.observe_action(self._device.serial, step)
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug("memory record_action failed: %s", exc)
 
-    def _action_label(self, element: Element | None) -> str:
-        if element is None:
-            return ""
-        lab = redact_label(element, redact=self.config.memory.redact)
-        return f"'{lab}'" if lab else f"[{element.type}]"
+    def _cached_package(self) -> str | None:
+        """Package of the last analyze (call BEFORE the action invalidates the cache)."""
+        cached = self._read_cache()
+        return cached.screen.package if cached else None
+
+    def _step(
+        self,
+        kind: str,
+        element: Element | None = None,
+        *,
+        arg: str | None = None,
+        submit: bool = False,
+    ) -> RouteStep:
+        """The structured record of one action (selector + redacted label, never a value)."""
+        label = redact_label(element, redact=self.config.memory.redact) if element else None
+        return RouteStep(
+            kind=kind,
+            label=label,
+            resource_id=_id_tail(element.resource_id) if element else None,
+            arg=arg,
+            submit=submit,
+            package=self._cached_package(),
+        )
 
     def current_package(self) -> str | None:
         """Best-effort foreground package (for ``aua map`` without ``--app``)."""
@@ -1076,9 +1096,10 @@ class Engine:
     def tap(self, element_id: int, *, observe: bool = True) -> ActionResult:
         el = self._resolve(element_id)
         cx, cy = el.center
+        step = self._step("tap", el)  # built pre-action: needs the cached package
         self.device.click(cx, cy)
         self._invalidate_cache()
-        self._record_action_safe(f"tap {self._action_label(el)}")
+        self._record_action_safe(step)
         return self._observe(
             ActionResult(ok=True, action="tap", id=element_id, target=[cx, cy]), observe
         )
@@ -1086,9 +1107,10 @@ class Engine:
     def long_press(self, element_id: int, *, ms: int = 600, observe: bool = True) -> ActionResult:
         el = self._resolve(element_id)
         cx, cy = el.center
+        step = self._step("long-press", el)
         self.device.long_click(cx, cy, ms)
         self._invalidate_cache()
-        self._record_action_safe(f"long-press {self._action_label(el)}")
+        self._record_action_safe(step)
         return self._observe(
             ActionResult(ok=True, action="long-press", id=element_id, target=[cx, cy]), observe
         )
@@ -1098,10 +1120,12 @@ class Engine:
     ) -> ActionResult:
         el = self._resolve(element_id)
         cx, cy = el.center
+        # The step records the field's SHAPE only — the typed value is never persisted
+        # (PRD §6b privacy; observe_action strips `text` defensively too).
+        step = self._step("input", el, submit=submit)
         self.device.input_text(cx, cy, text, clear=True, submit=submit)
         self._invalidate_cache()
-        # Record the action SHAPE only — the typed value is never persisted (PRD §6b privacy).
-        self._record_action_safe("input '<filled>'" + (" + send" if submit else ""))
+        self._record_action_safe(step)
         return self._observe(
             ActionResult(ok=True, action="input", id=element_id, detail=text), observe
         )
@@ -1109,10 +1133,11 @@ class Engine:
     def clear(self, element_id: int, *, observe: bool = True) -> ActionResult:
         el = self._resolve(element_id)
         cx, cy = el.center
+        step = self._step("clear", el)
         self.device.click(cx, cy)
         self.device.clear_text()
         self._invalidate_cache()
-        self._record_action_safe(f"clear {self._action_label(el)}")
+        self._record_action_safe(step)
         return self._observe(ActionResult(ok=True, action="clear", id=element_id), observe)
 
     def swipe(
@@ -1127,9 +1152,10 @@ class Engine:
         device = self.device
         if coords is not None:
             x1, y1, x2, y2 = coords
+            step = self._step("swipe", arg="coords")
             device.swipe(x1, y1, x2, y2)
             self._invalidate_cache()
-            self._record_action_safe("swipe coords")
+            self._record_action_safe(step)
             return self._observe(
                 ActionResult(ok=True, action="swipe", target=[x1, y1, x2, y2]), observe
             )
@@ -1156,9 +1182,10 @@ class Engine:
         clamp = lambda v, lo, hi: max(lo, min(hi, v))  # noqa: E731
         x1, x2 = clamp(x1, 0, w - 1), clamp(x2, 0, w - 1)
         y1, y2 = clamp(y1, 0, h - 1), clamp(y2, 0, h - 1)
+        step = self._step("swipe", arg=d)
         device.swipe(x1, y1, x2, y2)
         self._invalidate_cache()
-        self._record_action_safe(f"swipe {d}")
+        self._record_action_safe(step)
         return self._observe(
             ActionResult(ok=True, action="swipe", target=[x1, y1, x2, y2]), observe
         )
@@ -1171,9 +1198,10 @@ class Engine:
         ignore_case: bool = False,
         observe: bool = True,
     ) -> ActionResult:
+        step = self._step("scroll-to", arg=query)
         found = self.device.scroll_to(query, match=MatchMode(match), ignore_case=ignore_case)
         self._invalidate_cache()
-        self._record_action_safe(f"scroll-to '{query}'")
+        self._record_action_safe(step)
         return self._observe(
             ActionResult(
                 ok=found is not None,
@@ -1185,9 +1213,10 @@ class Engine:
         )
 
     def key(self, name: str, *, observe: bool = True) -> ActionResult:
+        step = self._step("key", arg=name)
         self.device.press(name)
         self._invalidate_cache()
-        self._record_action_safe(f"key '{name}'")
+        self._record_action_safe(step)
         return self._observe(ActionResult(ok=True, action="key", detail=name), observe)
 
     def wait(
