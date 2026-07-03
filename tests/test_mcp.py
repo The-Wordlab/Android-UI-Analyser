@@ -73,6 +73,11 @@ def test_mcp_lists_core_tools() -> None:
         "has",
         "screenshot",
         "inspect",
+        "long_press",
+        "scroll_to",
+        "wait_stable",
+        "goto",
+        "flow_run",
         "list_devices",
     } <= set(names)
 
@@ -124,3 +129,66 @@ def test_mcp_analyze_via_monkeypatched_connect(monkeypatch: pytest.MonkeyPatch) 
 
     data = json.loads(anyio.run(run))
     AnalyzeResult.model_validate(data)
+
+
+def test_mcp_long_press_drives_device() -> None:
+    eng = _engine()
+    server = build_server(eng)
+
+    async def run() -> dict:
+        async with create_connected_server_and_client_session(server) as client:
+            await client.call_tool("analyze_screen", {"source": "hierarchy"})
+            result = await client.call_tool("long_press", {"id": 1})
+            assert not result.isError, result
+            return json.loads(_first_text(result))
+
+    data = anyio.run(run)
+    assert data["ok"] is True and data["action"] == "long-press"
+    assert any(c[0] == "long_click" for c in eng.device.calls)  # type: ignore[attr-defined]
+
+
+def test_mcp_wait_stable_settles_on_static_screen() -> None:
+    server = build_server(_engine())  # FakeDevice returns identical frames
+
+    async def run() -> dict:
+        async with create_connected_server_and_client_session(server) as client:
+            result = await client.call_tool("wait_stable", {"settle": 100, "interval": 10})
+            assert not result.isError, result
+            return json.loads(_first_text(result))
+
+    data = anyio.run(run)
+    assert data["ok"] is True and data["action"] == "wait-stable"
+
+
+def test_mcp_goto_error_payload_when_memory_disabled() -> None:
+    cfg = make_config(memory={"enabled": False})
+    server = build_server(Engine(cfg, device=FakeDevice(hierarchy_xml=HIERARCHY_XML)))
+
+    async def run() -> dict:
+        async with create_connected_server_and_client_session(server) as client:
+            result = await client.call_tool("goto", {"goal": "settings"})
+            return json.loads(_first_text(result))
+
+    data = anyio.run(run)
+    assert data["error"]["code"] == "usage"  # structured AuaError payload, not a crash
+
+
+def test_mcp_flow_run_dry_run_roundtrip(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from android_ui_analyser.flows import Flow, FlowStore
+    from android_ui_analyser.memory import RouteStep
+
+    cfg = make_config(memory={"dir": str(tmp_path / "home")})
+    FlowStore(cfg.memory).save(
+        Flow(name="mcpflow", app="com.test.app", steps=[RouteStep(kind="tap", label="Continue")])
+    )
+    eng = Engine(cfg, device=FakeDevice(hierarchy_xml=HIERARCHY_XML))
+    server = build_server(eng)
+
+    async def run() -> dict:
+        async with create_connected_server_and_client_session(server) as client:
+            result = await client.call_tool("flow_run", {"name": "mcpflow", "dry_run": True})
+            assert not result.isError, result
+            return json.loads(_first_text(result))
+
+    data = anyio.run(run)
+    assert data["ok"] and data["dry_run"] and data["steps"][0]["step"] == "tap 'Continue'"

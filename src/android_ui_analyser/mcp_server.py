@@ -153,6 +153,90 @@ def _tool_definitions() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="long_press",
+            description="Long-press the element with the given id (context menus).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer"},
+                    "ms": {"type": "integer", "default": 600},
+                },
+                "required": ["id"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="scroll_to",
+            description="Scroll until the given text is visible; returns whether it was found.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "match": {"type": "string", "enum": match_enum, "default": "contains"},
+                    "ignore_case": {"type": "boolean", "default": False},
+                },
+                "required": ["text"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="wait_stable",
+            description="Wait until the screen stops visually changing (perceptual hash; "
+            "works on opaque/Compose/video screens) — for loading / image generation.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "interval": {"type": "integer", "default": 200},
+                    "settle": {"type": "integer", "default": 600},
+                    "timeout": {"type": "integer", "default": 30000},
+                },
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="goto",
+            description="Drive to a remembered screen via the learned app map: replays "
+            "the recorded steps of each route edge (including cross-app auth legs) and "
+            "verifies each hop; hands back remaining steps on divergence. plan=true "
+            "previews without acting.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "goal": {
+                        "type": "string",
+                        "description": "Screen name or fuzzy goal, e.g. 'settings'.",
+                    },
+                    "plan": {"type": "boolean", "default": False},
+                    "max_steps": {"type": "integer", "default": 8},
+                    "allow_destructive": {"type": "boolean", "default": False},
+                },
+                "required": ["goal"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="flow_run",
+            description="Replay a saved flow (whole journey — launch, taps, waits, "
+            "asserts, cross-app auth) in one call; on divergence returns the failing "
+            "step index + remaining steps, resumable via from_step.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "params": {
+                        "type": "object",
+                        "description": "${NAME} placeholder values.",
+                        "additionalProperties": {"type": "string"},
+                    },
+                    "dry_run": {"type": "boolean", "default": False},
+                    "from_step": {"type": "integer", "default": 0},
+                    "allow_destructive": {"type": "boolean", "default": True},
+                },
+                "required": ["name"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
             name="list_devices",
             description="List attached devices (serial, model, android version, state).",
             inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
@@ -208,6 +292,38 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         )
     if name == "inspect":
         return engine.inspect(int(args["id"])).model_dump(mode="json")
+    if name == "long_press":
+        return engine.long_press(int(args["id"]), ms=int(args.get("ms", 600))).model_dump(
+            mode="json"
+        )
+    if name == "scroll_to":
+        return engine.scroll_to(
+            args["text"],
+            match=args.get("match", "contains"),
+            ignore_case=args.get("ignore_case", False),
+        ).model_dump(mode="json")
+    if name == "wait_stable":
+        return engine.wait_stable(
+            interval_ms=int(args.get("interval", 200)),
+            settle_ms=int(args.get("settle", 600)),
+            timeout_ms=int(args.get("timeout", 30000)),
+        ).model_dump(mode="json")
+    if name == "goto":
+        # Plain dict (route/hops/handoff) — same payload the CLI/daemon emit.
+        return engine.goto(
+            args["goal"],
+            plan=args.get("plan", False),
+            max_steps=int(args.get("max_steps", 8)),
+            allow_destructive=args.get("allow_destructive", False),
+        )
+    if name == "flow_run":
+        return engine.flow_run(
+            args["name"],
+            params={str(k): str(v) for k, v in (args.get("params") or {}).items()},
+            dry_run=args.get("dry_run", False),
+            from_step=int(args.get("from_step", 0)),
+            allow_destructive=args.get("allow_destructive", True),
+        )
     if name == "list_devices":
         return [d.model_dump(mode="json") for d in engine.list_devices()]
     raise AuaError(f"unknown tool '{name}'", code="usage")
