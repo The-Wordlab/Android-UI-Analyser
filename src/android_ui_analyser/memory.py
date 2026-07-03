@@ -26,6 +26,7 @@ Design notes
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import shutil
 from collections import Counter, deque
@@ -35,13 +36,20 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .config import MemoryCfg
     from .schema import Element
 
-MEMORY_SCHEMA_VERSION = 1
+MEMORY_SCHEMA_VERSION = 2
+
+# Session pending buffer: cap on steps accumulated between analyzes (a hit DROPS the
+# eventual edge — a truncated step list would replay wrong), and a TTL so an abandoned
+# journey (app killed mid-flow) can't smear a stale edge onto a later navigation.
+_PENDING_CAP = 12
+_PENDING_TTL_S = 600
+_RECENT_CAP = 40  # rolling action journal (feeds `aua flow save --last N`)
 
 # Jaccard overlap (after a small activity bonus) at/above which a screen is recognised as
 # a known one rather than treated as new. Below the drift band it is a fresh screen.
@@ -60,6 +68,45 @@ def matches_any(package: str | None, globs: Sequence[str]) -> bool:
         return False
     p = package.lower()
     return any(fnmatch(p, g.lower()) for g in globs)
+
+
+# Inbound labels too generic (or too destructive) to name a screen after — a screen
+# reached via "Continue" or "Delete" is named from its title/activity instead. Compared
+# via slug(label).
+GENERIC_INBOUND = frozenset(
+    {
+        "continue",
+        "next",
+        "ok",
+        "okay",
+        "done",
+        "skip",
+        "cancel",
+        "back",
+        "close",
+        "yes",
+        "no",
+        "not_now",
+        "later",
+        "ask_me_later",
+        "got_it",
+        "accept",
+        "agree",
+        "confirm",
+        "allow",
+        "deny",
+        "submit",
+        "save",
+        "retry",
+        "get_started",
+        "delete",
+        "sign_out",
+        "log_out",
+        "login",
+        "log_in",
+        "sign_in",
+    }
+)
 
 
 # --------------------------------------------------------------------------- models
@@ -95,11 +142,33 @@ class ScreenRecord(BaseModel):
     stale: bool = False
 
 
+class RouteStep(BaseModel):
+    """One replayable action of a route edge or flow (the shared step model).
+
+    Auto-recorded steps carry a durable selector (``resource_id`` tail first, redacted
+    ``label`` second) and NEVER a typed value; ``text`` exists for agent-authored flows
+    only. ``package`` is the package the step ran in — ``None`` means the journey's
+    origin app (transit steps through e.g. Chrome keep their package).
+    """
+
+    model_config = ConfigDict(extra="ignore")
+    kind: str  # tap | long-press | input | clear | key | swipe | scroll-to
+    #            (flows also: launch-app | wait-for | wait-stable | assert-visible | goto)
+    label: str | None = None  # redacted-safe element label (may be '<redacted>')
+    resource_id: str | None = None  # resource-id TAIL, the primary replay selector
+    arg: str | None = None  # kind-specific: key name / swipe direction / query / package
+    text: str | None = None  # input value — FLOWS ONLY, never set by auto-recording
+    submit: bool = False  # input: fire the IME action after typing
+    package: str | None = None  # package the step ran in; None = the journey's origin
+    timeout_ms: int | None = None  # wait-for / wait-stable / assert-visible override
+
+
 class RouteEdge(BaseModel):
     model_config = ConfigDict(extra="ignore")
     from_screen: str
     to_screen: str
-    action: str  # human label, e.g. "tap 'Apps'"
+    action: str  # human label, e.g. "tap 'Apps'" (derived from steps when present)
+    steps: list[RouteStep] = Field(default_factory=list)  # [] = legacy pre-v2 edge
     count: int = 1
     last_seen: str
 
@@ -121,8 +190,19 @@ class SessionState(BaseModel):
     model_config = ConfigDict(extra="ignore")
     package: str | None = None
     current_screen: str | None = None
-    pending: list[str] = Field(default_factory=list)  # action summaries since last analyze
+    pending: list[RouteStep] = Field(default_factory=list)  # steps since last analyze
+    pending_since: str | None = None  # ISO ts of the first pending step (TTL guard)
+    pending_overflow: bool = False  # cap hit → the eventual edge is dropped, never garbled
+    recent: list[RouteStep] = Field(default_factory=list)  # rolling journal (`flow save`)
     last_goal: str | None = None  # last `goto`/find target (boosts ranked suggestions)
+
+    @field_validator("pending", "recent", mode="before")
+    @classmethod
+    def _drop_legacy_strings(cls, v: object) -> object:
+        """Pre-v2 sessions stored plain strings; drop them (pending is ephemeral)."""
+        if isinstance(v, list):
+            return [item for item in v if isinstance(item, dict | RouteStep)]
+        return v
 
 
 class RecordOutcome(NamedTuple):
@@ -138,6 +218,64 @@ class NavHints(NamedTuple):
     known_routes: list[str]  # outgoing edges: ["tap 'Apps' → apps", ...]
     suggested_gotos: list[str]  # ranked ready-to-run: ["goto image_creator", ...]
     map_hint: str | None  # nudge when there's a map but nothing actionable from here
+
+
+# --------------------------------------------------------------------------- steps
+
+
+def step_display(step: RouteStep) -> str:
+    """Human/display form of one step (also the searchable text for ``--find``)."""
+    kind = step.kind
+    if kind in ("tap", "long-press", "clear"):
+        if step.label:
+            return f"{kind} '{step.label}'"
+        if step.resource_id:
+            return f"{kind} [#{step.resource_id}]"
+        return f"{kind} [unlabeled]"
+    if kind == "input":
+        return "input '<filled>'" + (" + send" if step.submit else "")
+    if kind in ("key", "scroll-to", "wait-for", "assert-visible"):
+        return f"{kind} '{step.arg}'"
+    if kind == "swipe":
+        return f"swipe {step.arg}"
+    if kind in ("launch-app", "goto"):
+        return f"{kind} {step.arg}"
+    return kind  # wait-stable and future kinds
+
+
+def derive_action(steps: list[RouteStep], origin_package: str | None = None) -> str:
+    """The edge's display string, derived deterministically from its steps.
+
+    Join rules match the legacy format (≤3 steps → ``a + b``, else ``first … last``) so
+    single-tap edges keep their exact old identity; a transit leg appends a
+    ``⇢ (via <pkg>)`` suffix naming the foreign package(s) crossed.
+    """
+    displays = [step_display(s) for s in steps]
+    if not displays:
+        return ""
+    base = " + ".join(displays) if len(displays) <= 3 else f"{displays[0]} … {displays[-1]}"
+    vias: list[str] = []
+    for s in steps:
+        if s.package and s.package != origin_package and s.package not in vias:
+            vias.append(s.package)
+    if vias:
+        base += f" ⇢ (via {', '.join(vias)})"
+    return base
+
+
+def is_destructive_step(step: RouteStep, lexicon: Sequence[str]) -> bool:
+    """True when auto-replaying *step* could destroy state (guards ``goto``).
+
+    Word-boundary match on the step's label; only tap/long-press can act destructively
+    (scrolling *to* "Delete" is harmless).
+    """
+    if step.kind not in ("tap", "long-press"):
+        return False
+    label = (step.label or "").strip()
+    if not label or label in REDACT_TOKENS:
+        return False
+    low = label.lower()
+    return any(re.search(rf"\b{re.escape(w.lower())}\b", low) for w in lexicon)
 
 
 # --------------------------------------------------------------------------- redaction
@@ -357,19 +495,25 @@ def propose_name(
     activity: str | None = None,
     is_first: bool = False,
 ) -> str:
+    # A generic/confirm/destructive inbound label ("Continue", "Delete", "Ask me later")
+    # says nothing about the DESTINATION — the login screen must not be named "delete"
+    # just because a Delete tap led there. Demote such labels below title/activity.
+    generic = bool(inbound_label) and slug(inbound_label) in GENERIC_INBOUND
     cands: list[str] = []
     if hint:
         cands.append(slug(hint))  # an explicit name is used verbatim
-    if inbound_kind == "tap" and inbound_label:
+    if inbound_kind == "tap" and inbound_label and not generic:
         cands.append(_short(inbound_label))  # nav taps give clean names ("Apps" → apps)
     if title:
         cands.append(_short(title))
-    if inbound_label:
+    if inbound_label and not generic:
         cands.append(_short(inbound_label))
     if is_first:
         cands.append("home")
     if activity:
         cands.append(_short(activity.rsplit(".", 1)[-1].replace("Activity", "")))
+    if inbound_label and generic:
+        cands.append(_short(inbound_label))  # last resort, still better than "screen"
     for c in cands:
         if c:
             return c
@@ -426,6 +570,7 @@ class AppMemoryStore:
             return None
 
     def save(self, app: AppMap) -> None:
+        app.schema_version = MEMORY_SCHEMA_VERSION  # older maps upgrade on first write
         d = self.app_dir(app.package)
         d.mkdir(parents=True, exist_ok=True)
         self.index_path(app.package).write_text(app.model_dump_json(indent=2), encoding="utf-8")
@@ -449,9 +594,13 @@ class AppMemoryStore:
         return SessionState()
 
     def save_session(self, serial: str, sess: SessionState) -> None:
+        # Atomic replace: daemon + CLI may write concurrently (last-writer-wins is fine,
+        # a torn/half-written JSON is not).
         path = self.session_path(serial)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(sess.model_dump_json(), encoding="utf-8")
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(sess.model_dump_json(), encoding="utf-8")
+        os.replace(tmp, path)
 
     # -- recording --------------------------------------------------------
 
@@ -575,33 +724,64 @@ class AppMemoryStore:
         self.save(app)
         return RecordOutcome(name=name, was_known=was_known, stale=stale, created=created)
 
-    def record_route(self, package: str, from_screen: str, to_screen: str, action: str) -> None:
+    def record_route(
+        self,
+        package: str,
+        from_screen: str,
+        to_screen: str,
+        action: str | None = None,
+        *,
+        steps: list[RouteStep] | None = None,
+    ) -> None:
         if not self.cfg.enabled or from_screen == to_screen:
             return
         app = self.load(package)
         if app is None:
+            return
+        steps = steps or []
+        if action is None:
+            action = derive_action(steps, package)
+        if not action:
             return
         now = _now_iso()
         for e in app.routes:
             if e.from_screen == from_screen and e.to_screen == to_screen and e.action == action:
                 e.count += 1
                 e.last_seen = now
+                if steps and not e.steps:
+                    e.steps = steps  # re-walking a legacy edge upgrades it in place
                 self.save(app)
                 return
         app.routes.append(
-            RouteEdge(from_screen=from_screen, to_screen=to_screen, action=action, last_seen=now)
+            RouteEdge(
+                from_screen=from_screen,
+                to_screen=to_screen,
+                action=action,
+                steps=steps,
+                last_seen=now,
+            )
         )
         self.save(app)
 
     # -- auto-record orchestration (engine + daemon call these) -----------
 
-    def observe_action(self, serial: str, summary: str) -> None:
+    def observe_action(self, serial: str, step: RouteStep) -> None:
         """Remember the last state-changing action so the next analyze can draw an edge."""
         if not (self.cfg.enabled and self.cfg.auto_record):
             return
+        # Privacy invariant (PRD §6b): auto-recorded steps never carry a typed value.
+        if step.text is not None:
+            step = step.model_copy(update={"text": None})
         sess = self.load_session(serial)
-        sess.pending.append(summary)
-        sess.pending = sess.pending[-6:]
+        sess.recent.append(step)
+        sess.recent = sess.recent[-_RECENT_CAP:]
+        if not sess.pending:
+            sess.pending_since = _now_iso()
+        if len(sess.pending) >= _PENDING_CAP:
+            # Stop accumulating: a truncated step list must never become an edge.
+            sess.pending_overflow = True
+        else:
+            sess.pending.append(step)
         self.save_session(serial, sess)
 
     def observe_screen(
@@ -635,12 +815,24 @@ class AppMemoryStore:
             inbound_kind=inbound_kind,
             screen_height=screen_height,
         )
-        if pending and prev and prev_pkg == package and prev != outcome.name:
-            action = " + ".join(pending) if len(pending) <= 3 else f"{pending[0]} … {pending[-1]}"
-            self.record_route(package, prev, outcome.name, action)
+        if (
+            pending
+            and prev
+            and prev_pkg == package
+            and prev != outcome.name
+            and not sess.pending_overflow
+            and _pending_fresh(sess.pending_since)
+        ):
+            steps = [
+                s.model_copy(update={"package": None}) if s.package == package else s
+                for s in pending
+            ]
+            self.record_route(package, prev, outcome.name, steps=steps)
         sess.current_screen = outcome.name
         sess.package = package
         sess.pending = []
+        sess.pending_since = None
+        sess.pending_overflow = False
         self.save_session(serial, sess)
         return outcome.name if outcome.was_known else None
 
@@ -716,15 +908,25 @@ class AppMemoryStore:
         return {"forgot": None}
 
 
-def _parse_inbound(pending: list[str]) -> tuple[str | None, str | None]:
-    """Pull a (label, kind) from action summaries for naming a destination screen."""
+def _pending_fresh(since: str | None, *, now: datetime | None = None) -> bool:
+    """False when the pending buffer is older than the TTL (an abandoned journey)."""
+    if not since:
+        return True
+    try:
+        started = datetime.fromisoformat(since)
+    except (ValueError, TypeError):
+        return True
+    now = now or datetime.now().astimezone()
+    return (now.timestamp() - started.timestamp()) <= _PENDING_TTL_S
+
+
+def _parse_inbound(pending: list[RouteStep]) -> tuple[str | None, str | None]:
+    """Pull a (label, kind) from the pending steps for naming a destination screen."""
     label: str | None = None
     kind: str | None = None
     for s in pending:
-        m = re.match(r"([\w-]+)\s+'(.+?)'", s)
-        if m:
-            kind, lbl = m.group(1), m.group(2)
-            label = None if lbl in REDACT_TOKENS else lbl
+        if s.label and s.label not in REDACT_TOKENS:
+            label, kind = s.label, s.kind
     return label, kind
 
 
@@ -915,7 +1117,10 @@ def _shortest_path(app: AppMap, target: str, start: str | None = None) -> list[R
         queue: deque[tuple[str, list[RouteEdge]]] = deque([(start, [])])
         while queue:
             node, path = queue.popleft()
-            for e in adj.get(node, []):
+            # Among parallel edges to the same screen, prefer a replayable (steps-bearing)
+            # one, then the most-travelled — BFS shortest-path is unaffected.
+            edges = sorted(adj.get(node, []), key=lambda e: (not e.steps, -e.count, e.action))
+            for e in edges:
                 if e.to_screen in visited:
                     continue
                 new_path = path + [e]
