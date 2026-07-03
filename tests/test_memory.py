@@ -16,7 +16,13 @@ import android_ui_analyser.engine as engine_mod
 from android_ui_analyser import hierarchy
 from android_ui_analyser.cli import app
 from android_ui_analyser.engine import Engine
-from android_ui_analyser.memory import AppMemoryStore, find_result, render_map, signature
+from android_ui_analyser.memory import (
+    AppMemoryStore,
+    find_result,
+    matches_any,
+    render_map,
+    signature,
+)
 from android_ui_analyser.providers.registry import ProviderFactory
 from conftest import FakeDevice, make_config
 
@@ -27,8 +33,8 @@ P = "co.thewordlab.luzia"
 # --------------------------------------------------------------------------- fixtures
 
 
-def _node(cls: str, *, text="", rid=None, desc=None, clk=False, b="[0,0][400,80]") -> str:
-    attrs = [f'class="{cls}"', f'package="{P}"']
+def _node(cls: str, *, text="", rid=None, desc=None, clk=False, b="[0,0][400,80]", pkg=P) -> str:
+    attrs = [f'class="{cls}"', f'package="{pkg}"']
     if text:
         attrs.append(f'text="{text}"')
     if rid:
@@ -352,3 +358,46 @@ def test_cli_map_lists_screens_routes_and_find(tmp_path, monkeypatch) -> None:
     # text tree (default) also names screens + routes
     t = runner.invoke(app, ["map", "--app", P])
     assert t.exit_code == 0 and "home" in t.stdout and "apps" in t.stdout
+
+
+# --------------------------------------------------------------- package hygiene
+
+
+def test_package_vote_ignores_ime() -> None:
+    """An open keyboard dominating the dump must not win the foreground vote."""
+    ime = "com.google.android.inputmethod.latin"
+    xml = _hier(
+        _node("android.widget.TextView", text="Hi", b="[40,120][1040,210]"),
+        _node("android.view.View", pkg=ime, b="[0,1200][1080,1500]"),
+        _node("android.view.View", pkg=ime, b="[0,1500][1080,1800]"),
+        _node("android.view.View", pkg=ime, b="[0,1800][1080,2100]"),
+    )
+    assert engine_mod._package_from_xml(xml, ["com.android.systemui", "*inputmethod*"]) == P
+
+
+def test_package_vote_all_ignored_falls_back_to_majority() -> None:
+    xml = _hier(
+        _node("android.view.View", pkg="com.android.systemui"),
+        _node("android.view.View", pkg="com.android.systemui"),
+    )
+    assert engine_mod._package_from_xml(xml, ["com.android.systemui"]) == "com.android.systemui"
+
+
+def test_matches_any_globs() -> None:
+    globs = ["com.android.systemui", "*inputmethod*"]
+    assert matches_any("com.android.systemui", globs)
+    assert matches_any("com.google.android.inputmethod.latin", globs)
+    assert matches_any("COM.GOOGLE.ANDROID.INPUTMETHOD.LATIN", globs)
+    assert not matches_any("co.thewordlab.luzia", globs)
+    assert not matches_any(None, globs)
+
+
+def test_ignored_package_records_no_map(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    ime = "com.google.android.inputmethod.latin"
+    known = store.observe_screen(
+        "serial-x", package=ime, elements=_elements(HOME), screen_height=800
+    )
+    assert known is None
+    assert not (tmp_path / "home" / "memory" / ime).exists()
+    assert store.list_apps() == []

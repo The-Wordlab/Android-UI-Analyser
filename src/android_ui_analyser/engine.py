@@ -15,6 +15,7 @@ import logging
 import re
 import time
 from collections import Counter
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +23,14 @@ from . import routing
 from .config import Config
 from .device import Device, connect, list_devices
 from .errors import ElementNotFoundError, ProviderError, StabilityTimeout, UsageError
-from .memory import AppMemoryStore, NavHints, _shortest_path, redact_label, resolve_goal
+from .memory import (
+    AppMemoryStore,
+    NavHints,
+    _shortest_path,
+    matches_any,
+    redact_label,
+    resolve_goal,
+)
 from .providers.base import DetBox, Point, ScreenImage, TextBox
 from .providers.registry import ProviderFactory, registered_names, run_chain
 from .schema import (
@@ -49,17 +57,21 @@ QUERY_SOFT = 0.5  # best-effort threshold when escalation is exhausted
 _PACKAGE_RE = re.compile(r'package="([^"]+)"')
 
 
-def _package_from_xml(xml: str) -> str | None:
+def _package_from_xml(
+    xml: str, ignore: Sequence[str] = ("com.android.systemui",)
+) -> str | None:
     """Cheap foreground-package guess from a hierarchy dump (avoids an app_current RPC).
 
-    Picks the most common ``package=`` among nodes, ignoring the system UI overlay.
+    Picks the most common ``package=`` among nodes, excluding *ignore* globs — system
+    chrome and IMEs overlay every app, so an open keyboard must never win the vote.
+    Falls back to the overall majority when every node is ignorable.
     """
     pkgs = _PACKAGE_RE.findall(xml)
     if not pkgs:
         return None
-    counts = Counter(p for p in pkgs if p and p != "com.android.systemui")
+    counts = Counter(p for p in pkgs if p and not matches_any(p, ignore))
     if not counts:
-        return pkgs[0]
+        counts = Counter(pkgs)
     return counts.most_common(1)[0][0]
 
 
@@ -150,7 +162,8 @@ class Engine:
         from . import hierarchy
 
         xml = device.dump_hierarchy()
-        return hierarchy.parse_hierarchy(xml, (w, h)), _package_from_xml(xml)
+        pkg = _package_from_xml(xml, self.config.memory.ignore_packages)
+        return hierarchy.parse_hierarchy(xml, (w, h)), pkg
 
     def _run_vision(
         self, device: Device, *, with_ocr: bool | None, start_id: int = 0
@@ -721,7 +734,9 @@ class Engine:
         if pkg:
             return pkg
         try:
-            return _package_from_xml(self.device.dump_hierarchy())
+            return _package_from_xml(
+                self.device.dump_hierarchy(), self.config.memory.ignore_packages
+            )
         except Exception:  # pragma: no cover
             return None
 

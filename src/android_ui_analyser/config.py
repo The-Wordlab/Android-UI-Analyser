@@ -132,6 +132,44 @@ class MemoryCfg(BaseModel):
     suggest: bool = True  # push known_routes/suggested_gotos/map_hint inline into analyze
     suggest_max: int = 4  # cap on suggested_gotos returned per analyze
     rank_half_life_days: float = 3.0  # recency decay for usage-based ranking (days)
+    # Packages that never count as the foreground app: excluded from the hierarchy
+    # package vote (an open keyboard must not win it) and never recorded as maps.
+    ignore_packages: list[str] = Field(
+        default_factory=lambda: ["com.android.systemui", "*inputmethod*"]
+    )
+    # Auth/consent surfaces a flow passes THROUGH without leaving the origin app's
+    # journey: Google sign-in (gms / Chrome custom tabs), permission dialogs. Screens
+    # there still record into their own maps, but the navigation cursor stays on the
+    # origin app so the round trip becomes one recorded (and replayable) edge.
+    transit_packages: list[str] = Field(
+        default_factory=lambda: [
+            "com.google.android.gms",
+            "com.android.chrome",
+            "com.android.permissioncontroller",
+            "com.google.android.permissioncontroller",
+        ]
+    )
+    # Step labels goto refuses to auto-replay without --allow-destructive (word-boundary
+    # match, tap/long-press steps only). Authored flows are exempt by default.
+    destructive_labels: list[str] = Field(
+        default_factory=lambda: [
+            "delete",
+            "remove",
+            "sign out",
+            "log out",
+            "logout",
+            "pay",
+            "buy",
+            "purchase",
+            "subscribe",
+            "unsubscribe",
+            "uninstall",
+            "format",
+            "erase",
+            "reset",
+            "deactivate",
+        ]
+    )
 
 
 def _default_models() -> dict[str, dict[str, Any]]:
@@ -463,6 +501,16 @@ memory:
   suggest: true            # push known_routes/suggested_gotos/map_hint inline into analyze
   suggest_max: 4           # cap on suggested_gotos per analyze
   rank_half_life_days: 3.0 # recency decay for usage-based ranking (days)
+  # Never the foreground app (excluded from the package vote; never mapped):
+  ignore_packages: ["com.android.systemui", "*inputmethod*"]
+  # Surfaces a flow passes through (Google auth, permission dialogs) — the journey
+  # cursor stays on the origin app so the round trip records as one replayable edge:
+  transit_packages: ["com.google.android.gms", "com.android.chrome",
+                     "com.android.permissioncontroller", "com.google.android.permissioncontroller"]
+  # Step labels goto refuses to auto-replay without --allow-destructive:
+  destructive_labels: ["delete", "remove", "sign out", "log out", "logout", "pay", "buy",
+                       "purchase", "subscribe", "unsubscribe", "uninstall", "format",
+                       "erase", "reset", "deactivate"]
 
 # profiles:
 #   cloud:

@@ -29,7 +29,9 @@ import hashlib
 import re
 import shutil
 from collections import Counter, deque
+from collections.abc import Sequence
 from datetime import datetime
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -50,6 +52,14 @@ _RECOGNIZE_MIN = 0.34
 _LAST_GOAL_BOOST = 1_000_000.0
 
 REDACT_TOKENS = {"<filled>", "<empty>", "<redacted>"}
+
+
+def matches_any(package: str | None, globs: Sequence[str]) -> bool:
+    """True if *package* matches any fnmatch glob (a bare literal matches exactly)."""
+    if not package:
+        return False
+    p = package.lower()
+    return any(fnmatch(p, g.lower()) for g in globs)
 
 
 # --------------------------------------------------------------------------- models
@@ -609,6 +619,8 @@ class AppMemoryStore:
         """Record the current screen + any pending route edge. Returns ``known_screen``."""
         if not (self.cfg.enabled and self.cfg.auto_record):
             return None
+        if matches_any(package, self.cfg.ignore_packages):
+            return None  # keyboards / system chrome never get a map of their own
         sess = self.load_session(serial)
         prev, prev_pkg, pending = sess.current_screen, sess.package, list(sess.pending)
         inbound_label, inbound_kind = _parse_inbound(pending)
