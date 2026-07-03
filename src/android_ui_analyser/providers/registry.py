@@ -20,6 +20,7 @@ from __future__ import annotations
 import importlib
 import logging
 import pkgutil
+import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
@@ -132,10 +133,21 @@ def all_registered() -> dict[str, list[str]]:
 
 
 class ProviderFactory:
-    """Builds configured strategy instances and ordered chains from config."""
+    """Builds configured strategy instances and ordered chains from config.
+
+    Instances are memoized per ``(kind, name)`` for the factory's lifetime: one factory
+    is bound to one immutable :class:`Config` (the daemon holds one Engine → one factory
+    for its whole life), so lazily-loaded models (omniparser's detector, rapidocr's
+    engine) stay warm across calls instead of being re-created per analyze. The lock
+    only guards the memo dict — provider instances are NOT certified for *concurrent*
+    inference (the daemon serves requests serially today; a thread-per-connection
+    daemon would need per-instance locking).
+    """
 
     def __init__(self, config: Config) -> None:
         self.config = config
+        self._instances: dict[tuple[str, str], Provider] = {}
+        self._lock = threading.Lock()
 
     def _settings_for(self, name: str) -> dict[str, Any]:
         models = getattr(self.config, "models", {}) or {}
@@ -143,8 +155,14 @@ class ProviderFactory:
         return dict(value) if value else {}
 
     def create(self, kind: str, name: str) -> Provider:
-        cls = get_provider_class(kind, name)
-        return cls(self._settings_for(name))
+        key = (kind, name)
+        with self._lock:
+            inst = self._instances.get(key)
+            if inst is None:
+                cls = get_provider_class(kind, name)
+                inst = cls(self._settings_for(name))
+                self._instances[key] = inst
+            return inst
 
     def is_enabled(self, kind: str) -> bool:
         section = getattr(self.config, kind, None)

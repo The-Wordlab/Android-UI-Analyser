@@ -102,3 +102,62 @@ def test_unknown_provider_in_chain_is_skipped_not_fatal() -> None:
     cfg = make_config(ocr={"chain": ["does_not_exist", "dummy"]})
     chain = ProviderFactory(cfg).build_chain("ocr")
     assert [p.name for p in chain.providers] == ["dummy"]  # bogus name skipped
+
+
+# --------------------------------------------------------------- factory memoization
+
+
+def test_factory_memoizes_instances_per_kind_and_name() -> None:
+    """One factory returns the SAME instance per (kind, name) — warm models persist."""
+    factory = ProviderFactory(make_config())
+    a = factory.create("ocr", "dummy")
+    b = factory.create("ocr", "dummy")
+    assert a is b
+    # a different kind with the same name is a different instance
+    assert factory.create("detection", "dummy") is not a
+
+
+def test_factory_build_chain_reuses_memoized_instances() -> None:
+    cfg = make_config(ocr={"enabled": True, "chain": ["dummy"]})
+    factory = ProviderFactory(cfg)
+    first = factory.build_chain("ocr").providers[0]
+    second = factory.build_chain("ocr").providers[0]
+    assert first is second
+
+
+def test_two_factories_do_not_share_instances() -> None:
+    cfg = make_config()
+    assert ProviderFactory(cfg).create("ocr", "dummy") is not ProviderFactory(cfg).create(
+        "ocr", "dummy"
+    )
+
+
+def test_engine_vision_calls_construct_provider_once() -> None:
+    """Two vision analyzes on one Engine build the OCR provider exactly once."""
+    from android_ui_analyser.engine import Engine
+    from conftest import FakeDevice
+
+    @register_ocr("counting_xyz")
+    class _Counting(OcrProvider):
+        init_count = 0
+
+        def __init__(self, settings=None) -> None:  # noqa: ANN001
+            super().__init__(settings)
+            type(self).init_count += 1
+
+        def is_available(self) -> Availability:
+            return Availability(True, "ok")
+
+        def recognize(self, image: ScreenImage) -> list[TextBox]:
+            return [TextBox(text="x", bounds=(0, 0, 5, 5))]
+
+    cfg = make_config(
+        ocr={"enabled": True, "chain": ["counting_xyz"]},
+        detection={"enabled": False},
+        memory={"enabled": False},
+        daemon={"enabled": False},
+    )
+    eng = Engine(cfg, device=FakeDevice(), factory=ProviderFactory(cfg))
+    eng.analyze(source="vision")
+    eng.analyze(source="vision")
+    assert _Counting.init_count == 1
