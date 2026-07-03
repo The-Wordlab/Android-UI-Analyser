@@ -50,10 +50,26 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
     ),
     (
         "Jump to a known screen in one call",
-        '`aua goto "<goal>"` drives the remembered route to a screen — it taps and verifies each '
-        "hop for you, turning multi-step navigation into a single command (prefer it whenever "
-        "`suggested_gotos` lists your target). `--plan` prints the route without acting; if the "
-        "route diverges it stops and hands back the remaining steps + the current screen.",
+        '`aua goto "<goal>"` replays the remembered steps of each route edge — by resource-id '
+        "first, then label — verifying every hop, including cross-app auth legs (Google sign-in "
+        "through Chrome/GMS is folded into one edge). Prefer it whenever `suggested_gotos` lists "
+        "your target. `--plan` prints the annotated route (steps, replayable, destructive) "
+        "without acting. Steps matching `memory.destructive_labels` (delete/sign out/pay/…) are "
+        "refused without `--allow-destructive`. On divergence it hands back the failing step, "
+        "the remaining steps, and the current elements — finish that one step manually, then "
+        "just re-run `aua goto`: it resumes mid-route, even mid-auth.",
+    ),
+    (
+        "Replay whole journeys in one call (flows)",
+        'A flow is a Maestro-style YAML journey you can AUTHOR directly (no walking needed) or '
+        "record: `aua flow save <name> --last N` materializes your recent actions (typed values "
+        "become required `${PARAM_n}` placeholders — fill them in the file). "
+        '`aua flow run <name> --param K=V` drives the whole journey — launch, taps, waits, '
+        "asserts, cross-app auth, even `goto:` steps — and on divergence returns the failing "
+        "step index + remaining steps; fix and resume with `--from-step N`. Flows live under "
+        "`<memory.dir>/flows/*.yaml` (`aua flow list|show|delete`); `--dry-run` previews. Use a "
+        "flow for any setup you repeat (reset account, log in, reach the screen under test) — "
+        "one call instead of a dozen.",
     ),
     (
         "Drive by element ID",
@@ -87,7 +103,7 @@ ESCALATION_LADDER: list[tuple[str, str, str]] = [
     ("T0 text", "hierarchy text match (`has`)", "is this text/element present?"),
     ("T1 selector", "hierarchy selector locate", "give me THIS known element to act on"),
     ("T2 hierarchy", "full hierarchy parse → element list", "what's on screen? (`analyze`)"),
-    ("T3 vision", "detection + OCR (local)", "Compose/WebView/canvas/game the tree can't see"),
+    ("T3 vision", "detection + OCR (local)", "Compose/canvas/game (and weak WebView) trees"),
     ("T4 grounding", "grounding VLM (local or paid)", "fuzzy/visual targets not resolvable above"),
 ]
 
@@ -121,7 +137,16 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "map",
         '`--app <pkg>`, `--brief`, `--screen <name>`, `--depth N`, `--find "<goal>"`, `--json`',
     ),
-    ("goto", "`<goal>` (fuzzy), `--plan` (route only, no taps), `--max-steps N`"),
+    (
+        "goto",
+        "`<goal>` (fuzzy), `--plan` (annotated route, no taps), `--max-steps N`, "
+        "`--allow-destructive`",
+    ),
+    (
+        "flow",
+        "`run <name> [--param K=V] [--file PATH] [--dry-run] [--from-step N] "
+        "[--no-allow-destructive]`, `save <name> [--last N] [--force]`, `list|show|delete`",
+    ),
     (
         "actions (tap/input/swipe/scroll-to/key/…)",
         "return the post-action screen inline by default (`observation`, fresh ids); "
@@ -214,9 +239,12 @@ def render_markdown(*, brief: bool = False) -> str:
     )
 
     p.append("")
-    p.append("## Hard screens (Compose / Flutter / WebView / games)")
+    p.append("## Hard screens (Compose / Flutter / canvas / games)")
     p.append(
-        "When the accessibility tree is empty/useless, force vision:\n"
+        "Compose-without-semantics, Flutter, canvas, and games need vision — the gate escalates "
+        "automatically. **WebView pages (Google sign-in, web content) usually expose a rich tree "
+        "and stay on the fast hierarchy path**; only weak/hollow WebView trees escalate. If "
+        "`analyze` visibly misses content, force it:\n"
         "```bash\naua --format compact analyze --source vision --annotate\n```\n"
         "`meta.annotated_image` is a PNG with numbered boxes you can open."
     )
@@ -234,8 +262,14 @@ def render_markdown(*, brief: bool = False) -> str:
         "secrets / PII are redacted (`<filled>` / `<redacted>`). The map is pushed to you "
         "inline on every `analyze` (`meta.known_routes` / `meta.suggested_gotos` / "
         "`meta.map_hint`), ranked by your recent navigation so the screens you use most surface "
-        'first; `aua goto "<goal>"` drives a remembered route in one call. Manage with '
-        "`aua memory show|path|update|forget`."
+        'first; `aua goto "<goal>"` drives a remembered route in one call. **Cross-app auth '
+        "legs (Google sign-in via Chrome/GMS, permission dialogs) fold into the origin app's "
+        "route** and replay step by step — a redacted account row hands off for one manual tap, "
+        "then re-running `goto` resumes. Replay refuses destructive steps (delete/sign out/…) "
+        "without `--allow-destructive`; the map improves with every walk (legacy edges upgrade "
+        "in place when re-driven). Manage with `aua memory show|path|update|forget` "
+        "(`memory update --screen <name>` renames a badly-auto-named screen so `goto <name>` "
+        "reads naturally)."
     )
 
     p.append("")
@@ -248,9 +282,14 @@ def render_markdown(*, brief: bool = False) -> str:
     p.append("# meta.known_screen + meta.known_routes + meta.suggested_gotos — act on those.")
     p.append("aua --format compact analyze")
     p.append("")
-    p.append("# Jump straight to a remembered screen (drives + verifies each hop):")
+    p.append("# Jump straight to a remembered screen (drives + verifies each hop,")
+    p.append("# including cross-app auth legs):")
     p.append('aua goto "image creator"')
     p.append('aua goto "settings" --plan          # just print the route, take no action')
+    p.append("")
+    p.append("# Replay a whole journey (authored or recorded) in ONE call:")
+    p.append('aua flow run reset_account_google_login --param ACCOUNT="Engineering Team"')
+    p.append("aua flow save reach_checkout --last 8   # materialize what you just did")
     p.append("")
     p.append("# Act by id. Every action returns the post-action screen by default, so the")
     p.append("# result already carries observation.elements with fresh ids — type → send is")

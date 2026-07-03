@@ -141,7 +141,9 @@ Global options (apply to all commands; override config):
 
 ### Memory / app map (§6b)
 - `aua map [--app <pkg>] [--brief] [--screen <name>] [--depth N] [--find "<goal>"] [--json]` → print the app's map. **With no query it prints the WHOLE app as a compact text tree** (every known screen, what's on it, routes between them) — not just a search result. `--brief` = skeleton only (screen tree + routes, smallest — load at session start); default = screens + key elements + routes; `--screen`/`--depth` drill into one screen; `--find "image"` returns just the screen(s) + route to a target. The agent reads this at session start to know the layout before navigating.
-- `aua memory show|path|update|forget [--app <pkg>] [--screen <name>]` → inspect / locate / force-record the current screen / clear. Recording is automatic by default (§6b).
+- `aua goto "<goal>" [--plan] [--max-steps N] [--allow-destructive]` → the navigation autopilot: resolve the (fuzzy) goal against the map, walk the shortest route from the current screen, and **replay each edge's recorded steps** (resource-id selector first, then label), verifying `known_screen` per hop. Cross-app auth legs (edges through `memory.transit_packages`) replay end-to-end with package-aware perception; steps matching `memory.destructive_labels` are refused without `--allow-destructive`. On divergence it exits `1` with the failing step, the remaining steps, and the current elements; a re-run **resumes**, even stranded mid-auth. `--plan` prints the annotated route (steps / replayable / legacy / destructive) without acting.
+- `aua flow run <name> [--param K=V]… [--file PATH] [--dry-run] [--from-step N] [--no-allow-destructive]` / `aua flow save <name> [--last N] [--force]` / `aua flow list|show|delete` → **flows**: Maestro-style YAML journeys under `<memory.dir>/flows/`, authored directly or materialized from the session's recent actions (typed values become required `${PARAM_n}` placeholders — never persisted). `flow run` replays the whole journey (launch, taps, input with `${PARAM}` substitution, key/swipe/scroll, waits, asserts, `goto:` steps, cross-package legs) through the same executor as `goto`, returning a resumable step index on divergence. Flows are deliberate authored intent → destructive steps allowed by default.
+- `aua memory show|path|update|forget [--app <pkg>] [--screen <name>]` → inspect / locate / force-record (or rename) the current screen / clear. Recording is automatic by default (§6b).
 
 ### Agent guide (self-documentation)
 - `aua guide` (aliases `skill`, `agent`) → print the **agent operating manual** to stdout (markdown; `--json` for structured, `--brief` for short). It tells an agent everything needed to use the tool: what it is; the recommended **session protocol** — (1) `aua daemon start` for speed, (2) `aua map` to load the app's known layout before navigating, (3) drive with `analyze`/`has`/`tap`/`input`/`swipe` acting on element **IDs**, (4) use `wait --for-stable`/`--for` instead of fixed sleeps, (5) `aua daemon stop` when done; how perception **self-routes** (the §6a escalation ladder — hierarchy→vision automatically; paid grounding only with `--deep`); how **memory** works (auto-recorded, read via `aua map`, `meta.known_screen`); the output schema; exit codes; and key global flags. This is the **single source of truth** that also generates `.claude/skills/android-ui-analyser/SKILL.md` (`aua guide --emit-skill [path]`), and the `aua --help` epilog points the agent to it.
@@ -149,7 +151,8 @@ Global options (apply to all commands; override config):
 ### MCP
 - `aua mcp` → run the MCP server over stdio, exposing the same tools (§11)
 
-Exit codes: `0` success; `2` usage error; `3` no device / device error; `4` provider
+Exit codes: `0` success; `1` negative result (`has`: text absent; `goto`/`flow run`:
+did not arrive / diverged); `2` usage error; `3` no device / device error; `4` provider
 error after exhausting fallbacks; `5` config error. Errors print a structured object
 to stderr: `{ "error": { "code", "message", "hint" } }` — actionable, in the tool's
 voice (e.g. `"hint": "Set GEMINI_API_KEY or choose a local grounding provider."`).
@@ -164,13 +167,17 @@ voice (e.g. `"hint": "Set GEMINI_API_KEY or choose a local grounding provider."`
    text, content-desc, class (short name), clickable/enabled/focused; drop zero-area
    and fully off-screen nodes; compute centers; assign integer IDs in stable
    top-to-bottom, left-to-right order.
-3. **Quality gate** (`gate.py`) decides if the hierarchy is sufficient. Default
-   heuristics (all configurable thresholds):
+3. **Quality gate** (`gate.py`) decides if the hierarchy is sufficient. Rules in
+   order, first match wins (all thresholds configurable):
    - usable element count below `gate.min_elements` (default 3), **or**
    - no node carries `text`/`content-desc` (likely custom-drawn), **or**
-   - foreground package/class matches `gate.vision_packages` (e.g. Flutter views,
-     known game engines, `WebView`), **or**
-   - ratio of clickable-with-label elements below `gate.min_labeled_ratio`.
+   - **hard**: the foreground *package/activity* matches `gate.vision_packages`
+     (Flutter, game engines — genuinely opaque surfaces), **or**
+   - ratio of clickable-with-label elements below `gate.min_labeled_ratio`, **or**
+   - **soft**: an *element class* matches `gate.vision_packages` (e.g. a `WebView`
+     node) AND the tree is weak — fewer than `gate.soft_min_elements` elements or a
+     labeled fraction over ALL elements below `gate.soft_min_labeled_ratio`. A rich
+     WebView tree (Google sign-in, most web content) stays on the fast hierarchy path.
    - `--source` overrides the gate.
 4. **Vision fallback** (only if gate fails or `--source vision`):
    - **Detection** via the detection fallback chain → interactable boxes.
@@ -276,14 +283,27 @@ One app = one folder; the tool may write/update **one or several files** per app
 ### How the tool maintains it (by itself)
 - **Auto-record (default on):** every `analyze` records/updates the current screen
   (signature, tier, key elements); every successful action (`tap`/`input`/…) that changes
-  the screen records a **route edge** between the previous and new screen. The map grows
-  passively as the agent uses the tool — no extra calls.
+  the screen records a **route edge** between the previous and new screen. Each edge
+  carries structured **steps** (kind + resource-id tail + redacted label + package) so it
+  is replayable, not just displayable; the human `action` string is derived from them.
+  The map grows passively as the agent uses the tool — no extra calls. Post-action
+  `observation` snapshots record too (recognition-only: they draw single-step edges when
+  they land on a known screen, and never create screens from a mid-transition frame).
 - **Screen recognition:** on each `analyze` the tool computes the signature and, if it
-  matches a known screen, sets `meta.known_screen` and can attach remembered routes — the
-  agent instantly knows where it is and what's reachable.
+  matches a known screen, sets `meta.known_screen` and attaches inline affordances —
+  `meta.known_routes` (outgoing edges), `meta.suggested_gotos` (ranked ready-to-run
+  targets), `meta.map_hint` — the agent instantly knows where it is and what's reachable.
+- **Cross-app transit:** screens in `memory.transit_packages` (Google auth via
+  Chrome/GMS, permission dialogs) record into their own maps, but the **journey cursor
+  stays on the origin app**, so an auth excursion returns as ONE replayable edge
+  (`tap 'Continue with Google' … ⇢ (via com.android.chrome)`). IME/system packages
+  (`memory.ignore_packages`) are never mapped and can't win the foreground vote.
 - **Drift detection:** if the app version changed or a screen's signature diverges beyond
   `memory.drift_threshold`, the screen is flagged `stale` so the agent re-verifies;
-  otherwise it trusts the map.
+  otherwise it trusts the map. Pre-v2 (string-only) edges upgrade in place when re-walked.
+- **Guarded replay:** `goto` refuses steps whose label matches
+  `memory.destructive_labels` unless `--allow-destructive` — the map legitimately learns
+  routes THROUGH destructive taps ("the way to the login screen is Delete").
 
 ### Map output & detail levels (the full picture, but token-aware) — CLI in §5
 `aua map` with no query prints the **whole app as a compact text tree** — every known
@@ -316,7 +336,9 @@ full **structural** picture; live **contents** come from `analyze`.
 
 ### CLI (agent-facing) — see §5
 `aua map [--brief|--screen|--depth|--find]` loads the map / answers "where is X and how do
-I get there"; `aua memory show|path|update|forget` inspects and manages it.
+I get there"; `aua goto "<goal>"` drives it (the autopilot); `aua flow run|save|list|show|
+delete` replays whole journeys (Maestro-style, agent-authored or recorded);
+`aua memory show|path|update|forget` inspects and manages it.
 
 ### Privacy
 Memory is **local-only**, never transmitted. The tool stores structure and durable labels,
@@ -423,6 +445,8 @@ perception:
     min_elements: 3
     min_labeled_ratio: 0.15
     vision_packages: ["io.flutter", "com.unity3d", "org.libsdl", "*.WebView"]
+    soft_min_elements: 8        # element-CLASS matches escalate only on a weak tree
+    soft_min_labeled_ratio: 0.3 # (package/activity matches always escalate)
 routing:
   auto_escalate: true
   max_tier: vision          # text < selector < hierarchy < vision < grounding
@@ -457,6 +481,12 @@ memory:
   dir: "~/.android-ui-analyser"
   drift_threshold: 0.3     # signature divergence that flags a screen stale
   redact: true             # never store secrets / PII / EditText values verbatim
+  ignore_packages: ["com.android.systemui", "*inputmethod*"]   # never the foreground app
+  transit_packages: ["com.google.android.gms", "com.android.chrome",
+                     "com.android.permissioncontroller", "com.google.android.permissioncontroller"]
+  destructive_labels: ["delete", "remove", "sign out", "log out", "logout", "pay", "buy",
+                       "purchase", "subscribe", "unsubscribe", "uninstall", "format",
+                       "erase", "reset", "deactivate"]
 ```
 
 > Note: model identifiers above are examples; the implementer should not hard-code a
@@ -479,8 +509,12 @@ sensitive and bind only to the socket (never a TCP port by default).
 
 `aua mcp` runs an MCP server (stdio) using the Python MCP SDK, exposing tools that map
 1:1 to the engine: `analyze_screen(source?, with_ocr?, query?)`, `tap(id)`,
-`input(id, text, submit?)`, `swipe(direction|coords)`, `key(name)`,
-`wait(for?, idle?)`, `has(text, match?, ignore_case?, ocr_fallback?)`, `screenshot(annotate?)`, `list_devices()`. Tool results are the
+`long_press(id, ms?)`, `input(id, text, submit?)`, `swipe(direction|coords)`,
+`scroll_to(text, match?, ignore_case?)`, `key(name)`, `wait(for?, idle?)`,
+`wait_stable(interval?, settle?, timeout?)`, `has(text, match?, ignore_case?,
+ocr_fallback?)`, `screenshot(annotate?)`, `inspect(id)`,
+`goto(goal, plan?, max_steps?, allow_destructive?)`, `flow_run(name, params?, dry_run?,
+from_step?, allow_destructive?)`, `list_devices()`. Tool results are the
 same pydantic-validated JSON as the CLI. The MCP layer must be a **thin** adapter over
 the engine — no perception logic of its own.
 

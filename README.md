@@ -56,10 +56,28 @@ Or without uv:
 pip install -e ".[dev,apple,rapidocr]"
 ```
 
-Global install via pipx (no extras):
+Global install (no extras):
 
 ```bash
-pipx install .
+uv tool install .        # or:  pipx install .
+```
+
+### Put `aua` on your PATH (works from any directory)
+
+Like `adb`, the `aua` binary must resolve from **any** directory — you (and your agents)
+will call it from project folders, not from this repo:
+
+- `uv tool install .` / `pipx install .` (run from the clone) install it globally to
+  `~/.local/bin`. If a **new** shell still can't find `aua`, run `uv tool update-shell`
+  or `pipx ensurepath` once, then open a new terminal.
+- `./install.sh` does all of the above automatically (uv → pipx → venv fallback). If it
+  printed the venv-fallback warning, `aua` exists **only** at `<repo>/.venv/bin/aua`:
+  call it by that absolute path, add `<repo>/.venv/bin` to your `PATH`, or install
+  `uv`/`pipx` and re-run `./install.sh`.
+- Verify from your home directory:
+
+```bash
+cd ~ && command -v aua && aua --version
 ```
 
 ### Optional-dependency extras matrix
@@ -252,12 +270,46 @@ Because of that, `analyze` hands navigation affordances back to you **inline**, 
 ### Jump to a known screen in one command
 
 ```bash
-aua goto "image creator"      # drive the remembered route: taps + verifies each hop
-aua goto "settings" --plan    # print the route only, don't act
-aua goto "checkout" --max-steps 12
+aua goto "image creator"      # replay the remembered steps: selector-matched, verified per hop
+aua goto "settings" --plan    # print the annotated route (steps/replayable/destructive), don't act
+aua goto "onboarding"         # cross-app auth legs (Google sign-in via Chrome) replay too
+aua goto "login" --allow-destructive   # required when a step matches memory.destructive_labels
 ```
 
-`goto` resolves the goal (fuzzy) against the map, walks the shortest route from the **current** screen, and re-checks `known_screen` after every hop. If the route diverges it stops and hands back the remaining steps, the current screen, and the on-screen elements (exit `1`); it exits `0` once it arrives, returning the destination's `elements` (fresh ids). Either way you can keep going without a separate `analyze`. It runs through the warm daemon too.
+`goto` resolves the goal (fuzzy) against the map, walks the shortest route from the **current** screen, and replays each edge's recorded steps — matching by resource-id first, then label — re-checking `known_screen` after every hop. Auth excursions through `memory.transit_packages` (Google sign-in in Chrome/GMS, permission dialogs) are recorded as **one edge on the origin app** and replay end-to-end; a step whose identity was redacted (e.g. an account row containing an email) hands off for one manual tap — then just re-run `goto`: it resumes mid-route, even mid-auth. Destructive steps (delete / sign out / pay / …) are refused without `--allow-destructive`. On divergence it stops and hands back the failing step, the remaining steps, the current screen, and its elements (exit `1`); it exits `0` on arrival, returning the destination's `elements` (fresh ids). It runs through the warm daemon too.
+
+### Replay whole journeys in one call (flows)
+
+A **flow** is a Maestro-style YAML journey — authored directly by you/your agent, or materialized from what you just did. The repeated setup path to the screen under test (reset account → log back in → reach onboarding) becomes one command:
+
+```bash
+aua flow run reset_account_google_login --param ACCOUNT="Engineering Team"
+aua flow run smoke --dry-run          # print the resolved steps, act on nothing
+aua flow run smoke --from-step 4      # resume after fixing a divergence
+aua flow save reach_checkout --last 8 # materialize your recent actions into YAML
+aua flow list · aua flow show <name> · aua flow delete <name>
+```
+
+Flows live flat under `<memory.dir>/flows/<name>.yaml` (they span packages by design — the auth leg is the point). Step vocabulary: `launch_app`, `tap` (by `id:` tail or `text:`), `input` (with `${PARAM}` substitution), `key`, `swipe`, `scroll_to`, `wait_for`, `wait_stable`, `assert_visible`, and `goto:` to compose map navigation. `flow save` never persists typed values — inputs become required `${PARAM_n}` placeholders you fill in the file. Flows are deliberate authored intent, so destructive steps run by default (`--no-allow-destructive` opts back into the guard). On divergence you get the failing step index, the remaining steps, and the current elements — fix, then `--from-step N`.
+
+```yaml
+# ~/.android-ui-analyser/flows/reset_account_google_login.yaml
+name: reset_account_google_login
+app: co.thewordlab.luzia.dev
+params:
+  ACCOUNT: "Engineering Team"
+steps:
+  - launch_app: co.thewordlab.luzia.dev
+  - tap: {id: buttonSettings}          # unlabeled gear — id-tail selector
+  - tap: "Account & Data"
+  - tap: "Delete my account"
+  - tap: "Delete"
+  - wait_for: {text: "Continue with Google", timeout_ms: 15000}
+  - tap: "Continue with Google"
+  - tap: {text: "${ACCOUNT}", package: com.android.chrome}
+  - tap: {text: "Continue", package: com.android.chrome}
+  - wait_stable
+```
 
 ### Inspect and manage the map
 
@@ -265,9 +317,10 @@ aua goto "checkout" --max-steps 12
 aua map                       # learned screens + routes for the current app
 aua map --find "image"        # just the route to a target
 aua memory show|path|update|forget
+aua memory update --screen login   # rename a badly-auto-named screen
 ```
 
-**Privacy:** only the durable skeleton is stored (screen names, routes, stable elements). Dynamic lists are kept as a *shape*, and `EditText` values / secrets / PII are redacted (`<filled>` / `<redacted>`).
+**Privacy:** only the durable skeleton is stored (screen names, routes, stable elements). Dynamic lists are kept as a *shape*, and `EditText` values / secrets / PII are redacted (`<filled>` / `<redacted>`) — which is also why auto-learned edges never contain typed text, and why an account row may need one manual tap during replay.
 
 ### Tuning
 
@@ -422,7 +475,7 @@ The daemon binds **only to a unix socket** (default `~/.cache/android-ui-analyse
 
 `aua mcp` runs an MCP server over stdio, exposing the same tools as the CLI. It is a thin adapter over the engine — no separate perception logic.
 
-Tools exposed: `analyze_screen`, `tap`, `input`, `swipe`, `key`, `wait`, `has`, `screenshot`, `list_devices`.
+Tools exposed: `analyze_screen`, `tap`, `long_press`, `input`, `swipe`, `scroll_to`, `key`, `wait`, `wait_stable`, `has`, `screenshot`, `inspect`, `goto`, `flow_run`, `list_devices`.
 
 Example MCP client config (Claude Desktop / `claude_desktop_config.json`):
 
