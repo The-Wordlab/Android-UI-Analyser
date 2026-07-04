@@ -1344,6 +1344,24 @@ def explore_mine_cmd(
     _run(ctx, go)
 
 
+@explore_app.command("plan")
+def explore_plan_cmd(
+    ctx: typer.Context,
+    app_pkg: str | None = typer.Option(None, "--app", help="Package (default: current)."),
+    max_tasks: int = typer.Option(12, "--max-tasks", help="Cap on returned tasks."),
+) -> None:
+    """Get a prioritized exploration worklist for THIS app (probe deeplinks, expand screens).
+
+    Run the tasks with normal `aua` commands — results auto-record into the map/playbook,
+    so re-running the plan shows what's left. The way to have an agent index an app.
+    """
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(_route(engine, "explore_plan", package=app_pkg, max_tasks=max_tasks), fmt)
+
+    _run(ctx, go)
+
+
 # --------------------------------------------------------------------------- flows
 
 
