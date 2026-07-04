@@ -1475,6 +1475,39 @@ class Engine:
             "elements": [e.compact() for e in res.elements],
         }
 
+    def explore_mine(
+        self, source: str, *, package: str | None = None, save: bool = True
+    ) -> dict[str, Any]:
+        """Mine an app's source tree for deeplinks and save them to its playbook (§6b).
+
+        Deeplinks are shortcuts — jump straight to a screen instead of navigating — and
+        the app declares them in its source. Found links are recorded so the agent can
+        reuse them (`aua open <uri>`); templated ones (``$id``/``{id}``) are flagged.
+        """
+        from .explore import mine_deeplinks
+
+        result = mine_deeplinks(Path(source))
+        pkg = package or self.current_package()
+        saved = 0
+        mem = self._memory
+        if save and pkg and mem is not None:
+            for d in result.deeplinks:
+                note = "mined from source" + (f" ({d.source})" if d.source else "")
+                if d.templated:
+                    note += " — templated, fill the placeholder"
+                mem.remember_deeplink(pkg, d.uri, note=note)
+                saved += 1
+        return {
+            "ok": True,
+            "action": "explore-mine",
+            "package": pkg,
+            "source": source,
+            "schemes": result.schemes,
+            "found": len(result.deeplinks),
+            "saved": saved,
+            "deeplinks": result.as_dict()["deeplinks"],
+        }
+
     def flow_save(self, name: str, *, last: int = 12, force: bool = False) -> dict[str, Any]:
         """Materialize the session's recent recorded actions into an editable flow file.
 

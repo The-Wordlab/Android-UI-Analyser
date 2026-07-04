@@ -1310,6 +1310,40 @@ def memory_forget(
     _run(ctx, go)
 
 
+# --------------------------------------------------------------------------- explore
+
+
+explore_app = typer.Typer(
+    name="explore",
+    help="Discover app knowledge — mine deeplink shortcuts from source, plan a crawl (§6b).",
+    no_args_is_help=True,
+)
+app.add_typer(explore_app, name="explore")
+
+
+@explore_app.command("mine")
+def explore_mine_cmd(
+    ctx: typer.Context,
+    source: str = typer.Argument(..., help="Path to the app's source tree (repo root)."),
+    app_pkg: str | None = typer.Option(
+        None, "--app", help="Package to attribute the deeplinks to (default: current)."
+    ),
+    save: bool = typer.Option(
+        True, "--save/--no-save", help="Save found deeplinks to the app playbook."
+    ),
+) -> None:
+    """Scan an app's source for deeplinks (shortcuts) and record them in its playbook.
+
+    Deeplinks let you jump straight to a screen — `aua open "luzia://dynamic_tools/summarize"`
+    instead of tapping through the Apps grid. Run once per app; `aua about` then lists them.
+    """
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(_route(engine, "explore_mine", source=source, package=app_pkg, save=save), fmt)
+
+    _run(ctx, go)
+
+
 # --------------------------------------------------------------------------- flows
 
 
