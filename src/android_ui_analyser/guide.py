@@ -105,6 +105,15 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         'Use `aua has "<text>"` (exit 0/1) to branch cheaply without parsing JSON.',
     ),
     (
+        "Verify by resource-id, not just text",
+        '`aua has "<id>" --by id` checks a resource-id (a bare tail like "containerChatDetail" '
+        "works) — and it finds non-interactive **container** ids that `analyze` prunes from "
+        "the element list, so it's the reliable way to assert you reached a screen "
+        "(Maestro-style `assertVisible: id:`). `wait --for <id> --by id` and "
+        "`scroll-to <id> --by id` take `--by id` too. If a screen is WebView/Compose-backed "
+        "and its result text isn't in the tree at all, read it with `analyze --source vision`.",
+    ),
+    (
         "Act, then read the screen the action gives back",
         "IDs are only valid until the screen changes. By default every state-changing action "
         "(tap/input/swipe/scroll-to/key) returns the next screen inline in `observation` "
@@ -156,10 +165,14 @@ KEY_FLAGS: list[tuple[str, str]] = [
     ),
     (
         "has",
-        "`--match exact|contains|regex`, `--ignore-case`, `--ocr-fallback/--no-ocr-fallback`, "
-        "`--timeout <ms>`",
+        "`--by text|id|desc` (id finds pruned containers), `--match exact|contains|regex`, "
+        "`--ignore-case`, `--ocr-fallback/--no-ocr-fallback`, `--timeout <ms>`",
     ),
-    ("wait", '`--for "<text>"`, `--idle`, `--for-stable`, `--interval`, `--settle`, `--timeout`'),
+    (
+        "wait",
+        '`--for "<text>"` (`--by id`), `--idle`, `--for-stable`, `--interval`, `--settle`, '
+        "`--timeout`, `--observe` (fresh ids after the wait)",
+    ),
     (
         "map",
         '`--app <pkg>`, `--brief`, `--screen <name>`, `--depth N`, `--find "<goal>"`, `--json`',
