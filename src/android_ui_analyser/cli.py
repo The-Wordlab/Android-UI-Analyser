@@ -714,6 +714,46 @@ def goto(
     _run(ctx, go)
 
 
+@app.command()
+def navigate(
+    ctx: typer.Context,
+    goal: str = typer.Argument(..., help="Natural-language destination, e.g. 'open the image generator'."),
+    until: str | None = typer.Option(
+        None, "--until", help="Stop when this text appears (a deterministic arrival check)."
+    ),
+    max_steps: int = typer.Option(12, "--max-steps", help="Max planner actions."),
+    allow_destructive: bool = typer.Option(
+        False, "--allow-destructive", help="Permit destructive taps (delete/sign out/…)."
+    ),
+    save_flow: str | None = typer.Option(
+        None, "--save-flow", help="Also save the taken path as a reusable flow with this name."
+    ),
+) -> None:
+    """Drive to a goal with the opt-in planner LLM, recording the path for a free replay.
+
+    Needs `planner.enabled` (this command is the explicit opt-in). The planner chooses
+    each action; because they run through the normal actions, the journey is learned into
+    memory — next time, `aua goto <that screen>` replays it deterministically. `--save-flow`
+    also writes the path as a YAML flow.
+    """
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        result = _route(
+            engine,
+            "navigate",
+            goal=goal,
+            until=until,
+            max_steps=max_steps,
+            allow_destructive=allow_destructive,
+            save_flow=save_flow,
+        )
+        _emit(result, fmt)
+        if isinstance(result, dict) and result.get("ok") is False:
+            raise typer.Exit(1)
+
+    _run(ctx, go)
+
+
 # --------------------------------------------------------------------------- device/session
 
 

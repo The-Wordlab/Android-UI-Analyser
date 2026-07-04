@@ -207,3 +207,90 @@ def test_flow_without_assist_suggests_it(tmp_path) -> None:
     eng = Engine(cfg, device=dev, factory=ProviderFactory(cfg))
     out = eng.flow_run("b2")
     assert out["ok"] is False and "--assist" in out["hint"]
+
+
+# --------------------------------------------------------------- navigate (flywheel)
+
+IMAGES = _hier(
+    _node("android.widget.TextView", text="Create image", rid="x:id/h", b="[40,120][1040,210]"),
+    _node("android.widget.Button", text="Generate", rid="x:id/go", clk=True, b="[40,640][400,740]"),
+)
+
+
+def _to_images_decider():
+    """Tap 'Apps', then 'Images', then declare done — a scripted 2-hop journey."""
+
+    def fn(objective: str, elements: list[dict]) -> PlannerDecision:
+        for target in ("Apps", "Images"):
+            for e in elements:
+                if e.get("label") == target and e.get("clickable"):
+                    return PlannerDecision(action="tap", target_id=e["id"])
+        return PlannerDecision(action="done", reason="on the image screen")
+
+    return fn
+
+
+def test_navigate_requires_planner_enabled(tmp_path) -> None:
+    from android_ui_analyser.errors import UsageError
+
+    dev = ScriptedDevice([HOME], package=P, serial="emu-n0")
+    eng = _engine(tmp_path, dev, planner_enabled=False)
+    try:
+        eng.navigate("open images")
+        raise AssertionError("expected UsageError")
+    except UsageError as exc:
+        assert "planner" in str(exc).lower()
+
+
+def test_navigate_drives_and_records_the_path(tmp_path, monkeypatch) -> None:
+    dev = ScriptedDevice([HOME, APPS, IMAGES], package=P, serial="emu-n1")
+    eng = _engine(tmp_path, dev, planner_enabled=True)
+    _wire(monkeypatch, eng, StubPlanner(decide_fn=_to_images_decider()))
+    out = eng.navigate("open the image generator")
+    assert out["ok"] is True and out["arrived"] is True, out
+    assert sum(1 for c in dev.calls if c[0] == "click") == 2  # Apps + Images
+
+    # The flywheel: the journey is now in memory as replayable edges.
+    app_map = _store(tmp_path).load(P)
+    assert app_map is not None and len(app_map.routes) >= 2
+    assert all(e.steps for e in app_map.routes)  # every recorded edge is replayable
+
+
+def test_navigate_until_stops_early(tmp_path, monkeypatch) -> None:
+    # 'Generate' is on the IMAGES screen; --until should stop as soon as it's visible.
+    dev = ScriptedDevice(
+        [HOME, APPS, IMAGES],
+        package=P,
+        serial="emu-n2",
+        text_index={"Generate": (40, 640, 400, 740)},
+    )
+    # text_index is only IMAGES' button; `has` finds it only once there.
+    eng = _engine(tmp_path, dev, planner_enabled=True)
+    _wire(monkeypatch, eng, StubPlanner(decide_fn=_to_images_decider()))
+    out = eng.navigate("reach image creation", until="Generate")
+    assert out["ok"] is True
+
+
+def test_navigate_save_flow_writes_reusable_yaml(tmp_path, monkeypatch) -> None:
+    from android_ui_analyser.flows import FlowStore
+
+    dev = ScriptedDevice([HOME, APPS, IMAGES], package=P, serial="emu-n3")
+    eng = _engine(tmp_path, dev, planner_enabled=True)
+    _wire(monkeypatch, eng, StubPlanner(decide_fn=_to_images_decider()))
+    out = eng.navigate("open images", save_flow="to_images")
+    assert out["ok"] and "flow_saved" in out
+    flow = FlowStore(eng.config.memory).load("to_images")
+    assert flow.app == P
+    labels = [s.label for s in flow.steps if s.kind == "tap"]
+    assert "Apps" in labels and "Images" in labels
+
+
+def test_daemon_dispatch_navigate() -> None:
+    from android_ui_analyser.daemon import dispatch
+
+    class FakeEng:
+        def navigate(self, **kw: object) -> dict[str, object]:
+            return {"ok": True, "goal": kw.get("goal")}
+
+    r = dispatch(FakeEng(), {"cmd": "navigate", "args": {"goal": "x", "max_steps": 5}})
+    assert r["ok"] and r["result"]["goal"] == "x"

@@ -1474,6 +1474,74 @@ class Engine:
             "hint": "edit the YAML to fill ${PARAM_n} values / trim steps, then `aua flow run`",
         }
 
+    def navigate(
+        self,
+        goal: str,
+        *,
+        max_steps: int = 12,
+        allow_destructive: bool = False,
+        until: str | None = None,
+        save_flow: str | None = None,
+    ) -> dict[str, Any]:
+        """Drive to *goal* from scratch with the opt-in planner — the self-improving path.
+
+        No prior map needed: the planner chooses each action; because those actions run
+        through the normal tap/input/… methods, the journey is **recorded into memory**,
+        so a later ``aua goto <that screen>`` replays it deterministically for free. Stop
+        early on ``until`` text. ``save_flow`` also materializes the taken path as a flow.
+        Requires ``planner.enabled`` (this command IS the explicit opt-in).
+        """
+        if not self.factory.is_enabled("planner"):
+            raise UsageError(
+                "navigate needs the planner enabled",
+                hint="set `planner.enabled: true` + the model's API key (e.g. GEMINI_API_KEY)",
+            )
+        mem = self._memory
+        serial = self.device.serial
+        recent_before = len(mem.load_session(serial).recent) if mem else 0
+        res = self.analyze(source="auto")  # perceive + record the starting screen
+        arrived, res = self._drive_with_planner(
+            goal,
+            res=res,
+            max_steps=max_steps,
+            allow_destructive=allow_destructive,
+            until=until,
+        )
+        flow_saved: str | None = None
+        if save_flow and mem is not None:
+            from .flows import Flow, FlowStore, steps_from_recent
+
+            taken = mem.load_session(serial).recent[recent_before:]
+            if taken:
+                steps, params = steps_from_recent(taken)
+                path = FlowStore(self.config.memory).save(
+                    Flow(
+                        name=save_flow,
+                        app=res.screen.package,
+                        description=f"Recorded by `aua navigate`: {goal}",
+                        params=params,
+                        steps=steps,
+                    ),
+                    force=True,
+                )
+                flow_saved = str(path)
+        out: dict[str, Any] = {
+            "ok": arrived,
+            "goal": goal,
+            "arrived": arrived,
+            "final_screen": res.meta.known_screen,
+            "package": res.screen.package,
+            "elements": [e.compact() for e in res.elements],
+            "hint": (
+                "goal reached — the path was recorded; next time use `aua goto` (free/fast)"
+                if arrived
+                else "planner could not confirm the goal — finish manually or refine the goal"
+            ),
+        }
+        if flow_saved:
+            out["flow_saved"] = flow_saved
+        return out
+
     def close(self) -> None:
         """Release the device (and its on-device uiautomator2 server). Idempotent."""
         dev = self._device
