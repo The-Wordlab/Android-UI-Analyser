@@ -100,11 +100,19 @@ class GroundingCfg(_ChainCfg):
     chain: list[str] = Field(default_factory=lambda: ["local_vllm", "gemini"])
 
 
+class PlannerCfg(_ChainCfg):
+    """Optional LLM navigator for goto/flow recovery + `aua navigate` (PRD §7.3)."""
+
+    enabled: bool = False  # opt-in; also needs a per-call --assist (or `aua navigate`)
+    chain: list[str] = Field(default_factory=lambda: ["gemini_flash"])
+
+
 class TimeoutsCfg(BaseModel):
     model_config = ConfigDict(extra="forbid")
     vision_ms: int = 8000  # OCR chain (fast)
     detection_ms: int = 20000  # detection chain (cold model load on per-call CLI can be slow)
     grounding_ms: int = 30000
+    planner_ms: int = 15000  # per planner decision (fast text model)
     action_ms: int = 5000
 
 
@@ -206,6 +214,11 @@ def _default_models() -> dict[str, dict[str, Any]]:
             "api_key_env": "GEMINI_API_KEY",
             "base_url": "https://generativelanguage.googleapis.com/v1beta",
         },
+        "gemini_flash": {
+            "model": "gemini-2.5-flash-lite",
+            "api_key_env": "GEMINI_API_KEY",
+            "base_url": "https://generativelanguage.googleapis.com/v1beta",
+        },
     }
 
 
@@ -220,6 +233,7 @@ class Config(BaseModel):
     ocr: OcrCfg = Field(default_factory=OcrCfg)
     detection: DetectionCfg = Field(default_factory=DetectionCfg)
     grounding: GroundingCfg = Field(default_factory=GroundingCfg)
+    planner: PlannerCfg = Field(default_factory=PlannerCfg)
     timeouts: TimeoutsCfg = Field(default_factory=TimeoutsCfg)
     models: dict[str, dict[str, Any]] = Field(default_factory=_default_models)
     daemon: DaemonCfg = Field(default_factory=DaemonCfg)
@@ -478,6 +492,10 @@ grounding:
   enabled: false                      # opt-in; off by default
   chain: [local_vllm, gemini]
 
+planner:
+  enabled: false                      # opt-in LLM navigator; also needs --assist / `aua navigate`
+  chain: [gemini_flash]
+
 models:
   yolo:         { weights: null, device: mps, conf: 0.25 }   # set weights to enable YOLO
   omniparser:   { device: mps, accept_agpl: false }          # MUST be true to run (AGPL-3.0!)
@@ -487,6 +505,7 @@ models:
   openai:       { model: gpt-5, api_key_env: OPENAI_API_KEY }
   anthropic:    { model: claude-opus-4-8, api_key_env: ANTHROPIC_API_KEY }
   gemini:       { model: gemini-2.5-flash, api_key_env: GEMINI_API_KEY }
+  gemini_flash: { model: gemini-2.5-flash-lite, api_key_env: GEMINI_API_KEY }
 
 daemon:
   enabled: true

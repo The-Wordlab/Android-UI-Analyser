@@ -34,12 +34,13 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 logger = logging.getLogger("android_ui_analyser.providers")
 
-_KINDS = ("ocr", "detection", "grounding")
+_KINDS = ("ocr", "detection", "grounding", "planner")
 _REGISTRY: dict[str, dict[str, type[Provider]]] = {k: {} for k in _KINDS}
 _PROVIDER_PACKAGES: dict[str, str] = {
     "ocr": "android_ui_analyser.providers.ocr",
     "detection": "android_ui_analyser.providers.detection",
     "grounding": "android_ui_analyser.providers.grounding",
+    "planner": "android_ui_analyser.providers.planner",
 }
 _loaded: set[str] = set()
 
@@ -71,6 +72,10 @@ def register_detection(name: str) -> Callable[[type[Provider]], type[Provider]]:
 
 def register_grounding(name: str) -> Callable[[type[Provider]], type[Provider]]:
     return register("grounding", name)
+
+
+def register_planner(name: str) -> Callable[[type[Provider]], type[Provider]]:
+    return register("planner", name)
 
 
 # --------------------------------------------------------------------------- discovery

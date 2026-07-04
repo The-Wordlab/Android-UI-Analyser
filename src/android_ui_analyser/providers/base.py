@@ -6,6 +6,7 @@ Three provider *kinds*, each an abstract base class (a Strategy):
     DetectionProvider.detect(image)         -> list[DetBox]
     GroundingProvider.locate(image, instr)  -> Point | DetBox | None
     GroundingProvider.parse(image)          -> list[DetBox] | None   (optional)
+    PlannerProvider.decide(objective, els)  -> PlannerDecision | None
 
 The engine depends ONLY on these interfaces and on the factory (registry.py). It never
 imports a concrete provider. Adding a model = implement a strategy + register it +
@@ -148,6 +149,28 @@ class Point:
     confidence: float | None = None
 
 
+# The action vocabulary a planner may emit. ``done``/``give-up`` are terminal; the rest
+# name a state-changing action the engine already knows how to perform.
+PLANNER_ACTIONS = frozenset(
+    {"tap", "input", "key", "swipe", "scroll-to", "done", "give-up"}
+)
+
+
+@dataclass(frozen=True)
+class PlannerDecision:
+    """One decision from a planner: the next action toward the objective (or a verdict).
+
+    ``target_id`` is an id **from the element list handed to the planner** — the engine
+    validates it against that set, so the model can never invent an off-screen target.
+    """
+
+    action: str  # one of PLANNER_ACTIONS
+    target_id: int | None = None  # element id for tap/input (must be in the provided set)
+    text: str | None = None  # value for `input`
+    arg: str | None = None  # key name / swipe direction / scroll-to query
+    reason: str | None = None  # short rationale (logs / enriched handoff)
+
+
 class Availability(NamedTuple):
     """Result of ``Provider.is_available()`` — unpacks as ``(ok, reason)``."""
 
@@ -216,6 +239,26 @@ class GroundingProvider(Provider):
         skips it for the vision-parse path.
         """
         return None
+
+
+class PlannerProvider(Provider):
+    kind: ClassVar[str] = "planner"
+
+    @abstractmethod
+    def decide(
+        self,
+        objective: str,
+        elements: list[dict[str, Any]],
+        image: ScreenImage | None = None,
+    ) -> PlannerDecision | None:
+        """Choose the next action toward *objective* given the on-screen *elements*.
+
+        *elements* is a token-light list of ``{id, label, clickable, ...}`` from the
+        current screen; *image* is attached only when the screen is weakly labelled.
+        Returns ``None`` when the provider cannot decide (the chain then advances / the
+        caller hands off) — like the other strategies, this must never raise.
+        """
+        raise NotImplementedError
 
 
 @dataclass
