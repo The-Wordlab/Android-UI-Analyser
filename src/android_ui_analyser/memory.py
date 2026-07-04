@@ -181,6 +181,8 @@ class Deeplink(BaseModel):
     uri: str
     note: str | None = None
     count: int = 1
+    probed: bool = False  # True once actually opened on device (mined links start False)
+    landed: str | None = None  # screen it landed on when last opened (if recognized)
     last_seen: str | None = None
 
 
@@ -789,8 +791,20 @@ class AppMemoryStore:
 
     # -- playbook (durable app-level knowledge the agent reuses) ----------
 
-    def remember_deeplink(self, package: str, uri: str, note: str | None = None) -> None:
-        """Record a deeplink for an app (dedup by uri; bump count on re-use)."""
+    def remember_deeplink(
+        self,
+        package: str,
+        uri: str,
+        note: str | None = None,
+        *,
+        probed: bool = False,
+        landed: str | None = None,
+    ) -> None:
+        """Record a deeplink for an app (dedup by uri; bump count on re-use).
+
+        *probed* marks that it was actually opened on device (mined links start False, so
+        ``explore plan`` can suggest probing them); *landed* is the screen it reached.
+        """
         if not self.cfg.enabled or not uri:
             return
         app = self.load(package) or AppMap(package=package)
@@ -801,9 +815,15 @@ class AppMemoryStore:
                 d.last_seen = now
                 if note:
                     d.note = note
+                if probed:
+                    d.probed = True
+                if landed:
+                    d.landed = landed
                 self.save(app)
                 return
-        app.deeplinks.append(Deeplink(uri=uri, note=note, last_seen=now))
+        app.deeplinks.append(
+            Deeplink(uri=uri, note=note, probed=probed, landed=landed, last_seen=now)
+        )
         self.save(app)
 
     def remember_note(self, package: str, note: str) -> None:

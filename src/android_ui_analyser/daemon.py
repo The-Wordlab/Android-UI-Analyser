@@ -179,6 +179,9 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
         elif cmd == "explore_mine":
             return _result_ok(engine.explore_mine(**args))
 
+        elif cmd == "explore_plan":
+            return _result_ok(engine.explore_plan(**args))
+
         elif cmd == "orient":
             # What the tool already knows about the foreground app (plain dict).
             return _result_ok(engine.orient())

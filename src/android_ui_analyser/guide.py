@@ -63,7 +63,16 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "`aua open \"<uri>\"` fires a deeplink — jump straight to a screen or trigger an app "
         "action (e.g. set a feature flag) instead of tapping through the UI. Far faster than "
         "navigating; the deeplink is remembered in the playbook. Some deeplinks need an app "
-        "restart to take effect — follow with `aua app stop <pkg>` + `aua app launch <pkg>`.",
+        "restart to take effect — follow with `aua app stop <pkg>` + `aua app launch <pkg>`. "
+        "Don't know the app's deeplinks? `aua explore mine <repo> --app <pkg>` harvests them "
+        "from the source once (they show up in `aua about`).",
+    ),
+    (
+        "Index an app you don't know yet",
+        "`aua explore plan` returns a prioritized worklist — mined deeplinks to probe, "
+        "dead-end screens to expand. Run the tasks with normal `aua` commands; the results "
+        "auto-record into the map + playbook, and re-running the plan shows what's left. "
+        "This is how you (the agent) index an app for aua to remember.",
     ),
     (
         "Jump to a known screen in one call",
@@ -196,6 +205,12 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "(a `flow:` step runs a saved flow inline — reuse a shared `login` recipe).",
     ),
     ("open / about / remember", "`open <uri>` deeplink; `about` app playbook; `remember …` teach it"),
+    (
+        "explore",
+        "`mine <repo> --app <pkg>` harvests deeplink shortcuts from source into the "
+        "playbook; `plan` returns a prioritized crawl worklist (probe deeplinks, expand "
+        "dead-end screens) whose results auto-record",
+    ),
     (
         "navigate (opt-in planner)",
         "`<goal>` (natural language), `--until <text>`, `--max-steps N`, "

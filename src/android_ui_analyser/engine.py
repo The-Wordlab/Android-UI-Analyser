@@ -1508,6 +1508,80 @@ class Engine:
             "deeplinks": result.as_dict()["deeplinks"],
         }
 
+    def explore_plan(self, *, package: str | None = None, max_tasks: int = 12) -> dict[str, Any]:
+        """A prioritized exploration worklist for the calling agent (the offline-agent mode).
+
+        Reads the app's map + playbook and returns concrete next actions — probe mined
+        deeplinks (shortcuts) to learn where they land, and expand dead-end screens. The
+        agent runs these with normal `aua` commands; auto-record persists the results, so
+        re-running the plan shows what's left. This is how the agent "explores and hands
+        the result back" for aua to memorize.
+        """
+        from .explore import _is_templated as _is_templated_uri
+
+        mem = self._memory
+        pkg = package or self.current_package()
+        out: dict[str, Any] = {"ok": True, "action": "explore-plan", "package": pkg, "tasks": []}
+        if mem is None or not pkg:
+            out["hint"] = "no memory/package — run on a device with memory enabled"
+            return out
+        app = mem.load(pkg)
+        tasks: list[dict[str, Any]] = []
+        if app is None or (not app.screens and not app.deeplinks):
+            out["known"] = {"screens": 0, "routes": 0, "deeplinks": 0}
+            out["bootstrap"] = (
+                "no map yet — mine deeplinks first (`aua explore mine <repo> --app "
+                f"{pkg}`), then launch + log in (`aua about` for the recipe) and `aua open` "
+                "each concrete deeplink, analyzing after each to seed screens fast."
+            )
+            out["hint"] = "then re-run `aua explore plan`"
+            return out
+        out["known"] = {
+            "screens": len(app.screens),
+            "routes": len(app.routes),
+            "deeplinks": len(app.deeplinks),
+        }
+        # 1) Unprobed, concrete deeplinks — the highest-value: each opens a screen in one hop.
+        for d in app.deeplinks:
+            if d.probed or _is_templated_uri(d.uri):
+                continue
+            tasks.append(
+                {
+                    "kind": "probe_deeplink",
+                    "do": f'aua open "{d.uri}" && aua analyze',
+                    "why": "unprobed deeplink shortcut — record where it lands",
+                }
+            )
+        # 2) Templated deeplinks — need a value; tell the agent to fill it.
+        for d in app.deeplinks:
+            if d.probed or not _is_templated_uri(d.uri):
+                continue
+            tasks.append(
+                {
+                    "kind": "probe_template",
+                    "do": f'fill the placeholder in "{d.uri}", then `aua open` it',
+                    "why": "templated deeplink — a shortcut once you supply the id",
+                }
+            )
+        # 3) Dead-end screens (no outgoing routes) — likely under-explored.
+        outgoing = {e.from_screen for e in app.routes}
+        for name in app.screens:
+            if name not in outgoing:
+                tasks.append(
+                    {
+                        "kind": "expand_screen",
+                        "do": f'aua goto "{name}"; aua analyze; tap each new clickable',
+                        "why": "screen has no recorded routes out — map what it leads to",
+                    }
+                )
+        out["tasks"] = tasks[: max(0, max_tasks)]
+        out["remaining"] = len(tasks)
+        out["hint"] = (
+            "run these (results auto-record), then re-run `aua explore plan` — it shrinks "
+            "as coverage grows. Save durable facts with `aua remember`."
+        )
+        return out
+
     def flow_save(self, name: str, *, last: int = 12, force: bool = False) -> dict[str, Any]:
         """Materialize the session's recent recorded actions into an editable flow file.
 
@@ -1989,7 +2063,7 @@ class Engine:
         if not pkg:
             return
         with contextlib.suppress(Exception):  # playbook is a bonus; never fail the action
-            mem.remember_deeplink(pkg, uri)
+            mem.remember_deeplink(pkg, uri, probed=True)
 
     def wait(
         self,
