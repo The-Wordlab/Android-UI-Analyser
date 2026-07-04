@@ -42,11 +42,28 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "still works without it.",
     ),
     (
+        "Start from the app playbook",
+        "`aua about` prints what the tool already learned about THIS app — a one-line "
+        "description, login **recipes** (e.g. how to log in as a test/full user), useful "
+        "**deeplinks**, and **notes** (quirks, e.g. a dialog to dismiss after login, or that "
+        "the 'Apps' tab is really Tools). Read it first and follow it — it saves you the "
+        "discovery the last run already did. As you learn things, teach it back with "
+        '`aua remember --about "…" | --note "…" | --recipe NAME --note "…" | --deeplink URI --note "…"` '
+        "so the next run starts even more informed.",
+    ),
+    (
         "Use what memory already knows",
         "`aua map` (or `aua map --brief`) prints the app's known screens + routes — but you "
         "usually don't need to call it: every `analyze` already returns `meta.known_screen` plus "
         "inline `meta.known_routes` / `meta.suggested_gotos` / `meta.map_hint`. Act on those "
         'instead of re-exploring. `aua map --find "<goal>"` gives just the route to a target.',
+    ),
+    (
+        "Take shortcuts with deeplinks",
+        "`aua open \"<uri>\"` fires a deeplink — jump straight to a screen or trigger an app "
+        "action (e.g. set a feature flag) instead of tapping through the UI. Far faster than "
+        "navigating; the deeplink is remembered in the playbook. Some deeplinks need an app "
+        "restart to take effect — follow with `aua app stop <pkg>` + `aua app launch <pkg>`.",
     ),
     (
         "Jump to a known screen in one call",
@@ -156,8 +173,10 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "flow",
         "`run <name> [--param K=V] [--file PATH] [--dry-run] [--from-step N] "
         "[--no-allow-destructive] [--assist]`, `save <name> [--last N] [--force]`, "
-        "`list|show|delete`",
+        "`list|show|delete`. Steps incl. `launch_app`/`stop_app`/`open_link`/`goto`/`flow` "
+        "(a `flow:` step runs a saved flow inline — reuse a shared `login` recipe).",
     ),
+    ("open / about / remember", "`open <uri>` deeplink; `about` app playbook; `remember …` teach it"),
     (
         "navigate (opt-in planner)",
         "`<goal>` (natural language), `--until <text>`, `--max-steps N`, "
