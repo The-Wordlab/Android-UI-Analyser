@@ -222,9 +222,22 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
     cfg = engine.config
     if getattr(cfg.daemon, "enabled", False):
         try:
+            from . import __version__
             from . import daemon as daemon_mod
 
-            if daemon_mod.is_running(cfg):
+            ver = daemon_mod.running_version(cfg)
+            # A daemon running OLDER code than this CLI can reject new args (e.g. a kwarg
+            # added since it started) → confusing crashes. On a version mismatch, skip the
+            # daemon and run in-process; a `None` version is a pre-report daemon (trusted).
+            skew = isinstance(ver, str) and ver != __version__
+            if skew:
+                logger.warning(
+                    "daemon runs aua %s but this CLI is %s; using in-process. "
+                    "Restart it: `aua daemon stop && aua daemon start`.",
+                    ver,
+                    __version__,
+                )
+            if ver is not False and not skew:
                 client = daemon_mod.DaemonClient(daemon_mod.socket_path(cfg))
                 cmd = _DAEMON_CMD.get(method, method)
                 resp = client.call(cmd, **kwargs)

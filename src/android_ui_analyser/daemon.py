@@ -97,7 +97,7 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
 
     try:
         if cmd == "ping":
-            return _result_ok("pong")
+            return _result_ok({"pong": True, "version": _aua_version()})
 
         elif cmd == "analyze":
             result: Any = engine.analyze(**args)
@@ -364,13 +364,31 @@ class DaemonClient:
 
     def ping(self) -> bool:
         """Return True if the daemon responds to a ping, False otherwise."""
+        return self.pong_version() is not False
+
+    def pong_version(self) -> str | None | bool:
+        """Ping and return the daemon's aua version: a string, ``None`` (old daemon that
+        predates version reporting), or ``False`` if the daemon is down/unresponsive."""
         try:
             resp = self.call("ping")
-            return bool(resp.get("ok")) and resp.get("result") == "pong"
+            result = resp.get("result")
+            if not resp.get("ok"):
+                return False
+            if result == "pong":  # pre-version-reporting daemon
+                return None
+            if isinstance(result, dict) and result.get("pong"):
+                return result.get("version")
+            return False
         except (OSError, json.JSONDecodeError):
             # A daemon mid-shutdown may accept the connection but send nothing (empty line
             # → JSONDecodeError); treat any non-response as "not running".
             return False
+
+
+def _aua_version() -> str:
+    from . import __version__
+
+    return __version__
 
 
 # --------------------------------------------------------------------------- lifecycle
@@ -381,6 +399,15 @@ def is_running(config: Config) -> bool:
     try:
         with DaemonClient(socket_path(config), timeout=2.0) as client:
             return client.ping()
+    except OSError:
+        return False
+
+
+def running_version(config: Config) -> str | None | bool:
+    """The live daemon's aua version (string / None if unknown / False if down)."""
+    try:
+        with DaemonClient(socket_path(config), timeout=2.0) as client:
+            return client.pong_version()
     except OSError:
         return False
 
