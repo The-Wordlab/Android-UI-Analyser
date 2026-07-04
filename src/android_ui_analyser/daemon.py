@@ -176,6 +176,9 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
             # Autonomous planner-driven navigation — returns a plain dict.
             return _result_ok(engine.navigate(**args))
 
+        elif cmd == "explore_mine":
+            return _result_ok(engine.explore_mine(**args))
+
         elif cmd == "orient":
             # What the tool already knows about the foreground app (plain dict).
             return _result_ok(engine.orient())
