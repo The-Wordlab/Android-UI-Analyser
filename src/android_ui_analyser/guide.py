@@ -72,6 +72,16 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "one call instead of a dozen.",
     ),
     (
+        "Optional: let a fast model recover or explore (opt-in)",
+        "If `planner.enabled` is set (+ an API key like GEMINI_API_KEY), you get two "
+        "extras. (1) On a `goto`/`flow` divergence, add `--assist` and a fast planner LLM "
+        "tries to recover in the same call (dismiss a popup, find the moved element) "
+        "before handing off — the divergence hint tells you when it's worth trying. "
+        "(2) `aua navigate \"<goal>\"` drives to a goal with no prior map AND records the "
+        "path, so the next `aua goto` is a free deterministic replay. It's OFF by default "
+        "and never touches the fast path; destructive taps still need `--allow-destructive`.",
+    ),
+    (
         "Drive by element ID",
         "`aua --format compact analyze` → a list of elements each with an integer `id` + bounds. "
         'Act on the id: `aua tap <id>`, `aua input <id> "text"`, `aua swipe up`, `aua key back`. '
@@ -140,12 +150,18 @@ KEY_FLAGS: list[tuple[str, str]] = [
     (
         "goto",
         "`<goal>` (fuzzy), `--plan` (annotated route, no taps), `--max-steps N`, "
-        "`--allow-destructive`",
+        "`--allow-destructive`, `--assist` (opt-in planner recovery)",
     ),
     (
         "flow",
         "`run <name> [--param K=V] [--file PATH] [--dry-run] [--from-step N] "
-        "[--no-allow-destructive]`, `save <name> [--last N] [--force]`, `list|show|delete`",
+        "[--no-allow-destructive] [--assist]`, `save <name> [--last N] [--force]`, "
+        "`list|show|delete`",
+    ),
+    (
+        "navigate (opt-in planner)",
+        "`<goal>` (natural language), `--until <text>`, `--max-steps N`, "
+        "`--allow-destructive`, `--save-flow <name>` — needs `planner.enabled`",
     ),
     (
         "actions (tap/input/swipe/scroll-to/key/…)",
