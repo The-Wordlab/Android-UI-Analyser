@@ -60,6 +60,12 @@ def _tool_definitions() -> list[types.Tool]:
                     "match": {"type": "string", "enum": match_enum, "default": "contains"},
                     "ignore_case": {"type": "boolean", "default": False},
                     "ocr_fallback": {"type": "boolean", "default": True},
+                    "by": {
+                        "type": "string",
+                        "enum": ["text", "id", "desc"],
+                        "default": "text",
+                        "description": "Match by text, resource-id (finds pruned containers), or desc.",
+                    },
                 },
                 "required": ["text"],
                 "additionalProperties": False,
@@ -284,6 +290,7 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
             match=args.get("match", "contains"),
             ignore_case=args.get("ignore_case", False),
             ocr_fallback=args.get("ocr_fallback", True),
+            by=args.get("by", "text"),
         ).model_dump(mode="json")
     if name == "tap":
         return engine.tap(int(args["id"])).model_dump(mode="json")

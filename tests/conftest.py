@@ -89,6 +89,7 @@ class FakeDevice(Device):
         package: str = "com.test.app",
         activity: str = ".MainActivity",
         text_index: dict[str, Bounds] | None = None,
+        resource_index: dict[str, Bounds] | None = None,
         screenshot_bytes: bytes | None = None,
         screenshots: list[bytes] | None = None,
         app_version: str | None = None,
@@ -101,6 +102,8 @@ class FakeDevice(Device):
         self._pkg = package
         self._act = activity
         self._text_index = text_index or {}
+        # Resource-id → bounds (for by="id" lookups; keys may be a tail or full id).
+        self._resource_index = resource_index or {}
         self._png = screenshot_bytes or make_png(width, height)
         # An optional stream of screenshots (for wait --for-stable tests); the last frame
         # repeats once exhausted.
@@ -165,10 +168,22 @@ class FakeDevice(Device):
         self.calls.append(("open_link", (uri,)))
 
     def find_text(
-        self, text: str, *, match: MatchMode | str = MatchMode.contains, ignore_case: bool = False
+        self,
+        text: str,
+        *,
+        match: MatchMode | str = MatchMode.contains,
+        ignore_case: bool = False,
+        by: str = "text",
     ) -> Bounds | None:
-        self.calls.append(("find_text", (text, str(match), ignore_case)))
+        self.calls.append(("find_text", (text, str(match), ignore_case, by)))
         mode = MatchMode(match)
+        if by == "id":
+            # tail-match against the resource index (keys may be a tail or full id)
+            for key, bounds in self._resource_index.items():
+                tail = key.split("/")[-1]
+                if key == text or tail == text or (mode is MatchMode.contains and text in key):
+                    return bounds
+            return None
         needle = text.lower() if ignore_case else text
         for key, bounds in self._text_index.items():
             hay = key.lower() if ignore_case else key

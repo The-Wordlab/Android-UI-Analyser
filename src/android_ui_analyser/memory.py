@@ -161,6 +161,7 @@ class RouteStep(BaseModel):
     submit: bool = False  # input: fire the IME action after typing
     package: str | None = None  # package the step ran in; None = the journey's origin
     timeout_ms: int | None = None  # wait-for / wait-stable / assert-visible override
+    by: str | None = None  # match target by: text (default) | id (resource-id) | desc
 
 
 class RouteEdge(BaseModel):

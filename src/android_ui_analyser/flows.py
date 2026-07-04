@@ -148,8 +148,14 @@ def _parse_step(item: Any, index: int) -> RouteStep:
     else:
         alias = _ARG_ALIAS[kind]
         kw["arg"] = v.pop(alias, None) or v.pop("arg", None)
+        # scroll_to/wait_for/assert_visible may target a resource-id: `{id: containerX}`.
+        if kw["arg"] is None and kind in ("scroll-to", "wait-for", "assert-visible"):
+            rid = v.pop("id", None)
+            if rid is not None:
+                kw["arg"] = rid
+                kw["by"] = "id"
         if not kw["arg"]:
-            raise _step_error(index, f"{key} needs `{alias}:`")
+            raise _step_error(index, f"{key} needs `{alias}:` (or `id:` for a resource-id)")
     kw["package"] = v.pop("package", None)
     timeout = v.pop("timeout_ms", None)
     if timeout is not None:

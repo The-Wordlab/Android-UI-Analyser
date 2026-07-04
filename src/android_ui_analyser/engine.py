@@ -922,7 +922,7 @@ class Engine:
             elif kind == "scroll-to":
                 if not s.arg:
                     return StepFailure("unsupported_action", i, s), res
-                if not self.scroll_to(s.arg, observe=False).ok:
+                if not self.scroll_to(s.arg, observe=False, by=s.by or "text").ok:
                     return StepFailure("element_not_found", i, s), res
             elif kind == "launch-app":
                 pkg = s.arg or origin_package  # bare launch_app → the flow's own app
@@ -942,7 +942,9 @@ class Engine:
             elif kind == "wait-for":
                 if not s.arg:
                     return StepFailure("unsupported_action", i, s), res
-                if not self.wait(for_=s.arg, timeout_ms=s.timeout_ms or 10000).ok:
+                if not self.wait(
+                    for_=s.arg, timeout_ms=s.timeout_ms or 10000, by=s.by or "text"
+                ).ok:
                     return StepFailure("wait_timeout", i, s), res
                 settle = False  # the wait already absorbed the transition
             elif kind == "wait-stable":
@@ -954,7 +956,7 @@ class Engine:
             elif kind == "assert-visible":
                 if not s.arg:
                     return StepFailure("unsupported_action", i, s), res
-                if not self.has(s.arg, timeout_ms=s.timeout_ms or 0).found:
+                if not self.has(s.arg, timeout_ms=s.timeout_ms or 0, by=s.by or "text").found:
                     return StepFailure("assert_failed", i, s), res
                 reanalyze = False  # pure check, screen unchanged
             elif kind == "goto":
@@ -1688,8 +1690,14 @@ class Engine:
         ocr_fallback: bool = True,
         source: str = "auto",
         timeout_ms: int = 0,
+        by: str = "text",
     ) -> HasResult:
-        """Quick presence check — NOT the full pipeline (PRD §5, §6a T0)."""
+        """Quick presence check — NOT the full pipeline (PRD §5, §6a T0).
+
+        ``by="id"`` matches a resource-id (a bare tail like ``containerChatDetail`` too) —
+        this can confirm containers the parsed element list prunes (Maestro-style
+        ``assertVisible: id:``). OCR fallback only applies to text lookups.
+        """
         mode = MatchMode(match)
         device = self.device
         src = (source or "auto").lower()
@@ -1698,13 +1706,13 @@ class Engine:
         if src in ("auto", "hierarchy"):
             if timeout_ms and timeout_ms > 0:
                 bounds = device.wait_for(
-                    text, match=mode, ignore_case=ignore_case, timeout_ms=timeout_ms
+                    text, match=mode, ignore_case=ignore_case, timeout_ms=timeout_ms, by=by
                 )
             else:
-                bounds = device.find_text(text, match=mode, ignore_case=ignore_case)
+                bounds = device.find_text(text, match=mode, ignore_case=ignore_case, by=by)
             if bounds is not None:
                 return HasResult(found=True, source="hierarchy", bounds=bounds, text=text)
-            if src == "hierarchy":
+            if src == "hierarchy" or by == "id":
                 return HasResult(found=False, source="hierarchy")
 
         # T0→T3: OCR fallback (only on a hierarchy miss)
@@ -1902,9 +1910,12 @@ class Engine:
         match: str = "contains",
         ignore_case: bool = False,
         observe: bool = True,
+        by: str = "text",
     ) -> ActionResult:
         step = self._step("scroll-to", arg=query)
-        found = self.device.scroll_to(query, match=MatchMode(match), ignore_case=ignore_case)
+        found = self.device.scroll_to(
+            query, match=MatchMode(match), ignore_case=ignore_case, by=by
+        )
         self._invalidate_cache()
         self._record_action_safe(step)
         return self._observe(
@@ -1956,6 +1967,7 @@ class Engine:
         match: str = "contains",
         ignore_case: bool = False,
         observe: bool = False,
+        by: str = "text",
     ) -> ActionResult:
         device = self.device
         if idle:
@@ -1964,7 +1976,7 @@ class Engine:
         if not for_:
             raise UsageError("wait needs --for <text> or --idle")
         found = device.wait_for(
-            for_, match=MatchMode(match), ignore_case=ignore_case, timeout_ms=timeout_ms
+            for_, match=MatchMode(match), ignore_case=ignore_case, timeout_ms=timeout_ms, by=by
         )
         result = ActionResult(
             ok=found is not None,

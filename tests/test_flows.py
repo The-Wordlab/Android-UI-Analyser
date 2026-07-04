@@ -641,3 +641,67 @@ def test_flow_composition_missing_sub_flow_diverges(tmp_path) -> None:
     out = eng.flow_run(file=str(f))
     assert out["ok"] is False and out["code"] == "route_unknown"
     assert out["failed_step"]["display"] == "flow nonexistent"
+
+
+# --------------------------------------------------------------- resource-id matching (by=id)
+
+
+def test_has_by_id_finds_pruned_container(tmp_path) -> None:
+    # A container that the parsed element list prunes is still verifiable via by="id"
+    # (u2 queries the raw tree; the FakeDevice mimics this with a resource_index).
+    from android_ui_analyser.engine import Engine
+    from android_ui_analyser.providers.registry import ProviderFactory
+    from conftest import FakeDevice
+
+    cfg = make_config(daemon={"enabled": False})
+    dev = FakeDevice(
+        hierarchy_xml=HOME,
+        package=P,
+        resource_index={"co.thewordlab.luzia:id/containerChatDetail": (0, 0, 100, 100)},
+    )
+    eng = Engine(cfg, device=dev, factory=ProviderFactory(cfg))
+    # by text: absent
+    assert eng.has("containerChatDetail").found is False
+    # by id (bare tail): found
+    r = eng.has("containerChatDetail", by="id")
+    assert r.found is True and r.source == "hierarchy"
+
+
+def test_flow_assert_visible_by_id(tmp_path) -> None:
+    text = (
+        "name: t\napp: co.thewordlab.luzia\nsteps:\n"
+        "  - assert_visible: {id: containerChatDetail}\n"
+        "  - wait_for: {id: inputBar, timeout_ms: 2000}\n"
+    )
+    flow = parse_flow_yaml(text, name="t")
+    assert flow.steps[0].kind == "assert-visible" and flow.steps[0].by == "id"
+    assert flow.steps[0].arg == "containerChatDetail"
+    assert flow.steps[1].kind == "wait-for" and flow.steps[1].by == "id"
+
+    from android_ui_analyser.engine import Engine
+    from android_ui_analyser.providers.registry import ProviderFactory
+    from conftest import FakeDevice
+
+    cfg = make_config(memory={"dir": str(tmp_path / "home")}, daemon={"enabled": False})
+    dev = FakeDevice(
+        hierarchy_xml=HOME,
+        package=P,
+        resource_index={"x:id/containerChatDetail": (0, 0, 9, 9), "x:id/inputBar": (0, 0, 9, 9)},
+    )
+    eng = Engine(cfg, device=dev, factory=ProviderFactory(cfg))
+    f = tmp_path / "t.yaml"
+    f.write_text(text, encoding="utf-8")
+    out = eng.flow_run(file=str(f))
+    assert out["ok"] is True, out
+
+
+def test_cli_has_by_id(tmp_path, monkeypatch) -> None:
+    import android_ui_analyser.engine as engine_mod
+    from conftest import FakeDevice
+
+    dev = FakeDevice(hierarchy_xml=HOME, package=P, resource_index={"x:id/containerHome": (0, 0, 9, 9)})
+    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
+    ok = runner.invoke(app, ["has", "containerHome", "--by", "id"])
+    assert ok.exit_code == 0, ok.stderr
+    miss = runner.invoke(app, ["has", "containerHome"])  # by text → absent
+    assert miss.exit_code == 1
