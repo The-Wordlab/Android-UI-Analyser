@@ -198,7 +198,8 @@ def _tool_definitions() -> list[types.Tool]:
             description="Drive to a remembered screen via the learned app map: replays "
             "the recorded steps of each route edge (including cross-app auth legs) and "
             "verifies each hop; hands back remaining steps on divergence. plan=true "
-            "previews without acting.",
+            "previews without acting. assist=true lets the opt-in planner recover a "
+            "divergence (needs planner.enabled).",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -209,6 +210,7 @@ def _tool_definitions() -> list[types.Tool]:
                     "plan": {"type": "boolean", "default": False},
                     "max_steps": {"type": "integer", "default": 8},
                     "allow_destructive": {"type": "boolean", "default": False},
+                    "assist": {"type": "boolean", "default": False},
                 },
                 "required": ["goal"],
                 "additionalProperties": False,
@@ -218,7 +220,8 @@ def _tool_definitions() -> list[types.Tool]:
             name="flow_run",
             description="Replay a saved flow (whole journey — launch, taps, waits, "
             "asserts, cross-app auth) in one call; on divergence returns the failing "
-            "step index + remaining steps, resumable via from_step.",
+            "step index + remaining steps, resumable via from_step. assist=true lets the "
+            "opt-in planner clear a blocker and resume (needs planner.enabled).",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -231,8 +234,27 @@ def _tool_definitions() -> list[types.Tool]:
                     "dry_run": {"type": "boolean", "default": False},
                     "from_step": {"type": "integer", "default": 0},
                     "allow_destructive": {"type": "boolean", "default": True},
+                    "assist": {"type": "boolean", "default": False},
                 },
                 "required": ["name"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="navigate",
+            description="Drive to a natural-language goal with the opt-in planner LLM "
+            "(needs planner.enabled), recording the path so a later goto replays it for "
+            "free. until=<text> stops deterministically; save_flow saves the path.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "goal": {"type": "string", "description": "e.g. 'open the image generator'."},
+                    "until": {"type": "string"},
+                    "max_steps": {"type": "integer", "default": 12},
+                    "allow_destructive": {"type": "boolean", "default": False},
+                    "save_flow": {"type": "string"},
+                },
+                "required": ["goal"],
                 "additionalProperties": False,
             },
         ),
@@ -315,6 +337,7 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
             plan=args.get("plan", False),
             max_steps=int(args.get("max_steps", 8)),
             allow_destructive=args.get("allow_destructive", False),
+            assist=args.get("assist", False),
         )
     if name == "flow_run":
         return engine.flow_run(
@@ -323,6 +346,15 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
             dry_run=args.get("dry_run", False),
             from_step=int(args.get("from_step", 0)),
             allow_destructive=args.get("allow_destructive", True),
+            assist=args.get("assist", False),
+        )
+    if name == "navigate":
+        return engine.navigate(
+            args["goal"],
+            until=args.get("until"),
+            max_steps=int(args.get("max_steps", 12)),
+            allow_destructive=args.get("allow_destructive", False),
+            save_flow=args.get("save_flow"),
         )
     if name == "list_devices":
         return [d.model_dump(mode="json") for d in engine.list_devices()]
