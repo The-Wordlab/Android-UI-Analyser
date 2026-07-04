@@ -18,7 +18,7 @@ Supported commands
 ------------------
 ping, analyze, has, inspect, screenshot, tap, long_press, input, clear,
 swipe, scroll_to, key, wait, wait_stable, memory_update, goto, flow_run,
-flow_save, orient, list_devices, app
+flow_save, navigate, orient, list_devices, app
 """
 
 from __future__ import annotations
@@ -168,6 +168,10 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
         elif cmd == "flow_save":
             return _result_ok(engine.flow_save(**args))
 
+        elif cmd == "navigate":
+            # Autonomous planner-driven navigation — returns a plain dict.
+            return _result_ok(engine.navigate(**args))
+
         elif cmd == "orient":
             # What the tool already knows about the foreground app (plain dict).
             return _result_ok(engine.orient())
@@ -186,8 +190,8 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
                 f"unknown command: {cmd!r}",
                 hint="Valid commands: ping, analyze, has, inspect, screenshot, "
                 "tap, long_press, input, clear, swipe, scroll_to, key, wait, "
-                "wait_stable, memory_update, goto, flow_run, flow_save, orient, "
-                "list_devices, app",
+                "wait_stable, memory_update, goto, flow_run, flow_save, navigate, "
+                "orient, list_devices, app",
             )
 
     except AuaError as exc:
