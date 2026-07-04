@@ -78,6 +78,7 @@ def test_mcp_lists_core_tools() -> None:
         "wait_stable",
         "goto",
         "flow_run",
+        "navigate",
         "list_devices",
     } <= set(names)
 
@@ -192,3 +193,36 @@ def test_mcp_flow_run_dry_run_roundtrip(tmp_path) -> None:  # type: ignore[no-un
 
     data = anyio.run(run)
     assert data["ok"] and data["dry_run"] and data["steps"][0]["step"] == "tap 'Continue'"
+
+
+def test_mcp_navigate_requires_planner(monkeypatch) -> None:
+    # navigate without planner.enabled → structured usage error, not a crash.
+    from android_ui_analyser.engine import Engine
+
+    device = FakeDevice(hierarchy_xml=HIERARCHY_XML)
+    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: device)
+    server = build_server(Engine(make_config()))
+
+    async def run() -> dict:
+        async with create_connected_server_and_client_session(server) as client:
+            result = await client.call_tool("navigate", {"goal": "open images"})
+            return json.loads(_first_text(result))
+
+    data = anyio.run(run)
+    assert data["error"]["code"] == "usage"
+
+
+def test_mcp_goto_accepts_assist_param() -> None:
+    # The assist param is accepted by the schema (memory disabled → route_unknown, no crash).
+    from android_ui_analyser.engine import Engine
+
+    cfg = make_config(memory={"enabled": False})
+    server = build_server(Engine(cfg, device=FakeDevice(hierarchy_xml=HIERARCHY_XML)))
+
+    async def run() -> dict:
+        async with create_connected_server_and_client_session(server) as client:
+            result = await client.call_tool("goto", {"goal": "x", "assist": True})
+            return json.loads(_first_text(result))
+
+    data = anyio.run(run)
+    assert "error" in data  # memory disabled → usage error, but the param was accepted
