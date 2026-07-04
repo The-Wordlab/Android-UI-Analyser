@@ -996,7 +996,7 @@ def _render_doctor_pretty(report: dict[str, Any]) -> str:
     lines.append("")
     lines.append("Providers:")
     providers = report.get("providers", {})
-    for kind in ("ocr", "detection", "grounding"):
+    for kind in ("ocr", "detection", "grounding", "planner"):
         items = providers.get(kind, [])
         lines.append(f"  {kind}:")
         if not items:

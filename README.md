@@ -322,6 +322,25 @@ aua memory update --screen login   # rename a badly-auto-named screen
 
 **Privacy:** only the durable skeleton is stored (screen names, routes, stable elements). Dynamic lists are kept as a *shape*, and `EditText` values / secrets / PII are redacted (`<filled>` / `<redacted>`) — which is also why auto-learned edges never contain typed text, and why an account row may need one manual tap during replay.
 
+### Optional: LLM assist (off by default)
+
+Everything above is fully deterministic — no model runs during navigation. If you opt in, a **fast planner LLM** (default Gemini Flash Lite) plugs into the *edges* of that core to cut agent iterations further. It's off unless you enable it **and** ask for it:
+
+```yaml
+planner:
+  enabled: true            # off by default; also needs the model's API key (GEMINI_API_KEY)
+  chain: [gemini_flash]
+```
+
+```bash
+aua goto "onboarding" --assist      # on a divergence, the planner tries to recover in-call
+aua flow run reset --assist         # dismiss an unexpected popup mid-flow, then resume
+aua navigate "open the image generator"          # drive to a goal with NO prior map…
+aua navigate "reach checkout" --save-flow checkout   # …and record it as a reusable flow
+```
+
+Two roles: (1) **recovery** — when `goto`/`flow` diverge (an "Allow notifications?" popup, an A/B modal, a moved button), `--assist` lets the planner clear the blocker and continue in the same call instead of handing the whole screen back to you; the un-assisted handoff hint tells you when it's worth adding. (2) **`aua navigate "<goal>"`** — autonomous, map-free navigation that **records the path into memory**, so the next `aua goto <that screen>` is a free, deterministic replay (the expensive run happens once). The planner reads the compact element list (a cheap text call; a screenshot is attached only on unlabeled screens), may only act on an on-screen element, is bounded by `--max-steps`, and its taps still obey the destructive guard — so it never wanders into Delete/Pay without `--allow-destructive`.
+
 ### Tuning
 
 ```yaml
@@ -425,7 +444,15 @@ aua config path          # print the resolved config file path
 | `anthropic` | Commercial | `anthropic` | Claude vision; key via `ANTHROPIC_API_KEY` |
 | `gemini` | Commercial | `gemini` | Gemini vision; key via `GEMINI_API_KEY` |
 
-**Default config is commercially licensable.** No AGPL or research-only component is active out of the box. OmniParser requires explicit `accept_agpl: true`.
+### Planner (opt-in, `planner.enabled: false` by default)
+
+The fast LLM behind `--assist` and `aua navigate` (see [Optional: LLM assist](#optional-llm-assist-off-by-default)). Text-first (the element list rides in the prompt; a screenshot is attached only on unlabeled screens).
+
+| Provider | License | Config key | Notes |
+|---|---|---|---|
+| `gemini_flash` | Commercial | `gemini_flash` | Default; Gemini Flash Lite, key via `GEMINI_API_KEY`. Swap the `planner.chain` for any provider you prefer. |
+
+**Default config is commercially licensable.** No AGPL or research-only component is active out of the box. OmniParser requires explicit `accept_agpl: true`; grounding and the planner are off until you enable them.
 
 ---
 

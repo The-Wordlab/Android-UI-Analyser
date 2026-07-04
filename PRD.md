@@ -142,7 +142,8 @@ Global options (apply to all commands; override config):
 ### Memory / app map (§6b)
 - `aua map [--app <pkg>] [--brief] [--screen <name>] [--depth N] [--find "<goal>"] [--json]` → print the app's map. **With no query it prints the WHOLE app as a compact text tree** (every known screen, what's on it, routes between them) — not just a search result. `--brief` = skeleton only (screen tree + routes, smallest — load at session start); default = screens + key elements + routes; `--screen`/`--depth` drill into one screen; `--find "image"` returns just the screen(s) + route to a target. The agent reads this at session start to know the layout before navigating.
 - `aua goto "<goal>" [--plan] [--max-steps N] [--allow-destructive]` → the navigation autopilot: resolve the (fuzzy) goal against the map, walk the shortest route from the current screen, and **replay each edge's recorded steps** (resource-id selector first, then label), verifying `known_screen` per hop. Cross-app auth legs (edges through `memory.transit_packages`) replay end-to-end with package-aware perception; steps matching `memory.destructive_labels` are refused without `--allow-destructive`. On divergence it exits `1` with the failing step, the remaining steps, and the current elements; a re-run **resumes**, even stranded mid-auth. `--plan` prints the annotated route (steps / replayable / legacy / destructive) without acting.
-- `aua flow run <name> [--param K=V]… [--file PATH] [--dry-run] [--from-step N] [--no-allow-destructive]` / `aua flow save <name> [--last N] [--force]` / `aua flow list|show|delete` → **flows**: Maestro-style YAML journeys under `<memory.dir>/flows/`, authored directly or materialized from the session's recent actions (typed values become required `${PARAM_n}` placeholders — never persisted). `flow run` replays the whole journey (launch, taps, input with `${PARAM}` substitution, key/swipe/scroll, waits, asserts, `goto:` steps, cross-package legs) through the same executor as `goto`, returning a resumable step index on divergence. Flows are deliberate authored intent → destructive steps allowed by default.
+- `aua flow run <name> [--param K=V]… [--file PATH] [--dry-run] [--from-step N] [--no-allow-destructive] [--assist]` / `aua flow save <name> [--last N] [--force]` / `aua flow list|show|delete` → **flows**: Maestro-style YAML journeys under `<memory.dir>/flows/`, authored directly or materialized from the session's recent actions (typed values become required `${PARAM_n}` placeholders — never persisted). `flow run` replays the whole journey (launch, taps, input with `${PARAM}` substitution, key/swipe/scroll, waits, asserts, `goto:` steps, cross-package legs) through the same executor as `goto`, returning a resumable step index on divergence. Flows are deliberate authored intent → destructive steps allowed by default.
+- `aua navigate "<goal>" [--until TEXT] [--max-steps N] [--allow-destructive] [--save-flow NAME]` → **opt-in autonomous navigation** (§7.3 planner; requires `planner.enabled`). A fast LLM drives to a natural-language goal with no prior map, recording the path into memory so a later `aua goto` replays it deterministically (the self-improvement flywheel); `--save-flow` also materializes it as a flow. `goto`/`flow run` gain `--assist` to invoke the same planner for one-call divergence recovery.
 - `aua memory show|path|update|forget [--app <pkg>] [--screen <name>]` → inspect / locate / force-record (or rename) the current screen / clear. Recording is automatic by default (§6b).
 
 ### Agent guide (self-documentation)
@@ -360,6 +361,9 @@ stderr) and advances to the next; if all fail it raises a `ProviderError` (exit 
 - `DetectionProvider.detect(image) -> list[Box{bounds, label?, interactable?, confidence}]`
 - `GroundingProvider.locate(image, instruction) -> Point|Box` and/or
   `GroundingProvider.parse(image) -> list[Element]` (for VLMs that can do full parsing)
+- `PlannerProvider.decide(objective, elements, image?) -> PlannerDecision{action, target_id?, text?, arg?}`
+  — an LLM navigator that picks the next action (or `done`/`give-up`) from a compact
+  element list (image attached only on weakly-labelled screens).
 
 Each provider declares `name`, `is_available() -> (bool, reason)` (checks deps,
 platform, keys, endpoint), and reads its settings from the resolved config.
@@ -389,6 +393,15 @@ platform, keys, endpoint), and reads its settings from the resolved config.
 - Commercial providers send the screenshot + a strict prompt instructing the model to
   return **only** JSON (element list or a single `{id|point|box}`); responses are
   parsed defensively (strip code fences, validate against the schema).
+
+**Planner** (optional; off by default — powers `--assist` + `aua navigate`, §6b)
+- `gemini_flash` — Gemini Flash Lite (`GEMINI_API_KEY`); the default. Given a goal + the
+  compact on-screen element list (text-only; a screenshot is attached only when the
+  screen is weakly labelled), it returns the next action to take. The `id` it may target
+  is validated against the provided set (prompt-injection guard), its taps obey the
+  destructive guard, and it is bounded by a per-recovery step cap. Never on the escalation
+  ladder and never invoked on the happy path — gated by `planner.enabled` **and** an
+  explicit per-call opt-in (`--assist`, or the `aua navigate` command).
 
 ### 7.3 Adding a provider
 Document (in README) the contract: subclass the relevant base, register via an entry
@@ -463,6 +476,9 @@ detection:
 grounding:
   enabled: false                       # opt-in
   chain: [local_vllm, gemini]
+planner:
+  enabled: false                       # opt-in LLM navigator (--assist / `aua navigate`)
+  chain: [gemini_flash]
 models:
   yolo:        { weights: "~/models/ui-yolo.pt", device: mps, conf: 0.25 }
   omniparser:  { device: mps, accept_agpl: false }   # must be true to actually run
@@ -472,6 +488,7 @@ models:
   openai:      { model: "gpt-5", api_key_env: OPENAI_API_KEY }
   anthropic:   { model: "claude-opus-4-8", api_key_env: ANTHROPIC_API_KEY }
   gemini:      { model: "gemini-2.5-pro", api_key_env: GEMINI_API_KEY }
+  gemini_flash:{ model: "gemini-2.5-flash-lite", api_key_env: GEMINI_API_KEY }
 daemon:
   enabled: true
   socket: "~/.cache/android-ui-analyser/daemon.sock"
