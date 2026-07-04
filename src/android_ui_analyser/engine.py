@@ -1968,6 +1968,7 @@ class Engine:
         ignore_case: bool = False,
         observe: bool = False,
         by: str = "text",
+        absent: bool = False,
     ) -> ActionResult:
         device = self.device
         if idle:
@@ -1975,8 +1976,24 @@ class Engine:
             return self._observe(ActionResult(ok=True, action="wait", detail="idle"), observe)
         if not for_:
             raise UsageError("wait needs --for <text> or --idle")
+        mode = MatchMode(match)
+        if absent:
+            # Wait until the target is NO LONGER present (loading spinners, transient
+            # dialogs) — Maestro's `notVisible`. ok=True once it's gone.
+            deadline = time.monotonic() + timeout_ms / 1000.0
+            gone = False
+            while True:
+                if device.find_text(for_, match=mode, ignore_case=ignore_case, by=by) is None:
+                    gone = True
+                    break
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.2)
+            return self._observe(
+                ActionResult(ok=gone, action="wait", detail=f"absent:{for_}"), observe
+            )
         found = device.wait_for(
-            for_, match=MatchMode(match), ignore_case=ignore_case, timeout_ms=timeout_ms, by=by
+            for_, match=mode, ignore_case=ignore_case, timeout_ms=timeout_ms, by=by
         )
         result = ActionResult(
             ok=found is not None,
@@ -1984,11 +2001,13 @@ class Engine:
             detail=for_,
             target=list(found) if found else None,
         )
-        # `--observe` returns the settled screen with fresh ids — so the agent can act on
-        # what it waited for without a separate `analyze` round-trip.
-        return self._observe(result, observe and found is not None)
+        # `--observe` returns the screen with fresh ids so the agent acts without a separate
+        # `analyze` — attached even on a MISS, so a failed wait is diagnosable in one call.
+        return self._observe(result, observe)
 
-    def app(self, action: str, *, package: str | None = None) -> ActionResult:
+    def app(
+        self, action: str, *, package: str | None = None, activity: str | None = None
+    ) -> ActionResult:
         device = self.device
         a = action.lower()
         if a in ("foreground", "current"):
@@ -1997,9 +2016,12 @@ class Engine:
         if a == "launch":
             if not package:
                 raise UsageError("app launch needs a package name")
-            device.launch_app(package)
+            # --activity pins the entry Activity — some builds have multiple launcher
+            # activities (e.g. a Dev Tools menu) and default resolution is nondeterministic.
+            device.launch_app(package, activity=activity)
             self._invalidate_cache()
-            return ActionResult(ok=True, action="app-launch", detail=package)
+            detail = f"{package}/{activity}" if activity else package
+            return ActionResult(ok=True, action="app-launch", detail=detail)
         if a == "stop":
             if not package:
                 raise UsageError("app stop needs a package name")

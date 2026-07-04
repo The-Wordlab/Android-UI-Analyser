@@ -679,8 +679,11 @@ def wait(
         help="Also return the (settled) screen with fresh ids — act on it without a re-analyze.",
     ),
     by: str = typer.Option("text", "--by", help="--for match by: text (default) | id | desc."),
+    absent: bool = typer.Option(
+        False, "--absent", help="With --for: wait until it DISAPPEARS (loading spinners, dialogs)."
+    ),
 ) -> None:
-    """Wait for text to appear, for the UI to go idle, or for the screen to settle.
+    """Wait for text to appear (or with ``--absent`` disappear), for idle, or for settle.
 
     ``--for-stable`` polls cheap screenshots (a perceptual-hash "settled" check — no OCR,
     no hierarchy parse; works on opaque screens) and returns once the screen stops changing
@@ -715,6 +718,7 @@ def wait(
                 ignore_case=ignore_case,
                 observe=observe,
                 by=by,
+                absent=absent,
             ),
             fmt,
         )
@@ -832,11 +836,21 @@ def app_cmd(
     ctx: typer.Context,
     action: str = typer.Argument(..., metavar="ACTION", help="foreground|launch|stop|current."),
     package: str | None = typer.Argument(None, metavar="[PKG]", help="Package for launch/stop."),
+    activity: str | None = typer.Option(
+        None,
+        "--activity",
+        help="launch: pin the entry Activity (e.g. .LaunchActivity) on multi-launcher builds.",
+    ),
 ) -> None:
-    """Inspect or control the foreground app."""
+    """Inspect or control the foreground app.
+
+    Some dev builds have several launcher activities (a Dev Tools menu next to the real
+    entry), so a bare `launch` opens the wrong one nondeterministically — pass
+    ``--activity`` to pin it.
+    """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(engine.app(action, package=package), fmt)
+        _emit(engine.app(action, package=package, activity=activity), fmt)
 
     _run(ctx, go)
 

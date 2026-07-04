@@ -158,8 +158,8 @@ class FakeDevice(Device):
     def press(self, key: str) -> None:
         self.calls.append(("press", (key,)))
 
-    def launch_app(self, package: str) -> None:
-        self.calls.append(("launch_app", (package,)))
+    def launch_app(self, package: str, *, activity: str | None = None) -> None:
+        self.calls.append(("launch_app", (package,) if activity is None else (package, activity)))
 
     def stop_app(self, package: str) -> None:
         self.calls.append(("stop_app", (package,)))

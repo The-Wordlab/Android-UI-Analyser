@@ -155,3 +155,48 @@ def test_cli_wait_accepts_timeout_ms_alias(monkeypatch: pytest.MonkeyPatch) -> N
     # --timeout-ms is accepted as an alias for --timeout (both are ms).
     r = runner.invoke(app, ["wait", "--for", "Continue", "--timeout-ms", "1500"])
     assert r.exit_code == 0, r.stderr
+
+
+# --------------------------------------------------------------- batch-3 fixes
+
+
+def test_wait_absent_returns_when_gone() -> None:
+    # find_text returns None (nothing in text_index) → the target is already absent.
+    dev = FakeDevice(hierarchy_xml=_XML)
+    eng = _engine(dev)
+    res = eng.wait(for_="Loading", timeout_ms=500, absent=True)
+    assert res.ok is True and res.detail == "absent:Loading"
+
+
+def test_wait_absent_times_out_while_present() -> None:
+    dev = FakeDevice(hierarchy_xml=_XML, text_index={"Loading": (0, 0, 50, 50)})
+    eng = _engine(dev)
+    res = eng.wait(for_="Loading", timeout_ms=300, absent=True)
+    assert res.ok is False  # still present → not gone within the timeout
+
+
+def test_wait_observe_attaches_screen_even_on_miss() -> None:
+    # A failed wait still returns the current screen so the agent can diagnose in one call.
+    dev = FakeDevice(hierarchy_xml=_XML)  # "Nope" is not in the tree
+    eng = _engine(dev)
+    res = eng.wait(for_="Nope", timeout_ms=200, observe=True)
+    assert res.ok is False and res.observation is not None
+
+
+def test_app_launch_activity_threads_to_device() -> None:
+    dev = FakeDevice(hierarchy_xml=_XML, package="com.x")
+    eng = _engine(dev)
+    eng.app("launch", package="com.x", activity=".LaunchActivity")
+    assert ("launch_app", ("com.x", ".LaunchActivity")) in dev.calls
+    eng.app("launch", package="com.x")  # bare launch keeps the old 1-tuple shape
+    assert ("launch_app", ("com.x",)) in dev.calls
+
+
+def test_cli_wait_absent_and_app_activity(monkeypatch: pytest.MonkeyPatch) -> None:
+    dev = FakeDevice(hierarchy_xml=_XML, package="com.x")
+    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
+    r = runner.invoke(app, ["wait", "--for", "Loading", "--absent", "--timeout", "200"])
+    assert r.exit_code == 0, r.stderr  # already absent → ok
+    r2 = runner.invoke(app, ["app", "launch", "com.x", "--activity", ".LaunchActivity"])
+    assert r2.exit_code == 0, r2.stderr
+    assert ("launch_app", ("com.x", ".LaunchActivity")) in dev.calls
