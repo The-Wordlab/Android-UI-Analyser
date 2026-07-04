@@ -520,3 +520,74 @@ def test_v2_map_without_playbook_loads(tmp_path) -> None:
     idx.write_text(json.dumps(data))
     app = store.load(P)
     assert app is not None and app.deeplinks == [] and app.description is None
+
+
+# --------------------------------------------------------------- playbook surfacing
+
+
+def test_render_map_shows_playbook(tmp_path) -> None:
+    from android_ui_analyser.memory import render_map
+
+    store = _store(tmp_path)
+    store.record_screen(package=P, elements=_elements(HOME), name_hint="home")
+    store.set_description(P, "Luzia AI assistant")
+    store.remember_recipe(P, "login_full", "tap 'Login with test user'")
+    store.remember_deeplink(P, "luzia-test://set-flags?x=a", note="set feature flags then restart")
+    store.remember_note(P, "the Apps tab is bottomBarTools (Tools=Apps)")
+    text = render_map(store.load(P))
+    assert "## Playbook" in text
+    assert "Luzia AI assistant" in text
+    assert "recipe `login_full`" in text
+    assert "luzia-test://set-flags" in text
+    assert "Tools=Apps" in text
+
+
+def test_orient_surfaces_playbook(tmp_path) -> None:
+    from android_ui_analyser.engine import Engine
+    from android_ui_analyser.providers.registry import ProviderFactory
+    from conftest import FakeDevice
+
+    cfg = make_config(memory={"dir": str(tmp_path / "home")}, daemon={"enabled": False})
+    store = AppMemoryStore(cfg.memory)
+    store.set_description(P, "Luzia")
+    store.remember_recipe(P, "login_full", "tap testUserLogin")
+    store.remember_deeplink(P, "luzia-test://set-flags?x=a", note="flags")
+    dev = FakeDevice(hierarchy_xml=HOME, package=P)
+    eng = Engine(cfg, device=dev, factory=ProviderFactory(cfg))
+    out = eng.orient()
+    assert out["known"] is True
+    assert out["description"] == "Luzia"
+    assert out["recipes"]["login_full"] == "tap testUserLogin"
+    assert out["deeplinks"][0]["uri"] == "luzia-test://set-flags?x=a"
+
+
+def test_cli_remember_and_about(tmp_path, monkeypatch) -> None:
+    import android_ui_analyser.engine as engine_mod
+    from conftest import FakeDevice
+
+    dev = FakeDevice(hierarchy_xml=HOME, package=P)
+    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
+
+    r = runner.invoke(
+        app, ["remember", "--app", P, "--recipe", "login_full", "--note", "tap testUserLogin"]
+    )
+    assert r.exit_code == 0, r.stderr
+    assert json.loads(r.stdout)["saved"] == ["recipe:login_full"]
+
+    r2 = runner.invoke(app, ["remember", "--app", P, "--deeplink", "luzia-test://x", "--note", "z"])
+    assert r2.exit_code == 0
+
+    about = runner.invoke(app, ["--format", "compact", "about", "--app", P])
+    assert about.exit_code == 0
+    data = json.loads(about.stdout)
+    assert data["recipes"]["login_full"] == "tap testUserLogin"
+    assert data["deeplinks"][0]["uri"] == "luzia-test://x"
+
+
+def test_cli_remember_recipe_requires_note(tmp_path, monkeypatch) -> None:
+    import android_ui_analyser.engine as engine_mod
+    from conftest import FakeDevice
+
+    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: FakeDevice(package=P))
+    r = runner.invoke(app, ["remember", "--app", P, "--recipe", "x"])
+    assert r.exit_code != 0
