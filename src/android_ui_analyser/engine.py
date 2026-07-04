@@ -923,9 +923,20 @@ class Engine:
                 if not self.scroll_to(s.arg, observe=False).ok:
                     return StepFailure("element_not_found", i, s), res
             elif kind == "launch-app":
+                pkg = s.arg or origin_package  # bare launch_app → the flow's own app
+                if not pkg:
+                    return StepFailure("unsupported_action", i, s), res
+                self.app("launch", package=pkg)
+            elif kind == "stop-app":
+                pkg = s.arg or origin_package
+                if not pkg:
+                    return StepFailure("unsupported_action", i, s), res
+                self.app("stop", package=pkg)
+                reanalyze = False  # app is gone; nothing to perceive until relaunch
+            elif kind == "open-link":
                 if not s.arg:
                     return StepFailure("unsupported_action", i, s), res
-                self.app("launch", package=s.arg)
+                self.open_link(s.arg, observe=False)
             elif kind == "wait-for":
                 if not s.arg:
                     return StepFailure("unsupported_action", i, s), res
@@ -1858,6 +1869,29 @@ class Engine:
         self._invalidate_cache()
         self._record_action_safe(step)
         return self._observe(ActionResult(ok=True, action="key", detail=name), observe)
+
+    def open_link(self, uri: str, *, observe: bool = True) -> ActionResult:
+        """Open a deeplink URI (jump straight to a screen / trigger an app action).
+
+        A latency shortcut over tapping through the UI. The deeplink is remembered in the
+        app's playbook (§6b) so it can be suggested next time.
+        """
+        step = self._step("open-link", arg=uri)
+        self.device.open_link(uri)
+        self._invalidate_cache()
+        self._record_action_safe(step)
+        self._remember_deeplink_safe(uri)
+        return self._observe(ActionResult(ok=True, action="open-link", detail=uri), observe)
+
+    def _remember_deeplink_safe(self, uri: str) -> None:
+        mem = self._memory
+        if mem is None or self._device is None:
+            return
+        pkg = self._cached_package() or self.current_package()
+        if not pkg:
+            return
+        with contextlib.suppress(Exception):  # playbook is a bonus; never fail the action
+            mem.remember_deeplink(pkg, uri)
 
     def wait(
         self,

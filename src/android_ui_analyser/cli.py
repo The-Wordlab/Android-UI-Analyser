@@ -615,6 +615,27 @@ def key(
 
 
 @app.command()
+def open(  # noqa: A001 - matches the user-facing verb `aua open`
+    ctx: typer.Context,
+    uri: str = typer.Argument(..., help="Deeplink URI, e.g. 'luzia-test://set-flags?foo=a'."),
+    observe: bool = typer.Option(
+        True, "--observe/--no-observe", help="Also return the screen after opening."
+    ),
+) -> None:
+    """Open a deeplink — jump straight to a screen or trigger an app action (latency shortcut).
+
+    The deeplink is remembered in the app's playbook (`aua map`) so it can be reused. Many
+    deeplinks (e.g. setting feature flags) need an app restart to take effect — follow with
+    `aua app stop <pkg>` + `aua app launch <pkg>` if the change doesn't appear.
+    """
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(_route(engine, "open_link", uri=uri, observe=observe), fmt)
+
+    _run(ctx, go)
+
+
+@app.command()
 def wait(
     ctx: typer.Context,
     for_: str | None = typer.Option(None, "--for", help="Text/resource-id to wait for."),

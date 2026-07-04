@@ -52,6 +52,8 @@ _KINDS = {
     "wait_stable": "wait-stable",
     "assert_visible": "assert-visible",
     "launch_app": "launch-app",
+    "stop_app": "stop-app",
+    "open_link": "open-link",
     "goto": "goto",
 }
 _KEYS = {kind: key for key, kind in _KINDS.items()}
@@ -64,6 +66,8 @@ _ARG_ALIAS = {
     "wait-for": "text",
     "assert-visible": "text",
     "launch-app": "package",
+    "stop-app": "package",
+    "open-link": "uri",
     "goto": "screen",
 }
 
@@ -87,9 +91,12 @@ def _step_error(index: int, msg: str, hint: str | None = None) -> UsageError:
 
 def _parse_step(item: Any, index: int) -> RouteStep:
     if isinstance(item, str):
-        if _KINDS.get(item) == "wait-stable":
-            return RouteStep(kind="wait-stable")
-        raise _step_error(index, f"a bare string step must be 'wait_stable', got {item!r}")
+        # Bare-string steps that need no argument (like Maestro's `- stopApp`).
+        if _KINDS.get(item) in ("wait-stable", "launch-app", "stop-app"):
+            return RouteStep(kind=_KINDS[item])
+        raise _step_error(
+            index, f"a bare string step must be wait_stable / launch_app / stop_app, got {item!r}"
+        )
     if not isinstance(item, dict) or len(item) != 1:
         raise _step_error(index, "expected a single-key mapping like `tap: \"Send\"`")
     ((key, value),) = item.items()
@@ -132,6 +139,9 @@ def _parse_step(item: Any, index: int) -> RouteStep:
             raise _step_error(index, "input needs an `id:` or `label:` field selector")
     elif kind == "wait-stable":
         pass
+    elif kind in ("launch-app", "stop-app"):
+        # Optional arg: a bare `stop_app`/`launch_app` targets the flow's own app.
+        kw["arg"] = v.pop(_ARG_ALIAS[kind], None) or v.pop("arg", None)
     else:
         alias = _ARG_ALIAS[kind]
         kw["arg"] = v.pop(alias, None) or v.pop("arg", None)

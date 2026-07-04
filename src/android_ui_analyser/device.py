@@ -119,6 +119,9 @@ class Device(ABC):
     def stop_app(self, package: str) -> None:  # overridden by real device
         raise DeviceError("app stop requires a real device")
 
+    def open_link(self, uri: str) -> None:  # overridden by real device
+        raise DeviceError("open-link requires a real device")
+
     def close(self) -> None:  # overridden by real device
         """Release the device connection / on-device agent (no-op by default)."""
         return None
@@ -350,6 +353,11 @@ class Uiautomator2Device(Device):
 
     def stop_app(self, package: str) -> None:
         self._call("app_stop", package)
+
+    def open_link(self, uri: str) -> None:
+        # u2's open_url shells out to `am start -a VIEW -d <uri>`; jumps straight to a
+        # deeplinked screen (or triggers app actions like setting feature flags).
+        self._call("open_url", uri)
 
 
 # --------------------------------------------------------------------------- factory

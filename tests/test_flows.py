@@ -443,3 +443,80 @@ def test_engine_flow_save_uses_session_store(tmp_path: Path) -> None:
     # the session store agrees
     sess = AppMemoryStore(eng.config.memory).load_session("emu-journal")
     assert sess.recent
+
+
+# --------------------------------------------------------------- deeplinks + playbook
+
+
+def test_open_link_action_records_deeplink(tmp_path) -> None:
+    dev = ScriptedDevice([HOME], package=P, serial="emu-dl")
+    eng = _engine(tmp_path, dev)
+    eng.analyze(source="hierarchy")  # seed a cached package
+    out = eng.open_link("luzia-test://set-flags?foo=a")
+    assert out.ok and out.action == "open-link"
+    assert ("open_link", ("luzia-test://set-flags?foo=a",)) in dev.calls
+    app = AppMemoryStore(eng.config.memory).load(P)
+    assert app is not None
+    assert [d.uri for d in app.deeplinks] == ["luzia-test://set-flags?foo=a"]
+
+
+def test_remember_deeplink_dedups_and_counts(tmp_path) -> None:
+    store = _store(tmp_path)
+    store.remember_deeplink(P, "luzia-test://x", note="do x")
+    store.remember_deeplink(P, "luzia-test://x")
+    app = store.load(P)
+    assert len(app.deeplinks) == 1
+    assert app.deeplinks[0].count == 2 and app.deeplinks[0].note == "do x"
+
+
+def test_playbook_notes_recipes_description(tmp_path) -> None:
+    store = _store(tmp_path)
+    store.set_description(P, "Luzia AI assistant (dev build)")
+    store.remember_note(P, "gamification pill needs a feature flag")
+    store.remember_recipe(P, "login_full", "tap 'Login with test user'")
+    store.remember_recipe(P, "login_full", "tap testUserLogin")  # updates in place
+    app = store.load(P)
+    assert app.description == "Luzia AI assistant (dev build)"
+    assert app.notes == ["gamification pill needs a feature flag"]
+    assert len(app.recipes) == 1 and app.recipes[0].note == "tap testUserLogin"
+
+
+def test_flow_open_link_and_bare_stop_app(tmp_path) -> None:
+    # The real set-feature-flags recipe: open a deeplink, restart the app.
+    text = """
+name: set_flags
+app: co.thewordlab.luzia
+steps:
+  - open_link: "luzia-test://set-flags?chat_v5=treatment"
+  - stop_app
+  - launch_app
+  - wait_stable
+"""
+    flow = parse_flow_yaml(text, name="set_flags")
+    kinds = [s.kind for s in flow.steps]
+    assert kinds == ["open-link", "stop-app", "launch-app", "wait-stable"]
+    assert flow.steps[0].arg == "luzia-test://set-flags?chat_v5=treatment"
+    assert flow.steps[1].arg is None  # bare stop_app → defaults to flow.app at run
+
+    dev = ScriptedDevice([HOME, HOME], package=P, serial="emu-flow-dl")
+    eng = _engine(tmp_path, dev)
+    flow_file = tmp_path / "set_flags.yaml"
+    flow_file.write_text(text, encoding="utf-8")
+    out = eng.flow_run(file=str(flow_file))
+    assert out["ok"] is True, out
+    assert ("open_link", ("luzia-test://set-flags?chat_v5=treatment",)) in dev.calls
+    assert ("stop_app", ("co.thewordlab.luzia",)) in dev.calls  # bare → flow.app
+    assert ("launch_app", ("co.thewordlab.luzia",)) in dev.calls
+
+
+def test_v2_map_without_playbook_loads(tmp_path) -> None:
+    # Older maps have no deeplinks/recipes/notes/description — they must load fine.
+    store = _store(tmp_path)
+    store.record_screen(package=P, elements=_elements(HOME), name_hint="home")
+    idx = store.index_path(P)
+    data = json.loads(idx.read_text())
+    for k in ("deeplinks", "recipes", "notes", "description"):
+        data.pop(k, None)
+    idx.write_text(json.dumps(data))
+    app = store.load(P)
+    assert app is not None and app.deeplinks == [] and app.description is None

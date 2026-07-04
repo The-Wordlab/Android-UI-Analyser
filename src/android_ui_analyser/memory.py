@@ -173,6 +173,24 @@ class RouteEdge(BaseModel):
     last_seen: str
 
 
+class Deeplink(BaseModel):
+    """A known deeplink URI for an app + what it does (a latency shortcut to suggest)."""
+
+    model_config = ConfigDict(extra="ignore")
+    uri: str
+    note: str | None = None
+    count: int = 1
+    last_seen: str | None = None
+
+
+class Recipe(BaseModel):
+    """A named app-specific procedure the agent should reuse (e.g. login_full)."""
+
+    model_config = ConfigDict(extra="ignore")
+    name: str
+    note: str
+
+
 class AppMap(BaseModel):
     model_config = ConfigDict(extra="ignore")
     schema_version: int = MEMORY_SCHEMA_VERSION
@@ -180,6 +198,11 @@ class AppMap(BaseModel):
     label: str | None = None
     app_version: str | None = None
     last_verified: str | None = None
+    # Playbook — durable app-level knowledge the tool learns and surfaces to the agent.
+    description: str | None = None  # what this app is / how it behaves (one-liner)
+    deeplinks: list[Deeplink] = Field(default_factory=list)  # shortcuts (set flags, jump)
+    recipes: list[Recipe] = Field(default_factory=list)  # login_full, etc.
+    notes: list[str] = Field(default_factory=list)  # quirks worth remembering
     screens: dict[str, ScreenRecord] = Field(default_factory=dict)
     routes: list[RouteEdge] = Field(default_factory=list)
 
@@ -238,7 +261,7 @@ def step_display(step: RouteStep) -> str:
         return f"{kind} '{step.arg}'"
     if kind == "swipe":
         return f"swipe {step.arg}"
-    if kind in ("launch-app", "goto"):
+    if kind in ("launch-app", "stop-app", "open-link", "goto"):
         return f"{kind} {step.arg}"
     return kind  # wait-stable and future kinds
 
@@ -761,6 +784,52 @@ class AppMemoryStore:
                 last_seen=now,
             )
         )
+        self.save(app)
+
+    # -- playbook (durable app-level knowledge the agent reuses) ----------
+
+    def remember_deeplink(self, package: str, uri: str, note: str | None = None) -> None:
+        """Record a deeplink for an app (dedup by uri; bump count on re-use)."""
+        if not self.cfg.enabled or not uri:
+            return
+        app = self.load(package) or AppMap(package=package)
+        now = _now_iso()
+        for d in app.deeplinks:
+            if d.uri == uri:
+                d.count += 1
+                d.last_seen = now
+                if note:
+                    d.note = note
+                self.save(app)
+                return
+        app.deeplinks.append(Deeplink(uri=uri, note=note, last_seen=now))
+        self.save(app)
+
+    def remember_note(self, package: str, note: str) -> None:
+        if not self.cfg.enabled or not note:
+            return
+        app = self.load(package) or AppMap(package=package)
+        if note not in app.notes:
+            app.notes.append(note)
+            self.save(app)
+
+    def remember_recipe(self, package: str, name: str, note: str) -> None:
+        if not self.cfg.enabled or not (name and note):
+            return
+        app = self.load(package) or AppMap(package=package)
+        for r in app.recipes:
+            if r.name == name:
+                r.note = note
+                self.save(app)
+                return
+        app.recipes.append(Recipe(name=name, note=note))
+        self.save(app)
+
+    def set_description(self, package: str, description: str) -> None:
+        if not self.cfg.enabled or not description:
+            return
+        app = self.load(package) or AppMap(package=package)
+        app.description = description
         self.save(app)
 
     # -- auto-record orchestration (engine + daemon call these) -----------
