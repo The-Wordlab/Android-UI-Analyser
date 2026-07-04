@@ -1672,7 +1672,7 @@ class Engine:
 
     def provider_status(self) -> dict[str, list[dict[str, Any]]]:
         out: dict[str, list[dict[str, Any]]] = {}
-        for kind in ("ocr", "detection", "grounding"):
+        for kind in ("ocr", "detection", "grounding", "planner"):
             chain_names = self.factory.chain_names(kind)
             enabled = self.factory.is_enabled(kind)
             items: list[dict[str, Any]] = []

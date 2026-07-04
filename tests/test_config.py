@@ -111,3 +111,39 @@ def test_explicit_config_path_replaces_discovery(tmp_path, monkeypatch) -> None:
     explicit.write_text("output:\n  format: compact\n", encoding="utf-8")
     cfg = load_config(cwd=tmp_path, env={}, explicit_path=str(explicit))
     assert cfg.output.format.value == "compact"
+
+
+# --------------------------------------------------------------- planner kind (opt-in)
+
+
+def test_planner_defaults_off() -> None:
+    cfg = Config()
+    assert cfg.planner.enabled is False
+    assert cfg.planner.chain == ["gemini_flash"]
+    assert "gemini_flash" in cfg.models
+    assert cfg.models["gemini_flash"]["model"] == "gemini-2.5-flash-lite"
+    assert cfg.timeouts.planner_ms == 15000
+
+
+def test_planner_enabled_via_env(tmp_path, monkeypatch) -> None:
+    _isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("AUA_PLANNER__ENABLED", "true")
+    cfg = load_config()
+    assert cfg.planner.enabled is True
+
+
+def test_default_yaml_documents_planner() -> None:
+    from android_ui_analyser.config import default_config_yaml
+
+    text = default_config_yaml()
+    assert "planner:" in text and "gemini_flash" in text
+    # round-trips through validation
+    import yaml
+
+    Config.model_validate(yaml.safe_load(text))
+
+
+def test_registry_and_doctor_know_planner_kind() -> None:
+    from android_ui_analyser.providers.registry import _KINDS
+
+    assert "planner" in _KINDS
