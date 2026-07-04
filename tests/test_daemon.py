@@ -83,7 +83,10 @@ def test_dispatch_ping() -> None:
     device = FakeDevice()
     engine = make_engine(device=device)
     resp = dispatch(engine, {"cmd": "ping", "args": {}})
-    assert resp == {"ok": True, "result": "pong"}
+    from android_ui_analyser import __version__
+
+    assert resp["ok"] is True
+    assert resp["result"] == {"pong": True, "version": __version__}
 
 
 def test_dispatch_unknown_command() -> None:
@@ -224,3 +227,22 @@ def test_socket_path_expands_tilde() -> None:
     result = socket_path(cfg)
     assert "~" not in result
     assert result.startswith("/")
+
+
+def test_pong_version_reports_and_back_compat() -> None:
+    """The client extracts the daemon version; an old 'pong' string → None (trusted)."""
+    from unittest.mock import patch
+
+    from android_ui_analyser import __version__
+    from android_ui_analyser.daemon import DaemonClient
+
+    client = DaemonClient("/tmp/x.sock")
+    with patch.object(client, "call", return_value={"ok": True, "result": {"pong": True, "version": __version__}}):
+        assert client.pong_version() == __version__
+        assert client.ping() is True
+    with patch.object(client, "call", return_value={"ok": True, "result": "pong"}):
+        assert client.pong_version() is None  # pre-version daemon
+        assert client.ping() is True
+    with patch.object(client, "call", side_effect=OSError):
+        assert client.pong_version() is False
+        assert client.ping() is False
