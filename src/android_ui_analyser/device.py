@@ -125,8 +125,8 @@ class Device(ABC):
     def wait_idle(self, timeout_ms: int = 5000) -> None:  # overridden by real device
         return None
 
-    def launch_app(self, package: str) -> None:  # overridden by real device
-        raise DeviceError("app launch requires a real device")
+    def launch_app(self, package: str, *, activity: str | None = None) -> None:
+        raise DeviceError("app launch requires a real device")  # overridden by real device
 
     def stop_app(self, package: str) -> None:  # overridden by real device
         raise DeviceError("app stop requires a real device")
@@ -384,8 +384,11 @@ class Uiautomator2Device(Device):
         except Exception:  # pragma: no cover - best effort
             time.sleep(0.1)
 
-    def launch_app(self, package: str) -> None:
-        self._call("app_start", package)
+    def launch_app(self, package: str, *, activity: str | None = None) -> None:
+        if activity is not None:
+            self._call("app_start", package, activity=activity)
+        else:
+            self._call("app_start", package)
 
     def stop_app(self, package: str) -> None:
         self._call("app_stop", package)
