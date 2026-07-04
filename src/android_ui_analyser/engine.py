@@ -58,6 +58,7 @@ logger = logging.getLogger("android_ui_analyser.engine")
 
 QUERY_CONFIDENT = 1.0  # all salient tokens / exact phrase present
 QUERY_SOFT = 0.5  # best-effort threshold when escalation is exhausted
+_ASSIST_MAX_STEPS = 6  # bound on planner actions per recovery attempt (opt-in only)
 
 _PACKAGE_RE = re.compile(r'package="([^"]+)"')
 
@@ -962,6 +963,123 @@ class Engine:
                 res = self.analyze(source=self._source_for(steps, i + 1, origin_package))
         return None, res
 
+    # ----------------------------------------------------------------- planner (§7.3)
+
+    def _planner_view(
+        self, res: AnalyzeResult
+    ) -> tuple[list[dict[str, Any]], ScreenImage | None]:
+        """Token-light element list for the planner (+ a screenshot only if weakly labelled)."""
+        elements = [
+            {
+                "id": e.id,
+                "label": e.text or e.content_desc,
+                "clickable": e.clickable,
+                "input": "edittext" in (e.type or "").lower(),
+            }
+            for e in res.elements
+        ]
+        labeled = sum(1 for e in res.elements if e.text or e.content_desc)
+        img: ScreenImage | None = None
+        if res.elements and (labeled < 3 or labeled / len(res.elements) < 0.3):
+            with contextlib.suppress(Exception):  # image is a bonus; text-only still works
+                img = self.device.screenshot()
+        return elements, img
+
+    def _drive_with_planner(
+        self,
+        objective: str,
+        *,
+        res: AnalyzeResult,
+        max_steps: int,
+        allow_destructive: bool,
+        until: str | None = None,
+    ) -> tuple[bool, AnalyzeResult]:
+        """Let the opt-in planner choose actions toward *objective* until done/until/cap.
+
+        Bounded and safe: the planner may only target an id from the list we hand it
+        (validated here), its taps pass the destructive guard, and it runs at most
+        *max_steps* times. Returns ``(reached, last analyze result)``. Never the happy
+        path — callers gate on ``factory.is_enabled("planner")`` + an explicit opt-in.
+        """
+        if not self.factory.is_enabled("planner"):
+            return False, res
+        chain = self.factory.build_chain("planner")
+        if not chain.providers:
+            return False, res
+        lexicon = self.config.memory.destructive_labels
+        for _ in range(max(1, max_steps)):
+            if until and self.has(until).found:
+                return True, res
+            elements, img = self._planner_view(res)
+            try:
+                decision, name = run_chain(
+                    chain,
+                    lambda p: p.decide(objective, elements, img),  # type: ignore[attr-defined]  # noqa: B023
+                    is_empty=lambda r: r is None,
+                    timeout_s=self.config.timeouts.planner_ms / 1000.0,
+                )
+            except ProviderError as exc:
+                logger.info("planner unavailable: %s", exc)
+                return False, res
+            action = decision.action
+            if action == "done":
+                return True, res
+            if action == "give-up":
+                return False, res
+            el = (
+                res.element_by_id(decision.target_id)
+                if decision.target_id is not None
+                else None
+            )
+            if action in ("tap", "input") and el is None:
+                return False, res  # invalid/off-screen id → hand off rather than guess
+            if el is not None:  # destructive guard applies to the planner too
+                probe = RouteStep(
+                    kind="tap", label=redact_label(el, redact=self.config.memory.redact)
+                )
+                if is_destructive_step(probe, lexicon) and not allow_destructive:
+                    return False, res
+            if action == "tap" and el is not None:
+                self.tap(el.id, observe=False)
+            elif action == "input" and el is not None:
+                self.input_text(el.id, decision.text or "", observe=False)
+            elif action == "key" and decision.arg:
+                self.key(decision.arg, observe=False)
+            elif action == "swipe" and decision.arg in ("up", "down", "left", "right"):
+                self.swipe(decision.arg, observe=False)
+            elif action == "scroll-to" and decision.arg:
+                self.scroll_to(decision.arg, observe=False)
+            else:
+                return False, res  # unusable decision → hand off
+            with contextlib.suppress(StabilityTimeout):
+                self.wait_stable(settle_ms=500, timeout_ms=8000)
+            res = self.analyze(source="auto")  # planner may land on unlabeled screens
+        return False, res
+
+    def _goto_assist_recover(
+        self, target: str, res: AnalyzeResult, *, allow_destructive: bool
+    ) -> tuple[bool, AnalyzeResult]:
+        """On a diverged goto, let the planner try to reach *target*. Verified by
+        ``known_screen`` (deterministic), not the planner's own verdict."""
+        objective = (
+            f"Reach the app screen named '{target}'. If a dialog, permission prompt, or "
+            "popup is blocking the screen, dismiss it (Allow, Not now, Skip, Close, "
+            "Continue) to make progress toward that screen."
+        )
+        _, res = self._drive_with_planner(
+            objective, res=res, max_steps=_ASSIST_MAX_STEPS, allow_destructive=allow_destructive
+        )
+        return res.meta.known_screen == target, res
+
+    def _assist_suggestion(self, assist: bool) -> str | None:
+        """Handoff hint: suggest --assist when it wasn't used; note it was tried if it was."""
+        if not assist:
+            return (
+                "route diverged — continue manually, or re-run with `--assist` to let a "
+                "fast model try to recover (needs `planner.enabled` + its API key)"
+            )
+        return "route diverged and assisted recovery could not reach the target — continue manually"
+
     def goto(
         self,
         goal: str,
@@ -969,6 +1087,7 @@ class Engine:
         plan: bool = False,
         max_steps: int = 8,
         allow_destructive: bool = False,
+        assist: bool = False,
     ) -> dict[str, Any]:
         """Drive to a remembered screen via the app map (PRD §6b).
 
@@ -1138,6 +1257,12 @@ class Engine:
                 res=res,
             )
             if fail is not None:
+                if assist:
+                    recovered, res = self._goto_assist_recover(
+                        target, res, allow_destructive=allow_destructive
+                    )
+                    if recovered:
+                        break  # post-loop confirms arrival from known_screen
                 return _goto_handoff(
                     goal,
                     target,
@@ -1147,6 +1272,7 @@ class Engine:
                     res,
                     failed_step=fail.step,
                     remaining_steps=steps[fail.at :],
+                    hint=self._assist_suggestion(assist),
                 )
             reached = res.meta.known_screen
             hops.append(
@@ -1158,7 +1284,21 @@ class Engine:
                 }
             )
             if reached != edge.to_screen:
-                return _goto_handoff(goal, target, "wrong_screen", hops, route[i + 1 :], res)
+                if assist:
+                    recovered, res = self._goto_assist_recover(
+                        target, res, allow_destructive=allow_destructive
+                    )
+                    if recovered:
+                        break
+                return _goto_handoff(
+                    goal,
+                    target,
+                    "wrong_screen",
+                    hops,
+                    route[i + 1 :],
+                    res,
+                    hint=self._assist_suggestion(assist),
+                )
         arrived = res.meta.known_screen == target
         return {
             "ok": arrived,
@@ -1185,13 +1325,16 @@ class Engine:
         dry_run: bool = False,
         from_step: int = 0,
         allow_destructive: bool = True,
+        assist: bool = False,
     ) -> dict[str, Any]:
         """Replay a named (or ``--file``) flow in one call — the whole journey.
 
         Runs through the same executor as ``goto``; on divergence returns the failing
         step's index + the remaining steps so the caller can fix or finish manually and
         resume with ``from_step``. Authored flows are deliberate intent, so destructive
-        steps are ALLOWED by default (unlike goto's auto-learned replay).
+        steps are ALLOWED by default (unlike goto's auto-learned replay). With *assist*
+        (opt-in planner), a divergence triggers one recovery attempt (dismiss a blocking
+        dialog) then resumes from the failed step before handing off.
         """
         from .flows import FlowStore, parse_flow_yaml, resolve_params
 
@@ -1229,18 +1372,46 @@ class Engine:
                 "note": "not executed (--dry-run)",
             }
         executed: list[dict[str, Any]] = []
-        fail, res = self._run_steps(
-            steps_slice,
-            origin_package=flow.app,
-            allow_destructive=allow_destructive,
-            allow_goto_steps=True,
-            scroll_fallback=True,
-            executed=executed,
-        )
-        for e in executed:
-            e["index"] += from_step  # report absolute flow indices
+
+        def _exec(slice_start: int, res_in: AnalyzeResult | None) -> tuple[Any, AnalyzeResult, int | None]:
+            ex: list[dict[str, Any]] = []
+            f, r = self._run_steps(
+                steps[slice_start:],
+                origin_package=flow.app,
+                allow_destructive=allow_destructive,
+                allow_goto_steps=True,
+                scroll_fallback=True,
+                res=res_in,
+                executed=ex,
+            )
+            for e in ex:
+                e["index"] += slice_start  # absolute flow indices
+            executed.extend(ex)
+            return f, r, (slice_start + f.at if f is not None else None)
+
+        fail, res, idx = _exec(from_step, None)
+        if fail is not None and assist and self.factory.is_enabled("planner"):
+            objective = (
+                f"A UI automation step could not run: {step_display(fail.step)}. If a "
+                "dialog, permission prompt, or popup is blocking the screen, dismiss it "
+                "(Allow, Not now, Skip, Close, Continue) so the flow can proceed."
+            )
+            recovered, res = self._drive_with_planner(
+                objective, res=res, max_steps=_ASSIST_MAX_STEPS, allow_destructive=allow_destructive
+            )
+            if recovered and idx is not None:
+                fail, res, idx = _exec(idx, res)  # resume from the failed step
         if fail is not None:
-            idx = from_step + fail.at
+            assert idx is not None
+            hint = (
+                "fix the flow or finish the step manually, then resume with "
+                f"`aua flow run {flow.name} --from-step {idx}`"
+            )
+            if not assist:
+                hint += (
+                    "; or add `--assist` to let a fast model clear blockers "
+                    "(needs `planner.enabled` + its API key)"
+                )
             return {
                 "ok": False,
                 "code": fail.code,
@@ -1255,10 +1426,7 @@ class Engine:
                     for e in res.elements
                     if (e.text or e.content_desc)
                 ][:20],
-                "hint": (
-                    "fix the flow or finish the step manually, then resume with "
-                    f"`aua flow run {flow.name} --from-step {idx}`"
-                ),
+                "hint": hint,
             }
         return {
             "ok": True,

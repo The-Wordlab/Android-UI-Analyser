@@ -30,6 +30,8 @@ from android_ui_analyser.providers.base import (
     DetectionProvider,
     GroundingProvider,
     OcrProvider,
+    PlannerDecision,
+    PlannerProvider,
     Point,
     Provider,
     ScreenImage,
@@ -331,6 +333,55 @@ class StubGrounding(GroundingProvider):
         if self._raises:
             raise self._raises
         return self._result
+
+
+class StubPlanner(PlannerProvider):
+    """A scriptable planner for tests.
+
+    Pass ``decisions=[...]`` for a fixed sequence (one per ``decide`` call; the last
+    repeats), or ``decide_fn(objective, elements)`` to compute a decision from the live
+    element list (so a test can target an element by its label without knowing its id).
+    A convenience ``tap_label`` helper builds such a function. Records objectives in
+    ``.seen`` and counts ``.calls``; ``images`` records whether a screenshot was attached.
+    """
+
+    name = "stub_planner"
+
+    def __init__(
+        self,
+        *,
+        available: bool = True,
+        reason: str = "ok",
+        decisions: list[PlannerDecision] | None = None,
+        decide_fn: Any = None,
+        raises: Exception | None = None,
+    ) -> None:
+        super().__init__()
+        self._available = available
+        self._reason = reason
+        self._decisions = list(decisions or [])
+        self._decide_fn = decide_fn
+        self._raises = raises
+        self.calls = 0
+        self.seen: list[str] = []
+        self.images: list[bool] = []
+
+    def is_available(self) -> Availability:
+        return Availability(self._available, self._reason)
+
+    def decide(
+        self, objective: str, elements: list[dict[str, Any]], image: ScreenImage | None = None
+    ) -> PlannerDecision | None:
+        self.calls += 1
+        self.seen.append(objective)
+        self.images.append(image is not None)
+        if self._raises:
+            raise self._raises
+        if self._decide_fn is not None:
+            return self._decide_fn(objective, elements)
+        if not self._decisions:
+            return PlannerDecision(action="give-up", reason="no scripted decisions")
+        return self._decisions[min(self.calls - 1, len(self._decisions) - 1)]
 
 
 def make_chain(kind: str, providers: list[Provider]) -> ChainSpec:
