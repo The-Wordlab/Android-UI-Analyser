@@ -646,16 +646,22 @@ def wait(
     interval: int = typer.Option(200, "--interval", help="--for-stable: ms between screenshots."),
     settle: int = typer.Option(600, "--settle", help="--for-stable: ms of no change to settle."),
     timeout: int | None = typer.Option(
-        None, "--timeout", help="Timeout in ms (default 5000; 30000 for --for-stable)."
+        None, "--timeout", "--timeout-ms", help="Timeout in ms (default 5000; 30000 for --for-stable)."
     ),
     match: str = typer.Option("contains", "--match", help="exact|contains|regex."),
     ignore_case: bool = typer.Option(False, "--ignore-case", help="Case-insensitive match."),
+    observe: bool = typer.Option(
+        False,
+        "--observe",
+        help="Also return the (settled) screen with fresh ids — act on it without a re-analyze.",
+    ),
 ) -> None:
     """Wait for text to appear, for the UI to go idle, or for the screen to settle.
 
     ``--for-stable`` polls cheap screenshots (a perceptual-hash "settled" check — no OCR,
     no hierarchy parse; works on opaque screens) and returns once the screen stops changing
-    for ``--settle`` ms. Ideal for waiting on image generation / loading.
+    for ``--settle`` ms. Ideal for waiting on image generation / loading. ``--observe``
+    folds in the post-wait screen so you can act on what you waited for in one fewer call.
     """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
@@ -668,6 +674,7 @@ def wait(
                     interval_ms=interval,
                     settle_ms=settle,
                     timeout_ms=eff,
+                    observe=observe,
                 ),
                 fmt,
             )
@@ -682,6 +689,7 @@ def wait(
                 timeout_ms=eff,
                 match=match,
                 ignore_case=ignore_case,
+                observe=observe,
             ),
             fmt,
         )
