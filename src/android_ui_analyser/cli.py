@@ -410,10 +410,17 @@ def has(
     ),
     source: str = typer.Option("auto", "--source", help="hierarchy|vision|auto."),
     timeout: int = typer.Option(
-        0, "--timeout", help="Poll until present or timeout ms (0 = instant)."
+        0, "--timeout", "--timeout-ms", help="Poll until present or timeout ms (0 = instant)."
+    ),
+    by: str = typer.Option(
+        "text", "--by", help="Match by: text (default) | id (resource-id) | desc."
     ),
 ) -> None:
-    """Is this text on screen right now? Exit 0 if present, 1 if not."""
+    """Is this on screen right now? Exit 0 if present, 1 if not.
+
+    ``--by id`` checks a resource-id (a bare tail works) — verifies containers the element
+    list prunes, i.e. Maestro-style ``assertVisible: id:``.
+    """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
         result = engine.has(
@@ -423,6 +430,7 @@ def has(
             ocr_fallback=ocr_fallback,
             source=source,
             timeout_ms=timeout,
+            by=by,
         )
         _emit(result, fmt)
         if not result.found:
@@ -577,6 +585,7 @@ def scroll_to(
         "--observe/--no-observe",
         help="Also return the screen after scrolling (skips a follow-up analyze).",
     ),
+    by: str = typer.Option("text", "--by", help="Match by: text (default) | id | desc."),
 ) -> None:
     """Scroll the container until an element appears (or the swipe limit is hit)."""
 
@@ -589,6 +598,7 @@ def scroll_to(
                 match=match,
                 ignore_case=ignore_case,
                 observe=observe,
+                by=by,
             ),
             fmt,
         )
@@ -655,6 +665,7 @@ def wait(
         "--observe",
         help="Also return the (settled) screen with fresh ids — act on it without a re-analyze.",
     ),
+    by: str = typer.Option("text", "--by", help="--for match by: text (default) | id | desc."),
 ) -> None:
     """Wait for text to appear, for the UI to go idle, or for the screen to settle.
 
@@ -690,6 +701,7 @@ def wait(
                 match=match,
                 ignore_case=ignore_case,
                 observe=observe,
+                by=by,
             ),
             fmt,
         )

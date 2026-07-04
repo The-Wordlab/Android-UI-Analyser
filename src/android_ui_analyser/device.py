@@ -75,9 +75,20 @@ class Device(ABC):
     # -- hierarchy selectors (T0/T1) --------------------------------------
     @abstractmethod
     def find_text(
-        self, text: str, *, match: MatchMode | str = MatchMode.contains, ignore_case: bool = False
+        self,
+        text: str,
+        *,
+        match: MatchMode | str = MatchMode.contains,
+        ignore_case: bool = False,
+        by: str = "text",
     ) -> Bounds | None:
-        """Cheap selector locate — return the box of the first match, or None."""
+        """Cheap selector locate — return the box of the first match, or None.
+
+        ``by``: ``"text"`` searches text + content-desc (default); ``"id"`` matches the
+        resource-id (a bare tail like ``containerChatDetail`` matches the id's suffix) —
+        this can find containers that the parsed element list prunes; ``"desc"`` is
+        content-desc only.
+        """
 
     # -- optional metadata (best-effort; default unknown) -----------------
     def app_version(self, package: str) -> str | None:
@@ -100,10 +111,11 @@ class Device(ABC):
         match: MatchMode | str = MatchMode.contains,
         ignore_case: bool = False,
         timeout_ms: int = 5000,
+        by: str = "text",
     ) -> Bounds | None:
         deadline = time.monotonic() + timeout_ms / 1000.0
         while True:
-            found = self.find_text(text, match=match, ignore_case=ignore_case)
+            found = self.find_text(text, match=match, ignore_case=ignore_case, by=by)
             if found is not None:
                 return found
             if time.monotonic() >= deadline:
@@ -133,14 +145,15 @@ class Device(ABC):
         match: MatchMode | str = MatchMode.contains,
         ignore_case: bool = False,
         max_swipes: int = 8,
+        by: str = "text",
     ) -> Bounds | None:
-        found = self.find_text(query, match=match, ignore_case=ignore_case)
+        found = self.find_text(query, match=match, ignore_case=ignore_case, by=by)
         if found is not None:
             return found
         w, h = self.window_size()
         for _ in range(max_swipes):
             self.swipe(w // 2, int(h * 0.7), w // 2, int(h * 0.3), 300)
-            found = self.find_text(query, match=match, ignore_case=ignore_case)
+            found = self.find_text(query, match=match, ignore_case=ignore_case, by=by)
             if found is not None:
                 return found
         return None
@@ -324,12 +337,35 @@ class Uiautomator2Device(Device):
             return {field: text}
         return {f"{field}Contains": text}
 
+    def _resource_id_kwargs(self, text: str, match: MatchMode) -> dict:
+        """Selector for a resource-id. A full ``pkg:id/name`` matches exactly; a bare tail
+        (``containerChatDetail``) matches any id ending in ``:id/<tail>``."""
+        if ":id/" in text:
+            return {"resourceId": text} if match is not MatchMode.contains else {
+                "resourceIdMatches": f".*{re.escape(text)}.*"
+            }
+        if match is MatchMode.contains:
+            return {"resourceIdMatches": f".*{re.escape(text)}.*"}
+        return {"resourceIdMatches": f".*:id/{re.escape(text)}$"}
+
+    def _fields_for(self, by: str) -> list[str]:
+        return {"id": ["resourceId"], "desc": ["description"]}.get(by, ["text", "description"])
+
     def find_text(
-        self, text: str, *, match: MatchMode | str = MatchMode.contains, ignore_case: bool = False
+        self,
+        text: str,
+        *,
+        match: MatchMode | str = MatchMode.contains,
+        ignore_case: bool = False,
+        by: str = "text",
     ) -> Bounds | None:
         match = MatchMode(match)
-        for field in ("text", "description"):
-            kwargs = self._selector_kwargs(text, match, ignore_case, field)
+        for field in self._fields_for(by):
+            kwargs = (
+                self._resource_id_kwargs(text, match)
+                if field == "resourceId"
+                else self._selector_kwargs(text, match, ignore_case, field)
+            )
             try:
                 el = self._d(**kwargs)
                 exists = el.exists
