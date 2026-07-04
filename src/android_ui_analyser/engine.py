@@ -59,6 +59,7 @@ logger = logging.getLogger("android_ui_analyser.engine")
 QUERY_CONFIDENT = 1.0  # all salient tokens / exact phrase present
 QUERY_SOFT = 0.5  # best-effort threshold when escalation is exhausted
 _ASSIST_MAX_STEPS = 6  # bound on planner actions per recovery attempt (opt-in only)
+_MAX_FLOW_DEPTH = 5  # bound on nested `flow:` sub-flow composition (cycle backstop)
 
 _PACKAGE_RE = re.compile(r'package="([^"]+)"')
 
@@ -871,6 +872,7 @@ class Engine:
         scroll_fallback: bool = False,
         res: AnalyzeResult | None = None,
         executed: list[dict[str, Any]] | None = None,
+        flow_depth: int = 0,
     ) -> tuple[StepFailure | None, AnalyzeResult]:
         """Execute *steps* with selector matching, settle waits, and re-perception.
 
@@ -962,6 +964,29 @@ class Engine:
                 if not out.get("ok"):
                     return StepFailure(str(out.get("code") or "route_unknown"), i, s), res
                 settle = False  # goto verified arrival; just refresh our view
+            elif kind == "flow":
+                # Run a saved flow inline (Maestro's runFlow) — reuse shared recipes.
+                if not allow_goto_steps or not s.arg or flow_depth >= _MAX_FLOW_DEPTH:
+                    return StepFailure("unsupported_action", i, s), res
+                from .flows import FlowStore, resolve_params
+
+                try:
+                    sub = FlowStore(self.config.memory).load(s.arg)
+                except UsageError:
+                    return StepFailure("route_unknown", i, s), res
+                subfail, res = self._run_steps(
+                    resolve_params(sub, {}),
+                    origin_package=sub.app or origin_package,
+                    allow_destructive=allow_destructive,
+                    allow_goto_steps=True,
+                    scroll_fallback=scroll_fallback,
+                    res=res,
+                    executed=executed,
+                    flow_depth=flow_depth + 1,
+                )
+                if subfail is not None:
+                    return StepFailure(subfail.code, i, s), res  # surface sub-failure here
+                settle = False  # the sub-flow already settled
             else:
                 return StepFailure("unsupported_action", i, s), res
 

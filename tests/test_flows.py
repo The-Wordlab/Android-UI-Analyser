@@ -591,3 +591,53 @@ def test_cli_remember_recipe_requires_note(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(engine_mod, "connect", lambda serial=None: FakeDevice(package=P))
     r = runner.invoke(app, ["remember", "--app", P, "--recipe", "x"])
     assert r.exit_code != 0
+
+
+# --------------------------------------------------------------- flow composition (runFlow)
+
+
+def test_flow_composition_runs_sub_flow(tmp_path) -> None:
+    # A `setup` flow (tap Apps) reused by a parent flow via `flow:`.
+    cfg = make_config(memory={"dir": str(tmp_path / "home")}, daemon={"enabled": False})
+    store = FlowStore(cfg.memory)
+    store.save(Flow(name="go_apps", app=P, steps=[RouteStep(kind="tap", label="Apps", resource_id="nav_apps")]))
+
+    parent = tmp_path / "parent.yaml"
+    parent.write_text(
+        "name: parent\napp: co.thewordlab.luzia\nsteps:\n  - flow: go_apps\n  - assert_visible: \"Images\"\n",
+        encoding="utf-8",
+    )
+    flow = parse_flow_yaml(parent.read_text(), name="parent")
+    assert flow.steps[0].kind == "flow" and flow.steps[0].arg == "go_apps"
+
+    from android_ui_analyser.engine import Engine
+    from android_ui_analyser.providers.registry import ProviderFactory
+
+    dev = ScriptedDevice(
+        [HOME, APPS], package=P, serial="emu-compose", text_index={"Images": (0, 0, 9, 9)}
+    )
+    eng = Engine(cfg, device=dev, factory=ProviderFactory(cfg))
+    out = eng.flow_run(file=str(parent))
+    assert out["ok"] is True, out
+    assert sum(1 for c in dev.calls if c[0] == "click") == 1  # the sub-flow's tap ran
+
+
+def test_flow_composition_run_flow_alias_and_render(tmp_path) -> None:
+    flow = parse_flow_yaml("steps:\n  - run_flow: login\n", name="x")
+    assert flow.steps[0].kind == "flow" and flow.steps[0].arg == "login"
+    # canonical render key is `flow`
+    assert "flow: login" in render_flow_yaml(flow)
+
+
+def test_flow_composition_missing_sub_flow_diverges(tmp_path) -> None:
+    cfg = make_config(memory={"dir": str(tmp_path / "home")}, daemon={"enabled": False})
+    f = tmp_path / "p.yaml"
+    f.write_text("name: p\napp: co.thewordlab.luzia\nsteps:\n  - flow: nonexistent\n", encoding="utf-8")
+    from android_ui_analyser.engine import Engine
+    from android_ui_analyser.providers.registry import ProviderFactory
+
+    dev = ScriptedDevice([HOME], package=P, serial="emu-nosub")
+    eng = Engine(cfg, device=dev, factory=ProviderFactory(cfg))
+    out = eng.flow_run(file=str(f))
+    assert out["ok"] is False and out["code"] == "route_unknown"
+    assert out["failed_step"]["display"] == "flow nonexistent"

@@ -55,6 +55,8 @@ _KINDS = {
     "stop_app": "stop-app",
     "open_link": "open-link",
     "goto": "goto",
+    "run_flow": "flow",  # alias; canonical render key is `flow` (listed last → wins _KEYS)
+    "flow": "flow",
 }
 _KEYS = {kind: key for key, kind in _KINDS.items()}
 _ELEMENT_KINDS = ("tap", "long-press", "clear")
@@ -69,6 +71,7 @@ _ARG_ALIAS = {
     "stop-app": "package",
     "open-link": "uri",
     "goto": "screen",
+    "flow": "name",
 }
 
 

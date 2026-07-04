@@ -261,7 +261,7 @@ def step_display(step: RouteStep) -> str:
         return f"{kind} '{step.arg}'"
     if kind == "swipe":
         return f"swipe {step.arg}"
-    if kind in ("launch-app", "stop-app", "open-link", "goto"):
+    if kind in ("launch-app", "stop-app", "open-link", "goto", "flow"):
         return f"{kind} {step.arg}"
     return kind  # wait-stable and future kinds
 
