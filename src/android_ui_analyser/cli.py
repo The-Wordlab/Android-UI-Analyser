@@ -682,6 +682,11 @@ def goto(
         "--allow-destructive",
         help="Replay steps whose label matches memory.destructive_labels (delete/sign out/…).",
     ),
+    assist: bool = typer.Option(
+        False,
+        "--assist",
+        help="On divergence, let the opt-in planner LLM try to recover (needs planner.enabled).",
+    ),
 ) -> None:
     """Navigate to a known screen using app memory — drives and verifies each hop (§6b).
 
@@ -689,7 +694,7 @@ def goto(
     along the shortest route from the current screen, confirming ``known_screen`` after
     every hop. Stops and returns the remaining route/steps + current screen if anything
     diverges. ``--plan`` prints the annotated route only; destructive steps are refused
-    without ``--allow-destructive``.
+    without ``--allow-destructive``. ``--assist`` lets a fast model recover a divergence.
     """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
@@ -700,6 +705,7 @@ def goto(
             plan=plan,
             max_steps=max_steps,
             allow_destructive=allow_destructive,
+            assist=assist,
         )
         _emit(result, fmt)
         if isinstance(result, dict) and result.get("ok") is False:
@@ -1150,6 +1156,11 @@ def flow_run_cmd(
         "--allow-destructive/--no-allow-destructive",
         help="Authored flows may take destructive steps by default.",
     ),
+    assist: bool = typer.Option(
+        False,
+        "--assist",
+        help="On divergence, let the opt-in planner LLM clear the blocker (needs planner.enabled).",
+    ),
 ) -> None:
     """Replay a whole journey in one call; on divergence returns a resumable step index."""
 
@@ -1163,6 +1174,7 @@ def flow_run_cmd(
             dry_run=dry_run,
             from_step=from_step,
             allow_destructive=allow_destructive,
+            assist=assist,
         )
         _emit(result, fmt)
         if isinstance(result, dict) and result.get("ok") is False:
