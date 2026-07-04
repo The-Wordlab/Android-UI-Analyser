@@ -113,3 +113,45 @@ def test_cli_wait_for_stable_timeout_exit_3(monkeypatch: pytest.MonkeyPatch) -> 
 
     err = json.loads(res.stderr)
     assert err["error"]["code"] == "wait_timeout"
+
+
+# --------------------------------------------------------------- wait --observe (fresh ids)
+
+_XML = (
+    '<hierarchy rotation="0">'
+    '<node class="android.widget.Button" text="Continue" resource-id="x:id/go"'
+    ' clickable="true" enabled="true" bounds="[0,0][100,60]"/>'
+    "</hierarchy>"
+)
+
+
+def test_wait_for_observe_returns_fresh_ids() -> None:
+    dev = FakeDevice(hierarchy_xml=_XML, text_index={"Continue": (0, 0, 100, 60)})
+    eng = _engine(dev)
+    res = eng.wait(for_="Continue", timeout_ms=1000, observe=True)
+    assert res.ok and res.observation is not None
+    # the id is available immediately — no separate analyze needed
+    assert any(e.text == "Continue" for e in res.observation.elements)
+
+
+def test_wait_for_no_observe_has_no_observation() -> None:
+    dev = FakeDevice(hierarchy_xml=_XML, text_index={"Continue": (0, 0, 100, 60)})
+    eng = _engine(dev)
+    res = eng.wait(for_="Continue", timeout_ms=1000)
+    assert res.ok and res.observation is None
+
+
+def test_wait_stable_observe_returns_screen() -> None:
+    dev = FakeDevice(hierarchy_xml=_XML, screenshots=[FRAME_A] * 10)
+    eng = _engine(dev)
+    res = eng.wait_stable(interval_ms=1, settle_ms=2, timeout_ms=2000, observe=True)
+    assert res.ok and res.observation is not None
+    assert any(e.text == "Continue" for e in res.observation.elements)
+
+
+def test_cli_wait_accepts_timeout_ms_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    dev = FakeDevice(hierarchy_xml=_XML, text_index={"Continue": (0, 0, 100, 60)})
+    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
+    # --timeout-ms is accepted as an alias for --timeout (both are ms).
+    r = runner.invoke(app, ["wait", "--for", "Continue", "--timeout-ms", "1500"])
+    assert r.exit_code == 0, r.stderr

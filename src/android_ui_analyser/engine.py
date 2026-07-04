@@ -1630,12 +1630,19 @@ class Engine:
     # ----------------------------------------------------------------- wait --for-stable
 
     def wait_stable(
-        self, *, interval_ms: int = 200, settle_ms: int = 600, timeout_ms: int = 30000
+        self,
+        *,
+        interval_ms: int = 200,
+        settle_ms: int = 600,
+        timeout_ms: int = 30000,
+        observe: bool = False,
     ) -> ActionResult:
         """Return once the screen stops changing for ``settle_ms`` (PRD §5, AC14).
 
         Cheap perceptual-hash over screenshots only — NO OCR, NO hierarchy parse. Works on
         opaque/Compose/video screens; ideal for waiting on image generation / loading.
+        ``observe`` folds in a post-settle ``analyze`` — because the screen is settled, the
+        returned ids are reliable (fixes the "premature observation" trap on transitions).
         """
         from . import imaging
 
@@ -1652,8 +1659,13 @@ class Engine:
                 if stable_since is None:
                     stable_since = now
                 if (now - stable_since) * 1000.0 >= settle_ms:
-                    return ActionResult(
-                        ok=True, action="wait-stable", detail=f"settled after {samples} samples"
+                    return self._observe(
+                        ActionResult(
+                            ok=True,
+                            action="wait-stable",
+                            detail=f"settled after {samples} samples",
+                        ),
+                        observe,
                     )
             else:
                 stable_since = None
@@ -1943,22 +1955,26 @@ class Engine:
         timeout_ms: int = 5000,
         match: str = "contains",
         ignore_case: bool = False,
+        observe: bool = False,
     ) -> ActionResult:
         device = self.device
         if idle:
             device.wait_idle(timeout_ms)
-            return ActionResult(ok=True, action="wait", detail="idle")
+            return self._observe(ActionResult(ok=True, action="wait", detail="idle"), observe)
         if not for_:
             raise UsageError("wait needs --for <text> or --idle")
         found = device.wait_for(
             for_, match=MatchMode(match), ignore_case=ignore_case, timeout_ms=timeout_ms
         )
-        return ActionResult(
+        result = ActionResult(
             ok=found is not None,
             action="wait",
             detail=for_,
             target=list(found) if found else None,
         )
+        # `--observe` returns the settled screen with fresh ids — so the agent can act on
+        # what it waited for without a separate `analyze` round-trip.
+        return self._observe(result, observe and found is not None)
 
     def app(self, action: str, *, package: str | None = None) -> ActionResult:
         device = self.device
