@@ -1206,6 +1206,23 @@ def _header(app: AppMap) -> list[str]:
     return lines
 
 
+def _playbook_lines(app: AppMap) -> list[str]:
+    """The app-level knowledge block (description, deeplinks, recipes, notes) — the
+    durable facts the tool learned and should surface to the agent up front."""
+    if not (app.description or app.deeplinks or app.recipes or app.notes):
+        return []
+    lines = ["## Playbook"]
+    if app.description:
+        lines.append(app.description)
+    for r in app.recipes:
+        lines.append(f"- recipe `{r.name}`: {r.note}")
+    for d in app.deeplinks:
+        lines.append(f"- deeplink `{d.uri}`" + (f" — {d.note}" if d.note else ""))
+    for note in app.notes:
+        lines.append(f"- note: {note}")
+    return lines
+
+
 def render_map(
     app: AppMap,
     *,
@@ -1221,6 +1238,8 @@ def render_map(
         return _render_screen_detail(app, screen)
 
     lines = [*_header(app), ""]
+    if playbook := _playbook_lines(app):
+        lines.extend([*playbook, ""])
     if not app.screens:
         lines.append("_(no screens recorded yet — run `aua analyze` while navigating)_")
         return "\n".join(lines) + "\n"

@@ -1092,6 +1092,88 @@ memory_app = typer.Typer(
 app.add_typer(memory_app, name="memory")
 
 
+@app.command()
+def remember(
+    ctx: typer.Context,
+    about: str | None = typer.Option(None, "--about", help="One-line description of the app."),
+    note: str | None = typer.Option(None, "--note", help="A quirk/fact to remember."),
+    recipe: str | None = typer.Option(None, "--recipe", help="Recipe NAME (needs --note)."),
+    deeplink: str | None = typer.Option(None, "--deeplink", help="A useful deeplink URI (needs/uses --note)."),
+    app_pkg: str | None = typer.Option(None, "--app", help="Package (default: current)."),
+) -> None:
+    """Teach the app playbook: a description, a quirk note, a login/etc. recipe, or a deeplink.
+
+    The agent should record what it learns so the NEXT run starts informed, e.g.
+    `aua remember --recipe login_full --note "tap 'Login with test user'"` or
+    `aua remember --deeplink "luzia-test://set-flags?x=a" --note "set feature flags, then restart"`.
+    """
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        import json
+
+        opts = _opts(ctx)
+        store = AppMemoryStore(opts.load().memory)
+        pkg = _resolve_package(opts, app_pkg)
+        did: list[str] = []
+        if about:
+            store.set_description(pkg, about)
+            did.append("description")
+        if recipe:
+            if not note:
+                raise UsageError("--recipe needs --note", hint='e.g. --recipe login_full --note "tap X"')
+            store.remember_recipe(pkg, recipe, note)
+            did.append(f"recipe:{recipe}")
+        if deeplink:
+            store.remember_deeplink(pkg, deeplink, note=note)
+            did.append("deeplink")
+        if note and not recipe and not deeplink:
+            store.remember_note(pkg, note)
+            did.append("note")
+        if not did:
+            raise UsageError(
+                "remember needs something to store",
+                hint="pass --about / --note / --recipe NAME --note / --deeplink URI",
+            )
+        typer.echo(json.dumps({"ok": True, "action": "remember", "package": pkg, "saved": did}))
+
+    _run(ctx, go)
+
+
+@app.command()
+def about(
+    ctx: typer.Context,
+    app_pkg: str | None = typer.Option(None, "--app", help="Package (default: current)."),
+) -> None:
+    """Print the app playbook — description, deeplinks, recipes, and quirks the tool learned."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        import json
+
+        opts = _opts(ctx)
+        store = AppMemoryStore(opts.load().memory)
+        pkg = _resolve_package(opts, app_pkg)
+        app_map = store.load(pkg)
+        if app_map is None:
+            typer.echo(f"nothing recorded for {pkg} yet")
+            return
+        if fmt in (OutputFormat.json, OutputFormat.compact):
+            play = {
+                "package": pkg,
+                "description": app_map.description,
+                "recipes": {r.name: r.note for r in app_map.recipes},
+                "deeplinks": [{"uri": d.uri, "note": d.note} for d in app_map.deeplinks],
+                "notes": list(app_map.notes),
+            }
+            typer.echo(json.dumps(play, indent=None if fmt is OutputFormat.compact else 2))
+        else:
+            from .memory import _playbook_lines
+
+            lines = _playbook_lines(app_map)
+            typer.echo("\n".join(lines) if lines else f"no playbook for {pkg} yet")
+
+    _run(ctx, go)
+
+
 @memory_app.command("show")
 def memory_show(
     ctx: typer.Context,

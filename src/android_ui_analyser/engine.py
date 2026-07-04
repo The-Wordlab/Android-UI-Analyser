@@ -1562,14 +1562,21 @@ class Engine:
             self._device = None
 
     def orient(self) -> dict[str, Any]:
-        """What the tool already knows about the foreground app (for ``daemon start``)."""
+        """What the tool already knows about the foreground app (for ``daemon start``).
+
+        Surfaces the app **playbook** (description, deeplinks, login recipes, quirks) up
+        front so the agent starts informed — the durable knowledge the tool learned.
+        """
         mem = self._memory
         pkg = self.current_package()
         out: dict[str, Any] = {"package": pkg, "known": False}
         if mem is None or not pkg:
             return out
         app = mem.load(pkg)
-        if app is None or not app.screens:
+        if app is None:
+            return out
+        has_playbook = bool(app.description or app.deeplinks or app.recipes or app.notes)
+        if not app.screens and not has_playbook:
             return out
         hints = mem.navigation_hints(
             self.device.serial,
@@ -1583,6 +1590,16 @@ class Engine:
             routes=len(app.routes),
             suggested_gotos=hints.suggested_gotos,
         )
+        if app.description:
+            out["description"] = app.description
+        if app.recipes:
+            out["recipes"] = {r.name: r.note for r in app.recipes}
+        if app.deeplinks:
+            out["deeplinks"] = [
+                {"uri": d.uri, "note": d.note} for d in app.deeplinks
+            ]
+        if app.notes:
+            out["notes"] = list(app.notes)
         return out
 
     # ----------------------------------------------------------------- wait --for-stable
