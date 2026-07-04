@@ -17,8 +17,8 @@ Errors::
 Supported commands
 ------------------
 ping, analyze, has, inspect, screenshot, tap, long_press, input, clear,
-swipe, scroll_to, key, wait, wait_stable, memory_update, goto, flow_run,
-flow_save, navigate, orient, list_devices, app
+swipe, scroll_to, key, open_link, wait, wait_stable, memory_update, goto,
+flow_run, flow_save, navigate, orient, list_devices, app
 """
 
 from __future__ import annotations
@@ -143,6 +143,10 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
             result = engine.key(**args)
             return _result_ok(result.model_dump(mode="json"))
 
+        elif cmd == "open_link":
+            result = engine.open_link(**args)
+            return _result_ok(result.model_dump(mode="json"))
+
         elif cmd == "wait":
             # "for" is a Python keyword; remap "for_" ↔ "for" transparently.
             remapped = {("for_" if k == "for" else k): v for k, v in args.items()}
@@ -189,8 +193,8 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
                 "unknown_command",
                 f"unknown command: {cmd!r}",
                 hint="Valid commands: ping, analyze, has, inspect, screenshot, "
-                "tap, long_press, input, clear, swipe, scroll_to, key, wait, "
-                "wait_stable, memory_update, goto, flow_run, flow_save, navigate, "
+                "tap, long_press, input, clear, swipe, scroll_to, key, open_link, "
+                "wait, wait_stable, memory_update, goto, flow_run, flow_save, navigate, "
                 "orient, list_devices, app",
             )
 

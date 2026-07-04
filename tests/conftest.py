@@ -161,6 +161,9 @@ class FakeDevice(Device):
     def stop_app(self, package: str) -> None:
         self.calls.append(("stop_app", (package,)))
 
+    def open_link(self, uri: str) -> None:
+        self.calls.append(("open_link", (uri,)))
+
     def find_text(
         self, text: str, *, match: MatchMode | str = MatchMode.contains, ignore_case: bool = False
     ) -> Bounds | None:
