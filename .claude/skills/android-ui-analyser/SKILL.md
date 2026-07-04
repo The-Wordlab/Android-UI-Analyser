@@ -36,7 +36,8 @@ description: >-
 - _global, BEFORE the subcommand_: `--format json|pretty|compact`, `--serial`, `--config`, `--profile`, `--timeout`, `--log-level`, `--no-cache`
 - _analyze_: `--source auto|hierarchy|vision`, `--query "<nl>"`, `--deep`, `--cheap`, `--strategy <tier>`, `--annotate [path]`, `--with-ocr/--no-ocr`
 - _has_: `--by text|id|desc` (id finds pruned containers), `--match exact|contains|regex`, `--ignore-case`, `--ocr-fallback/--no-ocr-fallback`, `--timeout <ms>`
-- _wait_: `--for "<text>"` (`--by id`), `--idle`, `--for-stable`, `--interval`, `--settle`, `--timeout`, `--observe` (fresh ids after the wait)
+- _wait_: `--for "<text>"` (`--by id`, `--absent` = wait until it disappears), `--idle`, `--for-stable`, `--interval`, `--settle`, `--timeout`, `--observe` (fresh ids, even on a miss)
+- _app_: `launch <pkg> [--activity .Entry]` (pin the entry Activity on multi-launcher builds), `stop <pkg>`, `foreground`
 - _map_: `--app <pkg>`, `--brief`, `--screen <name>`, `--depth N`, `--find "<goal>"`, `--json`
 - _goto_: `<goal>` (fuzzy), `--plan` (annotated route, no taps), `--max-steps N`, `--allow-destructive`, `--assist` (opt-in planner recovery)
 - _flow_: `run <name> [--param K=V] [--file PATH] [--dry-run] [--from-step N] [--no-allow-destructive] [--assist]`, `save <name> [--last N] [--force]`, `list|show|delete`. Steps incl. `launch_app`/`stop_app`/`open_link`/`goto`/`flow` (a `flow:` step runs a saved flow inline — reuse a shared `login` recipe).

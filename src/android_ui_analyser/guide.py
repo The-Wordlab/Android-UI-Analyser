@@ -170,8 +170,14 @@ KEY_FLAGS: list[tuple[str, str]] = [
     ),
     (
         "wait",
-        '`--for "<text>"` (`--by id`), `--idle`, `--for-stable`, `--interval`, `--settle`, '
-        "`--timeout`, `--observe` (fresh ids after the wait)",
+        '`--for "<text>"` (`--by id`, `--absent` = wait until it disappears), `--idle`, '
+        "`--for-stable`, `--interval`, `--settle`, `--timeout`, `--observe` (fresh ids, "
+        "even on a miss)",
+    ),
+    (
+        "app",
+        "`launch <pkg> [--activity .Entry]` (pin the entry Activity on multi-launcher "
+        "builds), `stop <pkg>`, `foreground`",
     ),
     (
         "map",
