@@ -160,6 +160,9 @@ class Meta(BaseModel):
     # the analyze it already runs, instead of having to remember to call `aua map`.
     known_routes: list[str] = Field(default_factory=list)  # ["tap 'Apps' → apps", ...]
     suggested_gotos: list[str] = Field(default_factory=list)  # ["goto image_creator", ...]
+    suggested_deeplinks: list[str] = Field(  # ["open luzia://chats", ...] — shortcuts
+        default_factory=list
+    )
     map_hint: str | None = None  # e.g. "12 screens mapped — run `aua map`"
     annotated_image: str | None = None
     device_serial: str | None = None

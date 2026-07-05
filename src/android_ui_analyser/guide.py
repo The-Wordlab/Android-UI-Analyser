@@ -62,10 +62,12 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "Take shortcuts with deeplinks",
         "`aua open \"<uri>\"` fires a deeplink — jump straight to a screen or trigger an app "
         "action (e.g. set a feature flag) instead of tapping through the UI. Far faster than "
-        "navigating; the deeplink is remembered in the playbook. Some deeplinks need an app "
-        "restart to take effect — follow with `aua app stop <pkg>` + `aua app launch <pkg>`. "
+        "navigating. When an app has known deeplinks, every `analyze` offers the best ones "
+        "inline in `meta.suggested_deeplinks` (e.g. `open luzia://chats`) — so to reach the "
+        "screen under test, open the shortcut instead of navigating to it. Some deeplinks "
+        "need an app restart to take effect (`aua app stop <pkg>` + `aua app launch <pkg>`). "
         "Don't know the app's deeplinks? `aua explore mine <repo> --app <pkg>` harvests them "
-        "from the source once (they show up in `aua about`).",
+        "from the source once (then they ride inline + show in `aua about`).",
     ),
     (
         "Index an app you don't know yet",

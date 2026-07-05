@@ -243,6 +243,7 @@ class NavHints(NamedTuple):
 
     known_routes: list[str]  # outgoing edges: ["tap 'Apps' → apps", ...]
     suggested_gotos: list[str]  # ranked ready-to-run: ["goto image_creator", ...]
+    suggested_deeplinks: list[str]  # shortcut jumps: ["open luzia://chats", ...]
     map_hint: str | None  # nudge when there's a map but nothing actionable from here
 
 
@@ -1017,10 +1018,26 @@ class AppMemoryStore:
         Reads the session cursor (just updated by :meth:`observe_screen`) for the current
         screen, then derives routes/suggestions from the stored map. Empty when no map.
         """
-        empty = NavHints(known_routes=[], suggested_gotos=[], map_hint=None)
+        empty = NavHints(
+            known_routes=[], suggested_gotos=[], suggested_deeplinks=[], map_hint=None
+        )
         app = self.load(package)
-        if app is None or not app.screens:
+        if app is None:
             return empty
+        deeplinks = _suggest_deeplinks(app, max_suggest)
+        if not app.screens:
+            # Playbook-only (e.g. freshly mined): still offer the deeplink shortcuts.
+            hint = (
+                f"{len(app.deeplinks)} deeplink shortcut(s) known — see `aua about`"
+                if app.deeplinks
+                else None
+            )
+            return NavHints(
+                known_routes=[],
+                suggested_gotos=[],
+                suggested_deeplinks=deeplinks,
+                map_hint=hint,
+            )
         sess = self.load_session(serial)
         current = sess.current_screen
         now = now or datetime.now().astimezone()
@@ -1044,10 +1061,15 @@ class AppMemoryStore:
         )
         suggested = [f"goto {n}" for n in ranked[: max(0, max_suggest)]]
         map_hint = None
-        if not known_routes and not suggested:
+        if not known_routes and not suggested and not deeplinks:
             n = len(app.screens)
             map_hint = f"{n} screen{'s' * (n != 1)} mapped — run `aua map`"
-        return NavHints(known_routes=known_routes, suggested_gotos=suggested, map_hint=map_hint)
+        return NavHints(
+            known_routes=known_routes,
+            suggested_gotos=suggested,
+            suggested_deeplinks=deeplinks,
+            map_hint=map_hint,
+        )
 
     def set_last_goal(self, serial: str, goal: str | None) -> None:
         """Remember the last goto/find target on the session cursor (ranking boost)."""
@@ -1073,6 +1095,18 @@ class AppMemoryStore:
             self.save(app)
             return {"forgot": f"{package}/{screen}"}
         return {"forgot": None}
+
+
+def _suggest_deeplinks(app: AppMap, cap: int) -> list[str]:
+    """Ready-to-run deeplink shortcuts for inline `analyze` hints — concrete URIs only
+    (templated ones need a value), proven (probed) ones first."""
+    concrete = [
+        d
+        for d in app.deeplinks
+        if "$" not in d.uri and "{" not in d.uri and not d.uri.rstrip().endswith("/")
+    ]
+    concrete.sort(key=lambda d: (not d.probed, d.uri))  # probed (known-good) first
+    return [f"open {d.uri}" for d in concrete[: max(0, cap)]]
 
 
 def _pending_fresh(since: str | None, *, now: datetime | None = None) -> bool:
