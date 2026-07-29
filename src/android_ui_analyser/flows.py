@@ -195,8 +195,16 @@ def _parse_step(item: Any, index: int) -> RouteStep:
     else:
         alias = _ARG_ALIAS[kind]
         kw["arg"] = v.pop(alias, None) or v.pop("arg", None)
-        # scroll_to/wait_for/assert_visible may target a resource-id: `{id: containerX}`.
-        if kw["arg"] is None and kind in ("scroll-to", "wait-for", "assert-visible"):
+        # scroll_to/wait_for/assert_visible/assert_not_visible may target a resource-id:
+        # `{id: containerX}`. assert_not_visible needs it as much as its positive twin —
+        # "this id is gone" is how you check a selected tab (which drops its rid) or an
+        # entry point that must not be offered on a given screen.
+        if kw["arg"] is None and kind in (
+            "scroll-to",
+            "wait-for",
+            "assert-visible",
+            "assert-not-visible",
+        ):
             rid = v.pop("id", None)
             if rid is not None:
                 kw["arg"] = rid
