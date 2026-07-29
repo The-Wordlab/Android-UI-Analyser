@@ -138,6 +138,35 @@ aua devices     # aua's own device listing (serial, model, Android version)
 
 ---
 
+## Working on `aua` itself
+
+Dependencies are locked (`uv.lock`) and the interpreter is pinned (`.python-version`), so
+everyone resolves the same versions:
+
+```bash
+# The test suite asserts apple-vision + rapidocr ARE available and paddle/easyocr are NOT
+# (tests/test_ocr.py), so sync exactly that set — `--all-extras` fails the
+# "provider unavailable" tests, and syncing none fails the "provider available" ones.
+uv sync --extra dev --extra apple --extra rapidocr --extra yolo
+
+uv run pytest          # test
+uv run ruff check src  # lint
+uv run aua analyze     # run the CLI from THIS tree
+```
+
+Use `uv run`, not a hand-rolled `.venv`. `uv run` resolves the project from the working
+directory, so inside a **git worktree** you get that worktree's source. An editable install in
+a shared `.venv` points at whichever checkout created it, which silently tests the wrong tree —
+that has produced real false conclusions (a flag reported "missing" that was present all along).
+
+Two related traps:
+
+* **The daemon caches loaded modules.** After changing source, `aua daemon stop` — otherwise a
+  warm daemon keeps serving the old code.
+* **`.githooks/pre-commit` resolves `aua` from `PATH`**, which in a worktree is the *main*
+  checkout, so it can regenerate `SKILL.md` from the wrong tree. Regenerate manually
+  (`uv run aua guide --emit-skill <path>`) and commit with `--no-verify` if it interferes.
+
 ## Quickstart
 
 ```bash

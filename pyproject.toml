@@ -15,14 +15,22 @@ keywords = ["android", "ui-testing", "uiautomator2", "set-of-marks", "accessibil
 # Base install is intentionally light. Heavy perception backends live in extras and
 # are lazy-imported, so a missing optional dep never breaks the core CLI.
 dependencies = [
-    "typer>=0.12",
+    # <0.26: typer 0.26+ stopped accepting `--emit-skill` with no value, so the documented
+    # bare `aua guide --emit-skill` breaks (verified broken on 0.26.8 and 0.27.0, fine on
+    # 0.25.1). The real fix is to declare that option so a bare flag still works on modern
+    # typer; until then this bound holds the line. Bounds matter even with uv.lock committed —
+    # `install.sh` uses `uv tool install <repo>`, which resolves fresh and ignores the lock.
+    "typer>=0.12,<0.26",
     "pydantic>=2.6",
     "pyyaml>=6.0",
     "httpx>=0.27",
     "pillow>=10.0",
     "numpy>=1.26",
     "uiautomator2>=3.0",
-    "mcp>=1.2",
+    # <2: mcp 2.0 dropped mcp.shared.memory.create_connected_server_and_client_session,
+    # which the server and its tests are written against. Moving to 2.x is a deliberate
+    # port, not something a fresh resolve should do silently.
+    "mcp>=1.2,<2",
 ]
 
 [project.optional-dependencies]
