@@ -192,12 +192,11 @@ def test_grid_settle_does_not_settle_when_everything_changes() -> None:
     ]
     gs = GridSettle(streak=3)
     for img in frames:
-        if gs.feed(img):
-            # After streak, all cells may mask → then "stable" over empty set.
-            # That is intentional: pure full-screen animation is treated as settled-except-anim.
-            # Require that at least one cell is still unmasked and changing for early frames.
-            if gs.samples < 4:
-                raise AssertionError("should not settle while cells are still being classified")
+        # After streak, all cells may mask → then "stable" over an empty set. That is
+        # intentional: pure full-screen animation is treated as settled-except-anim. But at
+        # least one cell must still be unmasked and changing while cells are being classified.
+        if gs.feed(img) and gs.samples < 4:
+            raise AssertionError("should not settle while cells are still being classified")
 
 
 def test_wait_stable_ignore_animation_settles() -> None:

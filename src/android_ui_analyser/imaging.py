@@ -87,7 +87,7 @@ CELL_MAD_THRESHOLD = 6.0
 
 
 def grid_signatures(
-    image: "ScreenImage", *, cols: int = GRID_COLS, rows: int = GRID_ROWS, side: int = 8
+    image: ScreenImage, *, cols: int = GRID_COLS, rows: int = GRID_ROWS, side: int = 8
 ) -> list[tuple[float, ...]]:
     """Per-cell content fingerprints (downscaled grayscale samples).
 
@@ -115,7 +115,7 @@ def cell_mad(a: tuple[float, ...], b: tuple[float, ...]) -> float:
     return sum(abs(x - y) for x, y in zip(a, b, strict=True)) / len(a)
 
 
-def frame_signature(image: "ScreenImage", *, side: int = 16) -> tuple[float, ...]:
+def frame_signature(image: ScreenImage, *, side: int = 16) -> tuple[float, ...]:
     """Whole-frame coarse signature for 'did anything change?' checks."""
     pil = image.pil().convert("L").resize((side, side), _RESAMPLE)
     return tuple(float(v) for v in pil.getdata())
@@ -129,7 +129,7 @@ def frames_differ(
 
 # Back-compat alias used by earlier drafts / tests.
 def grid_hashes(
-    image: "ScreenImage", *, cols: int = GRID_COLS, rows: int = GRID_ROWS
+    image: ScreenImage, *, cols: int = GRID_COLS, rows: int = GRID_ROWS
 ) -> list[int]:
     """Legacy int hashes derived from cell mean luminance (for simple equality checks)."""
     sigs = grid_signatures(image, cols=cols, rows=rows)
@@ -167,7 +167,7 @@ class GridSettle:
         """Indices of cells currently flagged as live animation."""
         return [i for i, m in enumerate(self._masked) if m]
 
-    def feed(self, image: "ScreenImage") -> bool:
+    def feed(self, image: ScreenImage) -> bool:
         """Feed a new frame. Returns True if the non-animated portion is stable."""
         sigs = grid_signatures(image, cols=self.cols, rows=self.rows)
         self.samples += 1
@@ -225,12 +225,12 @@ def parse_region(raw: str) -> Bounds:
 
 
 def crop_and_scale(
-    image: "ScreenImage",
+    image: ScreenImage,
     *,
     region: Bounds | None = None,
     scale: float | None = None,
     max_width: int | None = None,
-) -> "ScreenImage":
+) -> ScreenImage:
     """Return *image* cropped to *region* then downscaled, or itself when asked for nothing.
 
     ``region`` is clamped to the screen (an off-screen box is a usage error, not a crash).
