@@ -258,6 +258,14 @@ class FakeDevice(Device):
     def utc_offset_minutes(self) -> int | None:
         return self.utc_offset
 
+    def advance_clock(self, ms: int) -> None:
+        """Move the DEVICE clock forward without moving the host's.
+
+        Lets a fake interaction consume time the way an adb round-trip does, so "when the
+        app logged" and "when the interaction returned" are distinguishable instants.
+        """
+        self.clock_skew_ms -= ms
+
     def log_now(self, tag: str = "Test", msg: str = "hello", *, offset_ms: int = 0) -> str:
         """Append a line stamped off the DEVICE clock in device-local time, as apps do."""
         device_ms = (self.get_clock_ms() or 0) + offset_ms

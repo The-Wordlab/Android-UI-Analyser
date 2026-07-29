@@ -135,7 +135,8 @@ def test_engine_capture_hint_after_burst(tmp_path: Path) -> None:
     engine = Engine(cfg, device=device)
     status = engine.capture_start()
     assert status["running"] is True
-    engine._screen_changed()  # mark + burst
+    with engine._acting():  # mark + burst, bracketing a (no-op) interaction
+        pass
     deadline = time.time() + 2.5
     while time.time() < deadline and not engine._capture.hint_ready():  # type: ignore[union-attr]
         time.sleep(0.05)
