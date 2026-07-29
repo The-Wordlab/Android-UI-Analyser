@@ -15,7 +15,7 @@ import logging
 import re
 import time
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -2226,8 +2226,8 @@ class Engine:
         el = self._target(element_id, selector)
         cx, cy = el.center
         step = self._step("tap", el)  # built pre-action: needs the cached package
-        self.device.click(cx, cy)
-        self._screen_changed()
+        with self._acting():
+            self.device.click(cx, cy)
         self._record_action_safe(step)
         return self._observe(
             ActionResult(ok=True, action="tap", id=el.id, target=[cx, cy]), observe, with_image
@@ -2245,8 +2245,8 @@ class Engine:
         el = self._target(element_id, selector, verb="long-press")
         cx, cy = el.center
         step = self._step("long-press", el)
-        self.device.long_click(cx, cy, ms)
-        self._screen_changed()
+        with self._acting():
+            self.device.long_click(cx, cy, ms)
         self._record_action_safe(step)
         return self._observe(
             ActionResult(ok=True, action="long-press", id=el.id, target=[cx, cy]),
@@ -2265,8 +2265,8 @@ class Engine:
         el = self._target(element_id, selector, verb="double-tap")
         cx, cy = el.center
         step = self._step("double-tap", el)
-        self.device.double_click(cx, cy)
-        self._screen_changed()
+        with self._acting():
+            self.device.double_click(cx, cy)
         self._record_action_safe(step)
         return self._observe(
             ActionResult(ok=True, action="double-tap", id=el.id, target=[cx, cy]),
@@ -2289,8 +2289,8 @@ class Engine:
         # The step records the field's SHAPE only — the typed value is never persisted
         # (PRD §6b privacy; observe_action strips `text` defensively too).
         step = self._step("input", el, submit=submit)
-        self.device.input_text(cx, cy, text, clear=True, submit=submit)
-        self._screen_changed()
+        with self._acting():
+            self.device.input_text(cx, cy, text, clear=True, submit=submit)
         self._record_action_safe(step)
         return self._observe(
             ActionResult(ok=True, action="input", id=el.id, detail=text), observe, with_image
@@ -2307,9 +2307,9 @@ class Engine:
         el = self._target(element_id, selector, verb="clear")
         cx, cy = el.center
         step = self._step("clear", el)
-        self.device.click(cx, cy)
-        self.device.clear_text()
-        self._screen_changed()
+        with self._acting():
+            self.device.click(cx, cy)
+            self.device.clear_text()
         self._record_action_safe(step)
         return self._observe(
             ActionResult(ok=True, action="clear", id=el.id), observe, with_image
@@ -2411,8 +2411,8 @@ class Engine:
         if coords is not None:
             x1, y1, x2, y2 = coords
             step = self._step("swipe", arg="coords")
-            device.swipe(x1, y1, x2, y2)
-            self._screen_changed()
+            with self._acting():
+                device.swipe(x1, y1, x2, y2)
             self._record_action_safe(step)
             return self._observe(
                 ActionResult(ok=True, action="swipe", target=[x1, y1, x2, y2]),
@@ -2426,14 +2426,14 @@ class Engine:
         x1, y1, x2, y2 = self._swipe_path(box, d, percent)
         step = self._step("swipe", arg=d)
         if not verify:
-            device.swipe(x1, y1, x2, y2)
-            self._screen_changed()
+            with self._acting():
+                device.swipe(x1, y1, x2, y2)
             self._record_action_safe(step)
             return self._observe(
                 ActionResult(ok=True, action="swipe", target=[x1, y1, x2, y2]), observe, with_image
             )
-        distance, moved = self._swipe_once(box, d, percent)
-        self._screen_changed()
+        with self._acting():
+            distance, moved = self._swipe_once(box, d, percent)
         self._record_action_safe(step)
         # ok stays True — the gesture WAS performed, and a swipe is also used to dismiss or
         # page things where "the screen did not move" is the expected outcome. The verdict
@@ -2488,13 +2488,13 @@ class Engine:
         step = self._step("scroll", arg=d)
         travelled = 0
         steps = 0
-        for _ in range(limit):
-            dy, moved = self._swipe_once(box, d, percent)
-            if not moved:
-                break
-            steps += 1
-            travelled += abs(dy)
-        self._screen_changed()
+        with self._acting():
+            for _ in range(limit):
+                dy, moved = self._swipe_once(box, d, percent)
+                if not moved:
+                    break
+                steps += 1
+                travelled += abs(dy)
         self._record_action_safe(step)
         at_end = steps < limit
         if steps == 0:
@@ -2564,16 +2564,16 @@ class Engine:
         travelled = 0
         steps = 0
         exhausted = True
-        for _ in range(max(1, max_swipes)):
-            dy, moved = self._swipe_once(box, direction, percent)
-            if moved:
-                steps += 1
-                travelled += abs(dy)
-            found = locate()
-            if found is not None or not moved:
-                exhausted = False
-                break
-        self._screen_changed()
+        with self._acting():
+            for _ in range(max(1, max_swipes)):
+                dy, moved = self._swipe_once(box, direction, percent)
+                if moved:
+                    steps += 1
+                    travelled += abs(dy)
+                found = locate()
+                if found is not None or not moved:
+                    exhausted = False
+                    break
         self._record_action_safe(step)
         if found is not None:
             outcome = "moved"
@@ -2614,8 +2614,8 @@ class Engine:
                 hint="Valid: " + ", ".join(sorted(_KEY_NAMES)) + ", KEYCODE_*, or a keycode number.",
             )
         step = self._step("key", arg=name)
-        self.device.press(name)
-        self._screen_changed()
+        with self._acting():
+            self.device.press(name)
         self._record_action_safe(step)
         return self._observe(
             ActionResult(ok=True, action="key", detail=name), observe, with_image
@@ -2630,8 +2630,8 @@ class Engine:
         leave the screen; hide-keyboard aims to only dismiss the keyboard.
         """
         step = self._step("hide-keyboard")
-        self.device.hide_keyboard()
-        self._screen_changed()
+        with self._acting():
+            self.device.hide_keyboard()
         self._record_action_safe(step)
         return self._observe(
             ActionResult(ok=True, action="hide-keyboard"), observe, with_image
@@ -2661,8 +2661,8 @@ class Engine:
         if pin_package and not target_pkg:
             target_pkg = self.current_package() or self._cached_package()
         step = self._step("open-link", arg=uri)
-        self.device.open_link(uri, package=target_pkg if pin_package else None)
-        self._screen_changed()
+        with self._acting():
+            self.device.open_link(uri, package=target_pkg if pin_package else None)
         time.sleep(0.35)  # chooser / activity settle
         detail = uri if not target_pkg else f"{uri} → {target_pkg}"
         if self._is_chooser():
@@ -2770,7 +2770,9 @@ class Engine:
                 if (el.text or "").strip() == "Just once" and el.clickable:
                     device.click(*el.center)
                     break
-        self._screen_changed()
+        # Cache only — deliberately NOT `_acting()`. This runs mid-`open_link`, whose window
+        # is already open; re-stamping here would move it past the deeplink's own output.
+        self._invalidate_cache()
         return True
 
     def _remember_deeplink_safe(self, uri: str, *, package: str | None = None) -> None:
@@ -3065,8 +3067,8 @@ class Engine:
         return ActionResult(ok=True, action="clipboard-get", detail=text)
 
     def paste(self, *, observe: bool = True, with_image: bool | str | None = None) -> ActionResult:
-        self.device.paste()
-        self._screen_changed()
+        with self._acting():
+            self.device.paste()
         return self._observe(ActionResult(ok=True, action="paste"), observe, with_image)
 
     def copy_text(
@@ -3090,8 +3092,8 @@ class Engine:
         return ActionResult(ok=True, action="location-set", detail=f"{lat},{lon}")
 
     def orientation_set(self, mode: str) -> ActionResult:
-        self.device.set_orientation(mode)
-        self._screen_changed()
+        with self._acting():
+            self.device.set_orientation(mode)
         return ActionResult(ok=True, action="orientation-set", detail=mode)
 
     def orientation_get(self) -> ActionResult:
@@ -3173,14 +3175,14 @@ class Engine:
             if (element_id is not None or selector)
             else None
         )
-        if el is not None:
-            cx, cy = el.center
-            self.device.click(cx, cy)
-        if chars is None or chars <= 0:
-            self.device.clear_text()
-        else:
-            self.device.erase_chars(chars)
-        self._screen_changed()
+        with self._acting():
+            if el is not None:
+                cx, cy = el.center
+                self.device.click(cx, cy)
+            if chars is None or chars <= 0:
+                self.device.clear_text()
+            else:
+                self.device.erase_chars(chars)
         detail = "all" if not chars or chars <= 0 else str(chars)
         return self._observe(
             ActionResult(ok=True, action="erase", id=el.id if el else None, detail=detail),
@@ -3205,17 +3207,18 @@ class Engine:
         if a == "launch":
             if not package:
                 raise UsageError("app launch needs a package name")
-            if clear_state:
-                if not confirmed:
-                    raise UsageError(
-                        "launch --clear wipes app data (flags + session) — pass --yes",
-                        hint="`aua app launch <pkg> --clear --yes`",
-                    )
-                device.clear_app(package)
-            # --activity pins the entry Activity — some builds have multiple launcher
-            # activities (e.g. a Dev Tools menu) and default resolution is nondeterministic.
-            device.launch_app(package, activity=activity)
-            self._screen_changed()
+            if clear_state and not confirmed:
+                raise UsageError(
+                    "launch --clear wipes app data (flags + session) — pass --yes",
+                    hint="`aua app launch <pkg> --clear --yes`",
+                )
+            with self._acting():
+                if clear_state:
+                    device.clear_app(package)
+                # --activity pins the entry Activity — some builds have multiple launcher
+                # activities (e.g. a Dev Tools menu) and default resolution is
+                # nondeterministic.
+                device.launch_app(package, activity=activity)
             detail = f"{package}/{activity}" if activity else package
             if clear_state:
                 detail = f"{detail} (cleared)"
@@ -3223,14 +3226,14 @@ class Engine:
         if a in ("kill", "force-stop"):
             if not package:
                 raise UsageError("app kill needs a package name")
-            device.stop_app(package)
-            self._screen_changed()
+            with self._acting():
+                device.stop_app(package)
             return ActionResult(ok=True, action="app-kill", detail=package)
         if a == "stop":
             if not package:
                 raise UsageError("app stop needs a package name")
-            device.stop_app(package)
-            self._screen_changed()
+            with self._acting():
+                device.stop_app(package)
             return ActionResult(ok=True, action="app-stop", detail=package)
         if a in ("clear", "clear-state", "clear_state"):
             if not package:
@@ -3241,8 +3244,8 @@ class Engine:
                     "— pass --yes / --yes-wipe-flags to confirm",
                     hint="Then re-apply flag overrides / re-login before asserting experiment UI.",
                 )
-            device.clear_app(package)
-            self._screen_changed()
+            with self._acting():
+                device.clear_app(package)
             return ActionResult(ok=True, action="app-clear", detail=package)
         if a in ("grant", "grant-permissions", "grant_permissions"):
             if not package:
@@ -3439,16 +3442,24 @@ class Engine:
             logger.warning("ignoring corrupt analyze cache: %s", exc)
             return None
 
-    def _screen_changed(self) -> None:
-        """The single funnel every state-changing action passes through.
+    @contextlib.contextmanager
+    def _acting(self) -> Iterator[None]:
+        """Bracket a device interaction: open the log window, then drop the stale id cache.
 
-        Dropping the stale id cache and re-stamping ``last-action`` are the same event, so
-        they live together: an action that forgot the stamp would leave
-        ``logcat --since last-action`` pointing at some *earlier* action's window, and
-        under-reporting a window looks exactly like "the app logged nothing".
+        Wrap the interaction rather than following it, because the two halves belong on
+        opposite sides of it. ``last-action`` has to be stamped BEFORE the device is
+        touched — ``logcat --since last-action`` means "since just before the last action",
+        so it must cover what the app logged *in response*. A stamp taken after
+        ``device.click()`` returns excludes exactly those lines, and under-reporting a
+        window looks identical to "the app logged nothing". The id cache, conversely, can
+        only be known stale once the interaction has happened.
+
+        Being a context manager is the point: an action cannot complete without having
+        opened its window first, so the ordering cannot come apart per-action again.
         """
-        self._invalidate_cache()
         self._mark_logcat("last-action")
+        yield
+        self._invalidate_cache()
 
     def _invalidate_cache(self) -> None:
         path = self._cache_path()

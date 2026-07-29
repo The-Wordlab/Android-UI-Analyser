@@ -322,8 +322,10 @@ KEY_FLAGS: list[tuple[str, str]] = [
     ),
     (
         "logcat",
-        "`aua logcat mark [NAME]` (default `default`; also auto-marks `last-action` on every "
-        "state-changing action), `aua logcat [--grep REGEX] [--since MARK|last-action|30s] "
+        "`aua logcat mark [NAME]` (default `default`; also auto-marks `last-action` immediately "
+        "BEFORE every state-changing action, so `--since last-action` covers what the app "
+        "logged in RESPONSE to it — that is the `act → what did it do` loop), "
+        "`aua logcat [--grep REGEX] [--since MARK|last-action|30s] "
         "[--tag TAG] [--lines N] [--json]` — dump since the mark (default: last-action, else "
         "30s). Windows are in DEVICE time (logcat lines are device-stamped and emulator "
         "clocks drift from the host by seconds); `mark` reports `clock`, `host_unix_ms` and "
