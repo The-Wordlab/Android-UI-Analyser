@@ -304,8 +304,11 @@ KEY_FLAGS: list[tuple[str, str]] = [
     ),
     (
         "flags",
-        "`flags set <pkg> KEY=VAL…`, `flags apply file.yaml` — deeplink templates "
-        "(Luzia `luzia-test://set-flags?…` by default)",
+        "`flags set <pkg> KEY=VAL…`, `flags apply file.yaml` — needs a `flags.templates` "
+        "entry for the package (set-flags schemes are app-specific). Writes, then **verifies** "
+        "against the app's shared_prefs (`applied`/`ignored`; a dropped key exits 8, "
+        "`--no-verify` to skip) and **restarts** the app (`--no-restart` to skip) because "
+        "flags read at cold start ignore a live-process override",
     ),
     (
         "proxy / mock",
