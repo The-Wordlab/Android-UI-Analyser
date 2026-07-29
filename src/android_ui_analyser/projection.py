@@ -97,6 +97,17 @@ def short_rid(resource_id: str | None) -> str | None:
     return resource_id.rsplit("/", 1)[-1]
 
 
+def is_system_rid(resource_id: str | None) -> bool:
+    """True when a resource-id belongs to system chrome rather than the app under test.
+
+    The package list lives here because ``--no-system`` already owns it; candidate ranking
+    reads the same one so a status-bar id can never be offered as a "did you mean".
+    """
+    if not resource_id or ":" not in resource_id:
+        return False
+    return resource_id.split(":", 1)[0] in _SYSTEM_ID_PACKAGES
+
+
 def _valid_field_names() -> str:
     return ", ".join(sorted(FIELD_ALIASES))
 
@@ -374,9 +385,7 @@ def _matches(value: Any, needles: Iterable[str]) -> bool:
 
 
 def _is_system(element: dict[str, Any], screen_height: int) -> bool:
-    resource_id = element.get("resource_id") or ""
-    package = resource_id.split(":", 1)[0] if ":" in resource_id else ""
-    if package in _SYSTEM_ID_PACKAGES:
+    if is_system_rid(element.get("resource_id")):
         return True
     desc = element.get("content_desc") or ""
     if not desc or not _SYSTEM_DESC_RE.search(desc):

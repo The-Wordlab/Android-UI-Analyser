@@ -97,10 +97,26 @@ def match_selector(
     return tiers[min(tiers)] if tiers else []
 
 
+def app_elements(elements: Sequence[Element]) -> list[Element]:
+    """*elements* minus system chrome (``com.android.systemui`` & friends).
+
+    A miss on an app selector is never explained by the status bar, so the diagnostic
+    counts and candidate lists are computed over the app's own elements.
+    """
+    from .projection import is_system_rid
+
+    return [el for el in elements if not is_system_rid(el.resource_id)]
+
+
 def nearest_elements(
     elements: Sequence[Element], needle: str, limit: int = 5
 ) -> list[Element]:
-    """Best "did you mean" candidates for a selector that matched nothing."""
+    """Best "did you mean" candidates for a selector that matched nothing.
+
+    App elements are ranked alone; system chrome is only offered when the app contributed
+    nothing at all, because four status-bar ids ranked above nothing is worse than an empty
+    hint — it reads as a real answer and sends the caller looking in the wrong place.
+    """
     import difflib
 
     def score(el: Element) -> float:
@@ -110,7 +126,8 @@ def nearest_elements(
             default=0.0,
         )
 
-    ranked = sorted(((score(el), el) for el in elements), key=lambda pair: pair[0], reverse=True)
+    pool = app_elements(elements) or list(elements)
+    ranked = sorted(((score(el), el) for el in pool), key=lambda pair: pair[0], reverse=True)
     near = [el for value, el in ranked if value >= _NEAREST_FLOOR][:limit]
     return near or [el for _v, el in ranked[:limit]]
 
