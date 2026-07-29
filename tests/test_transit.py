@@ -107,10 +107,10 @@ def test_auth_leg_records_one_replayable_edge(tmp_path: Path) -> None:
     _, eng = _walk_auth_leg(tmp_path, "emu-transit")
     store = _store(tmp_path)
 
-    luzia = store.load(P)
-    assert luzia is not None
-    assert len(luzia.routes) == 1
-    edge = luzia.routes[0]
+    origin = store.load(P)
+    assert origin is not None
+    assert len(origin.routes) == 1
+    edge = origin.routes[0]
     assert edge.from_screen == "welcome" and edge.to_screen == "onboarding"
     assert [s.kind for s in edge.steps] == ["tap", "tap", "tap"]
     assert edge.steps[0].package is None  # origin step normalized
@@ -206,7 +206,7 @@ def test_goto_resumes_mid_transit_after_manual_step(tmp_path: Path) -> None:
     row = next(e.id for e in res.elements if e.text == "Engineering Team")
     eng.tap(row, observe=False)  # → CHROME_CONSENT
 
-    resumed = eng.goto("onboarding")  # foreground=chrome, journey=luzia → resume
+    resumed = eng.goto("onboarding")  # foreground=chrome, journey=origin app → resume
     assert resumed["ok"] is True and resumed["arrived"] is True, resumed
     # resume matched 'Continue' on the consent screen and only tapped that
     clicks_total = sum(1 for c in dev.calls if c[0] == "click")
@@ -223,7 +223,7 @@ def test_goto_resume_hands_off_when_nothing_matches(tmp_path: Path) -> None:
         "onboarding",
         steps=[RouteStep(kind="tap", label="No Such Thing", package=CHROME)],
     )
-    # Start ALREADY mid-transit: session says the journey is luzia's, screen is chrome.
+    # Start ALREADY mid-transit: session says the journey is the origin app's, screen is chrome.
     sess = store.load_session("emu-stuck")
     sess.package = P
     sess.current_screen = "welcome"
@@ -254,8 +254,8 @@ def test_transitional_same_screen_frame_does_not_eat_the_edge(tmp_path: Path) ->
     eng.key("enter", observe=False)  # any action; ScriptedDevice advances → ONBOARDING
     eng.analyze(source="hierarchy")
     store = _store(tmp_path)
-    luzia = store.load(P)
-    edge = next(e for e in luzia.routes if e.from_screen == "welcome")
+    origin = store.load(P)
+    edge = next(e for e in origin.routes if e.from_screen == "welcome")
     assert edge.to_screen != "welcome"
     labels = [s.label for s in edge.steps]
     assert "Continue with Google" in labels  # survived the transitional same-screen frame

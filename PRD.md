@@ -6,7 +6,7 @@ and selectable models (local or commercial).**
 
 - Status: ready to build
 - Background: see `docs/RESEARCH.md` (landscape) and `docs/ARCHITECTURE.md` (decisions)
-- Working directory: `/Users/luzia/repositories/ai/android-ui-analyser`
+- Working directory: the repository root
 
 ---
 
@@ -264,7 +264,7 @@ A per-user directory, default `~/.android-ui-analyser/` (override `memory.dir`):
 ```
 ~/.android-ui-analyser/
   memory/
-    <package>/                 # one folder per app, e.g. co.thewordlab.luzia/
+    <package>/                 # one folder per app, e.g. com.example.app/
       MAP.md                   # human- + AI-readable app map (what the agent reads)
       index.json               # machine index: screens, signatures, routes, freshness
       screens/<screen>.json    # optional per-screen element detail
@@ -717,7 +717,7 @@ Do all of these in a single run; later items depend on earlier ones:
 - The MCP wrapper exposes the same capabilities as the CLI.
 
 ## 18. Operational guidance for the implementing agent (`/goal`)
-- Work entirely inside `/Users/luzia/repositories/ai/android-ui-analyser`.
+- Work entirely inside this repository.
 - Use a local virtualenv; install dev + the lighter provider extras you can
   (`apple` on macOS, `rapidocr`, `yolo` if feasible). Heavy/large model downloads
   (OmniParser weights, a 7B VLM) are **not** required for the build — implement and

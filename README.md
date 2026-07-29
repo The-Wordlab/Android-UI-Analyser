@@ -333,11 +333,11 @@ Flows live flat under `<memory.dir>/flows/<name>.yaml` (they span packages by de
 ```yaml
 # ~/.android-ui-analyser/flows/reset_account_google_login.yaml
 name: reset_account_google_login
-app: co.thewordlab.luzia.dev
+app: com.example.app.dev
 params:
   ACCOUNT: "Engineering Team"
 steps:
-  - launch_app: co.thewordlab.luzia.dev
+  - launch_app: com.example.app.dev
   - tap: {id: buttonSettings}          # unlabeled gear — id-tail selector
   - tap: "Account & Data"
   - tap: "Delete my account"

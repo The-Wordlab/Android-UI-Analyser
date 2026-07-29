@@ -721,15 +721,15 @@ def test_analyze_suggests_deeplinks_inline(tmp_path: Path) -> None:
     """A mapped app offers its deeplink shortcuts inline on analyze — no `about` needed."""
     store = _store(tmp_path)
     store.record_screen(package=P, elements=_elements(HOME), name_hint="home")
-    store.remember_deeplink(P, "luzia://chats", note="mined", probed=True)  # proven → first
-    store.remember_deeplink(P, "luzia://pet", note="mined")  # concrete, unprobed
-    store.remember_deeplink(P, "luzia://tools/{toolId}", note="mined")  # templated → excluded
+    store.remember_deeplink(P, "myapp://chats", note="mined", probed=True)  # proven → first
+    store.remember_deeplink(P, "myapp://pet", note="mined")  # concrete, unprobed
+    store.remember_deeplink(P, "myapp://tools/{toolId}", note="mined")  # templated → excluded
     dev = FakeDevice(hierarchy_xml=HOME, package=P, serial="emu-dl-hint")
     eng = _engine(tmp_path, dev)
     meta = eng.analyze(source="hierarchy").meta
-    assert "open luzia://chats" in meta.suggested_deeplinks
-    assert "open luzia://pet" in meta.suggested_deeplinks
-    assert meta.suggested_deeplinks[0] == "open luzia://chats"  # probed ranked first
+    assert "open myapp://chats" in meta.suggested_deeplinks
+    assert "open myapp://pet" in meta.suggested_deeplinks
+    assert meta.suggested_deeplinks[0] == "open myapp://chats"  # probed ranked first
     assert not any("toolId" in s for s in meta.suggested_deeplinks)  # templated excluded
 
 

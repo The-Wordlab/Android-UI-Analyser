@@ -65,7 +65,7 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "`aua open \"<uri>\"` fires a deeplink — jump straight to a screen or trigger an app "
         "action (e.g. set a feature flag) instead of tapping through the UI. Far faster than "
         "navigating. When an app has known deeplinks, every `analyze` offers the best ones "
-        "inline in `meta.suggested_deeplinks` (e.g. `open luzia://chats`) — so to reach the "
+        "inline in `meta.suggested_deeplinks` (e.g. `open myapp://home`) — so to reach the "
         "screen under test, open the shortcut instead of navigating to it. Some deeplinks "
         "need an app restart to take effect (`aua app stop <pkg>` + `aua app launch <pkg>`). "
         "Don't know the app's deeplinks? `aua explore mine <repo> --app <pkg>` harvests them "
@@ -258,7 +258,7 @@ KEY_FLAGS: list[tuple[str, str]] = [
     (
         "app",
         "`launch <pkg> [--activity .Entry] [--clear --yes]`, `stop|kill|clear|grant`. "
-        "`clear` / `launch --clear` wipe ALL app data (Luzia: flags + login) — **requires "
+        "`clear` / `launch --clear` wipe ALL app data (typically flags + login) — **requires "
         "`--yes` / `--yes-wipe-flags`**; re-apply flags afterwards",
     ),
     (
@@ -305,7 +305,7 @@ KEY_FLAGS: list[tuple[str, str]] = [
     (
         "flags",
         "`flags set <pkg> KEY=VAL…`, `flags apply file.yaml` — deeplink templates "
-        "(Luzia `luzia-test://set-flags?…` by default)",
+        "from config `flags.templates` (e.g. `myapp://set-flags?…`)",
     ),
     (
         "proxy / mock",

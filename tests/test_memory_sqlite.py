@@ -7,7 +7,7 @@ from pathlib import Path
 from android_ui_analyser.memory import AppMap, AppMemoryStore, RouteStep, ScreenRecord, SessionState
 from conftest import make_config
 
-P = "co.thewordlab.luzia"
+P = "com.example.app"
 
 
 def _screen(name: str = "home") -> ScreenRecord:
@@ -33,12 +33,12 @@ def test_sqlite_app_and_session_round_trip(tmp_path: Path) -> None:
     )
     store = AppMemoryStore(cfg.memory)
 
-    app = AppMap(package=P, label="Luzia", screens={"home": _screen()})
+    app = AppMap(package=P, label="Example App", screens={"home": _screen()})
     store.save(app)
     loaded = store.load(P)
     assert loaded is not None
     assert loaded.package == P
-    assert loaded.label == "Luzia"
+    assert loaded.label == "Example App"
     assert "home" in loaded.screens
     assert store.list_apps() == [P]
 
