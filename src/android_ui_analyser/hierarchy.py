@@ -124,6 +124,27 @@ def _gather_descendant_text(node: ET.Element) -> str | None:
     return label[:_MAX_LABEL] if label else None
 
 
+def classify_window(package: str | None) -> str | None:
+    """Map an a11y node ``package`` to a window layer for agents (``--no-ime`` etc.)."""
+    if not package:
+        return None
+    p = package.lower()
+    if "inputmethod" in p or p.endswith(".ime") or "keyboard" in p:
+        return "ime"
+    if "systemui" in p or p in {
+        "com.android.launcher3",
+        "com.android.launcher",
+        "com.google.android.apps.nexuslauncher",
+    }:
+        return "system"
+    if (
+        p in {"android", "com.android.intentresolver", "com.android.internal.app"}
+        or "permissioncontroller" in p
+    ):
+        return "overlay"
+    return "app"
+
+
 def parse_hierarchy(xml: str, screen_size: tuple[int, int] | None = None) -> list[Element]:
     """Parse UiAutomator hierarchy ``xml`` into a list of :class:`Element`.
 
@@ -198,6 +219,7 @@ def parse_hierarchy(xml: str, screen_size: tuple[int, int] | None = None) -> lis
                         focused=_is_true(node, "focused"),
                         source=Source.hierarchy,
                         confidence=None,
+                        window=classify_window(node.get("package")),
                         **state,
                     ),
                 )

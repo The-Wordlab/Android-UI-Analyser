@@ -209,6 +209,7 @@ class Engine:
         self._default_with_image: bool | str | None = (
             config.output.with_image if config.output.with_image else None
         )
+        self._capture: Any = None  # CaptureBuffer | None — set by capture_start
 
     def _effective_with_image(self, with_image: bool | str | None) -> bool | str | None:
         """Per-call ``with_image`` overrides the session default; ``False`` forces off."""
@@ -473,6 +474,7 @@ class Engine:
                 suggested_gotos=hints.suggested_gotos if hints else [],
                 suggested_deeplinks=hints.suggested_deeplinks if hints else [],
                 map_hint=hints.map_hint if hints else None,
+                capture_hint=self._capture_hint(),
                 annotated_image=annotated,
                 device_serial=device.serial,
             ),
@@ -692,6 +694,7 @@ class Engine:
                 suggested_gotos=hints.suggested_gotos if hints else [],
                 suggested_deeplinks=hints.suggested_deeplinks if hints else [],
                 map_hint=hints.map_hint if hints else None,
+                capture_hint=self._capture_hint(),
                 annotated_image=annotated,
                 device_serial=device.serial,
             ),
@@ -1059,6 +1062,32 @@ class Engine:
                 self.hide_keyboard(observe=False)
             elif kind == "paste":
                 self.paste(observe=False)
+            elif kind == "dev-profile":
+                if not s.arg:
+                    return StepFailure("unsupported_action", i, s), res
+                self.dev_profile(s.arg)
+                reanalyze = False
+            elif kind == "a11y-scroll":
+                el = _match_step(res.elements, s)
+                if el is None:
+                    return StepFailure("element_not_found", i, s), res
+                direction = (s.arg or "forward").lower()
+                self.a11y_scroll(el.id, direction=direction, observe=False)
+            elif kind == "flags-apply":
+                if not s.arg:
+                    return StepFailure("unsupported_action", i, s), res
+                self.flags_apply(s.arg, observe=False)
+            elif kind == "proxy-start":
+                self.proxy_start()
+                reanalyze = False
+            elif kind == "proxy-stop":
+                self.proxy_stop()
+                reanalyze = False
+            elif kind == "mock-replay":
+                if not s.arg:
+                    return StepFailure("unsupported_action", i, s), res
+                self.mock_replay(s.arg)
+                reanalyze = False
             elif kind == "repeat":
                 times = max(1, s.repeat or 1)
                 for _ in range(times):
@@ -1826,6 +1855,8 @@ class Engine:
 
     def close(self) -> None:
         """Release the device (and its on-device uiautomator2 server). Idempotent."""
+        with contextlib.suppress(Exception):
+            self.capture_stop()
         dev = self._device
         if dev is not None:
             with contextlib.suppress(Exception):
@@ -3158,6 +3189,277 @@ class Engine:
         safe = str(serial).replace(":", "_")
         return Path(self.config.cache.dir).expanduser() / f"clock_backup_{safe}.txt"
 
+    def _dev_backup_path(self) -> Path:
+        serial = self._device.serial if self._device else (self.config.device.serial or "default")
+        safe = str(serial).replace(":", "_")
+        return Path(self.config.cache.dir).expanduser() / f"devopts_backup_{safe}.json"
+
+    def _proxy_port(self) -> int:
+        return 8080
+
+    def dev_show(self) -> dict[str, Any]:
+        from . import devopts
+
+        state = devopts.read_state(self.device.shell)
+        return {"ok": True, "action": "dev-show", **state}
+
+    def dev_anim(self, mode: str) -> dict[str, Any]:
+        from . import devopts
+
+        path = self._dev_backup_path()
+        m = (mode or "").lower()
+        if m == "off":
+            state = devopts.anim_off(self.device.shell, path)
+        elif m == "restore":
+            state = devopts.anim_restore(self.device.shell, path)
+        else:
+            raise UsageError(
+                f"unknown anim mode {mode!r}",
+                hint="Use `aua dev anim off` or `aua dev anim restore`.",
+            )
+        return {"ok": True, "action": f"dev-anim-{m}", **state}
+
+    def dev_crashes(self, enabled: bool) -> dict[str, Any]:
+        from . import devopts
+
+        state = devopts.crashes_set(self.device.shell, enabled, self._dev_backup_path())
+        return {
+            "ok": True,
+            "action": "dev-crashes-on" if enabled else "dev-crashes-off",
+            **state,
+        }
+
+    def dev_profile(self, name: str) -> dict[str, Any]:
+        from . import devopts
+
+        path = self._dev_backup_path()
+        n = (name or "").lower()
+        if n == "ac":
+            state = devopts.profile_ac(self.device.shell, path)
+        elif n == "default":
+            state = devopts.profile_default(self.device.shell, path)
+        else:
+            raise UsageError(
+                f"unknown dev profile {name!r}",
+                hint="Use `ac` (anim off + crashes on) or `default` (restore).",
+            )
+        return {"ok": True, "action": f"dev-profile-{n}", **state}
+
+    def a11y_scroll(
+        self,
+        element_id: int | None = None,
+        *,
+        selector: dict[str, Any] | None = None,
+        direction: str = "forward",
+        observe: bool = True,
+        with_image: bool | str | None = None,
+    ) -> ActionResult:
+        el = self._target(element_id, selector, verb="a11y scroll")
+        d = (direction or "forward").lower()
+        action = "SCROLL_FORWARD" if d in ("forward", "fwd", "down") else "SCROLL_BACKWARD"
+        if d not in ("forward", "fwd", "down", "backward", "back", "up"):
+            raise UsageError(
+                f"unknown scroll direction {direction!r}",
+                hint="Use --forward or --backward.",
+            )
+        cx, cy = el.center
+        step = self._step("a11y-scroll", el, arg=d)
+        self.device.a11y_action(cx, cy, action)
+        self._screen_changed()
+        self._record_action_safe(step)
+        return self._observe(
+            ActionResult(ok=True, action="a11y-scroll", detail=f"{d} @{el.id}"),
+            observe,
+            with_image,
+        )
+
+    def a11y_action(
+        self,
+        element_id: int | None = None,
+        *,
+        selector: dict[str, Any] | None = None,
+        action: str = "CLICK",
+        observe: bool = True,
+        with_image: bool | str | None = None,
+    ) -> ActionResult:
+        el = self._target(element_id, selector, verb="a11y action")
+        cx, cy = el.center
+        act = (action or "CLICK").strip().upper()
+        step = self._step("a11y-action", el, arg=act)
+        self.device.a11y_action(cx, cy, act)
+        self._screen_changed()
+        self._record_action_safe(step)
+        return self._observe(
+            ActionResult(ok=True, action="a11y-action", detail=f"{act} @{el.id}"),
+            observe,
+            with_image,
+        )
+
+    def flags_set(
+        self,
+        package: str,
+        assignments: list[str] | dict[str, str],
+        *,
+        observe: bool = True,
+        with_image: bool | str | None = None,
+    ) -> ActionResult:
+        from .flags import build_uri, dump_result, parse_assignments
+
+        pairs = (
+            parse_assignments(list(assignments))
+            if not isinstance(assignments, dict)
+            else dict(assignments)
+        )
+        templates = dict(self.config.flags.templates)
+        uri = build_uri(package, pairs, templates)
+        self.open_link(
+            uri, package=package, pin_package=True, observe=observe, with_image=with_image
+        )
+        # Prefer flags-specific detail while keeping open_link side effects.
+        payload = dump_result(package=package, uri=uri, flags=pairs)
+        return ActionResult(ok=True, action="flags-set", detail=payload["uri"])
+
+    def flags_apply(
+        self,
+        path: str,
+        *,
+        package: str | None = None,
+        observe: bool = True,
+        with_image: bool | str | None = None,
+    ) -> ActionResult:
+        from .flags import load_flags_file
+
+        app, pairs = load_flags_file(path)
+        pkg = package or app or self.current_package()
+        if not pkg:
+            raise UsageError(
+                "flags apply needs a package",
+                hint="Put `app: <pkg>` in the YAML or pass `--package`.",
+            )
+        return self.flags_set(pkg, pairs, observe=observe, with_image=with_image)
+
+    def proxy_start(self, *, port: int | None = None) -> dict[str, Any]:
+        from . import proxy_mock as pm
+
+        p = int(port or self._proxy_port())
+        cache = Path(self.config.cache.dir).expanduser()
+        pid = pm.start_mitm(cache_dir=cache, port=p, mode="map")
+        self.device.adb_reverse(p, p)
+        self.device.set_http_proxy(f"127.0.0.1:{p}")
+        return {
+            "ok": True,
+            "action": "proxy-start",
+            "pid": pid,
+            "port": p,
+            "hint": (
+                "Install the mitmproxy CA on the device once (Settings → Security → "
+                "Install from storage), or trust user CAs for debug builds."
+            ),
+        }
+
+    def proxy_stop(self) -> dict[str, Any]:
+        from . import proxy_mock as pm
+
+        p = self._proxy_port()
+        with contextlib.suppress(Exception):
+            self.device.set_http_proxy(None)
+        with contextlib.suppress(Exception):
+            self.device.adb_reverse_remove(p)
+        stopped = pm.stop_mitm(Path(self.config.cache.dir).expanduser())
+        return {"ok": True, "action": "proxy-stop", "stopped": stopped}
+
+    def mock_map(
+        self,
+        method: str,
+        path: str,
+        *,
+        status: int = 200,
+        body: str | None = None,
+    ) -> dict[str, Any]:
+        from . import proxy_mock as pm
+
+        cache = Path(self.config.cache.dir).expanduser()
+        rules_file = pm.rules_path(cache)
+        rules = pm.load_rules(rules_file)
+        rule = pm.map_rule(method, path, status=status, body=body)
+        rules.append(rule)
+        pm.write_rules(rules_file, rules)
+        return {"ok": True, "action": "mock-map", "rule": rule, "count": len(rules)}
+
+    def mock_record(self, action: str, name: str | None = None) -> dict[str, Any]:
+        from . import proxy_mock as pm
+
+        cache = Path(self.config.cache.dir).expanduser()
+        a = (action or "").lower()
+        if a == "start":
+            if not name:
+                raise UsageError("mock record start needs a NAME")
+            pm.record_path(cache).write_text("[]", encoding="utf-8")
+            # Restart mitm in record mode if running; otherwise just arm the sidecar.
+            env_mode = cache / "mock_mode.txt"
+            env_mode.write_text("record", encoding="utf-8")
+            (cache / "mock_record_name.txt").write_text(name, encoding="utf-8")
+            # Live addon reads AUA_MOCK_MODE from process env — restart to flip mode.
+            pm.stop_mitm(cache)
+            port = self._proxy_port()
+            pm.start_mitm(cache_dir=cache, port=port, mode="record")
+            with contextlib.suppress(Exception):
+                self.device.adb_reverse(port, port)
+                self.device.set_http_proxy(f"127.0.0.1:{port}")
+            return {"ok": True, "action": "mock-record-start", "name": name}
+        if a == "stop":
+            name_path = cache / "mock_record_name.txt"
+            rec_name = name or (
+                name_path.read_text(encoding="utf-8").strip() if name_path.is_file() else ""
+            )
+            if not rec_name:
+                raise UsageError("mock record stop needs the cassette NAME")
+            entries: list[dict[str, Any]] = []
+            rec = pm.record_path(cache)
+            if rec.is_file():
+                try:
+                    import json as _json
+
+                    data = _json.loads(rec.read_text(encoding="utf-8"))
+                    if isinstance(data, list):
+                        entries = data
+                except Exception:
+                    entries = []
+            dest = pm.cassette_dir(self.config.memory.dir) / f"{rec_name}.yaml"
+            pm.save_cassette(dest, rec_name, entries)
+            pm.stop_mitm(cache)
+            pm.start_mitm(cache_dir=cache, port=self._proxy_port(), mode="map")
+            return {
+                "ok": True,
+                "action": "mock-record-stop",
+                "name": rec_name,
+                "path": str(dest),
+                "entries": len(entries),
+            }
+        raise UsageError(
+            f"unknown mock record action {action!r}",
+            hint="Use `aua mock record start NAME` or `aua mock record stop`.",
+        )
+
+    def mock_replay(self, name: str) -> dict[str, Any]:
+        from . import proxy_mock as pm
+
+        cache = Path(self.config.cache.dir).expanduser()
+        path = pm.cassette_dir(self.config.memory.dir) / f"{name}.yaml"
+        if not path.is_file():
+            # also accept a direct path
+            alt = Path(name).expanduser()
+            path = alt if alt.is_file() else path
+        entries = pm.load_cassette(path)
+        pm.write_rules(pm.rules_path(cache), entries)
+        return {
+            "ok": True,
+            "action": "mock-replay",
+            "name": name,
+            "entries": len(entries),
+            "path": str(path),
+        }
+
     def erase(
         self,
         element_id: int | None = None,
@@ -3449,6 +3751,118 @@ class Engine:
         """
         self._invalidate_cache()
         self._mark_logcat("last-action")
+        buf = self._capture
+        if buf is not None:
+            with contextlib.suppress(Exception):
+                buf.mark("action")
+
+    def _capture_hint(self) -> str | None:
+        buf = self._capture
+        if buf is None or not self.config.capture.hint:
+            return None
+        if not buf.hint_ready():
+            return None
+        return (
+            "recent pixel change after last action — "
+            "`aua capture last --since last-action`"
+        )
+
+    def capture_start(self) -> dict[str, Any]:
+        """Start the rolling capture buffer (daemon-warm sessions)."""
+        from .capture import CaptureBuffer, CaptureCfgView
+
+        if not self.config.capture.enabled and self._capture is None:
+            # Explicit start still allowed even if config default is off.
+            pass
+        cfg = self.config.capture
+        device = self.device
+        root = Path(self.config.cache.dir).expanduser() / "captures"
+        view = CaptureCfgView(
+            enabled=True,
+            idle_fps=cfg.idle_fps,
+            burst_fps=cfg.burst_fps,
+            burst_ms=cfg.burst_ms,
+            ttl_s=cfg.ttl_s,
+            max_mb=cfg.max_mb,
+            jpeg_quality=cfg.jpeg_quality,
+            hint=cfg.hint,
+        )
+        if self._capture is not None:
+            self._capture.resume()
+            if not self._capture.running:
+                self._capture.start()
+            return self._capture.status()
+        buf = CaptureBuffer(
+            root=root,
+            serial=device.serial,
+            cfg=view,
+            screenshot=device.screenshot,
+        )
+        buf.start()
+        self._capture = buf
+        return buf.status()
+
+    def capture_stop(self) -> dict[str, Any]:
+        buf = self._capture
+        if buf is None:
+            return {"ok": True, "action": "capture-stop", "running": False}
+        buf.stop()
+        self._capture = None
+        return {"ok": True, "action": "capture-stop", "running": False, "session_id": buf.session_id}
+
+    def capture_on(self) -> dict[str, Any]:
+        if self._capture is None:
+            return self.capture_start()
+        self._capture.resume()
+        return self._capture.status()
+
+    def capture_off(self) -> dict[str, Any]:
+        if self._capture is None:
+            return {"ok": True, "action": "capture-status", "running": False, "paused": True}
+        self._capture.pause()
+        return self._capture.status()
+
+    def capture_status(self) -> dict[str, Any]:
+        if self._capture is None:
+            return {
+                "ok": True,
+                "action": "capture-status",
+                "running": False,
+                "paused": False,
+                "hint": "Start the daemon (`aua daemon start`) — capture is always-on while warm.",
+            }
+        return self._capture.status()
+
+    def capture_last(
+        self,
+        *,
+        seconds: float | None = None,
+        since: str | None = None,
+    ) -> dict[str, Any]:
+        if self._capture is None:
+            raise UsageError(
+                "capture buffer is not running",
+                hint="Run `aua daemon start` (capture.enabled) or `aua capture on`.",
+            )
+        since_ms: int | None = None
+        if since:
+            s = since.lower().strip()
+            if s in ("last-action", "last_action", "action"):
+                since_ms = self._capture.last_action_ms()
+                if since_ms is None:
+                    raise UsageError(
+                        "no last-action mark in the capture buffer yet",
+                        hint="Perform a tap/input/swipe first, then retry.",
+                    )
+            else:
+                # treat as a logcat-style mark name stored via capture.mark — fall back
+                since_ms = self._capture.last_action_ms()
+        return self._capture.last(seconds=seconds, since_ms=since_ms)
+
+    def capture_prune(self) -> dict[str, Any]:
+        if self._capture is None:
+            return {"ok": True, "action": "capture-prune", "removed": 0, "running": False}
+        return self._capture.prune()
 
     def _invalidate_cache(self) -> None:
         path = self._cache_path()

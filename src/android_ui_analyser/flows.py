@@ -60,6 +60,12 @@ _KINDS = {
     "goto": "goto",
     "run_flow": "flow",  # alias; canonical render key is `flow` (listed last → wins _KEYS)
     "flow": "flow",
+    "dev_profile": "dev-profile",
+    "a11y_scroll": "a11y-scroll",
+    "flags_apply": "flags-apply",
+    "proxy_start": "proxy-start",
+    "proxy_stop": "proxy-stop",
+    "mock_replay": "mock-replay",
 }
 _KEYS = {kind: key for key, kind in _KINDS.items()}
 _ELEMENT_KINDS = ("tap", "long-press", "clear")
@@ -76,7 +82,21 @@ _ARG_ALIAS = {
     "open-link": "uri",
     "goto": "screen",
     "flow": "name",
+    "dev-profile": "name",
+    "flags-apply": "path",
+    "mock-replay": "name",
 }
+_BARE_KINDS = frozenset(
+    {
+        "wait-stable",
+        "launch-app",
+        "stop-app",
+        "hide-keyboard",
+        "paste",
+        "proxy-start",
+        "proxy-stop",
+    }
+)
 
 
 class Flow(BaseModel):
@@ -115,10 +135,11 @@ def _parse_step(item: Any, index: int) -> RouteStep:
             return RouteStep(kind="retry", max_retries=max_retries, substeps=substeps)
     if isinstance(item, str):
         # Bare-string steps that need no argument (like Maestro's `- stopApp`).
-        if _KINDS.get(item) in ("wait-stable", "launch-app", "stop-app"):
+        if _KINDS.get(item) in _BARE_KINDS:
             return RouteStep(kind=_KINDS[item])
         raise _step_error(
-            index, f"a bare string step must be wait_stable / launch_app / stop_app, got {item!r}"
+            index,
+            f"a bare string step must be one of {', '.join(sorted(_BARE_KINDS))}, got {item!r}",
         )
     if not isinstance(item, dict) or len(item) != 1:
         raise _step_error(index, "expected a single-key mapping like `tap: \"Send\"`")
@@ -160,8 +181,14 @@ def _parse_step(item: Any, index: int) -> RouteStep:
             raise _step_error(index, "input needs `text:` (a literal or ${PARAM})")
         if not (kw["resource_id"] or kw["label"]):
             raise _step_error(index, "input needs an `id:` or `label:` field selector")
-    elif kind in ("wait-stable", "hide-keyboard", "paste"):
+    elif kind in ("wait-stable", "hide-keyboard", "paste", "proxy-start", "proxy-stop"):
         pass
+    elif kind == "a11y-scroll":
+        kw["resource_id"] = v.pop("id", None) or v.pop("rid", None)
+        kw["label"] = v.pop("text", None) or v.pop("label", None)
+        kw["arg"] = str(v.pop("direction", None) or "forward")
+        if not (kw["resource_id"] or kw["label"]):
+            raise _step_error(index, "a11y_scroll needs an `id:`/`rid:` or `text:` selector")
     elif kind in ("launch-app", "stop-app"):
         # Optional arg: a bare `stop_app`/`launch_app` targets the flow's own app.
         kw["arg"] = v.pop(_ARG_ALIAS[kind], None) or v.pop("arg", None)
@@ -240,7 +267,15 @@ def _render_step(s: RouteStep) -> dict[str, Any] | str:
             body["submit"] = True
         body.update(extras)
         return {key: body}
-    if s.kind == "wait-stable":
+    if s.kind == "a11y-scroll":
+        body = {"direction": s.arg or "forward"}
+        if s.resource_id:
+            body["rid"] = s.resource_id
+        if s.label:
+            body["text"] = s.label
+        body.update(extras)
+        return {key: body}
+    if s.kind in ("wait-stable", "proxy-start", "proxy-stop", "hide-keyboard", "paste"):
         return {key: extras} if extras else key
     if extras:
         return {key: {_ARG_ALIAS[s.kind]: s.arg, **extras}}

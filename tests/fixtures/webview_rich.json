@@ -26,7 +26,8 @@
     "password": false,
     "source": "hierarchy",
     "confidence": null,
-    "stable_key": "rid:close_button"
+    "stable_key": "rid:close_button",
+    "window": "app"
   },
   {
     "id": 1,
@@ -55,7 +56,8 @@
     "password": false,
     "source": "hierarchy",
     "confidence": null,
-    "stable_key": "rid:title_url_bar"
+    "stable_key": "rid:title_url_bar",
+    "window": "app"
   },
   {
     "id": 2,
@@ -84,7 +86,8 @@
     "password": false,
     "source": "hierarchy",
     "confidence": null,
-    "stable_key": "geo:WebView:q52:1a72b22ddd"
+    "stable_key": "geo:WebView:q52:1a72b22ddd",
+    "window": "app"
   },
   {
     "id": 3,
@@ -113,7 +116,8 @@
     "password": false,
     "source": "hierarchy",
     "confidence": null,
-    "stable_key": "tx:b8ba0321e7"
+    "stable_key": "tx:b8ba0321e7",
+    "window": "app"
   },
   {
     "id": 4,
@@ -142,7 +146,8 @@
     "password": false,
     "source": "hierarchy",
     "confidence": null,
-    "stable_key": "tx:bbab768874"
+    "stable_key": "tx:bbab768874",
+    "window": "app"
   },
   {
     "id": 5,
@@ -171,7 +176,8 @@
     "password": false,
     "source": "hierarchy",
     "confidence": null,
-    "stable_key": "tx:113935f739"
+    "stable_key": "tx:113935f739",
+    "window": "app"
   },
   {
     "id": 6,
@@ -200,7 +206,8 @@
     "password": false,
     "source": "hierarchy",
     "confidence": null,
-    "stable_key": "tx:69e73a7f5d"
+    "stable_key": "tx:69e73a7f5d",
+    "window": "app"
   },
   {
     "id": 7,
@@ -229,7 +236,8 @@
     "password": false,
     "source": "hierarchy",
     "confidence": null,
-    "stable_key": "tx:4fe1cde196"
+    "stable_key": "tx:4fe1cde196",
+    "window": "app"
   },
   {
     "id": 8,
@@ -258,7 +266,8 @@
     "password": false,
     "source": "hierarchy",
     "confidence": null,
-    "stable_key": "tx:93195e282b"
+    "stable_key": "tx:93195e282b",
+    "window": "app"
   },
   {
     "id": 9,
@@ -287,7 +296,8 @@
     "password": false,
     "source": "hierarchy",
     "confidence": null,
-    "stable_key": "tx:f038596d25"
+    "stable_key": "tx:f038596d25",
+    "window": "app"
   },
   {
     "id": 10,
@@ -316,7 +326,8 @@
     "password": false,
     "source": "hierarchy",
     "confidence": null,
-    "stable_key": "tx:fb26cca437"
+    "stable_key": "tx:fb26cca437",
+    "window": "app"
   },
   {
     "id": 11,
@@ -345,6 +356,7 @@
     "password": false,
     "source": "hierarchy",
     "confidence": null,
-    "stable_key": "tx:78a83d1337"
+    "stable_key": "tx:78a83d1337",
+    "window": "app"
   }
 ]

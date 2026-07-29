@@ -280,6 +280,70 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
         elif cmd == "suite_run":
             return _result_ok(engine.suite_run(**args))
 
+        elif cmd == "dev_show":
+            return _result_ok(engine.dev_show())
+
+        elif cmd == "dev_anim":
+            return _result_ok(engine.dev_anim(**args))
+
+        elif cmd == "dev_crashes":
+            return _result_ok(engine.dev_crashes(**args))
+
+        elif cmd == "dev_profile":
+            return _result_ok(engine.dev_profile(**args))
+
+        elif cmd == "a11y_scroll":
+            result = engine.a11y_scroll(**args)
+            return _result_ok(result.model_dump(mode="json"))
+
+        elif cmd == "a11y_action":
+            result = engine.a11y_action(**args)
+            return _result_ok(result.model_dump(mode="json"))
+
+        elif cmd == "flags_set":
+            result = engine.flags_set(**args)
+            return _result_ok(result.model_dump(mode="json"))
+
+        elif cmd == "flags_apply":
+            result = engine.flags_apply(**args)
+            return _result_ok(result.model_dump(mode="json"))
+
+        elif cmd == "proxy_start":
+            return _result_ok(engine.proxy_start(**args))
+
+        elif cmd == "proxy_stop":
+            return _result_ok(engine.proxy_stop())
+
+        elif cmd == "mock_map":
+            return _result_ok(engine.mock_map(**args))
+
+        elif cmd == "mock_record":
+            return _result_ok(engine.mock_record(**args))
+
+        elif cmd == "mock_replay":
+            return _result_ok(engine.mock_replay(**args))
+
+        elif cmd == "capture_status":
+            return _result_ok(engine.capture_status())
+
+        elif cmd == "capture_last":
+            return _result_ok(engine.capture_last(**args))
+
+        elif cmd == "capture_on":
+            return _result_ok(engine.capture_on())
+
+        elif cmd == "capture_off":
+            return _result_ok(engine.capture_off())
+
+        elif cmd == "capture_prune":
+            return _result_ok(engine.capture_prune())
+
+        elif cmd == "capture_start":
+            return _result_ok(engine.capture_start())
+
+        elif cmd == "capture_stop":
+            return _result_ok(engine.capture_stop())
+
         else:
             return _result_err(
                 "unknown_command",
@@ -290,7 +354,10 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
                 "location_set, orientation_set, orientation_get, airplane_set, airplane_toggle, "
                 "media_add, record_start, record_stop, clock_set, open_link, resolve, wait, wait_stable, "
                 "memory_update, goto, flow_run, flow_save, navigate, orient, list_devices, app, "
-                "logcat, logcat_mark, suite_run",
+                "logcat, logcat_mark, suite_run, dev_show, dev_anim, dev_crashes, dev_profile, "
+                "a11y_scroll, a11y_action, flags_set, flags_apply, proxy_start, proxy_stop, "
+                "mock_map, mock_record, mock_replay, capture_status, capture_last, capture_on, "
+                "capture_off, capture_prune, capture_start, capture_stop",
             )
 
     except AuaError as exc:
@@ -339,6 +406,10 @@ def serve(
         logger.info("daemon listening on %s", sock_path)
         with contextlib.suppress(OSError):  # pidfile so `daemon stop` can signal this process
             Path(sock_path + ".pid").write_text(str(os.getpid()))
+        if engine.config.capture.enabled:
+            with contextlib.suppress(Exception):
+                engine.capture_start()
+                logger.info("capture buffer started")
         if ready_event is not None:
             ready_event.set()
 

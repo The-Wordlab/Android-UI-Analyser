@@ -129,6 +129,8 @@ class Element(BaseModel):
     confidence: float | None = None
     # Cross-frame fingerprint — survives re-analyze ID churn (see ``identity.stable_key``).
     stable_key: str | None = None
+    # Window layer: app | ime | system | overlay (hierarchy package heuristics).
+    window: str | None = None
 
     def compact(self) -> dict[str, Any]:
         """Token-minimal dict: drop nulls and default-valued verbose fields."""
@@ -157,6 +159,8 @@ class Element(BaseModel):
             out["confidence"] = round(self.confidence, 4)
         if self.stable_key is not None:
             out["stable_key"] = self.stable_key
+        if self.window is not None:
+            out["window"] = self.window
         return out
 
     def _compact_state(self) -> dict[str, Any]:
@@ -205,6 +209,7 @@ class Meta(BaseModel):
         default_factory=list
     )
     map_hint: str | None = None  # e.g. "12 screens mapped — run `aua map`"
+    capture_hint: str | None = None  # rolling buffer saw post-action change
     annotated_image: str | None = None
     raw_image: str | None = None  # unannotated screenshot saved on request (--with-image)
     device_serial: str | None = None

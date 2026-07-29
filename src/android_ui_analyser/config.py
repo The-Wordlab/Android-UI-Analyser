@@ -140,6 +140,20 @@ class CacheCfg(BaseModel):
     dir: str = "~/.cache/android-ui-analyser"
 
 
+class CaptureCfg(BaseModel):
+    """Always-on rolling screencap buffer (daemon-warm sessions)."""
+
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = True  # auto-start with daemon
+    idle_fps: float = 2.0
+    burst_fps: float = 10.0  # best-effort; screencap often caps lower
+    burst_ms: int = 1500
+    ttl_s: int = 180
+    max_mb: int = 200
+    jpeg_quality: int = 70
+    hint: bool = True  # push meta.capture_hint after post-action pixel change
+
+
 class MemoryCfg(BaseModel):
     """Persistent per-app map settings (PRD §6b, §9)."""
 
@@ -236,6 +250,13 @@ def _default_models() -> dict[str, dict[str, Any]]:
     }
 
 
+class FlagsCfg(BaseModel):
+    """Feature-flag deeplink templates (package → URI with ``{query}`` placeholder)."""
+
+    model_config = ConfigDict(extra="forbid")
+    templates: dict[str, str] = Field(default_factory=dict)
+
+
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -252,7 +273,9 @@ class Config(BaseModel):
     models: dict[str, dict[str, Any]] = Field(default_factory=_default_models)
     daemon: DaemonCfg = Field(default_factory=DaemonCfg)
     cache: CacheCfg = Field(default_factory=CacheCfg)
+    capture: CaptureCfg = Field(default_factory=CaptureCfg)
     memory: MemoryCfg = Field(default_factory=MemoryCfg)
+    flags: FlagsCfg = Field(default_factory=FlagsCfg)
     profiles: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
     # -- views -------------------------------------------------------------
@@ -525,6 +548,16 @@ daemon:
   enabled: true
   socket: "~/.cache/android-ui-analyser/daemon.sock"
 
+capture:
+  enabled: true           # rolling screencap while daemon is warm
+  idle_fps: 2
+  burst_fps: 10           # best-effort after actions
+  burst_ms: 1500
+  ttl_s: 180
+  max_mb: 200
+  jpeg_quality: 70
+  hint: true              # meta.capture_hint after post-action pixel change
+
 memory:
   enabled: true
   auto_record: true        # record screens + route edges on every analyze/action
@@ -544,6 +577,11 @@ memory:
   destructive_labels: ["delete", "remove", "sign out", "log out", "logout", "pay", "buy",
                        "purchase", "subscribe", "unsubscribe", "uninstall", "format",
                        "erase", "reset", "deactivate"]
+
+# Feature-flag deeplink templates (optional; Luzia packages ship built-in defaults):
+# flags:
+#   templates:
+#     com.example.app: "myapp://set-flags?{query}"
 
 # profiles:
 #   cloud:

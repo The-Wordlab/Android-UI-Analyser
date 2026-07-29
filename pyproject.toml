@@ -45,8 +45,11 @@ dev = [
     "types-PyYAML>=6.0",
 ]
 all = [
-    "android-ui-analyser[apple,rapidocr,paddle,tesseract,easyocr,yolo,omniparser]",
+    "android-ui-analyser[apple,rapidocr,paddle,tesseract,easyocr,yolo,omniparser,proxy]",
 ]
+# --- Headless HTTP mock / record-replay ---
+proxy = ["mitmproxy>=10.0"]
+
 
 [project.scripts]
 aua = "android_ui_analyser.cli:app"

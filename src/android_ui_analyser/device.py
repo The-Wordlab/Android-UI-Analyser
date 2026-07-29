@@ -223,6 +223,26 @@ class Device(ABC):
         for _ in range(max(0, count)):
             self.press("KEYCODE_DEL")
 
+    def shell(self, command: str) -> str:
+        """Run a shell command on the device; return combined stdout text."""
+        raise DeviceError("shell requires a real device")
+
+    def a11y_action(self, x: int, y: int, action: str) -> None:
+        """Perform an accessibility action on the node at *(x, y)*."""
+        raise DeviceError("a11y action requires a real device")
+
+    def set_http_proxy(self, host_port: str | None) -> None:
+        """Set or clear the global HTTP proxy (``host:port`` or ``None`` to clear)."""
+        raise DeviceError("http proxy requires a real device")
+
+    def adb_reverse(self, device_port: int, host_port: int) -> None:
+        """``adb reverse tcp:device_port tcp:host_port``."""
+        raise DeviceError("adb reverse requires a real device")
+
+    def adb_reverse_remove(self, device_port: int) -> None:
+        """Remove a reverse port mapping (no-op if absent)."""
+        return None
+
     def logcat(self, *, since_ms: int | None = None, dump: bool = True) -> str:
         """Dump (or clear) logcat. ``dump=False`` clears the buffer and returns ``""``.
 
@@ -686,6 +706,170 @@ class Uiautomator2Device(Device):
     def erase_chars(self, count: int) -> None:
         for _ in range(max(0, count)):
             self._d.shell("input keyevent 67")  # KEYCODE_DEL
+
+    def shell(self, command: str) -> str:
+        try:
+            out = self._d.shell(command)
+        except Exception as exc:
+            raise DeviceError(
+                f"shell failed: {exc}",
+                hint="Check the device is online (`adb devices`) and the command is valid.",
+            ) from exc
+        return out if isinstance(out, str) else str(getattr(out, "output", out) or "")
+
+    def a11y_action(self, x: int, y: int, action: str) -> None:
+        """Resolve the smallest hierarchy node containing *(x, y)* and perform *action*."""
+        action_u = (action or "").strip().upper().replace("-", "_")
+        node = self._node_at(x, y)
+        if node is None:
+            raise DeviceError(
+                f"no accessibility node at ({x}, {y})",
+                hint="Re-analyze and pass a visible element id / selector.",
+            )
+        obj = self._u2_object_for(node)
+        try:
+            if action_u in ("CLICK", "ACTION_CLICK"):
+                if obj is not None:
+                    obj.click()
+                else:
+                    self.click(x, y)
+                return
+            if action_u in ("LONG_CLICK", "ACTION_LONG_CLICK", "LONG_PRESS"):
+                if obj is not None:
+                    obj.long_click()
+                else:
+                    self.long_click(x, y)
+                return
+            if action_u in ("SCROLL_FORWARD", "ACTION_SCROLL_FORWARD", "FORWARD"):
+                if obj is None:
+                    raise DeviceError("SCROLL_FORWARD needs a selectable scrollable node")
+                obj.scroll.forward()
+                return
+            if action_u in ("SCROLL_BACKWARD", "ACTION_SCROLL_BACKWARD", "BACKWARD"):
+                if obj is None:
+                    raise DeviceError("SCROLL_BACKWARD needs a selectable scrollable node")
+                obj.scroll.backward()
+                return
+            if action_u in ("EXPAND", "ACTION_EXPAND"):
+                if obj is None:
+                    raise DeviceError(f"{action_u} needs a selectable node")
+                with contextlib.suppress(Exception):
+                    obj.expand()
+                    return
+                raise DeviceError(f"action {action_u} unsupported on this node")
+            if action_u in ("COLLAPSE", "ACTION_COLLAPSE"):
+                if obj is None:
+                    raise DeviceError(f"{action_u} needs a selectable node")
+                with contextlib.suppress(Exception):
+                    obj.collapse()
+                    return
+                raise DeviceError(f"action {action_u} unsupported on this node")
+            if action_u in ("DISMISS", "ACTION_DISMISS"):
+                if obj is None:
+                    raise DeviceError(f"{action_u} needs a selectable node")
+                with contextlib.suppress(Exception):
+                    obj.dismiss()
+                    return
+                raise DeviceError(f"action {action_u} unsupported on this node")
+            if action_u in ("SET_TEXT", "ACTION_SET_TEXT"):
+                raise DeviceError(
+                    "SET_TEXT via a11y action needs a value — use `aua input` instead",
+                )
+        except DeviceError:
+            raise
+        except Exception as exc:
+            raise DeviceError(
+                f"a11y action {action_u} failed: {exc}",
+                hint="The node may not support that accessibility action.",
+            ) from exc
+        raise DeviceError(
+            f"unsupported a11y action {action!r}",
+            hint="Supported: CLICK, LONG_CLICK, SCROLL_FORWARD, SCROLL_BACKWARD, "
+            "EXPAND, COLLAPSE, DISMISS.",
+        )
+
+    def _node_at(self, x: int, y: int) -> dict[str, str] | None:
+        """Smallest on-screen node whose bounds contain *(x, y)*."""
+        xml = self.dump_hierarchy()
+        best: dict[str, str] | None = None
+        best_area: int | None = None
+        for m in re.finditer(r"<node\b([^>]*)/?>", xml):
+            attrs = m.group(1)
+            bm = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', attrs)
+            if not bm:
+                continue
+            x1, y1, x2, y2 = (int(bm.group(i)) for i in range(1, 5))
+            if not (x1 <= x < x2 and y1 <= y < y2):
+                continue
+            area = max(0, x2 - x1) * max(0, y2 - y1)
+            if best_area is not None and area >= best_area:
+                continue
+            info: dict[str, str] = {
+                "bounds": f"[{x1},{y1}][{x2},{y2}]",
+            }
+            for key in ("resource-id", "text", "content-desc", "class", "package"):
+                am = re.search(rf'{key}="([^"]*)"', attrs)
+                if am and am.group(1):
+                    info[key] = am.group(1)
+            best, best_area = info, area
+        return best
+
+    def _u2_object_for(self, node: dict[str, str]) -> Any | None:
+        rid = node.get("resource-id")
+        if rid:
+            obj = self._d(resourceId=rid)
+            if obj.exists:
+                return obj
+        text = node.get("text")
+        if text:
+            obj = self._d(text=text)
+            if obj.exists:
+                return obj
+        desc = node.get("content-desc")
+        if desc:
+            obj = self._d(description=desc)
+            if obj.exists:
+                return obj
+        return None
+
+    def set_http_proxy(self, host_port: str | None) -> None:
+        if host_port:
+            self.shell(f"settings put global http_proxy {host_port}")
+        else:
+            # `:0` clears the proxy on modern Android; delete is a fallback.
+            self.shell("settings put global http_proxy :0")
+            with contextlib.suppress(Exception):
+                self.shell("settings delete global http_proxy")
+
+    def adb_reverse(self, device_port: int, host_port: int) -> None:
+        try:
+            subprocess.run(  # noqa: S603
+                [
+                    "adb",
+                    "-s",
+                    self.serial,
+                    "reverse",
+                    f"tcp:{device_port}",
+                    f"tcp:{host_port}",
+                ],
+                check=True,
+                capture_output=True,
+                timeout=15,
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            raise DeviceError(
+                f"adb reverse tcp:{device_port} tcp:{host_port} failed",
+                hint="Check `adb` is on PATH and the device is reachable.",
+            ) from exc
+
+    def adb_reverse_remove(self, device_port: int) -> None:
+        with contextlib.suppress(Exception):
+            subprocess.run(  # noqa: S603
+                ["adb", "-s", self.serial, "reverse", "--remove", f"tcp:{device_port}"],
+                check=False,
+                capture_output=True,
+                timeout=15,
+            )
 
     def _logcat_dump(self, args: list[str]) -> str:
         proc = subprocess.run(  # noqa: S603
