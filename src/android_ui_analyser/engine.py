@@ -2660,13 +2660,22 @@ class Engine:
         return region_probe(self._dump(), box, ignore_packages=self.config.memory.ignore_packages)
 
     def _swipe_once(self, box: Box, direction: str, percent: int) -> tuple[int, bool]:
-        """One verified swipe inside *box*: ``(distance_along_axis, moved)``."""
+        """One verified swipe inside *box*: ``(distance_along_axis, scrolled)``.
+
+        ``travel``'s own ``moved`` is "the sample differs at all" — a repaint, a ripple, or an
+        element appearing all set it, none of which mean the content scrolled. Reporting that
+        as movement is how `scroll --direction down` came to answer ``moved steps=1`` with no
+        distance at the very top of a list, where scrolling further is impossible. The verdict
+        is therefore the measured shift ALONG THE AXIS the caller asked about; a changed sample
+        with zero shift is honestly "did not scroll".
+        """
         before = self._probe(box)
         x1, y1, x2, y2 = self._swipe_path(box, direction, percent)
         self.device.swipe(x1, y1, x2, y2)
         self._settle_after_swipe()
-        dx, dy, moved = travel(before, self._probe(box))
-        return (dx if direction in ("left", "right") else dy), moved
+        dx, dy, _changed = travel(before, self._probe(box))
+        distance = dx if direction in ("left", "right") else dy
+        return distance, bool(distance)
 
     def swipe(
         self,

@@ -13,6 +13,7 @@ import hashlib
 import io
 import json
 import logging
+import shutil
 import threading
 import time
 import uuid
@@ -81,12 +82,22 @@ class CaptureBuffer:
         return self.root / safe / self.session_id
 
     @property
+    def serial_root(self) -> Path:
+        """All sessions for this device, live and dead."""
+        safe = str(self.serial).replace(":", "_").replace("/", "_")
+        return self.root / safe
+
+    @property
     def index_path(self) -> Path:
         return self.dir / "index.jsonl"
 
     def start(self) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
         (self.dir / "frames").mkdir(parents=True, exist_ok=True)
+        # Sessions from earlier runs have no owner to prune them, so the aggregate only
+        # stays bounded if each new session clears up after the dead ones.
+        with contextlib.suppress(Exception):
+            self.sweep_sessions()
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop.clear()
@@ -101,6 +112,11 @@ class CaptureBuffer:
         if t is not None and t.is_alive():
             t.join(timeout=2.0)
         self._thread = None
+        # A session that captured nothing (or deduped everything) must not leave a directory
+        # behind for the next sweep to find.
+        with contextlib.suppress(OSError):
+            if self.dir.is_dir() and not any((self.dir / "frames").glob("*.jpg")):
+                shutil.rmtree(self.dir, ignore_errors=True)
 
     def pause(self) -> None:
         self._paused = True
@@ -156,6 +172,7 @@ class CaptureBuffer:
             "frames": len(entries),
             "age_span_ms": age_span,
             "disk_bytes": disk,
+            "total_disk_bytes": self.total_disk_bytes(),
             "last_action_ms": last_action,
             "kept_since_action": kept_since,
             "idle_fps": self.cfg.idle_fps,
@@ -304,6 +321,77 @@ class CaptureBuffer:
             with contextlib.suppress(OSError):
                 total += p.stat().st_size
         return total
+
+    def _dir_bytes(self, session: Path) -> int:
+        total = 0
+        for p in (session / "frames").glob("*.jpg"):
+            with contextlib.suppress(OSError):
+                total += p.stat().st_size
+        return total
+
+    def total_disk_bytes(self) -> int:
+        """Every session for this device — what the tool is ACTUALLY consuming.
+
+        ``_disk_bytes`` covers the live session only, which under-reports badly once dead
+        sessions accumulate: it read 114 kB while 11 MB sat on disk.
+        """
+        if not self.serial_root.is_dir():
+            return 0
+        return sum(self._dir_bytes(d) for d in self.serial_root.iterdir() if d.is_dir())
+
+    def sweep_sessions(self) -> dict[str, int]:
+        """Prune DEAD sessions left by earlier runs. Returns what it removed.
+
+        The per-session TTL/size caps are enforced by the thread that owns the session, so
+        when a daemon stops, whatever was still inside the TTL window is orphaned: no process
+        owns those files any more, and nothing ever prunes them. Every restart then mints
+        another session directory, so the aggregate grew without bound — 9 sessions and 11 MB
+        in one afternoon, the oldest 95 minutes past a 3-minute TTL.
+
+        Bound it here instead: drop a dead session once its newest frame is older than the
+        TTL, then, oldest-first, drop whole dead sessions until the total fits ``max_mb``.
+        The live session is never touched — ``_prune`` owns it.
+        """
+        removed_sessions = 0
+        removed_bytes = 0
+        if not self.serial_root.is_dir():
+            return {"sessions": 0, "bytes": 0}
+
+        cutoff = time.time() - float(self.cfg.ttl_s)
+        dead: list[tuple[float, Path, int]] = []
+        for session in sorted(self.serial_root.iterdir()):
+            if not session.is_dir() or session.name == self.session_id:
+                continue
+            frames = sorted((session / "frames").glob("*.jpg"))
+            newest = 0.0
+            for p in frames:
+                with contextlib.suppress(OSError):
+                    newest = max(newest, p.stat().st_mtime)
+            size = self._dir_bytes(session)
+            # An empty session (a run that captured nothing, deduped everything, or was
+            # already swept) has no reason to survive at all.
+            if not frames or newest < cutoff:
+                removed_bytes += size
+                removed_sessions += 1
+                shutil.rmtree(session, ignore_errors=True)
+            else:
+                dead.append((newest, session, size))
+
+        max_bytes = max(1, int(self.cfg.max_mb)) * 1024 * 1024
+        total = self._dir_bytes(self.dir) + sum(size for _, _, size in dead)
+        dead.sort()  # oldest first
+        for _, session, size in dead:
+            if total <= max_bytes:
+                break
+            shutil.rmtree(session, ignore_errors=True)
+            total -= size
+            removed_bytes += size
+            removed_sessions += 1
+        if removed_sessions:
+            logger.info(
+                "capture swept %d dead session(s), %d bytes", removed_sessions, removed_bytes
+            )
+        return {"sessions": removed_sessions, "bytes": removed_bytes}
 
     def _prune(self) -> int:
         """Drop frames older than TTL or over max_mb. Returns count removed."""
