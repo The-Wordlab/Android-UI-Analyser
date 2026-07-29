@@ -530,6 +530,12 @@ def analyze(
     no_system: bool = typer.Option(
         False, "--no-system", help="Drop status-bar / system chrome (systemui ids, battery…)."
     ),
+    no_wrappers: bool = typer.Option(
+        False,
+        "--no-wrappers",
+        help="Drop pure layout containers (id'd but unlabeled, inert, wrapping something). "
+        "Leaves and addressable containers stay.",
+    ),
     show_all: bool = typer.Option(
         False, "--all", help="Keep every element (undoes tsv's implicit --nonempty --no-system)."
     ),
@@ -560,6 +566,7 @@ def analyze(
             fields=fields,
             nonempty=nonempty,
             no_system=no_system,
+            no_wrappers=no_wrappers,
             show_all=show_all,
             where_text=where_text,
             where_rid=where_rid,

@@ -579,6 +579,12 @@ aua --format compact analyze --fields id,rid --nonempty   # same views, JSON out
   A wrong name exits **2** and lists the valid ones — before touching the device.
 - `--format tsv` implies `--nonempty --no-system` (drops rows with no text/id/desc, and
   status-bar chrome). `--all` opts out. JSON formats filter **nothing** unless you ask.
+- `--no-wrappers` (opt-in) drops the app's **own** id'd layout scaffolding — `app_bar`,
+  `content_frame`, `collapsing_toolbar`: nodes that are unlabelled, non-actionable, and wrap
+  something else. Leaves stay (an unlabelled leaf is the icon you tap), and so do actionable
+  or scrollable containers. Worth it on View-based apps, where such wrappers can be most of
+  the top of the list; Compose apps barely notice. `--nonempty` does **not** drop them —
+  they do have a resource-id, which is exactly what makes them addressable.
 - Filters of different kinds AND together; repeating one kind ORs together
   (`--region A --region B` = either box).
 - **IDs are never renumbered.** The id in a filtered row is the id `aua tap` takes.
