@@ -83,10 +83,13 @@ def test_dispatch_ping() -> None:
     device = FakeDevice()
     engine = make_engine(device=device)
     resp = dispatch(engine, {"cmd": "ping", "args": {}})
-    from android_ui_analyser import __version__
+    from android_ui_analyser import __version__, daemon
 
     assert resp["ok"] is True
-    assert resp["result"] == {"pong": True, "version": __version__}
+    # The reported identity is version + loaded-source fingerprint, so an edited file makes
+    # a warm daemon detectably stale (a bare version never differs during development).
+    assert resp["result"] == {"pong": True, "version": daemon._aua_version()}
+    assert str(resp["result"]["version"]).startswith(f"{__version__}+src")
 
 
 def test_dispatch_unknown_command() -> None:

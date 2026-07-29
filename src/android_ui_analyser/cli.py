@@ -330,6 +330,14 @@ def _warm(engine: Engine) -> None:
 # Engine method name → daemon command name (they differ only for ``input``).
 _DAEMON_CMD = {"input_text": "input"}
 
+# Methods whose STATE lives only in the daemon process. For these, an in-process fallback
+# cannot produce a correct answer — a process with no capture buffer reports "not running"
+# while the daemon is happily writing frames — so a stale daemon must be an error, not a
+# silent downgrade.
+_DAEMON_ONLY_METHODS = frozenset(
+    {"capture_status", "capture_last", "capture_on", "capture_off", "capture_prune"}
+)
+
 
 def _daemon_error(err: dict[str, Any]) -> AuaError:
     """Reconstruct an :class:`AuaError` (with the right exit code) from a daemon error."""
@@ -367,20 +375,34 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
     cfg = engine.config
     if getattr(cfg.daemon, "enabled", False):
         try:
-            from . import __version__
             from . import daemon as daemon_mod
 
             ver = daemon_mod.running_version(cfg)
             # A daemon running OLDER code than this CLI can reject new args (e.g. a kwarg
             # added since it started) → confusing crashes. On a version mismatch, skip the
             # daemon and run in-process; a `None` version is a pre-report daemon (trusted).
-            skew = isinstance(ver, str) and ver != __version__
+            #
+            # Compare the FULL identity (version + loaded-source fingerprint), not the bare
+            # version: during development both sides are the same release, so a plain version
+            # check never fires and an edited file keeps being served from the daemon's memory.
+            # Must be symmetric — comparing a composite against a bare `__version__` would
+            # make every call look skewed and silently disable the daemon.
+            skew = isinstance(ver, str) and ver != daemon_mod._aua_version()
+            if skew and method in _DAEMON_ONLY_METHODS:
+                # An in-process answer here is not a slower answer, it is a WRONG one: the
+                # buffer lives in the daemon, so this process would report "not running"
+                # while frames are being written. Say so instead of guessing.
+                raise UsageError(
+                    f"the running daemon has older code than this CLI, and `{method}` can "
+                    "only be answered by the daemon that holds the buffer",
+                    hint="Restart it: `aua daemon stop && aua daemon start`.",
+                )
             if skew:
                 logger.warning(
                     "daemon runs aua %s but this CLI is %s; using in-process. "
                     "Restart it: `aua daemon stop && aua daemon start`.",
                     ver,
-                    __version__,
+                    daemon_mod._aua_version(),
                 )
             if ver is not False and not skew:
                 client = daemon_mod.DaemonClient(daemon_mod.socket_path(cfg))
