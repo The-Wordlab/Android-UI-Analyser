@@ -93,6 +93,17 @@ class SqliteMemoryBackend:
         )
         self._conn.commit()
 
+    def latest_session(self, package: str) -> SessionState | None:
+        rows = self._conn.execute("SELECT data FROM sessions ORDER BY rowid DESC").fetchall()
+        for (raw,) in rows:
+            try:
+                session = SessionState.model_validate_json(raw)
+            except Exception:  # pragma: no cover - skip corrupt cursor
+                continue
+            if session.package == package:
+                return session
+        return None
+
     # -- migration ------------------------------------------------------------
 
     def _maybe_migrate(self, migrate_from: Path) -> None:

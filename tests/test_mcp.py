@@ -103,6 +103,15 @@ def test_mcp_lists_core_tools() -> None:
         "app",
         "resolve",
         "configure",
+        "map_audit",
+        "reconcile_plan",
+        "reconcile_submit",
+        "reconcile_status",
+        "reconcile_apply",
+        "reconcile_rollback",
+        "knowledge_list",
+        "knowledge_add",
+        "knowledge_stale",
     } <= set(names)
 
 
@@ -123,6 +132,22 @@ def test_mcp_analyze_screen_returns_schema_valid_json() -> None:
     parsed = AnalyzeResult.model_validate(data)
     assert parsed.screen.source.value == "hierarchy"
     assert len(parsed.elements) == 3
+
+
+def test_mcp_map_audit_and_reconcile_plan_roundtrip() -> None:
+    server = build_server(_engine())
+
+    async def run() -> tuple[dict, dict]:  # type: ignore[type-arg]
+        async with create_connected_server_and_client_session(server) as client:
+            await client.call_tool("analyze_screen", {"source": "hierarchy"})
+            audited = await client.call_tool("map_audit", {"package": "com.test.app"})
+            planned = await client.call_tool("reconcile_plan", {"package": "com.test.app"})
+            return json.loads(_first_text(audited)), json.loads(_first_text(planned))
+
+    audit, plan = anyio.run(run)
+    assert audit["package"] == "com.test.app"
+    assert plan["package"] == "com.test.app"
+    assert isinstance(plan["tasks"], list)
 
 
 def test_mcp_has_tool_roundtrip() -> None:

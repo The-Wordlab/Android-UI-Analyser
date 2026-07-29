@@ -54,6 +54,7 @@ def test_sqlite_app_and_session_round_trip(tmp_path: Path) -> None:
     assert got.current_screen == "home"
     assert len(got.pending) == 1
     assert got.pending[0].resource_id == "nav_apps"
+    assert store.latest_session(P).current_screen == "home"
 
     # Fresh store against the same DB recovers the same blobs.
     store2 = AppMemoryStore(cfg.memory)

@@ -15,6 +15,7 @@ import shutil
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, TypeVar
 
 import click
@@ -41,8 +42,17 @@ from .errors import (
     UsageError,
     emit_error,
 )
-from .memory import AppMap, AppMemoryStore, find_result, render_map
+from .memory import (
+    DEFAULT_CONTEXT_ID,
+    AppMap,
+    AppMemoryStore,
+    KnowledgeEvidence,
+    context_view,
+    find_result,
+    render_map,
+)
 from .projection import Projection
+from .reconcile import ReconciliationStore, ResearchReport, audit_map
 from .schema import ActionResult, OutputFormat
 
 logger = logging.getLogger("android_ui_analyser")
@@ -2218,14 +2228,41 @@ def _resolve_package(opts: GlobalOpts, app_pkg: str | None) -> str:
     return pkg
 
 
+def _active_map_context(
+    engine: Engine,
+    opts: GlobalOpts,
+    store: AppMemoryStore,
+    package: str,
+    *,
+    explicit_package: bool,
+) -> str:
+    """Resolve a context without making offline ``map --app`` require a device."""
+    configured_serial = opts.serial or opts.load().device.serial
+    if configured_serial:
+        return store.load_session(configured_serial).active_context_id
+    if not explicit_package:
+        return store.load_session(engine.device.serial).active_context_id
+    latest = store.latest_session(package)
+    return latest.active_context_id if latest else DEFAULT_CONTEXT_ID
+
+
 @app.command(name="map")
 def map_cmd(
     ctx: typer.Context,
     app_pkg: str | None = typer.Option(None, "--app", help="Package to map (default: current)."),
     brief: bool = typer.Option(False, "--brief", help="Skeleton only (screens + routes)."),
     screen: str | None = typer.Option(None, "--screen", help="Drill into one screen."),
-    depth: int | None = typer.Option(None, "--depth", help="Limit the route-tree depth."),
+    depth: int | None = typer.Option(
+        None, "--depth", help="Compatibility option; ignored by the flat logical outline."
+    ),
     find: str | None = typer.Option(None, "--find", help="Just the route to a target goal."),
+    audit: bool = typer.Option(
+        False, "--audit", help="Find ambiguous names/routes and research questions."
+    ),
+    context: str | None = typer.Option(
+        None, "--context", help="Show/audit one feature-flag context."
+    ),
+    all_contexts: bool = typer.Option(False, "--all-contexts", help="Show every recorded context."),
     as_json: bool = typer.Option(False, "--json", help="Emit JSON instead of the text tree."),
 ) -> None:
     """Print the app's known layout from memory (screens, key elements, routes)."""
@@ -2237,21 +2274,70 @@ def map_cmd(
         store = AppMemoryStore(opts.load().memory)
         pkg = _resolve_package(opts, app_pkg)
         app_map = store.load(pkg) or AppMap(package=pkg)
+        selected_context = context or _active_map_context(
+            engine,
+            opts,
+            store,
+            pkg,
+            explicit_package=app_pkg is not None,
+        )
+        if context and context not in app_map.contexts:
+            raise UsageError(
+                f"unknown map context: {context}",
+                hint="Use `aua map --all-contexts --json` to list recorded contexts.",
+            )
         compact = fmt is OutputFormat.compact
+        if audit:
+            result = audit_map(app_map, context_id=None if all_contexts else selected_context)
+            audit_payload = result.model_dump(mode="json")
+            if as_json or compact or fmt is OutputFormat.json:
+                typer.echo(
+                    json.dumps(
+                        audit_payload,
+                        indent=None if compact else 2,
+                        separators=(",", ":") if compact else None,
+                        ensure_ascii=False,
+                    )
+                )
+            else:
+                typer.echo(f"# Map audit: {pkg} [{selected_context}]")
+                if not result.issues:
+                    typer.echo("No structural issues found.")
+                for issue in result.issues:
+                    typer.echo(f"- [{issue.severity}] {issue.type}: {issue.message}")
+                    for question in issue.questions:
+                        typer.echo(f"    ? {question}")
+            return
         if as_json or compact:
             if find:
-                payload: Any = find_result(app_map, find)
+                payload: Any = find_result(
+                    app_map,
+                    find,
+                    None if all_contexts else selected_context,
+                )
             elif screen:
                 rec = app_map.screens.get(screen)
                 payload = rec.model_dump(mode="json") if rec else {}
             else:
-                payload = app_map.model_dump(mode="json")
+                payload = (
+                    app_map if all_contexts else context_view(app_map, selected_context)
+                ).model_dump(mode="json")
             sep = (",", ":") if compact else None
             indent = None if compact else 2
             typer.echo(json.dumps(payload, indent=indent, separators=sep, ensure_ascii=False))
             return
         detail = "brief" if brief else "default"
-        typer.echo(render_map(app_map, detail=detail, find=find, screen=screen, depth=depth))
+        typer.echo(
+            render_map(
+                app_map,
+                detail=detail,
+                find=find,
+                screen=screen,
+                depth=depth,
+                context_id=selected_context,
+                all_contexts=all_contexts,
+            )
+        )
 
     _run(ctx, go)
 
@@ -2340,6 +2426,274 @@ def about(
 
             lines = _playbook_lines(app_map)
             typer.echo("\n".join(lines) if lines else f"no playbook for {pkg} yet")
+
+    _run(ctx, go)
+
+
+knowledge_app = typer.Typer(
+    name="knowledge",
+    help="Inspect and add provenance-bearing app knowledge.",
+    no_args_is_help=True,
+)
+app.add_typer(knowledge_app, name="knowledge")
+
+
+@knowledge_app.command("list")
+def knowledge_list(
+    ctx: typer.Context,
+    app_pkg: str | None = typer.Option(None, "--app", help="Package (default: current)."),
+    status: str | None = typer.Option(
+        None, "--status", help="Filter accepted/proposed/stale/rejected."
+    ),
+) -> None:
+    """List durable knowledge with source, scope, and status."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        import json
+
+        opts = _opts(ctx)
+        pkg = _resolve_package(opts, app_pkg)
+        app_map = AppMemoryStore(opts.load().memory).load(pkg) or AppMap(package=pkg)
+        items = [
+            item.model_dump(mode="json")
+            for item in app_map.knowledge
+            if status is None or item.status == status
+        ]
+        typer.echo(json.dumps({"package": pkg, "knowledge": items}, indent=2, ensure_ascii=False))
+
+    _run(ctx, go)
+
+
+@knowledge_app.command("show")
+def knowledge_show(
+    ctx: typer.Context,
+    knowledge_id: str = typer.Argument(..., help="Knowledge item id."),
+    app_pkg: str | None = typer.Option(None, "--app", help="Package (default: current)."),
+) -> None:
+    """Show one knowledge item including its evidence."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        import json
+
+        opts = _opts(ctx)
+        pkg = _resolve_package(opts, app_pkg)
+        app_map = AppMemoryStore(opts.load().memory).load(pkg) or AppMap(package=pkg)
+        item = next((known for known in app_map.knowledge if known.id == knowledge_id), None)
+        if item is None:
+            raise UsageError(f"unknown knowledge item: {knowledge_id}")
+        typer.echo(json.dumps(item.model_dump(mode="json"), indent=2, ensure_ascii=False))
+
+    _run(ctx, go)
+
+
+@knowledge_app.command("add")
+def knowledge_add(
+    ctx: typer.Context,
+    text: str = typer.Option(..., "--text", help="Fact or experience to retain."),
+    kind: str = typer.Option("claim", "--kind", help="description|note|recipe|deeplink|claim"),
+    name: str | None = typer.Option(None, "--name", help="Recipe name or deeplink URI."),
+    context: str | None = typer.Option(None, "--context", help="Feature-flag context scope."),
+    source: str = typer.Option("agent", "--source", help="user|agent|runtime|source"),
+    agent: str | None = typer.Option(None, "--agent", help="Agent/provider name."),
+    session: str | None = typer.Option(None, "--session", help="External agent session id."),
+    evidence: list[str] | None = typer.Option(
+        None, "--evidence", help="Evidence reference; repeat for more."
+    ),
+    app_pkg: str | None = typer.Option(None, "--app", help="Package (default: current)."),
+) -> None:
+    """Add agent feedback or source/runtime research to the app knowledge base."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        import json
+
+        opts = _opts(ctx)
+        pkg = _resolve_package(opts, app_pkg)
+        allowed_kinds = {"description", "note", "recipe", "deeplink", "claim"}
+        allowed_sources = {"user", "agent", "runtime", "source"}
+        if kind not in allowed_kinds or source not in allowed_sources:
+            raise UsageError("invalid knowledge kind or source")
+        item = AppMemoryStore(opts.load().memory).remember_knowledge(
+            pkg,
+            kind=kind,  # type: ignore[arg-type]
+            text=text,
+            name=name,
+            context_id=context,
+            source=source,  # type: ignore[arg-type]
+            agent=agent,
+            session=session,
+            evidence=[KnowledgeEvidence(kind="agent", ref=ref) for ref in (evidence or [])],
+        )
+        typer.echo(json.dumps(item.model_dump(mode="json") if item else {}, indent=2))
+
+    _run(ctx, go)
+
+
+@knowledge_app.command("stale")
+def knowledge_stale(
+    ctx: typer.Context,
+    knowledge_id: str = typer.Argument(..., help="Knowledge item id."),
+    app_pkg: str | None = typer.Option(None, "--app", help="Package (default: current)."),
+) -> None:
+    """Mark one learned fact stale without deleting its evidence."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        import json
+
+        opts = _opts(ctx)
+        pkg = _resolve_package(opts, app_pkg)
+        store = AppMemoryStore(opts.load().memory)
+        app_map = store.load(pkg) or AppMap(package=pkg)
+        item = next((known for known in app_map.knowledge if known.id == knowledge_id), None)
+        if item is None:
+            raise UsageError(f"unknown knowledge item: {knowledge_id}")
+        item.status = "stale"
+        store.save(app_map)
+        typer.echo(json.dumps({"ok": True, "id": knowledge_id, "status": "stale"}))
+
+    _run(ctx, go)
+
+
+reconcile_app = typer.Typer(
+    name="reconcile",
+    help="Exchange map research with an external agent and apply validated corrections.",
+    no_args_is_help=True,
+)
+app.add_typer(reconcile_app, name="reconcile")
+
+
+def _read_json_document(path: str) -> dict[str, Any]:
+    import json
+    import sys
+
+    raw = sys.stdin.read() if path == "-" else Path(path).read_text(encoding="utf-8")
+    parsed = json.loads(raw)
+    if not isinstance(parsed, dict):
+        raise UsageError("expected a JSON object")
+    return parsed
+
+
+@reconcile_app.command("plan")
+def reconcile_plan(
+    ctx: typer.Context,
+    app_pkg: str | None = typer.Option(None, "--app", help="Package (default: current)."),
+    context: str | None = typer.Option(None, "--context", help="Audit one flag context."),
+) -> None:
+    """Emit canonical research tasks for an external coding/runtime agent."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        import json
+
+        opts = _opts(ctx)
+        pkg = _resolve_package(opts, app_pkg)
+        store = AppMemoryStore(opts.load().memory)
+        selected_context = context or _active_map_context(
+            engine,
+            opts,
+            store,
+            pkg,
+            explicit_package=app_pkg is not None,
+        )
+        tasks = ReconciliationStore(store).plan(pkg, context_id=selected_context)
+        typer.echo(
+            json.dumps(
+                {"package": pkg, "tasks": [task.model_dump(mode="json") for task in tasks]},
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+
+    _run(ctx, go)
+
+
+@reconcile_app.command("submit")
+def reconcile_submit(
+    ctx: typer.Context,
+    report: str = typer.Argument("-", help="Research report JSON file, or - for stdin."),
+    app_pkg: str | None = typer.Option(None, "--app", help="Package (default: current)."),
+) -> None:
+    """Submit an agent verdict; `apply` is committed automatically and transactionally."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        import json
+
+        opts = _opts(ctx)
+        pkg = _resolve_package(opts, app_pkg)
+        try:
+            parsed = ResearchReport.model_validate(_read_json_document(report))
+            result = ReconciliationStore(AppMemoryStore(opts.load().memory)).submit(pkg, parsed)
+        except (ValueError, OSError) as exc:
+            raise UsageError(str(exc)) from exc
+        typer.echo(json.dumps(result, indent=2, ensure_ascii=False))
+
+    _run(ctx, go)
+
+
+@reconcile_app.command("status")
+def reconcile_status(
+    ctx: typer.Context,
+    app_pkg: str | None = typer.Option(None, "--app", help="Package (default: current)."),
+) -> None:
+    """Show open tasks, queued reports, and correction events."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        import json
+
+        opts = _opts(ctx)
+        pkg = _resolve_package(opts, app_pkg)
+        result = ReconciliationStore(AppMemoryStore(opts.load().memory)).status(pkg)
+        typer.echo(json.dumps(result, indent=2, ensure_ascii=False))
+
+    _run(ctx, go)
+
+
+@reconcile_app.command("apply")
+def reconcile_apply(
+    ctx: typer.Context,
+    task_id: str = typer.Argument(..., help="Queued review task id to apply."),
+    app_pkg: str | None = typer.Option(None, "--app", help="Package (default: current)."),
+) -> None:
+    """Apply a queued review report after a human/agent decision."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        import json
+
+        opts = _opts(ctx)
+        pkg = _resolve_package(opts, app_pkg)
+        store = AppMemoryStore(opts.load().memory)
+        app_map = store.load(pkg) or AppMap(package=pkg)
+        raw = next(
+            (item for item in app_map.pending_reports if item.get("task_id") == task_id),
+            None,
+        )
+        if raw is None:
+            raise UsageError(f"no queued report for task: {task_id}")
+        report = ResearchReport.model_validate({**raw, "verdict": "apply"})
+        event = ReconciliationStore(store).apply(pkg, report)
+        typer.echo(json.dumps(event.model_dump(mode="json"), indent=2, ensure_ascii=False))
+
+    _run(ctx, go)
+
+
+@reconcile_app.command("rollback")
+def reconcile_rollback(
+    ctx: typer.Context,
+    rollback_id: str = typer.Argument(..., help="Correction event/rollback id."),
+    app_pkg: str | None = typer.Option(None, "--app", help="Package (default: current)."),
+) -> None:
+    """Restore the exact map snapshot from before a correction event."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        import json
+
+        opts = _opts(ctx)
+        pkg = _resolve_package(opts, app_pkg)
+        try:
+            event = ReconciliationStore(AppMemoryStore(opts.load().memory)).rollback(
+                pkg, rollback_id
+            )
+        except ValueError as exc:
+            raise UsageError(str(exc)) from exc
+        typer.echo(json.dumps(event.model_dump(mode="json"), indent=2, ensure_ascii=False))
 
     _run(ctx, go)
 

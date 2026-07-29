@@ -435,7 +435,7 @@ def test_edge_records_structured_steps(tmp_path: Path) -> None:
     eng.analyze(source="hierarchy")
 
     am = AppMemoryStore(eng.config.memory).load(P)
-    assert am is not None and am.schema_version == 2
+    assert am is not None and am.schema_version == 3
     edge = next(e for e in am.routes if e.to_screen == "apps")
     assert edge.action == "tap 'Apps'"  # display string unchanged from v1
     assert len(edge.steps) == 1
@@ -543,7 +543,7 @@ def test_legacy_string_pending_is_dropped_on_load(tmp_path: Path) -> None:
     assert sess.pending == [] and sess.current_screen == "home"
 
 
-def test_v1_map_loads_and_saves_as_v2(tmp_path: Path) -> None:
+def test_v1_map_loads_and_saves_as_v3(tmp_path: Path) -> None:
     store = _store(tmp_path)
     store.record_screen(package=P, elements=_elements(HOME), name_hint="home")
     idx = store.index_path(P)
@@ -553,7 +553,7 @@ def test_v1_map_loads_and_saves_as_v2(tmp_path: Path) -> None:
     am = store.load(P)
     assert am is not None  # loads version-agnostically
     store.record_screen(package=P, elements=_elements(HOME))
-    assert json.loads(idx.read_text())["schema_version"] == 2
+    assert json.loads(idx.read_text())["schema_version"] == 3
 
 
 def test_generic_inbound_label_defers_to_title(tmp_path: Path) -> None:
