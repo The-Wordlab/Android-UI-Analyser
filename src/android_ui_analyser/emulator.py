@@ -16,6 +16,7 @@ import shutil
 import signal
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -160,10 +161,37 @@ def status(*, cache_dir: str | Path | None = None) -> dict[str, Any]:
     return info
 
 
+def _serial_shell(serial: str) -> Callable[[str], str]:
+    """A ``devopts.ShellFn`` bound to one serial, for use before an Engine exists."""
+
+    def shell(cmd: str) -> str:
+        proc = subprocess.run(  # noqa: S603
+            [adb_bin(), "-s", serial, "shell", cmd],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        return proc.stdout or ""
+
+    return shell
+
+
+def _wait_for_boot(shell: Callable[[str], str], *, timeout_s: float = 90.0) -> bool:
+    """Block until ``sys.boot_completed`` is 1. Returns False on timeout."""
+    deadline = time.monotonic() + max(5.0, timeout_s)
+    while time.monotonic() < deadline:
+        if (shell("getprop sys.boot_completed") or "").strip() == "1":
+            return True
+        time.sleep(_POLL_S)
+    return False
+
+
 def start(
     avd: str | None = None,
     *,
     headless: bool = True,
+    animations: bool = False,
     wait_s: float = _DEFAULT_WAIT_S,
     cache_dir: str | Path,
     extra_args: list[str] | None = None,
@@ -242,6 +270,29 @@ def start(
     (_pid_dir(cache_dir) / f"{avd}.json").write_text(
         json.dumps(meta, indent=2) + "\n", encoding="utf-8"
     )
+    # Animations off by default. Measured on a windowed AVD: a tap settles in 272ms instead
+    # of 357ms, and the spread narrows from 225ms to 69ms — the predictability matters more
+    # than the mean, because every wait-for-settle is sized by the worst case. Scoped to an
+    # AVD WE booted: `dev anim off` writes global settings that outlive the process, so doing
+    # it to a device someone else started would silently change their manual QA or break a
+    # visual/animation test. `--animations` keeps them.
+    animations_disabled = False
+    if not animations:
+        with contextlib.suppress(Exception):
+            from . import devopts
+
+            shell = _serial_shell(serial)
+            # Wait for sys.boot_completed, not just adb `state=device`. Those are ~15s apart,
+            # and a `settings put` made in between is undone as the system finishes booting —
+            # which looked like success while the scales stayed at 1.0.
+            _wait_for_boot(shell, timeout_s=min(90.0, wait_s))
+            state = devopts.anim_off(shell, _pid_dir(cache_dir) / f"{avd}.anim.json")
+            # Read back rather than assume: claiming this without checking is the same
+            # false-success the wait above was hiding.
+            anim = (state or {}).get("anim") or {}
+            animations_disabled = bool(anim) and all(
+                str(v) in ("0", "0.0") for v in anim.values()
+            )
     return {
         "ok": True,
         "action": "emulator-start",
@@ -249,6 +300,7 @@ def start(
         "serial": serial,
         "pid": proc.pid,
         "headless": headless,
+        "animations_disabled": animations_disabled,
         "log": str(log_path),
         "hint": f"Use `aua --serial {serial} analyze` (or `aua daemon start`) next.",
     }

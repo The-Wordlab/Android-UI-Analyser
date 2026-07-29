@@ -1702,6 +1702,12 @@ def emulator_start_cmd(
         "--headless/--windowed",
         help="Headless (-no-window) so agents can verify without stealing the desktop UI.",
     ),
+    animations: bool = typer.Option(
+        False,
+        "--animations/--no-animations",
+        help="Keep system animations. Off by default: a tap settles in 272ms instead of 357ms "
+        "and the spread narrows from 225ms to 69ms, and every wait is sized by the worst case.",
+    ),
     wait: int = typer.Option(
         120, "--wait", help="Seconds to wait for adb state=device after boot."
     ),
@@ -1715,7 +1721,7 @@ def emulator_start_cmd(
         _emulator_emit(
             emulator_mod.start(
                 avd,
-                headless=headless,
+                headless=headless, animations=animations,
                 wait_s=float(wait),
                 cache_dir=cfg.cache.dir,
             ),

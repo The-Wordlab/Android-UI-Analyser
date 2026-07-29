@@ -3096,9 +3096,33 @@ class Engine:
         with self._acting("hide-keyboard"):
             self.device.hide_keyboard()
         self._record_action_safe(step)
+        # Verify, don't assume. This returned ok=True unconditionally, and an IME that stays
+        # up is not a cosmetic miss: it covers the bottom of the screen, so the button the
+        # caller is trying to reach is hidden while the command says the keyboard is gone.
+        shown = self._ime_shown()
+        detail = "hidden" if shown is False else ("still-shown" if shown else "unknown")
         return self._observe(
-            ActionResult(ok=True, action="hide-keyboard"), observe, with_image
+            ActionResult(ok=shown is not True, action="hide-keyboard", detail=detail),
+            observe,
+            with_image,
         )
+
+    def _ime_shown(self) -> bool | None:
+        """Is the soft keyboard up? ``None`` when the device will not say.
+
+        Tri-state on purpose: "cannot tell" must not read as "hidden", or this check would
+        recreate the very false-success it exists to catch.
+        """
+        try:
+            out = self.device.shell("dumpsys input_method | grep -m1 mInputShown")
+        except Exception:  # pragma: no cover - device/shell unavailable
+            return None
+        text = (out or "").strip()
+        if "mInputShown=true" in text:
+            return True
+        if "mInputShown=false" in text:
+            return False
+        return None
 
     def open_link(
         self,
