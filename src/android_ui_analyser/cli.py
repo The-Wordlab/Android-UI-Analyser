@@ -2656,7 +2656,7 @@ def capture_status_cmd(ctx: typer.Context) -> None:
     """Show whether the buffer is running, fps mode, frame count, disk use."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(engine.capture_status(), fmt)
+        _emit(_route(engine, "capture_status"), fmt)
 
     _run(ctx, go)
 
@@ -2676,7 +2676,7 @@ def capture_last_cmd(
     """Emit timeline JSON + frame paths + cheap local diff summary."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(engine.capture_last(seconds=seconds, since=since), fmt)
+        _emit(_route(engine, "capture_last", seconds=seconds, since=since), fmt)
 
     _run(ctx, go)
 
@@ -2686,7 +2686,7 @@ def capture_on_cmd(ctx: typer.Context) -> None:
     """Resume (or start) the rolling capture buffer."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(engine.capture_on(), fmt)
+        _emit(_route(engine, "capture_on"), fmt)
 
     _run(ctx, go)
 
@@ -2696,7 +2696,7 @@ def capture_off_cmd(ctx: typer.Context) -> None:
     """Pause capture without stopping the daemon."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(engine.capture_off(), fmt)
+        _emit(_route(engine, "capture_off"), fmt)
 
     _run(ctx, go)
 
@@ -2706,7 +2706,7 @@ def capture_prune_cmd(ctx: typer.Context) -> None:
     """Force TTL / max-size prune of old frames."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(engine.capture_prune(), fmt)
+        _emit(_route(engine, "capture_prune"), fmt)
 
     _run(ctx, go)
 

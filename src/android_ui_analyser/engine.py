@@ -3843,7 +3843,13 @@ class Engine:
                 "action": "capture-status",
                 "running": False,
                 "paused": False,
-                "hint": "Start the daemon (`aua daemon start`) — capture is always-on while warm.",
+                # Do NOT assert the daemon is down: this same answer comes back from
+                # INSIDE a warm daemon whose buffer is simply off, and telling the caller
+                # to start a daemon they already started sends them down a blind alley.
+                "hint": (
+                    "no capture buffer in this process — `aua capture on` if the daemon is "
+                    "warm, otherwise `aua daemon start` (capture.enabled) first."
+                ),
             }
         return self._capture.status()
 
@@ -3856,7 +3862,10 @@ class Engine:
         if self._capture is None:
             raise UsageError(
                 "capture buffer is not running",
-                hint="Run `aua daemon start` (capture.enabled) or `aua capture on`.",
+                hint=(
+                    "`aua capture on` if the daemon is warm, otherwise `aua daemon start` "
+                    "(capture.enabled) first — then re-run. Frames only exist while it runs."
+                ),
             )
         since_ms: int | None = None
         if since:
