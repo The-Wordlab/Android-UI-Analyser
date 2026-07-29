@@ -1,0 +1,49 @@
+// hierarchy.fbs — target FlatBuffers schema for on-device binary dumps (phase 3).
+// Host today uses AUA1 zlib frames (see binary_dump.py). Device-side codegen lands
+// with the incremental AccessibilityService / u2 fork (phase 2).
+namespace aua;
+
+table Bounds {
+  x1:int;
+  y1:int;
+  x2:int;
+  y2:int;
+}
+
+table Element {
+  id:int;
+  type:string;
+  text:string;
+  content_desc:string;
+  resource_id:string;
+  bounds:Bounds;
+  clickable:bool;
+  enabled:bool;
+  source:string;
+}
+
+table Screen {
+  width:int;
+  height:int;
+  package:string;
+  activity:string;
+  source:string;
+}
+
+table Meta {
+  duration_ms:int;
+  tier_used:string;
+  path:string;
+  fingerprint:string;
+  unchanged:bool;
+  via:string;
+}
+
+table AnalyzeResult {
+  schema_version:int = 1;
+  screen:Screen;
+  elements:[Element];
+  meta:Meta;
+}
+
+root_type AnalyzeResult;

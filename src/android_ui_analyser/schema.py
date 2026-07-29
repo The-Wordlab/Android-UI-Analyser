@@ -75,6 +75,8 @@ class OutputFormat(str, Enum):
     pretty = "pretty"
     compact = "compact"
     tsv = "tsv"  # one element per line, tab-separated (see :mod:`projection`)
+    delta = "delta"  # omit elements when meta.unchanged; else compact + element_diff
+    msgpack = "msgpack"  # binary dump (host-side; see binary_dump.py / hierarchy.fbs)
 
 
 class MatchMode(str, Enum):
@@ -215,6 +217,12 @@ class Meta(BaseModel):
     device_serial: str | None = None
     # Optional token-cheap delta vs the previous analyze (perf.differential).
     element_diff: dict[str, Any] | None = None
+    # Host-side incremental a11y: True when hierarchy XML matched the previous analyze.
+    unchanged: bool = False
+    # SHA1 of the raw hierarchy XML (or elements fingerprint for vision paths).
+    fingerprint: str | None = None
+    # How the result was produced (e.g. hierarchy, hierarchy-unchanged, vision).
+    via: str | None = None
 
 
 class AnalyzeResult(BaseModel):
@@ -236,6 +244,29 @@ class AnalyzeResult(BaseModel):
         renders in the same format as a standalone ``analyze``.
         """
         fmt = OutputFormat(fmt)
+        if fmt is OutputFormat.delta:
+            base = self.as_dict(OutputFormat.compact)
+            if self.meta.unchanged:
+                base["elements"] = []
+                base["meta"] = {
+                    k: v
+                    for k, v in base.get("meta", {}).items()
+                    if k
+                    in {
+                        "duration_ms",
+                        "tier_used",
+                        "path",
+                        "unchanged",
+                        "fingerprint",
+                        "via",
+                        "element_diff",
+                        "device_serial",
+                        "known_screen",
+                    }
+                    and v not in (None, [], False)
+                }
+                base["meta"]["unchanged"] = True
+            return base
         if fmt is OutputFormat.compact:
             return {
                 "schema_version": self.schema_version,
@@ -246,14 +277,18 @@ class AnalyzeResult(BaseModel):
                 "meta": {
                     k: v
                     for k, v in self.meta.model_dump(mode="json").items()
-                    if v not in (None, [])
+                    if v not in (None, [], False)
                 },
             }
         return self.model_dump(mode="json")
 
     def render(self, fmt: OutputFormat | str = OutputFormat.json) -> str:
-        """Serialise to one of the three output formats (PRD §8)."""
+        """Serialise to one of the output formats (PRD §8)."""
         fmt = OutputFormat(fmt)
+        if fmt is OutputFormat.msgpack:
+            from .binary_dump import pack_analyze_b64
+
+            return pack_analyze_b64(self)
         data = self.as_dict(fmt)
         indent = 2 if fmt is OutputFormat.pretty else None
         sep = None if indent else (",", ":")

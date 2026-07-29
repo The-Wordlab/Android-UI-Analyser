@@ -54,7 +54,9 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "still works without it. For even lower host latency on hot commands once the daemon is "
         "up, build `native/aua-fast` (`make -C native/aua-fast install`) and use `aua-fast "
         "analyze|tap|has|…` — a tiny C client that speaks the daemon socket (falls back to "
-        "`aua` if the daemon is down). See `docs/NATIVE_ROADMAP.md`.",
+        "`aua` if the daemon is down). See `docs/NATIVE_ROADMAP.md`. Unchanged screens short-"
+        "circuit via `meta.via=hierarchy-unchanged` / `--format delta`; wait on any tree change "
+        "with `aua wait --changed` (or MCP `wait_changed`); multi-device with `aua fanout`.",
     ),
     (
         "Start from the app playbook",
@@ -224,7 +226,8 @@ EXIT_CODES: list[tuple[str, str]] = [
 KEY_FLAGS: list[tuple[str, str]] = [
     (
         "global, BEFORE the subcommand",
-        "`--format json|pretty|compact|tsv` (`tsv` = the readable one, analyze only), "
+        "`--format json|pretty|compact|tsv|delta|msgpack` (`tsv`/`delta`/`msgpack` = analyze; "
+        "`delta` omits elements when unchanged; `msgpack` is AUA1 binary/base64), "
         "`--serial`, `--config`, `--profile`, `--timeout`, `--log-level`, `--no-cache`, "
         "`--with-image` (session default: attach raw screenshots on analyze/actions — "
         "prefer off; use only when you must SEE pixels)",
@@ -271,10 +274,15 @@ KEY_FLAGS: list[tuple[str, str]] = [
     (
         "wait",
         '`--for "<text>"` (`--by id`, `--absent` = wait until it disappears), `--idle`, '
-        "`--for-stable`, `--interval`, `--settle`, `--timeout`, `--observe` (fresh ids, "
-        "even on a miss). On timeout exit 3 with detail naming `--match` mode, fields "
-        "searched, closest candidates — and a hint if the pattern looks like regex under "
-        "`--match contains`",
+        "`--for-stable`, `--changed` (any hierarchy fingerprint change), `--interval`, "
+        "`--settle`, `--timeout`, `--observe` (fresh ids, even on a miss). On timeout exit 3 "
+        "with detail naming `--match` mode, fields searched, closest candidates — and a hint "
+        "if the pattern looks like regex under `--match contains`",
+    ),
+    (
+        "fanout",
+        "`aua fanout [--serials a,b] [--parallel] <cmd…>` — run one subcommand on many "
+        "devices (each gets `daemon.sock.<serial>`); gathers JSON per serial",
     ),
     (
         "open",
@@ -713,7 +721,7 @@ def render_json() -> dict[str, object]:
             ],
         },
         "element_views": {
-            "formats": ["json", "pretty", "compact", "tsv"],
+            "formats": ["json", "pretty", "compact", "tsv", "delta", "msgpack"],
             "field_aliases": sorted(FIELD_ALIASES),
             "tsv_default_fields": list(TSV_DEFAULT_FIELDS),
             "filters": [
