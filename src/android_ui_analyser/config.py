@@ -148,10 +148,12 @@ class CaptureCfg(BaseModel):
     idle_fps: float = 2.0
     burst_fps: float = 10.0  # best-effort; screencap often caps lower
     burst_ms: int = 1500
+    extend_burst_on_change: bool = True  # keep bursting while pixels keep changing
     ttl_s: int = 180
     max_mb: int = 200
     jpeg_quality: int = 70
     hint: bool = True  # push meta.capture_hint after post-action pixel change
+    sidecar: bool = True  # allow host capture sidecar when daemon is off
 
 
 class MemoryCfg(BaseModel):
@@ -558,10 +560,12 @@ capture:
   idle_fps: 2
   burst_fps: 10           # best-effort after actions
   burst_ms: 1500
+  extend_burst_on_change: true  # keep bursting while pixels keep changing
   ttl_s: 180
   max_mb: 200
   jpeg_quality: 70
   hint: true              # meta.capture_hint after post-action pixel change
+  sidecar: true           # host capture process when full daemon is off
 
 memory:
   enabled: true

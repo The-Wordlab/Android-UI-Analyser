@@ -600,6 +600,43 @@ def _tool_definitions() -> list[types.Tool]:
                         "type": "string",
                         "description": "Use 'last-action' for frames since the last tap/input.",
                     },
+                    "region": {
+                        "type": "string",
+                        "description": "Filter diff to a 3×3 cell (center, upper, left, …).",
+                    },
+                    "where_rid": {
+                        "type": "string",
+                        "description": "Infer region from a resource-id's last-known center.",
+                    },
+                },
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="capture_export",
+            description="Export recent capture frames to a GIF (or MP4 with imageio).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "seconds": {"type": "number"},
+                    "since": {"type": "string"},
+                    "format": {"type": "string", "description": "gif|mp4"},
+                    "fps": {"type": "number"},
+                },
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="capture_explain",
+            description="Narrate recent capture (local summary; optional LLM).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "seconds": {"type": "number"},
+                    "since": {"type": "string"},
+                    "llm": {"type": "boolean"},
                 },
                 "additionalProperties": False,
             },
@@ -982,6 +1019,26 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
             engine.capture_last(
                 seconds=args.get("seconds"),
                 since=args.get("since"),
+                region=args.get("region"),
+                where_rid=args.get("where_rid"),
+            )
+        )
+    if name == "capture_export":
+        return _dump(
+            engine.capture_export(
+                args["path"],
+                seconds=args.get("seconds"),
+                since=args.get("since"),
+                fmt=args.get("format", "gif"),
+                fps=float(args.get("fps") or 8.0),
+            )
+        )
+    if name == "capture_explain":
+        return _dump(
+            engine.capture_explain(
+                seconds=args.get("seconds"),
+                since=args.get("since"),
+                llm=bool(args.get("llm", False)),
             )
         )
     if name == "dev_profile":

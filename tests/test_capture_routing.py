@@ -18,6 +18,8 @@ CLI = Path(__file__).resolve().parent.parent / "src" / "android_ui_analyser" / "
 CAPTURE_COMMANDS = {
     "capture_status_cmd",
     "capture_last_cmd",
+    "capture_export_cmd",
+    "capture_explain_cmd",
     "capture_on_cmd",
     "capture_off_cmd",
     "capture_prune_cmd",
@@ -48,5 +50,21 @@ def test_every_capture_command_routes_through_the_daemon() -> None:
 def test_daemon_dispatches_every_capture_command() -> None:
     """The other half: routing is useless if the daemon has no branch to answer it."""
     daemon_src = (CLI.parent / "daemon.py").read_text(encoding="utf-8")
-    for cmd in ("capture_status", "capture_last", "capture_on", "capture_off", "capture_prune"):
+    for cmd in (
+        "capture_status",
+        "capture_last",
+        "capture_export",
+        "capture_explain",
+        "capture_on",
+        "capture_off",
+        "capture_prune",
+    ):
         assert f'"{cmd}"' in daemon_src, f"daemon.py has no dispatch branch for {cmd}"
+
+
+def test_sidecar_is_local_not_daemon_routed() -> None:
+    """Sidecar starts a host process — it must talk to the local engine, not the daemon buffer."""
+    tree = ast.parse(CLI.read_text(encoding="utf-8"))
+    src = ast.get_source_segment(CLI.read_text(encoding="utf-8"), _function(tree, "capture_sidecar_cmd")) or ""
+    assert "engine.capture_sidecar_" in src
+    assert "_route(" not in src

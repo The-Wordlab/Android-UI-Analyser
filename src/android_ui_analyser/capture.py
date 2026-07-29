@@ -34,6 +34,7 @@ class CaptureCfgView:
     idle_fps: float = 2.0
     burst_fps: float = 10.0
     burst_ms: int = 1500
+    extend_burst_on_change: bool = True  # keep bursting while pixels keep changing
     ttl_s: int = 180
     max_mb: int = 200
     jpeg_quality: int = 70
@@ -166,6 +167,8 @@ class CaptureBuffer:
         *,
         seconds: float | None = None,
         since_ms: int | None = None,
+        region: str | None = None,
+        where_rid: str | None = None,
     ) -> dict[str, Any]:
         with self._lock:
             entries = list(self._entries)
@@ -174,7 +177,8 @@ class CaptureBuffer:
         elif seconds is not None:
             cutoff = int(time.time() * 1000) - int(seconds * 1000)
             entries = [e for e in entries if e.t_ms >= cutoff]
-        summary = diff_summary(entries)
+        summary = diff_summary(entries, region=region)
+        duration = change_duration_ms(entries)
         return {
             "ok": True,
             "action": "capture-last",
@@ -183,7 +187,44 @@ class CaptureBuffer:
             "frames": [e.__dict__ for e in entries],
             "count": len(entries),
             "summary": summary,
+            "change_duration_ms": duration,
+            "region": region,
+            "where_rid": where_rid,
         }
+
+    def export(
+        self,
+        path: str | Path,
+        *,
+        seconds: float | None = None,
+        since_ms: int | None = None,
+        fmt: str = "gif",
+        fps: float = 8.0,
+    ) -> dict[str, Any]:
+        """Assemble kept frames into a GIF (or MJPEG-style multipage PDF fallback)."""
+        payload = self.last(seconds=seconds, since_ms=since_ms)
+        entries = [FrameEntry(**f) if isinstance(f, dict) else f for f in payload["frames"]]
+        out = Path(path).expanduser()
+        out.parent.mkdir(parents=True, exist_ok=True)
+        written = export_animation(entries, out, fmt=fmt, fps=fps)
+        return {
+            "ok": True,
+            "action": "capture-export",
+            "path": written,
+            "frames": len(entries),
+            "format": fmt,
+        }
+
+    def explain_local(
+        self,
+        *,
+        seconds: float | None = None,
+        since_ms: int | None = None,
+    ) -> dict[str, Any]:
+        """Cheap text narration from marks + diff summary (no LLM)."""
+        payload = self.last(seconds=seconds, since_ms=since_ms)
+        narration = local_narration(payload)
+        return {**payload, "action": "capture-explain", "narration": narration}
 
     def prune(self) -> dict[str, Any]:
         removed = self._prune()
@@ -242,6 +283,11 @@ class CaptureBuffer:
                 and (time.time() < self._burst_until or action)
             ):
                 self._kept_since_action += 1
+            # Animation-aware: while frames keep changing during a burst, keep it open.
+            if self.cfg.extend_burst_on_change and (
+                action or time.time() < self._burst_until
+            ):
+                self._burst_until = time.time() + max(0, self.cfg.burst_ms) / 1000.0
             self._append_index(entry)
         self._prune()
 
@@ -320,7 +366,13 @@ def _write_jpeg(img: Any, path: Path, *, quality: int = 70) -> int:
     return path.stat().st_size
 
 
-def diff_summary(entries: list[FrameEntry], *, grid: int = 3, threshold: float = 8.0) -> list[str]:
+def diff_summary(
+    entries: list[FrameEntry],
+    *,
+    grid: int = 3,
+    threshold: float = 8.0,
+    region: str | None = None,
+) -> list[str]:
     """Cheap local summary of where consecutive kept frames differ."""
     if len(entries) < 2:
         return [] if not entries else [f"t={entries[0].t_ms}: single frame (no diff)"]
@@ -328,20 +380,27 @@ def diff_summary(entries: list[FrameEntry], *, grid: int = 3, threshold: float =
     lines: list[str] = []
     t0 = entries[0].t_ms
     i = 0
+    want = (region or "").lower().strip() or None
     while i < len(entries) - 1:
-        start = entries[i]
         j = i + 1
         regions: set[str] = set()
         end = entries[j]
         while j < len(entries):
             end = entries[j]
-            cells = _changed_cells(start.path if j == i + 1 else entries[j - 1].path, end.path, grid=grid, threshold=threshold)
+            cells = _changed_cells(
+                entries[i].path if j == i + 1 else entries[j - 1].path,
+                end.path,
+                grid=grid,
+                threshold=threshold,
+            )
             if not cells:
                 break
             regions.update(cells)
             j += 1
             if j - i > 30:
                 break
+        if want:
+            regions = {r for r in regions if want in r}
         if regions:
             rel0 = entries[i].t_ms - t0
             rel1 = end.t_ms - t0
@@ -354,10 +413,96 @@ def diff_summary(entries: list[FrameEntry], *, grid: int = 3, threshold: float =
         else:
             i += 1
     if not lines and len(entries) >= 2:
-        lines.append(
-            f"t+0–t+{entries[-1].t_ms - t0}ms: {len(entries)} frames kept (subtle/no grid change)"
-        )
+        if want:
+            lines.append(
+                f"t+0–t+{entries[-1].t_ms - t0}ms: no '{want}' cell change "
+                f"across {len(entries)} kept frames"
+            )
+        else:
+            lines.append(
+                f"t+0–t+{entries[-1].t_ms - t0}ms: {len(entries)} frames kept (subtle/no grid change)"
+            )
     return lines
+
+
+def change_duration_ms(entries: list[FrameEntry]) -> int | None:
+    """Wall ms from first → last kept frame in the window (loading-flash duration)."""
+    if len(entries) < 2:
+        return None
+    return max(0, entries[-1].t_ms - entries[0].t_ms)
+
+
+def local_narration(payload: dict[str, Any]) -> str:
+    """Turn marks + summary into a short agent-readable paragraph."""
+    frames = payload.get("frames") or []
+    summary = payload.get("summary") or []
+    duration = payload.get("change_duration_ms")
+    marks = [f.get("action") for f in frames if isinstance(f, dict) and f.get("action")]
+    parts: list[str] = []
+    if marks:
+        parts.append("Actions: " + " → ".join(dict.fromkeys(marks)) + ".")
+    if duration is not None:
+        parts.append(f"Visible change spanned ~{duration}ms across {len(frames)} kept frames.")
+    elif frames:
+        parts.append(f"{len(frames)} kept frame(s).")
+    if summary:
+        parts.append("Diff: " + "; ".join(summary) + ".")
+    else:
+        parts.append("No coarse-grid pixel change detected between kept frames.")
+    return " ".join(parts)
+
+
+def export_animation(
+    entries: list[FrameEntry],
+    path: Path,
+    *,
+    fmt: str = "gif",
+    fps: float = 8.0,
+) -> str:
+    """Write a GIF (Pillow) from frame paths. ``fmt=mp4`` requires imageio+ffmpeg."""
+    from PIL import Image
+
+    if not entries:
+        raise ValueError("no frames to export")
+    fmt_l = (fmt or "gif").lower().lstrip(".")
+    images = []
+    for e in entries:
+        try:
+            images.append(Image.open(e.path).convert("RGB"))
+        except OSError:
+            continue
+    if not images:
+        raise ValueError("could not open any frame images")
+    duration_ms = max(20, int(1000 / max(0.5, fps)))
+    if fmt_l == "gif":
+        out = path if path.suffix.lower() == ".gif" else path.with_suffix(".gif")
+        images[0].save(
+            out,
+            save_all=True,
+            append_images=images[1:],
+            duration=duration_ms,
+            loop=0,
+            optimize=True,
+        )
+        return str(out)
+    if fmt_l in ("mp4", "video"):
+        out = path if path.suffix.lower() == ".mp4" else path.with_suffix(".mp4")
+        try:
+            import imageio.v2 as imageio
+            import numpy as np
+        except ImportError as exc:
+            raise ImportError(
+                "mp4 export needs imageio (and typically ffmpeg). "
+                "Use fmt=gif, or `pip install imageio imageio-ffmpeg`."
+            ) from exc
+        writer = imageio.get_writer(out, fps=fps, codec="libx264", quality=7)
+        try:
+            for im in images:
+                writer.append_data(np.asarray(im))
+        finally:
+            writer.close()
+        return str(out)
+    raise ValueError(f"unsupported export format {fmt!r} (use gif or mp4)")
 
 
 def _changed_cells(path_a: str, path_b: str, *, grid: int, threshold: float) -> list[str]:
@@ -398,6 +543,9 @@ __all__ = [
     "CaptureBuffer",
     "CaptureCfgView",
     "FrameEntry",
+    "change_duration_ms",
     "diff_summary",
+    "export_animation",
     "frame_hash",
+    "local_narration",
 ]

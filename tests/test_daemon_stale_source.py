@@ -37,7 +37,15 @@ def test_capture_methods_are_marked_daemon_only() -> None:
     """On skew these must error, because an in-process answer is wrong, not just slower."""
     from android_ui_analyser import cli
 
-    for method in ("capture_status", "capture_last", "capture_on", "capture_off"):
+    for method in (
+        "capture_status",
+        "capture_last",
+        "capture_export",
+        "capture_explain",
+        "capture_on",
+        "capture_off",
+        "capture_prune",
+    ):
         assert method in cli._DAEMON_ONLY_METHODS, method
     # Stateless calls must NOT be in the set — they degrade to in-process correctly.
     for method in ("analyze", "tap", "has"):

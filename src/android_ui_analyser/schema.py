@@ -297,6 +297,8 @@ class ActionResult(BaseModel):
     # The screen right after the action (when called with observe=True), so an agent gets
     # fresh element ids without a separate `analyze` round-trip (act + observe in one call).
     observation: AnalyzeResult | None = None
+    # Rolling capture saw a post-action pixel change — pull `aua capture last`.
+    capture_hint: str | None = None
 
     def render(self, fmt: OutputFormat | str = OutputFormat.json) -> str:
         fmt = OutputFormat(fmt)

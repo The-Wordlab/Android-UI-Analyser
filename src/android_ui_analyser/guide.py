@@ -288,9 +288,11 @@ KEY_FLAGS: list[tuple[str, str]] = [
     ),
     (
         "capture",
-        "`capture status|last [--seconds N|--since last-action]|on|off|prune` — always-on "
-        "rolling screencap with the daemon (deduped frames + diff summary); see "
-        "`meta.capture_hint` after fast transitions",
+        "`capture status|last [--seconds N|--since last-action] [--region center]|"
+        "export PATH.gif|explain [--llm]|on|off|prune|sidecar start|stop` — always-on "
+        "rolling screencap with the daemon (deduped frames + diff summary / GIF); see "
+        "`meta.capture_hint` / action `capture_hint` after fast transitions; suite failures "
+        "attach `capture last --since last-action`",
     ),
     (
         "dev",

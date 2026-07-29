@@ -335,7 +335,15 @@ _DAEMON_CMD = {"input_text": "input"}
 # while the daemon is happily writing frames — so a stale daemon must be an error, not a
 # silent downgrade.
 _DAEMON_ONLY_METHODS = frozenset(
-    {"capture_status", "capture_last", "capture_on", "capture_off", "capture_prune"}
+    {
+        "capture_status",
+        "capture_last",
+        "capture_export",
+        "capture_explain",
+        "capture_on",
+        "capture_off",
+        "capture_prune",
+    }
 )
 
 
@@ -2694,11 +2702,79 @@ def capture_last_cmd(
         "--since",
         help="last-action — frames since the last tap/input/swipe mark.",
     ),
+    region: str | None = typer.Option(
+        None,
+        "--region",
+        help="Filter diff summary to a grid region (center, upper, left, …).",
+    ),
+    where_rid: str | None = typer.Option(
+        None,
+        "--where-rid",
+        help="Infer --region from a resource-id's last-known center cell.",
+    ),
 ) -> None:
     """Emit timeline JSON + frame paths + cheap local diff summary."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(_route(engine, "capture_last", seconds=seconds, since=since), fmt)
+        _emit(
+            _route(
+                engine,
+                "capture_last",
+                seconds=seconds,
+                since=since,
+                region=region,
+                where_rid=where_rid,
+            ),
+            fmt,
+        )
+
+    _run(ctx, go)
+
+
+@capture_app.command("export")
+def capture_export_cmd(
+    ctx: typer.Context,
+    path: str = typer.Argument(..., help="Output .gif (or .mp4 with imageio)."),
+    seconds: float | None = typer.Option(None, "--seconds"),
+    since: str | None = typer.Option(None, "--since", help="last-action"),
+    fmt: str = typer.Option("gif", "--format", help="gif|mp4"),
+    fps: float = typer.Option(8.0, "--fps"),
+) -> None:
+    """Assemble recent kept frames into a GIF (or MP4)."""
+
+    def go(engine: Engine, fmt_out: OutputFormat) -> None:
+        _emit(
+            _route(
+                engine,
+                "capture_export",
+                path=path,
+                seconds=seconds,
+                since=since,
+                fmt=fmt,
+                fps=fps,
+            ),
+            fmt_out,
+        )
+
+    _run(ctx, go)
+
+
+@capture_app.command("explain")
+def capture_explain_cmd(
+    ctx: typer.Context,
+    seconds: float | None = typer.Option(None, "--seconds"),
+    since: str | None = typer.Option(None, "--since", help="last-action"),
+    llm: bool = typer.Option(
+        False, "--llm", help="Also ask the opt-in planner LLM to narrate."
+    ),
+) -> None:
+    """Narrate the recent capture window (local diff summary; optional --llm)."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(
+            _route(engine, "capture_explain", seconds=seconds, since=since, llm=llm),
+            fmt,
+        )
 
     _run(ctx, go)
 
@@ -2729,6 +2805,25 @@ def capture_prune_cmd(ctx: typer.Context) -> None:
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
         _emit(_route(engine, "capture_prune"), fmt)
+
+    _run(ctx, go)
+
+
+@capture_app.command("sidecar")
+def capture_sidecar_cmd(
+    ctx: typer.Context,
+    action: str = typer.Argument(..., help="start|stop"),
+) -> None:
+    """Host capture process that survives without the full warm daemon."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        a = action.lower()
+        if a == "start":
+            _emit(engine.capture_sidecar_start(), fmt)
+        elif a == "stop":
+            _emit(engine.capture_sidecar_stop(), fmt)
+        else:
+            raise UsageError("use `aua capture sidecar start` or `stop`")
 
     _run(ctx, go)
 
