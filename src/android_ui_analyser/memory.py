@@ -42,7 +42,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from .config import MemoryCfg
     from .schema import Element
 
-MEMORY_SCHEMA_VERSION = 3
+MEMORY_SCHEMA_VERSION = 4
 LEGACY_CONTEXT_ID = "legacy-default"
 DEFAULT_CONTEXT_ID = "default"
 
@@ -142,6 +142,7 @@ class ContextRecord(BaseModel):
     shell_anchors: list[str] = Field(default_factory=list)
     source: Literal["legacy", "default", "flags_verified", "flags_unverified", "agent"] = "default"
     verified: bool = False
+    evidence: list[str] = Field(default_factory=list)
     first_seen: str
     last_seen: str
 
@@ -188,6 +189,7 @@ class ScreenRecord(BaseModel):
     logical_name: str | None = None
     variant: str | None = None
     state: str | None = None
+    surface: str | None = None
     context_id: str = DEFAULT_CONTEXT_ID
     name_source: Literal["explicit", "resource", "title", "route", "activity", "legacy"] = "legacy"
     activity: str | None = None
@@ -242,6 +244,9 @@ class RouteEdge(BaseModel):
     guards: dict[str, str] = Field(default_factory=dict)
     steps: list[RouteStep] = Field(default_factory=list)  # [] = legacy pre-v2 edge
     count: int = 1
+    status: Literal["provisional", "verified", "rejected"] = "verified"
+    verification_count: int = 0
+    rejection_reason: str | None = None
     last_seen: str
 
 
@@ -324,6 +329,7 @@ class NavHints(NamedTuple):
     suggested_gotos: list[str]  # ranked ready-to-run: ["goto image_creator", ...]
     suggested_deeplinks: list[str]  # shortcut jumps: ["open myapp://home", ...]
     map_hint: str | None  # nudge when there's a map but nothing actionable from here
+    research_tasks: list[str]  # unresolved map questions ready for an external agent
 
 
 # --------------------------------------------------------------------------- steps
@@ -603,7 +609,12 @@ def detect_dynamic(elements: list[Element]) -> list[str]:
 
 
 def title_of(elements: list[Element], height: int | None = None) -> str | None:
-    """Topmost short, non-dynamic heading text (below the status bar) — a name heuristic."""
+    """Topmost compact, non-dynamic heading text (below the status bar).
+
+    App and document titles routinely exceed the old 24-character anchor limit.
+    Keeping those titles eligible prevents a short toolbar action such as ``Mute``
+    or ``Share`` from becoming the screen name.
+    """
     if not elements:
         return None
     h = height or max((e.bounds[3] for e in elements), default=1) or 1
@@ -612,7 +623,7 @@ def title_of(elements: list[Element], height: int | None = None) -> str | None:
         if _is_input(el) or _system_chrome(el, height):
             continue
         t = (el.text or el.content_desc or "").strip()
-        if not t or _looks_dynamic(t) or not (2 <= len(t) <= 24):
+        if not t or _looks_dynamic(t) or not (2 <= len(t) <= 64):
             continue
         if el.center[1] <= 0.22 * h:
             cands.append((el.center[1], -len(t), t))
@@ -627,16 +638,116 @@ def slug(text: str | None) -> str:
     return s.strip("_")[:40]
 
 
-def _short(text: str | None, tokens: int = 2) -> str:
+def _short(text: str | None, tokens: int = 3) -> str:
     """A short slug: first ``tokens`` words only (so a long card label → a clean name)."""
-    parts = [p for p in slug(text).split("_") if p]
+    parts = [p for p in slug(text).split("_") if p and p not in {"a", "an", "the"}]
     return "_".join(parts[:tokens])
+
+
+_GENERIC_TITLES = frozenset(
+    {
+        "create",
+        "new",
+        "details",
+        "detail",
+        "result",
+        "screen",
+        "home",
+        "open",
+        "crear",
+        "nouveau",
+        "nuovo",
+    }
+)
+
+_GENERIC_RESOURCE_FAMILIES = frozenset(
+    {
+        "action_bar",
+        "app",
+        "body",
+        "content",
+        "main",
+        "nav_bar",
+        "navigation",
+        "root",
+        "scaffold",
+        "toolbar",
+    }
+)
+
+
+def _resource_slug(resource_id: str | None) -> str:
+    tail = _id_tail(resource_id) or ""
+    words = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", tail)
+    return slug(words)
+
+
+def _semantic_resource_family(resource_id: str | None) -> tuple[str | None, int]:
+    """Turn app-authored resource namespaces into locale-independent destinations."""
+    value = _resource_slug(resource_id)
+    if not value or _looks_dynamic(value):
+        return None, 0
+    for prefix in ("container_", "screen_"):
+        if value.startswith(prefix) and len(value) > len(prefix):
+            family = value.removeprefix(prefix)
+            if family not in _GENERIC_RESOURCE_FAMILIES:
+                return family, 5
+    title_view = re.match(r"^(.+?)_title_view$", value)
+    if title_view and title_view.group(1) not in _GENERIC_RESOURCE_FAMILIES:
+        return title_view.group(1), 4
+    structural = re.match(
+        r"^(?:screen_|container_)?(.+?)_(?:root|content|screen|container|page|layout)$",
+        value,
+    )
+    if structural:
+        family = structural.group(1)
+        if family not in _GENERIC_RESOURCE_FAMILIES:
+            return family, 4
+    return None, 0
+
+
+def _destination_from_resource(resource_id: str | None) -> str | None:
+    """Infer the destination represented by an action's stable resource id."""
+    value = _resource_slug(resource_id)
+    if not value:
+        return None
+    if value.startswith("bottom_bar_"):
+        return value.removeprefix("bottom_bar_")
+    if value.startswith("button_"):
+        candidate = value.removeprefix("button_")
+        if candidate in {"settings", "notifications", "profile"}:
+            return candidate
+    tokens = [
+        token
+        for token in value.split("_")
+        if token
+        not in {
+            "button",
+            "btn",
+            "cta",
+            "link",
+            "card",
+            "action",
+            "open",
+            "launch",
+            "show",
+            "view",
+            "go",
+            "to",
+        }
+    ]
+    if len(tokens) >= 2:
+        return "_".join(tokens)
+    family, _score = _semantic_resource_family(resource_id)
+    return family
 
 
 def propose_name(
     *,
     hint: str | None = None,
+    resource_name: str | None = None,
     inbound_label: str | None = None,
+    inbound_resource_id: str | None = None,
     inbound_kind: str | None = None,
     title: str | None = None,
     activity: str | None = None,
@@ -647,12 +758,15 @@ def propose_name(
     # just because a Delete tap led there. Demote such labels below title/activity.
     generic = bool(inbound_label) and slug(inbound_label) in GENERIC_INBOUND
     cands: list[str] = []
+    title_slug = _short(title)
     if hint:
         cands.append(slug(hint))  # an explicit name is used verbatim
-    if inbound_kind == "tap" and inbound_label and not generic:
-        cands.append(_short(inbound_label))  # nav taps give clean names ("Apps" → apps)
-    if title:
+    if resource_name:
+        cands.append(slug(resource_name))
+    if title_slug and title_slug not in _GENERIC_TITLES:
         cands.append(_short(title))
+    if inbound_kind == "tap":
+        cands.append(_destination_from_resource(inbound_resource_id) or "")
     if inbound_label and not generic:
         cands.append(_short(inbound_label))
     if is_first:
@@ -692,31 +806,79 @@ def _infer_state(elements: list[Element]) -> str | None:
         for el in elements
         if el.text or el.content_desc
     )
-    if re.search(r"\b(loading|please wait)\b", labels):
+    resources = " ".join(_resource_slug(el.resource_id) for el in elements if el.resource_id)
+    if re.search(r"\b(loading|please wait|creating|creando|generating)\b", labels):
         return "loading"
-    if re.search(r"\b(oops|something went wrong|try again|failed|error)\b", labels):
+    if re.search(r"\b(oops|something went wrong|try again|failed|error|reintentar)\b", labels):
         return "error"
-    if re.search(r"\b(no .+ yet|nothing here|empty)\b", labels):
+    if re.search(r"\b(no .+ yet|nothing here|empty|nada que mostrar|sin resultados)\b", labels):
         return "empty"
+    if "ready" in resources or re.search(r"\b(tap to open|ready to open|listo para abrir)\b", labels):
+        return "ready"
     return None
 
 
+def _screen_surface(elements: list[Element]) -> str:
+    kinds = {(el.type or "").lower() for el in elements}
+    if any("webview" in kind for kind in kinds):
+        return "webview"
+    if any(kind in {"image", "canvas"} or "surfaceview" in kind for kind in kinds):
+        return "canvas"
+    if any(_is_input(el) for el in elements):
+        return "form"
+    return "native"
+
+
 def _resource_name(elements: list[Element], height: int | None = None) -> str | None:
-    """Prefer stable selected navigation/resource ids over volatile visible copy."""
+    """Prefer stable resource namespaces over volatile or localized visible copy."""
     selected: list[str] = []
+    candidates: Counter[str] = Counter()
+    resource_slugs: set[str] = set()
     for el in elements:
         if _system_chrome(el, height):
             continue
         tail = _id_tail(el.resource_id)
         if not tail or _looks_dynamic(tail):
             continue
-        semantic = re.sub(r"^(?:bottom|top)bar", "", tail, flags=re.I)
-        candidate = slug(re.sub(r"^(button|container|screen|tab|nav)", "", semantic, flags=re.I))
-        if not candidate:
-            continue
         if el.selected is True or el.checked is True:
-            selected.append(candidate)
-    return selected[0] if selected else None
+            destination = _destination_from_resource(tail)
+            if destination:
+                selected.append(destination)
+        if _bottom_nav(el, height):
+            continue
+        resource_slugs.add(_resource_slug(tail))
+        family, score = _semantic_resource_family(tail)
+        if family:
+            candidates[family] += score
+    if selected:
+        return selected[0]
+    if candidates:
+        return candidates.most_common(1)[0][0]
+    # Compose/WebView bridges often expose a semantic namespace rather than a
+    # structural ``*Root`` id: e.g. ``articleDetailPoster``,
+    # ``articleDetailShare``, and ``articleDetailSave``. A repeated two-token
+    # prefix is a durable screen family; count distinct ids so repeated list rows
+    # cannot win merely through volume.
+    namespace_counts: Counter[str] = Counter()
+    generic_prefixes = {
+        "button",
+        "icon",
+        "image",
+        "item",
+        "label",
+        "text",
+        "view",
+    }
+    for value in resource_slugs:
+        tokens = value.split("_")
+        if len(tokens) >= 3 and tokens[0] not in generic_prefixes:
+            namespace_counts["_".join(tokens[:2])] += 1
+    namespaces = [
+        (namespace, count)
+        for namespace, count in namespace_counts.items()
+        if count >= 2 and namespace not in _GENERIC_RESOURCE_FAMILIES
+    ]
+    return max(namespaces, key=lambda item: item[1])[0] if namespaces else None
 
 
 # --------------------------------------------------------------------------- store
@@ -733,8 +895,9 @@ def _safe(name: str) -> str:
 def upgrade_app_map(app: AppMap) -> AppMap:
     """Upgrade v1/v2 maps in memory without discarding their learned routes."""
     now = app.last_verified or _now_iso()
-    legacy = app.schema_version < MEMORY_SCHEMA_VERSION
-    if legacy:
+    original_version = app.schema_version
+    pre_context = original_version < 3
+    if pre_context:
         app.contexts.setdefault(
             LEGACY_CONTEXT_ID,
             ContextRecord(
@@ -747,7 +910,7 @@ def upgrade_app_map(app: AppMap) -> AppMap:
             ),
         )
     for key, rec in app.screens.items():
-        if legacy or not rec.context_id:
+        if pre_context or not rec.context_id:
             rec.context_id = LEGACY_CONTEXT_ID
             rec.name_source = "legacy"
         rec.name = key
@@ -755,8 +918,12 @@ def upgrade_app_map(app: AppMap) -> AppMap:
         rec.logical_name = rec.logical_name or rec.canonical_name
         rec.id = rec.id or _stable_id("screen", app.package, rec.context_id, key)
     for index, edge in enumerate(app.routes):
-        if legacy or not edge.context_id:
+        if pre_context or not edge.context_id:
             edge.context_id = LEGACY_CONTEXT_ID
+        # Routes learned before provisional verification existed remain trusted.
+        if original_version < 4:
+            edge.status = "verified"
+            edge.verification_count = max(edge.verification_count, edge.count)
         edge.id = edge.id or _stable_id(
             "route",
             app.package,
@@ -787,7 +954,7 @@ def upgrade_app_map(app: AppMap) -> AppMap:
         )
         existing.add(kid)
 
-    if legacy:
+    if pre_context:
         if app.description:
             add_legacy("description", app.description)
         for note in app.notes:
@@ -930,10 +1097,18 @@ class AppMemoryStore:
         *,
         app_version: str | None = None,
         verified: bool,
+        replace: bool = False,
+        evidence: list[str] | None = None,
     ) -> str:
         """Promote a flag set to the active observation context after flags-set/restart."""
         sess = self.load_session(serial)
-        merged = dict(sess.active_flags) if sess.package in (None, package) else {}
+        merged = (
+            {}
+            if replace
+            else dict(sess.active_flags)
+            if sess.package in (None, package)
+            else {}
+        )
         merged.update(flags)
         context_id = context_id_for_flags(merged)
         if sess.active_context_id != context_id or sess.package not in (None, package):
@@ -958,6 +1133,7 @@ class AppMemoryStore:
                 app_version=app_version,
                 source="flags_verified" if verified else "flags_unverified",
                 verified=verified,
+                evidence=evidence or [],
                 first_seen=now,
                 last_seen=now,
             )
@@ -968,6 +1144,8 @@ class AppMemoryStore:
             existing.verified = existing.verified or verified
             if verified:
                 existing.source = "flags_verified"
+            if evidence:
+                existing.evidence = sorted(set(existing.evidence) | set(evidence))
         self.save(app)
         return context_id
 
@@ -1023,6 +1201,9 @@ class AppMemoryStore:
         activity: str | None,
         sig: str,
         context_id: str = DEFAULT_CONTEXT_ID,
+        *,
+        state: str | None = None,
+        surface: str | None = None,
     ) -> tuple[str | None, float]:
         best: str | None = None
         best_sim = 0.0
@@ -1037,11 +1218,17 @@ class AppMemoryStore:
             group_best: str | None = None
             group_sim = 0.0
             for name, rec in candidates:
-                if rec.signature == sig:
+                state_compatible = rec.state == state or (rec.state is None and state is None)
+                surface_compatible = not rec.surface or not surface or rec.surface == surface
+                if rec.signature == sig and state_compatible and surface_compatible:
                     return name, 1.0
+                if not state_compatible:
+                    continue
                 sim = anchor_similarity(anchors, set(rec.anchors))
                 if rec.activity and activity:
                     sim += 0.05 if rec.activity == activity else -0.10
+                if not surface_compatible:
+                    sim -= 0.45
                 if sim > group_sim:
                     group_best, group_sim = name, sim
             threshold = _RECOGNIZE_MIN if group_index == 0 else 0.72
@@ -1059,14 +1246,26 @@ class AppMemoryStore:
         base: str,
         *,
         context_id: str = DEFAULT_CONTEXT_ID,
+        context_flags: dict[str, str] | None = None,
         state: str | None = None,
     ) -> str:
         base = base or "screen"
         if base not in app.screens:
             return base
-        qualifier = state or (context_id if context_id != DEFAULT_CONTEXT_ID else None)
-        if qualifier:
-            candidate = f"{base}__{slug(qualifier)[:24]}"
+        flags = context_flags
+        if flags is None and context_id in app.contexts:
+            flags = app.contexts[context_id].flags
+        parts: list[str] = []
+        if context_id != DEFAULT_CONTEXT_ID:
+            if flags:
+                key = sorted(flags)[0]
+                parts.append(f"{key}_{flags[key]}")
+            else:
+                parts.append(context_id)
+        if state:
+            parts.append(state)
+        if parts:
+            candidate = f"{base}__{slug('_'.join(parts))[:32]}"
             if candidate not in app.screens:
                 return candidate
         return f"{base}__{_stable_id('variant', context_id, base)[-8:]}"
@@ -1099,6 +1298,7 @@ class AppMemoryStore:
         tier: str = "hierarchy",
         name_hint: str | None = None,
         inbound_label: str | None = None,
+        inbound_resource_id: str | None = None,
         inbound_kind: str | None = None,
         screen_height: int | None = None,
         context_id: str = DEFAULT_CONTEXT_ID,
@@ -1113,7 +1313,16 @@ class AppMemoryStore:
         anchors = screen_anchors(elements, redact=self.cfg.redact, height=screen_height)
         sig = signature(activity, anchors)
         state = _infer_state(elements)
-        name, _sim = self._recognize(app, anchors, activity, sig, context_id)
+        surface = _screen_surface(elements)
+        name, _sim = self._recognize(
+            app,
+            anchors,
+            activity,
+            sig,
+            context_id,
+            state=state,
+            surface=surface,
+        )
         was_known = name is not None
         created = False
         stale = False
@@ -1124,9 +1333,10 @@ class AppMemoryStore:
             title = title_of(elements, screen_height)
             base = (
                 name_hint
-                or resource_name
                 or propose_name(
+                    resource_name=resource_name,
                     inbound_label=inbound_label,
+                    inbound_resource_id=inbound_resource_id,
                     inbound_kind=inbound_kind,
                     title=title,
                     activity=activity,
@@ -1139,20 +1349,29 @@ class AppMemoryStore:
                 else "resource"
                 if resource_name
                 else "title"
-                if title
+                if title and _short(title) not in _GENERIC_TITLES
+                else "resource"
+                if inbound_kind == "tap" and _destination_from_resource(inbound_resource_id)
                 else "route"
                 if inbound_label
                 else "activity"
             )
             logical_name = slug(base) or "screen"
-            name = self._unique_name(app, logical_name, context_id=context_id, state=state)
+            name = self._unique_name(
+                app,
+                logical_name,
+                context_id=context_id,
+                context_flags=context_flags,
+                state=state,
+            )
             app.screens[name] = ScreenRecord(
                 name=name,
-                id=_stable_id("screen", package, context_id, name, now),
+                id=_stable_id("screen", package, context_id, name, sig),
                 canonical_name=name,
                 logical_name=logical_name,
                 variant=context_id if context_id != DEFAULT_CONTEXT_ID else None,
                 state=state,
+                surface=surface,
                 context_id=context_id,
                 name_source=name_source,
                 activity=activity,
@@ -1170,9 +1389,36 @@ class AppMemoryStore:
             if name_hint and slug(name_hint) and slug(name_hint) != name:
                 name = self._rename(app, name, slug(name_hint))
             rec = app.screens[name]
+            resource_name = _resource_name(elements, screen_height)
+            title = title_of(elements, screen_height)
+            stronger_name = resource_name or (
+                _short(title)
+                if title and _short(title) not in _GENERIC_TITLES
+                else None
+            )
+            source_rank = {
+                "legacy": 0,
+                "activity": 1,
+                "route": 2,
+                "title": 3,
+                "resource": 4,
+                "explicit": 5,
+            }
+            stronger_source: Literal["resource", "title"] = (
+                "resource" if resource_name else "title"
+            )
+            if (
+                stronger_name
+                and slug(stronger_name) != (rec.logical_name or rec.name)
+                and source_rank[stronger_source] > source_rank[rec.name_source]
+            ):
+                name = self._rename(app, name, slug(stronger_name))
+                rec = app.screens[name]
+                rec.logical_name = slug(stronger_name)
+                rec.name_source = stronger_source
             if app_version and rec.app_version and app_version != rec.app_version:
                 stale = True
-            if (1.0 - jaccard(anchors, set(rec.anchors))) > self.cfg.drift_threshold:
+            if (1.0 - anchor_similarity(anchors, set(rec.anchors))) > self.cfg.drift_threshold:
                 stale = True
             rec.last_seen = now
             rec.visit_count += 1
@@ -1184,11 +1430,20 @@ class AppMemoryStore:
                 rec.signature = sig
                 rec.anchors = sorted(anchors)
                 rec.tier = tier
+                rec.surface = surface
                 if ke := key_elements(elements, redact=self.cfg.redact, height=screen_height):
                     rec.key_elements = ke
                 if dyn := detect_dynamic(elements):
                     rec.dynamic = dyn
                 rec.state = state
+            if title:
+                title_alias = _short(title)
+                if (
+                    title_alias
+                    and title_alias not in _GENERIC_TITLES
+                    and title_alias not in {rec.name, rec.logical_name, *rec.aliases}
+                ):
+                    rec.aliases.append(title_alias)
 
         context = app.contexts.get(context_id)
         if context is None:
@@ -1233,17 +1488,22 @@ class AppMemoryStore:
         *,
         steps: list[RouteStep] | None = None,
         context_id: str = DEFAULT_CONTEXT_ID,
-    ) -> None:
+        verified: bool | None = None,
+    ) -> RouteEdge | None:
         if not self.cfg.enabled or from_screen == to_screen:
-            return
+            return None
         app = self.load(package)
         if app is None:
-            return
+            return None
         steps = steps or []
         if action is None:
             action = derive_action(steps, package)
         if not action:
-            return
+            return None
+        # Explicit/manual edges without structured steps pre-date automatic observation
+        # and remain trusted. Auto-recorded edges always pass an explicit verification bit.
+        is_verified = True if verified is None else verified
+        rejection_reason = _route_rejection_reason(steps) if steps else None
         now = _now_iso()
         route_context = app.contexts.get(context_id)
         for e in app.routes:
@@ -1257,21 +1517,54 @@ class AppMemoryStore:
                 e.last_seen = now
                 if steps and not e.steps:
                     e.steps = steps  # re-walking a legacy edge upgrades it in place
+                if rejection_reason is None:
+                    e.rejection_reason = None
+                    if is_verified or (e.status == "provisional" and e.count >= 2):
+                        e.status = "verified"
+                        e.verification_count += 1
+                    elif e.status == "rejected":
+                        e.status = "provisional"
+                else:
+                    e.status = "rejected"
+                    e.rejection_reason = rejection_reason
                 self.save(app)
-                return
-        app.routes.append(
-            RouteEdge(
-                id=_stable_id("route", package, context_id, from_screen, action, to_screen, now),
-                from_screen=from_screen,
-                to_screen=to_screen,
-                action=action,
-                context_id=context_id,
-                guards=dict(route_context.flags) if route_context else {},
-                steps=steps,
-                last_seen=now,
-            )
+                return e
+        edge = RouteEdge(
+            id=_stable_id("route", package, context_id, from_screen, action, to_screen),
+            from_screen=from_screen,
+            to_screen=to_screen,
+            action=action,
+            context_id=context_id,
+            guards=dict(route_context.flags) if route_context else {},
+            steps=steps,
+            status=(
+                "rejected"
+                if rejection_reason
+                else "verified"
+                if is_verified
+                else "provisional"
+            ),
+            verification_count=1 if is_verified and not rejection_reason else 0,
+            rejection_reason=rejection_reason,
+            last_seen=now,
         )
+        app.routes.append(edge)
         self.save(app)
+        return edge
+
+    def refresh_research_tasks(
+        self, package: str, *, context_id: str | None = None
+    ) -> list[dict[str, object]]:
+        """Materialize current map uncertainties for two-way agent reconciliation."""
+        if not self.cfg.auto_research:
+            return []
+        # Local import avoids a module cycle: reconciliation is layered on map memory.
+        from .reconcile import ReconciliationStore
+
+        return [
+            task.model_dump(mode="json")
+            for task in ReconciliationStore(self).plan(package, context_id=context_id)
+        ]
 
     # -- playbook (durable app-level knowledge the agent reuses) ----------
 
@@ -1490,7 +1783,7 @@ class AppMemoryStore:
         context_id = sess.active_context_id if same_context_owner else DEFAULT_CONTEXT_ID
         context_flags = sess.active_flags if same_context_owner else {}
         context_verified = sess.context_verified if same_context_owner else False
-        inbound_label, inbound_kind = _parse_inbound(list(sess.pending))
+        inbound_label, inbound_kind, inbound_resource_id = _parse_inbound(list(sess.pending))
         outcome = self.record_screen(
             package=package,
             elements=elements,
@@ -1500,6 +1793,7 @@ class AppMemoryStore:
             tier=tier,
             inbound_label=inbound_label,
             inbound_kind=inbound_kind,
+            inbound_resource_id=inbound_resource_id,
             screen_height=screen_height,
             context_id=context_id,
             context_flags=context_flags,
@@ -1515,6 +1809,7 @@ class AppMemoryStore:
             # of a journey still in flight; the cap/TTL bound any accumulation.
             self.save_session(serial, sess)
             return outcome.name if outcome.was_known else None
+        route: RouteEdge | None = None
         if (
             pending
             and prev
@@ -1527,7 +1822,19 @@ class AppMemoryStore:
                 s.model_copy(update={"package": None}) if s.package == package else s
                 for s in pending
             ]
-            self.record_route(package, prev, outcome.name, steps=steps, context_id=context_id)
+            route = self.record_route(
+                package,
+                prev,
+                outcome.name,
+                steps=steps,
+                context_id=context_id,
+                verified=(
+                    (outcome.was_known and not outcome.stale)
+                    # A completed cross-package journey is already corroborated by
+                    # multiple package-scoped observations before it returns home.
+                    or any(step.package and step.package != package for step in steps)
+                ),
+            )
         sess.current_screen = outcome.name
         if not same_context_owner:
             sess.active_context_id = DEFAULT_CONTEXT_ID
@@ -1539,6 +1846,15 @@ class AppMemoryStore:
         sess.pending_since = None
         sess.pending_overflow = False
         self.save_session(serial, sess)
+        if (
+            self.cfg.auto_research
+            and (
+                outcome.created
+                or outcome.stale
+                or route is not None
+            )
+        ):
+            self.refresh_research_tasks(package, context_id=context_id)
         return outcome.name if outcome.was_known else None
 
     def observe_screen_passive(
@@ -1572,7 +1888,15 @@ class AppMemoryStore:
             return None
         anchors = screen_anchors(elements, redact=self.cfg.redact, height=screen_height)
         sig = signature(activity, anchors)
-        name, _sim = self._recognize(app, anchors, activity, sig, sess.active_context_id)
+        name, _sim = self._recognize(
+            app,
+            anchors,
+            activity,
+            sig,
+            sess.active_context_id,
+            state=_infer_state(elements),
+            surface=_screen_surface(elements),
+        )
         if name is None:
             return None
         prev = sess.current_screen
@@ -1588,6 +1912,7 @@ class AppMemoryStore:
                     name,
                     steps=steps,
                     context_id=sess.active_context_id,
+                    verified=True,
                 )
             sess.current_screen = name
             sess.pending = []
@@ -1602,6 +1927,8 @@ class AppMemoryStore:
         package: str,
         *,
         max_suggest: int = 4,
+        max_research: int = 3,
+        include_navigation: bool = True,
         half_life_days: float = 3.0,
         now: datetime | None = None,
     ) -> NavHints:
@@ -1610,11 +1937,21 @@ class AppMemoryStore:
         Reads the session cursor (just updated by :meth:`observe_screen`) for the current
         screen, then derives routes/suggestions from the stored map. Empty when no map.
         """
-        empty = NavHints(known_routes=[], suggested_gotos=[], suggested_deeplinks=[], map_hint=None)
+        empty = NavHints(
+            known_routes=[],
+            suggested_gotos=[],
+            suggested_deeplinks=[],
+            map_hint=None,
+            research_tasks=[],
+        )
         app = self.load(package)
         if app is None:
             return empty
-        deeplinks = _suggest_deeplinks(app, max_suggest)
+        sess = self.load_session(serial)
+        research_tasks = _research_prompts(
+            app, max_research, context_id=sess.active_context_id
+        )
+        deeplinks = _suggest_deeplinks(app, max_suggest) if include_navigation else []
         if not app.screens:
             # Playbook-only (e.g. freshly mined): still offer the deeplink shortcuts.
             hint = (
@@ -1627,15 +1964,19 @@ class AppMemoryStore:
                 suggested_gotos=[],
                 suggested_deeplinks=deeplinks,
                 map_hint=hint,
+                research_tasks=research_tasks,
             )
-        sess = self.load_session(serial)
         current = sess.current_screen
         now = now or datetime.now().astimezone()
         adj = _adjacency(app, sess.active_context_id)
-        known_routes = [
-            f"{e.action} → {e.to_screen}"
-            for e in sorted(adj.get(current or "", []), key=lambda x: x.to_screen)
-        ]
+        known_routes = (
+            [
+                f"{e.action} → {e.to_screen}"
+                for e in sorted(adj.get(current or "", []), key=lambda x: x.to_screen)
+            ]
+            if include_navigation
+            else []
+        )
         # Rank destinations by usage; prefer ones reachable from here so `goto` will work,
         # else fall back to the app's top screens (reachable from a root).
         reachable = _reachable(app, current, sess.active_context_id)
@@ -1654,7 +1995,11 @@ class AppMemoryStore:
             ),
             reverse=True,
         )
-        suggested = [f"goto {n}" for n in ranked[: max(0, max_suggest)]]
+        suggested = (
+            [f"goto {n}" for n in ranked[: max(0, max_suggest)]]
+            if include_navigation
+            else []
+        )
         map_hint = None
         if not known_routes and not suggested and not deeplinks:
             n = len(app.screens)
@@ -1664,6 +2009,7 @@ class AppMemoryStore:
             suggested_gotos=suggested,
             suggested_deeplinks=deeplinks,
             map_hint=map_hint,
+            research_tasks=research_tasks,
         )
 
     def set_last_goal(self, serial: str, goal: str | None) -> None:
@@ -1707,6 +2053,48 @@ def _suggest_deeplinks(app: AppMap, cap: int) -> list[str]:
     return [f"open {d.uri}" for d in concrete[: max(0, cap)]]
 
 
+def _research_prompts(
+    app: AppMap, cap: int, *, context_id: str | None = None
+) -> list[str]:
+    prompts: list[str] = []
+    for task in app.research_tasks:
+        if task.get("status") != "open":
+            continue
+        if (
+            context_id is not None
+            and task.get("context_id") not in (None, context_id, LEGACY_CONTEXT_ID)
+        ):
+            continue
+        questions = task.get("questions")
+        question = (
+            str(questions[0])
+            if isinstance(questions, list) and questions
+            else str(task.get("observations") or "Research this map uncertainty.")
+        )
+        prompts.append(f"research {task.get('id')}: {question}")
+        if len(prompts) >= max(0, cap):
+            break
+    return prompts
+
+
+def _route_rejection_reason(steps: list[RouteStep]) -> str | None:
+    """Why an automatically observed edge cannot safely be replayed."""
+    destination_steps = [
+        step
+        for step in steps
+        if step.kind in {"tap", "long-press", "open-link", "key", "goto"}
+    ]
+    if not destination_steps:
+        return "no destination-producing action"
+    for step in destination_steps:
+        if step.kind in {"tap", "long-press"}:
+            if step.resource_id or (step.label and step.label not in REDACT_TOKENS):
+                return None
+        elif step.arg:
+            return None
+    return "destination action has no durable selector"
+
+
 def _pending_fresh(since: str | None, *, now: datetime | None = None) -> bool:
     """False when the pending buffer is older than the TTL (an abandoned journey)."""
     if not since:
@@ -1719,23 +2107,46 @@ def _pending_fresh(since: str | None, *, now: datetime | None = None) -> bool:
     return (now.timestamp() - started.timestamp()) <= _PENDING_TTL_S
 
 
-def _parse_inbound(pending: list[RouteStep]) -> tuple[str | None, str | None]:
-    """Pull a (label, kind) from the pending steps for naming a destination screen."""
+def _parse_inbound(
+    pending: list[RouteStep],
+) -> tuple[str | None, str | None, str | None]:
+    """Pull a durable (label, kind, resource-id) from destination-producing steps."""
     label: str | None = None
     kind: str | None = None
+    resource_id: str | None = None
     for s in pending:
+        if s.kind not in {"tap", "long-press", "open-link", "key", "goto"}:
+            continue
         if s.label and s.label not in REDACT_TOKENS:
-            label, kind = s.label, s.kind
-    return label, kind
+            label = s.label
+        if s.resource_id:
+            resource_id = s.resource_id
+        if s.label or s.resource_id or s.arg:
+            kind = s.kind
+    return label, kind, resource_id
 
 
 # --------------------------------------------------------------------------- rendering
 
 
-def _routes_for_context(app: AppMap, context_id: str | None) -> list[RouteEdge]:
+def _routes_for_context(
+    app: AppMap,
+    context_id: str | None,
+    *,
+    include_provisional: bool = True,
+    include_rejected: bool = False,
+) -> list[RouteEdge]:
+    def eligible(edge: RouteEdge) -> bool:
+        return (
+            (include_rejected or edge.status != "rejected")
+            and (include_provisional or edge.status == "verified")
+        )
+
     if context_id is None:
-        return list(app.routes)
-    exact = [edge for edge in app.routes if edge.context_id == context_id]
+        return [edge for edge in app.routes if eligible(edge)]
+    exact = [
+        edge for edge in app.routes if edge.context_id == context_id and eligible(edge)
+    ]
     if context_id == LEGACY_CONTEXT_ID:
         return exact
     exact_keys = {(edge.from_screen, edge.action) for edge in exact}
@@ -1743,6 +2154,7 @@ def _routes_for_context(app: AppMap, context_id: str | None) -> list[RouteEdge]:
         edge
         for edge in app.routes
         if edge.context_id == LEGACY_CONTEXT_ID
+        and eligible(edge)
         and (edge.from_screen, edge.action) not in exact_keys
     ]
     return [*exact, *legacy]
@@ -1768,15 +2180,29 @@ def context_view(app: AppMap, context_id: str) -> AppMap:
     return view
 
 
-def _adjacency(app: AppMap, context_id: str | None = None) -> dict[str, list[RouteEdge]]:
+def _adjacency(
+    app: AppMap,
+    context_id: str | None = None,
+    *,
+    include_provisional: bool = False,
+) -> dict[str, list[RouteEdge]]:
     adj: dict[str, list[RouteEdge]] = {}
-    for e in _routes_for_context(app, context_id):
+    for e in _routes_for_context(
+        app, context_id, include_provisional=include_provisional
+    ):
         adj.setdefault(e.from_screen, []).append(e)
     return adj
 
 
-def _roots(app: AppMap, context_id: str | None = None) -> list[str]:
-    routes = _routes_for_context(app, context_id)
+def _roots(
+    app: AppMap,
+    context_id: str | None = None,
+    *,
+    include_provisional: bool = False,
+) -> list[str]:
+    routes = _routes_for_context(
+        app, context_id, include_provisional=include_provisional
+    )
     visible = {
         name
         for name, rec in app.screens.items()
@@ -1859,7 +2285,7 @@ def _header(app: AppMap, context_id: str | None = None) -> list[str]:
         n = sum(rec.context_id in (context_id, LEGACY_CONTEXT_ID) for rec in app.screens.values())
         r = len(_routes_for_context(app, context_id))
     else:
-        n, r = len(app.screens), len(app.routes)
+        n, r = len(app.screens), len(_routes_for_context(app, None))
     meta.append(f"{n} screen{'s' * (n != 1)}, {r} route{'s' * (r != 1)}")
     if context_id:
         meta.append(f"context {context_id}")
@@ -1933,6 +2359,8 @@ def render_map(
             lines.append(f"- {context.id}  ({status}, {context.source}) — {flags}")
             if detail != "brief" and context.shell_anchors:
                 lines.append(f"    - shell: {' | '.join(context.shell_anchors)}")
+            if detail != "brief" and context.evidence:
+                lines.append(f"    - evidence: {' | '.join(context.evidence)}")
         lines.append("")
     if playbook := _playbook_lines(app):
         lines.extend([*playbook, ""])
@@ -1960,6 +2388,8 @@ def render_map(
                 labels.append(f"variant: {rec.variant}")
             if rec.state:
                 labels.append(f"state: {rec.state}")
+            if rec.surface:
+                labels.append(f"surface: {rec.surface}")
             if rec.stale:
                 labels.append("STALE")
             display = f"- {rec.name}" if multiple else rec.name
@@ -1986,7 +2416,29 @@ def render_map(
                     if edge.guards
                     else ""
                 )
-                lines.append(f"{edge.from_screen} --{edge.action}--> {edge.to_screen}{guard}")
+                status = "  [provisional]" if edge.status == "provisional" else ""
+                lines.append(
+                    f"{edge.from_screen} --{edge.action}--> {edge.to_screen}{guard}{status}"
+                )
+    open_tasks = [
+        task
+        for task in app.research_tasks
+        if task.get("status") == "open"
+        and (
+            selected_context is None
+            or task.get("context_id") in (None, selected_context, LEGACY_CONTEXT_ID)
+        )
+    ]
+    if open_tasks and detail != "brief":
+        lines.extend(["", "## Research needed"])
+        for task in open_tasks:
+            questions = task.get("questions")
+            question = (
+                str(questions[0])
+                if isinstance(questions, list) and questions
+                else str(task.get("observations") or "Research this map uncertainty.")
+            )
+            lines.append(f"- `{task.get('id')}` ({task.get('issue_type')}): {question}")
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -1995,19 +2447,21 @@ def _shortest_path(
     target: str,
     start: str | None = None,
     context_id: str | None = None,
+    *,
+    include_provisional: bool = False,
 ) -> list[RouteEdge]:
     """Shortest route to *target*; ``[]`` if already there / no path.
 
     With *start* given, search only from that screen (used by ``goto`` from the agent's
     current position); otherwise search from roots, then any screen (the original behaviour).
     """
-    adj = _adjacency(app, context_id)
+    adj = _adjacency(app, context_id, include_provisional=include_provisional)
     if start is not None:
         if start == target or start not in app.screens:
             return []
         starts = [start]
     else:
-        roots = _roots(app, context_id)
+        roots = _roots(app, context_id, include_provisional=include_provisional)
         if target in roots:
             return []
         visible = [
@@ -2081,7 +2535,7 @@ def find_result(
     results = []
     for t in _find_targets(app, query, context_id):
         rec = app.screens.get(t)
-        path = _shortest_path(app, t, context_id=context_id)
+        path = _shortest_path(app, t, context_id=context_id, include_provisional=True)
         results.append(
             {
                 "screen": t,
@@ -2149,7 +2603,7 @@ def _render_find(
         rec = app.screens.get(t)
         lines.append("")
         lines.append(f"## {t}" + (f"  (tier: {rec.tier})" if rec else ""))
-        path = _shortest_path(app, t, context_id=context_id)
+        path = _shortest_path(app, t, context_id=context_id, include_provisional=True)
         lines.append("route: " + (_format_path(path) if path else "(start here)"))
         if rec:
             lines.extend(f"  - {s}" for s in _summarize_keys(rec))

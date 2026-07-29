@@ -409,10 +409,16 @@ def _result(meta: Meta) -> AnalyzeResult:
 
 
 def test_meta_new_fields_round_trip() -> None:
-    m = _meta(known_routes=["tap 'X' → y"], suggested_gotos=["goto y"], map_hint="hi")
+    m = _meta(
+        known_routes=["tap 'X' → y"],
+        suggested_gotos=["goto y"],
+        research_tasks=["research task_1: inspect source"],
+        map_hint="hi",
+    )
     again = Meta.model_validate(m.model_dump())
     assert again.known_routes == ["tap 'X' → y"]
     assert again.suggested_gotos == ["goto y"] and again.map_hint == "hi"
+    assert again.research_tasks == ["research task_1: inspect source"]
 
 
 def test_compact_drops_empty_keeps_set_affordances() -> None:
@@ -430,8 +436,17 @@ def test_memory_cfg_suggestion_knobs() -> None:
     cfg = make_config()
     assert cfg.memory.suggest is True
     assert cfg.memory.suggest_max == 4 and cfg.memory.rank_half_life_days == 3.0
-    cfg2 = make_config(memory={"suggest": False, "suggest_max": 2, "rank_half_life_days": 1.0})
+    assert cfg.memory.auto_research is True and cfg.memory.research_suggest_max == 3
+    cfg2 = make_config(
+        memory={
+            "suggest": False,
+            "suggest_max": 2,
+            "rank_half_life_days": 1.0,
+            "auto_research": False,
+        }
+    )
     assert cfg2.memory.suggest is False and cfg2.memory.suggest_max == 2
+    assert cfg2.memory.auto_research is False
 
 
 # --------------------------------------------------------------- CLI: aua goto

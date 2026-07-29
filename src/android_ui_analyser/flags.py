@@ -52,6 +52,18 @@ class PrefsRead(NamedTuple):
         return self.reason is None
 
 
+class ContextPrefsRead(NamedTuple):
+    """A privacy-filtered snapshot of feature flags already active in app prefs."""
+
+    flags: dict[str, str]
+    files: list[str]
+    reason: str | None
+
+    @property
+    def verified(self) -> bool:
+        return self.reason is None
+
+
 def build_uri(package: str, pairs: dict[str, str], templates: dict[str, str] | None = None) -> str:
     """Build the set-flags deeplink for *package* from the configured templates."""
     tmpl = (templates or {}).get(package)
@@ -127,6 +139,21 @@ def parse_prefs(xml: str, keys: set[str]) -> dict[str, list[str]]:
         if value is None:
             value = m.group("text") or ""
         found.setdefault(key, []).append(value)
+    return found
+
+
+def parse_all_prefs(xml: str) -> dict[str, list[str]]:
+    """Every primitive preference entry.
+
+    Callers must filter the result before persisting it; app prefs can contain tokens
+    and user data. Runtime context discovery only retains configured/flag-like keys.
+    """
+    found: dict[str, list[str]] = {}
+    for match in _ENTRY_RE.finditer(xml):
+        value = match.group("attr")
+        if value is None:
+            value = match.group("text") or ""
+        found.setdefault(match.group("key"), []).append(value)
     return found
 
 
@@ -209,6 +236,61 @@ def read_prefs(
     return PrefsRead(applied, ignored, mismatched, [f.rsplit("/", 1)[-1] for f in files], None)
 
 
+def read_context_flags(
+    device: Shell,
+    package: str,
+    *,
+    prefs_file: str | None = None,
+    keys: list[str] | None = None,
+    key_patterns: list[str] | None = None,
+) -> ContextPrefsRead:
+    """Read the current map-shaping flags without first writing a deeplink.
+
+    Exact ``keys`` win. Otherwise only names matching ``key_patterns`` survive, so
+    arbitrary app preferences are never copied into map memory.
+    """
+    directory = prefs_dir(package)
+    listing, failed = _run_as(device, package, ["ls", directory])
+    if failed:
+        return ContextPrefsRead({}, [], failed)
+    names = [name.strip() for name in listing.split() if name.strip().endswith(".xml")]
+    if prefs_file is not None:
+        names = [prefs_file] if prefs_file in names else []
+        if not names:
+            return ContextPrefsRead({}, [], f"prefs file not found: {prefs_file}")
+    files = [f"{directory}/{name}" for name in names]
+    if not files:
+        return ContextPrefsRead({}, [], None)
+    xml, failed = _run_as(device, package, ["cat", *files])
+    if failed:
+        return ContextPrefsRead({}, [], failed)
+
+    entries = parse_all_prefs(xml)
+    exact = set(keys or [])
+    compiled: list[re.Pattern[str]] = []
+    for raw in key_patterns or []:
+        try:
+            compiled.append(re.compile(raw))
+        except re.error:
+            continue
+
+    def selected(key: str) -> bool:
+        if exact:
+            return key in exact
+        return any(pattern.search(key) for pattern in compiled)
+
+    flags = {
+        key: values[-1]
+        for key, values in entries.items()
+        if values and selected(key)
+    }
+    return ContextPrefsRead(
+        dict(sorted(flags.items())),
+        [path.rsplit("/", 1)[-1] for path in files],
+        None,
+    )
+
+
 def dump_result(
     *,
     package: str,
@@ -259,12 +341,15 @@ def dump_result(
 
 
 __all__ = [
+    "ContextPrefsRead",
     "PrefsRead",
     "build_uri",
     "dump_result",
     "load_flags_file",
     "parse_assignments",
+    "parse_all_prefs",
     "parse_prefs",
     "prefs_dir",
+    "read_context_flags",
     "read_prefs",
 ]

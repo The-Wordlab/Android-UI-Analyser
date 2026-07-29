@@ -306,6 +306,7 @@ Because of that, `analyze` hands navigation affordances back to you **inline**, 
 | `known_screen` | The recognised screen name on a revisit (flagged `stale` if its signature or the app version drifted, so you re-verify) |
 | `known_routes` | Outgoing routes from here, e.g. `["tap 'Apps' → apps"]` |
 | `suggested_gotos` | Ranked, ready-to-run targets, e.g. `["goto image_creator"]` — ordered by what you've navigated to recently |
+| `research_tasks` | Open map-quality questions for the calling agent to investigate in source/runtime and submit through `reconcile` |
 | `map_hint` | A nudge like `"12 screens mapped — run aua map"` when there's a map but nothing actionable from the current screen |
 
 ### Jump to a known screen in one command
@@ -317,7 +318,7 @@ aua goto "onboarding"         # cross-app auth legs (Google sign-in via Chrome) 
 aua goto "login" --allow-destructive   # required when a step matches memory.destructive_labels
 ```
 
-`goto` resolves the goal (fuzzy) against the map, walks the shortest route from the **current** screen, and replays each edge's recorded steps — matching by resource-id first, then label — re-checking `known_screen` after every hop. Auth excursions through `memory.transit_packages` (Google sign-in in Chrome/GMS, permission dialogs) are recorded as **one edge on the origin app** and replay end-to-end; a step whose identity was redacted (e.g. an account row containing an email) hands off for one manual tap — then just re-run `goto`: it resumes mid-route, even mid-auth. Destructive steps (delete / sign out / pay / …) are refused without `--allow-destructive`. On divergence it stops and hands back the failing step, the remaining steps, the current screen, and its elements (exit `1`); it exits `0` on arrival, returning the destination's `elements` (fresh ids). It runs through the warm daemon too.
+`goto` resolves the goal (fuzzy) against the map, walks the shortest **verified** route from the current screen, and replays each edge's recorded steps — matching by resource-id first, then label — re-checking `known_screen` after every hop. A newly auto-observed edge is provisional until the same transition is observed again (a passive observation landing on an already-known screen verifies it immediately); selectorless edges are retained for audit but rejected from navigation. Auth excursions through `memory.transit_packages` (Google sign-in in Chrome/GMS, permission dialogs) are recorded as **one edge on the origin app** and replay end-to-end; a step whose identity was redacted (e.g. an account row containing an email) hands off for one manual tap — then just re-run `goto`: it resumes mid-route, even mid-auth. Destructive steps (delete / sign out / pay / …) are refused without `--allow-destructive`. On divergence it stops and hands back the failing step, the remaining steps, the current screen, and its elements (exit `1`); it exits `0` on arrival, returning the destination's `elements` (fresh ids). It runs through the warm daemon too.
 
 ### Replay whole journeys in one call (flows)
 
@@ -364,12 +365,14 @@ aua memory show|path|update|forget
 aua memory update --screen login   # rename a badly-auto-named screen
 ```
 
-Memory schema v3 treats a feature-flag set as part of UI identity. `flags set/apply`
-activates a deterministic context after the app restarts, and subsequent screens/routes
-carry that context and its verified flag guards. Exact-context routes outrank compatible
-legacy routes; v1/v2 maps migrate to a trusted `legacy-default` context and remain usable.
-The map groups one logical destination's variants instead of rendering a recursive route
-tree full of suffixes such as `_2`.
+Memory schema v4 treats a feature-flag set as part of UI identity. `flags set/apply`
+activates a deterministic context after the app restarts. When `flags.prefs_files` or
+`flags.context_keys` is configured, every `analyze` also reads the app's already-active,
+privacy-filtered experiment/treatment/variant/flag values and switches context before
+recording. Exact-context routes outrank compatible legacy routes; v1/v2/v3 maps migrate
+without losing trusted edges. Stable resource namespaces produce locale-independent names,
+and the map groups flag variants plus loading/error/empty/ready states under one logical
+destination instead of filling the output with numeric/hash suffixes.
 
 ### Agent feedback and self-correction
 
@@ -384,8 +387,11 @@ aua knowledge list --app com.example.app
 aua knowledge stale <knowledge-id> --app com.example.app
 ```
 
-The correction loop deliberately uses an external-agent contract: AUA finds structural
-problems and applies validated changes, but does not choose or spawn a model.
+The correction loop deliberately uses an external-agent contract: AUA automatically
+materializes tasks when it sees weak names, stale/duplicate screens, unverified contexts,
+provisional routes, or unreplayable/conflicting edges. It surfaces those tasks in
+`analyze.meta.research_tasks` and `MAP.md`; the calling agent researches source/runtime and
+feeds evidence back. AUA applies validated changes but does not choose or spawn a model.
 
 ```bash
 aua reconcile plan --app com.example.app > tasks.json
@@ -397,7 +403,7 @@ aua reconcile rollback --app com.example.app <rollback-id>
 
 A report has `verdict: apply|review|reject`, evidence, knowledge, and typed operations
 (`rename`, `alias`, `merge`, `split`, variant/state/context changes, route guards/replacement/
-deletion, knowledge upsert, or stale marking). `apply` is autonomous: AUA modifies a deep
+verification/rejection/deletion, knowledge upsert, or stale marking). `apply` is autonomous: AUA modifies a deep
 copy, validates stable IDs and route references, snapshots the old map, commits atomically,
 and returns a rollback ID. `review` is queued without mutation and `reject` is retained as
 feedback. The same audit, reconciliation, and knowledge operations are available as MCP
@@ -428,9 +434,19 @@ Two roles: (1) **recovery** — when `goto`/`flow` diverge (an "Allow notificati
 
 ```yaml
 memory:
-  suggest: true             # push known_routes/suggested_gotos/map_hint into analyze
+  suggest: true             # push known routes/gotos/map hints into analyze
   suggest_max: 4            # cap on suggested_gotos per analyze
   rank_half_life_days: 3.0  # recency decay for usage-based ranking
+  auto_research: true       # create/surface research tasks for map uncertainty
+  research_suggest_max: 3
+
+flags:
+  auto_context: true
+  prefs_files:
+    com.example.app.dev: "flag_overrides.xml"
+  # Optional exact allow-list; otherwise only flag-like key names survive.
+  context_keys:
+    com.example.app.dev: [catalog_experiment, services_treatment]
 ```
 
 ---

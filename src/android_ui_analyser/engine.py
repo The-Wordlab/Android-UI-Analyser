@@ -243,6 +243,7 @@ class Engine:
         self.factory = factory or ProviderFactory(config)
         self._mem: AppMemoryStore | None = None
         self._version_cache: dict[str, str | None] = {}
+        self._flag_context_checked_at: dict[str, float] = {}
         # Session default for --with-image (CLI global / MCP configure); per-call wins.
         self._default_with_image: bool | str | None = (
             config.output.with_image if config.output.with_image else None
@@ -573,6 +574,7 @@ class Engine:
                 known_routes=hints.known_routes if hints else [],
                 suggested_gotos=hints.suggested_gotos if hints else [],
                 suggested_deeplinks=hints.suggested_deeplinks if hints else [],
+                research_tasks=hints.research_tasks if hints else [],
                 map_hint=hints.map_hint if hints else None,
                 capture_hint=self._capture_hint(),
                 annotated_image=annotated,
@@ -813,6 +815,7 @@ class Engine:
                 known_routes=hints.known_routes if hints else [],
                 suggested_gotos=hints.suggested_gotos if hints else [],
                 suggested_deeplinks=hints.suggested_deeplinks if hints else [],
+                research_tasks=hints.research_tasks if hints else [],
                 map_hint=hints.map_hint if hints else None,
                 capture_hint=self._capture_hint(),
                 annotated_image=annotated,
@@ -924,6 +927,58 @@ class Engine:
                 self._version_cache[package] = None
         return self._version_cache[package]
 
+    def _sync_runtime_flag_context(
+        self, device: Device, package: str, mem: AppMemoryStore
+    ) -> bool:
+        """Discover already-active feature flags before assigning a screen context."""
+        cfg = self.config.flags
+        configured = package in cfg.prefs_files or package in cfg.context_keys
+        if not cfg.auto_context or not configured:
+            return False
+        now = time.monotonic()
+        if now - self._flag_context_checked_at.get(package, float("-inf")) < max(
+            0.0, cfg.context_refresh_s
+        ):
+            return False
+        self._flag_context_checked_at[package] = now
+        from .flags import read_context_flags
+
+        result = read_context_flags(
+            device,
+            package,
+            prefs_file=cfg.prefs_files.get(package),
+            keys=cfg.context_keys.get(package),
+            key_patterns=cfg.context_key_patterns,
+        )
+        if not result.verified:
+            logger.debug("runtime flag context unavailable for %s: %s", package, result.reason)
+            return False
+        previous = mem.load_session(device.serial)
+        previous_identity = (
+            previous.package,
+            previous.active_context_id,
+            tuple(sorted(previous.active_flags.items())),
+        )
+        mem.activate_flag_context(
+            device.serial,
+            package,
+            result.flags,
+            app_version=self._version_for(device, package),
+            verified=True,
+            replace=True,
+            evidence=[f"shared_prefs:{name}" for name in result.files],
+        )
+        current = mem.load_session(device.serial)
+        changed = previous_identity != (
+            current.package,
+            current.active_context_id,
+            tuple(sorted(current.active_flags.items())),
+        )
+        if changed:
+            self._last_mem_fp = None
+            self._last_known_screen = None
+        return changed
+
     def _record_screen_safe(
         self,
         device: Device,
@@ -944,19 +999,28 @@ class Engine:
             return None, None
         perf = self.config.perf
         try:
+            # Context discovery precedes the unchanged-screen fast path: a flag may have
+            # changed outside AUA while the rendered hierarchy stayed temporarily equal.
+            context_changed = self._sync_runtime_flag_context(device, package, mem)
             from .perf import elements_fingerprint
 
             fp = elements_fingerprint(elements)
-            if perf.skip_unchanged_memory and fp == self._last_mem_fp:
+            if (
+                perf.skip_unchanged_memory
+                and not context_changed
+                and fp == self._last_mem_fp
+            ):
                 mcfg = self.config.memory
                 hints = (
                     mem.navigation_hints(
                         device.serial,
                         package,
                         max_suggest=mcfg.suggest_max,
+                        max_research=mcfg.research_suggest_max,
+                        include_navigation=mcfg.suggest,
                         half_life_days=mcfg.rank_half_life_days,
                     )
-                    if mcfg.suggest
+                    if mcfg.suggest or mcfg.auto_research
                     else None
                 )
                 return self._last_known_screen, hints
@@ -980,9 +1044,11 @@ class Engine:
                         device.serial,
                         package,
                         max_suggest=mcfg.suggest_max,
+                        max_research=mcfg.research_suggest_max,
+                        include_navigation=mcfg.suggest,
                         half_life_days=mcfg.rank_half_life_days,
                     )
-                    if mcfg.suggest
+                    if mcfg.suggest or mcfg.auto_research
                     else None
                 )
 
@@ -1008,9 +1074,11 @@ class Engine:
                     device.serial,
                     package,
                     max_suggest=mcfg.suggest_max,
+                    max_research=mcfg.research_suggest_max,
+                    include_navigation=mcfg.suggest,
                     half_life_days=mcfg.rank_half_life_days,
                 )
-                if mcfg.suggest
+                if mcfg.suggest or mcfg.auto_research
                 else None
             )
             return known, hints
@@ -2061,6 +2129,8 @@ class Engine:
             self.device.serial,
             pkg,
             max_suggest=self.config.memory.suggest_max,
+            max_research=self.config.memory.research_suggest_max,
+            include_navigation=self.config.memory.suggest,
             half_life_days=self.config.memory.rank_half_life_days,
         )
         out.update(
@@ -2068,6 +2138,7 @@ class Engine:
             screens=len(app.screens),
             routes=len(app.routes),
             suggested_gotos=hints.suggested_gotos,
+            research_tasks=hints.research_tasks,
         )
         if app.description:
             out["description"] = app.description

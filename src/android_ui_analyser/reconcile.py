@@ -42,6 +42,9 @@ class MapIssue(BaseModel):
         "route_conflict",
         "orphan_route",
         "legacy_context",
+        "provisional_route",
+        "unreplayable_route",
+        "unverified_context",
     ]
     severity: Literal["info", "warning", "error"]
     message: str
@@ -93,6 +96,8 @@ class CorrectionOperation(BaseModel):
         "route_guard",
         "route_replace",
         "route_delete",
+        "route_verify",
+        "route_reject",
         "knowledge_upsert",
         "mark_stale",
     ]
@@ -138,7 +143,7 @@ class CorrectionEvent(BaseModel):
 
 _POOR_NAME = re.compile(
     r"^(?:screen|home_\d+|\d[\d_]*|[a-z][a-z0-9_]*_\d+|just_once|yes_delete|"
-    r"while_using_the_app|only_this_time)$"
+    r"while_using_the_app|only_this_time)$|__[0-9a-f]{8}$"
 )
 
 
@@ -157,7 +162,8 @@ def audit_map(app: AppMap, *, context_id: str | None = None) -> MapAudit:
     ]
     for rec in screens:
         sid = rec.id or rec.name
-        if _POOR_NAME.match(rec.name) or len(rec.name) < 2:
+        weak_source = rec.name_source in {"route", "activity", "legacy"}
+        if _POOR_NAME.search(rec.name) or len(rec.name) < 2 or weak_source:
             issues.append(
                 MapIssue(
                     id=_stable_id("issue", "poor_name", sid),
@@ -189,6 +195,14 @@ def audit_map(app: AppMap, *, context_id: str | None = None) -> MapAudit:
         for right in screens[index + 1 :]:
             if left.context_id != right.context_id:
                 continue
+            if (
+                left.logical_name
+                and left.logical_name == right.logical_name
+                and left.state != right.state
+            ):
+                continue
+            if left.surface and right.surface and left.surface != right.surface:
+                continue
             if not left.anchors or not right.anchors:
                 continue
             similarity = anchor_similarity(set(left.anchors), set(right.anchors))
@@ -213,6 +227,39 @@ def audit_map(app: AppMap, *, context_id: str | None = None) -> MapAudit:
             )
     grouped: dict[tuple[str, str, str], list[RouteEdge]] = defaultdict(list)
     for route in routes:
+        if route.status == "provisional":
+            issues.append(
+                MapIssue(
+                    id=_stable_id("issue", "provisional_route", route.id or route.action),
+                    type="provisional_route",
+                    severity="info",
+                    message=(
+                        f"Route '{route.action}' was observed once and is not used by goto yet."
+                    ),
+                    route_ids=[route.id or route.action],
+                    questions=[
+                        "Can this transition be replayed or observed a second time?",
+                        "Does it always land on this target in the same flag context?",
+                    ],
+                )
+            )
+        elif route.status == "rejected":
+            issues.append(
+                MapIssue(
+                    id=_stable_id("issue", "unreplayable_route", route.id or route.action),
+                    type="unreplayable_route",
+                    severity="warning",
+                    message=(
+                        f"Route '{route.action}' is excluded from navigation: "
+                        f"{route.rejection_reason or 'unreplayable'}."
+                    ),
+                    route_ids=[route.id or route.action],
+                    questions=[
+                        "Which stable resource id, label, deeplink, or source route can replay it?"
+                    ],
+                )
+            )
+            continue
         grouped[(route.context_id, route.from_screen, route.action)].append(route)
         if route.from_screen not in app.screens or route.to_screen not in app.screens:
             issues.append(
@@ -254,6 +301,22 @@ def audit_map(app: AppMap, *, context_id: str | None = None) -> MapAudit:
                 ],
                 questions=[
                     "Which legacy screens can be confirmed in an exact feature-flag context?"
+                ],
+            )
+        )
+    for context in app.contexts.values():
+        if context_id is not None and context.id not in (context_id, LEGACY_CONTEXT_ID):
+            continue
+        if context.id == LEGACY_CONTEXT_ID or context.verified:
+            continue
+        issues.append(
+            MapIssue(
+                id=_stable_id("issue", "unverified_context", context.id),
+                type="unverified_context",
+                severity="warning",
+                message=f"Feature context '{context.id}' has not been read back from the app.",
+                questions=[
+                    "Which runtime preference or source flag contract proves these values are active?"
                 ],
             )
         )
@@ -544,6 +607,16 @@ class ReconciliationStore:
         if op == "route_delete":
             route = self._route(app, operation.route_id)
             app.routes.remove(route)
+            return
+        if op in {"route_verify", "route_reject"}:
+            route = self._route(app, operation.route_id)
+            if op == "route_verify":
+                route.status = "verified"
+                route.verification_count += 1
+                route.rejection_reason = None
+            else:
+                route.status = "rejected"
+                route.rejection_reason = str(operation.value or "rejected by research")
             return
         if op in {"route_guard", "route_replace"}:
             route = self._route(app, operation.route_id)
