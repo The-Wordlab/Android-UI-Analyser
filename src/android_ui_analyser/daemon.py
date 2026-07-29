@@ -551,10 +551,29 @@ class DaemonClient:
             return False
 
 
+def _source_fingerprint() -> str:
+    """Newest .py mtime in the package, captured ONCE at import.
+
+    A daemon holds its modules in memory, so editing a source file is invisible to it: it
+    keeps serving the old code while the version string still matches, and the caller gets
+    stale answers with no signal. Computing this at import time means the value describes
+    what this process actually LOADED — a CLI started later sees a newer fingerprint, and
+    the existing version-skew path then does the right thing on its own.
+    """
+    newest = 0.0
+    for path in Path(__file__).resolve().parent.rglob("*.py"):
+        with contextlib.suppress(OSError):
+            newest = max(newest, path.stat().st_mtime)
+    return f"{newest:.0f}"
+
+
+_LOADED_SOURCE = _source_fingerprint()
+
+
 def _aua_version() -> str:
     from . import __version__
 
-    return __version__
+    return f"{__version__}+src{_LOADED_SOURCE}"
 
 
 # --------------------------------------------------------------------------- lifecycle
