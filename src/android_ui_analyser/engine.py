@@ -96,6 +96,28 @@ _FLAGS_FOREGROUND_TIMEOUT_S = 6.0  # how long the relaunched app gets to reach t
 _PACKAGE_RE = re.compile(r'package="([^"]+)"')
 
 
+def _action_mark(verb: str, el: Element) -> str:
+    """Compact capture timeline label — verb + best human/id token."""
+    label = el.text or el.content_desc or _id_tail(el.resource_id) or el.id
+    # Keep marks short for timeline readability.
+    text = str(label).replace("\n", " ").strip()
+    if len(text) > 40:
+        text = text[:37] + "…"
+    return f"{verb}:{text}"
+
+
+def _region_from_point(cx: int, cy: int, width: int, height: int) -> str:
+    """Map a screen point onto the same 3×3 names used by ``diff_summary``."""
+    gx = 0 if cx < width / 3 else (2 if cx >= 2 * width / 3 else 1)
+    gy = 0 if cy < height / 3 else (2 if cy >= 2 * height / 3 else 1)
+    names = (
+        ("upper-left", "upper", "upper-right"),
+        ("left", "center", "right"),
+        ("lower-left", "lower", "lower-right"),
+    )
+    return names[gy][gx]
+
+
 def _package_from_xml(
     xml: str, ignore: Sequence[str] = ("com.android.systemui",)
 ) -> str | None:
@@ -2100,6 +2122,9 @@ class Engine:
                         )
                         if known:
                             obs.meta.known_screen = known
+        hint = self._capture_hint()
+        if hint:
+            result.capture_hint = hint
         return result
 
     def resolve(
@@ -2272,7 +2297,7 @@ class Engine:
         el = self._target(element_id, selector)
         cx, cy = el.center
         step = self._step("tap", el)  # built pre-action: needs the cached package
-        with self._acting():
+        with self._acting(_action_mark("tap", el)):
             self.device.click(cx, cy)
         self._record_action_safe(step)
         return self._observe(
@@ -2291,7 +2316,7 @@ class Engine:
         el = self._target(element_id, selector, verb="long-press")
         cx, cy = el.center
         step = self._step("long-press", el)
-        with self._acting():
+        with self._acting(_action_mark("long-press", el)):
             self.device.long_click(cx, cy, ms)
         self._record_action_safe(step)
         return self._observe(
@@ -2311,7 +2336,7 @@ class Engine:
         el = self._target(element_id, selector, verb="double-tap")
         cx, cy = el.center
         step = self._step("double-tap", el)
-        with self._acting():
+        with self._acting(_action_mark("double-tap", el)):
             self.device.double_click(cx, cy)
         self._record_action_safe(step)
         return self._observe(
@@ -2335,7 +2360,7 @@ class Engine:
         # The step records the field's SHAPE only — the typed value is never persisted
         # (PRD §6b privacy; observe_action strips `text` defensively too).
         step = self._step("input", el, submit=submit)
-        with self._acting():
+        with self._acting(_action_mark("input", el)):
             self.device.input_text(cx, cy, text, clear=True, submit=submit)
         self._record_action_safe(step)
         return self._observe(
@@ -2353,7 +2378,7 @@ class Engine:
         el = self._target(element_id, selector, verb="clear")
         cx, cy = el.center
         step = self._step("clear", el)
-        with self._acting():
+        with self._acting(_action_mark("clear", el)):
             self.device.click(cx, cy)
             self.device.clear_text()
         self._record_action_safe(step)
@@ -2457,7 +2482,7 @@ class Engine:
         if coords is not None:
             x1, y1, x2, y2 = coords
             step = self._step("swipe", arg="coords")
-            with self._acting():
+            with self._acting(f"swipe:{direction or 'coords'}"):
                 device.swipe(x1, y1, x2, y2)
             self._record_action_safe(step)
             return self._observe(
@@ -2472,13 +2497,13 @@ class Engine:
         x1, y1, x2, y2 = self._swipe_path(box, d, percent)
         step = self._step("swipe", arg=d)
         if not verify:
-            with self._acting():
+            with self._acting(f"swipe:{d}"):
                 device.swipe(x1, y1, x2, y2)
             self._record_action_safe(step)
             return self._observe(
                 ActionResult(ok=True, action="swipe", target=[x1, y1, x2, y2]), observe, with_image
             )
-        with self._acting():
+        with self._acting(f"swipe:{d}"):
             distance, moved = self._swipe_once(box, d, percent)
         self._record_action_safe(step)
         # ok stays True — the gesture WAS performed, and a swipe is also used to dismiss or
@@ -2660,7 +2685,7 @@ class Engine:
                 hint="Valid: " + ", ".join(sorted(_KEY_NAMES)) + ", KEYCODE_*, or a keycode number.",
             )
         step = self._step("key", arg=name)
-        with self._acting():
+        with self._acting(f"key:{name}"):
             self.device.press(name)
         self._record_action_safe(step)
         return self._observe(
@@ -2676,7 +2701,7 @@ class Engine:
         leave the screen; hide-keyboard aims to only dismiss the keyboard.
         """
         step = self._step("hide-keyboard")
-        with self._acting():
+        with self._acting("hide-keyboard"):
             self.device.hide_keyboard()
         self._record_action_safe(step)
         return self._observe(
@@ -3281,7 +3306,7 @@ class Engine:
             )
         cx, cy = el.center
         step = self._step("a11y-scroll", el, arg=d)
-        with self._acting():
+        with self._acting(f"a11y-scroll:{d}"):
             self.device.a11y_action(cx, cy, action)
         self._record_action_safe(step)
         return self._observe(
@@ -3303,7 +3328,7 @@ class Engine:
         cx, cy = el.center
         act = (action or "CLICK").strip().upper()
         step = self._step("a11y-action", el, arg=act)
-        with self._acting():
+        with self._acting(f"a11y:{act}"):
             self.device.a11y_action(cx, cy, act)
         self._record_action_safe(step)
         return self._observe(
@@ -3871,7 +3896,7 @@ class Engine:
             return None
 
     @contextlib.contextmanager
-    def _acting(self) -> Iterator[None]:
+    def _acting(self, label: str | None = None) -> Iterator[None]:
         """Bracket a device interaction: open the log window, then drop the stale id cache.
 
         Wrap the interaction rather than following it, because the two halves belong on
@@ -3892,7 +3917,7 @@ class Engine:
         buf = self._capture
         if buf is not None:
             with contextlib.suppress(Exception):
-                buf.mark("action")
+                buf.mark(label or "action")
         yield
         self._invalidate_cache()
 
@@ -3922,6 +3947,7 @@ class Engine:
             idle_fps=cfg.idle_fps,
             burst_fps=cfg.burst_fps,
             burst_ms=cfg.burst_ms,
+            extend_burst_on_change=cfg.extend_burst_on_change,
             ttl_s=cfg.ttl_s,
             max_mb=cfg.max_mb,
             jpeg_quality=cfg.jpeg_quality,
@@ -3984,6 +4010,8 @@ class Engine:
         *,
         seconds: float | None = None,
         since: str | None = None,
+        region: str | None = None,
+        where_rid: str | None = None,
     ) -> dict[str, Any]:
         if self._capture is None:
             raise UsageError(
@@ -4004,14 +4032,137 @@ class Engine:
                         hint="Perform a tap/input/swipe first, then retry.",
                     )
             else:
-                # treat as a logcat-style mark name stored via capture.mark — fall back
                 since_ms = self._capture.last_action_ms()
-        return self._capture.last(seconds=seconds, since_ms=since_ms)
+        resolved_region = region
+        if where_rid and not resolved_region:
+            resolved_region = self._region_for_rid(where_rid)
+        return self._capture.last(
+            seconds=seconds,
+            since_ms=since_ms,
+            region=resolved_region,
+            where_rid=where_rid,
+        )
+
+    def _region_for_rid(self, rid: str) -> str | None:
+        """Best-effort grid cell for a resource-id from the last analyze cache."""
+        cached = self._read_cache()
+        if cached is None:
+            return None
+        want = rid.strip()
+        for el in cached.elements:
+            if not el.resource_id:
+                continue
+            if el.resource_id == want or el.resource_id.endswith("/" + want) or _id_tail(
+                el.resource_id
+            ) == want:
+                w = cached.screen.width or 0
+                h = cached.screen.height or 0
+                if w <= 0 or h <= 0:
+                    with contextlib.suppress(Exception):
+                        w, h = self.device.window_size()
+                if w > 0 and h > 0:
+                    cx, cy = el.center
+                    return _region_from_point(cx, cy, w, h)
+        return None
+
+    def capture_export(
+        self,
+        path: str,
+        *,
+        seconds: float | None = None,
+        since: str | None = None,
+        fmt: str = "gif",
+        fps: float = 8.0,
+    ) -> dict[str, Any]:
+        if self._capture is None:
+            raise UsageError(
+                "capture buffer is not running",
+                hint="`aua capture on` / `aua daemon start` first.",
+            )
+        since_ms = None
+        if since and since.lower().strip() in ("last-action", "last_action", "action"):
+            since_ms = self._capture.last_action_ms()
+        try:
+            return self._capture.export(
+                path, seconds=seconds, since_ms=since_ms, fmt=fmt, fps=fps
+            )
+        except (ValueError, ImportError) as exc:
+            raise UsageError(str(exc)) from exc
+
+    def capture_explain(
+        self,
+        *,
+        seconds: float | None = None,
+        since: str | None = None,
+        llm: bool = False,
+    ) -> dict[str, Any]:
+        """Narrate the recent capture window (local summary; optional LLM)."""
+        if self._capture is None:
+            raise UsageError(
+                "capture buffer is not running",
+                hint="`aua capture on` / `aua daemon start` first.",
+            )
+        since_ms = None
+        if since and since.lower().strip() in ("last-action", "last_action", "action"):
+            since_ms = self._capture.last_action_ms()
+        out = self._capture.explain_local(seconds=seconds, since_ms=since_ms)
+        if llm:
+            out["llm"] = self._capture_explain_llm(out)
+        return out
+
+    def _capture_explain_llm(self, payload: dict[str, Any]) -> str | None:
+        """Best-effort narration via the planner chain (opt-in)."""
+        try:
+            if not self.factory.is_enabled("planner"):
+                return (
+                    "(llm skipped: planner disabled — enable planner in config or use local narration)"
+                )
+            names = self.factory.chain_names("planner")
+            objective = (
+                "Summarize this Android UI transition for a QA agent in 2-4 sentences.\n"
+                f"{payload.get('narration')}\n"
+                f"Diff lines: {payload.get('summary')}"
+            )
+            for name in names:
+                try:
+                    prov = self.factory.create("planner", name)
+                    if not prov.is_available().ok:
+                        continue
+                    decision = prov.decide(objective, [])
+                    if decision is None:
+                        continue
+                    text = getattr(decision, "reason", None) or getattr(decision, "thought", None)
+                    return str(text or decision)[:2000]
+                except Exception:
+                    continue
+        except Exception as exc:
+            return f"(llm error: {exc})"
+        return None
 
     def capture_prune(self) -> dict[str, Any]:
         if self._capture is None:
             return {"ok": True, "action": "capture-prune", "removed": 0, "running": False}
         return self._capture.prune()
+
+    def capture_sidecar_start(self) -> dict[str, Any]:
+        """Start a host-side capture sidecar (survives without the full daemon)."""
+        from . import capture_sidecar as cs
+
+        if not self.config.capture.sidecar:
+            raise UsageError(
+                "capture sidecar is disabled",
+                hint="Set capture.sidecar: true in config.",
+            )
+        return cs.start(
+            serial=self.device.serial,
+            cache_dir=Path(self.config.cache.dir).expanduser(),
+            cfg=self.config.capture,
+        )
+
+    def capture_sidecar_stop(self) -> dict[str, Any]:
+        from . import capture_sidecar as cs
+
+        return cs.stop(Path(self.config.cache.dir).expanduser())
 
     def _invalidate_cache(self) -> None:
         path = self._cache_path()

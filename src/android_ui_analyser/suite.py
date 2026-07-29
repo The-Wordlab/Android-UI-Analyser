@@ -7,6 +7,7 @@ code (0 = all pass, 8 = any fail).
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -50,9 +51,13 @@ class CheckResult:
     ok: bool
     kind: str
     detail: str
+    capture: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        if data.get("capture") is None:
+            data.pop("capture", None)
+        return data
 
 
 @dataclass
@@ -63,9 +68,10 @@ class SuiteResult:
     passed: int
     failed: int
     stopped_early: bool = False
+    capture: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "ok": self.ok,
             "name": self.name,
             "passed": self.passed,
@@ -73,6 +79,9 @@ class SuiteResult:
             "stopped_early": self.stopped_early,
             "results": [r.as_dict() for r in self.results],
         }
+        if self.capture is not None:
+            out["capture"] = self.capture
+        return out
 
 
 def parse_suite(text: str, *, source: str = "<stdin>") -> Suite:
@@ -208,9 +217,17 @@ def run_suite(
 
     results: list[CheckResult] = []
     stopped_early = False
+    attached_capture: dict[str, Any] | None = None
     for i, check in enumerate(suite.checks):
         ok, detail = run_check(engine, check)
-        results.append(CheckResult(index=i, ok=ok, kind=check.kind, detail=detail))
+        cap = None
+        if not ok:
+            with contextlib.suppress(Exception):
+                cap = engine.capture_last(since="last-action", seconds=3.0)
+                attached_capture = cap
+        results.append(
+            CheckResult(index=i, ok=ok, kind=check.kind, detail=detail, capture=cap)
+        )
         if not ok and not continue_on_fail:
             stopped_early = True
             break
@@ -224,6 +241,7 @@ def run_suite(
         passed=passed,
         failed=failed,
         stopped_early=stopped_early,
+        capture=attached_capture,
     )
 
 

@@ -151,3 +151,202 @@ def test_capture_status_without_buffer(tmp_path: Path) -> None:
     st = engine.capture_status()
     assert st["running"] is False
     assert "daemon" in (st.get("hint") or "").lower()
+
+
+def test_diff_summary_region_filter(tmp_path: Path) -> None:
+    p1 = tmp_path / "a.jpg"
+    p2 = tmp_path / "b.jpg"
+    Image.new("RGB", (96, 96), (0, 0, 0)).save(p1, quality=90)
+    changed = Image.new("RGB", (96, 96), (0, 0, 0))
+    for y in range(32, 64):
+        for x in range(32, 64):
+            changed.putpixel((x, y), (255, 255, 255))
+    changed.save(p2, quality=90)
+    t0 = 1_000_000
+    entries = [
+        FrameEntry(t_ms=t0, path=str(p1), hash="a", bytes=10, w=96, h=96),
+        FrameEntry(t_ms=t0 + 80, path=str(p2), hash="b", bytes=10, w=96, h=96),
+    ]
+    all_lines = diff_summary(entries, threshold=5.0)
+    assert all_lines and "center" in all_lines[0]
+    filtered = diff_summary(entries, threshold=5.0, region="upper")
+    assert filtered and "no 'upper' cell change" in filtered[0]
+    center_only = diff_summary(entries, threshold=5.0, region="center")
+    assert center_only and "center" in center_only[0]
+
+
+def test_extend_burst_on_change(tmp_path: Path) -> None:
+    colors = [(i * 20, 0, 255 - i * 20) for i in range(8)]
+    shots = [ScreenImage(_png_color(48, 48, c), width=48, height=48) for c in colors]
+    idx = {"i": 0}
+
+    def shot() -> ScreenImage:
+        i = min(idx["i"], len(shots) - 1)
+        idx["i"] += 1
+        return shots[i]
+
+    cfg = CaptureCfgView(
+        idle_fps=40,
+        burst_fps=40,
+        burst_ms=80,  # short base burst — extension should keep it open
+        extend_burst_on_change=True,
+        ttl_s=60,
+        max_mb=50,
+    )
+    buf = CaptureBuffer(root=tmp_path, serial="burst", cfg=cfg, screenshot=shot)
+    buf.start()
+    buf.mark("tap:Go")
+    deadline = time.time() + 2.0
+    while time.time() < deadline and len(buf._entries) < 4:
+        time.sleep(0.03)
+    buf.stop()
+    assert len(buf._entries) >= 3
+
+
+def test_export_gif_and_explain(tmp_path: Path) -> None:
+    from android_ui_analyser.capture import change_duration_ms, export_animation, local_narration
+
+    p1 = tmp_path / "1.jpg"
+    p2 = tmp_path / "2.jpg"
+    Image.new("RGB", (40, 40), (10, 10, 10)).save(p1, quality=80)
+    Image.new("RGB", (40, 40), (200, 20, 20)).save(p2, quality=80)
+    t0 = 5_000_000
+    entries = [
+        FrameEntry(t_ms=t0, path=str(p1), hash="a", bytes=10, w=40, h=40, action="tap:X"),
+        FrameEntry(t_ms=t0 + 150, path=str(p2), hash="b", bytes=10, w=40, h=40),
+    ]
+    out = tmp_path / "clip.gif"
+    written = export_animation(entries, out, fmt="gif", fps=5)
+    assert Path(written).is_file()
+    assert change_duration_ms(entries) == 150
+    payload = {
+        "frames": [e.__dict__ for e in entries],
+        "summary": ["t+0–t+150ms: center changed"],
+        "change_duration_ms": 150,
+    }
+    narr = local_narration(payload)
+    assert "tap:X" in narr
+    assert "150ms" in narr
+
+    red = ScreenImage(_png_color(40, 40, (200, 0, 0)), width=40, height=40)
+    blue = ScreenImage(_png_color(40, 40, (0, 0, 200)), width=40, height=40)
+    stream = [red, blue]
+    idx = {"i": 0}
+
+    def shot() -> ScreenImage:
+        i = min(idx["i"], len(stream) - 1)
+        idx["i"] += 1
+        return stream[i]
+
+    cfg = CaptureCfgView(idle_fps=50, burst_fps=50, burst_ms=400, ttl_s=60, max_mb=50)
+    buf = CaptureBuffer(root=tmp_path / "buf", serial="exp", cfg=cfg, screenshot=shot)
+    buf.start()
+    buf.mark("tap")
+    deadline = time.time() + 2.0
+    while time.time() < deadline and len(buf._entries) < 2:
+        time.sleep(0.04)
+    exp = buf.export(tmp_path / "out.gif", fmt="gif", fps=6)
+    assert Path(exp["path"]).is_file()
+    explained = buf.explain_local()
+    assert "narration" in explained
+    buf.stop()
+
+
+def test_suite_failure_attaches_capture(tmp_path: Path) -> None:
+    from android_ui_analyser.suite import parse_suite, run_suite
+
+    red = make_png(60, 60, color=(180, 20, 20))
+    blue = make_png(60, 60, color=(20, 20, 180))
+    device = FakeDevice(
+        screenshot_bytes=red,
+        screenshots=[red, blue, blue],
+        width=60,
+        height=60,
+        hierarchy_xml=(
+            '<?xml version="1.0"?><hierarchy rotation="0">'
+            '<node class="android.widget.TextView" text="Hello" '
+            'clickable="false" enabled="true" bounds="[0,0][60,60]"/></hierarchy>'
+        ),
+        text_index={"Hello": (0, 0, 60, 60)},
+    )
+    cfg = make_config(
+        cache={"dir": str(tmp_path / "cache")},
+        capture={"enabled": True, "idle_fps": 40, "burst_fps": 40, "burst_ms": 500, "hint": True},
+    )
+    engine = Engine(cfg, device=device)
+    engine.capture_start()
+    with engine._acting("tap:Hello"):
+        pass
+    deadline = time.time() + 2.0
+    while time.time() < deadline and len(engine._capture._entries) < 1:  # type: ignore[union-attr]
+        time.sleep(0.04)
+    suite = parse_suite(
+        """
+name: fail_cap
+checks:
+  - has: "Nope"
+"""
+    )
+    result = run_suite(engine, suite)
+    assert not result.ok
+    assert result.capture is not None
+    assert result.results[0].capture is not None
+    engine.capture_stop()
+
+
+def test_action_result_capture_hint(tmp_path: Path) -> None:
+    red = make_png(50, 50, color=(100, 0, 0))
+    blue = make_png(50, 50, color=(0, 0, 100))
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8"?><hierarchy rotation="0">'
+        '<node index="0" class="android.widget.Button" text="Go" '
+        'resource-id="com.test:id/go" clickable="true" enabled="true" '
+        'bounds="[10,10][40,40]"/></hierarchy>'
+    )
+    device = FakeDevice(
+        hierarchy_xml=xml,
+        screenshot_bytes=red,
+        screenshots=[red, blue, blue, blue],
+        width=50,
+        height=50,
+        text_index={"Go": (10, 10, 40, 40)},
+        resource_index={"com.test:id/go": (10, 10, 40, 40)},
+    )
+    cfg = make_config(
+        cache={"dir": str(tmp_path / "cache")},
+        capture={"enabled": True, "idle_fps": 40, "burst_fps": 40, "burst_ms": 600, "hint": True},
+    )
+    engine = Engine(cfg, device=device)
+    engine.capture_start()
+    with engine._acting("tap:Go"):
+        device.click(25, 25)
+    deadline = time.time() + 2.0
+    while time.time() < deadline and not engine._capture.hint_ready():  # type: ignore[union-attr]
+        time.sleep(0.05)
+    # Simulate post-action observe attaching the hint (same path as ActionResult).
+    hint = engine._capture_hint()
+    assert hint is not None
+    engine.capture_stop()
+
+
+def test_sidecar_disabled_raises(tmp_path: Path) -> None:
+    engine = Engine(
+        make_config(cache={"dir": str(tmp_path)}, capture={"enabled": False, "sidecar": False}),
+        device=FakeDevice(),
+    )
+    from android_ui_analyser.errors import UsageError
+
+    try:
+        engine.capture_sidecar_start()
+    except UsageError as exc:
+        assert "sidecar" in str(exc).lower()
+    else:
+        raise AssertionError("expected UsageError when capture.sidecar is false")
+
+
+def test_region_from_point() -> None:
+    from android_ui_analyser.engine import _region_from_point
+
+    assert _region_from_point(10, 10, 300, 300) == "upper-left"
+    assert _region_from_point(150, 150, 300, 300) == "center"
+    assert _region_from_point(290, 290, 300, 300) == "lower-right"

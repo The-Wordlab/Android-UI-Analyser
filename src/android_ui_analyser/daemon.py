@@ -327,6 +327,12 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
         elif cmd == "capture_last":
             return _result_ok(engine.capture_last(**args))
 
+        elif cmd == "capture_export":
+            return _result_ok(engine.capture_export(**args))
+
+        elif cmd == "capture_explain":
+            return _result_ok(engine.capture_explain(**args))
+
         elif cmd == "capture_on":
             return _result_ok(engine.capture_on())
 
@@ -354,8 +360,8 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
                 "memory_update, goto, flow_run, flow_save, navigate, orient, list_devices, app, "
                 "logcat, logcat_mark, suite_run, dev_show, dev_anim, dev_crashes, dev_profile, "
                 "a11y_scroll, a11y_action, flags_set, flags_apply, proxy_start, proxy_stop, "
-                "mock_map, mock_record, mock_replay, capture_status, capture_last, capture_on, "
-                "capture_off, capture_prune, capture_start, capture_stop",
+                "mock_map, mock_record, mock_replay, capture_status, capture_last, capture_export, "
+                "capture_explain, capture_on, capture_off, capture_prune, capture_start, capture_stop",
             )
 
     except AuaError as exc:
