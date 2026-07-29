@@ -93,7 +93,7 @@ Bounds = tuple[int, int, int, int]
 
 
 def short_rid(resource_id: str | None) -> str | None:
-    """``com.app:id/tab_explore`` → ``tab_explore`` (the part a human recognises)."""
+    """``com.app:id/tab_browse`` → ``tab_browse`` (the part a human recognises)."""
     if not resource_id:
         return resource_id
     return resource_id.rsplit("/", 1)[-1]

@@ -89,7 +89,7 @@ class Device(ABC):
         """Cheap selector locate — return the box of the first match, or None.
 
         ``by``: ``"text"`` searches text + content-desc (default); ``"id"`` matches the
-        resource-id (a bare tail like ``containerChatDetail`` matches the id's suffix) —
+        resource-id (a bare tail like ``containerDetail`` matches the id's suffix) —
         this can find containers that the parsed element list prunes; ``"desc"`` is
         content-desc only.
         """
@@ -476,7 +476,7 @@ class Uiautomator2Device(Device):
 
     def _resource_id_kwargs(self, text: str, match: MatchMode) -> dict:
         """Selector for a resource-id. A full ``pkg:id/name`` matches exactly; a bare tail
-        (``containerChatDetail``) matches any id ending in ``:id/<tail>``."""
+        (``containerDetail``) matches any id ending in ``:id/<tail>``."""
         if ":id/" in text:
             return {"resourceId": text} if match is not MatchMode.contains else {
                 "resourceIdMatches": f".*{re.escape(text)}.*"

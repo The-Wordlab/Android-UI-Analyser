@@ -138,7 +138,7 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "Read interaction state, don't screenshot it",
         "Every element carries `checkable`/`checked`/`selected`/`scrollable`/`long_clickable`/"
         "`password` alongside `clickable`/`enabled`/`focused`. So *is this switch on?* is "
-        "`aua --format tsv analyze --where-rid pushSwitch --fields id,checkable,checked` — not a "
+        "`aua --format tsv analyze --where-rid settingsSwitch --fields id,checkable,checked` — not a "
         "screenshot you have to look at. `selected` tells you which tab is active; `scrollable` "
         "tells you which container actually scrolls. These are **tri-state**: `true`/`false` when "
         "the accessibility node reported it, **empty/null when genuinely unknown** (a "
@@ -146,7 +146,7 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
     ),
     (
         "Verify by resource-id, not just text",
-        '`aua has "<id>" --by id` checks a resource-id (a bare tail like "containerChatDetail" '
+        '`aua has "<id>" --by id` checks a resource-id (a bare tail like "containerDetail" '
         "works) — and it finds non-interactive **container** ids that `analyze` prunes from "
         "the element list, so it's the reliable way to assert you reached a screen "
         "(Maestro-style `assertVisible: id:`). `wait --for <id> --by id` and "
@@ -497,7 +497,7 @@ def render_markdown(*, brief: bool = False) -> str:
     p.append("aua --format tsv analyze --region 0,0,1080,300 --clickable --fields id,desc,rid")
     p.append("")
     p.append("# Is that switch on? Read the boolean instead of looking at a screenshot:")
-    p.append("aua --format tsv analyze --where-rid pushSwitch --fields id,checkable,checked")
+    p.append("aua --format tsv analyze --where-rid settingsSwitch --fields id,checkable,checked")
     p.append("")
     p.append("# Must you actually SEE something? Crop it — a full 1080x2400 PNG is expensive:")
     p.append("aua screenshot --region 0,0,1080,300 --out /tmp/header.png   # then read that file")
