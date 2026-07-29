@@ -1065,7 +1065,24 @@ class Engine:
                 t = threading.Thread(target=_bg, name="aua-mem-record", daemon=True)
                 self._mem_thread = t
                 t.start()
-                return self._last_known_screen, hints
+                # Recognise synchronously rather than reusing the remembered name: the write
+                # above has not landed yet, so `self._last_known_screen` still holds the
+                # PREVIOUS screen's name. Reporting it labelled the device launcher and a
+                # system ANR dialog with names from the app under test's own map, and told a
+                # caller that had just navigated back that it was still on the screen it left.
+                # Recognition is a read of a map `navigation_hints` just loaded on this same
+                # path, so it costs ~nothing; an unmapped screen answers None, which is honest
+                # rather than wrong.
+                return (
+                    mem.recognize_screen(
+                        device.serial,
+                        package=package,
+                        elements=elements,
+                        activity=activity,
+                        screen_height=height,
+                    ),
+                    hints,
+                )
 
             known = _do_record()
             self._last_known_screen = known

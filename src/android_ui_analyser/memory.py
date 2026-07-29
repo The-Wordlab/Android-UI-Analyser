@@ -1857,6 +1857,41 @@ class AppMemoryStore:
             self.refresh_research_tasks(package, context_id=context_id)
         return outcome.name if outcome.was_known else None
 
+    def recognize_screen(
+        self,
+        serial: str,
+        *,
+        package: str | None,
+        elements: list[Element],
+        activity: str | None = None,
+        screen_height: int | None = None,
+    ) -> str | None:
+        """The name this screen already has in *package*'s map, or None. Writes nothing.
+
+        Exists so a caller that records asynchronously can still name the screen it is
+        looking at. Returning a remembered name from the last observation instead would name
+        the PREVIOUS screen — and after a transition that is the one answer that must never
+        be given.
+        """
+        if not (self.cfg.enabled and self.cfg.auto_record):
+            return None
+        if not package or matches_any(package, self.cfg.ignore_packages):
+            return None
+        app = self.load(package)
+        if app is None or not app.screens:
+            return None
+        anchors = screen_anchors(elements, redact=self.cfg.redact, height=screen_height)
+        name, _sim = self._recognize(
+            app,
+            anchors,
+            activity,
+            signature(activity, anchors),
+            self.load_session(serial).active_context_id,
+            state=_infer_state(elements),
+            surface=_screen_surface(elements),
+        )
+        return name
+
     def observe_screen_passive(
         self,
         serial: str,
