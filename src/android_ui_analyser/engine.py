@@ -2892,7 +2892,7 @@ class Engine:
             f"(match={mode.value}, by={by}, fields={field}"
             f"{', ignore_case' if ignore_case else ''})"
         ]
-        # Accidental regex under contains — the Cursor Luzia failure mode.
+        # Accidental regex under contains — an observed agent failure mode.
         meta = set(r".*+?[](){}|^$\\")
         if mode is MatchMode.contains and any(c in needle for c in meta):
             parts.append(
@@ -3542,7 +3542,7 @@ class Engine:
                 raise UsageError("app clear needs a package name")
             if not confirmed:
                 raise UsageError(
-                    "app clear wipes ALL app data (feature flags, login session, LOCAL_CONFIG) "
+                    "app clear wipes ALL app data (feature flags, login session, local config) "
                     "— pass --yes / --yes-wipe-flags to confirm",
                     hint="Then re-apply flag overrides / re-login before asserting experiment UI.",
                 )

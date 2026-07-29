@@ -67,7 +67,7 @@ def _payload(*elements: dict, **meta: object) -> dict:
         "screen": {
             "width": 1080,
             "height": 2400,
-            "package": "co.thewordlab.luzia.dev",
+            "package": "com.example.app.dev",
             "activity": ".MainActivity",
             "source": "hierarchy",
         },
@@ -82,7 +82,7 @@ STATUS_BATTERY = _element(id=1, content_desc="Battery 100 percent.", bounds=[935
 HEADER_BELL = _element(
     id=2,
     type="ImageButton",
-    resource_id="co.thewordlab.luzia.dev:id/notificationBell",
+    resource_id="com.example.app.dev:id/notificationBell",
     content_desc="Notifications",
     bounds=[900, 84, 1010, 200],
     clickable=True,
@@ -91,7 +91,7 @@ UNLABELLED = _element(id=3, type="View", bounds=[0, 300, 1080, 400])
 TAB_EXPLORE = _element(
     id=4,
     text="Explore",
-    resource_id="co.thewordlab.luzia.dev:id/appsHubTabEXPLORE",
+    resource_id="com.example.app.dev:id/appsHubTabEXPLORE",
     bounds=[0, 400, 540, 500],
     clickable=True,
     selected=True,
@@ -99,7 +99,7 @@ TAB_EXPLORE = _element(
 SWITCH_OFF = _element(
     id=5,
     type="Switch",
-    resource_id="co.thewordlab.luzia.dev:id/pushSwitch",
+    resource_id="com.example.app.dev:id/pushSwitch",
     bounds=[859, 600, 996, 700],
     checkable=True,
     checked=False,
@@ -120,7 +120,7 @@ def test_rid_is_short_and_resource_id_is_full() -> None:
     view = Projection.parse(fields="rid,resource_id")
     projected = view.project(TAB_EXPLORE)
     assert projected["rid"] == "appsHubTabEXPLORE"
-    assert projected["resource_id"] == "co.thewordlab.luzia.dev:id/appsHubTabEXPLORE"
+    assert projected["resource_id"] == "com.example.app.dev:id/appsHubTabEXPLORE"
 
 
 def test_short_rid_passes_through_missing_values() -> None:
@@ -237,7 +237,7 @@ def test_where_text_is_case_insensitive_substring() -> None:
 
 
 def test_where_rid_matches_short_and_full_form() -> None:
-    for needle in ("appsHubTab", "luzia.dev:id/appsHubTabEXPLORE", "appshubtabexplore"):
+    for needle in ("appsHubTab", "example.app.dev:id/appsHubTabEXPLORE", "appshubtabexplore"):
         kept = Projection.parse(where_rid=[needle]).select(SCREEN)
         assert [e["id"] for e in kept] == [TAB_EXPLORE["id"]], needle
 
@@ -351,7 +351,7 @@ def test_tsv_all_opts_out_of_the_implicit_filters() -> None:
 
 def test_tsv_shape_is_comments_then_header_then_rows() -> None:
     lines = _tsv(SCREEN)
-    assert lines[0].startswith("# screen=my_apps package=co.thewordlab.luzia.dev 1080x2400")
+    assert lines[0].startswith("# screen=my_apps package=com.example.app.dev 1080x2400")
     assert lines[1].startswith("# elements=6 shown=3")
     assert lines[2] == "id\ttext\trid\tclickable"
     assert lines[3].split("\t") == ["2", "", "notificationBell", "true"]
