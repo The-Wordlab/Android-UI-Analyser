@@ -210,6 +210,14 @@ class Device(ABC):
         """Current device wall-clock as unix ms, or None if unreadable."""
         return None
 
+    def utc_offset_minutes(self) -> int | None:
+        """The device's UTC offset in minutes, or None if unreadable.
+
+        ``-v threadtime`` timestamps are device-local with no zone, so this is what turns
+        one into an epoch. Only the degraded post-filter path needs it.
+        """
+        return None
+
     def erase_chars(self, count: int) -> None:
         """Delete *count* characters before the caret in the focused field."""
         for _ in range(max(0, count)):
@@ -218,8 +226,9 @@ class Device(ABC):
     def logcat(self, *, since_ms: int | None = None, dump: bool = True) -> str:
         """Dump (or clear) logcat. ``dump=False`` clears the buffer and returns ``""``.
 
-        When *since_ms* is set, callers may still filter client-side; implementations
-        may pre-filter for convenience. Raise :class:`DeviceError` if unavailable.
+        *since_ms* is a **device**-clock epoch and an implementation MUST apply it — the
+        caller does no time filtering of its own. Raise :class:`DeviceError` if
+        unavailable.
         """
         raise DeviceError("logcat requires a real device")
 
@@ -662,9 +671,31 @@ class Uiautomator2Device(Device):
             return None
         return None
 
+    def utc_offset_minutes(self) -> int | None:
+        try:
+            out = self._d.shell("date +%z")
+            text = out if isinstance(out, str) else getattr(out, "output", str(out))
+            m = re.search(r"([+-])(\d{2})(\d{2})", str(text).strip())
+            if not m:
+                return None
+            sign = -1 if m.group(1) == "-" else 1
+            return sign * (int(m.group(2)) * 60 + int(m.group(3)))
+        except Exception:
+            return None
+
     def erase_chars(self, count: int) -> None:
         for _ in range(max(0, count)):
             self._d.shell("input keyevent 67")  # KEYCODE_DEL
+
+    def _logcat_dump(self, args: list[str]) -> str:
+        proc = subprocess.run(  # noqa: S603
+            ["adb", "-s", self.serial, "logcat", "-d", "-v", "threadtime", *args],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        return proc.stdout or ""
 
     def logcat(self, *, since_ms: int | None = None, dump: bool = True) -> str:
         if not dump:
@@ -681,25 +712,31 @@ class Uiautomator2Device(Device):
                     hint="Check `adb` is on PATH and the device is reachable.",
                 ) from exc
             return ""
+        # logcat's own `-T <sec.nsec>` compares against the same clock that stamped the
+        # lines, which no amount of host-side parsing can match.
+        native = [] if since_ms is None else ["-T", f"{since_ms // 1000}.{since_ms % 1000:03d}000000"]
         try:
-            proc = subprocess.run(  # noqa: S603
-                ["adb", "-s", self.serial, "logcat", "-d", "-v", "threadtime"],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
+            return self._logcat_dump(native)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            if not native:
+                raise DeviceError(
+                    "could not dump logcat",
+                    hint="Check `adb` is on PATH and the device is reachable.",
+                ) from exc
+        try:
+            raw = self._logcat_dump([])
         except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as exc:
             raise DeviceError(
                 "could not dump logcat",
                 hint="Check `adb` is on PATH and the device is reachable.",
             ) from exc
-        raw = proc.stdout or ""
-        if since_ms is None:
-            return raw
         from .logcat import filter_logcat
 
-        return "\n".join(filter_logcat(raw, since_ms=since_ms))
+        return "\n".join(
+            filter_logcat(
+                raw, since_ms=since_ms, tz_offset_minutes=self.utc_offset_minutes() or 0
+            )
+        )
 
     def open_link(self, uri: str, *, package: str | None = None) -> None:
         # Prefer package-scoped VIEW intent to skip the system "Open with…" chooser.

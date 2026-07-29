@@ -2615,7 +2615,11 @@ def logcat_mark_cmd(
         False, "--clear", help="Also clear the device logcat buffer (`logcat -c`)."
     ),
 ) -> None:
-    """Store a host-time mark for later ``aua logcat --since NAME``."""
+    """Store a device-clock mark for later ``aua logcat --since NAME``.
+
+    Reports the device timestamp plus the measured host↔device skew, because logcat lines
+    are stamped by the device and the two clocks drift (seconds, on emulators).
+    """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
         import json
