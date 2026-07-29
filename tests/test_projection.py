@@ -404,3 +404,69 @@ def test_tsv_survives_an_empty_screen() -> None:
     lines = _tsv(_payload())
     assert lines[1].startswith("# elements=0 shown=0")
     assert lines[-1] == "id\ttext\trid\tclickable"
+
+
+# ----------------------------------------------------------------- --no-wrappers (opt-in)
+
+# The View-based shape: id'd layout wrappers nested around one real control.
+WRAP_OUTER = _element(id=0, resource_id="com.android.settings:id/content_parent",
+                      bounds=[0, 0, 1080, 2400])
+WRAP_MID = _element(id=1, resource_id="com.android.settings:id/app_bar",
+                    bounds=[0, 0, 1080, 400])
+WRAP_INNER = _element(id=2, resource_id="com.android.settings:id/collapsing_toolbar",
+                      bounds=[0, 0, 1080, 300])
+REAL_ROW = _element(id=3, resource_id="com.android.settings:id/title", text="Network",
+                    bounds=[40, 100, 1000, 180], clickable=True)
+BARE_LEAF = _element(id=4, resource_id="com.android.settings:id/icon",
+                     bounds=[40, 500, 120, 580])
+FRAMEWORK_ROOT = _element(id=5, resource_id="android:id/content", bounds=[0, 0, 1080, 2400])
+
+_WRAPPED = _payload(WRAP_OUTER, WRAP_MID, WRAP_INNER, REAL_ROW, BARE_LEAF, FRAMEWORK_ROOT)
+
+
+def _ids(proj: Projection, payload: dict) -> list[int]:
+    return [e["id"] for e in proj.select(payload)]
+
+
+def test_no_wrappers_is_off_by_default() -> None:
+    """Container ids stay discoverable unless the caller opts out — the default never moves."""
+    assert _ids(Projection.parse(), _WRAPPED) == [0, 1, 2, 3, 4, 5]
+
+
+def test_no_wrappers_drops_pure_containers_only() -> None:
+    kept = _ids(Projection.parse(no_wrappers=True), _WRAPPED)
+    assert WRAP_OUTER["id"] not in kept
+    assert WRAP_MID["id"] not in kept
+    assert WRAP_INNER["id"] not in kept
+    # A labeled/actionable row and an unlabeled LEAF are both things a caller acts on.
+    assert REAL_ROW["id"] in kept
+    assert BARE_LEAF["id"] in kept
+
+
+def test_no_wrappers_keeps_actionable_and_labeled_containers() -> None:
+    tappable = _element(id=6, resource_id="com.app:id/card", bounds=[0, 600, 1080, 900],
+                        clickable=True)
+    scroller = _element(id=7, resource_id="com.app:id/list", bounds=[0, 900, 1080, 2000],
+                        scrollable=True)
+    described = _element(id=8, resource_id="com.app:id/hero", bounds=[0, 2000, 1080, 2300],
+                         content_desc="Hero banner")
+    inner = _element(id=9, resource_id="com.app:id/row", bounds=[10, 950, 500, 1000], text="Row")
+    payload = _payload(tappable, scroller, described, inner)
+    assert _ids(Projection.parse(no_wrappers=True), payload) == [6, 7, 8, 9]
+
+
+def test_no_wrappers_ignores_framework_ids_and_identical_bounds() -> None:
+    """``android:id/*`` is not an app id, and same-bounds siblings must not cancel out."""
+    twin_a = _element(id=0, resource_id="com.app:id/a", bounds=[0, 0, 500, 500])
+    twin_b = _element(id=1, resource_id="com.app:id/b", bounds=[0, 0, 500, 500])
+    payload = _payload(twin_a, twin_b, FRAMEWORK_ROOT)
+    assert _ids(Projection.parse(no_wrappers=True), payload) == [0, 1, 5]
+
+
+def test_no_wrappers_composes_with_all() -> None:
+    assert _ids(Projection.parse(no_wrappers=True, show_all=True), _WRAPPED) == [0, 1, 2, 3, 4, 5]
+
+
+def test_nonempty_still_keeps_id_only_containers() -> None:
+    """DEFECT 3 note: --nonempty means "has identity" and keeps them; --no-wrappers is separate."""
+    assert WRAP_OUTER["id"] in _ids(Projection.parse(nonempty=True), _WRAPPED)

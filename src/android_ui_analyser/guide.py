@@ -126,7 +126,10 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "`resource_id` = the full selector), `--where-text <substr>`, `--where-rid <substr>`, "
         "`--clickable`, `--region x1,y1,x2,y2` (header = `--region 0,0,1080,300 --clickable`), "
         "`--limit N`, `--nonempty`, `--no-system`, `--meta <csv>` / `--no-meta` (the routes and "
-        "deeplink suggestions are worth reading once, not on every call). Filters of different "
+        "deeplink suggestions are worth reading once, not on every call). On View-based apps "
+        "add `--no-wrappers` to drop the app's own id'd layout scaffolding (`app_bar`, "
+        "`content_frame`) — inert, unlabelled boxes that wrap something; leaves and "
+        "addressable containers stay. Filters of different "
         "kinds AND together, repeats of one kind OR together, and **ids are never renumbered** — "
         "the id in a filtered row is the id `aua tap` takes. The same flags work on "
         "`--format json|compact` when you want machine-readable output.",
@@ -210,7 +213,8 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "analyze — views (use these instead of post-processing JSON)",
         "`--fields <csv>` (`id,text,rid,desc,bounds,center,type,clickable,enabled,focused,"
         "checkable,checked,selected,scrollable,long_clickable,password,resource_id,source,"
-        "confidence`), `--nonempty`, `--no-system`, `--all`, `--where-text <substr>`, "
+        "confidence`), `--nonempty`, `--no-system`, `--no-wrappers`, `--all`, "
+        "`--where-text <substr>`, "
         "`--where-rid <substr>`, `--clickable`, `--region x1,y1,x2,y2`, `--limit N`, "
         "`--meta <csv>`, `--no-meta` — repeatable where it makes sense, and free of a device "
         "round-trip when the flags are wrong (bad name → exit 2 listing the valid ones)",
@@ -614,6 +618,7 @@ def render_json() -> dict[str, object]:
             "filters": [
                 "--nonempty",
                 "--no-system",
+                "--no-wrappers",
                 "--all",
                 "--where-text",
                 "--where-rid",

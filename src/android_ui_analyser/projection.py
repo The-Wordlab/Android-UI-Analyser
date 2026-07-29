@@ -163,6 +163,7 @@ class Projection:
     fields: tuple[str, ...] = ()
     nonempty: bool = False
     no_system: bool = False
+    no_wrappers: bool = False
     where_text: tuple[str, ...] = ()
     where_rid: tuple[str, ...] = ()
     clickable_only: bool = False
@@ -183,6 +184,7 @@ class Projection:
         fields: str | None = None,
         nonempty: bool = False,
         no_system: bool = False,
+        no_wrappers: bool = False,
         show_all: bool = False,
         where_text: Sequence[str] | None = None,
         where_rid: Sequence[str] | None = None,
@@ -205,6 +207,7 @@ class Projection:
             columns
             or nonempty
             or no_system
+            or no_wrappers
             or show_all
             or where_text
             or where_rid
@@ -220,6 +223,7 @@ class Projection:
             fields=columns,
             nonempty=(nonempty or is_tsv) and not show_all,
             no_system=(no_system or is_tsv) and not show_all,
+            no_wrappers=no_wrappers and not show_all,
             where_text=tuple(s.lower() for s in (where_text or ()) if s),
             where_rid=tuple(s.lower() for s in (where_rid or ()) if s),
             clickable_only=clickable,
@@ -275,8 +279,14 @@ class Projection:
 
     def select(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
         """The elements of *payload* that survive every filter, in payload order."""
+        elements = payload.get("elements") or []
         height = int((payload.get("screen") or {}).get("height") or 0)
-        kept = [e for e in (payload.get("elements") or []) if self._keep(e, height)]
+        # Structural, so it is derived from the whole screen: whether a node wraps something
+        # must not change because another flag filtered its children out of the view.
+        wrappers = _wrapper_ids(elements) if self.no_wrappers else frozenset()
+        kept = [
+            e for e in elements if e.get("id") not in wrappers and self._keep(e, height)
+        ]
         if self.limit is not None:
             kept = kept[: self.limit]
         return kept
@@ -382,6 +392,72 @@ def _has_label(element: dict[str, Any]) -> bool:
 def _matches(value: Any, needles: Iterable[str]) -> bool:
     hay = str(value or "").lower()
     return any(n in hay for n in needles)
+
+
+def _has_app_rid(resource_id: Any) -> bool:
+    """Mirrors the parse rule that keeps id-bearing nodes (see :mod:`hierarchy`)."""
+    rid = str(resource_id or "")
+    return ":id/" in rid and not rid.startswith("android:id/")
+
+
+def _is_inert(element: dict[str, Any]) -> bool:
+    return not any(
+        element.get(k) for k in ("clickable", "long_clickable", "checkable", "scrollable")
+    )
+
+
+def _box(bounds: Any) -> Bounds | None:
+    if not isinstance(bounds, (list, tuple)) or len(bounds) != 4:
+        return None
+    x1, y1, x2, y2 = (int(v) for v in bounds)
+    return (x1, y1, x2, y2) if x2 > x1 and y2 > y1 else None
+
+
+def _area(box: Bounds) -> int:
+    return (box[2] - box[0]) * (box[3] - box[1])
+
+
+def _strictly_contains(outer: Bounds, inner: Bounds) -> bool:
+    """*outer* wraps *inner* and is genuinely bigger.
+
+    Strictness matters: Compose siblings routinely share identical bounds, and a plain
+    containment test would make each of them "wrap" the other and drop both.
+    """
+    return (
+        outer[0] <= inner[0]
+        and outer[1] <= inner[1]
+        and outer[2] >= inner[2]
+        and outer[3] >= inner[3]
+        and _area(outer) > _area(inner)
+    )
+
+
+def _wrapper_ids(elements: Sequence[dict[str, Any]]) -> frozenset[int]:
+    """Ids of pure layout containers — the rows ``--no-wrappers`` drops.
+
+    A wrapper is a node that survived the parse *only* because it carries an app
+    resource-id: nothing to read, nothing to act on, and it encloses something else. Leaves
+    are never wrappers — an unlabeled leaf is the concrete drawn thing (an icon, an image, a
+    custom view), which is exactly what a caller taps.
+
+    "Encloses something else" is read off the emitted boxes, so a container whose children
+    were all absorbed into a clickable ancestor looks like a leaf here and survives. That
+    errs toward keeping a row rather than hiding an addressable one, which is the safe bias.
+    """
+    boxed = [(el, _box(el.get("bounds"))) for el in elements]
+    candidates = [
+        (el, box)
+        for el, box in boxed
+        if box is not None
+        and _has_app_rid(el.get("resource_id"))
+        and not (el.get("text") or el.get("content_desc"))
+        and _is_inert(el)
+    ]
+    return frozenset(
+        int(el["id"])
+        for el, box in candidates
+        if any(other is not el and ob is not None and _strictly_contains(box, ob) for other, ob in boxed)
+    )
 
 
 def _is_system(element: dict[str, Any], screen_height: int) -> bool:
