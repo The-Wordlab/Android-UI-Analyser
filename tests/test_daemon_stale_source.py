@@ -30,7 +30,7 @@ def test_fingerprint_is_captured_at_import_not_recomputed() -> None:
     """
     assert daemon._aua_version().split("+src", 1)[1] == daemon._LOADED_SOURCE
     recomputed = daemon._source_fingerprint()
-    assert isinstance(recomputed, str) and recomputed.isdigit()
+    assert isinstance(recomputed, str) and recomputed
 
 
 def test_capture_methods_are_marked_daemon_only() -> None:

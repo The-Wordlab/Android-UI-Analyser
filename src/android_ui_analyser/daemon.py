@@ -25,6 +25,7 @@ logcat_mark, suite_run
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -556,19 +557,26 @@ class DaemonClient:
 
 
 def _source_fingerprint() -> str:
-    """Newest .py mtime in the package, captured ONCE at import.
+    """Hash of the package's .py bytes, captured ONCE at import.
 
     A daemon holds its modules in memory, so editing a source file is invisible to it: it
     keeps serving the old code while the version string still matches, and the caller gets
     stale answers with no signal. Computing this at import time means the value describes
-    what this process actually LOADED — a CLI started later sees a newer fingerprint, and
-    the existing version-skew path then does the right thing on its own.
+    what this process actually LOADED — a CLI started later sees a different fingerprint,
+    and the existing version-skew path then does the right thing on its own.
+
+    Content, not mtime: the CLI and the daemon routinely run from two different trees (an
+    installed copy vs. the repo), and `install.sh` rewrites mtimes without changing a line.
+    An mtime fingerprint therefore reported skew for byte-identical code, which silently
+    dropped every call onto the in-process path — a ~6x slowdown announced only in a log line.
     """
-    newest = 0.0
-    for path in Path(__file__).resolve().parent.rglob("*.py"):
+    digest = hashlib.blake2b(digest_size=8)
+    root = Path(__file__).resolve().parent
+    for path in sorted(root.rglob("*.py")):
         with contextlib.suppress(OSError):
-            newest = max(newest, path.stat().st_mtime)
-    return f"{newest:.0f}"
+            digest.update(path.relative_to(root).as_posix().encode())
+            digest.update(path.read_bytes())
+    return digest.hexdigest()
 
 
 _LOADED_SOURCE = _source_fingerprint()

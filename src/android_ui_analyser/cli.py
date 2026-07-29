@@ -53,7 +53,7 @@ from .memory import (
 )
 from .projection import Projection
 from .reconcile import ReconciliationStore, ResearchReport, audit_map
-from .schema import ActionResult, OutputFormat
+from .schema import ActionResult, AnalyzeResult, OutputFormat
 
 logger = logging.getLogger("android_ui_analyser")
 
@@ -284,8 +284,33 @@ def _require_target(
     return element_id
 
 
+def _rehydrate(data: dict[str, Any]) -> Any:
+    """Restore the result model behind a daemon response, keyed on the payload's shape.
+
+    The daemon answers with a plain dict, which used to fall straight through to a raw dump —
+    so the model's ``render`` never ran and ``--format`` was silently ignored whenever a
+    daemon happened to be serving. ``--format compact`` returned the full verbose payload
+    (~2x the bytes) on exactly the calls an agent makes most.
+
+    Shape, not a method→model registry: a registry is one more place to forget when adding a
+    command, and forgetting it reintroduces the same silent divergence.
+    """
+    if isinstance(data.get("elements"), list) and "screen" in data:
+        model: Any = AnalyzeResult
+    elif "action" in data and "ok" in data:
+        model = ActionResult
+    else:
+        return data
+    try:
+        return model.model_validate(data)
+    except Exception:  # pragma: no cover - an unparseable payload still has to reach stdout
+        return data
+
+
 def _emit(result: Any, fmt: OutputFormat) -> None:
     """Render a pydantic result (``.render``) or a plain dict (daemon path) to stdout."""
+    if isinstance(result, dict):
+        result = _rehydrate(result)
     if hasattr(result, "render"):
         typer.echo(result.render(fmt))
         return
@@ -384,6 +409,39 @@ def _daemon_error(err: dict[str, Any]) -> AuaError:
     return AuaError(message, hint=hint, code=code)
 
 
+def _capture_session_live(daemon_mod: Any, cfg: Any) -> bool:
+    """True only when the daemon confirms it is recording. Any doubt answers False."""
+    try:
+        with daemon_mod.DaemonClient(daemon_mod.socket_path(cfg), timeout=2.0) as client:
+            resp = client.call("capture_status")
+    except Exception:  # pragma: no cover - a daemon too old to answer has no buffer to lose
+        return False
+    if not resp.get("ok"):
+        return False
+    return bool((resp.get("result") or {}).get("running"))
+
+
+def _replace_skewed_daemon(daemon_mod: Any, cfg: Any, ver: str) -> bool:
+    """Restart a daemon serving different code, so calls keep the warm path.
+
+    Skew is not a reason to degrade silently. The in-process fallback pays a device connect
+    on every call (~6x slower), and the warning saying so goes to stderr, where a caller
+    reading stdout never sees it. Restarting pays one connect, once.
+
+    Refused while a capture session is live: the ring buffer exists only in that process, so
+    losing recorded frames would be a worse outcome than a slow call.
+    """
+    if _capture_session_live(daemon_mod, cfg):
+        return False
+    with contextlib.suppress(Exception):
+        daemon_mod.stop(cfg)
+        daemon_mod.start(cfg, serial=cfg.device.serial)
+        if daemon_mod.running_version(cfg) == daemon_mod._aua_version():
+            logger.info("replaced a daemon running aua %s with %s", ver, daemon_mod._aua_version())
+            return True
+    return False
+
+
 def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
     """Run an engine call through the daemon when one is live, else in-process.
 
@@ -413,6 +471,9 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
             # Must be symmetric — comparing a composite against a bare `__version__` would
             # make every call look skewed and silently disable the daemon.
             skew = isinstance(ver, str) and ver != daemon_mod._aua_version()
+            if skew and _replace_skewed_daemon(daemon_mod, cfg, str(ver)):
+                ver = daemon_mod.running_version(cfg)
+                skew = False
             if skew and method in _DAEMON_ONLY_METHODS:
                 # An in-process answer here is not a slower answer, it is a WRONG one: the
                 # buffer lives in the daemon, so this process would report "not running"

@@ -29,7 +29,11 @@ install_global() {
   if command -v uv >/dev/null 2>&1; then
     echo "==> Installing the 'aua' CLI globally with uv tool..."
     local with=(); local p; for p in "${OCR_PKGS[@]}"; do with+=(--with "$p"); done
-    if uv tool install --force "${with[@]}" "$REPO_DIR"; then
+    # --reinstall: --force alone reuses uv's cached wheel when the version string has not
+    # changed, so editing the source and re-running installed the OLD code silently.
+    # --editable: the console script then imports straight from this clone, so `git pull`
+    # updates the CLI and the daemon can never load different bytes than the caller.
+    if uv tool install --force --reinstall --editable "${with[@]}" "$REPO_DIR"; then
       uv tool update-shell >/dev/null 2>&1 || true
       AUA="aua"; return 0
     fi
@@ -37,7 +41,7 @@ install_global() {
   fi
   if command -v pipx >/dev/null 2>&1; then
     echo "==> Installing the 'aua' CLI globally with pipx..."
-    if pipx install --force "$REPO_DIR"; then
+    if pipx install --force --editable "$REPO_DIR"; then
       pipx inject android-ui-analyser "${OCR_PKGS[@]}" >/dev/null 2>&1 \
         || echo "    (OCR engine not added — core CLI still works; add it later for the vision fallback)"
       pipx ensurepath >/dev/null 2>&1 || true
