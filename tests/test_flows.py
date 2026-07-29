@@ -657,25 +657,25 @@ def test_has_by_id_finds_pruned_container(tmp_path) -> None:
     dev = FakeDevice(
         hierarchy_xml=HOME,
         package=P,
-        resource_index={"com.example.app:id/containerChatDetail": (0, 0, 100, 100)},
+        resource_index={"com.example.app:id/containerDetail": (0, 0, 100, 100)},
     )
     eng = Engine(cfg, device=dev, factory=ProviderFactory(cfg))
     # by text: absent
-    assert eng.has("containerChatDetail").found is False
+    assert eng.has("containerDetail").found is False
     # by id (bare tail): found
-    r = eng.has("containerChatDetail", by="id")
+    r = eng.has("containerDetail", by="id")
     assert r.found is True and r.source == "hierarchy"
 
 
 def test_flow_assert_visible_by_id(tmp_path) -> None:
     text = (
         "name: t\napp: com.example.app\nsteps:\n"
-        "  - assert_visible: {id: containerChatDetail}\n"
+        "  - assert_visible: {id: containerDetail}\n"
         "  - wait_for: {id: inputBar, timeout_ms: 2000}\n"
     )
     flow = parse_flow_yaml(text, name="t")
     assert flow.steps[0].kind == "assert-visible" and flow.steps[0].by == "id"
-    assert flow.steps[0].arg == "containerChatDetail"
+    assert flow.steps[0].arg == "containerDetail"
     assert flow.steps[1].kind == "wait-for" and flow.steps[1].by == "id"
 
     from android_ui_analyser.engine import Engine
@@ -686,7 +686,7 @@ def test_flow_assert_visible_by_id(tmp_path) -> None:
     dev = FakeDevice(
         hierarchy_xml=HOME,
         package=P,
-        resource_index={"x:id/containerChatDetail": (0, 0, 9, 9), "x:id/inputBar": (0, 0, 9, 9)},
+        resource_index={"x:id/containerDetail": (0, 0, 9, 9), "x:id/inputBar": (0, 0, 9, 9)},
     )
     eng = Engine(cfg, device=dev, factory=ProviderFactory(cfg))
     f = tmp_path / "t.yaml"

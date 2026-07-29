@@ -18,7 +18,25 @@ REPO = Path(__file__).resolve().parent.parent
 # The last character is bracketed so this file never matches its own pattern: a plain
 # `git grep` for any banned term must come back empty across the whole tree, this guard
 # included.
-_BANNED = (r"luzi[a]", r"thewordla[b]", r"theworldla[b]")
+_BANNED_NAMES = (r"luzi[a]", r"thewordla[b]", r"theworldla[b]")
+
+# Resource-ids and flag keys lifted from a real app's UI dump. Each entry is an exact id,
+# not a shape — the goal is to keep REAL internal ids out, not to ban camelCase example
+# tags, so a neutral invention like `homeTabBROWSE` or `containerDetail` is fine. Two
+# surface-name stems are listed instead of every variant because the surface name itself
+# is the thing that must not appear.
+_BANNED_IDS = (
+    r"appsHu[b]",
+    r"apps_hu[b]",
+    r"containerChatDetai[l]",
+    r"notificationBel[l]",
+    r"pushSwitc[h]",
+    r"notificationPushToggleActivitySwitc[h]",
+    r"creationDetailLik[e]",
+    r"notificationRow_[7]",
+)
+
+_BANNED = _BANNED_NAMES + _BANNED_IDS
 
 # Repo-relative path -> why it may still name an app. Expected to stay empty; entries are
 # self-expiring (see test_allowlist_has_no_stale_entries), so an exemption cannot outlive
@@ -31,11 +49,16 @@ _ALLOWLIST: dict[str, str] = {
 
 _WHY = """
 `android-ui-analyser` is a PUBLIC repo and an app-agnostic tool: it must not name a
-specific app, its package ids, or its private debug deeplink scheme.
+specific app — not its package ids, not its private debug deeplink scheme, and not
+resource-ids or flag keys copied from its UI (those leak unreleased product structure).
 
-Use the fictional placeholders instead:
-  package   com.example.app   (com.example.app.dev for a dev build)
-  scheme    myapp://          (e.g. myapp://set-flags?flag=value, myapp://home)
+Use fictional placeholders instead:
+  package     com.example.app    (com.example.app.dev for a dev build)
+  scheme      myapp://           (e.g. myapp://set-flags?flag=value, myapp://home)
+  tab         homeTabBROWSE      notification entry   notificationsButton
+  container   containerDetail    switch/toggle        settingsSwitch
+
+Invented camelCase ids are welcome — only ids taken from a real app are banned.
 
 Targeting a real app is still fully supported — that knowledge belongs in the USER's
 config (`flags.templates`) or the local playbook `aua remember` builds, not in this repo.

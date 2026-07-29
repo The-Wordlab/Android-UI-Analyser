@@ -18,7 +18,7 @@ _NEAREST_FLOOR = 0.3  # similarity below which a "did you mean" suggestion is no
 
 
 def selector_label(selector: dict[str, Any]) -> str:
-    """``rid:appsHubTabEXPLORE`` — how a selector is echoed back in errors."""
+    """``rid:homeTabBROWSE`` — how a selector is echoed back in errors."""
     for field in _SELECTOR_FIELDS:
         value = selector.get(field)
         if value:
@@ -81,8 +81,8 @@ def match_selector(
 ) -> list[Element]:
     """Every element matching the selector, at its single best tier.
 
-    Tiering is what makes ``--text Explore`` usable on a screen that also has an
-    "Explore more apps" row: an exact hit never gets drowned in substring hits.
+    Tiering is what makes ``--text Browse`` usable on a screen that also has a
+    "Browse more apps" row: an exact hit never gets drowned in substring hits.
     """
     tiers: dict[int, list[Element]] = {}
     for el in elements:

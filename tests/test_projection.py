@@ -82,16 +82,16 @@ STATUS_BATTERY = _element(id=1, content_desc="Battery 100 percent.", bounds=[935
 HEADER_BELL = _element(
     id=2,
     type="ImageButton",
-    resource_id="com.example.app.dev:id/notificationBell",
+    resource_id="com.example.app.dev:id/notificationsButton",
     content_desc="Notifications",
     bounds=[900, 84, 1010, 200],
     clickable=True,
 )
 UNLABELLED = _element(id=3, type="View", bounds=[0, 300, 1080, 400])
-TAB_EXPLORE = _element(
+TAB_BROWSE = _element(
     id=4,
-    text="Explore",
-    resource_id="com.example.app.dev:id/appsHubTabEXPLORE",
+    text="Browse",
+    resource_id="com.example.app.dev:id/homeTabBROWSE",
     bounds=[0, 400, 540, 500],
     clickable=True,
     selected=True,
@@ -99,12 +99,12 @@ TAB_EXPLORE = _element(
 SWITCH_OFF = _element(
     id=5,
     type="Switch",
-    resource_id="com.example.app.dev:id/pushSwitch",
+    resource_id="com.example.app.dev:id/settingsSwitch",
     bounds=[859, 600, 996, 700],
     checkable=True,
     checked=False,
 )
-SCREEN = _payload(STATUS_CLOCK, STATUS_BATTERY, HEADER_BELL, UNLABELLED, TAB_EXPLORE, SWITCH_OFF)
+SCREEN = _payload(STATUS_CLOCK, STATUS_BATTERY, HEADER_BELL, UNLABELLED, TAB_BROWSE, SWITCH_OFF)
 
 
 # --------------------------------------------------------------------------- aliases
@@ -118,9 +118,9 @@ def test_every_alias_maps_to_a_real_element_key() -> None:
 
 def test_rid_is_short_and_resource_id_is_full() -> None:
     view = Projection.parse(fields="rid,resource_id")
-    projected = view.project(TAB_EXPLORE)
-    assert projected["rid"] == "appsHubTabEXPLORE"
-    assert projected["resource_id"] == "com.example.app.dev:id/appsHubTabEXPLORE"
+    projected = view.project(TAB_BROWSE)
+    assert projected["rid"] == "homeTabBROWSE"
+    assert projected["resource_id"] == "com.example.app.dev:id/homeTabBROWSE"
 
 
 def test_short_rid_passes_through_missing_values() -> None:
@@ -202,7 +202,7 @@ def test_any_flag_activates_the_view(kwargs: dict) -> None:
 def test_nonempty_drops_elements_with_no_label() -> None:
     kept = Projection.parse(nonempty=True).select(SCREEN)
     assert UNLABELLED["id"] not in [e["id"] for e in kept]
-    assert TAB_EXPLORE["id"] in [e["id"] for e in kept]
+    assert TAB_BROWSE["id"] in [e["id"] for e in kept]
 
 
 def test_no_system_drops_systemui_ids_and_status_band_chrome() -> None:
@@ -232,30 +232,30 @@ def test_no_system_keeps_dialog_buttons_under_the_android_package() -> None:
 
 
 def test_where_text_is_case_insensitive_substring() -> None:
-    kept = Projection.parse(where_text=["EXPLO"]).select(SCREEN)
-    assert [e["id"] for e in kept] == [TAB_EXPLORE["id"]]
+    kept = Projection.parse(where_text=["BROW"]).select(SCREEN)
+    assert [e["id"] for e in kept] == [TAB_BROWSE["id"]]
 
 
 def test_where_rid_matches_short_and_full_form() -> None:
-    for needle in ("appsHubTab", "example.app.dev:id/appsHubTabEXPLORE", "appshubtabexplore"):
+    for needle in ("homeTab", "example.app.dev:id/homeTabBROWSE", "hometabbrowse"):
         kept = Projection.parse(where_rid=[needle]).select(SCREEN)
-        assert [e["id"] for e in kept] == [TAB_EXPLORE["id"]], needle
+        assert [e["id"] for e in kept] == [TAB_BROWSE["id"]], needle
 
 
 def test_repeated_filters_of_one_kind_or_together() -> None:
-    kept = Projection.parse(where_text=["Explore", "3:37"]).select(SCREEN)
-    assert [e["id"] for e in kept] == [STATUS_CLOCK["id"], TAB_EXPLORE["id"]]
+    kept = Projection.parse(where_text=["Browse", "3:37"]).select(SCREEN)
+    assert [e["id"] for e in kept] == [STATUS_CLOCK["id"], TAB_BROWSE["id"]]
 
 
 def test_filters_of_different_kinds_and_together() -> None:
-    kept = Projection.parse(where_text=["Explore"], clickable=True, nonempty=True).select(SCREEN)
-    assert [e["id"] for e in kept] == [TAB_EXPLORE["id"]]
-    assert Projection.parse(where_text=["Explore"], region=["0,0,1080,10"]).select(SCREEN) == []
+    kept = Projection.parse(where_text=["Browse"], clickable=True, nonempty=True).select(SCREEN)
+    assert [e["id"] for e in kept] == [TAB_BROWSE["id"]]
+    assert Projection.parse(where_text=["Browse"], region=["0,0,1080,10"]).select(SCREEN) == []
 
 
 def test_clickable_filter() -> None:
     kept = [e["id"] for e in Projection.parse(clickable=True).select(SCREEN)]
-    assert kept == [HEADER_BELL["id"], TAB_EXPLORE["id"]]
+    assert kept == [HEADER_BELL["id"], TAB_BROWSE["id"]]
 
 
 def test_region_keeps_intersecting_elements_only() -> None:
@@ -354,7 +354,7 @@ def test_tsv_shape_is_comments_then_header_then_rows() -> None:
     assert lines[0].startswith("# screen=my_apps package=com.example.app.dev 1080x2400")
     assert lines[1].startswith("# elements=6 shown=3")
     assert lines[2] == "id\ttext\trid\tclickable"
-    assert lines[3].split("\t") == ["2", "", "notificationBell", "true"]
+    assert lines[3].split("\t") == ["2", "", "notificationsButton", "true"]
 
 
 def test_tsv_column_order_follows_fields() -> None:
@@ -364,14 +364,14 @@ def test_tsv_column_order_follows_fields() -> None:
 
 
 def test_tsv_tri_state_renders_true_false_and_empty_for_unknown() -> None:
-    lines = _tsv(SCREEN, fields="id,checkable,checked", where_rid=["pushSwitch"])
+    lines = _tsv(SCREEN, fields="id,checkable,checked", where_rid=["settingsSwitch"])
     assert lines[-1].split("\t") == ["5", "true", "false"]
-    unknown = _tsv(SCREEN, fields="id,checked", where_rid=["appsHubTab"])
+    unknown = _tsv(SCREEN, fields="id,checked", where_rid=["homeTab"])
     assert unknown[-1].split("\t") == ["4", ""]
 
 
 def test_tsv_lists_render_comma_joined_without_tabs() -> None:
-    lines = _tsv(SCREEN, fields="id,bounds,center", where_rid=["appsHubTab"])
+    lines = _tsv(SCREEN, fields="id,bounds,center", where_rid=["homeTab"])
     assert lines[-1] == "4\t0,400,540,500\t270,450"
 
 
@@ -397,7 +397,7 @@ def test_tsv_meta_keys_become_comment_lines() -> None:
 
 def test_tsv_summary_reports_how_many_rows_were_hidden() -> None:
     assert "# elements=6 shown=6" in _tsv(SCREEN, show_all=True)[1]
-    assert "# elements=6 shown=1" in _tsv(SCREEN, clickable=True, where_text=["explore"])[1]
+    assert "# elements=6 shown=1" in _tsv(SCREEN, clickable=True, where_text=["browse"])[1]
 
 
 def test_tsv_survives_an_empty_screen() -> None:

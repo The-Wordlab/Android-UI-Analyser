@@ -219,7 +219,7 @@ def _selector(
         if not ident:
             raise UsageError(
                 f"--by {by} needs the value as the positional argument",
-                hint="e.g. `aua tap --by id appsHubTabEXPLORE`",
+                hint="e.g. `aua tap --by id homeTabBROWSE`",
             )
         return {kind: ident, "index": index, "first": first}
     if rid or text or desc:
@@ -740,8 +740,8 @@ def tap(
 ) -> None:
     """Tap an element — by id from the last analyze, or by a one-shot selector.
 
-    `aua tap 9` · `aua tap --rid appsHubNotifications` · `aua tap --text "Create an app"` ·
-    `aua tap --by id appsHubTabEXPLORE`. A selector resolves on the live screen in this one
+    `aua tap 9` · `aua tap --rid notificationsButton` · `aua tap --text "Create an app"` ·
+    `aua tap --by id homeTabBROWSE`. A selector resolves on the live screen in this one
     call; matching nothing exits 6 and matching several exits 7 with the candidates — it
     never silently taps nothing.
     """
@@ -1171,7 +1171,7 @@ def scroll_to(
 ) -> None:
     """Scroll until something is on screen, verifying every step actually moved.
 
-    `aua scroll-to "Red Square Tap"` · `aua scroll-to --rid notificationRow_7`.
+    `aua scroll-to "Red Square Tap"` · `aua scroll-to --rid listRow_7`.
     ``detail`` starts with the outcome: ``already-visible`` · ``moved`` (with ``dy``) ·
     ``already-at-end`` (nothing scrolled, so it is not on this screen) ·
     ``target-not-found`` (scrolled the whole way, never saw it). The last two exit 6, so a
@@ -1237,10 +1237,10 @@ def expect(
 ) -> None:
     """Assert one thing about the screen. Exit 0 = pass, 8 = the assertion failed.
 
-    `aua expect --rid appsHubNotifications --exists` ·
+    `aua expect --rid notificationsButton --exists` ·
     `aua expect --text "Loading" --absent --timeout 5000` ·
-    `aua expect --rid creationDetailLike --text-is "7"` ·
-    `aua expect --rid notificationPushToggleActivitySwitch --checked`
+    `aua expect --rid itemDetailLikeCount --text-is "7"` ·
+    `aua expect --rid settingsPushToggleSwitch --checked`
 
     One acceptance criterion per call, so a criteria list becomes a script instead of a pile
     of eyeballed screenshots. Exit 8 is a *test* failure and stays distinct from 3 (device)
