@@ -54,7 +54,7 @@ description: >-
 - _capture_: `capture status|last [--seconds N|--since last-action]|on|off|prune` — always-on rolling screencap with the daemon (deduped frames + diff summary); see `meta.capture_hint` after fast transitions
 - _dev_: `dev show`, `dev anim off|restore`, `dev crashes on|off`, `dev profile ac|default` (AC: anim off + crashes on; always restore)
 - _a11y_: `a11y scroll <id|--rid …> [--forward|--backward]`, `a11y action <id> CLICK|LONG_CLICK|SCROLL_FORWARD|…`; analyze `--no-ime`
-- _flags_: `flags set <pkg> KEY=VAL…`, `flags apply file.yaml` — deeplink templates from config `flags.templates` (e.g. `myapp://set-flags?…`)
+- _flags_: `flags set <pkg> KEY=VAL…`, `flags apply file.yaml` — needs a `flags.templates` entry for the package (set-flags schemes are app-specific). Writes, then **verifies** against the app's shared_prefs (`applied`/`ignored`; a dropped key exits 8, `--no-verify` to skip) and **restarts** the app (`--no-restart` to skip) because flags read at cold start ignore a live-process override
 - _proxy / mock_: `proxy start|stop`, `mock map METHOD PATH [--status N --body '{…}']`, `mock record start|stop NAME`, `mock replay NAME` (optional `[proxy]` extra)
 - _map_: `--app <pkg>`, `--brief`, `--screen <name>`, `--depth N`, `--find "<goal>"`, `--json`
 - _goto_: `<goal>` (fuzzy), `--plan` (annotated route, no taps), `--max-steps N`, `--allow-destructive`, `--assist` (opt-in planner recovery)

@@ -643,12 +643,18 @@ def _tool_definitions() -> list[types.Tool]:
         ),
         types.Tool(
             name="flags_apply",
-            description="Apply feature flags from a YAML file via the package deeplink template.",
+            description=(
+                "Apply feature flags from a YAML file via the package's configured deeplink "
+                "template, verify them against the app's shared_prefs, and restart the app "
+                "(flags read at cold start need the restart)."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "path": {"type": "string"},
                     "package": {"type": "string"},
+                    "restart": {"type": "boolean", "default": True},
+                    "verify": {"type": "boolean", "default": True},
                 },
                 "required": ["path"],
                 "additionalProperties": False,
@@ -993,7 +999,13 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         )
     if name == "flags_apply":
         return _dump(
-            engine.flags_apply(args["path"], package=args.get("package"), observe=True)
+            engine.flags_apply(
+                args["path"],
+                package=args.get("package"),
+                observe=True,
+                restart=args.get("restart", True),
+                verify=args.get("verify", True),
+            )
         )
     if name == "proxy_start":
         return _dump(engine.proxy_start(port=args.get("port")))

@@ -17,7 +17,7 @@ import time
 from collections import Counter
 from collections.abc import Iterator, Sequence
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from . import routing
 from .config import Config
@@ -80,12 +80,18 @@ from .selectors import (
     selector_label,
 )
 
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .flags import PrefsRead
+
 logger = logging.getLogger("android_ui_analyser.engine")
 
 QUERY_CONFIDENT = 1.0  # all salient tokens / exact phrase present
 QUERY_SOFT = 0.5  # best-effort threshold when escalation is exhausted
 _ASSIST_MAX_STEPS = 6  # bound on planner actions per recovery attempt (opt-in only)
 _MAX_FLOW_DEPTH = 5  # bound on nested `flow:` sub-flow composition (cycle backstop)
+_FLAGS_VERIFY_DEADLINE_S = 2.0  # how long a flag write gets to reach the app's prefs file
+_FLAGS_ENTRY_TIMEOUT_S = 3.0  # how long a pinned entry Activity gets before the default one
+_FLAGS_FOREGROUND_TIMEOUT_S = 6.0  # how long the relaunched app gets to reach the foreground
 
 _PACKAGE_RE = re.compile(r'package="([^"]+)"')
 
@@ -118,6 +124,14 @@ def _parse_legacy_steps(action: str) -> list[RouteStep] | None:
     if m is None:
         return None
     return [RouteStep(kind="tap", label=m.group(1))]
+
+
+class Restart(NamedTuple):
+    """Whether the app was confirmed back up, through which entry, and why not."""
+
+    ok: bool
+    activity: str | None
+    error: str | None
 
 
 class StepFailure(NamedTuple):
@@ -1076,7 +1090,8 @@ class Engine:
             elif kind == "flags-apply":
                 if not s.arg:
                     return StepFailure("unsupported_action", i, s), res
-                self.flags_apply(s.arg, observe=False)
+                if not self.flags_apply(s.arg, observe=False).get("ok", True):
+                    return StepFailure("assert_failed", i, s), res
             elif kind == "proxy-start":
                 self.proxy_start()
                 reanalyze = False
@@ -3304,7 +3319,17 @@ class Engine:
         *,
         observe: bool = True,
         with_image: bool | str | None = None,
-    ) -> ActionResult:
+        restart: bool = True,
+        activity: str | None = None,
+        verify: bool = True,
+        prefs_file: str | None = None,
+    ) -> dict[str, Any]:
+        """Write flags via the package's deeplink, read them back, and restart the app.
+
+        The restart is the default because flags read at cold start (a landing view-model
+        building its tab list once) are invisible to the process that received the
+        deeplink: without it the caller screenshots the OLD ui and blames the flag.
+        """
         from .flags import build_uri, dump_result, parse_assignments
 
         pairs = (
@@ -3314,12 +3339,100 @@ class Engine:
         )
         templates = dict(self.config.flags.templates)
         uri = build_uri(package, pairs, templates)
-        self.open_link(
-            uri, package=package, pin_package=True, observe=observe, with_image=with_image
+        entry = (activity or self._foreground_activity(package)) if restart else None
+        self.open_link(uri, package=package, pin_package=True, observe=False)
+        # Read back BEFORE the force-stop: the file on disk is the proof the app committed
+        # the override, and killing a process with a pending async write would lose it.
+        prefs = (
+            self._verify_flags(
+                package, pairs, prefs_file=prefs_file, deadline_s=_FLAGS_VERIFY_DEADLINE_S
+            )
+            if verify
+            else None
         )
-        # Prefer flags-specific detail while keeping open_link side effects.
-        payload = dump_result(package=package, uri=uri, flags=pairs)
-        return ActionResult(ok=True, action="flags-set", detail=payload["uri"])
+        restarted = self._restart_app(package, entry) if restart else Restart(False, None, None)
+        self._observe(ActionResult(ok=True, action="flags-set"), observe, with_image)
+        return dump_result(
+            package=package,
+            uri=uri,
+            flags=pairs,
+            prefs=prefs,
+            restarted=restarted.ok,
+            activity=restarted.activity,
+            restart_error=restarted.error,
+        )
+
+    def _foreground_activity(self, package: str) -> str | None:
+        """The activity of *package* if it is in the foreground — the one to relaunch."""
+        with contextlib.suppress(Exception):
+            app = self.device.current_app() or {}
+            if (app.get("package") or "") == package:
+                return app.get("activity") or None
+        return None
+
+    def _wait_foreground(self, package: str, timeout_s: float | None = None) -> bool:
+        deadline = time.monotonic() + (
+            _FLAGS_FOREGROUND_TIMEOUT_S if timeout_s is None else timeout_s
+        )
+        while True:
+            with contextlib.suppress(Exception):
+                if ((self.device.current_app() or {}).get("package") or "") == package:
+                    return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.3)
+
+    def _restart_app(self, package: str, activity: str | None) -> Restart:
+        """Force-stop + relaunch, and confirm the app came back.
+
+        A pinned entry Activity is usually NOT exported (a mid-flow screen never is), and
+        ``am start -n`` then prints a SecurityException instead of failing — so the
+        foreground has to be re-read rather than assumed, or this reports a restart that
+        left the app dead.
+        """
+        device = self.device
+        with self._acting():
+            device.stop_app(package)
+            pinned = False
+            if activity:
+                with contextlib.suppress(Exception):
+                    device.launch_app(package, activity=activity)
+                pinned = self._wait_foreground(package, _FLAGS_ENTRY_TIMEOUT_S)
+                if not pinned:
+                    logger.debug(
+                        "%s/%s did not come up; using the default entry", package, activity
+                    )
+            if not pinned:
+                with contextlib.suppress(Exception):
+                    device.launch_app(package)
+                if not self._wait_foreground(package):
+                    return Restart(False, None, f"{package} did not come back after the restart")
+            with contextlib.suppress(Exception):
+                device.wait_idle(3000)
+        # Where it LANDED, not where it was aimed: a build with two launcher activities
+        # resolves the default entry ambiguously, and the caller analyzes that screen next.
+        return Restart(True, self._foreground_activity(package), None)
+
+    def _verify_flags(
+        self,
+        package: str,
+        pairs: dict[str, str],
+        *,
+        prefs_file: str | None,
+        deadline_s: float,
+    ) -> PrefsRead:
+        """Poll the app's prefs until every requested key is there, or time runs out."""
+        from .flags import read_prefs
+
+        name = prefs_file or self.config.flags.prefs_files.get(package)
+        deadline = time.monotonic() + deadline_s
+        while True:
+            prefs = read_prefs(self.device, package, pairs, prefs_file=name)
+            if not prefs.verified or not (prefs.ignored or prefs.mismatched):
+                return prefs
+            if time.monotonic() >= deadline:
+                return prefs
+            time.sleep(0.25)
 
     def flags_apply(
         self,
@@ -3328,7 +3441,11 @@ class Engine:
         package: str | None = None,
         observe: bool = True,
         with_image: bool | str | None = None,
-    ) -> ActionResult:
+        restart: bool = True,
+        activity: str | None = None,
+        verify: bool = True,
+        prefs_file: str | None = None,
+    ) -> dict[str, Any]:
         from .flags import load_flags_file
 
         app, pairs = load_flags_file(path)
@@ -3338,7 +3455,16 @@ class Engine:
                 "flags apply needs a package",
                 hint="Put `app: <pkg>` in the YAML or pass `--package`.",
             )
-        return self.flags_set(pkg, pairs, observe=observe, with_image=with_image)
+        return self.flags_set(
+            pkg,
+            pairs,
+            observe=observe,
+            with_image=with_image,
+            restart=restart,
+            activity=activity,
+            verify=verify,
+            prefs_file=prefs_file,
+        )
 
     def proxy_start(self, *, port: int | None = None) -> dict[str, Any]:
         from . import proxy_mock as pm

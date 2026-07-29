@@ -301,12 +301,10 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
             return _result_ok(result.model_dump(mode="json"))
 
         elif cmd == "flags_set":
-            result = engine.flags_set(**args)
-            return _result_ok(result.model_dump(mode="json"))
+            return _result_ok(engine.flags_set(**args))
 
         elif cmd == "flags_apply":
-            result = engine.flags_apply(**args)
-            return _result_ok(result.model_dump(mode="json"))
+            return _result_ok(engine.flags_apply(**args))
 
         elif cmd == "proxy_start":
             return _result_ok(engine.proxy_start(**args))

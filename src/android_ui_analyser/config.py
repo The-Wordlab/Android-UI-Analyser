@@ -251,10 +251,15 @@ def _default_models() -> dict[str, dict[str, Any]]:
 
 
 class FlagsCfg(BaseModel):
-    """Feature-flag deeplink templates (package → URI with ``{query}`` placeholder)."""
+    """Feature-flag deeplink templates (package → URI with ``{query}`` placeholder).
+
+    ``prefs_files`` pins the ``shared_prefs`` XML the read-back verification reads
+    (package → filename); unset, every prefs file of the app is searched.
+    """
 
     model_config = ConfigDict(extra="forbid")
     templates: dict[str, str] = Field(default_factory=dict)
+    prefs_files: dict[str, str] = Field(default_factory=dict)
 
 
 class Config(BaseModel):
@@ -578,10 +583,14 @@ memory:
                        "purchase", "subscribe", "unsubscribe", "uninstall", "format",
                        "erase", "reset", "deactivate"]
 
-# Feature-flag deeplink templates (map a package to its debug set-flags deeplink):
+# Feature-flag deeplink templates — required per package (a set-flags scheme is an app's
+# private contract, so there are no built-ins). prefs_files is optional: it pins the
+# shared_prefs XML `flags set` reads back to verify (default: search all of them).
 # flags:
 #   templates:
 #     com.example.app: "myapp://set-flags?{query}"
+#   prefs_files:
+#     com.example.app: "flag_overrides.xml"
 
 # profiles:
 #   cloud:
