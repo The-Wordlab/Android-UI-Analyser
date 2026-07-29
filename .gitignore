@@ -26,3 +26,6 @@ runs/
 
 # Secrets — never commit. Keys live in env vars only (see README).
 .env
+
+# Built AOT thin client
+native/aua-fast/aua-fast

@@ -51,7 +51,10 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "Start the warm daemon",
         "`aua daemon start` — holds the device connection + loaded models warm so each later "
         "call is ~tens of ms instead of paying Python/connect startup. Optional; every command "
-        "still works without it.",
+        "still works without it. For even lower host latency on hot commands once the daemon is "
+        "up, build `native/aua-fast` (`make -C native/aua-fast install`) and use `aua-fast "
+        "analyze|tap|has|…` — a tiny C client that speaks the daemon socket (falls back to "
+        "`aua` if the daemon is down). See `docs/NATIVE_ROADMAP.md`.",
     ),
     (
         "Start from the app playbook",
