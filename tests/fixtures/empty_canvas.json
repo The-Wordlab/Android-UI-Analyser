@@ -26,6 +26,7 @@
     "password": false,
     "source": "hierarchy",
     "confidence": null,
-    "stable_key": "rid:surface"
+    "stable_key": "rid:surface",
+    "window": "app"
   }
 ]

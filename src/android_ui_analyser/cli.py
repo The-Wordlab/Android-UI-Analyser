@@ -530,6 +530,9 @@ def analyze(
     no_system: bool = typer.Option(
         False, "--no-system", help="Drop status-bar / system chrome (systemui ids, battery…)."
     ),
+    no_ime: bool = typer.Option(
+        False, "--no-ime", help="Drop soft-keyboard (IME) chrome so chat trees stay readable."
+    ),
     no_wrappers: bool = typer.Option(
         False,
         "--no-wrappers",
@@ -566,6 +569,7 @@ def analyze(
             fields=fields,
             nonempty=nonempty,
             no_system=no_system,
+            no_ime=no_ime,
             no_wrappers=no_wrappers,
             show_all=show_all,
             where_text=where_text,
@@ -2633,6 +2637,336 @@ def logcat_mark_cmd(
 
         result = engine.logcat_mark(name, clear=clear)
         typer.echo(json.dumps(result, ensure_ascii=False))
+
+    _run(ctx, go)
+
+
+# --------------------------------------------------------------------------- session capture
+
+
+capture_app = typer.Typer(
+    help="Rolling screencap buffer (always-on with daemon) — recover fast loading flashes.",
+    no_args_is_help=True,
+)
+app.add_typer(capture_app, name="capture")
+
+
+@capture_app.command("status")
+def capture_status_cmd(ctx: typer.Context) -> None:
+    """Show whether the buffer is running, fps mode, frame count, disk use."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.capture_status(), fmt)
+
+    _run(ctx, go)
+
+
+@capture_app.command("last")
+def capture_last_cmd(
+    ctx: typer.Context,
+    seconds: float | None = typer.Option(
+        None, "--seconds", help="Only frames from the last N seconds."
+    ),
+    since: str | None = typer.Option(
+        None,
+        "--since",
+        help="last-action — frames since the last tap/input/swipe mark.",
+    ),
+) -> None:
+    """Emit timeline JSON + frame paths + cheap local diff summary."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.capture_last(seconds=seconds, since=since), fmt)
+
+    _run(ctx, go)
+
+
+@capture_app.command("on")
+def capture_on_cmd(ctx: typer.Context) -> None:
+    """Resume (or start) the rolling capture buffer."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.capture_on(), fmt)
+
+    _run(ctx, go)
+
+
+@capture_app.command("off")
+def capture_off_cmd(ctx: typer.Context) -> None:
+    """Pause capture without stopping the daemon."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.capture_off(), fmt)
+
+    _run(ctx, go)
+
+
+@capture_app.command("prune")
+def capture_prune_cmd(ctx: typer.Context) -> None:
+    """Force TTL / max-size prune of old frames."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.capture_prune(), fmt)
+
+    _run(ctx, go)
+
+
+# --------------------------------------------------------------------------- developer options / a11y / flags / proxy
+
+
+dev_app = typer.Typer(
+    help="Developer options — anim scales, crash dialogs, AC profiles (always restore).",
+    no_args_is_help=True,
+)
+app.add_typer(dev_app, name="dev")
+
+
+@dev_app.command("show")
+def dev_show_cmd(ctx: typer.Context) -> None:
+    """Print current anim scales, crash/ANR flags, don't-keep-activities."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.dev_show(), fmt)
+
+    _run(ctx, go)
+
+
+@dev_app.command("anim")
+def dev_anim_cmd(
+    ctx: typer.Context,
+    mode: str = typer.Argument(..., help="off|restore"),
+) -> None:
+    """Turn animations off (saving prior scales) or restore them."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.dev_anim(mode), fmt)
+
+    _run(ctx, go)
+
+
+@dev_app.command("crashes")
+def dev_crashes_cmd(
+    ctx: typer.Context,
+    mode: str = typer.Argument(..., help="on|off"),
+) -> None:
+    """Show or hide crash/ANR dialogs (``show_crash_dialog`` + background ANR)."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        m = mode.lower()
+        if m not in ("on", "off"):
+            raise UsageError("use `aua dev crashes on` or `aua dev crashes off`")
+        _emit(engine.dev_crashes(m == "on"), fmt)
+
+    _run(ctx, go)
+
+
+@dev_app.command("profile")
+def dev_profile_cmd(
+    ctx: typer.Context,
+    name: str = typer.Argument(..., help="ac|default"),
+) -> None:
+    """Apply a named profile: ``ac`` (anim off + crashes on) or ``default`` (restore)."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.dev_profile(name), fmt)
+
+    _run(ctx, go)
+
+
+a11y_app = typer.Typer(
+    help="Accessibility actions — scroll / expand / dismiss via the a11y tree.",
+    no_args_is_help=True,
+)
+app.add_typer(a11y_app, name="a11y")
+
+
+@a11y_app.command("scroll")
+def a11y_scroll_cmd(
+    ctx: typer.Context,
+    ident: str | None = typer.Argument(None, help="Element id from the last analyze."),
+    by: str | None = _SEL_BY,
+    rid: str | None = _SEL_RID,
+    text: str | None = _SEL_TEXT,
+    desc: str | None = _SEL_DESC,
+    index: int | None = _SEL_INDEX,
+    first: bool = _SEL_FIRST,
+    forward: bool = typer.Option(False, "--forward", help="Scroll forward (default)."),
+    backward: bool = typer.Option(False, "--backward", help="Scroll backward."),
+    no_observe: bool = typer.Option(False, "--no-observe", help="Skip post-action analyze."),
+) -> None:
+    """Accessibility scroll on a scrollable node (prefer over coordinate swipe)."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        if forward and backward:
+            raise UsageError("pass only one of --forward / --backward")
+        direction = "backward" if backward else "forward"
+        sel = _selector(
+            ident=ident, by=by, rid=rid, text=text, desc=desc, index=index, first=first
+        )
+        _emit(
+            engine.a11y_scroll(
+                _element_id(ident, sel),
+                selector=sel,
+                direction=direction,
+                observe=not no_observe,
+            ),
+            fmt,
+        )
+
+    _run(ctx, go)
+
+
+@a11y_app.command("action")
+def a11y_action_cmd(
+    ctx: typer.Context,
+    ident: str | None = typer.Argument(None, help="Element id from the last analyze."),
+    action: str = typer.Argument(
+        ...,
+        help="CLICK|LONG_CLICK|SCROLL_FORWARD|SCROLL_BACKWARD|EXPAND|COLLAPSE|DISMISS",
+    ),
+    by: str | None = _SEL_BY,
+    rid: str | None = _SEL_RID,
+    text: str | None = _SEL_TEXT,
+    desc: str | None = _SEL_DESC,
+    index: int | None = _SEL_INDEX,
+    first: bool = _SEL_FIRST,
+    no_observe: bool = typer.Option(False, "--no-observe", help="Skip post-action analyze."),
+) -> None:
+    """Perform a named accessibility action on an element."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        sel = _selector(
+            ident=ident, by=by, rid=rid, text=text, desc=desc, index=index, first=first
+        )
+        _emit(
+            engine.a11y_action(
+                _element_id(ident, sel),
+                selector=sel,
+                action=action,
+                observe=not no_observe,
+            ),
+            fmt,
+        )
+
+    _run(ctx, go)
+
+
+flags_app = typer.Typer(
+    help="Feature flags via package deeplink templates (Luzia set-flags by default).",
+    no_args_is_help=True,
+)
+app.add_typer(flags_app, name="flags")
+
+
+@flags_app.command("set")
+def flags_set_cmd(
+    ctx: typer.Context,
+    package: str = typer.Argument(..., help="App package id."),
+    assignments: list[str] = typer.Argument(..., help="KEY=VAL pairs."),
+    no_observe: bool = typer.Option(False, "--no-observe"),
+) -> None:
+    """Open the package's set-flags deeplink with KEY=VAL pairs."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(
+            engine.flags_set(package, assignments, observe=not no_observe),
+            fmt,
+        )
+
+    _run(ctx, go)
+
+
+@flags_app.command("apply")
+def flags_apply_cmd(
+    ctx: typer.Context,
+    path: str = typer.Argument(..., help="YAML file: optional app: + flags: mapping."),
+    package: str | None = typer.Option(None, "--package", "-p", help="Override package."),
+    no_observe: bool = typer.Option(False, "--no-observe"),
+) -> None:
+    """Batch-apply flags from a YAML file."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.flags_apply(path, package=package, observe=not no_observe), fmt)
+
+    _run(ctx, go)
+
+
+proxy_app = typer.Typer(
+    help="Headless mitmproxy — device http_proxy + adb reverse (optional proxy extra).",
+    no_args_is_help=True,
+)
+app.add_typer(proxy_app, name="proxy")
+
+
+@proxy_app.command("start")
+def proxy_start_cmd(
+    ctx: typer.Context,
+    port: int = typer.Option(8080, "--port", help="mitmdump listen port."),
+) -> None:
+    """Start mitmdump, adb-reverse, and set the device HTTP proxy."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.proxy_start(port=port), fmt)
+
+    _run(ctx, go)
+
+
+@proxy_app.command("stop")
+def proxy_stop_cmd(ctx: typer.Context) -> None:
+    """Clear the device proxy and stop mitmdump."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.proxy_stop(), fmt)
+
+    _run(ctx, go)
+
+
+mock_app = typer.Typer(
+    help="HTTP mock map / record / replay (YAML cassettes under memory.dir/cassettes/).",
+    no_args_is_help=True,
+)
+app.add_typer(mock_app, name="mock")
+
+
+@mock_app.command("map")
+def mock_map_cmd(
+    ctx: typer.Context,
+    method: str = typer.Argument(..., help="HTTP method (GET|POST|…)."),
+    path: str = typer.Argument(..., help="Path to match (prefix or exact)."),
+    status: int = typer.Option(200, "--status", help="Response status."),
+    body: str | None = typer.Option(None, "--body", help="JSON or raw body string."),
+) -> None:
+    """Add a live mock rule (reloaded by the mitmproxy addon)."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.mock_map(method, path, status=status, body=body), fmt)
+
+    _run(ctx, go)
+
+
+@mock_app.command("record")
+def mock_record_cmd(
+    ctx: typer.Context,
+    action: str = typer.Argument(..., help="start|stop"),
+    name: str | None = typer.Argument(None, help="Cassette name (required for start)."),
+) -> None:
+    """Record traffic into a named YAML cassette."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.mock_record(action, name), fmt)
+
+    _run(ctx, go)
+
+
+@mock_app.command("replay")
+def mock_replay_cmd(
+    ctx: typer.Context,
+    name: str = typer.Argument(..., help="Cassette name (or path to .yaml)."),
+) -> None:
+    """Load a cassette as live mock rules."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.mock_replay(name), fmt)
 
     _run(ctx, go)
 

@@ -585,6 +585,26 @@ def _tool_definitions() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="capture_status",
+            description="Status of the rolling screencap buffer (daemon-warm).",
+            inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
+        ),
+        types.Tool(
+            name="capture_last",
+            description="Return recent capture frames + cheap local diff summary.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "seconds": {"type": "number"},
+                    "since": {
+                        "type": "string",
+                        "description": "Use 'last-action' for frames since the last tap/input.",
+                    },
+                },
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
             name="clock_set",
             description="Set the device clock to a Unix timestamp in milliseconds.",
             inputSchema={
@@ -593,6 +613,68 @@ def _tool_definitions() -> list[types.Tool]:
                     "ms": {"type": "integer", "description": "Unix timestamp in milliseconds."},
                 },
                 "required": ["ms"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="dev_profile",
+            description="Apply developer-option profile: ac (anim off + crashes on) or default.",
+            inputSchema={
+                "type": "object",
+                "properties": {"name": {"type": "string", "enum": ["ac", "default"]}},
+                "required": ["name"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="a11y_scroll",
+            description="Accessibility scroll on an element (forward or backward).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer"},
+                    "rid": {"type": "string"},
+                    "text": {"type": "string"},
+                    "direction": {"type": "string", "enum": ["forward", "backward"]},
+                    "observe": {"type": "boolean", "default": True},
+                },
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="flags_apply",
+            description="Apply feature flags from a YAML file via the package deeplink template.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "package": {"type": "string"},
+                },
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="proxy_start",
+            description="Start headless mitmproxy + device http_proxy (needs [proxy] extra).",
+            inputSchema={
+                "type": "object",
+                "properties": {"port": {"type": "integer", "default": 8080}},
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="proxy_stop",
+            description="Stop mitmproxy and clear the device HTTP proxy.",
+            inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
+        ),
+        types.Tool(
+            name="mock_replay",
+            description="Load a YAML cassette as live HTTP mock rules.",
+            inputSchema={
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
                 "additionalProperties": False,
             },
         ),
@@ -887,6 +969,38 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
     if name == "clock_set":
         ms = args.get("ms", args.get("timestamp_ms"))
         return _dump(engine.clock_set(timestamp_ms=int(ms) if ms is not None else None))
+    if name == "capture_status":
+        return _dump(engine.capture_status())
+    if name == "capture_last":
+        return _dump(
+            engine.capture_last(
+                seconds=args.get("seconds"),
+                since=args.get("since"),
+            )
+        )
+    if name == "dev_profile":
+        return _dump(engine.dev_profile(args["name"]))
+    if name == "a11y_scroll":
+        sel = _selector_from_args(args)
+        eid = int(args["id"]) if args.get("id") is not None else None
+        return _dump(
+            engine.a11y_scroll(
+                eid,
+                selector=sel,
+                direction=args.get("direction", "forward"),
+                observe=args.get("observe", True),
+            )
+        )
+    if name == "flags_apply":
+        return _dump(
+            engine.flags_apply(args["path"], package=args.get("package"), observe=True)
+        )
+    if name == "proxy_start":
+        return _dump(engine.proxy_start(port=args.get("port")))
+    if name == "proxy_stop":
+        return _dump(engine.proxy_stop())
+    if name == "mock_replay":
+        return _dump(engine.mock_replay(args["name"]))
     if name == "app":
         return _dump(
             engine.app(

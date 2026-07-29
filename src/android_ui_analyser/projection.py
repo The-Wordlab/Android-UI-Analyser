@@ -51,6 +51,8 @@ FIELD_ALIASES: dict[str, str] = {
     "password": "password",
     "source": "source",
     "confidence": "confidence",
+    "window": "window",
+    "stable_key": "stable_key",
 }
 
 # Aliases that render the shortened form of their underlying key.
@@ -163,6 +165,7 @@ class Projection:
     fields: tuple[str, ...] = ()
     nonempty: bool = False
     no_system: bool = False
+    no_ime: bool = False
     no_wrappers: bool = False
     where_text: tuple[str, ...] = ()
     where_rid: tuple[str, ...] = ()
@@ -184,6 +187,7 @@ class Projection:
         fields: str | None = None,
         nonempty: bool = False,
         no_system: bool = False,
+        no_ime: bool = False,
         no_wrappers: bool = False,
         show_all: bool = False,
         where_text: Sequence[str] | None = None,
@@ -207,6 +211,7 @@ class Projection:
             columns
             or nonempty
             or no_system
+            or no_ime
             or no_wrappers
             or show_all
             or where_text
@@ -223,6 +228,7 @@ class Projection:
             fields=columns,
             nonempty=(nonempty or is_tsv) and not show_all,
             no_system=(no_system or is_tsv) and not show_all,
+            no_ime=no_ime and not show_all,
             no_wrappers=no_wrappers and not show_all,
             where_text=tuple(s.lower() for s in (where_text or ()) if s),
             where_rid=tuple(s.lower() for s in (where_rid or ()) if s),
@@ -296,6 +302,7 @@ class Projection:
         checks = (
             not self.nonempty or _has_label(element),
             not self.no_system or not _is_system(element, screen_height),
+            not self.no_ime or not _is_ime(element),
             not self.clickable_only or bool(element.get("clickable")),
             not self.where_text or _matches(element.get("text"), self.where_text),
             not self.where_rid or _matches(element.get("resource_id"), self.where_rid),
@@ -458,6 +465,14 @@ def _wrapper_ids(elements: Sequence[dict[str, Any]]) -> frozenset[int]:
         for el, box in candidates
         if any(other is not el and ob is not None and _strictly_contains(box, ob) for other, ob in boxed)
     )
+
+
+def _is_ime(element: dict[str, Any]) -> bool:
+    """Soft-keyboard chrome — drop with ``--no-ime`` so chat trees stay readable."""
+    if element.get("window") == "ime":
+        return True
+    rid = element.get("resource_id") or ""
+    return "inputmethod" in rid.lower()
 
 
 def _is_system(element: dict[str, Any], screen_height: int) -> bool:

@@ -290,6 +290,47 @@ class FakeDevice(Device):
     def erase_chars(self, count: int) -> None:
         self.calls.append(("erase_chars", (count,)))
 
+    def shell(self, command: str) -> str:
+        self.calls.append(("shell", (command,)))
+        if not hasattr(self, "_settings"):
+            self._settings = {
+                ("global", "window_animation_scale"): "1",
+                ("global", "transition_animation_scale"): "1",
+                ("global", "animator_duration_scale"): "1",
+                ("global", "hide_error_dialogs"): "1",
+                ("secure", "anr_show_background"): "0",
+                ("global", "always_finish_activities"): "0",
+                ("global", "http_proxy"): ":0",
+            }
+        parts = command.split()
+        if len(parts) >= 4 and parts[0] == "settings" and parts[1] == "get":
+            return str(self._settings.get((parts[2], parts[3]), "null"))
+        if len(parts) >= 5 and parts[0] == "settings" and parts[1] == "put":
+            self._settings[(parts[2], parts[3])] = parts[4]
+            return ""
+        if len(parts) >= 4 and parts[0] == "settings" and parts[1] == "delete":
+            self._settings.pop((parts[2], parts[3]), None)
+            return ""
+        return ""
+
+    def a11y_action(self, x: int, y: int, action: str) -> None:
+        self.calls.append(("a11y_action", (x, y, action)))
+
+    def set_http_proxy(self, host_port: str | None) -> None:
+        self.calls.append(("set_http_proxy", (host_port,)))
+        if not hasattr(self, "_settings"):
+            self.shell("settings get global http_proxy")  # ensure dict
+        if host_port:
+            self._settings[("global", "http_proxy")] = host_port
+        else:
+            self._settings[("global", "http_proxy")] = ":0"
+
+    def adb_reverse(self, device_port: int, host_port: int) -> None:
+        self.calls.append(("adb_reverse", (device_port, host_port)))
+
+    def adb_reverse_remove(self, device_port: int) -> None:
+        self.calls.append(("adb_reverse_remove", (device_port,)))
+
     def open_link(self, uri: str, *, package: str | None = None) -> None:
         self.calls.append(("open_link", (uri,) if package is None else (uri, package)))
 
@@ -345,6 +386,8 @@ def make_config(**overrides: Any) -> Config:
     if state:
         base["memory"]["dir"] = str(Path(state) / "memory_home")
         base["cache"]["dir"] = str(Path(state) / "cache")
+        # Capture is always-on with a real daemon; keep unit tests quiet unless opted in.
+        base["capture"]["enabled"] = False
     merged = _deep_merge(base, overrides) if overrides else base
     return Config.model_validate(merged)
 

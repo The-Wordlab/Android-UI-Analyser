@@ -125,7 +125,7 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "of piping into a filter: `--fields id,text,rid,clickable` (`rid` = the short tail; "
         "`resource_id` = the full selector), `--where-text <substr>`, `--where-rid <substr>`, "
         "`--clickable`, `--region x1,y1,x2,y2` (header = `--region 0,0,1080,300 --clickable`), "
-        "`--limit N`, `--nonempty`, `--no-system`, `--meta <csv>` / `--no-meta` (the routes and "
+        "`--limit N`, `--nonempty`, `--no-system`, `--no-ime`, `--meta <csv>` / `--no-meta` (the routes and "
         "deeplink suggestions are worth reading once, not on every call). On View-based apps "
         "add `--no-wrappers` to drop the app's own id'd layout scaffolding (`app_bar`, "
         "`content_frame`) — inert, unlabelled boxes that wrap something; leaves and "
@@ -213,7 +213,7 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "analyze — views (use these instead of post-processing JSON)",
         "`--fields <csv>` (`id,text,rid,desc,bounds,center,type,clickable,enabled,focused,"
         "checkable,checked,selected,scrollable,long_clickable,password,resource_id,source,"
-        "confidence`), `--nonempty`, `--no-system`, `--no-wrappers`, `--all`, "
+        "confidence`), `--nonempty`, `--no-system`, `--no-ime`, `--no-wrappers`, `--all`, "
         "`--where-text <substr>`, "
         "`--where-rid <substr>`, `--clickable`, `--region x1,y1,x2,y2`, `--limit N`, "
         "`--meta <csv>`, `--no-meta` — repeatable where it makes sense, and free of a device "
@@ -287,6 +287,32 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "per-item pass/fail + summary; exit 8 if any fail",
     ),
     (
+        "capture",
+        "`capture status|last [--seconds N|--since last-action]|on|off|prune` — always-on "
+        "rolling screencap with the daemon (deduped frames + diff summary); see "
+        "`meta.capture_hint` after fast transitions",
+    ),
+    (
+        "dev",
+        "`dev show`, `dev anim off|restore`, `dev crashes on|off`, "
+        "`dev profile ac|default` (AC: anim off + crashes on; always restore)",
+    ),
+    (
+        "a11y",
+        "`a11y scroll <id|--rid …> [--forward|--backward]`, "
+        "`a11y action <id> CLICK|LONG_CLICK|SCROLL_FORWARD|…`; analyze `--no-ime`",
+    ),
+    (
+        "flags",
+        "`flags set <pkg> KEY=VAL…`, `flags apply file.yaml` — deeplink templates "
+        "(Luzia `luzia-test://set-flags?…` by default)",
+    ),
+    (
+        "proxy / mock",
+        "`proxy start|stop`, `mock map METHOD PATH [--status N --body '{…}']`, "
+        "`mock record start|stop NAME`, `mock replay NAME` (optional `[proxy]` extra)",
+    ),
+    (
         "map",
         '`--app <pkg>`, `--brief`, `--screen <name>`, `--depth N`, `--find "<goal>"`, `--json`',
     ),
@@ -300,6 +326,7 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "`run <name> [--param K=V] [--file PATH] [--dry-run] [--from-step N] "
         "[--no-allow-destructive] [--assist]`, `save <name> [--last N] [--force]`, "
         "`list|show|delete`. Steps incl. `launch_app`/`stop_app`/`open_link`/`goto`/`flow` "
+        "/ `dev_profile` / `a11y_scroll` / `flags_apply` / `proxy_start`/`stop` / `mock_replay` "
         "(a `flow:` step runs a saved flow inline — reuse a shared `login` recipe).",
     ),
     ("open / about / remember", "`open <uri>` deeplink; `about` app playbook; `remember …` teach it"),

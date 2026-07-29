@@ -26,7 +26,8 @@
     "password": false,
     "source": "hierarchy",
     "confidence": null,
-    "stable_key": "geo:WebView:q52:1a72b22ddd"
+    "stable_key": "geo:WebView:q52:1a72b22ddd",
+    "window": "app"
   },
   {
     "id": 1,
@@ -55,7 +56,8 @@
     "password": false,
     "source": "hierarchy",
     "confidence": null,
-    "stable_key": "tx:9d2b9d1d9c"
+    "stable_key": "tx:9d2b9d1d9c",
+    "window": "app"
   },
   {
     "id": 2,
@@ -84,7 +86,8 @@
     "password": false,
     "source": "hierarchy",
     "confidence": null,
-    "stable_key": "geo:View:q32:1ea821d438"
+    "stable_key": "geo:View:q32:1ea821d438",
+    "window": "app"
   },
   {
     "id": 3,
@@ -113,7 +116,8 @@
     "password": false,
     "source": "hierarchy",
     "confidence": null,
-    "stable_key": "geo:View:q52:f89e9c8732"
+    "stable_key": "geo:View:q52:f89e9c8732",
+    "window": "app"
   },
   {
     "id": 4,
@@ -142,7 +146,8 @@
     "password": false,
     "source": "hierarchy",
     "confidence": null,
-    "stable_key": "geo:View:q52:dfb6100438"
+    "stable_key": "geo:View:q52:dfb6100438",
+    "window": "app"
   },
   {
     "id": 5,
@@ -171,6 +176,7 @@
     "password": false,
     "source": "hierarchy",
     "confidence": null,
-    "stable_key": "geo:View:q52:b57f1eb85b"
+    "stable_key": "geo:View:q52:b57f1eb85b",
+    "window": "app"
   }
 ]
