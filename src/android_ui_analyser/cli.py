@@ -2874,10 +2874,48 @@ def a11y_action_cmd(
 
 
 flags_app = typer.Typer(
-    help="Feature flags via package deeplink templates (config `flags.templates`).",
+    help="Feature flags via a configured package deeplink template (`flags.templates`).",
     no_args_is_help=True,
 )
 app.add_typer(flags_app, name="flags")
+
+_FLAGS_RESTART = typer.Option(
+    True,
+    "--restart/--no-restart",
+    help="Force-stop + relaunch after writing (flags read at cold start need it).",
+)
+_FLAGS_ACTIVITY = typer.Option(
+    None, "--activity", help="Pin the relaunch entry Activity (default: the one in front)."
+)
+_FLAGS_VERIFY = typer.Option(
+    True,
+    "--verify/--no-verify",
+    help="Read the app's shared_prefs back and report which keys actually landed.",
+)
+_FLAGS_PREFS_FILE = typer.Option(
+    None, "--prefs-file", help="shared_prefs XML to verify against (default: search all)."
+)
+_FLAGS_NOT_APPLIED_HINT = (
+    "The app only honours keys it knows, so a dropped key is a broken precondition for "
+    "whatever runs next: check the spelling against the app's flag registry. "
+    "`--no-verify` returns to fire-and-forget."
+)
+_FLAGS_NO_RESTART_HINT = (
+    "The flags are set but the app is not running, so the next command has nothing to "
+    "read. Pin the entry point with `--activity <exported launcher activity>`."
+)
+
+
+def _exit_unless_flags_ok(result: dict[str, Any]) -> None:
+    """Non-zero when the flags did not land, or when the app did not come back."""
+    lost = result.get("ignored") or result.get("mismatched")
+    if result.get("restart_error") and not lost:
+        _exit_unless_ok(
+            result, ExitCode.ASSERTION, code="app_not_restarted", hint=_FLAGS_NO_RESTART_HINT
+        )
+    _exit_unless_ok(
+        result, ExitCode.ASSERTION, code="flags_not_applied", hint=_FLAGS_NOT_APPLIED_HINT
+    )
 
 
 @flags_app.command("set")
@@ -2886,14 +2924,31 @@ def flags_set_cmd(
     package: str = typer.Argument(..., help="App package id."),
     assignments: list[str] = typer.Argument(..., help="KEY=VAL pairs."),
     no_observe: bool = typer.Option(False, "--no-observe"),
+    restart: bool = _FLAGS_RESTART,
+    activity: str | None = _FLAGS_ACTIVITY,
+    verify: bool = _FLAGS_VERIFY,
+    prefs_file: str | None = _FLAGS_PREFS_FILE,
 ) -> None:
-    """Open the package's set-flags deeplink with KEY=VAL pairs."""
+    """Set flags through the package's deeplink, verify them, and restart the app.
+
+    Both defaults exist because the alternative lies to you: an app that reads a flag at
+    cold start ignores an override written into the live process, and a deeplink for a key
+    the app does not know is dropped silently. Verified keys land in ``applied``, dropped
+    ones in ``ignored`` — a non-empty ``ignored`` exits 8.
+    """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(
-            engine.flags_set(package, assignments, observe=not no_observe),
-            fmt,
+        result = engine.flags_set(
+            package,
+            assignments,
+            observe=not no_observe,
+            restart=restart,
+            activity=activity,
+            verify=verify,
+            prefs_file=prefs_file,
         )
+        _emit(result, fmt)
+        _exit_unless_flags_ok(result)
 
     _run(ctx, go)
 
@@ -2904,11 +2959,25 @@ def flags_apply_cmd(
     path: str = typer.Argument(..., help="YAML file: optional app: + flags: mapping."),
     package: str | None = typer.Option(None, "--package", "-p", help="Override package."),
     no_observe: bool = typer.Option(False, "--no-observe"),
+    restart: bool = _FLAGS_RESTART,
+    activity: str | None = _FLAGS_ACTIVITY,
+    verify: bool = _FLAGS_VERIFY,
+    prefs_file: str | None = _FLAGS_PREFS_FILE,
 ) -> None:
-    """Batch-apply flags from a YAML file."""
+    """Batch-apply flags from a YAML file (verifies + restarts like `flags set`)."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(engine.flags_apply(path, package=package, observe=not no_observe), fmt)
+        result = engine.flags_apply(
+            path,
+            package=package,
+            observe=not no_observe,
+            restart=restart,
+            activity=activity,
+            verify=verify,
+            prefs_file=prefs_file,
+        )
+        _emit(result, fmt)
+        _exit_unless_flags_ok(result)
 
     _run(ctx, go)
 

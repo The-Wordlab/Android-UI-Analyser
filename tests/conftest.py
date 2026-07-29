@@ -98,8 +98,14 @@ class FakeDevice(Device):
         serial: str = "fake-emulator-5554",
         clock_skew_ms: int = 0,
         utc_offset: int = 0,
+        prefs: dict[str, dict[str, str]] | None = None,
+        run_as_error: str | None = None,
     ) -> None:
         self.serial = serial
+        # shared_prefs XML the app "owns": filename → {key: value}, served over `run-as`
+        # exactly as Android writes it (so the real parser is under test, not a stub).
+        self.prefs = {k: dict(v) for k, v in (prefs or {}).items()}
+        self.run_as_error = run_as_error
         self._xml = hierarchy_xml
         self._w = width
         self._h = height
@@ -298,8 +304,45 @@ class FakeDevice(Device):
     def erase_chars(self, count: int) -> None:
         self.calls.append(("erase_chars", (count,)))
 
+    def prefs_xml(self, name: str) -> str:
+        """One shared_prefs file, in Android's own layout."""
+        entries = []
+        for key, value in self.prefs.get(name, {}).items():
+            if value in ("true", "false"):
+                entries.append(f'    <boolean name="{key}" value="{value}" />')
+            else:
+                entries.append(f'    <string name="{key}">{value}</string>')
+        body = "\n".join(entries)
+        return "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n<map>\n" f"{body}\n</map>"
+
+    def _run_as(self, command: str) -> str:
+        """Serve `run-as <pkg> ls|grep|cat` against :attr:`prefs` (or refuse like Android)."""
+        import re as _re
+        import shlex
+
+        if self.run_as_error:
+            return self.run_as_error
+        argv = shlex.split(command)[2:]
+        verb, args = argv[0], argv[1:]
+        if verb == "ls":
+            return "\n".join(sorted(self.prefs))
+        names = [a.rsplit("/", 1)[-1] for a in args if a.endswith(".xml")]
+        if verb == "grep":
+            pattern = args[1]
+            directory = args[2].rsplit("/", 1)[0]
+            return "\n".join(
+                f"{directory}/{n}"
+                for n in names
+                if n in self.prefs and _re.search(pattern, self.prefs_xml(n))
+            )
+        if verb == "cat":
+            return "\n".join(self.prefs_xml(n) for n in names if n in self.prefs)
+        return ""
+
     def shell(self, command: str) -> str:
         self.calls.append(("shell", (command,)))
+        if command.startswith("run-as "):
+            return self._run_as(command)
         if not hasattr(self, "_settings"):
             self._settings = {
                 ("global", "window_animation_scale"): "1",

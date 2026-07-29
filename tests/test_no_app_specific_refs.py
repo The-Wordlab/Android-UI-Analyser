@@ -41,11 +41,7 @@ _BANNED = _BANNED_NAMES + _BANNED_IDS
 # Repo-relative path -> why it may still name an app. Expected to stay empty; entries are
 # self-expiring (see test_allowlist_has_no_stale_entries), so an exemption cannot outlive
 # its reason.
-_ALLOWLIST: dict[str, str] = {
-    "src/android_ui_analyser/flags.py": (
-        "being rewritten in a parallel change that drops its hardcoded package->scheme map"
-    ),
-}
+_ALLOWLIST: dict[str, str] = {}
 
 _WHY = """
 `android-ui-analyser` is a PUBLIC repo and an app-agnostic tool: it must not name a
