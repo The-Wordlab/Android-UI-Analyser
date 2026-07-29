@@ -11,7 +11,9 @@ tests can drive it in-process; ``run_stdio()`` is what ``aua mcp`` invokes.
 
 from __future__ import annotations
 
+import base64
 import json
+from pathlib import Path
 from typing import Any
 
 import mcp.types as types
@@ -22,6 +24,48 @@ from .engine import Engine
 from .errors import AuaError
 
 SERVER_NAME = "android-ui-analyser"
+
+
+def _with_image(engine: Engine, args: dict[str, Any]) -> bool | str | None:
+    """Per-call ``with_image``, else the engine default set by ``configure``."""
+    if "with_image" in args:
+        return args["with_image"]
+    return getattr(engine, "_default_with_image", None)
+
+
+def _selector_from_args(args: dict[str, Any]) -> dict[str, Any] | None:
+    """Build ``resolve_selector`` kwargs from optional rid/text/desc (+ index/first)."""
+    rid, text, desc = args.get("rid"), args.get("text"), args.get("desc")
+    if rid is None and text is None and desc is None:
+        return None
+    sel: dict[str, Any] = {"rid": rid, "text": text, "desc": desc}
+    if args.get("index") is not None:
+        sel["index"] = int(args["index"])
+    if args.get("first"):
+        sel["first"] = True
+    return sel
+
+
+def _dump(result: Any) -> Any:
+    return result.model_dump(mode="json") if hasattr(result, "model_dump") else result
+
+
+_WITH_IMAGE_PROP: dict[str, Any] = {
+    "type": "boolean",
+    "description": "Also attach a post-action screenshot (overrides configure default).",
+}
+_OBSERVE_PROP: dict[str, Any] = {
+    "type": "boolean",
+    "default": True,
+    "description": "Also return the post-action screen analysis.",
+}
+_SELECTOR_PROPS: dict[str, Any] = {
+    "rid": {"type": "string", "description": "Match by resource-id."},
+    "text": {"type": "string", "description": "Match by visible text."},
+    "desc": {"type": "string", "description": "Match by content-desc."},
+    "index": {"type": "integer", "description": "0-based index when the selector is ambiguous."},
+    "first": {"type": "boolean", "default": False, "description": "Take the first match."},
+}
 
 
 # --------------------------------------------------------------------------- tool specs
@@ -44,6 +88,11 @@ def _tool_definitions() -> list[types.Tool]:
                     "query": {
                         "type": "string",
                         "description": "Return the single best-matching element.",
+                    },
+                    "with_image": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Also return the raw screenshot as an image block.",
                     },
                 },
                 "additionalProperties": False,
@@ -76,7 +125,11 @@ def _tool_definitions() -> list[types.Tool]:
             description="Tap the element with the given id (from the last analyze).",
             inputSchema={
                 "type": "object",
-                "properties": {"id": {"type": "integer"}},
+                "properties": {
+                    "id": {"type": "integer"},
+                    "observe": _OBSERVE_PROP,
+                    "with_image": _WITH_IMAGE_PROP,
+                },
                 "required": ["id"],
                 "additionalProperties": False,
             },
@@ -90,6 +143,8 @@ def _tool_definitions() -> list[types.Tool]:
                     "id": {"type": "integer"},
                     "text": {"type": "string"},
                     "submit": {"type": "boolean", "default": False},
+                    "observe": _OBSERVE_PROP,
+                    "with_image": _WITH_IMAGE_PROP,
                 },
                 "required": ["id", "text"],
                 "additionalProperties": False,
@@ -109,6 +164,8 @@ def _tool_definitions() -> list[types.Tool]:
                         "minItems": 4,
                         "maxItems": 4,
                     },
+                    "observe": _OBSERVE_PROP,
+                    "with_image": _WITH_IMAGE_PROP,
                 },
                 "additionalProperties": False,
             },
@@ -118,7 +175,11 @@ def _tool_definitions() -> list[types.Tool]:
             description="Press a hardware/navigation key (back|home|enter|recents|KEYCODE_*).",
             inputSchema={
                 "type": "object",
-                "properties": {"name": {"type": "string"}},
+                "properties": {
+                    "name": {"type": "string"},
+                    "observe": _OBSERVE_PROP,
+                    "with_image": _WITH_IMAGE_PROP,
+                },
                 "required": ["name"],
                 "additionalProperties": False,
             },
@@ -166,6 +227,8 @@ def _tool_definitions() -> list[types.Tool]:
                 "properties": {
                     "id": {"type": "integer"},
                     "ms": {"type": "integer", "default": 600},
+                    "observe": _OBSERVE_PROP,
+                    "with_image": _WITH_IMAGE_PROP,
                 },
                 "required": ["id"],
                 "additionalProperties": False,
@@ -180,6 +243,8 @@ def _tool_definitions() -> list[types.Tool]:
                     "text": {"type": "string"},
                     "match": {"type": "string", "enum": match_enum, "default": "contains"},
                     "ignore_case": {"type": "boolean", "default": False},
+                    "observe": _OBSERVE_PROP,
+                    "with_image": _WITH_IMAGE_PROP,
                 },
                 "required": ["text"],
                 "additionalProperties": False,
@@ -269,6 +334,309 @@ def _tool_definitions() -> list[types.Tool]:
             description="List attached devices (serial, model, android version, state).",
             inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
         ),
+        types.Tool(
+            name="double_tap",
+            description="Double-tap the element with the given id.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer"},
+                    "observe": _OBSERVE_PROP,
+                    "with_image": _WITH_IMAGE_PROP,
+                },
+                "required": ["id"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="clear",
+            description="Focus an element and clear its text field.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer"},
+                    "observe": _OBSERVE_PROP,
+                    "with_image": _WITH_IMAGE_PROP,
+                },
+                "required": ["id"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="scroll",
+            description="Scroll a direction (up|down|left|right); optional percent of the "
+            "scrollable container.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "direction": {
+                        "type": "string",
+                        "enum": ["up", "down", "left", "right"],
+                    },
+                    "percent": {"type": "integer", "default": 70},
+                    "observe": _OBSERVE_PROP,
+                    "with_image": _WITH_IMAGE_PROP,
+                },
+                "required": ["direction"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="expect",
+            description="Assert something about the screen (exists/absent/text/state). "
+            "ok=false means the assertion failed.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "rid": {"type": "string"},
+                    "text": {"type": "string"},
+                    "desc": {"type": "string"},
+                    "exists": {"type": "boolean", "default": False},
+                    "absent": {"type": "boolean", "default": False},
+                    "text_is": {"type": "string"},
+                    "text_contains": {"type": "string"},
+                    "checked": {"type": "boolean"},
+                    "enabled": {"type": "boolean"},
+                    "selected": {"type": "boolean"},
+                    "focused": {"type": "boolean"},
+                    "index": {"type": "integer"},
+                    "first": {"type": "boolean", "default": False},
+                    "timeout_ms": {"type": "integer", "default": 0},
+                    "poll_ms": {"type": "integer", "default": 250},
+                    "observe": {"type": "boolean", "default": False},
+                },
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="hide_keyboard",
+            description="Dismiss the soft keyboard (prefer over key back when the IME is up).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "observe": _OBSERVE_PROP,
+                    "with_image": _WITH_IMAGE_PROP,
+                },
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="open_link",
+            description="Open a deeplink URI. Pass package/prefer to skip the system "
+            "'Open with…' chooser.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "uri": {"type": "string"},
+                    "package": {
+                        "type": "string",
+                        "description": "Target package — pins the VIEW intent.",
+                    },
+                    "prefer": {
+                        "type": "string",
+                        "description": "If a chooser appears, auto-pick this package/label.",
+                    },
+                    "observe": _OBSERVE_PROP,
+                    "with_image": _WITH_IMAGE_PROP,
+                },
+                "required": ["uri"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="clipboard_set",
+            description="Set the device clipboard to the given text.",
+            inputSchema={
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="clipboard_get",
+            description="Read the device clipboard.",
+            inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
+        ),
+        types.Tool(
+            name="paste",
+            description="Paste the clipboard into the focused field.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "observe": _OBSERVE_PROP,
+                    "with_image": _WITH_IMAGE_PROP,
+                },
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="copy_text",
+            description="Copy an element's text/content-desc to the clipboard "
+            "(by id or rid/text/desc selector).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer"},
+                    **_SELECTOR_PROPS,
+                },
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="erase",
+            description="Erase text in a field: focus (optional id) then delete chars "
+            "or clear all.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer"},
+                    "chars": {
+                        "type": "integer",
+                        "description": "Delete this many characters; omit to clear all.",
+                    },
+                    "observe": _OBSERVE_PROP,
+                    "with_image": _WITH_IMAGE_PROP,
+                    **_SELECTOR_PROPS,
+                },
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="location_set",
+            description="Set GPS mock location (lat, lon).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "lat": {"type": "number"},
+                    "lon": {"type": "number"},
+                },
+                "required": ["lat", "lon"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="orientation_set",
+            description="Set screen orientation (portrait|landscape|…).",
+            inputSchema={
+                "type": "object",
+                "properties": {"mode": {"type": "string"}},
+                "required": ["mode"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="orientation_get",
+            description="Get the current screen orientation.",
+            inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
+        ),
+        types.Tool(
+            name="airplane_set",
+            description="Enable or disable airplane mode.",
+            inputSchema={
+                "type": "object",
+                "properties": {"enabled": {"type": "boolean"}},
+                "required": ["enabled"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="airplane_toggle",
+            description="Toggle airplane mode.",
+            inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
+        ),
+        types.Tool(
+            name="media_add",
+            description="Push a local media file onto the device (DCIM/Camera by default).",
+            inputSchema={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="record_start",
+            description="Start screen recording on the device.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Remote path on device (default /sdcard/aua_recording.mp4).",
+                    },
+                },
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="record_stop",
+            description="Stop screen recording and pull the MP4 to a local path.",
+            inputSchema={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="clock_set",
+            description="Set the device clock to a Unix timestamp in milliseconds.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ms": {"type": "integer", "description": "Unix timestamp in milliseconds."},
+                },
+                "required": ["ms"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="app",
+            description="Inspect or control the foreground app "
+            "(foreground|launch|stop|kill|clear|grant|current).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string"},
+                    "package": {"type": "string"},
+                    "activity": {"type": "string"},
+                    "clear_state": {"type": "boolean", "default": False},
+                },
+                "required": ["action"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="resolve",
+            description="Remap a previous-frame id or stable_key onto the current screen.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "description": "Previous-frame integer id or stable_key string.",
+                        "oneOf": [{"type": "integer"}, {"type": "string"}],
+                    },
+                },
+                "required": ["target"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="configure",
+            description="Set session defaults for subsequent action tools "
+            "(e.g. with_image on every observation).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "with_image": {
+                        "type": "boolean",
+                        "description": "Default with_image for action tools that observe.",
+                    },
+                },
+                "additionalProperties": False,
+            },
+        ),
     ]
 
 
@@ -277,66 +645,105 @@ def _tool_definitions() -> list[types.Tool]:
 
 def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
     """Call the engine method for ``name`` and return a JSON-serialisable payload."""
+    img = _with_image(engine, args)
+
     if name == "analyze_screen":
         result = engine.analyze(
             source=args.get("source", "auto"),
             with_ocr=args.get("with_ocr"),
             query=args.get("query"),
+            with_image=args.get("with_image", False),
         )
-        return result.model_dump(mode="json")
+        return _dump(result)
     if name == "has":
-        return engine.has(
-            args["text"],
-            match=args.get("match", "contains"),
-            ignore_case=args.get("ignore_case", False),
-            ocr_fallback=args.get("ocr_fallback", True),
-            by=args.get("by", "text"),
-        ).model_dump(mode="json")
+        return _dump(
+            engine.has(
+                args["text"],
+                match=args.get("match", "contains"),
+                ignore_case=args.get("ignore_case", False),
+                ocr_fallback=args.get("ocr_fallback", True),
+                by=args.get("by", "text"),
+            )
+        )
     if name == "tap":
-        return engine.tap(int(args["id"])).model_dump(mode="json")
+        return _dump(
+            engine.tap(
+                int(args["id"]),
+                observe=args.get("observe", True),
+                with_image=img,
+            )
+        )
     if name == "input":
-        return engine.input_text(
-            int(args["id"]), args["text"], submit=args.get("submit", False)
-        ).model_dump(mode="json")
+        return _dump(
+            engine.input_text(
+                int(args["id"]),
+                args["text"],
+                submit=args.get("submit", False),
+                observe=args.get("observe", True),
+                with_image=img,
+            )
+        )
     if name == "swipe":
         coords = args.get("coords")
         coord_tuple: tuple[int, int, int, int] | None = None
         if coords:
             x1, y1, x2, y2 = (int(c) for c in coords)
             coord_tuple = (x1, y1, x2, y2)
-        return engine.swipe(direction=args.get("direction"), coords=coord_tuple).model_dump(
-            mode="json"
+        return _dump(
+            engine.swipe(
+                direction=args.get("direction"),
+                coords=coord_tuple,
+                observe=args.get("observe", True),
+                with_image=img,
+            )
         )
     if name == "key":
-        return engine.key(args["name"]).model_dump(mode="json")
-    if name == "wait":
-        return engine.wait(
-            for_=args.get("for_"),
-            idle=args.get("idle", False),
-            timeout_ms=args.get("timeout", 5000),
-        ).model_dump(mode="json")
-    if name == "screenshot":
-        return engine.screenshot(args.get("path"), annotate=args.get("annotate", False)).model_dump(
-            mode="json"
+        return _dump(
+            engine.key(
+                args["name"],
+                observe=args.get("observe", True),
+                with_image=img,
+            )
         )
+    if name == "wait":
+        return _dump(
+            engine.wait(
+                for_=args.get("for_"),
+                idle=args.get("idle", False),
+                timeout_ms=args.get("timeout", 5000),
+            )
+        )
+    if name == "screenshot":
+        return _dump(engine.screenshot(args.get("path"), annotate=args.get("annotate", False)))
     if name == "inspect":
-        return engine.inspect(int(args["id"])).model_dump(mode="json")
+        return _dump(engine.inspect(int(args["id"])))
     if name == "long_press":
-        return engine.long_press(int(args["id"]), ms=int(args.get("ms", 600))).model_dump(
-            mode="json"
+        return _dump(
+            engine.long_press(
+                int(args["id"]),
+                ms=int(args.get("ms", 600)),
+                observe=args.get("observe", True),
+                with_image=img,
+            )
         )
     if name == "scroll_to":
-        return engine.scroll_to(
-            args["text"],
-            match=args.get("match", "contains"),
-            ignore_case=args.get("ignore_case", False),
-        ).model_dump(mode="json")
+        return _dump(
+            engine.scroll_to(
+                args["text"],
+                match=args.get("match", "contains"),
+                ignore_case=args.get("ignore_case", False),
+                observe=args.get("observe", True),
+                with_image=img,
+            )
+        )
     if name == "wait_stable":
-        return engine.wait_stable(
-            interval_ms=int(args.get("interval", 200)),
-            settle_ms=int(args.get("settle", 600)),
-            timeout_ms=int(args.get("timeout", 30000)),
-        ).model_dump(mode="json")
+        return _dump(
+            engine.wait_stable(
+                interval_ms=int(args.get("interval", 200)),
+                settle_ms=int(args.get("settle", 600)),
+                timeout_ms=int(args.get("timeout", 30000)),
+            )
+        )
     if name == "goto":
         # Plain dict (route/hops/handoff) — same payload the CLI/daemon emit.
         return engine.goto(
@@ -365,7 +772,159 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         )
     if name == "list_devices":
         return [d.model_dump(mode="json") for d in engine.list_devices()]
+    if name == "double_tap":
+        return _dump(
+            engine.double_tap(
+                int(args["id"]),
+                observe=args.get("observe", True),
+                with_image=img,
+            )
+        )
+    if name == "clear":
+        return _dump(
+            engine.clear(
+                int(args["id"]),
+                observe=args.get("observe", True),
+                with_image=img,
+            )
+        )
+    if name == "scroll":
+        return _dump(
+            engine.scroll(
+                args.get("direction"),
+                percent=int(args.get("percent", 70)),
+                observe=args.get("observe", True),
+                with_image=img,
+            )
+        )
+    if name == "expect":
+        return _dump(
+            engine.expect(
+                rid=args.get("rid"),
+                text=args.get("text"),
+                desc=args.get("desc"),
+                exists=args.get("exists", False),
+                absent=args.get("absent", False),
+                text_is=args.get("text_is"),
+                text_contains=args.get("text_contains"),
+                checked=args.get("checked"),
+                enabled=args.get("enabled"),
+                selected=args.get("selected"),
+                focused=args.get("focused"),
+                index=args.get("index"),
+                first=args.get("first", False),
+                timeout_ms=int(args.get("timeout_ms", args.get("timeout", 0))),
+                poll_ms=int(args.get("poll_ms", 250)),
+                observe=args.get("observe", False),
+            )
+        )
+    if name == "hide_keyboard":
+        return _dump(
+            engine.hide_keyboard(
+                observe=args.get("observe", True),
+                with_image=img,
+            )
+        )
+    if name == "open_link":
+        return _dump(
+            engine.open_link(
+                args["uri"],
+                package=args.get("package"),
+                prefer=args.get("prefer"),
+                observe=args.get("observe", True),
+                with_image=img,
+            )
+        )
+    if name == "clipboard_set":
+        return _dump(engine.clipboard_set(args["text"]))
+    if name == "clipboard_get":
+        return _dump(engine.clipboard_get())
+    if name == "paste":
+        return _dump(
+            engine.paste(
+                observe=args.get("observe", True),
+                with_image=img,
+            )
+        )
+    if name == "copy_text":
+        selector = _selector_from_args(args)
+        element_id = int(args["id"]) if args.get("id") is not None else None
+        return _dump(engine.copy_text(element_id, selector=selector))
+    if name == "erase":
+        selector = _selector_from_args(args)
+        element_id = int(args["id"]) if args.get("id") is not None else None
+        return _dump(
+            engine.erase(
+                element_id,
+                selector=selector,
+                chars=args.get("chars"),
+                observe=args.get("observe", True),
+                with_image=img,
+            )
+        )
+    if name == "location_set":
+        return _dump(engine.location_set(float(args["lat"]), float(args["lon"])))
+    if name == "orientation_set":
+        return _dump(engine.orientation_set(args["mode"]))
+    if name == "orientation_get":
+        return _dump(engine.orientation_get())
+    if name == "airplane_set":
+        return _dump(engine.airplane_set(bool(args["enabled"])))
+    if name == "airplane_toggle":
+        return _dump(engine.airplane_toggle())
+    if name == "media_add":
+        return _dump(engine.media_add(args["path"]))
+    if name == "record_start":
+        return _dump(engine.record_start(args.get("path")))
+    if name == "record_stop":
+        return _dump(engine.record_stop(args["path"]))
+    if name == "clock_set":
+        ms = args.get("ms", args.get("timestamp_ms"))
+        return _dump(engine.clock_set(timestamp_ms=int(ms) if ms is not None else None))
+    if name == "app":
+        return _dump(
+            engine.app(
+                args["action"],
+                package=args.get("package"),
+                activity=args.get("activity"),
+                clear_state=args.get("clear_state", False),
+            )
+        )
+    if name == "resolve":
+        # Engine.resolve may land soon; call through getattr so MCP stays ahead of the method.
+        result = getattr(engine, "resolve")(args["target"])  # noqa: B009
+        return _dump(result)
+    if name == "configure":
+        if "with_image" in args:
+            engine._default_with_image = args["with_image"]  # type: ignore[attr-defined]
+        return {
+            "ok": True,
+            "with_image": getattr(engine, "_default_with_image", None),
+        }
     raise AuaError(f"unknown tool '{name}'", code="usage")
+
+
+def _image_block(name: str, payload: Any) -> types.ImageContent | None:
+    """Return the produced screenshot as an inline image block, when there is one.
+
+    Vision-capable MCP clients get the actual pixels alongside the JSON; text-only
+    clients simply ignore the extra block. The path stays in the JSON either way.
+    """
+    if not isinstance(payload, dict):
+        return None
+    path: str | None = None
+    if name == "screenshot" and payload.get("ok"):
+        path = payload.get("detail")
+    else:
+        meta = payload.get("meta") or (payload.get("observation") or {}).get("meta") or {}
+        path = meta.get("raw_image") or meta.get("annotated_image")
+    if not path:
+        return None
+    try:
+        data = base64.b64encode(Path(path).read_bytes()).decode("ascii")
+    except OSError:
+        return None
+    return types.ImageContent(type="image", data=data, mimeType="image/png")
 
 
 # --------------------------------------------------------------------------- server
@@ -387,7 +946,11 @@ def build_server(engine: Engine) -> Server:
         except AuaError as err:
             text = json.dumps(err.to_dict(), ensure_ascii=False)
             return [types.TextContent(type="text", text=text)]
-        return [types.TextContent(type="text", text=text)]
+        blocks: list[types.ContentBlock] = [types.TextContent(type="text", text=text)]
+        image = _image_block(name, payload)
+        if image is not None:
+            blocks.append(image)
+        return blocks
 
     return server
 

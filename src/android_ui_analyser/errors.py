@@ -2,10 +2,22 @@
 
 Exit codes:
     0  success
+    1  ``has`` miss, OR an unexpected internal error (see :attr:`ExitCode.INTERNAL`)
     2  usage error
     3  no device / device error
     4  provider error after exhausting fallbacks
     5  config error
+    6  selector matched nothing (target/assertion target absent)
+    7  selector matched several (caller must disambiguate)
+    8  expectation failed (`aua expect` predicate is false)
+
+Codes 6-8 exist so an agent can tell *addressing* failures apart from *device* failures:
+a selector that matches nothing is a script bug, exit 3 is a broken phone. A silent
+success on either is the worst possible outcome for an autonomous caller.
+
+Exit ``1`` is overloaded on purpose: ``aua has`` uses it as a cheap boolean miss (no
+structured error), while an unexpected exception also exits ``1`` with
+``{"error":{"code":"internal_error",…}}`` on stderr — agents branch on the JSON shape.
 
 Errors print a structured object to **stderr** (JSON results go to stdout):
     {"error": {"code": ..., "message": ..., "hint": ...}}
@@ -21,10 +33,14 @@ from typing import IO
 
 class ExitCode(IntEnum):
     OK = 0
+    INTERNAL = 1  # also: `aua has` miss (no AuaError); see module docstring
     USAGE = 2
     DEVICE = 3
     PROVIDER = 4
     CONFIG = 5
+    NOT_FOUND = 6
+    AMBIGUOUS = 7
+    ASSERTION = 8
 
 
 class AuaError(Exception):
@@ -105,6 +121,27 @@ class StabilityTimeout(AuaError):
 
     exit_code = ExitCode.DEVICE
     code = "wait_timeout"
+
+
+class SelectorNotFoundError(AuaError):
+    """A ``--rid``/``--text``/``--by`` selector matched no element on screen."""
+
+    exit_code = ExitCode.NOT_FOUND
+    code = "selector_not_found"
+
+
+class SelectorAmbiguousError(AuaError):
+    """A selector matched several elements; picking one silently would be a coin flip."""
+
+    exit_code = ExitCode.AMBIGUOUS
+    code = "selector_ambiguous"
+
+
+class ExpectationFailed(AuaError):
+    """An ``aua expect`` predicate is false — a test failure, not a tool failure."""
+
+    exit_code = ExitCode.ASSERTION
+    code = "expectation_failed"
 
 
 def emit_error(err: AuaError, *, stream: IO[str] | None = None) -> int:

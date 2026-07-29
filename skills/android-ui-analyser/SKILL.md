@@ -26,33 +26,44 @@ description: >-
 7. **Replay whole journeys in one call (flows).** A flow is a Maestro-style YAML journey you can AUTHOR directly (no walking needed) or record: `aua flow save <name> --last N` materializes your recent actions (typed values become required `${PARAM_n}` placeholders — fill them in the file). `aua flow run <name> --param K=V` drives the whole journey — launch, taps, waits, asserts, cross-app auth, even `goto:` steps — and on divergence returns the failing step index + remaining steps; fix and resume with `--from-step N`. Flows live under `<memory.dir>/flows/*.yaml` (`aua flow list|show|delete`); `--dry-run` previews. Use a flow for any setup you repeat (reset account, log in, reach the screen under test) — one call instead of a dozen.
 8. **Optional: let a fast model recover or explore (opt-in).** If `planner.enabled` is set (+ an API key like GEMINI_API_KEY), you get two extras. (1) On a `goto`/`flow` divergence, add `--assist` and a fast planner LLM tries to recover in the same call (dismiss a popup, find the moved element) before handing off — the divergence hint tells you when it's worth trying. (2) `aua navigate "<goal>"` drives to a goal with no prior map AND records the path, so the next `aua goto` is a free deterministic replay. It's OFF by default and never touches the fast path; destructive taps still need `--allow-destructive`.
 9. **Drive by element ID.** `aua --format compact analyze` → a list of elements each with an integer `id` + bounds. Act on the id: `aua tap <id>`, `aua input <id> "text"`, `aua swipe up`, `aua key back`. Use `aua has "<text>"` (exit 0/1) to branch cheaply without parsing JSON.
-10. **Verify by resource-id, not just text.** `aua has "<id>" --by id` checks a resource-id (a bare tail like "containerChatDetail" works) — and it finds non-interactive **container** ids that `analyze` prunes from the element list, so it's the reliable way to assert you reached a screen (Maestro-style `assertVisible: id:`). `wait --for <id> --by id` and `scroll-to <id> --by id` take `--by id` too. If a screen is WebView/Compose-backed and its result text isn't in the tree at all, read it with `analyze --source vision`.
-11. **Act, then read the screen the action gives back.** IDs are only valid until the screen changes. By default every state-changing action (tap/input/swipe/scroll-to/key) returns the next screen inline in `observation` (elements with fresh ids) — so you rarely need a separate `analyze`: `type → tap send` is two calls, not three, and `goto` returns the destination's `elements` too. Pass `--no-observe` to skip it on action-only sequences. `observation` is a no-wait snapshot taken right after the action — use a plain `analyze` (after `wait --for-stable`) when the screen is still animating.
-12. **Wait on state, never sleep.** `aua wait --for "<text>"` waits for text to appear; `aua wait --for-stable` returns once the screen stops visually changing (cheap perceptual-hash over screenshots — ideal for image generation / loading / video, works on opaque screens). Prefer these to fixed sleeps.
-13. **Stop the daemon when done.** `aua daemon stop` releases the warm connection.
+10. **Ask for the columns you want — never post-process JSON.** **`aua --format tsv analyze` is the default way to look at a screen**: one element per line, tab-separated, `#`-commented summary on top, and status-bar/unlabelled noise already dropped (`--all` keeps everything). Narrow it in the same call instead of piping into a filter: `--fields id,text,rid,clickable` (`rid` = the short tail; `resource_id` = the full selector), `--where-text <substr>`, `--where-rid <substr>`, `--clickable`, `--region x1,y1,x2,y2` (header = `--region 0,0,1080,300 --clickable`), `--limit N`, `--nonempty`, `--no-system`, `--meta <csv>` / `--no-meta` (the routes and deeplink suggestions are worth reading once, not on every call). Filters of different kinds AND together, repeats of one kind OR together, and **ids are never renumbered** — the id in a filtered row is the id `aua tap` takes. The same flags work on `--format json|compact` when you want machine-readable output.
+11. **Read interaction state, don't screenshot it.** Every element carries `checkable`/`checked`/`selected`/`scrollable`/`long_clickable`/`password` alongside `clickable`/`enabled`/`focused`. So *is this switch on?* is `aua --format tsv analyze --where-rid pushSwitch --fields id,checkable,checked` — not a screenshot you have to look at. `selected` tells you which tab is active; `scrollable` tells you which container actually scrolls. These are **tri-state**: `true`/`false` when the accessibility node reported it, **empty/null when genuinely unknown** (a vision-derived element has no a11y attributes), so off never masquerades as unknown.
+12. **Verify by resource-id, not just text.** `aua has "<id>" --by id` checks a resource-id (a bare tail like "containerChatDetail" works) — and it finds non-interactive **container** ids that `analyze` prunes from the element list, so it's the reliable way to assert you reached a screen (Maestro-style `assertVisible: id:`). `wait --for <id> --by id` and `scroll-to <id> --by id` take `--by id` too. If a screen is WebView/Compose-backed and its result text isn't in the tree at all, read it with `analyze --source vision`.
+13. **Act, then read the screen the action gives back.** IDs are only valid until the screen changes. By default every state-changing action (tap/input/swipe/scroll-to/key) returns the next screen inline in `observation` (elements with fresh ids) — so you rarely need a separate `analyze`: `type → tap send` is two calls, not three, and `goto` returns the destination's `elements` too. Pass `--no-observe` to skip it on action-only sequences. `observation` is a no-wait snapshot taken right after the action — use a plain `analyze` (after `wait --for-stable`) when the screen is still animating.
+14. **Wait on state, never sleep.** `aua wait --for "<text>"` waits for text to appear; `aua wait --for-stable` returns once the screen stops visually changing (cheap perceptual-hash over screenshots — ideal for image generation / loading / video, works on opaque screens). Prefer these to fixed sleeps.
+15. **Stop the daemon when done.** `aua daemon stop` releases the warm connection.
 
 ## Flag placement (this bites people)
 **Global** flags go BEFORE the subcommand; **command** flags after.
 ✅ `aua --format compact analyze --source vision`  ·  ❌ `aua analyze --format compact` ("No such option").
-- _global, BEFORE the subcommand_: `--format json|pretty|compact`, `--serial`, `--config`, `--profile`, `--timeout`, `--log-level`, `--no-cache`
-- _analyze_: `--source auto|hierarchy|vision`, `--query "<nl>"`, `--deep`, `--cheap`, `--strategy <tier>`, `--annotate [path]`, `--with-ocr/--no-ocr`
+- _global, BEFORE the subcommand_: `--format json|pretty|compact|tsv` (`tsv` = the readable one, analyze only), `--serial`, `--config`, `--profile`, `--timeout`, `--log-level`, `--no-cache`, `--with-image` (session default: attach raw screenshots on analyze/actions — prefer off; use only when you must SEE pixels)
+- _analyze_: `--source auto|hierarchy|vision`, `--query "<nl>"`, `--deep`, `--cheap`, `--strategy <tier>`, `--annotate [path]`, `--with-image [path]` (also save the raw screenshot; path lands in `meta.raw_image`), `--with-ocr/--no-ocr`
+- _analyze — views (use these instead of post-processing JSON)_: `--fields <csv>` (`id,text,rid,desc,bounds,center,type,clickable,enabled,focused,checkable,checked,selected,scrollable,long_clickable,password,resource_id,source,confidence`), `--nonempty`, `--no-system`, `--all`, `--where-text <substr>`, `--where-rid <substr>`, `--clickable`, `--region x1,y1,x2,y2`, `--limit N`, `--meta <csv>`, `--no-meta` — repeatable where it makes sense, and free of a device round-trip when the flags are wrong (bad name → exit 2 listing the valid ones)
+- _screenshot_: `[PATH] | --out PATH`, `--region x1,y1,x2,y2` (crop before writing), `--scale <factor>`, `--max-width <px>`, `--annotate` (full-screen only) — crop/downscale when you must LOOK at something, so one header icon doesn't cost a 1080x2400 PNG in image tokens
+- _daemon / orient_: `daemon start --quiet` skips the app-orientation blob (48 screens, mined deeplinks, notes); read it deliberately with `aua orient` instead — useful once per session, noise on every restart
 - _has_: `--by text|id|desc` (id finds pruned containers), `--match exact|contains|regex`, `--ignore-case`, `--ocr-fallback/--no-ocr-fallback`, `--timeout <ms>`
 - _wait_: `--for "<text>"` (`--by id`, `--absent` = wait until it disappears), `--idle`, `--for-stable`, `--interval`, `--settle`, `--timeout`, `--observe` (fresh ids, even on a miss)
-- _app_: `launch <pkg> [--activity .Entry]` (pin the entry Activity on multi-launcher builds), `stop <pkg>`, `foreground`
+- _open_: `<uri> [--app|--package <pkg>] [--prefer <pkg|label>]` — pin the target app to skip the system 'Open with…' chooser; `--prefer` auto-taps a chooser row
+- _resolve_: `<id|stable_key>` — remap a previous-frame id (or `rid:…` key) onto the current screen after IDs churn
+- _app_: `launch <pkg> [--activity .Entry] [--clear]` (``--clear`` = Maestro clearState), `stop <pkg>`, `kill <pkg>`, `clear <pkg>`, `grant <pkg>`, `foreground`
+- _clipboard / paste / copy_: `clipboard set|get`, `paste`, `copy --rid/--text/--desc` (Maestro copyTextFrom / pasteText / setClipboard)
+- _erase_: `erase [ID] --chars N` (Maestro eraseText; omit ``--chars`` to clear the whole field)
+- _location / orientation / airplane / media / record / clock_: `location set LAT,LON`, `orientation set|get`, `airplane on|off|toggle`, `media add PATH`, `record start|stop PATH`, `clock set --ms <unix-ms>` (Maestro setLocation / setOrientation / setAirplaneMode / addMedia / startRecording / travel)
 - _map_: `--app <pkg>`, `--brief`, `--screen <name>`, `--depth N`, `--find "<goal>"`, `--json`
 - _goto_: `<goal>` (fuzzy), `--plan` (annotated route, no taps), `--max-steps N`, `--allow-destructive`, `--assist` (opt-in planner recovery)
 - _flow_: `run <name> [--param K=V] [--file PATH] [--dry-run] [--from-step N] [--no-allow-destructive] [--assist]`, `save <name> [--last N] [--force]`, `list|show|delete`. Steps incl. `launch_app`/`stop_app`/`open_link`/`goto`/`flow` (a `flow:` step runs a saved flow inline — reuse a shared `login` recipe).
 - _open / about / remember_: `open <uri>` deeplink; `about` app playbook; `remember …` teach it
 - _explore_: `mine <repo> --app <pkg>` harvests deeplink shortcuts from source into the playbook; `plan` returns a prioritized crawl worklist (probe deeplinks, expand dead-end screens) whose results auto-record
 - _navigate (opt-in planner)_: `<goal>` (natural language), `--until <text>`, `--max-steps N`, `--allow-destructive`, `--save-flow <name>` — needs `planner.enabled`
-- _actions (tap/input/swipe/scroll-to/key/…)_: return the post-action screen inline by default (`observation`, fresh ids); `--no-observe` to skip it
+- _actions (tap/double-tap/input/swipe/scroll/scroll-to/key/hide-keyboard/…)_: return the post-action screen inline by default (`observation`, fresh ids); `--no-observe` to skip it. Prefer `hide-keyboard` over `key back` when the IME is covering the tree
 
 ## The loop
 ```bash
-aua --format compact analyze     # elements[] with id, type, text, bounds, center, clickable
+aua --format tsv analyze         # READ the screen: one element per line, no noise
+aua --format compact analyze     # same screen as JSON, when you need it machine-readable
 aua tap 4                        # act by id (alias: click)
 aua input 2 "hello@example.com"  # focus id 2 and type (--submit fires the IME action)
-aua --format compact analyze     # RE-ANALYZE: ids are invalidated after any action
+aua --format tsv analyze         # RE-ANALYZE: ids are invalidated after any action
 ```
 Cheap presence check to branch on: `aua has "Sign in"` (exit 0 found / 1 not). `aua wait --for "Welcome"` polls until present; `aua wait --for-stable` returns once the screen settles (no OCR/hierarchy — just screenshots).
 
@@ -81,11 +92,20 @@ The tool maintains a persistent, **local-only** map per app under `memory.dir` (
 ## Worked examples
 ```bash
 # Optional: warm daemon so every later call is ~tens of ms.
-aua daemon start
+aua daemon start --quiet            # `aua orient` prints the app playbook on demand
 
 # See the screen. When the app is mapped the response already carries
 # meta.known_screen + meta.known_routes + meta.suggested_gotos — act on those.
-aua --format compact analyze
+aua --format tsv analyze
+
+# Just the header, just the tappable things (no JSON post-processing):
+aua --format tsv analyze --region 0,0,1080,300 --clickable --fields id,desc,rid
+
+# Is that switch on? Read the boolean instead of looking at a screenshot:
+aua --format tsv analyze --where-rid pushSwitch --fields id,checkable,checked
+
+# Must you actually SEE something? Crop it — a full 1080x2400 PNG is expensive:
+aua screenshot --region 0,0,1080,300 --out /tmp/header.png   # then read that file
 
 # Jump straight to a remembered screen (drives + verifies each hop,
 # including cross-app auth legs):
@@ -117,22 +137,29 @@ aua has "Done" && echo present
   "elements": [ { "id", "type", "text", "resource_id", "content_desc",
                   "bounds": [x1,y1,x2,y2], "center": [x,y],
                   "clickable", "enabled", "focused",
+                  "checkable", "checked", "selected",      // tri-state:
+                  "scrollable", "long_clickable", "password",  // null = unknown
                   "source": "hierarchy|detection|ocr|grounding", "confidence" } ],
   "meta":     { "duration_ms", "tier_used", "path", "providers_used",
                 "known_screen", "known_routes", "suggested_gotos", "map_hint",
-                "annotated_image", "device_serial" } }
+                "annotated_image", "raw_image", "device_serial" } }
 ```
-`compact` drops null/default fields for the smallest token footprint.
+`compact` drops null/default fields for the smallest token footprint — except `checked` on a `checkable` node, where *off* is the answer you asked for.
+Don't post-process this by hand. `--format tsv` plus `--fields`/`--where-*`/`--region`/`--limit` gives you exactly the rows and columns you want in the same call (see the flag table above); `--all` turns tsv's implicit noise filtering off.
+Need the actual pixels too? `--with-image [path]` on `analyze` AND on every action (tap/input/swipe/scroll-to/key/open) saves the raw screenshot to a timestamped file and returns its path in `meta.raw_image` (on actions: inside `observation.meta`) — Read that file when you must SEE the screen (visual fidelity, images, charts) instead of just addressing it. Over MCP the image comes back inline as an image content block. **Default off.** Do not pass `--with-image` on every step — hierarchy/TSV is faster and cheaper; images erase the token advantage of acting by id.
 
 ## Exit codes
 | Code | Meaning |
 |---|---|
 | 0 | success (`has`: text present) |
-| 1 | `has`: text not present |
+| 1 | `has`: text not present · OR unexpected internal error (structured `internal_error` on stderr) |
 | 2 | usage error |
 | 3 | no device / device error / `wait --for-stable` timeout |
 | 4 | provider error (fallback chain exhausted) |
 | 5 | config error |
+| 6 | selector matched nothing (`--rid`/`--text`/`--desc`) |
+| 7 | selector matched several candidates (disambiguate with `--index`/`--first`) |
+| 8 | `aua expect` assertion failed |
 
 Errors print `{"error":{"code","message","hint"}}` to **stderr**; JSON results go to **stdout** (pipe-clean).
 

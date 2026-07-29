@@ -16,6 +16,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 
+from .projection import FIELD_ALIASES, TSV_DEFAULT_FIELDS
+
 # Skill metadata. The description carries the trigger conditions that make Claude Code
 # auto-activate the skill on Android-UI tasks — keep it stable across regenerations.
 SKILL_NAME = "android-ui-analyser"
@@ -116,6 +118,30 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         'Use `aua has "<text>"` (exit 0/1) to branch cheaply without parsing JSON.',
     ),
     (
+        "Ask for the columns you want — never post-process JSON",
+        "**`aua --format tsv analyze` is the default way to look at a screen**: one element "
+        "per line, tab-separated, `#`-commented summary on top, and status-bar/unlabelled "
+        "noise already dropped (`--all` keeps everything). Narrow it in the same call instead "
+        "of piping into a filter: `--fields id,text,rid,clickable` (`rid` = the short tail; "
+        "`resource_id` = the full selector), `--where-text <substr>`, `--where-rid <substr>`, "
+        "`--clickable`, `--region x1,y1,x2,y2` (header = `--region 0,0,1080,300 --clickable`), "
+        "`--limit N`, `--nonempty`, `--no-system`, `--meta <csv>` / `--no-meta` (the routes and "
+        "deeplink suggestions are worth reading once, not on every call). Filters of different "
+        "kinds AND together, repeats of one kind OR together, and **ids are never renumbered** — "
+        "the id in a filtered row is the id `aua tap` takes. The same flags work on "
+        "`--format json|compact` when you want machine-readable output.",
+    ),
+    (
+        "Read interaction state, don't screenshot it",
+        "Every element carries `checkable`/`checked`/`selected`/`scrollable`/`long_clickable`/"
+        "`password` alongside `clickable`/`enabled`/`focused`. So *is this switch on?* is "
+        "`aua --format tsv analyze --where-rid pushSwitch --fields id,checkable,checked` — not a "
+        "screenshot you have to look at. `selected` tells you which tab is active; `scrollable` "
+        "tells you which container actually scrolls. These are **tri-state**: `true`/`false` when "
+        "the accessibility node reported it, **empty/null when genuinely unknown** (a "
+        "vision-derived element has no a11y attributes), so off never masquerades as unknown.",
+    ),
+    (
         "Verify by resource-id, not just text",
         '`aua has "<id>" --by id` checks a resource-id (a bare tail like "containerChatDetail" '
         "works) — and it finds non-interactive **container** ids that `analyze` prunes from "
@@ -156,23 +182,50 @@ ESCALATION_LADDER: list[tuple[str, str, str]] = [
 
 EXIT_CODES: list[tuple[str, str]] = [
     ("0", "success (`has`: text present)"),
-    ("1", "`has`: text not present"),
+    ("1", "`has`: text not present · OR unexpected internal error (structured `internal_error` on stderr)"),
     ("2", "usage error"),
     ("3", "no device / device error / `wait --for-stable` timeout"),
     ("4", "provider error (fallback chain exhausted)"),
     ("5", "config error"),
+    ("6", "selector matched nothing (`--rid`/`--text`/`--desc`)"),
+    ("7", "selector matched several candidates (disambiguate with `--index`/`--first`)"),
+    ("8", "`aua expect` assertion failed"),
 ]
 
 KEY_FLAGS: list[tuple[str, str]] = [
     (
         "global, BEFORE the subcommand",
-        "`--format json|pretty|compact`, `--serial`, `--config`, "
-        "`--profile`, `--timeout`, `--log-level`, `--no-cache`",
+        "`--format json|pretty|compact|tsv` (`tsv` = the readable one, analyze only), "
+        "`--serial`, `--config`, `--profile`, `--timeout`, `--log-level`, `--no-cache`, "
+        "`--with-image` (session default: attach raw screenshots on analyze/actions — "
+        "prefer off; use only when you must SEE pixels)",
     ),
     (
         "analyze",
         '`--source auto|hierarchy|vision`, `--query "<nl>"`, `--deep`, `--cheap`, '
-        "`--strategy <tier>`, `--annotate [path]`, `--with-ocr/--no-ocr`",
+        "`--strategy <tier>`, `--annotate [path]`, `--with-image [path]` (also save the raw "
+        "screenshot; path lands in `meta.raw_image`), `--with-ocr/--no-ocr`",
+    ),
+    (
+        "analyze — views (use these instead of post-processing JSON)",
+        "`--fields <csv>` (`id,text,rid,desc,bounds,center,type,clickable,enabled,focused,"
+        "checkable,checked,selected,scrollable,long_clickable,password,resource_id,source,"
+        "confidence`), `--nonempty`, `--no-system`, `--all`, `--where-text <substr>`, "
+        "`--where-rid <substr>`, `--clickable`, `--region x1,y1,x2,y2`, `--limit N`, "
+        "`--meta <csv>`, `--no-meta` — repeatable where it makes sense, and free of a device "
+        "round-trip when the flags are wrong (bad name → exit 2 listing the valid ones)",
+    ),
+    (
+        "screenshot",
+        "`[PATH] | --out PATH`, `--region x1,y1,x2,y2` (crop before writing), `--scale <factor>`, "
+        "`--max-width <px>`, `--annotate` (full-screen only) — crop/downscale when you must LOOK "
+        "at something, so one header icon doesn't cost a 1080x2400 PNG in image tokens",
+    ),
+    (
+        "daemon / orient",
+        "`daemon start --quiet` skips the app-orientation blob (48 screens, mined deeplinks, "
+        "notes); read it deliberately with `aua orient` instead — useful once per session, noise "
+        "on every restart",
     ),
     (
         "has",
@@ -186,9 +239,34 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "even on a miss)",
     ),
     (
+        "open",
+        "`<uri> [--app|--package <pkg>] [--prefer <pkg|label>]` — pin the target app to "
+        "skip the system 'Open with…' chooser; `--prefer` auto-taps a chooser row",
+    ),
+    (
+        "resolve",
+        "`<id|stable_key>` — remap a previous-frame id (or `rid:…` key) onto the current "
+        "screen after IDs churn",
+    ),
+    (
         "app",
-        "`launch <pkg> [--activity .Entry]` (pin the entry Activity on multi-launcher "
-        "builds), `stop <pkg>`, `foreground`",
+        "`launch <pkg> [--activity .Entry] [--clear]` (``--clear`` = Maestro clearState), "
+        "`stop <pkg>`, `kill <pkg>`, `clear <pkg>`, `grant <pkg>`, `foreground`",
+    ),
+    (
+        "clipboard / paste / copy",
+        "`clipboard set|get`, `paste`, `copy --rid/--text/--desc` (Maestro copyTextFrom / "
+        "pasteText / setClipboard)",
+    ),
+    (
+        "erase",
+        "`erase [ID] --chars N` (Maestro eraseText; omit ``--chars`` to clear the whole field)",
+    ),
+    (
+        "location / orientation / airplane / media / record / clock",
+        "`location set LAT,LON`, `orientation set|get`, `airplane on|off|toggle`, "
+        "`media add PATH`, `record start|stop PATH`, `clock set --ms <unix-ms>` (Maestro "
+        "setLocation / setOrientation / setAirplaneMode / addMedia / startRecording / travel)",
     ),
     (
         "map",
@@ -219,9 +297,10 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "`--allow-destructive`, `--save-flow <name>` — needs `planner.enabled`",
     ),
     (
-        "actions (tap/input/swipe/scroll-to/key/…)",
+        "actions (tap/double-tap/input/swipe/scroll/scroll-to/key/hide-keyboard/…)",
         "return the post-action screen inline by default (`observation`, fresh ids); "
-        "`--no-observe` to skip it",
+        "`--no-observe` to skip it. Prefer `hide-keyboard` over `key back` when the IME is "
+        "covering the tree",
     ),
 ]
 
@@ -280,14 +359,13 @@ def render_markdown(*, brief: bool = False) -> str:
     p.append("")
     p.append("## The loop")
     p.append("```bash")
-    p.append(
-        "aua --format compact analyze     # elements[] with id, type, text, bounds, center, clickable"
-    )
+    p.append("aua --format tsv analyze         # READ the screen: one element per line, no noise")
+    p.append("aua --format compact analyze     # same screen as JSON, when you need it machine-readable")
     p.append("aua tap 4                        # act by id (alias: click)")
     p.append(
         'aua input 2 "hello@example.com"  # focus id 2 and type (--submit fires the IME action)'
     )
-    p.append("aua --format compact analyze     # RE-ANALYZE: ids are invalidated after any action")
+    p.append("aua --format tsv analyze         # RE-ANALYZE: ids are invalidated after any action")
     p.append("```")
     p.append(
         'Cheap presence check to branch on: `aua has "Sign in"` (exit 0 found / 1 not). '
@@ -347,11 +425,20 @@ def render_markdown(*, brief: bool = False) -> str:
     p.append("## Worked examples")
     p.append("```bash")
     p.append("# Optional: warm daemon so every later call is ~tens of ms.")
-    p.append("aua daemon start")
+    p.append("aua daemon start --quiet            # `aua orient` prints the app playbook on demand")
     p.append("")
     p.append("# See the screen. When the app is mapped the response already carries")
     p.append("# meta.known_screen + meta.known_routes + meta.suggested_gotos — act on those.")
-    p.append("aua --format compact analyze")
+    p.append("aua --format tsv analyze")
+    p.append("")
+    p.append("# Just the header, just the tappable things (no JSON post-processing):")
+    p.append("aua --format tsv analyze --region 0,0,1080,300 --clickable --fields id,desc,rid")
+    p.append("")
+    p.append("# Is that switch on? Read the boolean instead of looking at a screenshot:")
+    p.append("aua --format tsv analyze --where-rid pushSwitch --fields id,checkable,checked")
+    p.append("")
+    p.append("# Must you actually SEE something? Crop it — a full 1080x2400 PNG is expensive:")
+    p.append("aua screenshot --region 0,0,1080,300 --out /tmp/header.png   # then read that file")
     p.append("")
     p.append("# Jump straight to a remembered screen (drives + verifies each hop,")
     p.append("# including cross-app auth legs):")
@@ -386,12 +473,32 @@ def render_markdown(*, brief: bool = False) -> str:
     p.append('  "elements": [ { "id", "type", "text", "resource_id", "content_desc",')
     p.append('                  "bounds": [x1,y1,x2,y2], "center": [x,y],')
     p.append('                  "clickable", "enabled", "focused",')
+    p.append('                  "checkable", "checked", "selected",      // tri-state:')
+    p.append('                  "scrollable", "long_clickable", "password",  // null = unknown')
     p.append('                  "source": "hierarchy|detection|ocr|grounding", "confidence" } ],')
     p.append('  "meta":     { "duration_ms", "tier_used", "path", "providers_used",')
     p.append('                "known_screen", "known_routes", "suggested_gotos", "map_hint",')
-    p.append('                "annotated_image", "device_serial" } }')
+    p.append('                "annotated_image", "raw_image", "device_serial" } }')
     p.append("```")
-    p.append("`compact` drops null/default fields for the smallest token footprint.")
+    p.append(
+        "`compact` drops null/default fields for the smallest token footprint — except "
+        "`checked` on a `checkable` node, where *off* is the answer you asked for."
+    )
+    p.append(
+        "Don't post-process this by hand. `--format tsv` plus `--fields`/`--where-*`/`--region`/"
+        "`--limit` gives you exactly the rows and columns you want in the same call (see the "
+        "flag table above); `--all` turns tsv's implicit noise filtering off."
+    )
+    p.append(
+        "Need the actual pixels too? `--with-image [path]` on `analyze` AND on every "
+        "action (tap/input/swipe/scroll-to/key/open) saves the raw screenshot to a "
+        "timestamped file and returns its path in `meta.raw_image` (on actions: inside "
+        "`observation.meta`) — Read that file when you must SEE the screen (visual "
+        "fidelity, images, charts) instead of just addressing it. Over MCP the image "
+        "comes back inline as an image content block. **Default off.** Do not pass "
+        "`--with-image` on every step — hierarchy/TSV is faster and cheaper; images erase "
+        "the token advantage of acting by id."
+    )
 
     p.append("")
     p.append("## Exit codes")
@@ -447,6 +554,12 @@ def render_json() -> dict[str, object]:
                 "clickable",
                 "enabled",
                 "focused",
+                "checkable",
+                "checked",
+                "selected",
+                "scrollable",
+                "long_clickable",
+                "password",
                 "source",
                 "confidence",
             ],
@@ -458,9 +571,28 @@ def render_json() -> dict[str, object]:
                 "known_screen",
                 "known_routes",
                 "suggested_gotos",
+                "suggested_deeplinks",
                 "map_hint",
                 "annotated_image",
+                "raw_image",
                 "device_serial",
+            ],
+        },
+        "element_views": {
+            "formats": ["json", "pretty", "compact", "tsv"],
+            "field_aliases": sorted(FIELD_ALIASES),
+            "tsv_default_fields": list(TSV_DEFAULT_FIELDS),
+            "filters": [
+                "--nonempty",
+                "--no-system",
+                "--all",
+                "--where-text",
+                "--where-rid",
+                "--clickable",
+                "--region",
+                "--limit",
+                "--meta",
+                "--no-meta",
             ],
         },
         "exit_codes": [{"code": c, "meaning": d} for c, d in EXIT_CODES],

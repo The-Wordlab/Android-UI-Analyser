@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "android-ui-analyser"
-version = "0.5.1"
+version = "0.6.0"
 description = "Fast, configurable CLI that gives an AI agent structured 'what's on screen and where' for Android UI testing — hierarchy-first, with pluggable vision/OCR/grounding fallbacks."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -68,6 +68,11 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["B011"]
+
+[tool.ruff.lint.flake8-bugbear]
+# Typer declares CLI options as argument defaults; B008 only trips on the mutable-annotated
+# ones (a repeatable `list[str]` option), which is the same idiom, not a real bug.
+extend-immutable-calls = ["typer.Option", "typer.Argument"]
 
 [tool.mypy]
 python_version = "3.11"

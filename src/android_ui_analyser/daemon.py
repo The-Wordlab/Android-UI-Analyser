@@ -135,16 +135,92 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
             result = engine.swipe(**args)
             return _result_ok(result.model_dump(mode="json"))
 
+        elif cmd == "scroll":
+            result = engine.scroll(**args)
+            return _result_ok(result.model_dump(mode="json"))
+
         elif cmd == "scroll_to":
             result = engine.scroll_to(**args)
+            return _result_ok(result.model_dump(mode="json"))
+
+        elif cmd == "expect":
+            result = engine.expect(**args)
             return _result_ok(result.model_dump(mode="json"))
 
         elif cmd == "key":
             result = engine.key(**args)
             return _result_ok(result.model_dump(mode="json"))
 
+        elif cmd == "double_tap":
+            result = engine.double_tap(**args)
+            return _result_ok(result.model_dump(mode="json"))
+
+        elif cmd == "hide_keyboard":
+            result = engine.hide_keyboard(**args)
+            return _result_ok(result.model_dump(mode="json"))
+
+        elif cmd == "paste":
+            result = engine.paste(**args)
+            return _result_ok(result.model_dump(mode="json"))
+
+        elif cmd == "copy_text":
+            result = engine.copy_text(**args)
+            return _result_ok(result.model_dump(mode="json"))
+
+        elif cmd == "erase":
+            result = engine.erase(**args)
+            return _result_ok(result.model_dump(mode="json"))
+
+        elif cmd == "clipboard_set":
+            result = engine.clipboard_set(**args)
+            return _result_ok(result.model_dump(mode="json"))
+
+        elif cmd == "clipboard_get":
+            result = engine.clipboard_get()
+            return _result_ok(result.model_dump(mode="json"))
+
+        elif cmd == "location_set":
+            result = engine.location_set(**args)
+            return _result_ok(result.model_dump(mode="json"))
+
+        elif cmd == "orientation_set":
+            result = engine.orientation_set(**args)
+            return _result_ok(result.model_dump(mode="json"))
+
+        elif cmd == "orientation_get":
+            result = engine.orientation_get()
+            return _result_ok(result.model_dump(mode="json"))
+
+        elif cmd == "airplane_set":
+            result = engine.airplane_set(**args)
+            return _result_ok(result.model_dump(mode="json"))
+
+        elif cmd == "airplane_toggle":
+            result = engine.airplane_toggle()
+            return _result_ok(result.model_dump(mode="json"))
+
+        elif cmd == "media_add":
+            result = engine.media_add(**args)
+            return _result_ok(result.model_dump(mode="json"))
+
+        elif cmd == "record_start":
+            result = engine.record_start(**args)
+            return _result_ok(result.model_dump(mode="json"))
+
+        elif cmd == "record_stop":
+            result = engine.record_stop(**args)
+            return _result_ok(result.model_dump(mode="json"))
+
+        elif cmd == "clock_set":
+            result = engine.clock_set(**args)
+            return _result_ok(result.model_dump(mode="json"))
+
         elif cmd == "open_link":
             result = engine.open_link(**args)
+            return _result_ok(result.model_dump(mode="json"))
+
+        elif cmd == "resolve":
+            result = engine.resolve(**args)
             return _result_ok(result.model_dump(mode="json"))
 
         elif cmd == "wait":
@@ -199,9 +275,11 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
                 "unknown_command",
                 f"unknown command: {cmd!r}",
                 hint="Valid commands: ping, analyze, has, inspect, screenshot, "
-                "tap, long_press, input, clear, swipe, scroll_to, key, open_link, "
-                "wait, wait_stable, memory_update, goto, flow_run, flow_save, navigate, "
-                "orient, list_devices, app",
+                "tap, long_press, double_tap, input, clear, swipe, scroll, scroll_to, expect, key, "
+                "hide_keyboard, paste, copy_text, erase, clipboard_set, clipboard_get, "
+                "location_set, orientation_set, orientation_get, airplane_set, airplane_toggle, "
+                "media_add, record_start, record_stop, clock_set, open_link, resolve, wait, wait_stable, "
+                "memory_update, goto, flow_run, flow_save, navigate, orient, list_devices, app",
             )
 
     except AuaError as exc:

@@ -11,8 +11,12 @@ from __future__ import annotations
 import contextlib
 import logging
 import re
+import signal
+import subprocess
 import time
 from abc import ABC, abstractmethod
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from .errors import DeviceError
@@ -131,8 +135,81 @@ class Device(ABC):
     def stop_app(self, package: str) -> None:  # overridden by real device
         raise DeviceError("app stop requires a real device")
 
-    def open_link(self, uri: str) -> None:  # overridden by real device
-        raise DeviceError("open-link requires a real device")
+    def clear_app(self, package: str) -> None:  # overridden by real device
+        """Wipe app data/cache (``pm clear``) — Maestro ``clearState``."""
+        raise DeviceError("app clear requires a real device")
+
+    def grant_permissions(self, package: str) -> None:  # overridden by real device
+        """Auto-grant runtime permissions for *package* (best-effort)."""
+        raise DeviceError("app grant requires a real device")
+
+    def open_link(self, uri: str, *, package: str | None = None) -> None:
+        raise DeviceError("open-link requires a real device")  # overridden by real device
+
+    def query_uri_handlers(self, uri: str) -> list[str]:
+        """Packages that claim *uri* (best-effort; empty when unknown)."""
+        return []
+
+    def double_click(self, x: int, y: int) -> None:
+        """Double-tap at pixel coordinates (default: two quick clicks)."""
+        self.click(x, y)
+        time.sleep(0.05)
+        self.click(x, y)
+
+    def hide_keyboard(self) -> None:
+        """Dismiss the soft keyboard without navigating away when possible.
+
+        Prefers ``KEYCODE_ESCAPE`` (does not finish the activity); falls back to
+        ``back``, which on Android usually only hides the IME when it is showing.
+        """
+        try:
+            self.press("KEYCODE_ESCAPE")
+        except Exception:  # pragma: no cover - device-specific
+            self.press("back")
+
+    # -- Maestro-style device controls (best-effort; emulators fare better) ---------
+
+    def set_clipboard(self, text: str) -> None:
+        raise DeviceError("clipboard requires a real device")
+
+    def get_clipboard(self) -> str:
+        raise DeviceError("clipboard requires a real device")
+
+    def paste(self) -> None:
+        """Paste clipboard into the focused field (``KEYCODE_PASTE``)."""
+        self.press("KEYCODE_PASTE")
+
+    def set_location(self, lat: float, lon: float) -> None:
+        raise DeviceError("location requires a real device")
+
+    def set_orientation(self, mode: str) -> None:
+        raise DeviceError("orientation requires a real device")
+
+    def get_orientation(self) -> str:
+        return "unknown"
+
+    def set_airplane_mode(self, enabled: bool) -> None:
+        raise DeviceError("airplane mode requires a real device")
+
+    def get_airplane_mode(self) -> bool | None:
+        return None
+
+    def add_media(self, local_path: str, *, remote_dir: str = "/sdcard/DCIM/Camera") -> str:
+        raise DeviceError("add media requires a real device")
+
+    def start_recording(self, remote_path: str = "/sdcard/aua_recording.mp4") -> str:
+        raise DeviceError("screen recording requires a real device")
+
+    def stop_recording(self, local_path: str) -> str:
+        raise DeviceError("screen recording requires a real device")
+
+    def set_clock(self, timestamp_ms: int) -> None:
+        raise DeviceError("clock travel requires a real device")
+
+    def erase_chars(self, count: int) -> None:
+        """Delete *count* characters before the caret in the focused field."""
+        for _ in range(max(0, count)):
+            self.press("KEYCODE_DEL")
 
     def close(self) -> None:  # overridden by real device
         """Release the device connection / on-device agent (no-op by default)."""
@@ -173,6 +250,23 @@ _PRESS_ALIASES = {
     "power": "power",
     "volume_up": "volume_up",
     "volume_down": "volume_down",
+    "del": "del",
+    "delete": "del",
+    "backspace": "del",
+    "paste": "paste",
+}
+
+_ORIENTATION_ALIASES = {
+    "portrait": "n",
+    "natural": "n",
+    "n": "n",
+    "landscape": "l",
+    "left": "l",
+    "l": "l",
+    "right": "r",
+    "r": "r",
+    "upsidedown": "u",
+    "u": "u",
 }
 
 
@@ -184,6 +278,8 @@ class Uiautomator2Device(Device):
         self._settle = settle_wait
         self._d: Any = None
         self._winsize: tuple[int, int] | None = None
+        self._recording_remote: str | None = None
+        self._recording_proc: subprocess.Popen[bytes] | None = None
         self._connect()
 
     # -- connection --------------------------------------------------------
@@ -393,10 +489,184 @@ class Uiautomator2Device(Device):
     def stop_app(self, package: str) -> None:
         self._call("app_stop", package)
 
-    def open_link(self, uri: str) -> None:
+    def clear_app(self, package: str) -> None:
+        # u2 wraps `pm clear` — resets to a fresh-install state (Maestro clearState).
+        self._call("app_clear", package)
+
+    def grant_permissions(self, package: str) -> None:
+        # Best-effort grant of all declared dangerous permissions (camera/mic/…).
+        self._call("app_auto_grant_permissions", package)
+
+    def double_click(self, x: int, y: int) -> None:
+        self._call("double_click", x, y)
+
+    def hide_keyboard(self) -> None:
+        # KEYCODE_ESCAPE (111) dismisses the IME without finishing the Activity; fall
+        # back to back if the shell path is unavailable on this OEM/build.
+        try:
+            self._d.shell("input keyevent 111")
+            return
+        except Exception as exc:
+            logger.debug("hide_keyboard escape failed (%s); using back", exc)
+        self.press("back")
+
+    def set_clipboard(self, text: str) -> None:
+        self._call("set_clipboard", text)
+
+    def get_clipboard(self) -> str:
+        clip = self._d.clipboard
+        return str(clip) if clip is not None else ""
+
+    def paste(self) -> None:
+        self._d.shell("input keyevent 279")  # KEYCODE_PASTE
+
+    def set_location(self, lat: float, lon: float) -> None:
+        # Emulator console accepts longitude first; physical devices may need mock-location.
+        try:
+            subprocess.run(
+                ["adb", "-s", self.serial, "emu", "geo", "fix", str(lon), str(lat)],
+                check=True,
+                capture_output=True,
+                timeout=15,
+            )
+            return
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+        try:
+            self._d.shell(f"cmd location set-location {lat} {lon}")
+        except Exception as exc:
+            raise DeviceError(
+                f"could not set location to {lat},{lon}",
+                hint="On emulators use an AVD; on physical devices enable mock locations.",
+            ) from exc
+
+    def set_orientation(self, mode: str) -> None:
+        key = _ORIENTATION_ALIASES.get(mode.lower())
+        if key is None:
+            raise DeviceError(
+                f"unknown orientation {mode!r}",
+                hint="Use portrait|landscape|left|right|natural (or n|l|r|u).",
+            )
+        self._call("set_orientation", key)
+
+    def get_orientation(self) -> str:
+        try:
+            return str(self._d.orientation or "unknown")
+        except Exception:  # pragma: no cover - best effort
+            return "unknown"
+
+    def set_airplane_mode(self, enabled: bool) -> None:
+        val = "1" if enabled else "0"
+        self._d.shell(f"settings put global airplane_mode_on {val}")
+        state = "true" if enabled else "false"
+        self._d.shell(
+            f"am broadcast -a android.intent.action.AIRPLANE_MODE --ez state {state}"
+        )
+
+    def get_airplane_mode(self) -> bool | None:
+        try:
+            raw = str(self._d.shell("settings get global airplane_mode_on")).strip()
+            if raw in ("0", "1"):
+                return raw == "1"
+        except Exception:  # pragma: no cover
+            return None
+        return None
+
+    def add_media(self, local_path: str, *, remote_dir: str = "/sdcard/DCIM/Camera") -> str:
+        src = Path(local_path).expanduser().resolve()
+        if not src.is_file():
+            raise DeviceError(f"media file not found: {src}")
+        remote = f"{remote_dir.rstrip('/')}/{src.name}"
+        self._call("push", str(src), remote)
+        self._d.shell(
+            f"am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file://{remote}"
+        )
+        return remote
+
+    def start_recording(self, remote_path: str = "/sdcard/aua_recording.mp4") -> str:
+        if self._recording_remote is not None:
+            raise DeviceError(
+                "a screen recording is already in progress",
+                hint="Run `aua record stop` before starting another.",
+            )
+        self._recording_remote = remote_path
+        self._recording_proc = subprocess.Popen(  # noqa: S603
+            ["adb", "-s", self.serial, "shell", "screenrecord", remote_path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return remote_path
+
+    def stop_recording(self, local_path: str) -> str:
+        if self._recording_remote is None:
+            raise DeviceError(
+                "no screen recording in progress", hint="Start one with `aua record start`."
+            )
+        remote = self._recording_remote
+        proc = self._recording_proc
+        self._recording_remote = None
+        self._recording_proc = None
+        try:
+            subprocess.run(  # noqa: S603
+                ["adb", "-s", self.serial, "shell", "pkill", "-l", "2", "screenrecord"],
+                check=False,
+                capture_output=True,
+                timeout=10,
+            )
+        finally:
+            if proc is not None and proc.poll() is None:
+                with contextlib.suppress(Exception):
+                    proc.send_signal(signal.SIGINT)
+                    proc.wait(timeout=5)
+        dest = Path(local_path).expanduser().resolve()
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        self._call("pull", remote, str(dest))
+        with contextlib.suppress(Exception):
+            self._d.shell(f"rm {remote}")
+        return str(dest)
+
+    def set_clock(self, timestamp_ms: int) -> None:
+        dt = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=UTC)
+        stamp = dt.strftime("%m%d%H%M%Y.%S")
+        try:
+            self._d.shell(f"date {stamp}")
+        except Exception as exc:
+            raise DeviceError(
+                "could not set device clock",
+                hint="Usually works on emulators/rooted devices only (Maestro travel).",
+            ) from exc
+
+    def erase_chars(self, count: int) -> None:
+        for _ in range(max(0, count)):
+            self._d.shell("input keyevent 67")  # KEYCODE_DEL
+
+    def open_link(self, uri: str, *, package: str | None = None) -> None:
+        # Prefer package-scoped VIEW intent to skip the system "Open with…" chooser.
+        if package:
+            from shlex import quote
+
+            self._d.shell(
+                f"am start -a android.intent.action.VIEW -d {quote(uri)} -p {quote(package)}"
+            )
+            return
         # u2's open_url shells out to `am start -a VIEW -d <uri>`; jumps straight to a
         # deeplinked screen (or triggers app actions like setting feature flags).
         self._call("open_url", uri)
+
+    def query_uri_handlers(self, uri: str) -> list[str]:
+        from shlex import quote
+
+        try:
+            out = self._d.shell(f"cmd package resolve-activity --brief -a android.intent.action.VIEW -d {quote(uri)}")
+            text = out if isinstance(out, str) else getattr(out, "output", str(out))
+        except Exception:
+            return []
+        pkgs: list[str] = []
+        for line in str(text).splitlines():
+            line = line.strip()
+            if "/" in line and not line.startswith("priority"):
+                pkgs.append(line.split("/", 1)[0])
+        return pkgs
 
 
 # --------------------------------------------------------------------------- factory

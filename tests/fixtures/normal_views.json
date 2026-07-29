@@ -18,8 +18,15 @@
     "clickable": false,
     "enabled": true,
     "focused": false,
+    "checkable": false,
+    "checked": false,
+    "selected": false,
+    "scrollable": false,
+    "long_clickable": false,
+    "password": false,
     "source": "hierarchy",
-    "confidence": null
+    "confidence": null,
+    "stable_key": "rid:title"
   },
   {
     "id": 1,
@@ -40,8 +47,15 @@
     "clickable": true,
     "enabled": true,
     "focused": true,
+    "checkable": false,
+    "checked": false,
+    "selected": false,
+    "scrollable": false,
+    "long_clickable": true,
+    "password": false,
     "source": "hierarchy",
-    "confidence": null
+    "confidence": null,
+    "stable_key": "rid:email"
   },
   {
     "id": 2,
@@ -62,8 +76,15 @@
     "clickable": true,
     "enabled": true,
     "focused": false,
+    "checkable": false,
+    "checked": false,
+    "selected": false,
+    "scrollable": false,
+    "long_clickable": true,
+    "password": true,
     "source": "hierarchy",
-    "confidence": null
+    "confidence": null,
+    "stable_key": "rid:password"
   },
   {
     "id": 3,
@@ -84,8 +105,15 @@
     "clickable": true,
     "enabled": true,
     "focused": false,
+    "checkable": true,
+    "checked": false,
+    "selected": false,
+    "scrollable": false,
+    "long_clickable": false,
+    "password": false,
     "source": "hierarchy",
-    "confidence": null
+    "confidence": null,
+    "stable_key": "rid:remember"
   },
   {
     "id": 4,
@@ -106,8 +134,15 @@
     "clickable": true,
     "enabled": true,
     "focused": false,
+    "checkable": false,
+    "checked": false,
+    "selected": false,
+    "scrollable": false,
+    "long_clickable": false,
+    "password": false,
     "source": "hierarchy",
-    "confidence": null
+    "confidence": null,
+    "stable_key": "rid:login_btn"
   },
   {
     "id": 5,
@@ -128,7 +163,14 @@
     "clickable": true,
     "enabled": true,
     "focused": false,
+    "checkable": false,
+    "checked": false,
+    "selected": false,
+    "scrollable": false,
+    "long_clickable": false,
+    "password": false,
     "source": "hierarchy",
-    "confidence": null
+    "confidence": null,
+    "stable_key": "rid:forgot"
   }
 ]

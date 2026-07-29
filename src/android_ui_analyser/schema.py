@@ -26,6 +26,7 @@ class Source(str, Enum):
     detection = "detection"
     ocr = "ocr"
     grounding = "grounding"
+    webview = "webview"
 
 
 class ScreenSource(str, Enum):
@@ -73,6 +74,7 @@ class OutputFormat(str, Enum):
     json = "json"
     pretty = "pretty"
     compact = "compact"
+    tsv = "tsv"  # one element per line, tab-separated (see :mod:`projection`)
 
 
 class MatchMode(str, Enum):
@@ -94,7 +96,16 @@ def center_of(bounds: Bounds) -> Center:
 
 
 class Element(BaseModel):
-    """One actionable thing on screen, identified by a stable integer ``id``."""
+    """One actionable thing on screen, identified by a stable integer ``id``.
+
+    The interaction-state flags (``checkable``/``checked``/``selected``/``scrollable``/
+    ``long_clickable``/``password``) are **tri-state**: ``True``/``False`` when the
+    accessibility node reported the attribute, ``None`` when it is genuinely unknown (a
+    vision-derived element has no a11y attributes at all). A caller reading a toggle must
+    be able to tell "off" from "unknown", so we never coerce a missing attribute to
+    ``False``. ``clickable``/``enabled``/``focused`` predate this rule and keep their
+    long-standing plain-``bool`` semantics.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -108,8 +119,16 @@ class Element(BaseModel):
     clickable: bool = False
     enabled: bool = True
     focused: bool = False
+    checkable: bool | None = None
+    checked: bool | None = None
+    selected: bool | None = None
+    scrollable: bool | None = None
+    long_clickable: bool | None = None
+    password: bool | None = None
     source: Source = Source.hierarchy
     confidence: float | None = None
+    # Cross-frame fingerprint — survives re-analyze ID churn (see ``identity.stable_key``).
+    stable_key: str | None = None
 
     def compact(self) -> dict[str, Any]:
         """Token-minimal dict: drop nulls and default-valued verbose fields."""
@@ -131,10 +150,32 @@ class Element(BaseModel):
             out["enabled"] = False
         if self.focused:
             out["focused"] = True
+        out.update(self._compact_state())
         if self.source is not Source.hierarchy:
             out["source"] = self.source.value
         if self.confidence is not None:
             out["confidence"] = round(self.confidence, 4)
+        if self.stable_key is not None:
+            out["stable_key"] = self.stable_key
+        return out
+
+    def _compact_state(self) -> dict[str, Any]:
+        """Interaction-state flags worth their tokens.
+
+        ``checked`` rides along whenever the node is ``checkable`` even when it is
+        ``False``, because on a checkable node the *off* state is the payload — dropping
+        it as a "default" would make a switch unreadable, which is the whole point of
+        these fields.
+        """
+        out: dict[str, Any] = {}
+        if self.checkable:
+            out["checkable"] = True
+            out["checked"] = self.checked
+        elif self.checked:
+            out["checked"] = True
+        for name in ("selected", "scrollable", "long_clickable", "password"):
+            if getattr(self, name):
+                out[name] = True
         return out
 
 
@@ -165,6 +206,7 @@ class Meta(BaseModel):
     )
     map_hint: str | None = None  # e.g. "12 screens mapped — run `aua map`"
     annotated_image: str | None = None
+    raw_image: str | None = None  # unannotated screenshot saved on request (--with-image)
     device_serial: str | None = None
 
 
@@ -261,6 +303,25 @@ class ActionResult(BaseModel):
         if self.observation is not None:
             data["observation"] = self.observation.as_dict(fmt)
         indent = 2 if fmt is OutputFormat.pretty else None
+        sep = None if indent else (",", ":")
+        return json.dumps(data, indent=indent, separators=sep, ensure_ascii=False)
+
+
+class ResolveResult(BaseModel):
+    """Remap a previous-frame id or ``stable_key`` onto the current screen."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ok: bool
+    from_id: int | None = None
+    to_id: int | None = None
+    stable_key: str | None = None
+    element: Element | None = None
+    detail: str | None = None
+
+    def render(self, fmt: OutputFormat | str = OutputFormat.json) -> str:
+        data = {k: v for k, v in self.model_dump(mode="json").items() if v is not None}
+        indent = 2 if OutputFormat(fmt) is OutputFormat.pretty else None
         sep = None if indent else (",", ":")
         return json.dumps(data, indent=indent, separators=sep, ensure_ascii=False)
 

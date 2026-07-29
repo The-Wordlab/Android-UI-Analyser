@@ -18,7 +18,14 @@
     "clickable": false,
     "enabled": true,
     "focused": false,
+    "checkable": false,
+    "checked": false,
+    "selected": false,
+    "scrollable": false,
+    "long_clickable": false,
+    "password": false,
     "source": "hierarchy",
-    "confidence": null
+    "confidence": null,
+    "stable_key": "rid:surface"
   }
 ]

@@ -62,7 +62,7 @@ def test_mcp_lists_core_tools() -> None:
     assert "analyze_screen" in names
     assert "tap" in names
     assert "has" in names
-    # Full 1:1 surface (PRD §11).
+    # Full 1:1 surface (PRD §11) + Maestro/device parity tools.
     assert {
         "analyze_screen",
         "tap",
@@ -80,6 +80,29 @@ def test_mcp_lists_core_tools() -> None:
         "flow_run",
         "navigate",
         "list_devices",
+        "double_tap",
+        "clear",
+        "scroll",
+        "expect",
+        "hide_keyboard",
+        "open_link",
+        "clipboard_set",
+        "clipboard_get",
+        "paste",
+        "copy_text",
+        "erase",
+        "location_set",
+        "orientation_set",
+        "orientation_get",
+        "airplane_set",
+        "airplane_toggle",
+        "media_add",
+        "record_start",
+        "record_stop",
+        "clock_set",
+        "app",
+        "resolve",
+        "configure",
     } <= set(names)
 
 
@@ -226,3 +249,55 @@ def test_mcp_goto_accepts_assist_param() -> None:
 
     data = anyio.run(run)
     assert "error" in data  # memory disabled → usage error, but the param was accepted
+
+
+def test_mcp_hide_keyboard_drives_device() -> None:
+    eng = _engine()
+    server = build_server(eng)
+
+    async def run() -> dict:
+        async with create_connected_server_and_client_session(server) as client:
+            result = await client.call_tool("hide_keyboard", {"observe": False})
+            assert not result.isError, result
+            return json.loads(_first_text(result))
+
+    data = anyio.run(run)
+    assert data["ok"] is True and data["action"] == "hide-keyboard"
+    assert ("hide_keyboard", ()) in eng.device.calls  # type: ignore[attr-defined]
+
+
+def test_mcp_clipboard_set() -> None:
+    eng = _engine()
+    server = build_server(eng)
+
+    async def run() -> dict:
+        async with create_connected_server_and_client_session(server) as client:
+            result = await client.call_tool("clipboard_set", {"text": "mcp-clip"})
+            assert not result.isError, result
+            return json.loads(_first_text(result))
+
+    data = anyio.run(run)
+    assert data["ok"] is True and data["detail"] == "mcp-clip"
+    assert eng.device.get_clipboard() == "mcp-clip"  # type: ignore[attr-defined]
+
+
+def test_mcp_resolve_dispatch_stub() -> None:
+    """MCP resolve calls getattr(engine, 'resolve') — smoke-test the wiring with a stub."""
+    from android_ui_analyser.schema import ResolveResult
+
+    eng = _engine()
+
+    def _fake_resolve(target: int | str) -> ResolveResult:
+        return ResolveResult(ok=True, from_id=1 if isinstance(target, int) else None, to_id=2)
+
+    eng.resolve = _fake_resolve  # type: ignore[method-assign]
+    server = build_server(eng)
+
+    async def run() -> dict:
+        async with create_connected_server_and_client_session(server) as client:
+            result = await client.call_tool("resolve", {"target": 1})
+            assert not result.isError, result
+            return json.loads(_first_text(result))
+
+    data = anyio.run(run)
+    assert data["ok"] is True and data.get("to_id") == 2

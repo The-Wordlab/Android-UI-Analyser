@@ -71,6 +71,18 @@ def _is_true(node: ET.Element, name: str) -> bool:
     return node.get(name) == "true"
 
 
+def _tri(node: ET.Element, name: str) -> bool | None:
+    """Tri-state boolean: ``None`` when the node never reported the attribute.
+
+    A caller reading an interaction state (is this switch on?) must be able to tell
+    *off* from *unknown*, so an absent attribute must not collapse to ``False``.
+    """
+    raw = node.get(name)
+    if raw is None:
+        return None
+    return raw == "true"
+
+
 def _short_type(class_name: str | None) -> str:
     """Short class name: the segment after the last ``.`` (``android.widget.Button`` → ``Button``)."""
     if not class_name:
@@ -139,6 +151,14 @@ def parse_hierarchy(xml: str, screen_size: tuple[int, int] | None = None) -> lis
         long_clickable = _is_true(node, "long-clickable")
         checkable = _is_true(node, "checkable")
         scrollable = _is_true(node, "scrollable")
+        state = {
+            "checkable": _tri(node, "checkable"),
+            "checked": _tri(node, "checked"),
+            "selected": _tri(node, "selected"),
+            "scrollable": _tri(node, "scrollable"),
+            "long_clickable": _tri(node, "long-clickable"),
+            "password": _tri(node, "password"),
+        }
         # `actionable` drives roll-up/absorption; a scrollable container stays a
         # separate element (it must NOT swallow the rows inside it).
         actionable = clickable or long_clickable or checkable
@@ -172,6 +192,7 @@ def parse_hierarchy(xml: str, screen_size: tuple[int, int] | None = None) -> lis
                         focused=_is_true(node, "focused"),
                         source=Source.hierarchy,
                         confidence=None,
+                        **state,
                     ),
                 )
             )
@@ -185,4 +206,8 @@ def parse_hierarchy(xml: str, screen_size: tuple[int, int] | None = None) -> lis
 
     # stable top-to-bottom, then left-to-right
     collected.sort(key=lambda pair: (pair[0][1], pair[0][0]))
-    return [element.model_copy(update={"id": i}) for i, (_b, element) in enumerate(collected)]
+    from .identity import attach_stable_keys
+
+    return attach_stable_keys(
+        [element.model_copy(update={"id": i}) for i, (_b, element) in enumerate(collected)]
+    )

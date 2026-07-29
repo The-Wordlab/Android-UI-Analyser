@@ -187,7 +187,9 @@ def merge_vision(
 
     # stable top-to-bottom, then left-to-right; assign sequential ids from start_id
     built.sort(key=lambda pair: (pair[0][1], pair[0][0]))
+    from .identity import attach_stable_keys
+
     elements: list[Element] = []
     for offset, (_bounds, element) in enumerate(built):
         elements.append(element.model_copy(update={"id": start_id + offset}))
-    return elements
+    return attach_stable_keys(elements)

@@ -51,6 +51,9 @@ _KINDS = {
     "wait_for": "wait-for",
     "wait_stable": "wait-stable",
     "assert_visible": "assert-visible",
+    "assert_not_visible": "assert-not-visible",
+    "hide_keyboard": "hide-keyboard",
+    "paste": "paste",
     "launch_app": "launch-app",
     "stop_app": "stop-app",
     "open_link": "open-link",
@@ -67,6 +70,7 @@ _ARG_ALIAS = {
     "scroll-to": "text",
     "wait-for": "text",
     "assert-visible": "text",
+    "assert-not-visible": "text",
     "launch-app": "package",
     "stop-app": "package",
     "open-link": "uri",
@@ -93,6 +97,22 @@ def _step_error(index: int, msg: str, hint: str | None = None) -> UsageError:
 
 
 def _parse_step(item: Any, index: int) -> RouteStep:
+    if isinstance(item, dict) and len(item) == 1:
+        ((key, value),) = item.items()
+        if key in ("repeat", "retry"):
+            if not isinstance(value, dict):
+                raise _step_error(index, f"{key} needs a mapping with `steps:`")
+            raw_sub = value.get("steps") or value.get("commands") or []
+            if not isinstance(raw_sub, list) or not raw_sub:
+                raise _step_error(index, f"{key} needs a non-empty `steps:` list")
+            substeps = [_parse_step(sub, index * 100 + j) for j, sub in enumerate(raw_sub)]
+            if key == "repeat":
+                times = int(value.get("times") or value.get("count") or 1)
+                return RouteStep(kind="repeat", repeat=times, substeps=substeps)
+            max_retries = int(
+                value.get("max_retries") or value.get("maxRetries") or value.get("times") or 3
+            )
+            return RouteStep(kind="retry", max_retries=max_retries, substeps=substeps)
     if isinstance(item, str):
         # Bare-string steps that need no argument (like Maestro's `- stopApp`).
         if _KINDS.get(item) in ("wait-stable", "launch-app", "stop-app"):
@@ -140,7 +160,7 @@ def _parse_step(item: Any, index: int) -> RouteStep:
             raise _step_error(index, "input needs `text:` (a literal or ${PARAM})")
         if not (kw["resource_id"] or kw["label"]):
             raise _step_error(index, "input needs an `id:` or `label:` field selector")
-    elif kind == "wait-stable":
+    elif kind in ("wait-stable", "hide-keyboard", "paste"):
         pass
     elif kind in ("launch-app", "stop-app"):
         # Optional arg: a bare `stop_app`/`launch_app` targets the flow's own app.
