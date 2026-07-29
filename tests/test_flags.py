@@ -22,6 +22,7 @@ from android_ui_analyser.device import Device
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.errors import UsageError
 from android_ui_analyser.flags import build_uri, load_flags_file, parse_assignments, parse_prefs
+from android_ui_analyser.memory import AppMemoryStore
 from conftest import FakeDevice, make_config
 
 runner = CliRunner()
@@ -251,6 +252,10 @@ def test_flags_set_restarts_the_app_by_default(tmp_path: Path) -> None:
     names = call_names(device)
     assert names.index("stop_app") < names.index("launch_app")
     assert result["restarted"] is True
+    assert result["context_id"].startswith("flags-hub-")
+    session = AppMemoryStore(engine.config.memory).load_session(device.serial)
+    assert session.active_flags == {"hub": "a"}
+    assert session.context_verified is True
 
 
 def test_flags_set_restart_relaunches_the_activity_that_was_in_front(tmp_path: Path) -> None:

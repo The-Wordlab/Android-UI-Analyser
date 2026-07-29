@@ -36,6 +36,7 @@ from .memory import (
     RouteStep,
     _id_tail,
     _shortest_path,
+    context_view,
     is_destructive_step,
     matches_any,
     redact_label,
@@ -1382,6 +1383,7 @@ class Engine:
             start=current,
             half_life_days=self.config.memory.rank_half_life_days,
             last_goal=sess.last_goal,
+            context_id=sess.active_context_id,
         )
         if target is None:
             return {
@@ -1389,7 +1391,9 @@ class Engine:
                 "code": "route_unknown",
                 "goal": goal,
                 "package": package,
-                "known_screens": list(app.screens),
+                "known_screens": list(
+                    context_view(app, sess.active_context_id).screens
+                ),
                 "hint": "no known screen matches; explore with `aua analyze`",
             }
         mem.set_last_goal(serial, goal)  # remember intent for ranking even if we divert
@@ -1404,7 +1408,9 @@ class Engine:
                 "route": [],
                 "hops": [],
             }
-        path = _shortest_path(app, target, start=current)
+        path = _shortest_path(
+            app, target, start=current, context_id=sess.active_context_id
+        )
         route = [{"from": e.from_screen, "action": e.action, "to": e.to_screen} for e in path]
         if not path:
             return {
@@ -2754,9 +2760,26 @@ class Engine:
             detail = f"{uri} (chooser→{target_pkg or 'picked'})"
         self._record_action_safe(step)
         self._remember_deeplink_safe(uri, package=target_pkg)
+        self._remember_pending_flag_context(uri, target_pkg)
         return self._observe(
             ActionResult(ok=True, action="open-link", detail=detail), observe, with_image
         )
+
+    def _remember_pending_flag_context(self, uri: str, package: str | None) -> None:
+        """Recognize configured raw set-flags links so a later manual launch is scoped."""
+        if not package or self._memory is None:
+            return
+        template = self.config.flags.templates.get(package)
+        if not template or "{query}" not in template:
+            return
+        prefix = template.split("{query}", 1)[0]
+        if not uri.startswith(prefix):
+            return
+        from urllib.parse import parse_qsl, urlsplit
+
+        flags = dict(parse_qsl(urlsplit(uri).query))
+        if flags:
+            self._memory.set_pending_flags(self.device.serial, package, flags)
 
     def _is_chooser(self) -> bool:
         """True when the system resolver / 'Open with…' UI is in the foreground."""
@@ -3376,8 +3399,7 @@ class Engine:
             else None
         )
         restarted = self._restart_app(package, entry) if restart else Restart(False, None, None)
-        self._observe(ActionResult(ok=True, action="flags-set"), observe, with_image)
-        return dump_result(
+        payload = dump_result(
             package=package,
             uri=uri,
             flags=pairs,
@@ -3386,6 +3408,21 @@ class Engine:
             activity=restarted.activity,
             restart_error=restarted.error,
         )
+        if restarted.ok and self._memory is not None:
+            active = prefs.applied if prefs is not None and prefs.verified else pairs
+            fully_verified = bool(
+                prefs is not None and prefs.verified and not prefs.ignored and not prefs.mismatched
+            )
+            self._memory.activate_flag_context(
+                self.device.serial,
+                package,
+                active,
+                app_version=self._version_for(self.device, package),
+                verified=fully_verified,
+            )
+            payload["context_id"] = self._memory.load_session(self.device.serial).active_context_id
+        self._observe(ActionResult(ok=True, action="flags-set"), observe, with_image)
+        return payload
 
     def _foreground_activity(self, package: str) -> str | None:
         """The activity of *package* if it is in the foreground — the one to relaunch."""
@@ -3672,6 +3709,15 @@ class Engine:
                 # activities (e.g. a Dev Tools menu) and default resolution is
                 # nondeterministic.
                 device.launch_app(package, activity=activity)
+            if self._memory is not None:
+                if clear_state:
+                    self._memory.clear_context(device.serial, package)
+                else:
+                    self._memory.promote_pending_context(
+                        device.serial,
+                        package,
+                        app_version=self._version_for(device, package),
+                    )
             detail = f"{package}/{activity}" if activity else package
             if clear_state:
                 detail = f"{detail} (cleared)"
@@ -3699,6 +3745,8 @@ class Engine:
                 )
             with self._acting():
                 device.clear_app(package)
+            if self._memory is not None:
+                self._memory.clear_context(device.serial, package)
             return ActionResult(ok=True, action="app-clear", detail=package)
         if a in ("grant", "grant-permissions", "grant_permissions"):
             if not package:

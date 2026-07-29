@@ -34,7 +34,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -42,7 +42,9 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from .config import MemoryCfg
     from .schema import Element
 
-MEMORY_SCHEMA_VERSION = 2
+MEMORY_SCHEMA_VERSION = 3
+LEGACY_CONTEXT_ID = "legacy-default"
+DEFAULT_CONTEXT_ID = "default"
 
 # Session pending buffer: cap on steps accumulated between analyzes (a hit DROPS the
 # eventual edge — a truncated step list would replay wrong), and a TTL so an abandoned
@@ -105,6 +107,12 @@ GENERIC_INBOUND = frozenset(
         "login",
         "log_in",
         "sign_in",
+        "just_once",
+        "while_using_the_app",
+        "only_this_time",
+        "always_allow",
+        "open",
+        "create",
     }
 )
 
@@ -124,9 +132,64 @@ class KeyElement(BaseModel):
     value: str | None = None  # shape only, never the literal value (e.g. "<filled>")
 
 
+class ContextRecord(BaseModel):
+    """A reproducible UI configuration, normally created from verified feature flags."""
+
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    flags: dict[str, str] = Field(default_factory=dict)
+    app_version: str | None = None
+    shell_anchors: list[str] = Field(default_factory=list)
+    source: Literal["legacy", "default", "flags_verified", "flags_unverified", "agent"] = "default"
+    verified: bool = False
+    first_seen: str
+    last_seen: str
+
+
+class KnowledgeEvidence(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    kind: Literal["source", "runtime", "agent", "user"] = "agent"
+    ref: str | None = None
+    detail: str | None = None
+
+
+class KnowledgeScope(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    package: str
+    app_version: str | None = None
+    context_id: str | None = None
+    flags: dict[str, str] = Field(default_factory=dict)
+
+
+class KnowledgeItem(BaseModel):
+    """A provenance-bearing fact learned from a person, agent, runtime, or source."""
+
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    kind: Literal["description", "note", "recipe", "deeplink", "claim"] = "note"
+    text: str
+    name: str | None = None
+    scope: KnowledgeScope
+    source: Literal["legacy", "user", "agent", "runtime", "source"] = "agent"
+    agent: str | None = None
+    session: str | None = None
+    evidence: list[KnowledgeEvidence] = Field(default_factory=list)
+    status: Literal["accepted", "proposed", "stale", "rejected"] = "accepted"
+    created_at: str
+    last_verified: str | None = None
+
+
 class ScreenRecord(BaseModel):
     model_config = ConfigDict(extra="ignore")
     name: str
+    id: str | None = None
+    canonical_name: str | None = None
+    aliases: list[str] = Field(default_factory=list)
+    logical_name: str | None = None
+    variant: str | None = None
+    state: str | None = None
+    context_id: str = DEFAULT_CONTEXT_ID
+    name_source: Literal["explicit", "resource", "title", "route", "activity", "legacy"] = "legacy"
     activity: str | None = None
     signature: str
     anchors: list[str] = Field(default_factory=list)
@@ -171,9 +234,12 @@ class RouteStep(BaseModel):
 
 class RouteEdge(BaseModel):
     model_config = ConfigDict(extra="ignore")
+    id: str | None = None
     from_screen: str
     to_screen: str
     action: str  # human label, e.g. "tap 'Apps'" (derived from steps when present)
+    context_id: str = DEFAULT_CONTEXT_ID
+    guards: dict[str, str] = Field(default_factory=dict)
     steps: list[RouteStep] = Field(default_factory=list)  # [] = legacy pre-v2 edge
     count: int = 1
     last_seen: str
@@ -211,6 +277,10 @@ class AppMap(BaseModel):
     deeplinks: list[Deeplink] = Field(default_factory=list)  # shortcuts (set flags, jump)
     recipes: list[Recipe] = Field(default_factory=list)  # login_full, etc.
     notes: list[str] = Field(default_factory=list)  # quirks worth remembering
+    contexts: dict[str, ContextRecord] = Field(default_factory=dict)
+    knowledge: list[KnowledgeItem] = Field(default_factory=list)
+    research_tasks: list[dict[str, object]] = Field(default_factory=list)
+    pending_reports: list[dict[str, object]] = Field(default_factory=list)
     screens: dict[str, ScreenRecord] = Field(default_factory=dict)
     routes: list[RouteEdge] = Field(default_factory=list)
 
@@ -226,6 +296,10 @@ class SessionState(BaseModel):
     pending_overflow: bool = False  # cap hit → the eventual edge is dropped, never garbled
     recent: list[RouteStep] = Field(default_factory=list)  # rolling journal (`flow save`)
     last_goal: str | None = None  # last `goto`/find target (boosts ranked suggestions)
+    active_context_id: str = DEFAULT_CONTEXT_ID
+    active_flags: dict[str, str] = Field(default_factory=dict)
+    pending_flags: dict[str, str] = Field(default_factory=dict)
+    context_verified: bool = False
 
     @field_validator("pending", "recent", mode="before")
     @classmethod
@@ -341,10 +415,17 @@ def _looks_dynamic(text: str) -> bool:
     t = text.strip()
     if not t:
         return True
-    digits = sum(c.isdigit() for c in t)
-    if digits and digits / len(t) > 0.4:
+    if re.fullmatch(r"v?\d+(?:[._:/-]\d+){1,}(?:[-+._a-z0-9]*)?", t, re.IGNORECASE):
         return True
-    return bool(re.search(r"\d{1,2}:\d{2}", t))
+    if re.fullmatch(r"\d{1,4}(?:[./-]\d{1,4}){1,2}", t):
+        return True
+    digits = sum(c.isdigit() for c in t)
+    if digits and digits / len(t) > 0.30:
+        return True
+    return bool(
+        re.search(r"\d{1,2}:\d{2}", t)
+        or re.search(r"\b(today|yesterday|\d+\s*(min|hour|day|week)s?\s+ago)\b", t, re.I)
+    )
 
 
 def _id_tail(resource_id: str | None) -> str | None:
@@ -407,6 +488,8 @@ def screen_anchors(
         tail = _id_tail(el.resource_id)
         if tail and not _looks_dynamic(tail):
             anchors.add("id:" + tail.lower())
+            if el.selected is True or el.checked is True:
+                anchors.add("sel:" + tail.lower())
         cd = (el.content_desc or "").strip()
         if (
             cd
@@ -426,6 +509,23 @@ def screen_anchors(
     return anchors
 
 
+def shell_anchors(elements: list[Element], *, height: int | None = None) -> set[str]:
+    """Stable persistent-navigation anchors used to describe a context's app shell."""
+    anchors: set[str] = set()
+    for el in elements:
+        if not _bottom_nav(el, height):
+            continue
+        tail = _id_tail(el.resource_id)
+        label = (el.text or el.content_desc or "").strip()
+        if tail and not _looks_dynamic(tail):
+            anchors.add("id:" + tail.lower())
+            if el.selected is True or el.checked is True:
+                anchors.add("sel:" + tail.lower())
+        elif label and len(label) <= 24 and not _looks_dynamic(label):
+            anchors.add("tx:" + label.lower())
+    return anchors
+
+
 def signature(activity: str | None, anchors: set[str]) -> str:
     base = (activity or "") + "|" + "\n".join(sorted(anchors))
     return hashlib.sha1(base.encode("utf-8")).hexdigest()[:12]
@@ -438,6 +538,21 @@ def jaccard(a: set[str], b: set[str]) -> float:
         return 0.0
     union = len(a | b)
     return len(a & b) / union if union else 0.0
+
+
+def anchor_similarity(a: set[str], b: set[str]) -> float:
+    """Weighted overlap: resource and selected-state anchors carry more identity."""
+    if not a and not b:
+        return 1.0
+    weights = {"sel": 5.0, "id": 4.0, "cd": 2.0, "tx": 1.0}
+
+    def weight(anchor: str) -> float:
+        return weights.get(anchor.split(":", 1)[0], 1.0)
+
+    union = a | b
+    if not union:
+        return 0.0
+    return sum(weight(item) for item in a & b) / sum(weight(item) for item in union)
 
 
 def key_elements(
@@ -552,6 +667,58 @@ def propose_name(
     return "screen"
 
 
+def context_id_for_flags(flags: dict[str, str]) -> str:
+    """A stable context id; app version is metadata, not part of the identity."""
+    if not flags:
+        return DEFAULT_CONTEXT_ID
+    normalized = "&".join(f"{key}={flags[key]}" for key in sorted(flags))
+    digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:8]
+    readable = slug(next(iter(sorted(flags))))[:18] or "flags"
+    return f"flags-{readable}-{digest}"
+
+
+def _stable_id(kind: str, *parts: object) -> str:
+    raw = "|".join(str(part) for part in parts)
+    return f"{kind}_{hashlib.sha1(raw.encode('utf-8')).hexdigest()[:12]}"
+
+
+def _knowledge_id(package: str, kind: str, name: str | None, text: str) -> str:
+    return _stable_id("knowledge", package, kind, name or "", text)
+
+
+def _infer_state(elements: list[Element]) -> str | None:
+    labels = " ".join(
+        (el.text or el.content_desc or "").strip().lower()
+        for el in elements
+        if el.text or el.content_desc
+    )
+    if re.search(r"\b(loading|please wait)\b", labels):
+        return "loading"
+    if re.search(r"\b(oops|something went wrong|try again|failed|error)\b", labels):
+        return "error"
+    if re.search(r"\b(no .+ yet|nothing here|empty)\b", labels):
+        return "empty"
+    return None
+
+
+def _resource_name(elements: list[Element], height: int | None = None) -> str | None:
+    """Prefer stable selected navigation/resource ids over volatile visible copy."""
+    selected: list[str] = []
+    for el in elements:
+        if _system_chrome(el, height):
+            continue
+        tail = _id_tail(el.resource_id)
+        if not tail or _looks_dynamic(tail):
+            continue
+        semantic = re.sub(r"^(?:bottom|top)bar", "", tail, flags=re.I)
+        candidate = slug(re.sub(r"^(button|container|screen|tab|nav)", "", semantic, flags=re.I))
+        if not candidate:
+            continue
+        if el.selected is True or el.checked is True:
+            selected.append(candidate)
+    return selected[0] if selected else None
+
+
 # --------------------------------------------------------------------------- store
 
 
@@ -561,6 +728,76 @@ def _now_iso() -> str:
 
 def _safe(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", name)
+
+
+def upgrade_app_map(app: AppMap) -> AppMap:
+    """Upgrade v1/v2 maps in memory without discarding their learned routes."""
+    now = app.last_verified or _now_iso()
+    legacy = app.schema_version < MEMORY_SCHEMA_VERSION
+    if legacy:
+        app.contexts.setdefault(
+            LEGACY_CONTEXT_ID,
+            ContextRecord(
+                id=LEGACY_CONTEXT_ID,
+                source="legacy",
+                verified=True,
+                first_seen=now,
+                last_seen=now,
+                app_version=app.app_version,
+            ),
+        )
+    for key, rec in app.screens.items():
+        if legacy or not rec.context_id:
+            rec.context_id = LEGACY_CONTEXT_ID
+            rec.name_source = "legacy"
+        rec.name = key
+        rec.canonical_name = rec.canonical_name or key
+        rec.logical_name = rec.logical_name or rec.canonical_name
+        rec.id = rec.id or _stable_id("screen", app.package, rec.context_id, key)
+    for index, edge in enumerate(app.routes):
+        if legacy or not edge.context_id:
+            edge.context_id = LEGACY_CONTEXT_ID
+        edge.id = edge.id or _stable_id(
+            "route",
+            app.package,
+            edge.context_id,
+            edge.from_screen,
+            edge.action,
+            edge.to_screen,
+            index,
+        )
+    existing = {item.id for item in app.knowledge}
+
+    def add_legacy(kind: str, text: str, *, name: str | None = None) -> None:
+        kid = _knowledge_id(app.package, kind, name, text)
+        if kid in existing:
+            return
+        app.knowledge.append(
+            KnowledgeItem(
+                id=kid,
+                kind=kind,  # type: ignore[arg-type]
+                text=text,
+                name=name,
+                scope=KnowledgeScope(package=app.package, context_id=LEGACY_CONTEXT_ID),
+                source="legacy",
+                evidence=[KnowledgeEvidence(kind="user", detail="migrated from app playbook")],
+                created_at=now,
+                last_verified=now,
+            )
+        )
+        existing.add(kid)
+
+    if legacy:
+        if app.description:
+            add_legacy("description", app.description)
+        for note in app.notes:
+            add_legacy("note", note)
+        for recipe in app.recipes:
+            add_legacy("recipe", recipe.note, name=recipe.name)
+        for deeplink in app.deeplinks:
+            add_legacy("deeplink", deeplink.note or deeplink.uri, name=deeplink.uri)
+    app.schema_version = MEMORY_SCHEMA_VERSION
+    return app
 
 
 class AppMemoryStore:
@@ -602,17 +839,18 @@ class AppMemoryStore:
 
     def load(self, package: str) -> AppMap | None:
         if self._sqlite is not None:
-            return self._sqlite.load_app(package)
+            app = self._sqlite.load_app(package)
+            return upgrade_app_map(app) if app is not None else None
         path = self.index_path(package)
         if not path.is_file():
             return None
         try:
-            return AppMap.model_validate_json(path.read_text(encoding="utf-8"))
+            return upgrade_app_map(AppMap.model_validate_json(path.read_text(encoding="utf-8")))
         except Exception:  # pragma: no cover - corrupt file → treat as absent
             return None
 
     def save(self, app: AppMap) -> None:
-        app.schema_version = MEMORY_SCHEMA_VERSION  # older maps upgrade on first write
+        app = upgrade_app_map(app)
         if self._sqlite is not None:
             self._sqlite.save_app(app)
             # Keep the human-readable MAP.md next to the legacy tree for `aua map` browsing.
@@ -624,7 +862,10 @@ class AppMemoryStore:
             return
         d = self.app_dir(app.package)
         d.mkdir(parents=True, exist_ok=True)
-        self.index_path(app.package).write_text(app.model_dump_json(indent=2), encoding="utf-8")
+        index = self.index_path(app.package)
+        tmp = index.with_suffix(".json.tmp")
+        tmp.write_text(app.model_dump_json(indent=2), encoding="utf-8")
+        os.replace(tmp, index)
         self.map_path(app.package).write_text(render_map(app, detail="default"), encoding="utf-8")
 
     def list_apps(self) -> list[str]:
@@ -660,40 +901,185 @@ class AppMemoryStore:
         tmp.write_text(sess.model_dump_json(), encoding="utf-8")
         os.replace(tmp, path)
 
+    def latest_session(self, package: str) -> SessionState | None:
+        """Most recently written cursor for *package* (keeps offline ``map --app`` contextual)."""
+        if self._sqlite is not None:
+            return self._sqlite.latest_session(package)
+        root = self.base / "state"
+        if not root.is_dir():
+            return None
+        paths = sorted(
+            root.glob("session_*.json"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        for path in paths:
+            try:
+                session = SessionState.model_validate_json(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if session.package == package:
+                return session
+        return None
+
+    def activate_flag_context(
+        self,
+        serial: str,
+        package: str,
+        flags: dict[str, str],
+        *,
+        app_version: str | None = None,
+        verified: bool,
+    ) -> str:
+        """Promote a flag set to the active observation context after flags-set/restart."""
+        sess = self.load_session(serial)
+        merged = dict(sess.active_flags) if sess.package in (None, package) else {}
+        merged.update(flags)
+        context_id = context_id_for_flags(merged)
+        if sess.active_context_id != context_id or sess.package not in (None, package):
+            sess.current_screen = None
+            sess.pending = []
+            sess.pending_since = None
+            sess.pending_overflow = False
+        sess.package = package
+        sess.active_flags = merged
+        sess.pending_flags = {}
+        sess.active_context_id = context_id
+        sess.context_verified = verified
+        self.save_session(serial, sess)
+
+        now = _now_iso()
+        app = self.load(package) or AppMap(package=package)
+        existing = app.contexts.get(context_id)
+        if existing is None:
+            app.contexts[context_id] = ContextRecord(
+                id=context_id,
+                flags=merged,
+                app_version=app_version,
+                source="flags_verified" if verified else "flags_unverified",
+                verified=verified,
+                first_seen=now,
+                last_seen=now,
+            )
+        else:
+            existing.flags = merged
+            existing.last_seen = now
+            existing.app_version = app_version or existing.app_version
+            existing.verified = existing.verified or verified
+            if verified:
+                existing.source = "flags_verified"
+        self.save(app)
+        return context_id
+
+    def set_pending_flags(self, serial: str, package: str, flags: dict[str, str]) -> None:
+        """Remember a raw set-flags deeplink until the app is cold-launched."""
+        if not flags:
+            return
+        sess = self.load_session(serial)
+        if sess.package not in (None, package):
+            sess.active_flags = {}
+            sess.active_context_id = DEFAULT_CONTEXT_ID
+            sess.context_verified = False
+        sess.package = package
+        sess.pending_flags.update(flags)
+        self.save_session(serial, sess)
+
+    def promote_pending_context(
+        self, serial: str, package: str, *, app_version: str | None = None
+    ) -> str | None:
+        """Activate flags captured from a raw deeplink after a manual cold launch."""
+        sess = self.load_session(serial)
+        if sess.package != package or not sess.pending_flags:
+            return None
+        return self.activate_flag_context(
+            serial,
+            package,
+            dict(sess.pending_flags),
+            app_version=app_version,
+            verified=False,
+        )
+
+    def clear_context(self, serial: str, package: str) -> None:
+        """Forget session flag identity after app data is explicitly cleared."""
+        sess = self.load_session(serial)
+        if sess.package != package:
+            return
+        sess.current_screen = None
+        sess.pending = []
+        sess.pending_since = None
+        sess.pending_overflow = False
+        sess.active_context_id = DEFAULT_CONTEXT_ID
+        sess.active_flags = {}
+        sess.pending_flags = {}
+        sess.context_verified = False
+        self.save_session(serial, sess)
+
     # -- recording --------------------------------------------------------
 
     def _recognize(
-        self, app: AppMap, anchors: set[str], activity: str | None, sig: str
+        self,
+        app: AppMap,
+        anchors: set[str],
+        activity: str | None,
+        sig: str,
+        context_id: str = DEFAULT_CONTEXT_ID,
     ) -> tuple[str | None, float]:
         best: str | None = None
         best_sim = 0.0
-        for name, rec in app.screens.items():
-            if rec.signature == sig:
-                return name, 1.0
-            sim = jaccard(anchors, set(rec.anchors))
-            if rec.activity and activity:
-                sim += 0.05 if rec.activity == activity else -0.10
-            if sim > best_sim:
-                best, best_sim = name, sim
+        exact = [(name, rec) for name, rec in app.screens.items() if rec.context_id == context_id]
+        legacy = [
+            (name, rec) for name, rec in app.screens.items() if rec.context_id == LEGACY_CONTEXT_ID
+        ]
+        groups = [exact]
+        if context_id != LEGACY_CONTEXT_ID:
+            groups.append(legacy)
+        for group_index, candidates in enumerate(groups):
+            group_best: str | None = None
+            group_sim = 0.0
+            for name, rec in candidates:
+                if rec.signature == sig:
+                    return name, 1.0
+                sim = anchor_similarity(anchors, set(rec.anchors))
+                if rec.activity and activity:
+                    sim += 0.05 if rec.activity == activity else -0.10
+                if sim > group_sim:
+                    group_best, group_sim = name, sim
+            threshold = _RECOGNIZE_MIN if group_index == 0 else 0.72
+            if group_best is not None and group_sim >= threshold:
+                return group_best, group_sim
+            if group_sim > best_sim:
+                best, best_sim = group_best, group_sim
         if best is not None and best_sim >= _RECOGNIZE_MIN:
             return best, best_sim
         return None, best_sim
 
-    def _unique_name(self, app: AppMap, base: str) -> str:
+    def _unique_name(
+        self,
+        app: AppMap,
+        base: str,
+        *,
+        context_id: str = DEFAULT_CONTEXT_ID,
+        state: str | None = None,
+    ) -> str:
         base = base or "screen"
         if base not in app.screens:
             return base
-        i = 2
-        while f"{base}_{i}" in app.screens:
-            i += 1
-        return f"{base}_{i}"
+        qualifier = state or (context_id if context_id != DEFAULT_CONTEXT_ID else None)
+        if qualifier:
+            candidate = f"{base}__{slug(qualifier)[:24]}"
+            if candidate not in app.screens:
+                return candidate
+        return f"{base}__{_stable_id('variant', context_id, base)[-8:]}"
 
     def _rename(self, app: AppMap, old: str, new: str) -> str:
         if new == old or not new:
             return old
-        new = self._unique_name(app, new)
+        new = self._unique_name(app, new, context_id=app.screens[old].context_id)
         rec = app.screens.pop(old)
+        if old not in rec.aliases:
+            rec.aliases.append(old)
         rec.name = new
+        rec.canonical_name = new
         app.screens[new] = rec
         for e in app.routes:
             if e.from_screen == old:
@@ -715,6 +1101,9 @@ class AppMemoryStore:
         inbound_label: str | None = None,
         inbound_kind: str | None = None,
         screen_height: int | None = None,
+        context_id: str = DEFAULT_CONTEXT_ID,
+        context_flags: dict[str, str] | None = None,
+        context_verified: bool = False,
     ) -> RecordOutcome:
         """Record/update the current screen; return how it was identified."""
         if not self.cfg.enabled:
@@ -723,23 +1112,49 @@ class AppMemoryStore:
         app = self.load(package) or AppMap(package=package)
         anchors = screen_anchors(elements, redact=self.cfg.redact, height=screen_height)
         sig = signature(activity, anchors)
-        name, _sim = self._recognize(app, anchors, activity, sig)
+        state = _infer_state(elements)
+        name, _sim = self._recognize(app, anchors, activity, sig, context_id)
         was_known = name is not None
         created = False
         stale = False
 
         if name is None:
             created = True
-            base = name_hint or propose_name(
-                inbound_label=inbound_label,
-                inbound_kind=inbound_kind,
-                title=title_of(elements, screen_height),
-                activity=activity,
-                is_first=len(app.screens) == 0,
+            resource_name = _resource_name(elements, screen_height)
+            title = title_of(elements, screen_height)
+            base = (
+                name_hint
+                or resource_name
+                or propose_name(
+                    inbound_label=inbound_label,
+                    inbound_kind=inbound_kind,
+                    title=title,
+                    activity=activity,
+                    is_first=len(app.screens) == 0,
+                )
             )
-            name = self._unique_name(app, slug(base) or "screen")
+            name_source: Literal["explicit", "resource", "title", "route", "activity", "legacy"] = (
+                "explicit"
+                if name_hint
+                else "resource"
+                if resource_name
+                else "title"
+                if title
+                else "route"
+                if inbound_label
+                else "activity"
+            )
+            logical_name = slug(base) or "screen"
+            name = self._unique_name(app, logical_name, context_id=context_id, state=state)
             app.screens[name] = ScreenRecord(
                 name=name,
+                id=_stable_id("screen", package, context_id, name, now),
+                canonical_name=name,
+                logical_name=logical_name,
+                variant=context_id if context_id != DEFAULT_CONTEXT_ID else None,
+                state=state,
+                context_id=context_id,
+                name_source=name_source,
                 activity=activity,
                 signature=sig,
                 anchors=sorted(anchors),
@@ -773,6 +1188,33 @@ class AppMemoryStore:
                     rec.key_elements = ke
                 if dyn := detect_dynamic(elements):
                     rec.dynamic = dyn
+                rec.state = state
+
+        context = app.contexts.get(context_id)
+        if context is None:
+            source: Literal["legacy", "default", "flags_verified", "flags_unverified", "agent"] = (
+                "flags_verified"
+                if context_flags and context_verified
+                else "flags_unverified"
+                if context_flags
+                else "default"
+            )
+            context = ContextRecord(
+                id=context_id,
+                flags=context_flags or {},
+                app_version=app_version,
+                source=source,
+                verified=context_verified,
+                first_seen=now,
+                last_seen=now,
+            )
+            app.contexts[context_id] = context
+        context.last_seen = now
+        context.app_version = app_version or context.app_version
+        context.verified = context.verified or context_verified
+        shell = shell_anchors(elements, height=screen_height)
+        if shell:
+            context.shell_anchors = sorted(set(context.shell_anchors) | shell)
 
         if app_version:
             app.app_version = app_version
@@ -790,6 +1232,7 @@ class AppMemoryStore:
         action: str | None = None,
         *,
         steps: list[RouteStep] | None = None,
+        context_id: str = DEFAULT_CONTEXT_ID,
     ) -> None:
         if not self.cfg.enabled or from_screen == to_screen:
             return
@@ -802,8 +1245,14 @@ class AppMemoryStore:
         if not action:
             return
         now = _now_iso()
+        route_context = app.contexts.get(context_id)
         for e in app.routes:
-            if e.from_screen == from_screen and e.to_screen == to_screen and e.action == action:
+            if (
+                e.from_screen == from_screen
+                and e.to_screen == to_screen
+                and e.action == action
+                and e.context_id == context_id
+            ):
                 e.count += 1
                 e.last_seen = now
                 if steps and not e.steps:
@@ -812,9 +1261,12 @@ class AppMemoryStore:
                 return
         app.routes.append(
             RouteEdge(
+                id=_stable_id("route", package, context_id, from_screen, action, to_screen, now),
                 from_screen=from_screen,
                 to_screen=to_screen,
                 action=action,
+                context_id=context_id,
+                guards=dict(route_context.flags) if route_context else {},
                 steps=steps,
                 last_seen=now,
             )
@@ -822,6 +1274,57 @@ class AppMemoryStore:
         self.save(app)
 
     # -- playbook (durable app-level knowledge the agent reuses) ----------
+
+    def remember_knowledge(
+        self,
+        package: str,
+        *,
+        kind: Literal["description", "note", "recipe", "deeplink", "claim"],
+        text: str,
+        name: str | None = None,
+        context_id: str | None = None,
+        app_version: str | None = None,
+        flags: dict[str, str] | None = None,
+        source: Literal["legacy", "user", "agent", "runtime", "source"] = "agent",
+        agent: str | None = None,
+        session: str | None = None,
+        evidence: list[KnowledgeEvidence] | None = None,
+        status: Literal["accepted", "proposed", "stale", "rejected"] = "accepted",
+    ) -> KnowledgeItem | None:
+        if not self.cfg.enabled or not text:
+            return None
+        app = self.load(package) or AppMap(package=package)
+        kid = _knowledge_id(package, kind, name, text)
+        now = _now_iso()
+        item = next((known for known in app.knowledge if known.id == kid), None)
+        if item is None:
+            item = KnowledgeItem(
+                id=kid,
+                kind=kind,
+                text=text,
+                name=name,
+                scope=KnowledgeScope(
+                    package=package,
+                    app_version=app_version,
+                    context_id=context_id,
+                    flags=flags or {},
+                ),
+                source=source,
+                agent=agent,
+                session=session,
+                evidence=evidence or [],
+                status=status,
+                created_at=now,
+                last_verified=now if status == "accepted" else None,
+            )
+            app.knowledge.append(item)
+        else:
+            item.status = status
+            item.last_verified = now if status == "accepted" else item.last_verified
+            if evidence:
+                item.evidence = evidence
+        self.save(app)
+        return item
 
     def remember_deeplink(
         self,
@@ -851,10 +1354,16 @@ class AppMemoryStore:
                     d.probed = True
                 if landed:
                     d.landed = landed
+                self._upsert_knowledge_in_map(
+                    app, "deeplink", note or uri, name=uri, source="runtime" if probed else "user"
+                )
                 self.save(app)
                 return
         app.deeplinks.append(
             Deeplink(uri=uri, note=note, probed=probed, landed=landed, last_seen=now)
+        )
+        self._upsert_knowledge_in_map(
+            app, "deeplink", note or uri, name=uri, source="runtime" if probed else "user"
         )
         self.save(app)
 
@@ -864,6 +1373,7 @@ class AppMemoryStore:
         app = self.load(package) or AppMap(package=package)
         if note not in app.notes:
             app.notes.append(note)
+            self._upsert_knowledge_in_map(app, "note", note, source="user")
             self.save(app)
 
     def remember_recipe(self, package: str, name: str, note: str) -> None:
@@ -873,9 +1383,11 @@ class AppMemoryStore:
         for r in app.recipes:
             if r.name == name:
                 r.note = note
+                self._upsert_knowledge_in_map(app, "recipe", note, name=name, source="user")
                 self.save(app)
                 return
         app.recipes.append(Recipe(name=name, note=note))
+        self._upsert_knowledge_in_map(app, "recipe", note, name=name, source="user")
         self.save(app)
 
     def set_description(self, package: str, description: str) -> None:
@@ -883,7 +1395,38 @@ class AppMemoryStore:
             return
         app = self.load(package) or AppMap(package=package)
         app.description = description
+        self._upsert_knowledge_in_map(app, "description", description, source="user")
         self.save(app)
+
+    def _upsert_knowledge_in_map(
+        self,
+        app: AppMap,
+        kind: Literal["description", "note", "recipe", "deeplink", "claim"],
+        text: str,
+        *,
+        name: str | None = None,
+        source: Literal["legacy", "user", "agent", "runtime", "source"] = "agent",
+    ) -> KnowledgeItem:
+        kid = _knowledge_id(app.package, kind, name, text)
+        existing = next((item for item in app.knowledge if item.id == kid), None)
+        if existing is not None:
+            existing.status = "accepted"
+            existing.last_verified = _now_iso()
+            return existing
+        now = _now_iso()
+        item = KnowledgeItem(
+            id=kid,
+            kind=kind,
+            text=text,
+            name=name,
+            scope=KnowledgeScope(package=app.package),
+            source=source,
+            evidence=[KnowledgeEvidence(kind="user" if source == "user" else "runtime")],
+            created_at=now,
+            last_verified=now,
+        )
+        app.knowledge.append(item)
+        return item
 
     # -- auto-record orchestration (engine + daemon call these) -----------
 
@@ -943,6 +1486,10 @@ class AppMemoryStore:
             and package != sess.package
             and matches_any(package, self.cfg.transit_packages)
         )
+        same_context_owner = sess.package in (None, package)
+        context_id = sess.active_context_id if same_context_owner else DEFAULT_CONTEXT_ID
+        context_flags = sess.active_flags if same_context_owner else {}
+        context_verified = sess.context_verified if same_context_owner else False
         inbound_label, inbound_kind = _parse_inbound(list(sess.pending))
         outcome = self.record_screen(
             package=package,
@@ -954,6 +1501,9 @@ class AppMemoryStore:
             inbound_label=inbound_label,
             inbound_kind=inbound_kind,
             screen_height=screen_height,
+            context_id=context_id,
+            context_flags=context_flags,
+            context_verified=context_verified,
         )
         if in_transit:
             # The origin journey continues through this screen — session untouched.
@@ -977,8 +1527,13 @@ class AppMemoryStore:
                 s.model_copy(update={"package": None}) if s.package == package else s
                 for s in pending
             ]
-            self.record_route(package, prev, outcome.name, steps=steps)
+            self.record_route(package, prev, outcome.name, steps=steps, context_id=context_id)
         sess.current_screen = outcome.name
+        if not same_context_owner:
+            sess.active_context_id = DEFAULT_CONTEXT_ID
+            sess.active_flags = {}
+            sess.pending_flags = {}
+            sess.context_verified = False
         sess.package = package
         sess.pending = []
         sess.pending_since = None
@@ -1017,7 +1572,7 @@ class AppMemoryStore:
             return None
         anchors = screen_anchors(elements, redact=self.cfg.redact, height=screen_height)
         sig = signature(activity, anchors)
-        name, _sim = self._recognize(app, anchors, activity, sig)
+        name, _sim = self._recognize(app, anchors, activity, sig, sess.active_context_id)
         if name is None:
             return None
         prev = sess.current_screen
@@ -1027,7 +1582,13 @@ class AppMemoryStore:
                     s.model_copy(update={"package": None}) if s.package == package else s
                     for s in sess.pending
                 ]
-                self.record_route(package, prev, name, steps=steps)
+                self.record_route(
+                    package,
+                    prev,
+                    name,
+                    steps=steps,
+                    context_id=sess.active_context_id,
+                )
             sess.current_screen = name
             sess.pending = []
             sess.pending_since = None
@@ -1049,9 +1610,7 @@ class AppMemoryStore:
         Reads the session cursor (just updated by :meth:`observe_screen`) for the current
         screen, then derives routes/suggestions from the stored map. Empty when no map.
         """
-        empty = NavHints(
-            known_routes=[], suggested_gotos=[], suggested_deeplinks=[], map_hint=None
-        )
+        empty = NavHints(known_routes=[], suggested_gotos=[], suggested_deeplinks=[], map_hint=None)
         app = self.load(package)
         if app is None:
             return empty
@@ -1072,17 +1631,22 @@ class AppMemoryStore:
         sess = self.load_session(serial)
         current = sess.current_screen
         now = now or datetime.now().astimezone()
-        adj = _adjacency(app)
+        adj = _adjacency(app, sess.active_context_id)
         known_routes = [
             f"{e.action} → {e.to_screen}"
             for e in sorted(adj.get(current or "", []), key=lambda x: x.to_screen)
         ]
         # Rank destinations by usage; prefer ones reachable from here so `goto` will work,
         # else fall back to the app's top screens (reachable from a root).
-        reachable = _reachable(app, current)
-        pool = [n for n in app.screens if n != current and (not reachable or n in reachable)]
+        reachable = _reachable(app, current, sess.active_context_id)
+        visible = {
+            name
+            for name, rec in app.screens.items()
+            if rec.context_id in (sess.active_context_id, LEGACY_CONTEXT_ID)
+        }
+        pool = [n for n in visible if n != current and (not reachable or n in reachable)]
         if not pool:
-            pool = [n for n in app.screens if n != current]
+            pool = [n for n in visible if n != current]
         ranked = sorted(
             pool,
             key=lambda n: _rank_score(
@@ -1168,18 +1732,61 @@ def _parse_inbound(pending: list[RouteStep]) -> tuple[str | None, str | None]:
 # --------------------------------------------------------------------------- rendering
 
 
-def _adjacency(app: AppMap) -> dict[str, list[RouteEdge]]:
+def _routes_for_context(app: AppMap, context_id: str | None) -> list[RouteEdge]:
+    if context_id is None:
+        return list(app.routes)
+    exact = [edge for edge in app.routes if edge.context_id == context_id]
+    if context_id == LEGACY_CONTEXT_ID:
+        return exact
+    exact_keys = {(edge.from_screen, edge.action) for edge in exact}
+    legacy = [
+        edge
+        for edge in app.routes
+        if edge.context_id == LEGACY_CONTEXT_ID
+        and (edge.from_screen, edge.action) not in exact_keys
+    ]
+    return [*exact, *legacy]
+
+
+def context_view(app: AppMap, context_id: str) -> AppMap:
+    """A JSON-safe map projection with exact context plus trusted legacy fallback."""
+    view = app.model_copy(deep=True)
+    view.screens = {
+        name: rec
+        for name, rec in view.screens.items()
+        if rec.context_id in (context_id, LEGACY_CONTEXT_ID)
+    }
+    view.routes = _routes_for_context(view, context_id)
+    view.contexts = {
+        key: value for key, value in view.contexts.items() if key in (context_id, LEGACY_CONTEXT_ID)
+    }
+    view.knowledge = [
+        item
+        for item in view.knowledge
+        if item.scope.context_id in (None, context_id, LEGACY_CONTEXT_ID)
+    ]
+    return view
+
+
+def _adjacency(app: AppMap, context_id: str | None = None) -> dict[str, list[RouteEdge]]:
     adj: dict[str, list[RouteEdge]] = {}
-    for e in app.routes:
+    for e in _routes_for_context(app, context_id):
         adj.setdefault(e.from_screen, []).append(e)
     return adj
 
 
-def _roots(app: AppMap) -> list[str]:
-    targets = {e.to_screen for e in app.routes}
-    roots = [n for n in app.screens if n not in targets]
+def _roots(app: AppMap, context_id: str | None = None) -> list[str]:
+    routes = _routes_for_context(app, context_id)
+    visible = {
+        name
+        for name, rec in app.screens.items()
+        if context_id is None
+        or rec.context_id in (context_id, LEGACY_CONTEXT_ID)
+    }
+    targets = {edge.to_screen for edge in routes}
+    roots = [name for name in visible if name not in targets]
     if not roots:
-        roots = ["home"] if "home" in app.screens else list(app.screens)[:1]
+        roots = ["home"] if "home" in visible else list(visible)[:1]
     roots.sort(key=lambda n: (0 if n == "home" else 1, app.screens[n].first_seen))
     return roots
 
@@ -1208,11 +1815,13 @@ def _rank_score(
     return score
 
 
-def _reachable(app: AppMap, start: str | None) -> set[str]:
+def _reachable(
+    app: AppMap, start: str | None, context_id: str | None = None
+) -> set[str]:
     """Screens reachable from *start* via known routes (excluding *start* itself)."""
     if not start or start not in app.screens:
         return set()
-    adj = _adjacency(app)
+    adj = _adjacency(app, context_id)
     seen: set[str] = set()
     dq: deque[str] = deque([start])
     while dq:
@@ -1239,58 +1848,21 @@ def _summarize_keys(rec: ScreenRecord) -> list[str]:
     return out
 
 
-def _render_tree(
-    app: AppMap,
-    name: str,
-    adj: dict[str, list[RouteEdge]],
-    seen: set[str],
-    lines: list[str],
-    *,
-    prefix: str,
-    detail: str,
-    depth: int | None,
-    inbound: str | None = None,
-    level: int = 0,
-) -> None:
-    rec = app.screens.get(name)
-    via = f"  [{inbound}]" if inbound else ""
-    if name in seen:
-        lines.append(f"{prefix}{name}{via} ↩")
-        return
-    seen.add(name)
-    tier = f"  (tier: {rec.tier})" if rec else ""
-    stale = "  [STALE]" if rec and rec.stale else ""
-    lines.append(f"{prefix}{name}{tier}{stale}{via}")
-    kid = prefix + "    "
-    if detail != "brief" and rec:
-        lines.extend(f"{kid}- {s}" for s in _summarize_keys(rec))
-        lines.extend(f"{kid}- {d}" for d in rec.dynamic)
-    if depth is not None and level >= depth:
-        return
-    for e in sorted(adj.get(name, []), key=lambda x: x.to_screen):
-        _render_tree(
-            app,
-            e.to_screen,
-            adj,
-            seen,
-            lines,
-            prefix=kid,
-            detail=detail,
-            depth=depth,
-            inbound=e.action,
-            level=level + 1,
-        )
-
-
-def _header(app: AppMap) -> list[str]:
+def _header(app: AppMap, context_id: str | None = None) -> list[str]:
     lines = [f"# {app.label or app.package}  ({app.package})"]
     meta: list[str] = []
     if app.app_version:
         meta.append(f"version {app.app_version}")
     if app.last_verified:
         meta.append(f"last verified {app.last_verified}")
-    n, r = len(app.screens), len(app.routes)
+    if context_id:
+        n = sum(rec.context_id in (context_id, LEGACY_CONTEXT_ID) for rec in app.screens.values())
+        r = len(_routes_for_context(app, context_id))
+    else:
+        n, r = len(app.screens), len(app.routes)
     meta.append(f"{n} screen{'s' * (n != 1)}, {r} route{'s' * (r != 1)}")
+    if context_id:
+        meta.append(f"context {context_id}")
     lines.append("_" + " · ".join(meta) + "_")
     return lines
 
@@ -1298,7 +1870,7 @@ def _header(app: AppMap) -> list[str]:
 def _playbook_lines(app: AppMap) -> list[str]:
     """The app-level knowledge block (description, deeplinks, recipes, notes) — the
     durable facts the tool learned and should surface to the agent up front."""
-    if not (app.description or app.deeplinks or app.recipes or app.notes):
+    if not (app.description or app.deeplinks or app.recipes or app.notes or app.knowledge):
         return []
     lines = ["## Playbook"]
     if app.description:
@@ -1309,6 +1881,21 @@ def _playbook_lines(app: AppMap) -> list[str]:
         lines.append(f"- deeplink `{d.uri}`" + (f" — {d.note}" if d.note else ""))
     for note in app.notes:
         lines.append(f"- note: {note}")
+    legacy_text = {
+        app.description or "",
+        *app.notes,
+        *(recipe.note for recipe in app.recipes),
+        *(deeplink.note or deeplink.uri for deeplink in app.deeplinks),
+    }
+    for item in app.knowledge:
+        if item.status != "accepted" or item.text in legacy_text:
+            continue
+        scope = f" [{item.scope.context_id}]" if item.scope.context_id else ""
+        provenance = f" ({item.source}"
+        if item.agent:
+            provenance += f": {item.agent}"
+        provenance += ")"
+        lines.append(f"- {item.kind}{scope}: {item.text}{provenance}")
     return lines
 
 
@@ -1319,53 +1906,117 @@ def render_map(
     find: str | None = None,
     screen: str | None = None,
     depth: int | None = None,
+    context_id: str | None = None,
+    all_contexts: bool = True,
 ) -> str:
     """The single source for ``MAP.md`` and every ``aua map`` view (PRD §6b)."""
+    selected_context = None if all_contexts else (context_id or DEFAULT_CONTEXT_ID)
     if find:
-        return _render_find(app, find)
+        return _render_find(app, find, selected_context)
     if screen:
         return _render_screen_detail(app, screen)
 
-    lines = [*_header(app), ""]
+    lines = [*_header(app, selected_context), ""]
+    contexts = [
+        context
+        for context in app.contexts.values()
+        if selected_context is None or context.id in (selected_context, LEGACY_CONTEXT_ID)
+    ]
+    if contexts:
+        lines.append("## Contexts")
+        for context in sorted(contexts, key=lambda item: item.id):
+            status = "verified" if context.verified else "unverified"
+            flags = (
+                ", ".join(f"{key}={value}" for key, value in sorted(context.flags.items()))
+                or "no flags"
+            )
+            lines.append(f"- {context.id}  ({status}, {context.source}) — {flags}")
+            if detail != "brief" and context.shell_anchors:
+                lines.append(f"    - shell: {' | '.join(context.shell_anchors)}")
+        lines.append("")
     if playbook := _playbook_lines(app):
         lines.extend([*playbook, ""])
     if not app.screens:
         lines.append("_(no screens recorded yet — run `aua analyze` while navigating)_")
         return "\n".join(lines) + "\n"
 
+    visible = [
+        rec
+        for rec in app.screens.values()
+        if selected_context is None or rec.context_id in (selected_context, LEGACY_CONTEXT_ID)
+    ]
     lines.append("## Screens")
-    adj = _adjacency(app)
-    seen: set[str] = set()
-    for root in _roots(app):
-        _render_tree(app, root, adj, seen, lines, prefix="", detail=detail, depth=depth)
-    for name in app.screens:  # any screens not reachable from a root
-        if name not in seen:
-            _render_tree(app, name, adj, seen, lines, prefix="", detail=detail, depth=depth)
+    grouped: dict[str, list[ScreenRecord]] = {}
+    for rec in visible:
+        grouped.setdefault(rec.logical_name or rec.canonical_name or rec.name, []).append(rec)
+    for logical, variants in sorted(grouped.items()):
+        multiple = len(variants) > 1
+        if multiple:
+            lines.append(f"{logical}")
+        for rec in sorted(variants, key=lambda item: (item.context_id, item.name)):
+            indent = "    " if multiple else ""
+            labels = [f"tier: {rec.tier}", f"context: {rec.context_id}"]
+            if rec.variant:
+                labels.append(f"variant: {rec.variant}")
+            if rec.state:
+                labels.append(f"state: {rec.state}")
+            if rec.stale:
+                labels.append("STALE")
+            display = f"- {rec.name}" if multiple else rec.name
+            lines.append(f"{indent}{display}  ({', '.join(labels)})")
+            if detail != "brief":
+                lines.extend(f"{indent}    - {summary}" for summary in _summarize_keys(rec))
+                lines.extend(f"{indent}    - {shape}" for shape in rec.dynamic)
 
-    if app.routes:
+    routes = _routes_for_context(app, selected_context)
+    if routes:
         lines.append("")
         lines.append("## Routes")
-        for e in sorted(app.routes, key=lambda x: (x.from_screen, x.to_screen, x.action)):
-            lines.append(f"{e.from_screen} --{e.action}--> {e.to_screen}")
+        by_context: dict[str, list[RouteEdge]] = {}
+        for edge in routes:
+            by_context.setdefault(edge.context_id, []).append(edge)
+        for route_context, edges in sorted(by_context.items()):
+            if len(by_context) > 1 or selected_context is None:
+                lines.append(f"### {route_context}")
+            for edge in sorted(
+                edges, key=lambda item: (item.from_screen, item.action, item.to_screen)
+            ):
+                guard = (
+                    "  [" + ", ".join(f"{k}={v}" for k, v in sorted(edge.guards.items())) + "]"
+                    if edge.guards
+                    else ""
+                )
+                lines.append(f"{edge.from_screen} --{edge.action}--> {edge.to_screen}{guard}")
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _shortest_path(app: AppMap, target: str, start: str | None = None) -> list[RouteEdge]:
+def _shortest_path(
+    app: AppMap,
+    target: str,
+    start: str | None = None,
+    context_id: str | None = None,
+) -> list[RouteEdge]:
     """Shortest route to *target*; ``[]`` if already there / no path.
 
     With *start* given, search only from that screen (used by ``goto`` from the agent's
     current position); otherwise search from roots, then any screen (the original behaviour).
     """
-    adj = _adjacency(app)
+    adj = _adjacency(app, context_id)
     if start is not None:
         if start == target or start not in app.screens:
             return []
         starts = [start]
     else:
-        roots = _roots(app)
+        roots = _roots(app, context_id)
         if target in roots:
             return []
-        starts = roots + [n for n in app.screens if n not in roots]
+        visible = [
+            name
+            for name, rec in app.screens.items()
+            if context_id is None
+            or rec.context_id in (context_id, LEGACY_CONTEXT_ID)
+        ]
+        starts = roots + [name for name in visible if name not in roots]
     for start in starts:
         visited = {start}
         queue: deque[tuple[str, list[RouteEdge]]] = deque([(start, [])])
@@ -1391,7 +2042,9 @@ def _format_path(path: list[RouteEdge]) -> str:
     return " ".join(parts)
 
 
-def _find_targets(app: AppMap, query: str) -> list[str]:
+def _find_targets(
+    app: AppMap, query: str, context_id: str | None = None
+) -> list[str]:
     """Screens matching *query* by name, key-element label, anchor, dynamic shape, or a
     route action that leads to them (so ``--find "image"`` finds the image screen)."""
     q = query.lower().strip()
@@ -1406,19 +2059,29 @@ def _find_targets(app: AppMap, query: str) -> list[str]:
             return True
         return any(q in d.lower() for d in rec.dynamic)
 
-    targets = [n for n in app.screens if matches(n)]
-    for e in app.routes:
+    targets = [
+        name
+        for name, rec in app.screens.items()
+        if (
+            context_id is None
+            or rec.context_id in (context_id, LEGACY_CONTEXT_ID)
+        )
+        and matches(name)
+    ]
+    for e in _routes_for_context(app, context_id):
         if q in e.action.lower() and e.to_screen not in targets:
             targets.append(e.to_screen)
     return targets
 
 
-def find_result(app: AppMap, query: str) -> dict[str, object]:
+def find_result(
+    app: AppMap, query: str, context_id: str | None = None
+) -> dict[str, object]:
     """Structured ``--find --json`` payload: matching screens + the route to each."""
     results = []
-    for t in _find_targets(app, query):
+    for t in _find_targets(app, query, context_id):
         rec = app.screens.get(t)
-        path = _shortest_path(app, t)
+        path = _shortest_path(app, t, context_id=context_id)
         results.append(
             {
                 "screen": t,
@@ -1441,13 +2104,14 @@ def resolve_goal(
     now: datetime | None = None,
     half_life_days: float = 3.0,
     last_goal: str | None = None,
+    context_id: str | None = None,
 ) -> str | None:
     """Best screen name for a fuzzy *goal* (powers ``aua goto``).
 
     Exact name wins; otherwise prefer a screen reachable from *start*, then higher rank
     score, then a shorter route.
     """
-    targets = _find_targets(app, goal)
+    targets = _find_targets(app, goal, context_id)
     if not targets:
         return None
     g = goal.lower().strip()
@@ -1457,8 +2121,12 @@ def resolve_goal(
     now = now or datetime.now().astimezone()
 
     def key(name: str) -> tuple[bool, bool, float, int]:
-        path = _shortest_path(app, name, start=start)
-        reachable = bool(path) or name == start or (start is None and name in _roots(app))
+        path = _shortest_path(app, name, start=start, context_id=context_id)
+        reachable = (
+            bool(path)
+            or name == start
+            or (start is None and name in _roots(app, context_id))
+        )
         score = _rank_score(
             app.screens[name], now=now, half_life_days=half_life_days, last_goal=last_goal
         )
@@ -1468,8 +2136,10 @@ def resolve_goal(
     return sorted(targets, key=key, reverse=True)[0]
 
 
-def _render_find(app: AppMap, query: str) -> str:
-    targets = _find_targets(app, query)
+def _render_find(
+    app: AppMap, query: str, context_id: str | None = None
+) -> str:
+    targets = _find_targets(app, query, context_id)
     lines = [f"# find: {query}  ({app.package})"]
     if not targets:
         lines.append("")
@@ -1479,7 +2149,7 @@ def _render_find(app: AppMap, query: str) -> str:
         rec = app.screens.get(t)
         lines.append("")
         lines.append(f"## {t}" + (f"  (tier: {rec.tier})" if rec else ""))
-        path = _shortest_path(app, t)
+        path = _shortest_path(app, t, context_id=context_id)
         lines.append("route: " + (_format_path(path) if path else "(start here)"))
         if rec:
             lines.extend(f"  - {s}" for s in _summarize_keys(rec))

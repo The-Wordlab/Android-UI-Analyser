@@ -354,9 +354,51 @@ steps:
 ```bash
 aua map                       # learned screens + routes for the current app
 aua map --find "image"        # just the route to a target
+aua map --context flags-catalog_experiment-…  # one verified feature-flag context
+aua map --all-contexts        # compare variants across contexts
+aua map --audit               # ambiguities + questions for a research agent
 aua memory show|path|update|forget
 aua memory update --screen login   # rename a badly-auto-named screen
 ```
+
+Memory schema v3 treats a feature-flag set as part of UI identity. `flags set/apply`
+activates a deterministic context after the app restarts, and subsequent screens/routes
+carry that context and its verified flag guards. Exact-context routes outrank compatible
+legacy routes; v1/v2 maps migrate to a trusted `legacy-default` context and remain usable.
+The map groups one logical destination's variants instead of rendering a recursive route
+tree full of suffixes such as `_2`.
+
+### Agent feedback and self-correction
+
+Knowledge learned by a person, runtime probe, source inspection, or external agent can be
+stored with provenance and context:
+
+```bash
+aua knowledge add --app com.example.app --kind claim \
+  --text "Catalog uses catalogTabTOOLS under catalog_experiment=a" \
+  --source agent --agent codex --evidence features/apps-hub/…
+aua knowledge list --app com.example.app
+aua knowledge stale <knowledge-id> --app com.example.app
+```
+
+The correction loop deliberately uses an external-agent contract: AUA finds structural
+problems and applies validated changes, but does not choose or spawn a model.
+
+```bash
+aua reconcile plan --app com.example.app > tasks.json
+# An external agent researches source/runtime using package, version, flags, and questions.
+aua reconcile submit --app com.example.app report.json
+aua reconcile status --app com.example.app
+aua reconcile rollback --app com.example.app <rollback-id>
+```
+
+A report has `verdict: apply|review|reject`, evidence, knowledge, and typed operations
+(`rename`, `alias`, `merge`, `split`, variant/state/context changes, route guards/replacement/
+deletion, knowledge upsert, or stale marking). `apply` is autonomous: AUA modifies a deep
+copy, validates stable IDs and route references, snapshots the old map, commits atomically,
+and returns a rollback ID. `review` is queued without mutation and `reject` is retained as
+feedback. The same audit, reconciliation, and knowledge operations are available as MCP
+tools.
 
 **Privacy:** only the durable skeleton is stored (screen names, routes, stable elements). Dynamic lists are kept as a *shape*, and `EditText` values / secrets / PII are redacted (`<filled>` / `<redacted>`) — which is also why auto-learned edges never contain typed text, and why an account row may need one manual tap during replay.
 
@@ -804,9 +846,11 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 | `aua screenshot [path]` | Save a raw screenshot (`--region` / `--scale`) |
 | `aua inspect <id>` | Dump full details for one element |
 | `aua app launch\|stop\|kill\|clear\|grant` | App control (`launch --clear` = clearState) |
-| `aua map` | Show the learned map of the current app (`--find "<goal>"` for a route) |
+| `aua map` | Show the active-context map (`--all-contexts`, `--audit`, or `--find "<goal>"`) |
 | `aua goto "<goal>"` | Drive the remembered route to a known screen — taps + verifies each hop (`--plan` previews, `--max-steps N`) |
 | `aua memory show\|path\|update\|forget` | Manage the per-app learned layout (`memory.backend: sqlite` optional) |
+| `aua knowledge list\|show\|add\|stale` | Manage scoped, provenance-bearing learned facts |
+| `aua reconcile plan\|submit\|status\|apply\|rollback` | Research and transactionally correct a map |
 | `aua config init\|show\|path` | Manage configuration |
 | `aua daemon start\|status\|stop` | Manage the optional warm-state daemon |
 | `aua guide` | Print the agent operating manual (`--emit-skill` writes the Claude Code skill) |

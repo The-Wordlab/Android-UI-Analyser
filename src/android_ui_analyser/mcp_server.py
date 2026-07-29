@@ -698,6 +698,130 @@ def _tool_definitions() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="map_audit",
+            description="Audit a learned map for poor names, duplicate variants, stale "
+            "screens, route conflicts, and source/runtime research questions.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "package": {"type": "string"},
+                    "context": {"type": "string"},
+                },
+                "required": ["package"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="reconcile_plan",
+            description="Create canonical research tasks for an external agent. AUA does "
+            "not spawn the agent.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "package": {"type": "string"},
+                    "context": {"type": "string"},
+                },
+                "required": ["package"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="reconcile_submit",
+            description="Submit a structured external-agent report. verdict=apply is "
+            "validated, committed atomically, and given a rollback id.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "package": {"type": "string"},
+                    "report": {"type": "object", "additionalProperties": True},
+                },
+                "required": ["package", "report"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="reconcile_status",
+            description="List research tasks, queued reports, and correction events.",
+            inputSchema={
+                "type": "object",
+                "properties": {"package": {"type": "string"}},
+                "required": ["package"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="reconcile_apply",
+            description="Apply a queued review report by task id.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "package": {"type": "string"},
+                    "task_id": {"type": "string"},
+                },
+                "required": ["package", "task_id"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="reconcile_rollback",
+            description="Restore the transaction snapshot for a correction event.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "package": {"type": "string"},
+                    "rollback_id": {"type": "string"},
+                },
+                "required": ["package", "rollback_id"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="knowledge_list",
+            description="List provenance-bearing app knowledge.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "package": {"type": "string"},
+                    "status": {"type": "string"},
+                },
+                "required": ["package"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="knowledge_add",
+            description="Save feedback or source/runtime research for future agents.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "package": {"type": "string"},
+                    "kind": {"type": "string"},
+                    "text": {"type": "string"},
+                    "name": {"type": "string"},
+                    "context": {"type": "string"},
+                    "source": {"type": "string"},
+                    "agent": {"type": "string"},
+                    "session": {"type": "string"},
+                    "evidence": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["package", "text"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="knowledge_stale",
+            description="Mark one knowledge item stale while retaining its evidence.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "package": {"type": "string"},
+                    "id": {"type": "string"},
+                },
+                "required": ["package", "id"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
             name="proxy_start",
             description="Start headless mitmproxy + device http_proxy (needs [proxy] extra).",
             inputSchema={
@@ -1064,6 +1188,102 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 verify=args.get("verify", True),
             )
         )
+    if name in {
+        "map_audit",
+        "reconcile_plan",
+        "reconcile_submit",
+        "reconcile_status",
+        "reconcile_apply",
+        "reconcile_rollback",
+        "knowledge_list",
+        "knowledge_add",
+        "knowledge_stale",
+    }:
+        from .memory import AppMap, KnowledgeEvidence
+        from .reconcile import ReconciliationStore, ResearchReport, audit_map
+
+        store = engine._memory
+        if store is None:
+            raise AuaError("memory is disabled", code="usage")
+        package = str(args["package"])
+        app_map = store.load(package) or AppMap(package=package)
+        reconciliation = ReconciliationStore(store)
+        try:
+            if name == "map_audit":
+                context = (
+                    args.get("context")
+                    or store.load_session(engine.device.serial).active_context_id
+                )
+                return audit_map(app_map, context_id=context).model_dump(mode="json")
+            if name == "reconcile_plan":
+                context = (
+                    args.get("context")
+                    or store.load_session(engine.device.serial).active_context_id
+                )
+                tasks = reconciliation.plan(package, context_id=context)
+                return {
+                    "package": package,
+                    "tasks": [task.model_dump(mode="json") for task in tasks],
+                }
+            if name == "reconcile_submit":
+                report = ResearchReport.model_validate(args["report"])
+                return reconciliation.submit(package, report)
+            if name == "reconcile_status":
+                return reconciliation.status(package)
+            if name == "reconcile_apply":
+                raw = next(
+                    (
+                        item
+                        for item in app_map.pending_reports
+                        if item.get("task_id") == args["task_id"]
+                    ),
+                    None,
+                )
+                if raw is None:
+                    raise ValueError(f"no queued report for task: {args['task_id']}")
+                report = ResearchReport.model_validate({**raw, "verdict": "apply"})
+                return reconciliation.apply(package, report).model_dump(mode="json")
+            if name == "reconcile_rollback":
+                return reconciliation.rollback(package, str(args["rollback_id"])).model_dump(
+                    mode="json"
+                )
+            if name == "knowledge_list":
+                status = args.get("status")
+                return {
+                    "package": package,
+                    "knowledge": [
+                        item.model_dump(mode="json")
+                        for item in app_map.knowledge
+                        if status is None or item.status == status
+                    ],
+                }
+            if name == "knowledge_add":
+                item = store.remember_knowledge(
+                    package,
+                    kind=args.get("kind", "claim"),
+                    text=args["text"],
+                    name=args.get("name"),
+                    context_id=args.get("context"),
+                    source=args.get("source", "agent"),
+                    agent=args.get("agent"),
+                    session=args.get("session"),
+                    evidence=[
+                        KnowledgeEvidence(kind="agent", ref=ref) for ref in args.get("evidence", [])
+                    ],
+                )
+                return item.model_dump(mode="json") if item else {}
+            if name == "knowledge_stale":
+                item = next(
+                    (known for known in app_map.knowledge if known.id == args["id"]),
+                    None,
+                )
+                if item is None:
+                    raise ValueError(f"unknown knowledge item: {args['id']}")
+                item.status = "stale"
+                store.save(app_map)
+                return {"ok": True, "id": args["id"], "status": "stale"}
+        except (ValueError, OSError) as exc:
+            raise AuaError(str(exc), code="usage") from exc
     if name == "proxy_start":
         return _dump(engine.proxy_start(port=args.get("port")))
     if name == "proxy_stop":

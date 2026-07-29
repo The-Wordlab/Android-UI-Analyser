@@ -140,13 +140,15 @@ Global options (apply to all commands; override config):
   missing key, unreachable endpoint). **Must never print secret values.**
 
 ### Memory / app map (§6b)
-- `aua map [--app <pkg>] [--brief] [--screen <name>] [--depth N] [--find "<goal>"] [--json]` → print the app's map. **With no query it prints the WHOLE app as a compact text tree** (every known screen, what's on it, routes between them) — not just a search result. `--brief` = skeleton only (screen tree + routes, smallest — load at session start); default = screens + key elements + routes; `--screen`/`--depth` drill into one screen; `--find "image"` returns just the screen(s) + route to a target. The agent reads this at session start to know the layout before navigating.
+- `aua map [--app <pkg>] [--brief] [--screen <name>] [--depth N] [--find "<goal>"] [--context <id>|--all-contexts] [--audit] [--json]` → print the active flag context as a logical-screen outline, compare variants across all contexts, or emit structural issues and agent research questions. `--brief` = skeleton only; default = screens + key elements + context-grouped routes; `--find "image"` returns just the screen(s) + route to a target.
 - `aua goto "<goal>" [--plan] [--max-steps N] [--allow-destructive]` → the navigation autopilot: resolve the (fuzzy) goal against the map, walk the shortest route from the current screen, and **replay each edge's recorded steps** (resource-id selector first, then label), verifying `known_screen` per hop. Cross-app auth legs (edges through `memory.transit_packages`) replay end-to-end with package-aware perception; steps matching `memory.destructive_labels` are refused without `--allow-destructive`. On divergence it exits `1` with the failing step, the remaining steps, and the current elements; a re-run **resumes**, even stranded mid-auth. `--plan` prints the annotated route (steps / replayable / legacy / destructive) without acting.
 - `aua flow run <name> [--param K=V]… [--file PATH] [--dry-run] [--from-step N] [--no-allow-destructive] [--assist]` / `aua flow save <name> [--last N] [--force]` / `aua flow list|show|delete` → **flows**: Maestro-style YAML journeys under `<memory.dir>/flows/`, authored directly or materialized from the session's recent actions (typed values become required `${PARAM_n}` placeholders — never persisted). `flow run` replays the whole journey (launch, taps, input with `${PARAM}` substitution, key/swipe/scroll, waits, asserts, `goto:` steps, cross-package legs) through the same executor as `goto`, returning a resumable step index on divergence. Flows are deliberate authored intent → destructive steps allowed by default.
 - `aua navigate "<goal>" [--until TEXT] [--max-steps N] [--allow-destructive] [--save-flow NAME]` → **opt-in autonomous navigation** (§7.3 planner; requires `planner.enabled`). A fast LLM drives to a natural-language goal with no prior map, recording the path into memory so a later `aua goto` replays it deterministically (the self-improvement flywheel); `--save-flow` also materializes it as a flow. `goto`/`flow run` gain `--assist` to invoke the same planner for one-call divergence recovery.
 - `aua explore mine <repo> --app <pkg>` / `aua explore plan [--app <pkg>]` → **app indexing**. `mine` harvests deeplink shortcuts from the app's source (AndroidManifest intent-filters + `navDeepLink`/`uriPattern` literals for custom schemes; test/build sources skipped) into the playbook so the agent can `aua open` them. `plan` returns a prioritized crawl worklist (probe unprobed deeplinks, fill templated ones, expand dead-end screens) whose results auto-record — the agent runs it and re-runs until it converges (the "have the agent index the app" loop).
 - `aua open <uri>` → open a deeplink (jump to a screen / trigger an app action); remembered in the playbook and marked probed.
 - `aua about [--app <pkg>]` → print the app playbook (description, recipes, deeplinks, notes); `aua remember --about/--note/--recipe/--deeplink` teaches it.
+- `aua knowledge list|show|add|stale` → provenance-bearing feedback and source/runtime facts, scoped by package/version/context.
+- `aua reconcile plan|submit|status|apply|rollback` → external-agent research contract and transactional correction with snapshots and rollback.
 - `aua memory show|path|update|forget [--app <pkg>] [--screen <name>]` → inspect / locate / force-record (or rename) the current screen / clear. Recording is automatic by default (§6b).
 
 ### Agent guide (self-documentation)
@@ -266,7 +268,8 @@ A per-user directory, default `~/.android-ui-analyser/` (override `memory.dir`):
   memory/
     <package>/                 # one folder per app, e.g. com.example.app/
       MAP.md                   # human- + AI-readable app map (what the agent reads)
-      index.json               # machine index: screens, signatures, routes, freshness
+      index.json               # schema v3: contexts, screens, routes, knowledge, tasks
+      corrections/             # before snapshots + correction events (rollback)
       screens/<screen>.json    # optional per-screen element detail
 ```
 One app = one folder; the tool may write/update **one or several files** per app.
@@ -279,10 +282,14 @@ One app = one folder; the tool may write/update **one or several files** per app
   durable anchors — activity + a hash of stable resource-ids/labels) used to recognize the
   screen on revisit, the **perception tier** it needs (e.g. `image_result` → vision/opaque),
   the key elements (nav targets, inputs, buttons), and free-text notes.
+- **Feature-flag contexts:** a deterministic ID, exact flag set, app version, shell
+  anchors, verification state, and source. Screens and routes carry a context; an
+  exact-context route wins over a legacy route with the same source/action.
 - **Routes (navigation graph):** directed edges `screen --action--> screen`, e.g.
   `home --tap nav "Apps"--> apps_grid --tap "Images"--> image_create --input+send-->
   image_result`. This yields "how many steps, and from where" for any target.
-- **Notes / gotchas:** e.g. "CleverTap promo can overlay Apps; dismiss via X (vision)."
+- **Knowledge:** descriptions, notes, recipes, deeplinks, and source/runtime claims with
+  package/version/context scope, status, agent/session provenance, and evidence.
 
 ### How the tool maintains it (by itself)
 - **Auto-record (default on):** every `analyze` records/updates the current screen
@@ -297,6 +304,10 @@ One app = one folder; the tool may write/update **one or several files** per app
   matches a known screen, sets `meta.known_screen` and attaches inline affordances —
   `meta.known_routes` (outgoing edges), `meta.suggested_gotos` (ranked ready-to-run
   targets), `meta.map_hint` — the agent instantly knows where it is and what's reachable.
+- **Context recognition:** `flags set/apply` promotes the verified flags to the session's
+  active context after a successful restart. Recognition first compares weighted
+  resource/selected-state/content/text anchors inside that context, then falls back to
+  trusted `legacy-default` screens. Existing v1/v2 maps migrate without losing routes.
 - **Cross-app transit:** screens in `memory.transit_packages` (Google auth via
   Chrome/GMS, permission dialogs) record into their own maps, but the **journey cursor
   stays on the origin app**, so an auth excursion returns as ONE replayable edge
@@ -310,13 +321,18 @@ One app = one folder; the tool may write/update **one or several files** per app
   routes THROUGH destructive taps ("the way to the login screen is Delete").
 
 ### Map output & detail levels (the full picture, but token-aware) — CLI in §5
-`aua map` with no query prints the **whole app as a compact text tree** — every known
-screen, what's on it, and the routes between them. `--find` is the focused query on top.
+`aua map` prints a compact logical-screen outline for the active context. Variants and
+states are grouped under their logical destination, and routes are grouped by context
+instead of duplicated in a recursive tree. `--all-contexts` compares all variants;
+`--find` is the focused query on top.
 Detail is controlled so the agent loads only what it needs:
 - `--brief` → skeleton only (screen tree + routes); smallest, load at session start.
 - default → screens + their key/durable elements + routes.
 - `--screen <name>` / `--depth N` → drill into one screen's full element detail.
 - `--find "<goal>"` → just the screen(s) + route to a target. `--json` for any of these.
+- `--context <id>` / `--all-contexts` → select one flag configuration or compare all.
+- `--audit` → poor names, near-duplicate screens, stale entries, route conflicts, orphan
+  references, and concrete source/runtime questions for an external research agent.
 Example shape:
 ```
 home  (tier: hierarchy)
@@ -339,10 +355,23 @@ compact and always-fresh and avoids persisting user content (PII). So: the map g
 full **structural** picture; live **contents** come from `analyze`.
 
 ### CLI (agent-facing) — see §5
-`aua map [--brief|--screen|--depth|--find]` loads the map / answers "where is X and how do
+`aua map [--brief|--screen|--depth|--find|--audit|--context|--all-contexts]` loads the map / answers "where is X and how do
 I get there"; `aua goto "<goal>"` drives it (the autopilot); `aua flow run|save|list|show|
 delete` replays whole journeys (Maestro-style, agent-authored or recorded);
-`aua memory show|path|update|forget` inspects and manages it.
+`aua memory show|path|update|forget` inspects and manages it. `aua knowledge
+list|show|add|stale` manages provenance-bearing experience while `remember`/`about`
+remain backward compatible.
+
+### Bidirectional research and correction
+`aua reconcile plan` serializes `ResearchTask` objects containing package/version/context,
+affected stable IDs, observations, conflicts, and questions. The caller sends these to
+an external coding/runtime agent; AUA never spawns a model. `reconcile submit` accepts a
+`ResearchReport` containing agent/session, `apply|review|reject`, rationale, evidence,
+knowledge, and typed correction operations. `apply` reports are committed automatically:
+the operations run on a deep copy, structural invariants are checked, the old map is
+snapshotted, and the replacement is written atomically. A correction event includes its
+rollback ID. `review` queues the report without mutation; `reject` retains the feedback.
+`reconcile status|apply|rollback` completes the lifecycle, with equivalent MCP tools.
 
 ### Privacy
 Memory is **local-only**, never transmitted. The tool stores structure and durable labels,
