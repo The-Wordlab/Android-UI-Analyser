@@ -155,3 +155,79 @@ def test_cli_suite_stdin(monkeypatch) -> None:
     r = runner.invoke(app, ["suite", "run", "-", "--json"], input=yaml_text)
     assert r.exit_code == 0, r.stderr
     assert json.loads(r.stdout)["ok"] is True
+
+
+# --------------------------------------------------------------- system chrome in diagnostics
+
+# The status-bar shape from the real failure: four `com.android.systemui` wrappers ranked as
+# "nearest" for an app selector, which explains nothing about an app-side miss.
+_SYSTEM_CHROME_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy rotation="0">
+  <node index="0" class="android.widget.FrameLayout"
+        resource-id="com.android.systemui:id/notification_icon_area"
+        clickable="false" enabled="true" bounds="[0,0][540,84]"/>
+  <node index="1" class="android.view.ViewGroup"
+        resource-id="com.android.systemui:id/notificationIcons"
+        clickable="false" enabled="true" bounds="[0,0][280,84]"/>
+  <node index="2" class="android.widget.LinearLayout"
+        resource-id="com.android.systemui:id/system_icons"
+        clickable="false" enabled="true" bounds="[820,0][1040,84]"/>
+  <node index="3" class="android.widget.LinearLayout"
+        resource-id="com.android.systemui:id/status_bar_contents"
+        clickable="false" enabled="true" bounds="[0,0][1080,84]"/>
+  <node index="4" class="android.widget.TextView" text="Explore"
+        resource-id="com.test.app:id/appsHubTabExplore" clickable="true" enabled="true"
+        bounds="[40,200][1040,280]"/>
+</hierarchy>"""
+
+
+def _chrome_engine():
+    return make_engine(device=FakeDevice(hierarchy_xml=_SYSTEM_CHROME_XML, package="com.test.app"))
+
+
+def test_expect_miss_never_suggests_system_chrome() -> None:
+    detail = _chrome_engine().expect(rid="definitelyNotOnScreen", exists=True).detail or ""
+    assert "systemui" not in detail
+    for noise in ("notification_icon_area", "notificationIcons", "system_icons", "status_bar"):
+        assert noise not in detail, f"{noise} leaked into the nearest-candidate hint"
+    # The app's own element is what a caller can act on, so that is what gets offered.
+    assert "appsHubTabExplore" in detail
+
+
+def test_expect_miss_counts_app_elements_not_chrome() -> None:
+    detail = _chrome_engine().expect(rid="definitelyNotOnScreen", exists=True).detail or ""
+    assert "on_screen=1" in detail
+    assert "system=4" in detail
+
+
+def test_selector_not_found_never_suggests_system_chrome() -> None:
+    from android_ui_analyser.errors import SelectorNotFoundError
+
+    try:
+        _chrome_engine().tap(selector={"rid": "definitelyNotOnScreen"})
+    except SelectorNotFoundError as exc:
+        blob = f"{exc} {exc.hint}"
+        assert "systemui" not in blob
+        assert "1 app elements on screen" in blob
+    else:
+        raise AssertionError("expected SelectorNotFoundError")
+
+
+def test_wait_timeout_never_suggests_system_chrome() -> None:
+    eng = _chrome_engine()
+    detail = eng.wait(for_="definitelyNotOnScreen", timeout_ms=50).detail or ""
+    for noise in ("systemui", "notification_icon_area", "notificationIcons", "system_icons"):
+        assert noise not in detail, f"{noise} leaked into the wait timeout diagnostic"
+
+
+def test_system_chrome_is_still_offered_when_it_is_all_there_is() -> None:
+    """Falling back beats an empty hint when the app itself contributed nothing."""
+    from android_ui_analyser.hierarchy import parse_hierarchy
+    from android_ui_analyser.selectors import nearest_elements
+
+    chrome_only = [
+        el
+        for el in parse_hierarchy(_SYSTEM_CHROME_XML, (1080, 2400))
+        if "systemui" in (el.resource_id or "")
+    ]
+    assert nearest_elements(chrome_only, "system_icons")

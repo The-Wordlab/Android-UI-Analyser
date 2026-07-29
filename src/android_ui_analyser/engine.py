@@ -73,6 +73,7 @@ from .scroll_geom import (
 from .selectors import (
     _MAX_CANDIDATES,
     _match_step,
+    app_elements,
     element_digest,
     match_selector,
     nearest_elements,
@@ -2158,7 +2159,8 @@ class Engine:
             needle = rid or text or desc or ""
             near = nearest_elements(elements, needle)
             raise SelectorNotFoundError(
-                f"no element matches {label} ({len(elements)} elements on screen)",
+                f"no element matches {label} "
+                f"({len(app_elements(elements))} app elements on screen)",
                 hint=(
                     "nearest: " + " | ".join(element_digest(el) for el in near)
                     if near
@@ -2867,7 +2869,7 @@ class Engine:
         # Closest on-screen candidates.
         try:
             result = self.analyze(source="hierarchy", record=False)
-            from .selectors import nearest_elements
+            from .selectors import app_elements, nearest_elements
 
             near = nearest_elements(result.elements, needle, limit=5)
             if near:
@@ -2877,7 +2879,8 @@ class Engine:
                     digests.append(f"id={el.id}:{label!r}")
                 parts.append("closest on screen: " + "; ".join(digests))
             else:
-                parts.append(f"screen has {len(result.elements)} elements (no close text match)")
+                app_count = len(app_elements(result.elements))
+                parts.append(f"screen has {app_count} app elements (no close text match)")
         except Exception as exc:  # pragma: no cover - diagnostic bonus
             parts.append(f"(could not snapshot screen: {exc})")
         return " — ".join(parts)
@@ -2963,8 +2966,14 @@ class Engine:
             ) + " | found: " + " | ".join(element_digest(el) for el in matches[:_MAX_CANDIDATES])
         if not matches:
             near = nearest_elements(elements, selector.get("rid") or selector.get("text") or "")
+            app_only = app_elements(elements)
             detail = detail_tokens(
-                "fail", sought=label, predicate="exists", actual="absent", on_screen=len(elements)
+                "fail",
+                sought=label,
+                predicate="exists",
+                actual="absent",
+                on_screen=len(app_only),
+                system=len(elements) - len(app_only) or None,
             )
             if near:
                 detail += " | nearest: " + " | ".join(element_digest(el) for el in near)
