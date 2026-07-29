@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from android_ui_analyser import engine as engine_mod
@@ -19,7 +21,6 @@ from android_ui_analyser.logcat import (
     resolve_since_ms,
     set_mark,
 )
-from android_ui_analyser.memory import RouteStep
 from conftest import FakeDevice, make_config, make_engine
 
 runner = CliRunner()
@@ -124,7 +125,7 @@ def test_engine_logcat_mark_and_dump() -> None:
 
 def test_engine_auto_marks_last_action() -> None:
     eng = make_engine()
-    eng._record_action_safe(RouteStep(kind="tap", label="X"))
+    eng._screen_changed()
     marks = load_marks(marks_path(eng.config.cache.dir, eng.device.serial))
     assert "last-action" in marks
 
@@ -136,6 +137,175 @@ def test_logcat_clear_on_mark() -> None:
     eng.logcat_mark("cleared", clear=True)
     assert ("logcat", (None, False)) in dev.calls
     assert dev._logcat_lines == []
+
+
+# --------------------------------------------------------------------- device-clock windows
+
+# `-v threadtime` is stamped in device-LOCAL time: 0 is a UTC emulator, 120 Europe/Madrid
+# in summer. The measured host↔device skew on a plain AVD was +9.4s.
+_TZ_OFFSET = 120
+_SKEWS = (9_400, -9_400)
+
+
+@pytest.mark.parametrize("skew_ms", _SKEWS)
+@pytest.mark.parametrize("utc_offset", [0, _TZ_OFFSET])
+def test_mark_window_captures_the_line_logged_right_after_it(
+    skew_ms: int, utc_offset: int
+) -> None:
+    """mark → app logs → dump. Host-clock windows drop the line or stop filtering at all.
+
+    A boundary derived from the host lands ``skew_ms`` away from the clock that stamped the
+    log, so the fresh line falls outside the window and the dump comes back empty — which
+    reads exactly like "the app never logged anything".
+    """
+    dev = FakeDevice(clock_skew_ms=skew_ms, utc_offset=utc_offset)
+    eng = Engine(make_config(), device=dev)
+    stale = dev.log_now("Analytics", "event_from_previous_screen", offset_ms=-13_000)
+    eng.logcat_mark("before_tap")
+    fresh = dev.log_now("Analytics", "event_message_sent")
+
+    got = eng.logcat(since="before_tap")["lines"]
+    assert fresh in got, "the line logged right after the mark was silently dropped"
+    assert stale not in got, "a line from before the mark leaked into the window"
+
+
+def test_mark_reports_device_clock_and_skew() -> None:
+    dev = FakeDevice(clock_skew_ms=7_000, utc_offset=_TZ_OFFSET)
+    eng = Engine(make_config(), device=dev)
+    marked = eng.logcat_mark("m")
+    assert marked["clock"] == "device"
+    assert 6_000 <= marked["skew_ms"] <= 8_000
+    assert marked["host_unix_ms"] - marked["unix_ms"] == marked["skew_ms"]
+
+
+def test_duration_window_counts_back_from_device_now() -> None:
+    dev = FakeDevice(clock_skew_ms=9_400, utc_offset=_TZ_OFFSET)
+    eng = Engine(make_config(), device=dev)
+    inside = dev.log_now("A", "inside window", offset_ms=-5_000)
+    outside = dev.log_now("A", "outside window", offset_ms=-40_000)
+    dump = eng.logcat(since="30s")
+    assert inside in dump["lines"]
+    assert outside not in dump["lines"]
+
+
+def test_unreadable_device_clock_falls_back_to_host_and_says_so() -> None:
+    dev = FakeDevice()
+    dev.get_clock_ms = lambda: None  # type: ignore[method-assign]
+    eng = Engine(make_config(), device=dev)
+    marked = eng.logcat_mark("m")
+    assert marked["clock"] == "host"
+    assert "skew_ms" not in marked
+    assert eng.logcat(since="m")["clock"] == "host"
+
+
+def test_legacy_host_time_mark_is_converted() -> None:
+    """A marks file written before windows moved to the device clock must not mis-window."""
+    dev = FakeDevice(clock_skew_ms=9_400, utc_offset=_TZ_OFFSET)
+    eng = Engine(make_config(), device=dev)
+    host_ms = int(time.time() * 1000)
+    path = marks_path(eng.config.cache.dir, dev.serial)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"old": {"unix_ms": host_ms, "iso": "x"}}), encoding="utf-8")
+    fresh = dev.log_now("A", "after the legacy mark")
+    assert fresh in eng.logcat(since="old")["lines"]
+
+
+def test_dump_delegates_the_time_window_to_the_device() -> None:
+    dev = FakeDevice(clock_skew_ms=9_400, utc_offset=_TZ_OFFSET)
+    eng = Engine(make_config(), device=dev)
+    eng.logcat_mark("m")
+    dump = eng.logcat(since="m")
+    passed = [args[0] for name, args in dev.calls if name == "logcat" and args[1]]
+    assert passed and passed[-1] == dump["since_unix_ms"]
+
+
+def test_real_device_logcat_uses_native_T_filter(monkeypatch) -> None:
+    """The device compares against the clock that stamped the lines; nothing host-side can."""
+    from android_ui_analyser import device as device_mod
+
+    seen: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(list(cmd))
+        return type("P", (), {"stdout": "07-29 17:00:00.000  1  1 I A: x\n"})()
+
+    monkeypatch.setattr(device_mod.subprocess, "run", fake_run)
+    real = object.__new__(device_mod.Uiautomator2Device)
+    real.serial = "emulator-5554"
+    real.logcat(since_ms=1_785_337_446_619)
+    assert seen[-1][-2:] == ["-T", "1785337446.619000000"]
+
+
+def test_real_device_falls_back_to_device_tz_post_filter(monkeypatch) -> None:
+    """When `-T` is unsupported the post-filter must still compare on the device's clock."""
+    import subprocess as sp
+
+    from android_ui_analyser import device as device_mod
+
+    inside = "07-29 17:00:10.000  1  1 I A: inside"
+    outside = "07-29 16:59:00.000  1  1 I A: outside"
+
+    def fake_run(cmd, **kwargs):
+        if "-T" in cmd:
+            raise sp.CalledProcessError(1, cmd)
+        return type("P", (), {"stdout": f"{outside}\n{inside}\n"})()
+
+    monkeypatch.setattr(device_mod.subprocess, "run", fake_run)
+    real = object.__new__(device_mod.Uiautomator2Device)
+    real.serial = "emulator-5554"
+    monkeypatch.setattr(type(real), "utc_offset_minutes", lambda self: 120)
+    # 17:00:00 device-local at UTC+2 == 15:00:00Z
+    boundary = int(
+        datetime(2026, 7, 29, 15, 0, 0, tzinfo=UTC).timestamp() * 1000
+    )
+    got = real.logcat(since_ms=boundary)
+    assert inside in got and outside not in got
+
+
+_ACTION_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy rotation="0">
+  <node index="0" class="android.widget.EditText" text="Go"
+        resource-id="com.x:id/field" clickable="true" enabled="true" focused="true"
+        bounds="[40,200][1040,320]"/>
+</hierarchy>"""
+
+
+def test_every_state_changing_action_restamps_last_action() -> None:
+    """`--since last-action` is only meaningful if the LAST action wrote it."""
+    from android_ui_analyser import logcat as logcat_mod
+
+    dev = FakeDevice(hierarchy_xml=_ACTION_XML, package="com.x", clock_skew_ms=4_000)
+    eng = Engine(make_config(), device=dev)
+    path = marks_path(eng.config.cache.dir, dev.serial)
+    target = eng.analyze(source="hierarchy").elements[0].id
+
+    actions = {
+        "tap": lambda: eng.tap(target, observe=False),
+        "long_press": lambda: eng.long_press(target, observe=False),
+        "double_tap": lambda: eng.double_tap(target, observe=False),
+        "input": lambda: eng.input_text(target, "hi", observe=False),
+        "clear": lambda: eng.clear(target, observe=False),
+        "swipe": lambda: eng.swipe("up", observe=False, verify=False),
+        "scroll": lambda: eng.scroll("down", observe=False),
+        "scroll_to": lambda: eng.scroll_to("Go", observe=False),
+        "key": lambda: eng.key("back", observe=False),
+        "hide_keyboard": lambda: eng.hide_keyboard(observe=False),
+        "open": lambda: eng.open_link("app://x", observe=False),
+        "erase": lambda: eng.erase(chars=1, observe=False),
+        "paste": lambda: eng.paste(observe=False),
+        "orientation": lambda: eng.orientation_set("landscape"),
+        "app_launch": lambda: eng.app("launch", package="com.x"),
+    }
+    for name, run in actions.items():
+        path.unlink(missing_ok=True)
+        eng.analyze(source="hierarchy")
+        run()
+        marks = load_marks(path)
+        assert "last-action" in marks, f"{name} did not re-stamp last-action"
+        expected = logcat_mod.DeviceClock(skew_ms=4_000, measured=True).now_ms()
+        assert abs(int(marks["last-action"]["unix_ms"]) - expected) < 2_000, (
+            f"{name} stamped the wrong clock"
+        )
 
 
 def test_cli_logcat_mark_and_dump(monkeypatch) -> None:

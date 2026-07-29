@@ -845,7 +845,6 @@ class Engine:
             return None, None
 
     def _record_action_safe(self, step: RouteStep) -> None:
-        self._mark_logcat("last-action")
         mem = self._memory
         if mem is None or self._device is None:
             return
@@ -855,13 +854,14 @@ class Engine:
             logger.debug("memory record_action failed: %s", exc)
 
     def _mark_logcat(self, name: str) -> None:
-        """Best-effort logcat mark (never fails the action that triggered it)."""
+        """Best-effort device-clock logcat mark (never fails the action that triggered it)."""
         try:
             if self._device is None:
                 return
             from . import logcat as logcat_mod
 
-            logcat_mod.set_mark(self.config.cache.dir, self._device.serial, name)
+            clock = logcat_mod.resolve_clock(self._device, self.config.cache.dir)
+            logcat_mod.set_mark(self.config.cache.dir, self._device.serial, name, clock=clock)
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug("logcat mark %r failed: %s", name, exc)
 
@@ -2225,7 +2225,7 @@ class Engine:
         cx, cy = el.center
         step = self._step("tap", el)  # built pre-action: needs the cached package
         self.device.click(cx, cy)
-        self._invalidate_cache()
+        self._screen_changed()
         self._record_action_safe(step)
         return self._observe(
             ActionResult(ok=True, action="tap", id=el.id, target=[cx, cy]), observe, with_image
@@ -2244,7 +2244,7 @@ class Engine:
         cx, cy = el.center
         step = self._step("long-press", el)
         self.device.long_click(cx, cy, ms)
-        self._invalidate_cache()
+        self._screen_changed()
         self._record_action_safe(step)
         return self._observe(
             ActionResult(ok=True, action="long-press", id=el.id, target=[cx, cy]),
@@ -2264,7 +2264,7 @@ class Engine:
         cx, cy = el.center
         step = self._step("double-tap", el)
         self.device.double_click(cx, cy)
-        self._invalidate_cache()
+        self._screen_changed()
         self._record_action_safe(step)
         return self._observe(
             ActionResult(ok=True, action="double-tap", id=el.id, target=[cx, cy]),
@@ -2288,7 +2288,7 @@ class Engine:
         # (PRD §6b privacy; observe_action strips `text` defensively too).
         step = self._step("input", el, submit=submit)
         self.device.input_text(cx, cy, text, clear=True, submit=submit)
-        self._invalidate_cache()
+        self._screen_changed()
         self._record_action_safe(step)
         return self._observe(
             ActionResult(ok=True, action="input", id=el.id, detail=text), observe, with_image
@@ -2307,7 +2307,7 @@ class Engine:
         step = self._step("clear", el)
         self.device.click(cx, cy)
         self.device.clear_text()
-        self._invalidate_cache()
+        self._screen_changed()
         self._record_action_safe(step)
         return self._observe(
             ActionResult(ok=True, action="clear", id=el.id), observe, with_image
@@ -2410,7 +2410,7 @@ class Engine:
             x1, y1, x2, y2 = coords
             step = self._step("swipe", arg="coords")
             device.swipe(x1, y1, x2, y2)
-            self._invalidate_cache()
+            self._screen_changed()
             self._record_action_safe(step)
             return self._observe(
                 ActionResult(ok=True, action="swipe", target=[x1, y1, x2, y2]),
@@ -2425,13 +2425,13 @@ class Engine:
         step = self._step("swipe", arg=d)
         if not verify:
             device.swipe(x1, y1, x2, y2)
-            self._invalidate_cache()
+            self._screen_changed()
             self._record_action_safe(step)
             return self._observe(
                 ActionResult(ok=True, action="swipe", target=[x1, y1, x2, y2]), observe, with_image
             )
         distance, moved = self._swipe_once(box, d, percent)
-        self._invalidate_cache()
+        self._screen_changed()
         self._record_action_safe(step)
         # ok stays True — the gesture WAS performed, and a swipe is also used to dismiss or
         # page things where "the screen did not move" is the expected outcome. The verdict
@@ -2492,7 +2492,7 @@ class Engine:
                 break
             steps += 1
             travelled += abs(dy)
-        self._invalidate_cache()
+        self._screen_changed()
         self._record_action_safe(step)
         at_end = steps < limit
         if steps == 0:
@@ -2571,7 +2571,7 @@ class Engine:
             if found is not None or not moved:
                 exhausted = False
                 break
-        self._invalidate_cache()
+        self._screen_changed()
         self._record_action_safe(step)
         if found is not None:
             outcome = "moved"
@@ -2613,7 +2613,7 @@ class Engine:
             )
         step = self._step("key", arg=name)
         self.device.press(name)
-        self._invalidate_cache()
+        self._screen_changed()
         self._record_action_safe(step)
         return self._observe(
             ActionResult(ok=True, action="key", detail=name), observe, with_image
@@ -2629,7 +2629,7 @@ class Engine:
         """
         step = self._step("hide-keyboard")
         self.device.hide_keyboard()
-        self._invalidate_cache()
+        self._screen_changed()
         self._record_action_safe(step)
         return self._observe(
             ActionResult(ok=True, action="hide-keyboard"), observe, with_image
@@ -2660,7 +2660,7 @@ class Engine:
             target_pkg = self.current_package() or self._cached_package()
         step = self._step("open-link", arg=uri)
         self.device.open_link(uri, package=target_pkg if pin_package else None)
-        self._invalidate_cache()
+        self._screen_changed()
         time.sleep(0.35)  # chooser / activity settle
         detail = uri if not target_pkg else f"{uri} → {target_pkg}"
         if self._is_chooser():
@@ -2768,7 +2768,7 @@ class Engine:
                 if (el.text or "").strip() == "Just once" and el.clickable:
                     device.click(*el.center)
                     break
-        self._invalidate_cache()
+        self._screen_changed()
         return True
 
     def _remember_deeplink_safe(self, uri: str, *, package: str | None = None) -> None:
@@ -3057,7 +3057,7 @@ class Engine:
 
     def paste(self, *, observe: bool = True, with_image: bool | str | None = None) -> ActionResult:
         self.device.paste()
-        self._invalidate_cache()
+        self._screen_changed()
         return self._observe(ActionResult(ok=True, action="paste"), observe, with_image)
 
     def copy_text(
@@ -3082,7 +3082,7 @@ class Engine:
 
     def orientation_set(self, mode: str) -> ActionResult:
         self.device.set_orientation(mode)
-        self._invalidate_cache()
+        self._screen_changed()
         return ActionResult(ok=True, action="orientation-set", detail=mode)
 
     def orientation_get(self) -> ActionResult:
@@ -3171,7 +3171,7 @@ class Engine:
             self.device.clear_text()
         else:
             self.device.erase_chars(chars)
-        self._invalidate_cache()
+        self._screen_changed()
         detail = "all" if not chars or chars <= 0 else str(chars)
         return self._observe(
             ActionResult(ok=True, action="erase", id=el.id if el else None, detail=detail),
@@ -3206,7 +3206,7 @@ class Engine:
             # --activity pins the entry Activity — some builds have multiple launcher
             # activities (e.g. a Dev Tools menu) and default resolution is nondeterministic.
             device.launch_app(package, activity=activity)
-            self._invalidate_cache()
+            self._screen_changed()
             detail = f"{package}/{activity}" if activity else package
             if clear_state:
                 detail = f"{detail} (cleared)"
@@ -3215,13 +3215,13 @@ class Engine:
             if not package:
                 raise UsageError("app kill needs a package name")
             device.stop_app(package)
-            self._invalidate_cache()
+            self._screen_changed()
             return ActionResult(ok=True, action="app-kill", detail=package)
         if a == "stop":
             if not package:
                 raise UsageError("app stop needs a package name")
             device.stop_app(package)
-            self._invalidate_cache()
+            self._screen_changed()
             return ActionResult(ok=True, action="app-stop", detail=package)
         if a in ("clear", "clear-state", "clear_state"):
             if not package:
@@ -3233,7 +3233,7 @@ class Engine:
                     hint="Then re-apply flag overrides / re-login before asserting experiment UI.",
                 )
             device.clear_app(package)
-            self._invalidate_cache()
+            self._screen_changed()
             return ActionResult(ok=True, action="app-clear", detail=package)
         if a in ("grant", "grant-permissions", "grant_permissions"):
             if not package:
@@ -3248,13 +3248,20 @@ class Engine:
     # ----------------------------------------------------------------- logcat / suite
 
     def logcat_mark(self, name: str = "default", *, clear: bool = False) -> dict[str, Any]:
-        """Store a named host-time mark (and optionally clear the device logcat buffer)."""
+        """Store a named device-clock mark (and optionally clear the device logcat buffer).
+
+        Measures the skew fresh: this is the user-invoked entry point, the one place where
+        an adb round-trip is affordable and where reporting real drift is the whole point.
+        """
         from . import logcat as logcat_mod
 
         device = self.device
         if clear:
             device.logcat(dump=False)
-        entry = logcat_mod.set_mark(self.config.cache.dir, device.serial, name or "default")
+        clock = logcat_mod.resolve_clock(device, self.config.cache.dir, force=True)
+        entry = logcat_mod.set_mark(
+            self.config.cache.dir, device.serial, name or "default", clock=clock
+        )
         return {"ok": True, "action": "logcat-mark", **entry}
 
     def logcat(
@@ -3271,22 +3278,24 @@ class Engine:
         device = self.device
         path = logcat_mod.marks_path(self.config.cache.dir, device.serial)
         marks = logcat_mod.load_marks(path)
+        clock = logcat_mod.resolve_clock(device, self.config.cache.dir)
         try:
-            since_ms, since_label = logcat_mod.resolve_since_ms(marks, since)
+            since_ms, since_label = logcat_mod.resolve_since_ms(marks, since, clock=clock)
         except KeyError as exc:
             known = ", ".join(sorted(marks)) or "(none)"
             raise UsageError(
                 f"unknown logcat mark {since!r}",
                 hint=f"Known marks: {known}. Set one with `aua logcat mark <name>`.",
             ) from exc
-        raw = device.logcat(since_ms=None, dump=True)
-        filtered = logcat_mod.filter_logcat(
-            raw, since_ms=since_ms, grep=grep, tag=tag, lines=lines
-        )
+        raw = device.logcat(since_ms=since_ms, dump=True)
+        filtered = logcat_mod.filter_logcat(raw, grep=grep, tag=tag, lines=lines)
         return {
             "ok": True,
             "lines": filtered,
             "since": since_label,
+            "since_unix_ms": since_ms,
+            "clock": clock.name,
+            "skew_ms": clock.skew_ms,
             "grep": grep,
             "tag": tag,
             "count": len(filtered),
@@ -3420,6 +3429,17 @@ class Engine:
         except Exception as exc:  # pragma: no cover - corrupt cache
             logger.warning("ignoring corrupt analyze cache: %s", exc)
             return None
+
+    def _screen_changed(self) -> None:
+        """The single funnel every state-changing action passes through.
+
+        Dropping the stale id cache and re-stamping ``last-action`` are the same event, so
+        they live together: an action that forgot the stamp would leave
+        ``logcat --since last-action`` pointing at some *earlier* action's window, and
+        under-reporting a window looks exactly like "the app logged nothing".
+        """
+        self._invalidate_cache()
+        self._mark_logcat("last-action")
 
     def _invalidate_cache(self) -> None:
         path = self._cache_path()

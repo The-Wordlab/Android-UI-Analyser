@@ -14,6 +14,8 @@ Provides:
 from __future__ import annotations
 
 import io
+import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -94,6 +96,8 @@ class FakeDevice(Device):
         screenshots: list[bytes] | None = None,
         app_version: str | None = None,
         serial: str = "fake-emulator-5554",
+        clock_skew_ms: int = 0,
+        utc_offset: int = 0,
     ) -> None:
         self.serial = serial
         self._xml = hierarchy_xml
@@ -120,6 +124,10 @@ class FakeDevice(Device):
         self._recording: str | None = None
         self._logcat_lines: list[str] = []
         self._logcat_cleared = False
+        # host - device, so a positive skew means the host runs ahead (the emulator case).
+        self.clock_skew_ms = clock_skew_ms
+        self.utc_offset = utc_offset
+        self._clock_ms: int | None = None
 
     # capture
     def window_size(self) -> tuple[int, int]:
@@ -237,7 +245,31 @@ class FakeDevice(Device):
         self._clock_ms = timestamp_ms
 
     def get_clock_ms(self) -> int | None:
-        return getattr(self, "_clock_ms", 1_700_000_000_000)
+        """The device wall clock — host time shifted by ``clock_skew_ms`` unless pinned.
+
+        Real emulators run seconds away from their host, which is precisely what logcat
+        windows have to be computed against, so the fake models the offset rather than a
+        shared clock.
+        """
+        if self._clock_ms is not None:
+            return self._clock_ms
+        return int(time.time() * 1000) - self.clock_skew_ms
+
+    def utc_offset_minutes(self) -> int | None:
+        return self.utc_offset
+
+    def log_now(self, tag: str = "Test", msg: str = "hello", *, offset_ms: int = 0) -> str:
+        """Append a line stamped off the DEVICE clock in device-local time, as apps do."""
+        device_ms = (self.get_clock_ms() or 0) + offset_ms
+        local = datetime.fromtimestamp(
+            device_ms / 1000.0 + self.utc_offset * 60, tz=UTC
+        )
+        line = (
+            f"{local.month:02d}-{local.day:02d} {local.hour:02d}:{local.minute:02d}:"
+            f"{local.second:02d}.{local.microsecond // 1000:03d}  1234  5678 I {tag}: {msg}"
+        )
+        self._logcat_lines.append(line)
+        return line
 
     def logcat(self, *, since_ms: int | None = None, dump: bool = True) -> str:
         self.calls.append(("logcat", (since_ms, dump)))
@@ -250,7 +282,10 @@ class FakeDevice(Device):
         raw = "\n".join(self._logcat_lines)
         if since_ms is None:
             return raw
-        return "\n".join(filter_logcat(raw, since_ms=since_ms))
+        # Models `logcat -T <device epoch>`: the device compares against its own clock.
+        return "\n".join(
+            filter_logcat(raw, since_ms=since_ms, tz_offset_minutes=self.utc_offset)
+        )
 
     def erase_chars(self, count: int) -> None:
         self.calls.append(("erase_chars", (count,)))
