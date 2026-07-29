@@ -268,7 +268,7 @@ A per-user directory, default `~/.android-ui-analyser/` (override `memory.dir`):
   memory/
     <package>/                 # one folder per app, e.g. com.example.app/
       MAP.md                   # human- + AI-readable app map (what the agent reads)
-      index.json               # schema v3: contexts, screens, routes, knowledge, tasks
+      index.json               # schema v4: contexts, screens/states, trusted routes, tasks
       corrections/             # before snapshots + correction events (rollback)
       screens/<screen>.json    # optional per-screen element detail
 ```
@@ -277,17 +277,21 @@ One app = one folder; the tool may write/update **one or several files** per app
 ### What a map contains
 - **Identity & freshness:** package, app label, app version last seen, last-verified
   timestamp — so the agent knows how stale the map is.
-- **Screens / sections:** each known screen gets a stable name (`home`, `apps_grid`,
+- **Screens / sections:** each known screen gets a stable semantic name (`home`, `catalog_grid`,
   `image_create`, `image_result`, …) plus: its activity, a **signature** (fingerprint of
   durable anchors — activity + a hash of stable resource-ids/labels) used to recognize the
   screen on revisit, the **perception tier** it needs (e.g. `image_result` → vision/opaque),
-  the key elements (nav targets, inputs, buttons), and free-text notes.
+  its surface (`native`, `form`, `webview`, `canvas`), logical destination and state
+  (`loading`, `error`, `empty`, `ready`), the key elements, and aliases. App-authored
+  resource namespaces and inbound resource IDs outrank localized visible copy.
 - **Feature-flag contexts:** a deterministic ID, exact flag set, app version, shell
-  anchors, verification state, and source. Screens and routes carry a context; an
+  anchors, verification state, source, and runtime evidence. Screens and routes carry a context; an
   exact-context route wins over a legacy route with the same source/action.
 - **Routes (navigation graph):** directed edges `screen --action--> screen`, e.g.
   `home --tap nav "Apps"--> apps_grid --tap "Images"--> image_create --input+send-->
-  image_result`. This yields "how many steps, and from where" for any target.
+  image_result`. Auto-observed edges are `provisional` until independently observed again,
+  then `verified`; edges without a durable selector are `rejected`. Only verified edges
+  power `goto`, while provisional edges remain visible for map inspection/research.
 - **Knowledge:** descriptions, notes, recipes, deeplinks, and source/runtime claims with
   package/version/context scope, status, agent/session provenance, and evidence.
 
@@ -299,23 +303,29 @@ One app = one folder; the tool may write/update **one or several files** per app
   is replayable, not just displayable; the human `action` string is derived from them.
   The map grows passively as the agent uses the tool — no extra calls. Post-action
   `observation` snapshots record too (recognition-only: they draw single-step edges when
-  they land on a known screen, and never create screens from a mid-transition frame).
+  they land on a known screen, verify those edges immediately, and never create screens
+  from a mid-transition frame).
 - **Screen recognition:** on each `analyze` the tool computes the signature and, if it
   matches a known screen, sets `meta.known_screen` and attaches inline affordances —
   `meta.known_routes` (outgoing edges), `meta.suggested_gotos` (ranked ready-to-run
-  targets), `meta.map_hint` — the agent instantly knows where it is and what's reachable.
-- **Context recognition:** `flags set/apply` promotes the verified flags to the session's
-  active context after a successful restart. Recognition first compares weighted
+  targets), `meta.map_hint`, and open `meta.research_tasks` — the agent instantly knows
+  where it is, what's reachable, and what map uncertainty needs source/runtime research.
+- **Context recognition:** `flags set/apply` promotes verified flags after restart. In
+  addition, when a package has `flags.prefs_files` or `flags.context_keys`, `analyze`
+  privacy-filters current shared preferences to flag-like/exact keys and activates that
+  verified context before screen recognition—even when another tool set the flags.
+  Recognition first compares weighted
   resource/selected-state/content/text anchors inside that context, then falls back to
-  trusted `legacy-default` screens. Existing v1/v2 maps migrate without losing routes.
+  trusted `legacy-default` screens. Existing v1/v2/v3 maps migrate without losing routes.
 - **Cross-app transit:** screens in `memory.transit_packages` (Google auth via
   Chrome/GMS, permission dialogs) record into their own maps, but the **journey cursor
   stays on the origin app**, so an auth excursion returns as ONE replayable edge
   (`tap 'Continue with Google' … ⇢ (via com.android.chrome)`). IME/system packages
   (`memory.ignore_packages`) are never mapped and can't win the foreground vote.
-- **Drift detection:** if the app version changed or a screen's signature diverges beyond
+- **Drift detection:** if the app version changed or weighted anchors diverge beyond
   `memory.drift_threshold`, the screen is flagged `stale` so the agent re-verifies;
-  otherwise it trusts the map. Pre-v2 (string-only) edges upgrade in place when re-walked.
+  stable resource IDs can therefore preserve identity across localization changes.
+  Pre-v2 (string-only) edges upgrade in place when re-walked.
 - **Guarded replay:** `goto` refuses steps whose label matches
   `memory.destructive_labels` unless `--allow-destructive` — the map legitimately learns
   routes THROUGH destructive taps ("the way to the login screen is Delete").
@@ -331,8 +341,9 @@ Detail is controlled so the agent loads only what it needs:
 - `--screen <name>` / `--depth N` → drill into one screen's full element detail.
 - `--find "<goal>"` → just the screen(s) + route to a target. `--json` for any of these.
 - `--context <id>` / `--all-contexts` → select one flag configuration or compare all.
-- `--audit` → poor names, near-duplicate screens, stale entries, route conflicts, orphan
-  references, and concrete source/runtime questions for an external research agent.
+- `--audit` → poor names, near-duplicate screens, stale entries, unverified contexts,
+  provisional/unreplayable/conflicting routes, orphan references, and persisted
+  source/runtime questions for an external research agent.
 Example shape:
 ```
 home  (tier: hierarchy)
@@ -363,9 +374,11 @@ list|show|add|stale` manages provenance-bearing experience while `remember`/`abo
 remain backward compatible.
 
 ### Bidirectional research and correction
-`aua reconcile plan` serializes `ResearchTask` objects containing package/version/context,
-affected stable IDs, observations, conflicts, and questions. The caller sends these to
-an external coding/runtime agent; AUA never spawns a model. `reconcile submit` accepts a
+Map recording and `aua map --audit` automatically materialize `ResearchTask` objects
+containing package/version/context, affected stable IDs, observations, conflicts, and
+questions. They appear in `meta.research_tasks` and `MAP.md`; `aua reconcile plan` is the
+explicit JSON export. The caller sends these to an external coding/runtime agent; AUA
+never spawns a model. `reconcile submit` accepts a
 `ResearchReport` containing agent/session, `apply|review|reject`, rationale, evidence,
 knowledge, and typed correction operations. `apply` reports are committed automatically:
 the operations run on a deep copy, structural invariants are checked, the old map is
@@ -530,12 +543,19 @@ memory:
   dir: "~/.android-ui-analyser"
   drift_threshold: 0.3     # signature divergence that flags a screen stale
   redact: true             # never store secrets / PII / EditText values verbatim
+  auto_research: true      # materialize audit questions and push them through analyze
+  research_suggest_max: 3
   ignore_packages: ["com.android.systemui", "*inputmethod*"]   # never the foreground app
   transit_packages: ["com.google.android.gms", "com.android.chrome",
                      "com.android.permissioncontroller", "com.google.android.permissioncontroller"]
   destructive_labels: ["delete", "remove", "sign out", "log out", "logout", "pay", "buy",
                        "purchase", "subscribe", "unsubscribe", "uninstall", "format",
                        "erase", "reset", "deactivate"]
+flags:
+  auto_context: true
+  prefs_files: {com.example.app.dev: "flag_overrides.xml"}
+  # exact privacy allow-list (otherwise experiment/treatment/variant/flag-like keys only)
+  context_keys: {com.example.app.dev: [catalog_experiment, services_treatment]}
 ```
 
 > Note: model identifiers above are examples; the implementer should not hard-code a

@@ -208,6 +208,7 @@ class Meta(BaseModel):
     suggested_deeplinks: list[str] = Field(  # ["open myapp://home", ...] — shortcuts
         default_factory=list
     )
+    research_tasks: list[str] = Field(default_factory=list)
     map_hint: str | None = None  # e.g. "12 screens mapped — run `aua map`"
     capture_hint: str | None = None  # rolling buffer saw post-action change
     annotated_image: str | None = None

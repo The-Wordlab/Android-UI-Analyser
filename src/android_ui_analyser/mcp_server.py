@@ -699,8 +699,8 @@ def _tool_definitions() -> list[types.Tool]:
         ),
         types.Tool(
             name="map_audit",
-            description="Audit a learned map for poor names, duplicate variants, stale "
-            "screens, route conflicts, and source/runtime research questions.",
+            description="Audit a learned map and persist source/runtime research tasks for "
+            "poor names, variants/states, contexts, and untrusted routes.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1214,7 +1214,12 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                     args.get("context")
                     or store.load_session(engine.device.serial).active_context_id
                 )
-                return audit_map(app_map, context_id=context).model_dump(mode="json")
+                payload = audit_map(app_map, context_id=context).model_dump(mode="json")
+                payload["research_tasks"] = [
+                    task.model_dump(mode="json")
+                    for task in reconciliation.plan(package, context_id=context)
+                ]
+                return payload
             if name == "reconcile_plan":
                 context = (
                     args.get("context")

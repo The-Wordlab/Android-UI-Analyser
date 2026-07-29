@@ -21,8 +21,15 @@ from android_ui_analyser.cli import app
 from android_ui_analyser.device import Device
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.errors import UsageError
-from android_ui_analyser.flags import build_uri, load_flags_file, parse_assignments, parse_prefs
-from android_ui_analyser.memory import AppMemoryStore
+from android_ui_analyser.flags import (
+    build_uri,
+    load_flags_file,
+    parse_all_prefs,
+    parse_assignments,
+    parse_prefs,
+    read_context_flags,
+)
+from android_ui_analyser.memory import AppMemoryStore, context_id_for_flags
 from conftest import FakeDevice, make_config
 
 runner = CliRunner()
@@ -145,6 +152,76 @@ def test_parse_prefs_reads_both_entry_shapes() -> None:
         '    <string name="other">b</string>\n</map>'
     )
     assert parse_prefs(xml, {"hub", "on"}) == {"hub": ["a"], "on": ["true"]}
+
+
+def test_context_read_filters_private_preferences() -> None:
+    device = device_with(
+        {
+            "catalog_layout_experiment": "a",
+            "services_treatment": "b",
+            "aua_probe_flag": "true",
+            "auth_token": "must-not-leak",
+        }
+    )
+
+    result = read_context_flags(
+        device,
+        PKG,
+        prefs_file=PREFS_FILE,
+        key_patterns=[r"(?i)(experiment|treatment|flag)"],
+    )
+
+    assert result.verified
+    assert result.flags == {
+        "catalog_layout_experiment": "a",
+        "aua_probe_flag": "true",
+        "services_treatment": "b",
+    }
+    assert "auth_token" not in result.flags
+    assert parse_all_prefs(device.prefs_xml(PREFS_FILE))["auth_token"] == ["must-not-leak"]
+
+
+def test_analyze_discovers_and_switches_live_flag_context(tmp_path: Path) -> None:
+    hierarchy_xml = (
+        '<hierarchy rotation="0"><node class="android.widget.TextView" '
+        f'package="{PKG}" text="Catalog" resource-id="x:id/catalogGridContent" '
+        'clickable="false" enabled="true" bounds="[0,200][400,300]"/></hierarchy>'
+    )
+    device = device_with(
+        {"catalog_layout_experiment": "a", "auth_token": "must-not-leak"},
+        hierarchy_xml=hierarchy_xml,
+        serial="flag-context",
+    )
+    cfg = make_config(
+        cache={"dir": str(tmp_path / "cache")},
+        memory={"dir": str(tmp_path / "memory")},
+        flags={
+            "prefs_files": {PKG: PREFS_FILE},
+            "context_refresh_s": 0,
+        },
+        daemon={"enabled": False},
+        perf={"async_memory": False},
+    )
+    engine = Engine(cfg, device=device)
+
+    engine.analyze(source="hierarchy", no_cache=True)
+    first = AppMemoryStore(cfg.memory).load_session(device.serial)
+    assert first.active_context_id == context_id_for_flags({"catalog_layout_experiment": "a"})
+    assert first.context_verified is True
+
+    device.prefs[PREFS_FILE]["catalog_layout_experiment"] = "b"
+    engine.analyze(source="hierarchy", no_cache=True)
+    store = AppMemoryStore(cfg.memory)
+    second = store.load_session(device.serial)
+    app_map = store.load(PKG)
+
+    assert second.active_context_id == context_id_for_flags({"catalog_layout_experiment": "b"})
+    assert len({record.context_id for record in app_map.screens.values()}) == 2
+    assert all("auth_token" not in context.flags for context in app_map.contexts.values())
+    assert all(
+        context.evidence == [f"shared_prefs:{PREFS_FILE}"]
+        for context in app_map.contexts.values()
+    )
 
 
 def test_flags_set_reports_the_keys_the_app_dropped(tmp_path: Path) -> None:

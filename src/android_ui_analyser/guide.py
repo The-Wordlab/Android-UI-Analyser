@@ -57,10 +57,11 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "Use what memory already knows",
         "`aua map` (or `aua map --brief`) prints the app's known screens + routes — but you "
         "usually don't need to call it: every `analyze` already returns `meta.known_screen` plus "
-        "inline `meta.known_routes` / `meta.suggested_gotos` / `meta.map_hint`. Act on those "
+        "inline `meta.known_routes` / `meta.suggested_gotos` / `meta.map_hint`; unresolved "
+        "map questions arrive in `meta.research_tasks`. Act on those "
         'instead of re-exploring. `aua map --find "<goal>"` gives just the route to a target. '
         "Feature-flag sets are separate contexts; use `--all-contexts` to compare variants and "
-        "`--audit` to surface ambiguous names/routes plus concrete research questions.",
+        "`--audit` to persist ambiguous names/routes as concrete research tasks.",
     ),
     (
         "Take shortcuts with deeplinks",
@@ -83,9 +84,11 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
     (
         "Feed research back and correct the map",
         "`aua knowledge add` stores an experience with source/agent/session/evidence so future "
-        "runs inherit it. For structural cleanup, run `aua reconcile plan`, research its "
-        "questions in source/runtime, then submit the canonical JSON report. AUA does not spawn "
-        "the research agent. `verdict=apply` commits every operation transactionally and returns "
+        "runs inherit it. AUA also creates research tasks automatically when a new map entry is "
+        "ambiguous or a route is provisional/unreplayable. Research `meta.research_tasks` (or run "
+        "`aua reconcile plan`) in source/runtime, then submit the canonical JSON report. "
+        "AUA does not spawn the research agent. `verdict=apply` commits every operation "
+        "transactionally and returns "
         "a rollback id; `review` queues it and `reject` retains the feedback.",
     ),
     (
@@ -324,7 +327,9 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "against the app's shared_prefs (`applied`/`ignored`; a dropped key exits 8, "
         "`--no-verify` to skip) and **restarts** the app (`--no-restart` to skip) because "
         "flags read at cold start ignore a live-process override. A successful restart activates "
-        "a deterministic map context carrying the verified flags.",
+        "a deterministic map context carrying the verified flags. When `flags.prefs_files` or "
+        "`flags.context_keys` is configured, ordinary `analyze` also discovers already-active "
+        "experiment/treatment/variant/flag values and switches map context automatically.",
     ),
     (
         "proxy / mock",
@@ -497,16 +502,20 @@ def render_markdown(*, brief: bool = False) -> str:
         "routes, stable elements); dynamic lists are stored as a *shape*, and `EditText` values / "
         "secrets / PII are redacted (`<filled>` / `<redacted>`). The map is pushed to you "
         "inline on every `analyze` (`meta.known_routes` / `meta.suggested_gotos` / "
-        "`meta.map_hint`), ranked by your recent navigation so the screens you use most surface "
+        "`meta.map_hint` / `meta.research_tasks`), ranked by your recent navigation so the screens "
+        "you use most surface "
         'first; `aua goto "<goal>"` drives a remembered route in one call. **Cross-app auth '
         "legs (Google sign-in via Chrome/GMS, permission dialogs) fold into the origin app's "
         "route** and replay step by step — a redacted account row hands off for one manual tap, "
         "then re-running `goto` resumes. Replay refuses destructive steps (delete/sign out/…) "
-        "without `--allow-destructive`; the map improves with every walk (legacy edges upgrade "
-        "in place when re-driven). Schema v3 scopes screens/routes to deterministic feature-flag "
-        "contexts; exact-context routes outrank trusted `legacy-default` fallbacks. Logical "
-        "destinations group their variants instead of acquiring numeric suffixes. `aua map "
-        "--audit` emits source/runtime research questions. Store agent feedback with `aua "
+        "without `--allow-destructive`; an auto-recorded route is provisional until observed "
+        "twice (or landed on as a known post-action screen), and selectorless routes are rejected "
+        "from `goto`. Schema v4 scopes screens/routes to automatically discovered deterministic "
+        "feature-flag contexts; exact-context routes outrank trusted `legacy-default` fallbacks. "
+        "Stable resource namespaces produce locale-independent destination names, while logical "
+        "destinations group flag variants and loading/error/empty/ready states instead of "
+        "acquiring numeric suffixes. `aua map --audit` persists source/runtime research tasks. "
+        "Store agent feedback with `aua "
         "knowledge add`; exchange corrections through `aua reconcile plan|submit`, where "
         "`verdict=apply` is validated, snapshotted, committed atomically, and rollbackable. "
         "Manage with `aua memory show|path|update|forget` "
@@ -570,7 +579,10 @@ def render_markdown(*, brief: bool = False) -> str:
     p.append('                  "scrollable", "long_clickable", "password",  // null = unknown')
     p.append('                  "source": "hierarchy|detection|ocr|grounding", "confidence" } ],')
     p.append('  "meta":     { "duration_ms", "tier_used", "path", "providers_used",')
-    p.append('                "known_screen", "known_routes", "suggested_gotos", "map_hint",')
+    p.append(
+        '                "known_screen", "known_routes", "suggested_gotos", "research_tasks",'
+    )
+    p.append('                "map_hint",')
     p.append('                "annotated_image", "raw_image", "device_serial" } }')
     p.append("```")
     p.append(
@@ -629,9 +641,10 @@ def render_json() -> dict[str, object]:
             {"tier": t, "method": m, "answers": a} for t, m, a in ESCALATION_LADDER
         ],
         "memory": (
-            "Schema-v3 per-app map auto-recorded locally under memory.dir; feature-flag "
-            "contexts, provenance knowledge, audit/reconciliation with rollback; read via `aua map`; "
-            "meta.known_screen + inline meta.known_routes/suggested_gotos/map_hint on revisit "
+            "Schema-v4 per-app map auto-recorded locally under memory.dir; runtime feature-flag "
+            "contexts, semantic names/states, verified routes, provenance knowledge, and "
+            "audit/reconciliation with rollback; read via `aua map`; meta.known_screen + inline "
+            "meta.known_routes/suggested_gotos/map_hint/research_tasks on revisit "
             '(ranked by recent navigation); `aua goto "<goal>"` drives a remembered route; '
             "durable skeleton only; values/secrets redacted."
         ),
@@ -666,6 +679,7 @@ def render_json() -> dict[str, object]:
                 "known_routes",
                 "suggested_gotos",
                 "suggested_deeplinks",
+                "research_tasks",
                 "map_hint",
                 "annotated_image",
                 "raw_image",

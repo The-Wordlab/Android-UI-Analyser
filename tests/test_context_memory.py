@@ -1,4 +1,4 @@
-"""Schema-v3 contexts, knowledge provenance, audit, and transactional correction."""
+"""Schema-v4 contexts, route trust, knowledge provenance, and correction."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ from android_ui_analyser.reconcile import (
     audit_map,
 )
 from conftest import FakeDevice, make_config
-from test_memory import APPS, HOME, SETTINGS_XML, P, _elements, _store
+from test_memory import APPS, HOME, SETTINGS_XML, P, _elements, _hier, _node, _store
 
 runner = CliRunner()
 
@@ -56,7 +56,7 @@ def test_v2_map_migrates_to_trusted_legacy_context(tmp_path) -> None:
 
     migrated = store.load(P)
 
-    assert migrated is not None and migrated.schema_version == 3
+    assert migrated is not None and migrated.schema_version == 4
     assert migrated.contexts[LEGACY_CONTEXT_ID].verified is True
     assert migrated.screens["home"].context_id == LEGACY_CONTEXT_ID
     assert migrated.screens["home"].id
@@ -101,6 +101,7 @@ def test_same_ui_is_recorded_as_distinct_flag_variants(tmp_path) -> None:
     app = store.load(P)
 
     assert first.name != second.name
+    assert "catalog_experiment_b" in second.name
     assert revisit.was_known and revisit.name == first.name
     assert app is not None
     assert {app.screens[first.name].context_id, app.screens[second.name].context_id} == {
@@ -112,6 +113,202 @@ def test_same_ui_is_recorded_as_distinct_flag_variants(tmp_path) -> None:
     projected = context_view(app, context_a)
     assert second.name not in projected.screens
     assert first.name in projected.screens
+
+
+def test_resource_namespace_keeps_name_stable_across_locales(tmp_path) -> None:
+    store = _store(tmp_path)
+    english = _hier(
+        _node(
+            "android.widget.TextView",
+            text="Saved Items",
+            rid="x:id/savedItemsLibraryRoot",
+            b="[40,120][1040,210]",
+        ),
+        _node(
+            "android.widget.Button",
+            text="Create an item",
+            rid="x:id/savedItemsLibraryCreateItem",
+            clk=True,
+            b="[40,300][1040,400]",
+        ),
+    )
+    spanish = _hier(
+        _node(
+            "android.widget.TextView",
+            text="Elementos guardados",
+            rid="x:id/savedItemsLibraryRoot",
+            b="[40,120][1040,210]",
+        ),
+        _node(
+            "android.widget.Button",
+            text="Crear un elemento",
+            rid="x:id/savedItemsLibraryCreateItem",
+            clk=True,
+            b="[40,300][1040,400]",
+        ),
+    )
+
+    first = store.record_screen(package=P, elements=_elements(english), screen_height=800)
+    second = store.record_screen(package=P, elements=_elements(spanish), screen_height=800)
+    record = store.load(P).screens[first.name]
+
+    assert first.name == "saved_items_library"
+    assert second.was_known and second.name == first.name
+    assert record.name_source == "resource"
+    assert "elementos_guardados" in record.aliases
+
+
+def test_generic_shell_roots_do_not_override_destination_resource(tmp_path) -> None:
+    store = _store(tmp_path)
+    conversation = _hier(
+        _node(
+            "android.widget.FrameLayout",
+            rid="x:id/toolbarRoot",
+            b="[0,80][1080,220]",
+        ),
+        _node(
+            "android.widget.TextView",
+            text="A dynamic title",
+            rid="x:id/conversationTitleView",
+            b="[40,120][1040,210]",
+        ),
+    )
+
+    outcome = store.record_screen(
+        package=P, elements=_elements(conversation), screen_height=800
+    )
+
+    assert outcome.name == "conversation"
+
+
+def test_long_toolbar_title_beats_short_action_and_inbound_banner(tmp_path) -> None:
+    store = _store(tmp_path)
+    detail = _hier(
+        _node(
+            "android.widget.TextView",
+            text="Personal Budget Counter Demonstration",
+            b="[160,90][900,170]",
+        ),
+        _node(
+            "android.widget.Button",
+            text="Share",
+            rid="x:id/detailShare",
+            clk=True,
+            b="[850,200][1040,300]",
+        ),
+    )
+
+    outcome = store.record_screen(
+        package=P,
+        elements=_elements(detail),
+        inbound_label="Tap to open",
+        inbound_resource_id="catalogBuildBannerReady",
+        inbound_kind="tap",
+        screen_height=800,
+    )
+    record = store.load(P).screens[outcome.name]
+
+    assert outcome.name == "personal_budget_counter"
+    assert record.name_source == "title"
+
+
+def test_repeated_resource_namespace_names_detail_without_top_title(tmp_path) -> None:
+    store = _store(tmp_path)
+    detail = _hier(
+        _node(
+            "android.view.View",
+            text="Open app",
+            rid="x:id/articleDetailOpenApp",
+            clk=True,
+            b="[40,400][1040,500]",
+        ),
+        _node(
+            "android.view.View",
+            text="Share",
+            rid="x:id/articleDetailShare",
+            clk=True,
+            b="[40,600][1040,700]",
+        ),
+        _node(
+            "android.view.View",
+            text="Save",
+            rid="x:id/articleDetailSave",
+            clk=True,
+            b="[40,720][1040,820]",
+        ),
+    )
+
+    outcome = store.record_screen(
+        package=P,
+        elements=_elements(detail),
+        inbound_label="Tap to open",
+        inbound_resource_id="catalogBuildBannerReady",
+        inbound_kind="tap",
+        screen_height=1000,
+    )
+
+    assert outcome.name == "article_detail"
+    assert store.load(P).screens[outcome.name].name_source == "resource"
+
+
+def test_loading_and_error_are_grouped_as_states_of_one_screen(tmp_path) -> None:
+    store = _store(tmp_path)
+    loading = _hier(
+        _node(
+            "android.widget.TextView",
+            text="Loading",
+            rid="x:id/catalogGridContent",
+            b="[40,120][1040,210]",
+        )
+    )
+    error = _hier(
+        _node(
+            "android.widget.TextView",
+            text="Oops! Something went wrong. Try again",
+            rid="x:id/catalogGridContent",
+            b="[40,120][1040,210]",
+        )
+    )
+
+    first = store.record_screen(package=P, elements=_elements(loading), screen_height=800)
+    second = store.record_screen(package=P, elements=_elements(error), screen_height=800)
+    app_map = store.load(P)
+    records = [app_map.screens[first.name], app_map.screens[second.name]]
+
+    assert first.name != second.name
+    assert {record.logical_name for record in records} == {"catalog_grid"}
+    assert {record.state for record in records} == {"loading", "error"}
+    rendered = render_map(app_map)
+    assert "state: loading" in rendered and "state: error" in rendered
+
+
+def test_inbound_resource_names_webview_runtime_without_visible_title(tmp_path) -> None:
+    store = _store(tmp_path)
+    serial = "semantic-route"
+    runtime = _hier(
+        _node(
+            "android.webkit.WebView",
+            rid="x:id/containerCounterRuntime",
+            b="[0,80][1080,2300]",
+        )
+    )
+    store.observe_screen(serial, package=P, elements=_elements(HOME), screen_height=800)
+    store.observe_action(
+        serial,
+        RouteStep(
+            kind="tap",
+            label="Open app",
+            resource_id="openCounterRuntimeButton",
+        ),
+    )
+    store.observe_screen(serial, package=P, elements=_elements(runtime), screen_height=800)
+
+    app_map = store.load(P)
+    runtime_record = app_map.screens["counter_runtime"]
+    edge = next(route for route in app_map.routes if route.to_screen == "counter_runtime")
+    assert runtime_record.surface == "webview"
+    assert runtime_record.name_source == "resource"
+    assert edge.status == "provisional"
 
 
 def test_navigation_never_crosses_feature_flag_contexts(tmp_path) -> None:
@@ -160,6 +357,41 @@ def test_navigation_never_crosses_feature_flag_contexts(tmp_path) -> None:
     assert resolve_goal(
         app, target_b.name, start=home_a.name, context_id=context_a
     ) is None
+
+
+def test_research_hints_are_scoped_to_active_flag_context(tmp_path) -> None:
+    store = _store(tmp_path)
+    flags_a = {"catalog_experiment": "a"}
+    flags_b = {"catalog_experiment": "b"}
+    context_a = context_id_for_flags(flags_a)
+    context_b = context_id_for_flags(flags_b)
+    store.record_screen(
+        package=P,
+        elements=_elements(HOME),
+        context_id=context_a,
+        context_flags=flags_a,
+    )
+    app_map = store.load(P)
+    app_map.research_tasks = [
+        {
+            "id": "task-a",
+            "context_id": context_a,
+            "status": "open",
+            "questions": ["Research variant A"],
+        },
+        {
+            "id": "task-b",
+            "context_id": context_b,
+            "status": "open",
+            "questions": ["Research variant B"],
+        },
+    ]
+    store.save(app_map)
+    store.activate_flag_context("research-device", P, flags_b, verified=True)
+
+    hints = store.navigation_hints("research-device", P)
+
+    assert hints.research_tasks == ["research task-b: Research variant B"]
 
 
 def test_flag_context_activation_scopes_routes_and_resets_cursor(tmp_path) -> None:
@@ -220,6 +452,66 @@ def test_audit_emits_agent_research_questions(tmp_path) -> None:
 
     assert {issue.type for issue in audit.issues} >= {"poor_name", "stale_screen"}
     assert all(issue.questions for issue in audit.issues)
+
+
+def test_auto_routes_are_provisional_until_observed_twice(tmp_path) -> None:
+    store = _store(tmp_path)
+    serial = "route-verification"
+    store.observe_screen(serial, package=P, elements=_elements(HOME), screen_height=800)
+    store.observe_action(
+        serial, RouteStep(kind="tap", label="Apps", resource_id="nav_apps")
+    )
+    store.observe_screen(serial, package=P, elements=_elements(APPS), screen_height=800)
+
+    first_map = store.load(P)
+    edge = next(route for route in first_map.routes if route.to_screen == "apps")
+    assert edge.status == "provisional"
+    assert _shortest_path(first_map, "apps", start=edge.from_screen) == []
+    assert any(
+        task["issue_type"] == "provisional_route"
+        for task in first_map.research_tasks
+    )
+
+    store.observe_action(serial, RouteStep(kind="key", arg="back"))
+    store.observe_screen(serial, package=P, elements=_elements(HOME), screen_height=800)
+    store.observe_action(
+        serial, RouteStep(kind="tap", label="Apps", resource_id="nav_apps")
+    )
+    store.observe_screen(serial, package=P, elements=_elements(APPS), screen_height=800)
+
+    verified_map = store.load(P)
+    edge = next(route for route in verified_map.routes if route.to_screen == "apps")
+    assert edge.status == "verified"
+    assert edge.verification_count == 1
+    assert len(_shortest_path(verified_map, "apps", start=edge.from_screen)) == 1
+    assert not any(
+        task["issue_type"] == "provisional_route"
+        and edge.id in task["affected_ids"]
+        for task in verified_map.research_tasks
+    )
+
+
+def test_unlabeled_route_is_rejected_and_pushed_as_research(tmp_path) -> None:
+    store = _store(tmp_path)
+    serial = "route-rejection"
+    store.observe_screen(serial, package=P, elements=_elements(HOME), screen_height=800)
+    store.observe_action(serial, RouteStep(kind="tap"))
+    store.observe_screen(
+        serial, package=P, elements=_elements(SETTINGS_XML), screen_height=800
+    )
+    app_map = store.load(P)
+    edge = app_map.routes[0]
+    hints = store.navigation_hints(serial, P)
+
+    assert edge.status == "rejected"
+    assert edge.rejection_reason == "destination action has no durable selector"
+    assert "tap [unlabeled]" not in render_map(app_map)
+    task = next(
+        task for task in app_map.research_tasks if task["issue_type"] == "unreplayable_route"
+    )
+    assert edge.id in task["affected_ids"]
+    assert any(str(task["id"]) in prompt for prompt in hints.research_tasks)
+    assert any(issue.type == "unreplayable_route" for issue in audit_map(app_map).issues)
 
 
 def test_agent_apply_is_atomic_and_rollback_restores_snapshot(tmp_path) -> None:

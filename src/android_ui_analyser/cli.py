@@ -2290,6 +2290,12 @@ def map_cmd(
         if audit:
             result = audit_map(app_map, context_id=None if all_contexts else selected_context)
             audit_payload = result.model_dump(mode="json")
+            tasks = ReconciliationStore(store).plan(
+                pkg, context_id=None if all_contexts else selected_context
+            )
+            audit_payload["research_tasks"] = [
+                task.model_dump(mode="json") for task in tasks
+            ]
             if as_json or compact or fmt is OutputFormat.json:
                 typer.echo(
                     json.dumps(
@@ -2307,6 +2313,10 @@ def map_cmd(
                     typer.echo(f"- [{issue.severity}] {issue.type}: {issue.message}")
                     for question in issue.questions:
                         typer.echo(f"    ? {question}")
+                if tasks:
+                    typer.echo("\nResearch tasks saved:")
+                    for task in tasks:
+                        typer.echo(f"- {task.id} ({task.issue_type})")
             return
         if as_json or compact:
             if find:

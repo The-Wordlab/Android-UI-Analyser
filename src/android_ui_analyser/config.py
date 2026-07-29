@@ -188,6 +188,8 @@ class MemoryCfg(BaseModel):
     suggest: bool = True  # push known_routes/suggested_gotos/map_hint inline into analyze
     suggest_max: int = 4  # cap on suggested_gotos returned per analyze
     rank_half_life_days: float = 3.0  # recency decay for usage-based ranking (days)
+    auto_research: bool = True  # materialize audit questions when map quality is uncertain
+    research_suggest_max: int = 3  # cap research prompts pushed inline into analyze
     # Packages that never count as the foreground app: excluded from the hierarchy
     # package vote (an open keyboard must not win it) and never recorded as maps.
     ignore_packages: list[str] = Field(
@@ -275,11 +277,24 @@ class FlagsCfg(BaseModel):
 
     ``prefs_files`` pins the ``shared_prefs`` XML the read-back verification reads
     (package → filename); unset, every prefs file of the app is searched.
+
+    When a package has either ``prefs_files`` or ``context_keys`` configured, AUA can
+    read already-active runtime flags before recording a screen. This keeps maps
+    context-aware even when another tool or an earlier app session set the flags.
     """
 
     model_config = ConfigDict(extra="forbid")
     templates: dict[str, str] = Field(default_factory=dict)
     prefs_files: dict[str, str] = Field(default_factory=dict)
+    auto_context: bool = True
+    context_keys: dict[str, list[str]] = Field(default_factory=dict)
+    context_key_patterns: list[str] = Field(
+        default_factory=lambda: [
+            r"(?i)(?:^|[_\-.])(experiment|treatment|variant)(?:$|[_\-.])",
+            r"(?i)(?:^|[_\-.])flag(?:$|[_\-.])",
+        ]
+    )
+    context_refresh_s: float = 2.0
 
 
 class Config(BaseModel):
@@ -608,6 +623,8 @@ memory:
   suggest: true            # push known_routes/suggested_gotos/map_hint inline into analyze
   suggest_max: 4           # cap on suggested_gotos per analyze
   rank_half_life_days: 3.0 # recency decay for usage-based ranking (days)
+  auto_research: true      # surface audit questions to the agent automatically
+  research_suggest_max: 3
   # Never the foreground app (excluded from the package vote; never mapped):
   ignore_packages: ["com.android.systemui", "*inputmethod*"]
   # Surfaces a flow passes through (Google auth, permission dialogs) — the journey
@@ -623,10 +640,15 @@ memory:
 # private contract, so there are no built-ins). prefs_files is optional: it pins the
 # shared_prefs XML `flags set` reads back to verify (default: search all of them).
 # flags:
+#   auto_context: true
 #   templates:
 #     com.example.app: "myapp://set-flags?{query}"
 #   prefs_files:
 #     com.example.app: "flag_overrides.xml"
+#   # Optional exact allow-list. Without it, experiment/treatment/variant/flag-like
+#   # keys from the configured prefs file are used as the runtime map context.
+#   context_keys:
+#     com.example.app: [catalog_experiment, services_treatment]
 
 # profiles:
 #   cloud:
