@@ -69,7 +69,7 @@ def test_device_extras_engine() -> None:
 def test_app_launch_clear_and_kill() -> None:
     dev = FakeDevice(hierarchy_xml=_XML, package="com.x")
     eng = _engine(dev)
-    eng.app("launch", package="com.x", clear_state=True)
+    eng.app("launch", package="com.x", clear_state=True, confirmed=True)
     assert ("clear_app", ("com.x",)) in dev.calls
     assert any(c[0] == "launch_app" for c in dev.calls)
     eng.app("kill", package="com.x")
@@ -92,7 +92,10 @@ def test_cli_maestro_commands(monkeypatch: pytest.MonkeyPatch) -> None:
     assert runner.invoke(app, ["record", "start"]).exit_code == 0
     assert runner.invoke(app, ["record", "stop", "/tmp/out.mp4"]).exit_code == 0
     assert runner.invoke(app, ["clock", "set", "--ms", "1700000000000"]).exit_code == 0
-    assert runner.invoke(app, ["app", "launch", "com.x", "--clear"]).exit_code == 0
+    assert runner.invoke(app, ["clock", "restore"]).exit_code == 0
+    assert runner.invoke(app, ["app", "launch", "com.x", "--clear", "--yes"]).exit_code == 0
+    # Without --yes, clear must refuse.
+    assert runner.invoke(app, ["app", "clear", "com.x"]).exit_code == 2
 
 
 def test_flow_repeat_and_retry_parse() -> None:

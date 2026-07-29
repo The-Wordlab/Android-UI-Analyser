@@ -35,12 +35,12 @@ def test_exit_code_internal_is_one() -> None:
 def test_app_clear_and_grant() -> None:
     dev = FakeDevice(hierarchy_xml=_XML, package="com.x")
     eng = _engine(dev)
-    assert eng.app("clear", package="com.x").ok
+    assert eng.app("clear", package="com.x", confirmed=True).ok
     assert ("clear_app", ("com.x",)) in dev.calls
     assert eng.app("grant", package="com.x").ok
     assert ("grant_permissions", ("com.x",)) in dev.calls
     # Aliases Maestro users will try.
-    eng.app("clear-state", package="com.x")
+    eng.app("clear-state", package="com.x", confirmed=True)
     eng.app("grant-permissions", package="com.x")
     assert sum(1 for c, _ in dev.calls if c == "clear_app") == 2
 
@@ -62,7 +62,7 @@ def test_cli_app_clear_and_hide_keyboard(monkeypatch) -> None:
     dev = FakeDevice(hierarchy_xml=_XML, package="com.x")
     monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
 
-    r = runner.invoke(app, ["app", "clear", "com.x"])
+    r = runner.invoke(app, ["app", "clear", "com.x", "--yes"])
     assert r.exit_code == 0, r.stderr
     assert ("clear_app", ("com.x",)) in dev.calls
 

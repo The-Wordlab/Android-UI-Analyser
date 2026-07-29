@@ -42,13 +42,15 @@ description: >-
 - _screenshot_: `[PATH] | --out PATH`, `--region x1,y1,x2,y2` (crop before writing), `--scale <factor>`, `--max-width <px>`, `--annotate` (full-screen only) — crop/downscale when you must LOOK at something, so one header icon doesn't cost a 1080x2400 PNG in image tokens
 - _daemon / orient_: `daemon start --quiet` skips the app-orientation blob (48 screens, mined deeplinks, notes); read it deliberately with `aua orient` instead — useful once per session, noise on every restart
 - _has_: `--by text|id|desc` (id finds pruned containers), `--match exact|contains|regex`, `--ignore-case`, `--ocr-fallback/--no-ocr-fallback`, `--timeout <ms>`
-- _wait_: `--for "<text>"` (`--by id`, `--absent` = wait until it disappears), `--idle`, `--for-stable`, `--interval`, `--settle`, `--timeout`, `--observe` (fresh ids, even on a miss)
-- _open_: `<uri> [--app|--package <pkg>] [--prefer <pkg|label>]` — pin the target app to skip the system 'Open with…' chooser; `--prefer` auto-taps a chooser row
+- _wait_: `--for "<text>"` (`--by id`, `--absent` = wait until it disappears), `--idle`, `--for-stable`, `--interval`, `--settle`, `--timeout`, `--observe` (fresh ids, even on a miss). On timeout exit 3 with detail naming `--match` mode, fields searched, closest candidates — and a hint if the pattern looks like regex under `--match contains`
+- _open_: `<uri> [--package <pkg>]` — **pins the foreground package by default** so prod+dev installs never hit 'Open with…'; `--no-package-pin` to test the chooser; if a chooser still appears, errors naming the competing apps
 - _resolve_: `<id|stable_key>` — remap a previous-frame id (or `rid:…` key) onto the current screen after IDs churn
-- _app_: `launch <pkg> [--activity .Entry] [--clear]` (``--clear`` = Maestro clearState), `stop <pkg>`, `kill <pkg>`, `clear <pkg>`, `grant <pkg>`, `foreground`
+- _app_: `launch <pkg> [--activity .Entry] [--clear --yes]`, `stop|kill|clear|grant`. `clear` / `launch --clear` wipe ALL app data (Luzia: flags + login) — **requires `--yes` / `--yes-wipe-flags`**; re-apply flags afterwards
 - _clipboard / paste / copy_: `clipboard set|get`, `paste`, `copy --rid/--text/--desc` (Maestro copyTextFrom / pasteText / setClipboard)
 - _erase_: `erase [ID] --chars N` (Maestro eraseText; omit ``--chars`` to clear the whole field)
-- _location / orientation / airplane / media / record / clock_: `location set LAT,LON`, `orientation set|get`, `airplane on|off|toggle`, `media add PATH`, `record start|stop PATH`, `clock set --ms <unix-ms>` (Maestro setLocation / setOrientation / setAirplaneMode / addMedia / startRecording / travel)
+- _location / orientation / airplane / media / record / clock_: `location set LAT,LON`, `orientation set|get`, `airplane on|off|toggle`, `media add PATH`, `record start|stop PATH`, `clock set --ms <unix-ms>` / `clock restore` (time travel invalidates auth — always restore)
+- _logcat_: `logcat mark [NAME]`, `logcat --grep PAT [--since mark|last-action] [--tag T] [--json]` — bracket API/analytics verification around an action
+- _suite_: `suite run PATH.yaml [--continue]` — AC checklist (has/expect/wait_for) with per-item pass/fail + summary; exit 8 if any fail
 - _map_: `--app <pkg>`, `--brief`, `--screen <name>`, `--depth N`, `--find "<goal>"`, `--json`
 - _goto_: `<goal>` (fuzzy), `--plan` (annotated route, no taps), `--max-steps N`, `--allow-destructive`, `--assist` (opt-in planner recovery)
 - _flow_: `run <name> [--param K=V] [--file PATH] [--dry-run] [--from-step N] [--no-allow-destructive] [--assist]`, `save <name> [--last N] [--force]`, `list|show|delete`. Steps incl. `launch_app`/`stop_app`/`open_link`/`goto`/`flow` (a `flow:` step runs a saved flow inline — reuse a shared `login` recipe).
@@ -56,6 +58,8 @@ description: >-
 - _explore_: `mine <repo> --app <pkg>` harvests deeplink shortcuts from source into the playbook; `plan` returns a prioritized crawl worklist (probe deeplinks, expand dead-end screens) whose results auto-record
 - _navigate (opt-in planner)_: `<goal>` (natural language), `--until <text>`, `--max-steps N`, `--allow-destructive`, `--save-flow <name>` — needs `planner.enabled`
 - _actions (tap/double-tap/input/swipe/scroll/scroll-to/key/hide-keyboard/…)_: return the post-action screen inline by default (`observation`, fresh ids); `--no-observe` to skip it. Prefer `hide-keyboard` over `key back` when the IME is covering the tree
+- _logcat_: `aua logcat mark [NAME]` (default `default`; also auto-marks `last-action` on every state-changing action), `aua logcat [--grep REGEX] [--since MARK|last-action|30s] [--tag TAG] [--lines N] [--json]` — dump since the mark (default: last-action, else 30s)
+- _suite_: `aua suite run PATH|-- [--continue] [--json]` — YAML AC checklist of `has` / `expect` / `wait_for` checks; exit 0 all pass, 8 any fail (stop on first fail unless `--continue`)
 
 ## The loop
 ```bash
@@ -159,7 +163,7 @@ Need the actual pixels too? `--with-image [path]` on `analyze` AND on every acti
 | 5 | config error |
 | 6 | selector matched nothing (`--rid`/`--text`/`--desc`) |
 | 7 | selector matched several candidates (disambiguate with `--index`/`--first`) |
-| 8 | `aua expect` assertion failed |
+| 8 | `aua expect` / `aua suite run` assertion failed |
 
 Errors print `{"error":{"code","message","hint"}}` to **stderr**; JSON results go to **stdout** (pipe-clean).
 

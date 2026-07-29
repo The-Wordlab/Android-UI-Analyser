@@ -206,10 +206,22 @@ class Device(ABC):
     def set_clock(self, timestamp_ms: int) -> None:
         raise DeviceError("clock travel requires a real device")
 
+    def get_clock_ms(self) -> int | None:
+        """Current device wall-clock as unix ms, or None if unreadable."""
+        return None
+
     def erase_chars(self, count: int) -> None:
         """Delete *count* characters before the caret in the focused field."""
         for _ in range(max(0, count)):
             self.press("KEYCODE_DEL")
+
+    def logcat(self, *, since_ms: int | None = None, dump: bool = True) -> str:
+        """Dump (or clear) logcat. ``dump=False`` clears the buffer and returns ``""``.
+
+        When *since_ms* is set, callers may still filter client-side; implementations
+        may pre-filter for convenience. Raise :class:`DeviceError` if unavailable.
+        """
+        raise DeviceError("logcat requires a real device")
 
     def close(self) -> None:  # overridden by real device
         """Release the device connection / on-device agent (no-op by default)."""
@@ -636,9 +648,58 @@ class Uiautomator2Device(Device):
                 hint="Usually works on emulators/rooted devices only (Maestro travel).",
             ) from exc
 
+    def get_clock_ms(self) -> int | None:
+        try:
+            out = self._d.shell("date +%s%3N")
+            text = out if isinstance(out, str) else getattr(out, "output", str(out))
+            digits = "".join(c for c in str(text).strip() if c.isdigit())
+            if len(digits) >= 10:
+                # %s%3N → seconds + millis; fall back to seconds*1000
+                if len(digits) >= 13:
+                    return int(digits[:13])
+                return int(digits[:10]) * 1000
+        except Exception:
+            return None
+        return None
+
     def erase_chars(self, count: int) -> None:
         for _ in range(max(0, count)):
             self._d.shell("input keyevent 67")  # KEYCODE_DEL
+
+    def logcat(self, *, since_ms: int | None = None, dump: bool = True) -> str:
+        if not dump:
+            try:
+                subprocess.run(  # noqa: S603
+                    ["adb", "-s", self.serial, "logcat", "-c"],
+                    check=True,
+                    capture_output=True,
+                    timeout=15,
+                )
+            except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as exc:
+                raise DeviceError(
+                    "could not clear logcat buffer",
+                    hint="Check `adb` is on PATH and the device is reachable.",
+                ) from exc
+            return ""
+        try:
+            proc = subprocess.run(  # noqa: S603
+                ["adb", "-s", self.serial, "logcat", "-d", "-v", "threadtime"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            raise DeviceError(
+                "could not dump logcat",
+                hint="Check `adb` is on PATH and the device is reachable.",
+            ) from exc
+        raw = proc.stdout or ""
+        if since_ms is None:
+            return raw
+        from .logcat import filter_logcat
+
+        return "\n".join(filter_logcat(raw, since_ms=since_ms))
 
     def open_link(self, uri: str, *, package: str | None = None) -> None:
         # Prefer package-scoped VIEW intent to skip the system "Open with…" chooser.

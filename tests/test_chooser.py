@@ -1,8 +1,11 @@
-"""Deeplink chooser dismissal."""
+"""Deeplink package pin + chooser failure."""
 
 from __future__ import annotations
 
+import pytest
+
 from android_ui_analyser.engine import Engine
+from android_ui_analyser.errors import DeviceError
 from conftest import FakeDevice, make_config
 
 CHOOSER_XML = """<?xml version="1.0" encoding="UTF-8"?>
@@ -10,10 +13,12 @@ CHOOSER_XML = """<?xml version="1.0" encoding="UTF-8"?>
   <node index="0" class="android.widget.TextView" text="Open with" bounds="[0,0][1080,100]"/>
   <node index="1" class="android.widget.TextView" text="Luzia Dev" clickable="true"
         bounds="[40,200][1040,300]"/>
-  <node index="2" class="android.widget.Button" text="Just once" clickable="true"
-        bounds="[40,400][500,480]"/>
-  <node index="3" class="android.widget.Button" text="Always" clickable="true"
-        bounds="[540,400][1040,480]"/>
+  <node index="2" class="android.widget.TextView" text="Luzia" clickable="true"
+        bounds="[40,320][1040,400]"/>
+  <node index="3" class="android.widget.Button" text="Just once" clickable="true"
+        bounds="[40,500][500,580]"/>
+  <node index="4" class="android.widget.Button" text="Always" clickable="true"
+        bounds="[540,500][1040,580]"/>
 </hierarchy>"""
 
 APP_XML = """<?xml version="1.0" encoding="UTF-8"?>
@@ -22,13 +27,33 @@ APP_XML = """<?xml version="1.0" encoding="UTF-8"?>
 </hierarchy>"""
 
 
-def test_open_link_pins_package() -> None:
+def test_open_link_defaults_to_foreground_package_pin() -> None:
     cfg = make_config()
-    device = FakeDevice(hierarchy_xml=APP_XML)
+    device = FakeDevice(hierarchy_xml=APP_XML, package="co.thewordlab.luzia.dev")
     engine = Engine(cfg, device=device)
-    result = engine.open_link("luzia://chats", package="co.thewordlab.luzia.dev", observe=False)
+    result = engine.open_link("luzia://chats", observe=False)
     assert result.ok
     assert ("open_link", ("luzia://chats", "co.thewordlab.luzia.dev")) in device.calls
+
+
+def test_open_link_no_package_pin_skips_pin() -> None:
+    cfg = make_config()
+    device = FakeDevice(hierarchy_xml=APP_XML, package="co.thewordlab.luzia.dev")
+    engine = Engine(cfg, device=device)
+    engine.open_link("luzia://chats", pin_package=False, observe=False)
+    assert ("open_link", ("luzia://chats",)) in device.calls
+
+
+def test_open_link_errors_when_chooser_persists() -> None:
+    cfg = make_config()
+    device = FakeDevice(hierarchy_xml=CHOOSER_XML)
+    device._pkg = "android"
+    device._act = ".internal.app.ResolverActivity"
+    engine = Engine(cfg, device=device)
+    with pytest.raises(DeviceError) as ei:
+        engine.open_link("luzia://chats", pin_package=False, observe=False)
+    assert "Open with" in str(ei.value)
+    assert "Luzia Dev" in (ei.value.hint or "")
 
 
 def test_dismiss_chooser_taps_prefer() -> None:

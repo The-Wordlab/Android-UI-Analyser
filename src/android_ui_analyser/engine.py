@@ -845,6 +845,7 @@ class Engine:
             return None, None
 
     def _record_action_safe(self, step: RouteStep) -> None:
+        self._mark_logcat("last-action")
         mem = self._memory
         if mem is None or self._device is None:
             return
@@ -852,6 +853,17 @@ class Engine:
             mem.observe_action(self._device.serial, step)
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug("memory record_action failed: %s", exc)
+
+    def _mark_logcat(self, name: str) -> None:
+        """Best-effort logcat mark (never fails the action that triggered it)."""
+        try:
+            if self._device is None:
+                return
+            from . import logcat as logcat_mod
+
+            logcat_mod.set_mark(self.config.cache.dir, self._device.serial, name)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("logcat mark %r failed: %s", name, exc)
 
     def _cached_package(self) -> str | None:
         """Package of the last analyze (call BEFORE the action invalidates the cache)."""
@@ -2135,6 +2147,13 @@ class Engine:
         elements = result.elements
         matches = match_selector(elements, rid=rid, text=text, desc=desc)
         label = selector_label(selector)
+        if not matches and rid:
+            # The element list prunes unlabeled, non-actionable containers, so a real
+            # `containerChatDetail` is addressable without being listed. Ask the device
+            # directly before giving up — the same lookup `has --by id` uses.
+            container = self._resolve_container_rid(rid)
+            if container is not None:
+                return container
         if not matches:
             needle = rid or text or desc or ""
             near = nearest_elements(elements, needle)
@@ -2162,6 +2181,24 @@ class Engine:
                     + " | ".join(element_digest(el) for el in matches[:_MAX_CANDIDATES]),
                 )
         return matches[0]
+
+    def _resolve_container_rid(self, rid: str) -> Element | None:
+        """A pruned container, addressed by resource-id via the device itself.
+
+        Returns ``None`` when the device does not know it either, so the caller still
+        raises :class:`SelectorNotFoundError` with its candidate list. ``id=-1`` marks an
+        element that never came from an ``analyze``, so it is not in the id cache.
+        """
+        bounds = self.device.find_text(rid, match=MatchMode.exact, by="id")
+        if bounds is None:
+            return None
+        return Element(
+            id=-1,
+            type="Container",
+            resource_id=rid,
+            bounds=bounds,
+            center=center_of(bounds),
+        )
 
     def _target(
         self, element_id: int | None, selector: dict[str, Any] | None, *, verb: str = "tap"
@@ -2604,31 +2641,52 @@ class Engine:
         *,
         package: str | None = None,
         prefer: str | None = None,
+        pin_package: bool = True,
         observe: bool = True,
         with_image: bool | str | None = None,
     ) -> ActionResult:
         """Open a deeplink URI (jump straight to a screen / trigger an app action).
 
-        Pass ``package`` (or ``prefer``) to skip Android's "Open with…" chooser when
-        multiple apps handle the URI. After open, if a chooser is still showing, we
-        try to tap the preferred app row automatically.
+        By default pins the VIEW intent to the foreground/known package so Android's
+        "Open with…" chooser never appears when both prod + dev builds are installed.
+        Pass ``pin_package=False`` (CLI ``--no-package-pin``) to deliberately exercise
+        the chooser. If a chooser still appears after open, raises :class:`DeviceError`
+        naming the competing app rows — never leaves the caller stranded on the dialog.
         """
+        from .errors import DeviceError
+
         target_pkg = package or prefer
+        if pin_package and not target_pkg:
+            target_pkg = self.current_package() or self._cached_package()
         step = self._step("open-link", arg=uri)
-        self.device.open_link(uri, package=target_pkg)
+        self.device.open_link(uri, package=target_pkg if pin_package else None)
         self._invalidate_cache()
-        # Chooser may still appear when package pinning is unsupported — dismiss it.
-        detail = uri
-        if self._dismiss_chooser(prefer=target_pkg):
-            detail = f"{uri} (chooser→{target_pkg or 'first'})"
+        time.sleep(0.35)  # chooser / activity settle
+        detail = uri if not target_pkg else f"{uri} → {target_pkg}"
+        if self._is_chooser():
+            competitors = self._chooser_app_labels()
+            if pin_package and target_pkg and self._dismiss_chooser(prefer=target_pkg):
+                time.sleep(0.25)
+            if self._is_chooser():
+                listing = ", ".join(competitors) if competitors else "(unknown handlers)"
+                raise DeviceError(
+                    "deeplink opened the system 'Open with…' chooser",
+                    hint=(
+                        f"Competing apps on screen: {listing}. "
+                        f"Re-run with `--package <id>` (e.g. the foreground "
+                        f"`{self.current_package() or 'com.example.app'}`), or "
+                        f"`--no-package-pin` only when you intentionally want the chooser."
+                    ),
+                )
+            detail = f"{uri} (chooser→{target_pkg or 'picked'})"
         self._record_action_safe(step)
         self._remember_deeplink_safe(uri, package=target_pkg)
         return self._observe(
             ActionResult(ok=True, action="open-link", detail=detail), observe, with_image
         )
 
-    def _dismiss_chooser(self, *, prefer: str | None = None) -> bool:
-        """If the system 'Open with…' resolver is foreground, pick an app and continue."""
+    def _is_chooser(self) -> bool:
+        """True when the system resolver / 'Open with…' UI is in the foreground."""
         device = self.device
         try:
             app = device.current_app() or {}
@@ -2636,19 +2694,35 @@ class Engine:
             return False
         pkg = (app.get("package") or "").lower()
         activity = (app.get("activity") or "").lower()
-        chooserish = (
+        if (
             "resolver" in activity
             or "intentresolver" in pkg
             or pkg in {"android", "com.android.intentresolver", "com.android.internal.app"}
-        )
-        if not chooserish:
-            # Heuristic: hierarchy contains "Open with" / "Just once".
-            try:
-                xml = device.dump_hierarchy()
-            except Exception:
-                return False
-            if "Open with" not in xml and "Just once" not in xml and "Always" not in xml:
-                return False
+        ):
+            return True
+        with contextlib.suppress(Exception):
+            xml = device.dump_hierarchy()
+            if "Open with" in xml or ("Just once" in xml and "Always" in xml):
+                return True
+        return False
+
+    def _chooser_app_labels(self) -> list[str]:
+        """Clickable app-row labels on a chooser screen (best-effort)."""
+        skip = {"Just once", "Always", "Open with", "Cancel", "Open"}
+        labels: list[str] = []
+        with contextlib.suppress(Exception):
+            result = self.analyze(source="hierarchy", record=False)
+            for el in result.elements:
+                label = (el.text or el.content_desc or "").strip()
+                if label and label not in skip and el.clickable:
+                    labels.append(label)
+        return labels
+
+    def _dismiss_chooser(self, *, prefer: str | None = None) -> bool:
+        """If the system 'Open with…' resolver is foreground, pick an app and continue."""
+        if not self._is_chooser():
+            return False
+        device = self.device
         # Prefer an explicit package label match, else tap "Just once" on first row.
         try:
             result = self.analyze(source="hierarchy", record=False)
@@ -2738,21 +2812,75 @@ class Engine:
                 if time.monotonic() >= deadline:
                     break
                 time.sleep(0.2)
+            if not gone:
+                detail = self._wait_timeout_message(
+                    for_, mode=mode, by=by, ignore_case=ignore_case, absent=True
+                )
+                return self._observe(
+                    ActionResult(ok=False, action="wait", detail=detail), observe
+                )
             return self._observe(
-                ActionResult(ok=gone, action="wait", detail=f"absent:{for_}"), observe
+                ActionResult(ok=True, action="wait", detail=f"absent:{for_}"), observe
             )
         found = device.wait_for(
             for_, match=mode, ignore_case=ignore_case, timeout_ms=timeout_ms, by=by
         )
+        if found is None:
+            detail = self._wait_timeout_message(
+                for_, mode=mode, by=by, ignore_case=ignore_case, absent=False
+            )
+            return self._observe(ActionResult(ok=False, action="wait", detail=detail), observe)
         result = ActionResult(
-            ok=found is not None,
+            ok=True,
             action="wait",
             detail=for_,
-            target=list(found) if found else None,
+            target=list(found),
         )
         # `--observe` returns the screen with fresh ids so the agent acts without a separate
         # `analyze` — attached even on a MISS, so a failed wait is diagnosable in one call.
         return self._observe(result, observe)
+
+    def _wait_timeout_message(
+        self,
+        needle: str,
+        *,
+        mode: MatchMode,
+        by: str,
+        ignore_case: bool,
+        absent: bool,
+    ) -> str:
+        """Rich timeout diagnosis — mode, fields, candidates, accidental-regex hint."""
+        field = {"text": "text", "id": "resource-id", "desc": "content-desc"}.get(by, by)
+        intent = "still present" if absent else "never appeared"
+        parts = [
+            f"wait timed out: {needle!r} {intent} "
+            f"(match={mode.value}, by={by}, fields={field}"
+            f"{', ignore_case' if ignore_case else ''})"
+        ]
+        # Accidental regex under contains — the Cursor Luzia failure mode.
+        meta = set(r".*+?[](){}|^$\\")
+        if mode is MatchMode.contains and any(c in needle for c in meta):
+            parts.append(
+                f"hint: pattern looks like regex but --match is '{mode.value}' "
+                f"(matched literally as a substring). Use --match regex."
+            )
+        # Closest on-screen candidates.
+        try:
+            result = self.analyze(source="hierarchy", record=False)
+            from .selectors import nearest_elements
+
+            near = nearest_elements(result.elements, needle, limit=5)
+            if near:
+                digests = []
+                for el in near:
+                    label = el.text or el.content_desc or (el.resource_id or "").split("/")[-1]
+                    digests.append(f"id={el.id}:{label!r}")
+                parts.append("closest on screen: " + "; ".join(digests))
+            else:
+                parts.append(f"screen has {len(result.elements)} elements (no close text match)")
+        except Exception as exc:  # pragma: no cover - diagnostic bonus
+            parts.append(f"(could not snapshot screen: {exc})")
+        return " — ".join(parts)
 
     # ----------------------------------------------------------------- expect
 
@@ -2983,11 +3111,43 @@ class Engine:
         saved = self.device.stop_recording(local_path)
         return ActionResult(ok=True, action="record-stop", detail=saved)
 
-    def clock_set(self, *, timestamp_ms: int | None = None) -> ActionResult:
+    def clock_set(self, *, timestamp_ms: int | None = None, restore: bool = False) -> ActionResult:
+        """Set or restore the device wall clock (Maestro ``travel``).
+
+        Moving the clock often invalidates auth tokens (401s). Always ``clock restore``
+        (or ``clock set --restore``) when the test is done — never leave the device in
+        a time-traveled state.
+        """
+        path = self._clock_backup_path()
+        if restore:
+            if not path.is_file():
+                raise UsageError(
+                    "no saved clock to restore",
+                    hint="Run `aua clock set --ms …` first; it saves the prior wall clock.",
+                )
+            previous = int(path.read_text(encoding="utf-8").strip())
+            self.device.set_clock(previous)
+            path.unlink(missing_ok=True)
+            return ActionResult(ok=True, action="clock-restore", detail=str(previous))
         if timestamp_ms is None:
-            raise UsageError("clock set needs --ms <unix-ms>")
+            raise UsageError("clock set needs --ms <unix-ms> (or --restore)")
+        # Save current clock once so restore is possible.
+        current = self.device.get_clock_ms()
+        if current is not None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if not path.is_file():
+                path.write_text(str(current), encoding="utf-8")
         self.device.set_clock(timestamp_ms)
-        return ActionResult(ok=True, action="clock-set", detail=str(timestamp_ms))
+        return ActionResult(
+            ok=True,
+            action="clock-set",
+            detail=str(timestamp_ms),
+        )
+
+    def _clock_backup_path(self) -> Path:
+        serial = self._device.serial if self._device else (self.config.device.serial or "default")
+        safe = str(serial).replace(":", "_")
+        return Path(self.config.cache.dir).expanduser() / f"clock_backup_{safe}.txt"
 
     def erase(
         self,
@@ -3026,6 +3186,7 @@ class Engine:
         package: str | None = None,
         activity: str | None = None,
         clear_state: bool = False,
+        confirmed: bool = False,
     ) -> ActionResult:
         device = self.device
         a = action.lower()
@@ -3036,6 +3197,11 @@ class Engine:
             if not package:
                 raise UsageError("app launch needs a package name")
             if clear_state:
+                if not confirmed:
+                    raise UsageError(
+                        "launch --clear wipes app data (flags + session) — pass --yes",
+                        hint="`aua app launch <pkg> --clear --yes`",
+                    )
                 device.clear_app(package)
             # --activity pins the entry Activity — some builds have multiple launcher
             # activities (e.g. a Dev Tools menu) and default resolution is nondeterministic.
@@ -3060,6 +3226,12 @@ class Engine:
         if a in ("clear", "clear-state", "clear_state"):
             if not package:
                 raise UsageError("app clear needs a package name")
+            if not confirmed:
+                raise UsageError(
+                    "app clear wipes ALL app data (feature flags, login session, LOCAL_CONFIG) "
+                    "— pass --yes / --yes-wipe-flags to confirm",
+                    hint="Then re-apply flag overrides / re-login before asserting experiment UI.",
+                )
             device.clear_app(package)
             self._invalidate_cache()
             return ActionResult(ok=True, action="app-clear", detail=package)
@@ -3072,6 +3244,75 @@ class Engine:
             f"unknown app action '{action}'",
             hint="foreground|launch|stop|kill|clear|grant|current",
         )
+
+    # ----------------------------------------------------------------- logcat / suite
+
+    def logcat_mark(self, name: str = "default", *, clear: bool = False) -> dict[str, Any]:
+        """Store a named host-time mark (and optionally clear the device logcat buffer)."""
+        from . import logcat as logcat_mod
+
+        device = self.device
+        if clear:
+            device.logcat(dump=False)
+        entry = logcat_mod.set_mark(self.config.cache.dir, device.serial, name or "default")
+        return {"ok": True, "action": "logcat-mark", **entry}
+
+    def logcat(
+        self,
+        *,
+        grep: str | None = None,
+        since: str | None = None,
+        tag: str | None = None,
+        lines: int | None = None,
+    ) -> dict[str, Any]:
+        """Dump recent logcat, filtered by mark / grep / tag / line count."""
+        from . import logcat as logcat_mod
+
+        device = self.device
+        path = logcat_mod.marks_path(self.config.cache.dir, device.serial)
+        marks = logcat_mod.load_marks(path)
+        try:
+            since_ms, since_label = logcat_mod.resolve_since_ms(marks, since)
+        except KeyError as exc:
+            known = ", ".join(sorted(marks)) or "(none)"
+            raise UsageError(
+                f"unknown logcat mark {since!r}",
+                hint=f"Known marks: {known}. Set one with `aua logcat mark <name>`.",
+            ) from exc
+        raw = device.logcat(since_ms=None, dump=True)
+        filtered = logcat_mod.filter_logcat(
+            raw, since_ms=since_ms, grep=grep, tag=tag, lines=lines
+        )
+        return {
+            "ok": True,
+            "lines": filtered,
+            "since": since_label,
+            "grep": grep,
+            "tag": tag,
+            "count": len(filtered),
+        }
+
+    def suite_run(
+        self,
+        path: str,
+        *,
+        continue_on_fail: bool = False,
+        text: str | None = None,
+    ) -> dict[str, Any]:
+        """Run an AC checklist YAML (path, or *text* when path is ``-``)."""
+        from . import suite as suite_mod
+
+        if text is not None:
+            suite = suite_mod.parse_suite(text, source=path or "<stdin>")
+        elif path == "-":
+            raise UsageError(
+                "suite run from stdin needs the YAML body passed as text",
+                hint="CLI reads stdin when PATH is `-`.",
+            )
+        else:
+            suite = suite_mod.load_suite(path)
+        result = suite_mod.run_suite(self, suite, continue_on_fail=continue_on_fail)
+        return result.as_dict()
 
     # ----------------------------------------------------------------- doctor
 

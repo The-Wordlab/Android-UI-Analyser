@@ -189,7 +189,7 @@ EXIT_CODES: list[tuple[str, str]] = [
     ("5", "config error"),
     ("6", "selector matched nothing (`--rid`/`--text`/`--desc`)"),
     ("7", "selector matched several candidates (disambiguate with `--index`/`--first`)"),
-    ("8", "`aua expect` assertion failed"),
+    ("8", "`aua expect` / `aua suite run` assertion failed"),
 ]
 
 KEY_FLAGS: list[tuple[str, str]] = [
@@ -236,12 +236,15 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "wait",
         '`--for "<text>"` (`--by id`, `--absent` = wait until it disappears), `--idle`, '
         "`--for-stable`, `--interval`, `--settle`, `--timeout`, `--observe` (fresh ids, "
-        "even on a miss)",
+        "even on a miss). On timeout exit 3 with detail naming `--match` mode, fields "
+        "searched, closest candidates — and a hint if the pattern looks like regex under "
+        "`--match contains`",
     ),
     (
         "open",
-        "`<uri> [--app|--package <pkg>] [--prefer <pkg|label>]` — pin the target app to "
-        "skip the system 'Open with…' chooser; `--prefer` auto-taps a chooser row",
+        "`<uri> [--package <pkg>]` — **pins the foreground package by default** so "
+        "prod+dev installs never hit 'Open with…'; `--no-package-pin` to test the "
+        "chooser; if a chooser still appears, errors naming the competing apps",
     ),
     (
         "resolve",
@@ -250,8 +253,9 @@ KEY_FLAGS: list[tuple[str, str]] = [
     ),
     (
         "app",
-        "`launch <pkg> [--activity .Entry] [--clear]` (``--clear`` = Maestro clearState), "
-        "`stop <pkg>`, `kill <pkg>`, `clear <pkg>`, `grant <pkg>`, `foreground`",
+        "`launch <pkg> [--activity .Entry] [--clear --yes]`, `stop|kill|clear|grant`. "
+        "`clear` / `launch --clear` wipe ALL app data (Luzia: flags + login) — **requires "
+        "`--yes` / `--yes-wipe-flags`**; re-apply flags afterwards",
     ),
     (
         "clipboard / paste / copy",
@@ -265,8 +269,18 @@ KEY_FLAGS: list[tuple[str, str]] = [
     (
         "location / orientation / airplane / media / record / clock",
         "`location set LAT,LON`, `orientation set|get`, `airplane on|off|toggle`, "
-        "`media add PATH`, `record start|stop PATH`, `clock set --ms <unix-ms>` (Maestro "
-        "setLocation / setOrientation / setAirplaneMode / addMedia / startRecording / travel)",
+        "`media add PATH`, `record start|stop PATH`, `clock set --ms <unix-ms>` / "
+        "`clock restore` (time travel invalidates auth — always restore)",
+    ),
+    (
+        "logcat",
+        "`logcat mark [NAME]`, `logcat --grep PAT [--since mark|last-action] [--tag T] "
+        "[--json]` — bracket API/analytics verification around an action",
+    ),
+    (
+        "suite",
+        "`suite run PATH.yaml [--continue]` — AC checklist (has/expect/wait_for) with "
+        "per-item pass/fail + summary; exit 8 if any fail",
     ),
     (
         "map",
@@ -301,6 +315,18 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "return the post-action screen inline by default (`observation`, fresh ids); "
         "`--no-observe` to skip it. Prefer `hide-keyboard` over `key back` when the IME is "
         "covering the tree",
+    ),
+    (
+        "logcat",
+        "`aua logcat mark [NAME]` (default `default`; also auto-marks `last-action` on every "
+        "state-changing action), `aua logcat [--grep REGEX] [--since MARK|last-action|30s] "
+        "[--tag TAG] [--lines N] [--json]` — dump since the mark (default: last-action, else 30s)",
+    ),
+    (
+        "suite",
+        "`aua suite run PATH|-- [--continue] [--json]` — YAML AC checklist of `has` / "
+        "`expect` / `wait_for` checks; exit 0 all pass, 8 any fail (stop on first fail "
+        "unless `--continue`)",
     ),
 ]
 
