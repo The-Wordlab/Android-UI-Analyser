@@ -69,6 +69,18 @@ fi
 echo "==> Installing the Claude Code skill at user level (~/.claude/skills)..."
 "$AUA" guide --emit-skill "$HOME/.claude/skills/android-ui-analyser/SKILL.md"
 
+# Optional AOT thin client — skips Python startup when talking to a warm daemon.
+if command -v cc >/dev/null 2>&1 || command -v clang >/dev/null 2>&1; then
+  echo "==> Building optional aua-fast (C daemon client)..."
+  if make -C "$REPO_DIR/native/aua-fast" install; then
+    echo "    installed to ~/.local/bin/aua-fast (use after: aua daemon start)"
+  else
+    echo "    (aua-fast build skipped — 'aua' still works; see native/aua-fast/README.md)"
+  fi
+else
+  echo "==> Skipping aua-fast (no C compiler). Install later: make -C native/aua-fast install"
+fi
+
 echo
 echo "==> Verifying environment (aua doctor):"
 "$AUA" doctor || true
@@ -79,6 +91,7 @@ cat <<EOF
 ✓ Setup complete.
   • 'aua' CLI installed ($AUA)
   • Skill installed at ~/.claude/skills/android-ui-analyser/ — active in EVERY project
+  • Optional: 'aua-fast' (if built) for lower latency against a warm daemon
 
 Next steps:
   1. Connect an Android device or emulator   (README → "Connect a device or emulator")

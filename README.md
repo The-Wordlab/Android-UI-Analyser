@@ -602,6 +602,24 @@ time in a session and pure noise on every restart afterwards, so `--quiet` suppr
 
 The daemon binds **only to a unix socket** (default `~/.cache/android-ui-analyser/daemon.sock`). No TCP port, no auth surface.
 
+### Optional: `aua-fast` (C thin client)
+
+Once the daemon is up, each `aua …` call still pays Python/typer startup. `aua-fast` is a
+~35 KB binary that speaks the same unix-socket JSON protocol and falls back to `aua` if the
+daemon is down:
+
+```bash
+make -C native/aua-fast install   # → ~/.local/bin/aua-fast (also built by ./install.sh)
+aua daemon start --quiet
+aua-fast analyze
+aua-fast tap 4
+aua-fast has "Sign in"            # exit 0/1
+```
+
+Hot commands: `ping`, `analyze`, `devices`, `has`, `tap`, `key`, `input`, `swipe`, `wait`.
+Everything else (and any unknown flags) exec's the full Python CLI. Longer-term native ideas
+live in [`docs/NATIVE_ROADMAP.md`](docs/NATIVE_ROADMAP.md).
+
 ---
 
 ## MCP server
