@@ -118,6 +118,8 @@ class FakeDevice(Device):
         self._airplane = False
         self._location: tuple[float, float] | None = None
         self._recording: str | None = None
+        self._logcat_lines: list[str] = []
+        self._logcat_cleared = False
 
     # capture
     def window_size(self) -> tuple[int, int]:
@@ -232,6 +234,23 @@ class FakeDevice(Device):
 
     def set_clock(self, timestamp_ms: int) -> None:
         self.calls.append(("set_clock", (timestamp_ms,)))
+        self._clock_ms = timestamp_ms
+
+    def get_clock_ms(self) -> int | None:
+        return getattr(self, "_clock_ms", 1_700_000_000_000)
+
+    def logcat(self, *, since_ms: int | None = None, dump: bool = True) -> str:
+        self.calls.append(("logcat", (since_ms, dump)))
+        if not dump:
+            self._logcat_cleared = True
+            self._logcat_lines = []
+            return ""
+        from android_ui_analyser.logcat import filter_logcat
+
+        raw = "\n".join(self._logcat_lines)
+        if since_ms is None:
+            return raw
+        return "\n".join(filter_logcat(raw, since_ms=since_ms))
 
     def erase_chars(self, count: int) -> None:
         self.calls.append(("erase_chars", (count,)))

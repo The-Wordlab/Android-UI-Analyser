@@ -396,7 +396,6 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
     _warm(engine)
     return getattr(engine, method)(**kwargs)
 
-
 # --------------------------------------------------------------------------- app
 
 
@@ -1335,14 +1334,19 @@ def open(  # noqa: A001 - matches the user-facing verb `aua open`
     uri: str = typer.Argument(..., help="Deeplink URI, e.g. 'luzia-test://set-flags?foo=a'."),
     app_pkg: str | None = typer.Option(
         None,
-        "--app",
         "--package",
-        help="Target package — skips the system 'Open with…' chooser when set.",
+        "--app",
+        help="Pin the VIEW intent to this package (default: foreground app). Skips 'Open with…'.",
     ),
     prefer: str | None = typer.Option(
         None,
         "--prefer",
         help="If a chooser still appears, auto-pick the row matching this package/label.",
+    ),
+    pin_package: bool = typer.Option(
+        True,
+        "--package-pin/--no-package-pin",
+        help="Pin to foreground/known package by default; --no-package-pin exercises the chooser.",
     ),
     observe: bool = typer.Option(
         True, "--observe/--no-observe", help="Also return the screen after opening."
@@ -1357,8 +1361,10 @@ def open(  # noqa: A001 - matches the user-facing verb `aua open`
 ) -> None:
     """Open a deeplink — jump straight to a screen or trigger an app action (latency shortcut).
 
-    Pass ``--app <package>`` to avoid Android's "Open with…" dialog on the emulator.
-    The deeplink is remembered in the app's playbook (`aua map`) so it can be reused.
+    Pins the target package by default (foreground app, or ``--package``) so emulators
+    with both prod + dev installs never hit Android's "Open with…" chooser. If a chooser
+    still appears, aua errors with the competing app names rather than leaving you there.
+    Use ``--no-package-pin`` only when you intentionally want to test the chooser.
     """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
@@ -1369,6 +1375,7 @@ def open(  # noqa: A001 - matches the user-facing verb `aua open`
                 uri=uri,
                 package=app_pkg,
                 prefer=prefer,
+                pin_package=pin_package,
                 observe=observe,
                 with_image=_annotate_arg(with_image),
             ),
@@ -1448,21 +1455,28 @@ def wait(
             )
             return
         eff = timeout if timeout is not None else 5000
-        _emit(
-            _route(
-                engine,
-                "wait",
-                for_=for_,
-                idle=idle,
-                timeout_ms=eff,
-                match=match,
-                ignore_case=ignore_case,
-                observe=observe,
-                by=by,
-                absent=absent,
-            ),
-            fmt,
+        result = _route(
+            engine,
+            "wait",
+            for_=for_,
+            idle=idle,
+            timeout_ms=eff,
+            match=match,
+            ignore_case=ignore_case,
+            observe=observe,
+            by=by,
+            absent=absent,
         )
+        _emit(result, fmt)
+        # Misses used to exit 0 with ok:false — silent and costly to debug. Non-zero now,
+        # with detail naming match mode / fields / closest candidates.
+        if not idle:
+            _exit_unless_ok(
+                result,
+                ExitCode.DEVICE,
+                code="wait_timeout",
+                hint="Check --match (contains vs regex), --by, and the closest candidates in detail.",
+            )
 
     _run(ctx, go)
 
@@ -1591,21 +1605,48 @@ def app_cmd(
     clear_state: bool = typer.Option(
         False,
         "--clear",
-        help="launch: wipe app data first (Maestro launchApp clearState).",
+        help="launch: wipe app data first (Maestro launchApp clearState). Requires --yes.",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "--yes-wipe-flags",
+        help="Required for `clear` / `launch --clear`: confirms wiping app data "
+        "(feature-flag overrides, login session, LOCAL_CONFIG, …).",
     ),
 ) -> None:
     """Inspect or control the foreground app.
 
     Some dev builds have several launcher activities (a Dev Tools menu next to the real
     entry), so a bare `launch` opens the wrong one nondeterministically — pass
-    ``--activity`` to pin it. ``clear`` wipes app data (Maestro ``clearState``); ``grant``
-    auto-grants declared runtime permissions so agents skip the system permission sheets.
+    ``--activity`` to pin it.
+
+    ``clear`` / ``launch --clear`` run ``pm clear`` — a **full wipe** of app data. On Luzia
+    that destroys feature-flag overrides (``LOCAL_CONFIG.xml``) and the login session
+    (Google re-auth required). Always pass ``--yes`` / ``--yes-wipe-flags`` to confirm;
+    re-apply flags afterwards (e.g. via deeplink) before asserting experiment tabs.
+    ``grant`` auto-grants declared runtime permissions so agents skip permission sheets.
     """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
+        a = action.lower()
+        wiping = a in ("clear", "clear-state", "clear_state") or (
+            a == "launch" and clear_state
+        )
+        if wiping and not yes:
+            raise UsageError(
+                f"app {action}{' --clear' if a == 'launch' else ''} wipes ALL app data "
+                f"(feature flags, login session, LOCAL_CONFIG) — pass --yes to confirm",
+                hint="Example: `aua app clear co.thewordlab.luzia.dev --yes`. "
+                "Then re-apply flag overrides / re-login before asserting experiment UI.",
+            )
         _emit(
             engine.app(
-                action, package=package, activity=activity, clear_state=clear_state
+                action,
+                package=package,
+                activity=activity,
+                clear_state=clear_state,
+                confirmed=yes,
             ),
             fmt,
         )
@@ -1833,10 +1874,31 @@ app.add_typer(clock_app, name="clock")
 @clock_app.command("set")
 def clock_set_cmd(
     ctx: typer.Context,
-    ms: int = typer.Option(..., "--ms", help="Unix timestamp in milliseconds."),
+    ms: int | None = typer.Option(None, "--ms", help="Unix timestamp in milliseconds."),
+    restore: bool = typer.Option(
+        False,
+        "--restore",
+        help="Restore the wall clock saved by the last `clock set` (undo time travel).",
+    ),
 ) -> None:
+    """Set the device clock (emulator/rooted). Invalidates auth tokens — always restore.
+
+    One-shot tests only (e.g. >30-day notification expiry). After asserting, run
+    ``aua clock restore`` (or ``aua clock set --restore``) so the app can talk to APIs again.
+    """
+
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(engine.clock_set(timestamp_ms=ms), fmt)
+        _emit(engine.clock_set(timestamp_ms=ms, restore=restore), fmt)
+
+    _run(ctx, go)
+
+
+@clock_app.command("restore")
+def clock_restore_cmd(ctx: typer.Context) -> None:
+    """Restore the device wall clock saved by the last ``clock set``."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.clock_set(restore=True), fmt)
 
     _run(ctx, go)
 
@@ -2498,6 +2560,125 @@ def flow_delete_cmd(
         typer.echo(json.dumps({"ok": deleted, "action": "flow-delete", "flow": name}))
         if not deleted:
             raise typer.Exit(1)
+
+    _run(ctx, go)
+
+
+# --------------------------------------------------------------------------- logcat
+
+
+logcat_app = typer.Typer(
+    help="Mark + dump device logcat (filter by mark / grep / tag).",
+    invoke_without_command=True,
+    no_args_is_help=False,
+)
+app.add_typer(logcat_app, name="logcat")
+
+
+@logcat_app.callback(invoke_without_command=True)
+def logcat_cmd(
+    ctx: typer.Context,
+    grep: str | None = typer.Option(None, "--grep", help="Regex filter on log lines."),
+    since: str | None = typer.Option(
+        None,
+        "--since",
+        help="Mark name, last-action, duration (30s), or unix-ms. Default: last-action or 30s.",
+    ),
+    tag: str | None = typer.Option(None, "--tag", help="Exact log tag filter."),
+    as_json: bool = typer.Option(False, "--json", help="Emit structured JSON."),
+    lines: int | None = typer.Option(None, "--lines", "-n", help="Keep only the last N matching lines."),
+) -> None:
+    """Dump recent logcat (default since last-action mark, else last 30s)."""
+    if ctx.invoked_subcommand is not None:
+        return
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        import json
+
+        result = engine.logcat(grep=grep, since=since, tag=tag, lines=lines)
+        if as_json:
+            indent = 2 if fmt is OutputFormat.pretty else None
+            sep = None if indent else (",", ":")
+            typer.echo(json.dumps(result, indent=indent, separators=sep, ensure_ascii=False))
+        else:
+            for line in result.get("lines") or []:
+                typer.echo(line)
+
+    _run(ctx, go)
+
+
+@logcat_app.command("mark")
+def logcat_mark_cmd(
+    ctx: typer.Context,
+    name: str = typer.Argument("default", help="Mark name (default: default)."),
+    clear: bool = typer.Option(
+        False, "--clear", help="Also clear the device logcat buffer (`logcat -c`)."
+    ),
+) -> None:
+    """Store a host-time mark for later ``aua logcat --since NAME``."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        import json
+
+        result = engine.logcat_mark(name, clear=clear)
+        typer.echo(json.dumps(result, ensure_ascii=False))
+
+    _run(ctx, go)
+
+
+# --------------------------------------------------------------------------- suite
+
+
+suite_app = typer.Typer(
+    help="Run a YAML acceptance-criteria checklist (has / expect / wait_for).",
+    no_args_is_help=True,
+)
+app.add_typer(suite_app, name="suite")
+
+
+@suite_app.command("run")
+def suite_run_cmd(
+    ctx: typer.Context,
+    path: str = typer.Argument(..., help="Suite YAML path, or `-` to read stdin."),
+    continue_on_fail: bool = typer.Option(
+        False,
+        "--continue",
+        help="Keep going after a failed check (default: stop on first fail).",
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Emit structured JSON summary."),
+) -> None:
+    """Run each check via has/expect/wait. Exit 0 if all pass, 8 if any fail."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        import json
+
+        from . import suite as suite_mod
+
+        text = sys.stdin.read() if path == "-" else None
+        payload = _route(
+            engine,
+            "suite_run",
+            path=path,
+            continue_on_fail=continue_on_fail,
+            text=text,
+        )
+        result = suite_mod.SuiteResult(
+            ok=bool(payload["ok"]),
+            name=str(payload["name"]),
+            results=[suite_mod.CheckResult(**r) for r in payload.get("results") or []],
+            passed=int(payload.get("passed") or 0),
+            failed=int(payload.get("failed") or 0),
+            stopped_early=bool(payload.get("stopped_early")),
+        )
+
+        if as_json:
+            indent = 2 if fmt is OutputFormat.pretty else None
+            sep = None if indent else (",", ":")
+            typer.echo(json.dumps(payload, indent=indent, separators=sep, ensure_ascii=False))
+        else:
+            typer.echo(suite_mod.render_summary(result))
+        if not result.ok:
+            raise typer.Exit(int(ExitCode.ASSERTION))
 
     _run(ctx, go)
 

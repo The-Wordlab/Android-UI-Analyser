@@ -165,11 +165,17 @@ def parse_hierarchy(xml: str, screen_size: tuple[int, int] | None = None) -> lis
         children = node.findall("node")
         is_leaf = not children
         has_own_label = bool(text) or bool(content_desc)
-
-        interesting = actionable or scrollable or has_own_label or is_leaf
-        # A non-actionable node inside an actionable ancestor is folded into that
-        # ancestor (its text was rolled up), so we don't emit it separately.
-        absorbed = actionable_ancestor and not actionable
+        resource_id = _attr(node, "resource-id")
+        # App resource-ids (com.app:id/containerChatDetail) must stay in the analyze list —
+        # Compose hubs are often unlabeled containers the agent addresses with --rid / has --by id.
+        # Skip framework android:id/* noise so we don't bury the screen under layout wrappers.
+        has_app_id = bool(
+            resource_id and ":id/" in resource_id and not resource_id.startswith("android:id/")
+        )
+        interesting = actionable or scrollable or has_own_label or is_leaf or has_app_id
+        # Fold unlabeled non-actionable kids into clickable ancestors — unless they carry an
+        # app resource-id the agent needs to address.
+        absorbed = actionable_ancestor and not actionable and not has_app_id
 
         if valid and interesting and not absorbed:
             assert bounds is not None
@@ -183,7 +189,7 @@ def parse_hierarchy(xml: str, screen_size: tuple[int, int] | None = None) -> lis
                         id=-1,  # assigned after sorting
                         type=_short_type(node.get("class")),
                         text=label,
-                        resource_id=_attr(node, "resource-id"),
+                        resource_id=resource_id,
                         content_desc=content_desc,
                         bounds=bounds,
                         center=center_of(bounds),

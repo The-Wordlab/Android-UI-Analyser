@@ -436,6 +436,11 @@ def _tool_definitions() -> list[types.Tool]:
                         "type": "string",
                         "description": "If a chooser appears, auto-pick this package/label.",
                     },
+                    "pin_package": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "Pin to foreground/package (false = allow chooser).",
+                    },
                     "observe": _OBSERVE_PROP,
                     "with_image": _WITH_IMAGE_PROP,
                 },
@@ -831,6 +836,7 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 args["uri"],
                 package=args.get("package"),
                 prefer=args.get("prefer"),
+                pin_package=args.get("pin_package", True),
                 observe=args.get("observe", True),
                 with_image=img,
             )

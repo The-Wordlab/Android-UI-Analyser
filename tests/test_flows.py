@@ -454,7 +454,7 @@ def test_open_link_action_records_deeplink(tmp_path) -> None:
     eng.analyze(source="hierarchy")  # seed a cached package
     out = eng.open_link("luzia-test://set-flags?foo=a")
     assert out.ok and out.action == "open-link"
-    assert ("open_link", ("luzia-test://set-flags?foo=a",)) in dev.calls
+    assert ("open_link", ("luzia-test://set-flags?foo=a", P)) in dev.calls
     app = AppMemoryStore(eng.config.memory).load(P)
     assert app is not None
     assert [d.uri for d in app.deeplinks] == ["luzia-test://set-flags?foo=a"]
@@ -504,7 +504,7 @@ steps:
     flow_file.write_text(text, encoding="utf-8")
     out = eng.flow_run(file=str(flow_file))
     assert out["ok"] is True, out
-    assert ("open_link", ("luzia-test://set-flags?chat_v5=treatment",)) in dev.calls
+    assert ("open_link", ("luzia-test://set-flags?chat_v5=treatment", "co.thewordlab.luzia")) in dev.calls
     assert ("stop_app", ("co.thewordlab.luzia",)) in dev.calls  # bare → flow.app
     assert ("launch_app", ("co.thewordlab.luzia",)) in dev.calls
 
