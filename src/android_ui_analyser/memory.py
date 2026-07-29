@@ -248,7 +248,7 @@ class NavHints(NamedTuple):
 
     known_routes: list[str]  # outgoing edges: ["tap 'Apps' → apps", ...]
     suggested_gotos: list[str]  # ranked ready-to-run: ["goto image_creator", ...]
-    suggested_deeplinks: list[str]  # shortcut jumps: ["open luzia://chats", ...]
+    suggested_deeplinks: list[str]  # shortcut jumps: ["open myapp://home", ...]
     map_hint: str | None  # nudge when there's a map but nothing actionable from here
 
 

@@ -1969,7 +1969,7 @@ class Engine:
     ) -> HasResult:
         """Quick presence check — NOT the full pipeline (PRD §5, §6a T0).
 
-        ``by="id"`` matches a resource-id (a bare tail like ``containerChatDetail`` too) —
+        ``by="id"`` matches a resource-id (a bare tail like ``containerDetail`` too) —
         this can confirm containers the parsed element list prunes (Maestro-style
         ``assertVisible: id:``). OCR fallback only applies to text lookups.
         """
@@ -2172,7 +2172,7 @@ class Engine:
         if len(given) != 1:
             raise UsageError(
                 "give exactly one selector: --rid <resource-id> | --text <label> | --desc <desc>",
-                hint="e.g. `aua tap --rid appsHubNotifications` or `aua tap --text 'Create an app'`",
+                hint="e.g. `aua tap --rid notificationsButton` or `aua tap --text 'Create an app'`",
             )
         cached = None if fresh else self._read_cache()
         result = cached if cached is not None else self.analyze(source="hierarchy", record=False)
@@ -2181,7 +2181,7 @@ class Engine:
         label = selector_label(selector)
         if not matches and rid:
             # The element list prunes unlabeled, non-actionable containers, so a real
-            # `containerChatDetail` is addressable without being listed. Ask the device
+            # `containerDetail` is addressable without being listed. Ask the device
             # directly before giving up — the same lookup `has --by id` uses.
             container = self._resolve_container_rid(rid)
             if container is not None:
@@ -2892,7 +2892,7 @@ class Engine:
             f"(match={mode.value}, by={by}, fields={field}"
             f"{', ignore_case' if ignore_case else ''})"
         ]
-        # Accidental regex under contains — the Cursor Luzia failure mode.
+        # Accidental regex under contains — an observed agent failure mode.
         meta = set(r".*+?[](){}|^$\\")
         if mode is MatchMode.contains and any(c in needle for c in meta):
             parts.append(
@@ -3059,7 +3059,7 @@ class Engine:
         if len([v for v in selector.values() if v]) != 1:
             raise UsageError(
                 "expect needs exactly one of --rid / --text / --desc",
-                hint="e.g. `aua expect --rid appsHubNotifications --exists`",
+                hint="e.g. `aua expect --rid notificationsButton --exists`",
             )
         if absent and exists:
             raise UsageError("--exists and --absent are mutually exclusive")
@@ -3542,7 +3542,7 @@ class Engine:
                 raise UsageError("app clear needs a package name")
             if not confirmed:
                 raise UsageError(
-                    "app clear wipes ALL app data (feature flags, login session, LOCAL_CONFIG) "
+                    "app clear wipes ALL app data (feature flags, login session, local config) "
                     "— pass --yes / --yes-wipe-flags to confirm",
                     hint="Then re-apply flag overrides / re-login before asserting experiment UI.",
                 )

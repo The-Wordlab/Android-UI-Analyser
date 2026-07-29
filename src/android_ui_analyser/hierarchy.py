@@ -187,7 +187,7 @@ def parse_hierarchy(xml: str, screen_size: tuple[int, int] | None = None) -> lis
         is_leaf = not children
         has_own_label = bool(text) or bool(content_desc)
         resource_id = _attr(node, "resource-id")
-        # App resource-ids (com.app:id/containerChatDetail) must stay in the analyze list —
+        # App resource-ids (com.app:id/containerDetail) must stay in the analyze list —
         # Compose hubs are often unlabeled containers the agent addresses with --rid / has --by id.
         # Skip framework android:id/* noise so we don't bury the screen under layout wrappers.
         has_app_id = bool(

@@ -1,7 +1,7 @@
 """App exploration — mine an app's source tree for deeplinks (PRD §6b).
 
-Deeplinks are shortcuts: `aua open "luzia://dynamic_tools/summarize"` jumps straight to a
-tool instead of tapping through the Apps grid. They're declared in the app's source —
+Deeplinks are shortcuts: `aua open "myapp://tools/summarize"` jumps straight to a
+tool instead of tapping through the app's menus. They're declared in the app's source —
 AndroidManifest intent-filters and Compose/nav `navDeepLink`/`uriPattern` literals — so we
 mine them once and save them to the app's playbook for the agent to reuse.
 
@@ -82,7 +82,7 @@ def mine_deeplinks(root: Path, *, cap: int = 200) -> MineResult:
     Custom schemes are discovered from AndroidManifest ``android:scheme`` declarations
     (minus web/mail schemes); source literals are then harvested for exactly those
     schemes so we record real navigation deeplinks, not every URL. Manifest
-    scheme+host pairs (e.g. ``luzia-test`` + ``set-flags``) are reconstructed too.
+    scheme+host pairs (e.g. ``myapp`` + ``set-flags``) are reconstructed too.
     """
     root = root.expanduser()
     if not root.is_dir():

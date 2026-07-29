@@ -27,7 +27,7 @@ from android_ui_analyser.providers.registry import ProviderFactory
 from conftest import FakeDevice, make_config
 
 runner = CliRunner()
-P = "co.thewordlab.luzia"
+P = "com.example.app"
 
 
 # --------------------------------------------------------------------------- fixtures
@@ -388,7 +388,7 @@ def test_matches_any_globs() -> None:
     assert matches_any("com.android.systemui", globs)
     assert matches_any("com.google.android.inputmethod.latin", globs)
     assert matches_any("COM.GOOGLE.ANDROID.INPUTMETHOD.LATIN", globs)
-    assert not matches_any("co.thewordlab.luzia", globs)
+    assert not matches_any("com.example.app", globs)
     assert not matches_any(None, globs)
 
 

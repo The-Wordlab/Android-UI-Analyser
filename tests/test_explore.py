@@ -2,7 +2,7 @@
 
 The miner walks an app source tree and records the deeplinks it declares (shortcuts the
 agent can `aua open`). Tests use a tiny synthetic repo: a manifest declares the custom
-scheme, main source holds real `luzia://` literals, a test source holds a throwaway URI
+scheme, main source holds real `myapp://` literals, a test source holds a throwaway URI
 (must be skipped), and there are https/mailto URLs (must be ignored).
 """
 
@@ -16,20 +16,20 @@ from android_ui_analyser.memory import AppMemoryStore
 from android_ui_analyser.providers.registry import ProviderFactory
 from conftest import FakeDevice, make_config
 
-P = "co.thewordlab.luzia"
+P = "com.example.app"
 
 MANIFEST = """<?xml version="1.0"?>
-<manifest package="co.thewordlab.luzia">
+<manifest package="com.example.app">
   <application>
     <activity>
       <intent-filter><action android:name="android.intent.action.VIEW"/>
-        <data android:scheme="luzia"/>
+        <data android:scheme="myapp"/>
       </intent-filter>
       <intent-filter><action android:name="android.intent.action.VIEW"/>
-        <data android:scheme="luzia-test" android:host="set-flags"/>
+        <data android:scheme="myapp-test" android:host="set-flags"/>
       </intent-filter>
       <intent-filter><action android:name="android.intent.action.VIEW"/>
-        <data android:scheme="https" android:host="luzia.co"/>
+        <data android:scheme="https" android:host="example.com"/>
       </intent-filter>
     </activity>
   </application>
@@ -38,15 +38,15 @@ MANIFEST = """<?xml version="1.0"?>
 
 NAV_KT = """
 val routes = listOf(
-    navDeepLink { uriPattern = "luzia://landing/tools" },
-    navDeepLink { uriPattern = "luzia://landing/home" },
-    navDeepLink { uriPattern = "luzia://dynamic_tools/{toolId}" },
-    "https://luzia.co/help",           // web URL — not a deeplink
-    "mailto:support@luzia.co",         // ignored scheme
+    navDeepLink { uriPattern = "myapp://landing/tools" },
+    navDeepLink { uriPattern = "myapp://landing/home" },
+    navDeepLink { uriPattern = "myapp://dynamic_tools/{toolId}" },
+    "https://example.com/help",           // web URL — not a deeplink
+    "mailto:support@example.com",         // ignored scheme
 )
 """
 
-TEST_KT = 'val throwaway = "luzia://feed/123"  // example URI in a test — must be skipped'
+TEST_KT = 'val throwaway = "myapp://feed/123"  // example URI in a test — must be skipped'
 
 
 def _make_repo(tmp_path: Path) -> Path:
@@ -59,29 +59,29 @@ def _make_repo(tmp_path: Path) -> Path:
     (root / "feature/src/test/NavTest.kt").write_text(TEST_KT, encoding="utf-8")
     # a build dir that must be skipped
     (root / "app/build").mkdir(parents=True)
-    (root / "app/build/Generated.kt").write_text('"luzia://generated/junk"', encoding="utf-8")
+    (root / "app/build/Generated.kt").write_text('"myapp://generated/junk"', encoding="utf-8")
     return root
 
 
 def test_mine_finds_custom_deeplinks_only(tmp_path: Path) -> None:
     result = mine_deeplinks(_make_repo(tmp_path))
     uris = {d.uri for d in result.deeplinks}
-    assert "luzia" in result.schemes and "luzia-test" in result.schemes
+    assert "myapp" in result.schemes and "myapp-test" in result.schemes
     assert "https" not in result.schemes
-    assert "luzia://landing/tools" in uris
-    assert "luzia://landing/home" in uris
-    assert "luzia-test://set-flags" in uris  # reconstructed from manifest scheme+host
+    assert "myapp://landing/tools" in uris
+    assert "myapp://landing/home" in uris
+    assert "myapp-test://set-flags" in uris  # reconstructed from manifest scheme+host
     # ignored / skipped
     assert not any(u.startswith("https") or u.startswith("mailto") for u in uris)
-    assert "luzia://feed/123" not in uris  # from a test source → skipped
-    assert "luzia://generated/junk" not in uris  # from build/ → skipped
+    assert "myapp://feed/123" not in uris  # from a test source → skipped
+    assert "myapp://generated/junk" not in uris  # from build/ → skipped
 
 
 def test_mine_flags_templated(tmp_path: Path) -> None:
     result = mine_deeplinks(_make_repo(tmp_path))
     tmpl = {d.uri: d.templated for d in result.deeplinks}
-    assert tmpl["luzia://dynamic_tools/{toolId}"] is True
-    assert tmpl["luzia://landing/tools"] is False
+    assert tmpl["myapp://dynamic_tools/{toolId}"] is True
+    assert tmpl["myapp://landing/tools"] is False
 
 
 def test_mine_missing_dir_is_empty(tmp_path: Path) -> None:
@@ -98,9 +98,9 @@ def test_engine_explore_mine_saves_to_playbook(tmp_path: Path) -> None:
 
     app_map = AppMemoryStore(cfg.memory).load(P)
     saved = {d.uri for d in app_map.deeplinks}
-    assert "luzia://landing/tools" in saved and "luzia-test://set-flags" in saved
+    assert "myapp://landing/tools" in saved and "myapp-test://set-flags" in saved
     # the note records provenance
-    tools = next(d for d in app_map.deeplinks if d.uri == "luzia://landing/tools")
+    tools = next(d for d in app_map.deeplinks if d.uri == "myapp://landing/tools")
     assert "mined" in (tools.note or "")
 
 
@@ -131,15 +131,15 @@ def test_explore_plan_bootstrap_when_empty(tmp_path: Path) -> None:
 def test_explore_plan_lists_unprobed_deeplinks(tmp_path: Path) -> None:
     eng, cfg = _eng(tmp_path)
     store = AppMemoryStore(cfg.memory)
-    store.remember_deeplink(P, "luzia://pet", note="mined")  # unprobed, concrete
-    store.remember_deeplink(P, "luzia://tools/{toolId}", note="mined")  # templated
-    store.remember_deeplink(P, "luzia://home", note="mined", probed=True)  # already probed
+    store.remember_deeplink(P, "myapp://pet", note="mined")  # unprobed, concrete
+    store.remember_deeplink(P, "myapp://tools/{toolId}", note="mined")  # templated
+    store.remember_deeplink(P, "myapp://home", note="mined", probed=True)  # already probed
     out = eng.explore_plan(package=P)
     kinds = [t["kind"] for t in out["tasks"]]
     dos = " ".join(t["do"] for t in out["tasks"])
-    assert "probe_deeplink" in kinds and "luzia://pet" in dos
+    assert "probe_deeplink" in kinds and "myapp://pet" in dos
     assert "probe_template" in kinds  # templated one flagged separately
-    assert "luzia://home" not in dos  # probed → not re-suggested
+    assert "myapp://home" not in dos  # probed → not re-suggested
 
 
 def test_explore_plan_flags_dead_end_screens(tmp_path: Path) -> None:
@@ -160,6 +160,6 @@ def test_open_link_marks_deeplink_probed(tmp_path: Path) -> None:
     dev = ScriptedDevice([HOME], package=P, serial="emu-probe")
     eng = Engine(cfg, device=dev, factory=ProviderFactory(cfg))
     eng.analyze(source="hierarchy")  # seed cached package
-    eng.open_link("luzia://pet")
-    dl = next(d for d in AppMemoryStore(cfg.memory).load(P).deeplinks if d.uri == "luzia://pet")
+    eng.open_link("myapp://pet")
+    dl = next(d for d in AppMemoryStore(cfg.memory).load(P).deeplinks if d.uri == "myapp://pet")
     assert dl.probed is True

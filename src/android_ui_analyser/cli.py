@@ -219,7 +219,7 @@ def _selector(
         if not ident:
             raise UsageError(
                 f"--by {by} needs the value as the positional argument",
-                hint="e.g. `aua tap --by id appsHubTabEXPLORE`",
+                hint="e.g. `aua tap --by id homeTabBROWSE`",
             )
         return {kind: ident, "index": index, "first": first}
     if rid or text or desc:
@@ -762,8 +762,8 @@ def tap(
 ) -> None:
     """Tap an element — by id from the last analyze, or by a one-shot selector.
 
-    `aua tap 9` · `aua tap --rid appsHubNotifications` · `aua tap --text "Create an app"` ·
-    `aua tap --by id appsHubTabEXPLORE`. A selector resolves on the live screen in this one
+    `aua tap 9` · `aua tap --rid notificationsButton` · `aua tap --text "Create an app"` ·
+    `aua tap --by id homeTabBROWSE`. A selector resolves on the live screen in this one
     call; matching nothing exits 6 and matching several exits 7 with the candidates — it
     never silently taps nothing.
     """
@@ -1193,7 +1193,7 @@ def scroll_to(
 ) -> None:
     """Scroll until something is on screen, verifying every step actually moved.
 
-    `aua scroll-to "Red Square Tap"` · `aua scroll-to --rid notificationRow_7`.
+    `aua scroll-to "Red Square Tap"` · `aua scroll-to --rid listRow_7`.
     ``detail`` starts with the outcome: ``already-visible`` · ``moved`` (with ``dy``) ·
     ``already-at-end`` (nothing scrolled, so it is not on this screen) ·
     ``target-not-found`` (scrolled the whole way, never saw it). The last two exit 6, so a
@@ -1259,10 +1259,10 @@ def expect(
 ) -> None:
     """Assert one thing about the screen. Exit 0 = pass, 8 = the assertion failed.
 
-    `aua expect --rid appsHubNotifications --exists` ·
+    `aua expect --rid notificationsButton --exists` ·
     `aua expect --text "Loading" --absent --timeout 5000` ·
-    `aua expect --rid creationDetailLike --text-is "7"` ·
-    `aua expect --rid notificationPushToggleActivitySwitch --checked`
+    `aua expect --rid itemDetailLikeCount --text-is "7"` ·
+    `aua expect --rid settingsPushToggleSwitch --checked`
 
     One acceptance criterion per call, so a criteria list becomes a script instead of a pile
     of eyeballed screenshots. Exit 8 is a *test* failure and stays distinct from 3 (device)
@@ -1364,7 +1364,7 @@ def hide_keyboard(
 @app.command(cls=AnnotateCommand)
 def open(  # noqa: A001 - matches the user-facing verb `aua open`
     ctx: typer.Context,
-    uri: str = typer.Argument(..., help="Deeplink URI, e.g. 'luzia-test://set-flags?foo=a'."),
+    uri: str = typer.Argument(..., help="Deeplink URI, e.g. 'myapp://set-flags?flag=value'."),
     app_pkg: str | None = typer.Option(
         None,
         "--package",
@@ -1645,7 +1645,7 @@ def app_cmd(
         "--yes",
         "--yes-wipe-flags",
         help="Required for `clear` / `launch --clear`: confirms wiping app data "
-        "(feature-flag overrides, login session, LOCAL_CONFIG, …).",
+        "(feature-flag overrides, login session, local config, …).",
     ),
 ) -> None:
     """Inspect or control the foreground app.
@@ -1654,9 +1654,9 @@ def app_cmd(
     entry), so a bare `launch` opens the wrong one nondeterministically — pass
     ``--activity`` to pin it.
 
-    ``clear`` / ``launch --clear`` run ``pm clear`` — a **full wipe** of app data. On Luzia
-    that destroys feature-flag overrides (``LOCAL_CONFIG.xml``) and the login session
-    (Google re-auth required). Always pass ``--yes`` / ``--yes-wipe-flags`` to confirm;
+    ``clear`` / ``launch --clear`` run ``pm clear`` — a **full wipe** of app data. Many apps
+    keep feature-flag overrides and the login session in app data, so a wipe resets your test
+    preconditions (re-auth required). Always pass ``--yes`` / ``--yes-wipe-flags`` to confirm;
     re-apply flags afterwards (e.g. via deeplink) before asserting experiment tabs.
     ``grant`` auto-grants declared runtime permissions so agents skip permission sheets.
     """
@@ -1669,8 +1669,8 @@ def app_cmd(
         if wiping and not yes:
             raise UsageError(
                 f"app {action}{' --clear' if a == 'launch' else ''} wipes ALL app data "
-                f"(feature flags, login session, LOCAL_CONFIG) — pass --yes to confirm",
-                hint="Example: `aua app clear co.thewordlab.luzia.dev --yes`. "
+                f"(feature flags, login session, local config) — pass --yes to confirm",
+                hint="Example: `aua app clear com.example.app --yes`. "
                 "Then re-apply flag overrides / re-login before asserting experiment UI.",
             )
         _emit(
@@ -2256,7 +2256,7 @@ def remember(
 
     The agent should record what it learns so the NEXT run starts informed, e.g.
     `aua remember --recipe login_full --note "tap 'Login with test user'"` or
-    `aua remember --deeplink "luzia-test://set-flags?x=a" --note "set feature flags, then restart"`.
+    `aua remember --deeplink "myapp://set-flags?flag=value" --note "set flags, then restart"`.
     """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
@@ -2438,8 +2438,8 @@ def explore_mine_cmd(
 ) -> None:
     """Scan an app's source for deeplinks (shortcuts) and record them in its playbook.
 
-    Deeplinks let you jump straight to a screen — `aua open "luzia://dynamic_tools/summarize"`
-    instead of tapping through the Apps grid. Run once per app; `aua about` then lists them.
+    Deeplinks let you jump straight to a screen — `aua open "myapp://tools/summarize"`
+    instead of tapping through the app's menus. Run once per app; `aua about` then lists them.
     """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
@@ -2874,7 +2874,7 @@ def a11y_action_cmd(
 
 
 flags_app = typer.Typer(
-    help="Feature flags via package deeplink templates (Luzia set-flags by default).",
+    help="Feature flags via package deeplink templates (config `flags.templates`).",
     no_args_is_help=True,
 )
 app.add_typer(flags_app, name="flags")

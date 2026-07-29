@@ -122,7 +122,7 @@
   {
     "id": 4,
     "type": "View",
-    "text": "to continue to Luzia-dev",
+    "text": "to continue to Example App",
     "resource_id": null,
     "content_desc": null,
     "bounds": [
@@ -146,7 +146,7 @@
     "password": false,
     "source": "hierarchy",
     "confidence": null,
-    "stable_key": "tx:bbab768874",
+    "stable_key": "tx:3e5969cf9b",
     "window": "app"
   },
   {
@@ -212,7 +212,7 @@
   {
     "id": 7,
     "type": "View",
-    "text": "To continue, Google will share your name, email address, and profile picture with Luzia-dev.",
+    "text": "To continue, Google will share your name, email address, and profile picture with Example App.",
     "resource_id": null,
     "content_desc": null,
     "bounds": [
@@ -236,7 +236,7 @@
     "password": false,
     "source": "hierarchy",
     "confidence": null,
-    "stable_key": "tx:4fe1cde196",
+    "stable_key": "tx:ecbeec6fce",
     "window": "app"
   },
   {
