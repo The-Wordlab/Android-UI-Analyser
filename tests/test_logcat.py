@@ -125,7 +125,8 @@ def test_engine_logcat_mark_and_dump() -> None:
 
 def test_engine_auto_marks_last_action() -> None:
     eng = make_engine()
-    eng._screen_changed()
+    with eng._acting():
+        pass
     marks = load_marks(marks_path(eng.config.cache.dir, eng.device.serial))
     assert "last-action" in marks
 
@@ -268,6 +269,76 @@ _ACTION_XML = """<?xml version="1.0" encoding="UTF-8"?>
         resource-id="com.x:id/field" clickable="true" enabled="true" focused="true"
         bounds="[40,200][1040,320]"/>
 </hierarchy>"""
+
+
+# A real gesture is an adb round-trip: the app logs partway through, and the call returns
+# some milliseconds later. Both instants are needed to tell the two orderings apart.
+_INTERACTION_MS = 15
+
+
+class LoggingDevice(FakeDevice):
+    """A device whose interactions LOG, the way a real app's do.
+
+    Without this the mark's position relative to the action is unobservable — a fake that
+    never logs makes a window opened *after* the tap look identical to one opened before.
+    """
+
+    def _responds(self, event: str) -> None:
+        self.log_now("AnalyticsLog", f"[ACTION] {event}")
+        self.advance_clock(_INTERACTION_MS)
+
+    def click(self, x: int, y: int) -> None:
+        super().click(x, y)
+        self._responds("element_tapped")
+
+    def send_text(self, text: str, *, clear: bool = True) -> None:
+        super().send_text(text, clear=clear)
+        self._responds("text_entered")
+
+    def press(self, key: str) -> None:
+        super().press(key)
+        self._responds("key_pressed")
+
+    def swipe(self, x1: int, y1: int, x2: int, y2: int, duration_ms: int = 300) -> None:
+        super().swipe(x1, y1, x2, y2, duration_ms)
+        self._responds("list_scrolled")
+
+
+@pytest.mark.parametrize(
+    ("action", "event"),
+    [
+        ("tap", "element_tapped"),
+        ("input", "text_entered"),
+        ("key", "key_pressed"),
+        ("swipe", "list_scrolled"),
+    ],
+)
+def test_last_action_window_covers_the_actions_own_log_output(action: str, event: str) -> None:
+    """`--since last-action` must mean "since just BEFORE the action" — that is the point.
+
+    Stamped after the interaction returns, the window opens past everything the app logged
+    in response, so the caller's `mark -> act -> what did the app do` comes back empty.
+    """
+    dev = LoggingDevice(
+        hierarchy_xml=_ACTION_XML, package="com.x", clock_skew_ms=9_400, utc_offset=_TZ_OFFSET
+    )
+    eng = Engine(make_config(), device=dev)
+    target = eng.analyze(source="hierarchy").elements[0].id
+    stale = dev.log_now("AnalyticsLog", "[ACTION] event_from_previous_screen", offset_ms=-13_000)
+
+    runners = {
+        "tap": lambda: eng.tap(target, observe=False),
+        "input": lambda: eng.input_text(target, "hi", observe=False),
+        "key": lambda: eng.key("back", observe=False),
+        "swipe": lambda: eng.swipe("up", observe=False, verify=False),
+    }
+    runners[action]()
+
+    got = eng.logcat(since="last-action")["lines"]
+    assert any(event in line for line in got), (
+        f"{action} logged {event!r} but --since last-action excluded it: {got}"
+    )
+    assert stale not in got, "the window must still start at THIS action, not an earlier one"
 
 
 def test_every_state_changing_action_restamps_last_action() -> None:
