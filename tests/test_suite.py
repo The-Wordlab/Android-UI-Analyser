@@ -18,7 +18,7 @@ runner = CliRunner()
 _XML = """<?xml version="1.0" encoding="UTF-8"?>
 <hierarchy rotation="0">
   <node index="0" class="android.widget.TextView" text="Notifications"
-        resource-id="com.test.app:id/appsHubNotifications" clickable="false" enabled="true"
+        resource-id="com.test.app:id/notificationsButton" clickable="false" enabled="true"
         bounds="[40,100][1040,180]"/>
   <node index="1" class="android.widget.TextView" text="Hi there"
         resource-id="com.test.app:id/greeting" clickable="false" enabled="true"
@@ -33,7 +33,7 @@ name: notifications_ac
 checks:
   - has: "Notifications"
   - expect:
-      rid: appsHubNotifications
+      rid: notificationsButton
       exists: true
   - expect:
       text: "Hi"
@@ -48,7 +48,7 @@ def test_parse_suite() -> None:
     assert suite.name == "notifications_ac"
     assert len(suite.checks) == 4
     assert suite.checks[0].kind == "has"
-    assert suite.checks[1].kind == "expect" and suite.checks[1].rid == "appsHubNotifications"
+    assert suite.checks[1].kind == "expect" and suite.checks[1].rid == "notificationsButton"
     assert suite.checks[2].match == "contains"
     assert suite.checks[3].kind == "wait_for"
 
@@ -58,7 +58,7 @@ def test_run_suite_pass() -> None:
         device=FakeDevice(
             hierarchy_xml=_XML,
             text_index={"Notifications": (40, 100, 1040, 180), "Done": (40, 300, 1040, 380)},
-            resource_index={"com.test.app:id/appsHubNotifications": (40, 100, 1040, 180)},
+            resource_index={"com.test.app:id/notificationsButton": (40, 100, 1040, 180)},
         )
     )
     result = run_suite(eng, parse_suite(_SUITE))
@@ -93,7 +93,7 @@ def test_run_suite_launches_app() -> None:
     dev = FakeDevice(
         hierarchy_xml=_XML,
         text_index={"Notifications": (40, 100, 1040, 180), "Done": (40, 300, 1040, 380)},
-        resource_index={"com.test.app:id/appsHubNotifications": (40, 100, 1040, 180)},
+        resource_index={"com.test.app:id/notificationsButton": (40, 100, 1040, 180)},
     )
     eng = make_engine(device=dev)
     suite = parse_suite(
@@ -115,7 +115,7 @@ def test_cli_suite_run_pass_and_fail(tmp_path: Path, monkeypatch) -> None:
     dev = FakeDevice(
         hierarchy_xml=_XML,
         text_index={"Notifications": (40, 100, 1040, 180), "Done": (40, 300, 1040, 380)},
-        resource_index={"com.test.app:id/appsHubNotifications": (40, 100, 1040, 180)},
+        resource_index={"com.test.app:id/notificationsButton": (40, 100, 1040, 180)},
     )
     monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
 
@@ -175,8 +175,8 @@ _SYSTEM_CHROME_XML = """<?xml version="1.0" encoding="UTF-8"?>
   <node index="3" class="android.widget.LinearLayout"
         resource-id="com.android.systemui:id/status_bar_contents"
         clickable="false" enabled="true" bounds="[0,0][1080,84]"/>
-  <node index="4" class="android.widget.TextView" text="Explore"
-        resource-id="com.test.app:id/appsHubTabExplore" clickable="true" enabled="true"
+  <node index="4" class="android.widget.TextView" text="Browse"
+        resource-id="com.test.app:id/homeTabBrowse" clickable="true" enabled="true"
         bounds="[40,200][1040,280]"/>
 </hierarchy>"""
 
@@ -191,7 +191,7 @@ def test_expect_miss_never_suggests_system_chrome() -> None:
     for noise in ("notification_icon_area", "notificationIcons", "system_icons", "status_bar"):
         assert noise not in detail, f"{noise} leaked into the nearest-candidate hint"
     # The app's own element is what a caller can act on, so that is what gets offered.
-    assert "appsHubTabExplore" in detail
+    assert "homeTabBrowse" in detail
 
 
 def test_expect_miss_counts_app_elements_not_chrome() -> None:

@@ -15,7 +15,7 @@ SCREEN = (1080, 2400)
 
 FULL_ATTRS = """<?xml version="1.0" encoding="UTF-8"?>
 <hierarchy rotation="0">
-  <node text="Push notifications" resource-id="com.x:id/pushSwitch" class="android.widget.Switch"
+  <node text="Push notifications" resource-id="com.x:id/settingsSwitch" class="android.widget.Switch"
         content-desc="" checkable="true" checked="true" clickable="true" enabled="true"
         focusable="true" focused="false" scrollable="false" long-clickable="false"
         password="false" selected="false" bounds="[0,0][200,100]"/>
@@ -23,7 +23,7 @@ FULL_ATTRS = """<?xml version="1.0" encoding="UTF-8"?>
         checkable="false" checked="false" clickable="true" enabled="false" focusable="true"
         focused="false" scrollable="false" long-clickable="true" password="true"
         selected="false" bounds="[0,120][200,220]"/>
-  <node text="Explore" resource-id="com.x:id/tabExplore" class="android.widget.TextView"
+  <node text="Browse" resource-id="com.x:id/tabBrowse" class="android.widget.TextView"
         content-desc="" checkable="false" checked="false" clickable="true" enabled="true"
         focusable="true" focused="false" scrollable="false" long-clickable="false"
         password="false" selected="true" bounds="[0,240][200,340]"/>
@@ -50,15 +50,15 @@ def _by_rid(xml: str) -> dict[str, Element]:
 
 def test_reported_attributes_become_real_booleans() -> None:
     els = _by_rid(FULL_ATTRS)
-    assert (els["pushSwitch"].checkable, els["pushSwitch"].checked) == (True, True)
+    assert (els["settingsSwitch"].checkable, els["settingsSwitch"].checked) == (True, True)
     assert els["pwd"].password is True
     assert els["pwd"].long_clickable is True
-    assert els["tabExplore"].selected is True
+    assert els["tabBrowse"].selected is True
     assert els["list"].scrollable is True
 
 
 def test_reported_false_stays_false_not_none() -> None:
-    switch = _by_rid(FULL_ATTRS)["pushSwitch"]
+    switch = _by_rid(FULL_ATTRS)["settingsSwitch"]
     assert switch.selected is False
     assert switch.password is False
 
@@ -83,7 +83,7 @@ def test_disabled_element_keeps_its_long_standing_bool() -> None:
 
 
 def test_compact_spends_tokens_only_on_state_worth_reporting() -> None:
-    tab = _by_rid(FULL_ATTRS)["tabExplore"].compact()
+    tab = _by_rid(FULL_ATTRS)["tabBrowse"].compact()
     assert tab["selected"] is True
     for name in ("checkable", "checked", "scrollable", "long_clickable", "password"):
         assert name not in tab, name

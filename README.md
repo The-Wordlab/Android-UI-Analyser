@@ -189,7 +189,7 @@ aua --format tsv analyze --fields id,text,rid,checked
 
 # Ask a narrower question instead of filtering the JSON yourself
 aua --format tsv analyze --region 0,0,1080,300 --clickable   # just the header
-aua --format tsv analyze --where-rid pushSwitch --fields id,checkable,checked
+aua --format tsv analyze --where-rid settingsSwitch --fields id,checkable,checked
 
 # Is "Sign in" visible right now? Exit 0 = yes, 1 = no
 aua has "Sign in"
@@ -333,11 +333,11 @@ Flows live flat under `<memory.dir>/flows/<name>.yaml` (they span packages by de
 ```yaml
 # ~/.android-ui-analyser/flows/reset_account_google_login.yaml
 name: reset_account_google_login
-app: co.thewordlab.luzia.dev
+app: com.example.app.dev
 params:
   ACCOUNT: "Engineering Team"
 steps:
-  - launch_app: co.thewordlab.luzia.dev
+  - launch_app: com.example.app.dev
   - tap: {id: buttonSettings}          # unlabeled gear — id-tail selector
   - tap: "Account & Data"
   - tap: "Delete my account"
@@ -596,8 +596,8 @@ aua --format tsv analyze                                  # id, text, rid, click
 aua --format tsv analyze --fields id,text,rid,bounds      # your columns, your order
 aua --format tsv analyze --all                            # keep the noise too
 aua --format tsv analyze --region 0,0,1080,300 --clickable # the header's tap targets
-aua --format tsv analyze --where-text "Explore"           # case-insensitive substring
-aua --format tsv analyze --where-rid appsHubTab --limit 5
+aua --format tsv analyze --where-text "Browse"            # case-insensitive substring
+aua --format tsv analyze --where-rid homeTab --limit 5
 aua --format tsv analyze --no-meta                        # no `#` comment lines at all
 aua --format compact analyze --fields id,rid --nonempty   # same views, JSON output
 ```

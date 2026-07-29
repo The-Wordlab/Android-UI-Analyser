@@ -65,7 +65,7 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "`aua open \"<uri>\"` fires a deeplink — jump straight to a screen or trigger an app "
         "action (e.g. set a feature flag) instead of tapping through the UI. Far faster than "
         "navigating. When an app has known deeplinks, every `analyze` offers the best ones "
-        "inline in `meta.suggested_deeplinks` (e.g. `open luzia://chats`) — so to reach the "
+        "inline in `meta.suggested_deeplinks` (e.g. `open myapp://home`) — so to reach the "
         "screen under test, open the shortcut instead of navigating to it. Some deeplinks "
         "need an app restart to take effect (`aua app stop <pkg>` + `aua app launch <pkg>`). "
         "Don't know the app's deeplinks? `aua explore mine <repo> --app <pkg>` harvests them "
@@ -138,7 +138,7 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "Read interaction state, don't screenshot it",
         "Every element carries `checkable`/`checked`/`selected`/`scrollable`/`long_clickable`/"
         "`password` alongside `clickable`/`enabled`/`focused`. So *is this switch on?* is "
-        "`aua --format tsv analyze --where-rid pushSwitch --fields id,checkable,checked` — not a "
+        "`aua --format tsv analyze --where-rid settingsSwitch --fields id,checkable,checked` — not a "
         "screenshot you have to look at. `selected` tells you which tab is active; `scrollable` "
         "tells you which container actually scrolls. These are **tri-state**: `true`/`false` when "
         "the accessibility node reported it, **empty/null when genuinely unknown** (a "
@@ -146,7 +146,7 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
     ),
     (
         "Verify by resource-id, not just text",
-        '`aua has "<id>" --by id` checks a resource-id (a bare tail like "containerChatDetail" '
+        '`aua has "<id>" --by id` checks a resource-id (a bare tail like "containerDetail" '
         "works) — and it finds non-interactive **container** ids that `analyze` prunes from "
         "the element list, so it's the reliable way to assert you reached a screen "
         "(Maestro-style `assertVisible: id:`). `wait --for <id> --by id` and "
@@ -258,7 +258,7 @@ KEY_FLAGS: list[tuple[str, str]] = [
     (
         "app",
         "`launch <pkg> [--activity .Entry] [--clear --yes]`, `stop|kill|clear|grant`. "
-        "`clear` / `launch --clear` wipe ALL app data (Luzia: flags + login) — **requires "
+        "`clear` / `launch --clear` wipe ALL app data (typically flags + login) — **requires "
         "`--yes` / `--yes-wipe-flags`**; re-apply flags afterwards",
     ),
     (
@@ -305,7 +305,7 @@ KEY_FLAGS: list[tuple[str, str]] = [
     (
         "flags",
         "`flags set <pkg> KEY=VAL…`, `flags apply file.yaml` — deeplink templates "
-        "(Luzia `luzia-test://set-flags?…` by default)",
+        "from config `flags.templates` (e.g. `myapp://set-flags?…`)",
     ),
     (
         "proxy / mock",
@@ -497,7 +497,7 @@ def render_markdown(*, brief: bool = False) -> str:
     p.append("aua --format tsv analyze --region 0,0,1080,300 --clickable --fields id,desc,rid")
     p.append("")
     p.append("# Is that switch on? Read the boolean instead of looking at a screenshot:")
-    p.append("aua --format tsv analyze --where-rid pushSwitch --fields id,checkable,checked")
+    p.append("aua --format tsv analyze --where-rid settingsSwitch --fields id,checkable,checked")
     p.append("")
     p.append("# Must you actually SEE something? Crop it — a full 1080x2400 PNG is expensive:")
     p.append("aua screenshot --region 0,0,1080,300 --out /tmp/header.png   # then read that file")

@@ -36,7 +36,7 @@ SCREEN_XML = """<?xml version="1.0" encoding="UTF-8"?>
         checkable="false" checked="false" clickable="false" enabled="true" focusable="false"
         focused="false" scrollable="false" long-clickable="false" password="false"
         selected="false" bounds="[935,14][998,48]"/>
-  <node index="2" text="" resource-id="com.test.app:id/notificationBell"
+  <node index="2" text="" resource-id="com.test.app:id/notificationsButton"
         class="android.widget.ImageButton" package="com.test.app" content-desc="Notifications"
         checkable="false" checked="false" clickable="true" enabled="true" focusable="true"
         focused="false" scrollable="false" long-clickable="false" password="false"
@@ -45,12 +45,12 @@ SCREEN_XML = """<?xml version="1.0" encoding="UTF-8"?>
         content-desc="" checkable="false" checked="false" clickable="false" enabled="true"
         focusable="false" focused="false" scrollable="false" long-clickable="false"
         password="false" selected="false" bounds="[0,300][1080,400]"/>
-  <node index="4" text="Explore" resource-id="com.test.app:id/appsHubTabEXPLORE"
+  <node index="4" text="Browse" resource-id="com.test.app:id/homeTabBROWSE"
         class="android.widget.TextView" package="com.test.app" content-desc=""
         checkable="false" checked="false" clickable="true" enabled="true" focusable="true"
         focused="false" scrollable="false" long-clickable="true" password="false"
         selected="true" bounds="[0,400][540,500]"/>
-  <node index="5" text="" resource-id="com.test.app:id/pushSwitch" class="android.widget.Switch"
+  <node index="5" text="" resource-id="com.test.app:id/settingsSwitch" class="android.widget.Switch"
         package="com.test.app" content-desc="Push notifications" checkable="true" checked="true"
         clickable="true" enabled="true" focusable="true" focused="false" scrollable="false"
         long-clickable="false" password="false" selected="false" bounds="[859,600][996,700]"/>
@@ -112,13 +112,13 @@ def test_filters_alone_still_validate_as_an_analyze_result(device: FakeDevice) -
 
 
 def test_fields_projects_and_shortens_rid(device: FakeDevice) -> None:
-    payload = json.loads(_run("analyze", "--fields", "id,text,rid", "--where-rid", "appsHubTab"))
-    assert payload["elements"] == [{"id": 4, "text": "Explore", "rid": "appsHubTabEXPLORE"}]
+    payload = json.loads(_run("analyze", "--fields", "id,text,rid", "--where-rid", "homeTab"))
+    assert payload["elements"] == [{"id": 4, "text": "Browse", "rid": "homeTabBROWSE"}]
 
 
 def test_fields_resource_id_keeps_the_full_selector(device: FakeDevice) -> None:
-    payload = json.loads(_run("analyze", "--fields", "resource_id", "--where-rid", "pushSwitch"))
-    assert payload["elements"] == [{"resource_id": "com.test.app:id/pushSwitch"}]
+    payload = json.loads(_run("analyze", "--fields", "resource_id", "--where-rid", "settingsSwitch"))
+    assert payload["elements"] == [{"resource_id": "com.test.app:id/settingsSwitch"}]
 
 
 def test_unknown_field_exits_2_and_names_the_offender(device: FakeDevice) -> None:
@@ -161,7 +161,7 @@ def test_tsv_is_comment_header_then_columns_then_rows(device: FakeDevice) -> Non
 def test_tsv_default_view_hides_system_chrome_and_unlabelled_rows(device: FakeDevice) -> None:
     rids = [row[2] for row in _rows(_run("--format", "tsv", "analyze"))[1:]]
     assert "clock" not in rids  # com.android.systemui id
-    assert "notificationBell" in rids and "appsHubTabEXPLORE" in rids
+    assert "notificationsButton" in rids and "homeTabBROWSE" in rids
     assert "" not in rids  # the unlabelled View is gone
 
 
@@ -196,11 +196,11 @@ def test_invalid_global_format_still_exits_2() -> None:
 
 def test_region_and_clickable_compose_to_the_header_only(device: FakeDevice) -> None:
     rows = _rows(_run("--format", "tsv", "analyze", "--region", "0,0,1080,300", "--clickable"))
-    assert [r[2] for r in rows[1:]] == ["notificationBell"]
+    assert [r[2] for r in rows[1:]] == ["notificationsButton"]
 
 
 def test_where_text_is_case_insensitive(device: FakeDevice) -> None:
-    rows = _rows(_run("--format", "tsv", "analyze", "--where-text", "explo"))
+    rows = _rows(_run("--format", "tsv", "analyze", "--where-text", "brow"))
     assert [r[0] for r in rows[1:]] == ["4"]
 
 
@@ -211,7 +211,7 @@ def test_limit_caps_the_rows(device: FakeDevice) -> None:
 
 def test_ids_stay_addressable_after_filtering(device: FakeDevice) -> None:
     """A view must not renumber: the id a filtered row shows is the id `tap` takes."""
-    rows = _rows(_run("--format", "tsv", "analyze", "--where-rid", "pushSwitch"))
+    rows = _rows(_run("--format", "tsv", "analyze", "--where-rid", "settingsSwitch"))
     element_id = rows[1][0]
     _run("tap", element_id, "--no-observe")
     assert ("click", (927, 650)) in device.calls
@@ -221,7 +221,7 @@ def test_ids_stay_addressable_after_filtering(device: FakeDevice) -> None:
 
 
 def test_state_flags_are_readable_without_a_screenshot(device: FakeDevice) -> None:
-    payload = json.loads(_run("analyze", "--where-rid", "pushSwitch"))
+    payload = json.loads(_run("analyze", "--where-rid", "settingsSwitch"))
     switch = payload["elements"][0]
     assert switch["checkable"] is True
     assert switch["checked"] is True
@@ -230,7 +230,7 @@ def test_state_flags_are_readable_without_a_screenshot(device: FakeDevice) -> No
 
 
 def test_selected_distinguishes_the_active_tab(device: FakeDevice) -> None:
-    payload = json.loads(_run("analyze", "--where-rid", "appsHubTab"))
+    payload = json.loads(_run("analyze", "--where-rid", "homeTab"))
     assert payload["elements"][0]["selected"] is True
 
 
@@ -251,9 +251,9 @@ def test_missing_attributes_are_null_not_false(monkeypatch: pytest.MonkeyPatch) 
 def test_compact_keeps_a_checkable_nodes_off_state(device: FakeDevice) -> None:
     """`checked: false` is the payload on a checkable node, so compact must not drop it."""
     dumped = json.loads(_run("--format", "compact", "analyze"))
-    switch = next(e for e in dumped["elements"] if e.get("resource_id", "").endswith("pushSwitch"))
+    switch = next(e for e in dumped["elements"] if e.get("resource_id", "").endswith("settingsSwitch"))
     assert switch["checkable"] is True and switch["checked"] is True
-    tab = next(e for e in dumped["elements"] if e.get("resource_id", "").endswith("EXPLORE"))
+    tab = next(e for e in dumped["elements"] if e.get("resource_id", "").endswith("BROWSE"))
     assert "checkable" not in tab  # not checkable → no tokens spent
     assert tab["selected"] is True
 

@@ -33,11 +33,11 @@ runner = CliRunner()
 
 FLOW_YAML = """
 name: open_images
-app: co.thewordlab.luzia
+app: com.example.app
 params:
   TOOL: "Images"
 steps:
-  - launch_app: co.thewordlab.luzia
+  - launch_app: com.example.app
   - tap: "Apps"
   - tap: {text: "${TOOL}"}
 """
@@ -153,7 +153,7 @@ def test_resolve_params_undeclared_placeholder_raises() -> None:
 def _images_flow_text() -> str:
     return """
 name: to_images
-app: co.thewordlab.luzia
+app: com.example.app
 steps:
   - tap: "Apps"
   - tap: "Images"
@@ -202,7 +202,7 @@ def test_flow_run_divergence_hands_off_and_resumes(tmp_path: Path) -> None:
     flow = parse_flow_yaml(
         """
 name: bumpy
-app: co.thewordlab.luzia
+app: com.example.app
 steps:
   - tap: "Apps"
   - tap: "No Such Button"
@@ -246,7 +246,7 @@ def test_flow_run_allows_destructive_by_default_unlike_goto(tmp_path: Path) -> N
 
     flow_file = tmp_path / "reset.yaml"
     flow_file.write_text(
-        "name: reset\napp: co.thewordlab.luzia\nsteps:\n  - tap: \"Delete my account\"\n",
+        "name: reset\napp: com.example.app\nsteps:\n  - tap: \"Delete my account\"\n",
         encoding="utf-8",
     )
 
@@ -274,7 +274,7 @@ def test_flow_run_goto_step_composes_map_navigation(tmp_path: Path) -> None:
     )
     flow_file = tmp_path / "via_goto.yaml"
     flow_file.write_text(
-        "name: via_goto\napp: co.thewordlab.luzia\nsteps:\n  - goto: apps\n", encoding="utf-8"
+        "name: via_goto\napp: com.example.app\nsteps:\n  - goto: apps\n", encoding="utf-8"
     )
     dev = ScriptedDevice([HOME, APPS], package=P, serial="emu-goto-step")
     eng = _engine(tmp_path, dev)
@@ -452,18 +452,18 @@ def test_open_link_action_records_deeplink(tmp_path) -> None:
     dev = ScriptedDevice([HOME], package=P, serial="emu-dl")
     eng = _engine(tmp_path, dev)
     eng.analyze(source="hierarchy")  # seed a cached package
-    out = eng.open_link("luzia-test://set-flags?foo=a")
+    out = eng.open_link("myapp://set-flags?foo=a")
     assert out.ok and out.action == "open-link"
-    assert ("open_link", ("luzia-test://set-flags?foo=a", P)) in dev.calls
+    assert ("open_link", ("myapp://set-flags?foo=a", P)) in dev.calls
     app = AppMemoryStore(eng.config.memory).load(P)
     assert app is not None
-    assert [d.uri for d in app.deeplinks] == ["luzia-test://set-flags?foo=a"]
+    assert [d.uri for d in app.deeplinks] == ["myapp://set-flags?foo=a"]
 
 
 def test_remember_deeplink_dedups_and_counts(tmp_path) -> None:
     store = _store(tmp_path)
-    store.remember_deeplink(P, "luzia-test://x", note="do x")
-    store.remember_deeplink(P, "luzia-test://x")
+    store.remember_deeplink(P, "myapp://x", note="do x")
+    store.remember_deeplink(P, "myapp://x")
     app = store.load(P)
     assert len(app.deeplinks) == 1
     assert app.deeplinks[0].count == 2 and app.deeplinks[0].note == "do x"
@@ -471,12 +471,12 @@ def test_remember_deeplink_dedups_and_counts(tmp_path) -> None:
 
 def test_playbook_notes_recipes_description(tmp_path) -> None:
     store = _store(tmp_path)
-    store.set_description(P, "Luzia AI assistant (dev build)")
+    store.set_description(P, "Example App (dev build)")
     store.remember_note(P, "gamification pill needs a feature flag")
     store.remember_recipe(P, "login_full", "tap 'Login with test user'")
     store.remember_recipe(P, "login_full", "tap testUserLogin")  # updates in place
     app = store.load(P)
-    assert app.description == "Luzia AI assistant (dev build)"
+    assert app.description == "Example App (dev build)"
     assert app.notes == ["gamification pill needs a feature flag"]
     assert len(app.recipes) == 1 and app.recipes[0].note == "tap testUserLogin"
 
@@ -485,9 +485,9 @@ def test_flow_open_link_and_bare_stop_app(tmp_path) -> None:
     # The real set-feature-flags recipe: open a deeplink, restart the app.
     text = """
 name: set_flags
-app: co.thewordlab.luzia
+app: com.example.app
 steps:
-  - open_link: "luzia-test://set-flags?chat_v5=treatment"
+  - open_link: "myapp://set-flags?chat_v5=treatment"
   - stop_app
   - launch_app
   - wait_stable
@@ -495,7 +495,7 @@ steps:
     flow = parse_flow_yaml(text, name="set_flags")
     kinds = [s.kind for s in flow.steps]
     assert kinds == ["open-link", "stop-app", "launch-app", "wait-stable"]
-    assert flow.steps[0].arg == "luzia-test://set-flags?chat_v5=treatment"
+    assert flow.steps[0].arg == "myapp://set-flags?chat_v5=treatment"
     assert flow.steps[1].arg is None  # bare stop_app → defaults to flow.app at run
 
     dev = ScriptedDevice([HOME, HOME], package=P, serial="emu-flow-dl")
@@ -504,9 +504,9 @@ steps:
     flow_file.write_text(text, encoding="utf-8")
     out = eng.flow_run(file=str(flow_file))
     assert out["ok"] is True, out
-    assert ("open_link", ("luzia-test://set-flags?chat_v5=treatment", "co.thewordlab.luzia")) in dev.calls
-    assert ("stop_app", ("co.thewordlab.luzia",)) in dev.calls  # bare → flow.app
-    assert ("launch_app", ("co.thewordlab.luzia",)) in dev.calls
+    assert ("open_link", ("myapp://set-flags?chat_v5=treatment", "com.example.app")) in dev.calls
+    assert ("stop_app", ("com.example.app",)) in dev.calls  # bare → flow.app
+    assert ("launch_app", ("com.example.app",)) in dev.calls
 
 
 def test_v2_map_without_playbook_loads(tmp_path) -> None:
@@ -530,15 +530,15 @@ def test_render_map_shows_playbook(tmp_path) -> None:
 
     store = _store(tmp_path)
     store.record_screen(package=P, elements=_elements(HOME), name_hint="home")
-    store.set_description(P, "Luzia AI assistant")
+    store.set_description(P, "Example App")
     store.remember_recipe(P, "login_full", "tap 'Login with test user'")
-    store.remember_deeplink(P, "luzia-test://set-flags?x=a", note="set feature flags then restart")
+    store.remember_deeplink(P, "myapp://set-flags?x=a", note="set feature flags then restart")
     store.remember_note(P, "the Apps tab is bottomBarTools (Tools=Apps)")
     text = render_map(store.load(P))
     assert "## Playbook" in text
-    assert "Luzia AI assistant" in text
+    assert "Example App" in text
     assert "recipe `login_full`" in text
-    assert "luzia-test://set-flags" in text
+    assert "myapp://set-flags" in text
     assert "Tools=Apps" in text
 
 
@@ -549,16 +549,16 @@ def test_orient_surfaces_playbook(tmp_path) -> None:
 
     cfg = make_config(memory={"dir": str(tmp_path / "home")}, daemon={"enabled": False})
     store = AppMemoryStore(cfg.memory)
-    store.set_description(P, "Luzia")
+    store.set_description(P, "Example App")
     store.remember_recipe(P, "login_full", "tap testUserLogin")
-    store.remember_deeplink(P, "luzia-test://set-flags?x=a", note="flags")
+    store.remember_deeplink(P, "myapp://set-flags?x=a", note="flags")
     dev = FakeDevice(hierarchy_xml=HOME, package=P)
     eng = Engine(cfg, device=dev, factory=ProviderFactory(cfg))
     out = eng.orient()
     assert out["known"] is True
-    assert out["description"] == "Luzia"
+    assert out["description"] == "Example App"
     assert out["recipes"]["login_full"] == "tap testUserLogin"
-    assert out["deeplinks"][0]["uri"] == "luzia-test://set-flags?x=a"
+    assert out["deeplinks"][0]["uri"] == "myapp://set-flags?x=a"
 
 
 def test_cli_remember_and_about(tmp_path, monkeypatch) -> None:
@@ -574,14 +574,14 @@ def test_cli_remember_and_about(tmp_path, monkeypatch) -> None:
     assert r.exit_code == 0, r.stderr
     assert json.loads(r.stdout)["saved"] == ["recipe:login_full"]
 
-    r2 = runner.invoke(app, ["remember", "--app", P, "--deeplink", "luzia-test://x", "--note", "z"])
+    r2 = runner.invoke(app, ["remember", "--app", P, "--deeplink", "myapp://x", "--note", "z"])
     assert r2.exit_code == 0
 
     about = runner.invoke(app, ["--format", "compact", "about", "--app", P])
     assert about.exit_code == 0
     data = json.loads(about.stdout)
     assert data["recipes"]["login_full"] == "tap testUserLogin"
-    assert data["deeplinks"][0]["uri"] == "luzia-test://x"
+    assert data["deeplinks"][0]["uri"] == "myapp://x"
 
 
 def test_cli_remember_recipe_requires_note(tmp_path, monkeypatch) -> None:
@@ -604,7 +604,7 @@ def test_flow_composition_runs_sub_flow(tmp_path) -> None:
 
     parent = tmp_path / "parent.yaml"
     parent.write_text(
-        "name: parent\napp: co.thewordlab.luzia\nsteps:\n  - flow: go_apps\n  - assert_visible: \"Images\"\n",
+        "name: parent\napp: com.example.app\nsteps:\n  - flow: go_apps\n  - assert_visible: \"Images\"\n",
         encoding="utf-8",
     )
     flow = parse_flow_yaml(parent.read_text(), name="parent")
@@ -632,7 +632,7 @@ def test_flow_composition_run_flow_alias_and_render(tmp_path) -> None:
 def test_flow_composition_missing_sub_flow_diverges(tmp_path) -> None:
     cfg = make_config(memory={"dir": str(tmp_path / "home")}, daemon={"enabled": False})
     f = tmp_path / "p.yaml"
-    f.write_text("name: p\napp: co.thewordlab.luzia\nsteps:\n  - flow: nonexistent\n", encoding="utf-8")
+    f.write_text("name: p\napp: com.example.app\nsteps:\n  - flow: nonexistent\n", encoding="utf-8")
     from android_ui_analyser.engine import Engine
     from android_ui_analyser.providers.registry import ProviderFactory
 
@@ -657,25 +657,25 @@ def test_has_by_id_finds_pruned_container(tmp_path) -> None:
     dev = FakeDevice(
         hierarchy_xml=HOME,
         package=P,
-        resource_index={"co.thewordlab.luzia:id/containerChatDetail": (0, 0, 100, 100)},
+        resource_index={"com.example.app:id/containerDetail": (0, 0, 100, 100)},
     )
     eng = Engine(cfg, device=dev, factory=ProviderFactory(cfg))
     # by text: absent
-    assert eng.has("containerChatDetail").found is False
+    assert eng.has("containerDetail").found is False
     # by id (bare tail): found
-    r = eng.has("containerChatDetail", by="id")
+    r = eng.has("containerDetail", by="id")
     assert r.found is True and r.source == "hierarchy"
 
 
 def test_flow_assert_visible_by_id(tmp_path) -> None:
     text = (
-        "name: t\napp: co.thewordlab.luzia\nsteps:\n"
-        "  - assert_visible: {id: containerChatDetail}\n"
+        "name: t\napp: com.example.app\nsteps:\n"
+        "  - assert_visible: {id: containerDetail}\n"
         "  - wait_for: {id: inputBar, timeout_ms: 2000}\n"
     )
     flow = parse_flow_yaml(text, name="t")
     assert flow.steps[0].kind == "assert-visible" and flow.steps[0].by == "id"
-    assert flow.steps[0].arg == "containerChatDetail"
+    assert flow.steps[0].arg == "containerDetail"
     assert flow.steps[1].kind == "wait-for" and flow.steps[1].by == "id"
 
     from android_ui_analyser.engine import Engine
@@ -686,7 +686,7 @@ def test_flow_assert_visible_by_id(tmp_path) -> None:
     dev = FakeDevice(
         hierarchy_xml=HOME,
         package=P,
-        resource_index={"x:id/containerChatDetail": (0, 0, 9, 9), "x:id/inputBar": (0, 0, 9, 9)},
+        resource_index={"x:id/containerDetail": (0, 0, 9, 9), "x:id/inputBar": (0, 0, 9, 9)},
     )
     eng = Engine(cfg, device=dev, factory=ProviderFactory(cfg))
     f = tmp_path / "t.yaml"

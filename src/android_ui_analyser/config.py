@@ -578,7 +578,7 @@ memory:
                        "purchase", "subscribe", "unsubscribe", "uninstall", "format",
                        "erase", "reset", "deactivate"]
 
-# Feature-flag deeplink templates (optional; Luzia packages ship built-in defaults):
+# Feature-flag deeplink templates (map a package to its debug set-flags deeplink):
 # flags:
 #   templates:
 #     com.example.app: "myapp://set-flags?{query}"
