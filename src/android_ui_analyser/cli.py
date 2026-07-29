@@ -1648,6 +1648,117 @@ def devices(ctx: typer.Context) -> None:
     _run(ctx, go)
 
 
+emulator_app = typer.Typer(
+    help="Boot / list / stop Android AVDs (headless by default for unattended agent runs).",
+    no_args_is_help=True,
+)
+app.add_typer(emulator_app, name="emulator")
+
+
+def _emulator_emit(payload: dict[str, Any], ctx: typer.Context) -> None:
+    import json
+
+    opts = _opts(ctx)
+    fmt = (opts.format or "json").lower()
+    indent = 2 if fmt == "pretty" else None
+    sep = None if indent else (",", ":")
+    typer.echo(json.dumps(payload, indent=indent, separators=sep, ensure_ascii=False))
+
+
+@emulator_app.command("list")
+def emulator_list_cmd(ctx: typer.Context) -> None:
+    """List configured AVD names (does not start anything)."""
+    from . import emulator as emulator_mod
+
+    try:
+        _emulator_emit(emulator_mod.list_avds(), ctx)
+    except AuaError as err:
+        emit_error(err)
+        raise typer.Exit(int(err.exit_code)) from err
+
+
+@emulator_app.command("status")
+def emulator_status_cmd(ctx: typer.Context) -> None:
+    """SDK / AVD tooling + currently running emulator-* serials."""
+    from . import emulator as emulator_mod
+
+    opts = _opts(ctx)
+    cfg = opts.load()
+    try:
+        _emulator_emit(emulator_mod.status(cache_dir=cfg.cache.dir), ctx)
+    except AuaError as err:
+        emit_error(err)
+        raise typer.Exit(int(err.exit_code)) from err
+
+
+@emulator_app.command("start")
+def emulator_start_cmd(
+    ctx: typer.Context,
+    avd: str | None = typer.Option(
+        None, "--avd", help="AVD name (`aua emulator list`). Default: the only configured AVD."
+    ),
+    headless: bool = typer.Option(
+        True,
+        "--headless/--windowed",
+        help="Headless (-no-window) so agents can verify without stealing the desktop UI.",
+    ),
+    wait: int = typer.Option(
+        120, "--wait", help="Seconds to wait for adb state=device after boot."
+    ),
+) -> None:
+    """Boot an AVD and wait until adb sees it (headless by default)."""
+    from . import emulator as emulator_mod
+
+    opts = _opts(ctx)
+    cfg = opts.load()
+    try:
+        _emulator_emit(
+            emulator_mod.start(
+                avd,
+                headless=headless,
+                wait_s=float(wait),
+                cache_dir=cfg.cache.dir,
+            ),
+            ctx,
+        )
+    except AuaError as err:
+        emit_error(err)
+        raise typer.Exit(int(err.exit_code)) from err
+
+
+@emulator_app.command("stop")
+def emulator_stop_cmd(
+    ctx: typer.Context,
+    serial: str | None = typer.Option(
+        None, "--serial", help="Emulator serial to kill (e.g. emulator-5554)."
+    ),
+    avd: str | None = typer.Option(None, "--avd", help="Stop the AVD AUA started by name."),
+    all_devices: bool = typer.Option(
+        False, "--all", help="Kill EVERY running emulator (needed when no --serial/--avd)."
+    ),
+) -> None:
+    """Stop a running emulator (`adb emu kill`).
+
+    Needs an explicit target: an emulator may hold a signed-in session or seeded data, and
+    killing it cannot be undone, so an untargeted call is refused rather than assumed to
+    mean "all". Pass `--all` to say it deliberately.
+    """
+    from . import emulator as emulator_mod
+
+    opts = _opts(ctx)
+    cfg = opts.load()
+    try:
+        _emulator_emit(
+            emulator_mod.stop(
+                serial=serial, avd=avd, all_devices=all_devices, cache_dir=cfg.cache.dir
+            ),
+            ctx,
+        )
+    except AuaError as err:
+        emit_error(err)
+        raise typer.Exit(int(err.exit_code)) from err
+
+
 @app.command(name="app")
 def app_cmd(
     ctx: typer.Context,
@@ -2163,10 +2274,30 @@ def _build_doctor_report(engine: Engine) -> dict[str, Any]:
             "count": len(infos),
             "detail": [d.model_dump(mode="json") for d in infos] if infos else "no devices",
         }
+        if not infos:
+            checks["devices"]["hint"] = (
+                "No device attached — for unattended verify boot a headless AVD: "
+                "`aua emulator start --headless` (see `aua emulator list`)."
+            )
     except AuaError as exc:
         checks["devices"] = {"ok": False, "detail": exc.message}
     except Exception as exc:  # pragma: no cover - defensive
         checks["devices"] = {"ok": False, "detail": str(exc)}
+
+    try:
+        from . import emulator as emulator_mod
+
+        emu = emulator_mod.status(cache_dir=engine.config.cache.dir)
+        checks["emulator"] = {
+            "ok": bool(emu.get("emulator_ok")),
+            "detail": {
+                "binary": emu.get("emulator"),
+                "avds": emu.get("avds") or [],
+                "running": emu.get("running") or [],
+            },
+        }
+    except Exception as exc:  # pragma: no cover - defensive
+        checks["emulator"] = {"ok": False, "detail": str(exc)}
 
     try:
         providers = engine.provider_status()
@@ -2193,6 +2324,19 @@ def _render_doctor_pretty(report: dict[str, Any]) -> str:
     if isinstance(dev_detail, list):
         dev_detail = ", ".join(d.get("serial", "?") for d in dev_detail) or "(none)"
     lines.append(f"[{mark(dev.get('ok', False))}] devices       {dev_detail}")
+    if dev.get("hint"):
+        lines.append(f"               hint: {dev['hint']}")
+    emu = checks.get("emulator", {})
+    if emu:
+        detail = emu.get("detail", "")
+        if isinstance(detail, dict):
+            avds = detail.get("avds") or []
+            running = detail.get("running") or []
+            detail = (
+                f"bin={detail.get('binary') or 'missing'}  "
+                f"avds={len(avds)}  running={len(running)}"
+            )
+        lines.append(f"[{mark(emu.get('ok', False))}] emulator      {detail}")
 
     lines.append("")
     lines.append("Providers:")

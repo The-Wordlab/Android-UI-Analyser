@@ -68,8 +68,40 @@ def test_settle_profiles_learn() -> None:
     sp.observe("tap", 200)
     sp.observe("tap", 200)
     settle2, total2 = sp.budget("tap")
-    assert settle2 < 120
-    assert total2 < 1100 or total2 >= 400
+    # Settle window stays short (same-screen taps must not inherit transition idles).
+    assert settle2 == 45
+    assert 400 <= total2 <= 1600
+
+
+def test_await_same_tree_exits_hierarchy_same() -> None:
+    """In-screen taps: tree unchanged → via=hierarchy-same, not a long pixel settle."""
+    from android_ui_analyser.engine import Engine
+    from android_ui_analyser.providers.registry import ProviderFactory
+    from conftest import FakeDevice, make_config, make_png
+
+    xml = """<?xml version='1.0'?>
+    <hierarchy>
+      <node class="android.widget.TextView" text="Hello" clickable="true"
+            bounds="[0,0][100,50]" package="com.x"/>
+      <node class="android.widget.TextView" text="World" clickable="true"
+            bounds="[0,60][100,110]" package="com.x"/>
+    </hierarchy>"""
+    # Alternating frames so GridSettle never goes idle (ripple / spinner noise).
+    a = make_png(100, 120, color=(240, 240, 240), boxes=[((0, 0, 20, 20), (0, 0, 0))])
+    b = make_png(100, 120, color=(240, 240, 240), boxes=[((80, 0, 100, 20), (0, 0, 0))])
+    cfg = make_config(daemon={"enabled": False})
+    dev = FakeDevice(hierarchy_xml=xml, screenshots=[a, b] * 80, width=100, height=120)
+    eng = Engine(cfg, device=dev, factory=ProviderFactory(cfg))
+    eng.analyze(source="hierarchy", record=False)
+    # Pre-action tree matches what dump_hierarchy still returns (same-screen tap).
+    eng._pre_action_tree_fp = eng._tree_fingerprint()
+    eng._pre_action_sig = None  # skip pixel identical path; tree should short-circuit
+    t0 = time.perf_counter()
+    ready = eng._await_post_action_ready(settle_ms=200, total_timeout_ms=2000, poll_ms=5)
+    elapsed = (time.perf_counter() - t0) * 1000
+    assert ready["via"] == "hierarchy-same", ready
+    assert ready["changed"] is False
+    assert elapsed < 600, f"same-tree settle took {elapsed:.0f}ms"
 
 
 def test_gate_cache_roundtrip() -> None:

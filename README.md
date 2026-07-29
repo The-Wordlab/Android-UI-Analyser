@@ -113,10 +113,13 @@ emulator -list-avds                 # list existing AVDs
 # or:  sdkmanager "system-images;android-34;google_apis;arm64-v8a"
 avdmanager create avd -n pixel7 -k "system-images;android-34;google_apis;arm64-v8a" -d pixel_7
 
-emulator -avd pixel7                # boot it
+emulator -avd pixel7                # boot it (GUI)
+# Or let aua boot headless for unattended agent verify (no window on the desktop):
+#   aua emulator start --headless [--avd pixel7]
+#   aua --format compact analyze
 ```
 
-`emulator`, `avdmanager`, and `sdkmanager` live under `~/Library/Android/sdk/emulator` and `~/Library/Android/sdk/cmdline-tools/latest/bin` (macOS) — add those to your `PATH` too if you want them globally.
+`emulator`, `avdmanager`, and `sdkmanager` live under `~/Library/Android/sdk/emulator` and `~/Library/Android/sdk/cmdline-tools/latest/bin` (macOS) — add those to your `PATH` too if you want them globally. `aua emulator list|start|status|stop` wraps boot/stop only — it does **not** create AVDs.
 
 ### Option B — Physical device
 

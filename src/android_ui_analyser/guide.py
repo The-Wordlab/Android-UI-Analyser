@@ -38,6 +38,16 @@ DEFAULT_SKILL_PATH = Path(".claude/skills/android-ui-analyser/SKILL.md")
 
 SESSION_PROTOCOL: list[tuple[str, str]] = [
     (
+        "Ensure a device is available (headless is fine)",
+        "If `aua devices` is empty and you need to **verify a change without bothering the "
+        "user** (no emulator window on their desktop), boot one quietly: "
+        "`aua emulator start --headless` (uses `-no-window`; pick `--avd <name>` when several "
+        "AVDs exist — `aua emulator list`). Then analyze/drive as usual. Prefer an already "
+        "running device when one is attached; don't kill the user's headed emulator unless "
+        "they asked. Create AVDs once outside aua (Android Studio / avdmanager) — aua only "
+        "boots/stops them. `aua emulator status` / `aua emulator stop` for lifecycle.",
+    ),
+    (
         "Start the warm daemon",
         "`aua daemon start` — holds the device connection + loaded models warm so each later "
         "call is ~tens of ms instead of paying Python/connect startup. Optional; every command "
@@ -243,6 +253,12 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "`daemon start --quiet` skips the app-orientation blob (48 screens, mined deeplinks, "
         "notes); read it deliberately with `aua orient` instead — useful once per session, noise "
         "on every restart",
+    ),
+    (
+        "emulator",
+        "`emulator list|status|start [--avd NAME] [--headless|--windowed] [--wait N]|stop "
+        "[--serial emulator-5554|--avd NAME]` — boot a headless AVD for unattended verify; "
+        "does **not** create AVDs (Android Studio / avdmanager does that once)",
     ),
     (
         "has",
@@ -515,8 +531,29 @@ def render_markdown(*, brief: bool = False) -> str:
     )
 
     p.append("")
+    p.append("## Headless / unattended verify")
+    p.append(
+        "When you shipped a change and just need confidence it works — and the user should "
+        "**not** see an emulator window pop up — prefer a headless AVD:\n"
+        "```bash\n"
+        "aua devices                          # already have a device? use it\n"
+        "aua emulator list                    # which AVDs exist on this machine\n"
+        "aua emulator start --headless        # -no-window; waits until adb is ready\n"
+        "aua daemon start --quiet\n"
+        "aua --format compact analyze         # same analyze path as a headed emulator\n"
+        "# … drive the flow under test …\n"
+        "aua emulator stop                    # optional cleanup when you started it\n"
+        "```\n"
+        "Analyze/tap/wait work identically; hierarchy + screenshots do not need a visible "
+        "window. Never wipe or stop an emulator the user already had open unless they asked."
+    )
+
+    p.append("")
     p.append("## Worked examples")
     p.append("```bash")
+    p.append("# No device attached? Boot headless so you don't bother the user:")
+    p.append("aua emulator start --headless       # or: --avd pixel7")
+    p.append("")
     p.append("# Optional: warm daemon so every later call is ~tens of ms.")
     p.append("aua daemon start --quiet            # `aua orient` prints the app playbook on demand")
     p.append("")

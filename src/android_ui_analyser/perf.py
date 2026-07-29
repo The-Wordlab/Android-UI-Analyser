@@ -112,15 +112,17 @@ class SettleProfiles:
         default_settle_ms: int = 45,
         default_total_ms: int = 1100,
     ) -> tuple[int, int]:
-        """Return ``(settle_ms, total_timeout_ms)`` tuned from history."""
+        """Return ``(settle_ms, total_timeout_ms)`` tuned from history.
+
+        Only stretches the *deadline* from past transitions. Keeping ``settle_ms`` at the
+        default avoids same-screen taps paying a transition-sized idle wait after a ripple.
+        """
         with self._lock:
             ema = self._ema_ms.get(kind)
         if ema is None:
             return default_settle_ms, default_total_ms
-        # Settle window ≈ 40% of typical transition; total = 2.2× EMA with floors/caps.
-        settle = int(max(25, min(120, ema * 0.35)))
-        total = int(max(400, min(2000, ema * 2.2 + 80)))
-        return settle, total
+        total = int(max(400, min(1600, ema * 1.8 + 100)))
+        return default_settle_ms, total
 
 
 class GateCache:

@@ -2304,16 +2304,19 @@ class Engine:
                     ready = self._await_post_action_ready(
                         settle_ms=settle_ms, total_timeout_ms=total_ms
                     )
+                    # Only learn from real transitions — same-screen / timeouts poison the EMA
+                    # and made subsequent taps ~2× slower (450→900ms) in the field.
                     if (
                         ready
                         and self.config.perf.settle_profiles
                         and self._last_action_kind
+                        and ready.get("changed")
+                        and ready.get("via") in {"hierarchy-fast", "hierarchy", "pixels"}
                         and ready.get("ms") is not None
                     ):
-                        self._settle_profiles.observe(self._last_action_kind, float(ready["ms"]))
-                # Predictive: dump while the agent is about to read the result.
-                if self.config.perf.predictive_prefetch:
-                    self._kick_hierarchy_prefetch()
+                        self._settle_profiles.observe(
+                            self._last_action_kind, min(float(ready["ms"]), 500.0)
+                        )
                 obs = self.analyze(
                     source="hierarchy",
                     record=False,
@@ -2378,13 +2381,16 @@ class Engine:
         gs = imaging.GridSettle(streak=imaging.ANIMATION_STREAK)
         stable_since: float | None = None
         last_tree: tuple[str, ...] | None = None
-        next_hier_at = t0 + 0.05
+        next_hier_at = t0 + 0.04
         hier_checks = 0
         identical_polls = 0
+        same_tree_hits = 0
 
         while time.monotonic() < deadline:
             try:
-                img = self._screenshot(max_reuse_ms=35.0)
+                # Fresh frames only — reusing a capture-buffer JPEG (~2 fps) falsely
+                # reports idle / change and stretches same-screen taps.
+                img = device.screenshot()
             except Exception:
                 break
             now = time.monotonic()
@@ -2425,7 +2431,7 @@ class Engine:
 
             if pre_tree is not None and hier_checks < 8 and now >= next_hier_at:
                 hier_checks += 1
-                next_hier_at = now + 0.09
+                next_hier_at = now + 0.06
                 with contextlib.suppress(Exception):
                     xml = device.dump_hierarchy(
                         compressed=bool(self.config.device.compressed_hierarchy)
@@ -2441,13 +2447,29 @@ class Engine:
                         if rid or label:
                             parts.append(f"{rid}:{label}")
                     cur = tuple(parts[:60])
-                    if cur and cur != pre_tree:
+                    if not cur:
+                        pass
+                    elif cur == pre_tree:
+                        # Same accessibility tree as pre-action — in-screen tap / ripple /
+                        # selected-state. Element IDs are still valid; don't wait for pixels
+                        # (GridSettle stays busy on animations and was the 2× regression).
+                        same_tree_hits += 1
+                        if same_tree_hits >= 2 or (same_tree_hits >= 1 and now - t0 >= 0.12):
+                            return {
+                                "changed": False,
+                                "masked": len(gs.masked_cells),
+                                "ms": int((time.monotonic() - t0) * 1000),
+                                "timeout": False,
+                                "via": "hierarchy-same",
+                            }
+                    else:
+                        same_tree_hits = 0
                         changed = True
                         s_cur, s_pre = set(cur), set(pre_tree)
                         delta = len(s_cur ^ s_pre)
                         union = max(1, len(s_cur | s_pre))
                         # Big tree rewrite (tab / screen change): accept on first sample.
-                        if delta >= max(6, union // 2):
+                        if delta >= max(4, union // 3):
                             return {
                                 "changed": True,
                                 "masked": len(gs.masked_cells),
