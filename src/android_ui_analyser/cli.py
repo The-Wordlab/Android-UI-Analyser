@@ -208,6 +208,51 @@ _SEL_FIRST = typer.Option(
 )
 
 
+def _has_target(
+    positional: str | None,
+    *,
+    by: str,
+    rid: str | None,
+    text_sel: str | None,
+    desc: str | None,
+) -> tuple[str, str]:
+    """Resolve a ``has`` target from either spelling, as ``(value, by)``.
+
+    ``has`` predates the one-shot selectors and took only a positional, so
+    ``has --rid foo`` was a usage error while ``tap --rid foo`` worked. A guard loop written
+    the obvious way (`has --rid X` before `tap --rid X`) then failed on *every* iteration
+    with an empty stdout, which reads as "not on screen" rather than "you held it wrong".
+    """
+    chosen = [
+        (value, kind, flag)
+        for value, kind, flag in (
+            (rid, "id", "--rid"),
+            (text_sel, "text", "--text"),
+            (desc, "desc", "--desc"),
+        )
+        if value
+    ]
+    if len(chosen) > 1:
+        raise UsageError(
+            "pass only one of --rid/--text/--desc",
+            hint="They are alternative ways to name the same target.",
+        )
+    if chosen:
+        value, kind, flag = chosen[0]
+        if positional is not None:
+            raise UsageError(
+                "pass either a positional or one of --rid/--text/--desc, not both",
+                hint=f"Drop the positional: `aua has {flag} {value}`.",
+            )
+        return value, kind
+    if positional is None:
+        raise UsageError(
+            "has needs something to look for",
+            hint="`aua has 'Some label'` or `aua has --rid someId`.",
+        )
+    return positional, by
+
+
 def _selector(
     *,
     ident: str | None = None,
@@ -779,7 +824,7 @@ def inspect(
 @app.command()
 def has(
     ctx: typer.Context,
-    text: str = typer.Argument(..., help="Text to look for on screen."),
+    text: str | None = typer.Argument(None, help="Text to look for on screen."),
     match: str = typer.Option("contains", "--match", help="exact|contains|regex."),
     ignore_case: bool = typer.Option(False, "--ignore-case", help="Case-insensitive match."),
     ocr_fallback: bool = typer.Option(
@@ -794,22 +839,28 @@ def has(
     by: str = typer.Option(
         "text", "--by", help="Match by: text (default) | id (resource-id) | desc."
     ),
+    rid: str | None = _SEL_RID,
+    text_sel: str | None = _SEL_TEXT,
+    desc: str | None = _SEL_DESC,
 ) -> None:
     """Is this on screen right now? Exit 0 if present, 1 if not.
 
     ``--by id`` checks a resource-id (a bare tail works) — verifies containers the element
     list prunes, i.e. Maestro-style ``assertVisible: id:``.
-    """
 
+    Takes the same one-shot selectors as the action commands, so a check reads like the act
+    it guards: `aua has --rid buttonSettings` then `aua tap --rid buttonSettings`.
+    """
     def go(engine: Engine, fmt: OutputFormat) -> None:
+        target, target_by = _has_target(text, by=by, rid=rid, text_sel=text_sel, desc=desc)
         result = engine.has(
-            text,
+            target,
             match=match,
             ignore_case=ignore_case,
             ocr_fallback=ocr_fallback,
             source=source,
             timeout_ms=timeout,
-            by=by,
+            by=target_by,
         )
         _emit(result, fmt)
         if not result.found:

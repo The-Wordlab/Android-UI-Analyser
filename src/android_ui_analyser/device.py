@@ -304,6 +304,27 @@ _PRESS_ALIASES = {
     "paste": "paste",
 }
 
+# Same alias set as keycode names, for the `input keyevent` path. Measured on a headless
+# emulator over one uiautomator2 connection: `shell("input keyevent KEYCODE_BACK")` takes
+# ~103 ms, `press("back")` ~1125 ms for the identical keystroke. A `key back` is the second
+# half of most navigation steps, so that second was pure loop tax.
+_KEYCODE_NAMES = {
+    "back": "KEYCODE_BACK",
+    "home": "KEYCODE_HOME",
+    "enter": "KEYCODE_ENTER",
+    "recents": "KEYCODE_APP_SWITCH",
+    "recent": "KEYCODE_APP_SWITCH",
+    "menu": "KEYCODE_MENU",
+    "search": "KEYCODE_SEARCH",
+    "power": "KEYCODE_POWER",
+    "volume_up": "KEYCODE_VOLUME_UP",
+    "volume_down": "KEYCODE_VOLUME_DOWN",
+    "del": "KEYCODE_DEL",
+    "delete": "KEYCODE_DEL",
+    "backspace": "KEYCODE_DEL",
+    "paste": "KEYCODE_PASTE",
+}
+
 _ORIENTATION_ALIASES = {
     "portrait": "n",
     "natural": "n",
@@ -476,10 +497,19 @@ class Uiautomator2Device(Device):
         self._call("swipe", x1, y1, x2, y2, duration_ms / 1000.0)
 
     def press(self, key: str) -> None:
+        """Inject a keystroke, preferring `input keyevent` — see :data:`_KEYCODE_NAMES`.
+
+        Falls back to uiautomator2's own press for keys with no keycode name, so an exotic
+        key still works (slowly) rather than failing.
+        """
         k = key.strip()
-        if k.upper().startswith("KEYCODE_"):
-            self._call("press", k.upper())
-            return
+        keycode = k.upper() if k.upper().startswith("KEYCODE_") else _KEYCODE_NAMES.get(k.lower())
+        if keycode is not None:
+            try:
+                self.shell(f"input keyevent {keycode}")
+                return
+            except DeviceError:
+                pass  # a device that refuses `input` still deserves the keystroke
         mapped = _PRESS_ALIASES.get(k.lower())
         self._call("press", mapped if mapped is not None else k)
 
@@ -545,10 +575,25 @@ class Uiautomator2Device(Device):
             time.sleep(0.1)
 
     def launch_app(self, package: str, *, activity: str | None = None) -> None:
-        if activity is not None:
-            self._call("app_start", package, activity=activity)
-        else:
+        if activity is None:
             self._call("app_start", package)
+            return
+        # `am start` prints its refusal (commonly a non-exported Activity) and exits 0, and
+        # uiautomator2's app_start discards that output — so the caller learned nothing and
+        # went on to drive a screen that was never opened. Run it here and read the answer.
+        component = f"{package}/{activity}"
+        out = self.shell(f"am start -n {component}")
+        lowered = out.lower()
+        if "permission denial" in lowered or "securityexception" in lowered or "error:" in lowered:
+            first = next(
+                (line.strip() for line in out.splitlines() if line.strip().startswith(("Error", "java."))),
+                out.strip().splitlines()[-1] if out.strip() else "am start failed",
+            )
+            raise DeviceError(
+                f"am start refused {component}: {first}",
+                hint="Pick an exported launcher Activity, or drop --activity to let the "
+                "platform resolve one (`aua app launch <pkg>`).",
+            )
 
     def stop_app(self, package: str) -> None:
         self._call("app_stop", package)

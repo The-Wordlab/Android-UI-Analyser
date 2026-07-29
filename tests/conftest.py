@@ -181,6 +181,11 @@ class FakeDevice(Device):
 
     def launch_app(self, package: str, *, activity: str | None = None) -> None:
         self.calls.append(("launch_app", (package,) if activity is None else (package, activity)))
+        # A launch fronts the app. Model it, or `current_app` keeps naming the old package and
+        # callers that verify arrival see a launch that never happened.
+        self._pkg = package
+        if activity is not None:
+            self._act = activity
 
     def stop_app(self, package: str) -> None:
         self.calls.append(("stop_app", (package,)))

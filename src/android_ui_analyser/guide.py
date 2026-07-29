@@ -172,10 +172,12 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
     ),
     (
         "Verify by resource-id, not just text",
-        '`aua has "<id>" --by id` checks a resource-id (a bare tail like "containerDetail" '
-        "works) — and it finds non-interactive **container** ids that `analyze` prunes from "
-        "the element list, so it's the reliable way to assert you reached a screen "
-        "(Maestro-style `assertVisible: id:`). `wait --for <id> --by id` and "
+        '`aua has --rid <id>` (or `aua has "<id>" --by id`) checks a resource-id (a bare tail '
+        'like "containerDetail" works) — and it finds non-interactive **container** ids that '
+        "`analyze` prunes from the element list, so it's the reliable way to assert you "
+        "reached a screen (Maestro-style `assertVisible: id:`). Guard an action with the same "
+        "selector you act with: `aua has --rid saveButton && aua tap --rid saveButton`. "
+        "`wait --for <id> --by id` and "
         "`scroll-to <id> --by id` take `--by id` too. If a screen is WebView/Compose-backed "
         "and its result text isn't in the tree at all, read it with `analyze --source vision`.",
     ),

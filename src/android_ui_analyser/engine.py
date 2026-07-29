@@ -24,6 +24,7 @@ from . import routing
 from .config import Config
 from .device import Device, connect, list_devices
 from .errors import (
+    DeviceError,
     ElementNotFoundError,
     ProviderError,
     SelectorAmbiguousError,
@@ -2424,6 +2425,25 @@ class Engine:
             result.capture_hint = hint
         return result
 
+    @staticmethod
+    def _await_foreground(device: Device, package: str, *, timeout_ms: int = 20_000) -> bool:
+        """Whether *package* owns the foreground within the budget.
+
+        Returns as soon as it does, so a healthy launch pays only one `app_current` call. The
+        budget is generous because a refused launch already failed loudly in ``launch_app``:
+        what is left to catch is an app that starts and dies, and a cold start behind a long
+        splash must not be mistaken for one. A splash counts as arrival — it is the app's own
+        Activity — so this waits for arrival, not for readiness.
+        """
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        while True:
+            with contextlib.suppress(Exception):
+                if (device.current_app() or {}).get("package") == package:
+                    return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.1)
+
     def _await_post_action_ready(
         self,
         *,
@@ -3213,8 +3233,6 @@ class Engine:
         the chooser. If a chooser still appears after open, raises :class:`DeviceError`
         naming the competing app rows — never leaves the caller stranded on the dialog.
         """
-        from .errors import DeviceError
-
         target_pkg = package or prefer
         if pin_package and not target_pkg:
             target_pkg = self.current_package() or self._cached_package()
@@ -4203,6 +4221,19 @@ class Engine:
             detail = f"{package}/{activity}" if activity else package
             if clear_state:
                 detail = f"{detail} (cleared)"
+            if not self._await_foreground(device, package):
+                # uiautomator2's app_start swallows `am start` failures, so a launch that never
+                # happened used to answer ok=True. The caller then drives a screen that is not
+                # there and every selector fails with an unrelated "no element matches".
+                raise DeviceError(
+                    f"launched {detail} but {package} never reached the foreground",
+                    hint=(
+                        "That Activity may not be exported (`am start` denies it) — retry "
+                        "without --activity."
+                        if activity
+                        else "Check the package name, and that the device is unlocked."
+                    ),
+                )
             return ActionResult(ok=True, action="app-launch", detail=detail)
         if a in ("kill", "force-stop"):
             if not package:
