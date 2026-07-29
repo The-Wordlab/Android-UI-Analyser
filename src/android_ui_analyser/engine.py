@@ -246,6 +246,10 @@ class Engine:
             config.output.with_image if config.output.with_image else None
         )
         self._capture: Any = None  # CaptureBuffer | None — set by capture_start
+        # Pixel signature taken just before a state-changing action; consumed by
+        # ``_await_post_action_ready`` so observe does not return a mid-transition tree.
+        self._pre_action_sig: tuple[float, ...] | None = None
+        self._pre_action_tree_fp: tuple[str, ...] | None = None
 
     def _effective_with_image(self, with_image: bool | str | None) -> bool | str | None:
         """Per-call ``with_image`` overrides the session default; ``False`` forces off."""
@@ -1946,10 +1950,11 @@ class Engine:
     def wait_stable(
         self,
         *,
-        interval_ms: int = 200,
-        settle_ms: int = 600,
+        interval_ms: int = 120,
+        settle_ms: int = 200,
         timeout_ms: int = 30000,
         observe: bool = False,
+        ignore_animation: bool = True,
     ) -> ActionResult:
         """Return once the screen stops changing for ``settle_ms`` (PRD §5, AC14).
 
@@ -1957,39 +1962,83 @@ class Engine:
         opaque/Compose/video screens; ideal for waiting on image generation / loading.
         ``observe`` folds in a post-settle ``analyze`` — because the screen is settled, the
         returned ids are reliable (fixes the "premature observation" trap on transitions).
+
+        When ``ignore_animation`` is True (default), per-cell grid hashing is used so that
+        regions with continuous looping animation (spinners, videos, Lottie) are auto-masked
+        and don't prevent settling. The screen is "settled" when all non-animated cells stop
+        changing.
         """
         from . import imaging
 
         device = self.device
         deadline = time.monotonic() + timeout_ms / 1000.0
-        last: int | None = None
-        stable_since: float | None = None
         samples = 0
-        while True:
-            current = imaging.dhash(device.screenshot())
-            samples += 1
-            now = time.monotonic()
-            if last is not None and imaging.is_stable(current, last):
-                if stable_since is None:
-                    stable_since = now
-                if (now - stable_since) * 1000.0 >= settle_ms:
-                    return self._observe(
-                        ActionResult(
-                            ok=True,
-                            action="wait-stable",
-                            detail=f"settled after {samples} samples",
-                        ),
-                        observe,
+
+        if ignore_animation:
+            gs = imaging.GridSettle(streak=imaging.ANIMATION_STREAK)
+            stable_since: float | None = None
+            while True:
+                img = device.screenshot()
+                samples += 1
+                now = time.monotonic()
+                grid_stable = gs.feed(img)
+                if grid_stable:
+                    if stable_since is None:
+                        stable_since = now
+                    if (now - stable_since) * 1000.0 >= settle_ms:
+                        masked = gs.masked_cells
+                        detail = f"settled after {samples} samples"
+                        if masked:
+                            detail += f" (ignored {len(masked)} animated cells)"
+                        return self._observe(
+                            ActionResult(ok=True, action="wait-stable", detail=detail),
+                            observe,
+                            settle=False,  # already settled
+                        )
+                else:
+                    stable_since = None
+                if now >= deadline:
+                    masked = gs.masked_cells
+                    hint = "Increase --timeout/--settle, or the screen is still animating."
+                    if masked:
+                        hint = (
+                            f"{len(masked)} cell(s) flagged as animation and excluded; "
+                            "remaining content still changing. " + hint
+                        )
+                    raise StabilityTimeout(
+                        f"screen did not settle within {timeout_ms} ms ({samples} samples)",
+                        hint=hint,
                     )
-            else:
-                stable_since = None
-            last = current
-            if now >= deadline:
-                raise StabilityTimeout(
-                    f"screen did not settle within {timeout_ms} ms ({samples} samples)",
-                    hint="Increase --timeout/--settle, or the screen is still animating.",
-                )
-            time.sleep(interval_ms / 1000.0)
+                time.sleep(interval_ms / 1000.0)
+        else:
+            last: int | None = None
+            stable_since_legacy: float | None = None
+            while True:
+                current = imaging.dhash(device.screenshot())
+                samples += 1
+                now = time.monotonic()
+                if last is not None and imaging.is_stable(current, last):
+                    if stable_since_legacy is None:
+                        stable_since_legacy = now
+                    if (now - stable_since_legacy) * 1000.0 >= settle_ms:
+                        return self._observe(
+                            ActionResult(
+                                ok=True,
+                                action="wait-stable",
+                                detail=f"settled after {samples} samples",
+                            ),
+                            observe,
+                            settle=False,
+                        )
+                else:
+                    stable_since_legacy = None
+                last = current
+                if now >= deadline:
+                    raise StabilityTimeout(
+                        f"screen did not settle within {timeout_ms} ms ({samples} samples)",
+                        hint="Increase --timeout/--settle, or the screen is still animating.",
+                    )
+                time.sleep(interval_ms / 1000.0)
 
     # ----------------------------------------------------------------- has (T0)
 
@@ -2093,25 +2142,44 @@ class Engine:
     # ----------------------------------------------------------------- actions
 
     def _observe(
-        self, result: ActionResult, observe: bool, with_image: bool | str | None = None
+        self,
+        result: ActionResult,
+        observe: bool,
+        with_image: bool | str | None = None,
+        *,
+        settle: bool = True,
     ) -> ActionResult:
         """Attach the post-action screen so callers skip a separate ``analyze`` round-trip.
 
         The folded ``analyze`` also re-populates the id cache, so the agent can act on an id
         from ``result.observation`` immediately (e.g. type → tap send) in one fewer call.
+
+        When ``settle`` is True (default for actions), wait until pixels differ from the
+        pre-action frame and the non-animated region is idle — otherwise agents get the
+        previous screen and burn a second ``wait --for-stable`` + re-analyze.
         """
         if observe:
             with contextlib.suppress(Exception):  # observation is a bonus; never fail the action
+                ready: dict[str, Any] | None = None
+                if settle:
+                    ready = self._await_post_action_ready()
                 obs = self.analyze(
                     source="hierarchy",
                     record=False,
                     with_image=self._effective_with_image(with_image),
                 )
                 result.observation = obs
+                if ready and ready.get("ms") is not None and ready.get("via") != "unchanged":
+                    # Surface settle cost so agents/tests can see why a tap took >50 ms.
+                    prev = result.detail
+                    tag = f"settle={ready['ms']}ms"
+                    if ready.get("via"):
+                        tag += f" via={ready['via']}"
+                    if ready.get("masked"):
+                        tag += f" anim={ready['masked']}"
+                    result.detail = f"{prev} {tag}".strip() if prev else tag
                 mem = self._memory
                 if mem is not None and self._device is not None:
-                    # Recognition-only pass: draws the single-action edge when the
-                    # snapshot lands on a known screen; never creates screens.
                     with contextlib.suppress(Exception):
                         known = mem.observe_screen_passive(
                             self._device.serial,
@@ -2122,10 +2190,134 @@ class Engine:
                         )
                         if known:
                             obs.meta.known_screen = known
+        else:
+            self._pre_action_sig = None
         hint = self._capture_hint()
         if hint:
             result.capture_hint = hint
         return result
+
+    def _await_post_action_ready(
+        self,
+        *,
+        change_timeout_ms: int = 500,
+        settle_ms: int = 45,
+        total_timeout_ms: int = 1100,
+        poll_ms: int = 28,
+    ) -> dict[str, Any]:
+        """Wait for post-action content change, then pixel-idle (animation-aware).
+
+        Runs pixel settle and hierarchy double-sample in one loop so a Compose
+        transition that updates the tree early can return before pixels fully idle.
+        """
+        from . import imaging
+        from . import hierarchy as hierarchy_mod
+
+        device = self.device
+        pre = self._pre_action_sig
+        pre_tree = self._pre_action_tree_fp
+        self._pre_action_sig = None
+        self._pre_action_tree_fp = None
+        t0 = time.monotonic()
+        deadline = t0 + total_timeout_ms / 1000.0
+        change_deadline = t0 + change_timeout_ms / 1000.0
+        changed = pre is None
+        gs = imaging.GridSettle(streak=imaging.ANIMATION_STREAK)
+        stable_since: float | None = None
+        last_tree: tuple[str, ...] | None = None
+        next_hier_at = t0 + 0.05
+        hier_checks = 0
+        identical_polls = 0
+
+        while time.monotonic() < deadline:
+            try:
+                img = device.screenshot()
+            except Exception:
+                break
+            now = time.monotonic()
+            sig = imaging.frame_signature(img)
+            if not changed and pre is not None:
+                if imaging.frames_differ(pre, sig):
+                    changed = True
+                    identical_polls = 0
+                else:
+                    identical_polls += 1
+                    # No pixel movement and no tree rewrite → action was a visual no-op
+                    # (or FakeDevice). Don't burn the full change_timeout.
+                    if identical_polls >= 3 and now - t0 >= 0.08:
+                        return {
+                            "changed": False,
+                            "masked": 0,
+                            "ms": int((now - t0) * 1000),
+                            "timeout": False,
+                            "via": "unchanged",
+                        }
+            if not changed and now > change_deadline:
+                changed = True  # give up waiting for a pixel delta; settle what we have
+
+            visually_idle = gs.feed(img)
+            if visually_idle and changed:
+                if stable_since is None:
+                    stable_since = now
+                if (now - stable_since) * 1000.0 >= settle_ms:
+                    return {
+                        "changed": changed,
+                        "masked": len(gs.masked_cells),
+                        "ms": int((now - t0) * 1000),
+                        "timeout": False,
+                        "via": "pixels",
+                    }
+            else:
+                stable_since = None
+
+            if pre_tree is not None and hier_checks < 8 and now >= next_hier_at:
+                hier_checks += 1
+                next_hier_at = now + 0.09
+                with contextlib.suppress(Exception):
+                    xml = device.dump_hierarchy()
+                    w, h = device.window_size()
+                    els = hierarchy_mod.parse_hierarchy(xml, (w, h))
+                    parts: list[str] = []
+                    for e in els:
+                        if getattr(e, "window", None) == "system":
+                            continue
+                        rid = (e.resource_id or "").split("/")[-1]
+                        label = (e.text or e.content_desc or "")[:40]
+                        if rid or label:
+                            parts.append(f"{rid}:{label}")
+                    cur = tuple(parts[:60])
+                    if cur and cur != pre_tree:
+                        changed = True
+                        s_cur, s_pre = set(cur), set(pre_tree)
+                        delta = len(s_cur ^ s_pre)
+                        union = max(1, len(s_cur | s_pre))
+                        # Big tree rewrite (tab / screen change): accept on first sample.
+                        if delta >= max(6, union // 2):
+                            return {
+                                "changed": True,
+                                "masked": len(gs.masked_cells),
+                                "ms": int((time.monotonic() - t0) * 1000),
+                                "timeout": False,
+                                "via": "hierarchy-fast",
+                            }
+                        if cur == last_tree:
+                            return {
+                                "changed": True,
+                                "masked": len(gs.masked_cells),
+                                "ms": int((time.monotonic() - t0) * 1000),
+                                "timeout": False,
+                                "via": "hierarchy",
+                            }
+                        last_tree = cur
+            time.sleep(poll_ms / 1000.0)
+
+        return {
+            "changed": changed,
+            "masked": len(gs.masked_cells),
+            "ms": int((time.monotonic() - t0) * 1000),
+            "timeout": True,
+            "via": "timeout",
+        }
 
     def resolve(
         self,
@@ -2450,9 +2642,19 @@ class Engine:
 
     def _settle_after_swipe(self) -> None:
         """Let a fling finish before probing, or every scroll reads as "barely moved"."""
-        with contextlib.suppress(Exception):
-            self.device.wait_idle(1000)
-        time.sleep(0.25)
+        from . import imaging
+
+        device = self.device
+        gs = imaging.GridSettle(streak=2)
+        deadline = time.monotonic() + 0.9
+        while time.monotonic() < deadline:
+            try:
+                if gs.feed(device.screenshot()):
+                    return
+            except Exception:
+                break
+            time.sleep(0.035)
+        time.sleep(0.05)
 
     def _probe(self, box: Box) -> Sample:
         return region_probe(self._dump(), box, ignore_packages=self.config.memory.ignore_packages)
@@ -2475,7 +2677,7 @@ class Engine:
         percent: int = 70,
         coords: tuple[int, int, int, int] | None = None,
         observe: bool = True,
-        verify: bool = True,
+        verify: bool = False,
         with_image: bool | str | None = None,
     ) -> ActionResult:
         device = self.device
@@ -2499,6 +2701,10 @@ class Engine:
         if not verify:
             with self._acting(f"swipe:{d}"):
                 device.swipe(x1, y1, x2, y2)
+                # Only settle here when the caller skipped observe — otherwise
+                # ``_observe`` already does change+idle and a second settle doubles latency.
+                if not observe:
+                    self._settle_after_swipe()
             self._record_action_safe(step)
             return self._observe(
                 ActionResult(ok=True, action="swipe", target=[x1, y1, x2, y2]), observe, with_image
@@ -2871,7 +3077,7 @@ class Engine:
         device = self.device
         if idle:
             device.wait_idle(timeout_ms)
-            return self._observe(ActionResult(ok=True, action="wait", detail="idle"), observe)
+            return self._observe(ActionResult(ok=True, action="wait", detail="idle"), observe, settle=False)
         if not for_:
             raise UsageError("wait needs --for <text> or --idle")
         mode = MatchMode(match)
@@ -2892,10 +3098,10 @@ class Engine:
                     for_, mode=mode, by=by, ignore_case=ignore_case, absent=True
                 )
                 return self._observe(
-                    ActionResult(ok=False, action="wait", detail=detail), observe
+                    ActionResult(ok=False, action="wait", detail=detail), observe, settle=False
                 )
             return self._observe(
-                ActionResult(ok=True, action="wait", detail=f"absent:{for_}"), observe
+                ActionResult(ok=True, action="wait", detail=f"absent:{for_}"), observe, settle=False
             )
         found = device.wait_for(
             for_, match=mode, ignore_case=ignore_case, timeout_ms=timeout_ms, by=by
@@ -2904,7 +3110,7 @@ class Engine:
             detail = self._wait_timeout_message(
                 for_, mode=mode, by=by, ignore_case=ignore_case, absent=False
             )
-            return self._observe(ActionResult(ok=False, action="wait", detail=detail), observe)
+            return self._observe(ActionResult(ok=False, action="wait", detail=detail), observe, settle=False)
         result = ActionResult(
             ok=True,
             action="wait",
@@ -2913,7 +3119,8 @@ class Engine:
         )
         # `--observe` returns the screen with fresh ids so the agent acts without a separate
         # `analyze` — attached even on a MISS, so a failed wait is diagnosable in one call.
-        return self._observe(result, observe)
+        # settle=False: wait already blocked on the condition; don't pay pixel-settle again.
+        return self._observe(result, observe, settle=False)
 
     def _wait_timeout_message(
         self,
@@ -3918,8 +4125,31 @@ class Engine:
         if buf is not None:
             with contextlib.suppress(Exception):
                 buf.mark(label or "action")
+        # Pixel fingerprint for settle-then-observe: must be taken BEFORE the gesture.
+        with contextlib.suppress(Exception):
+            from . import imaging
+
+            self._pre_action_sig = imaging.frame_signature(self.device.screenshot())
+        # Cheap tree fingerprint from the last analyze (no extra dump) — used to
+        # early-accept observe once the accessibility tree has moved and stabilised.
+        self._pre_action_tree_fp = self._tree_fingerprint()
         yield
         self._invalidate_cache()
+
+    def _tree_fingerprint(self) -> tuple[str, ...] | None:
+        """Stable-ish fingerprint of the last cached screen (rids + labels)."""
+        cached = self._read_cache()
+        if cached is None:
+            return None
+        parts: list[str] = []
+        for e in cached.elements:
+            if getattr(e, "window", None) == "system":
+                continue
+            rid = (e.resource_id or "").split("/")[-1]
+            label = (e.text or e.content_desc or "")[:40]
+            if rid or label:
+                parts.append(f"{rid}:{label}")
+        return tuple(parts[:60]) if parts else None
 
     def _capture_hint(self) -> str | None:
         buf = self._capture

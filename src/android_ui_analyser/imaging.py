@@ -6,9 +6,11 @@ hashes by Hamming distance answers "did the screen change?" without OCR or a hie
 parse — the whole point of ``--for-stable`` (it works on opaque / Compose / video
 screens an accessibility tree can't see, and is cheap enough to poll in a tight loop).
 
-The crop/downscale half serves ``aua screenshot --region/--scale/--max-width``: an agent
-that only needs the header pays for a full 1080x2400 PNG in image tokens otherwise, so
-narrowing the capture before it is written is an order-of-magnitude saving.
+GridSettle extends this with a cell grid so looping animations (spinners, Lottie, video)
+can be masked while the rest of the screen is treated as settled — critical for
+post-action observe that must not return mid-transition OR hang forever on a spinner.
+
+The crop/downscale half serves ``aua screenshot --region/--scale/--max-width``.
 """
 
 from __future__ import annotations
@@ -72,6 +74,123 @@ def _resample():  # pragma: no cover - trivial import shim
 _RESAMPLE = _resample()
 
 
+# --------------------------------------------------------------------------- grid-based settle
+
+
+GRID_COLS = 4
+GRID_ROWS = 6
+# A cell that changed on this many consecutive samples is flagged as live animation.
+ANIMATION_STREAK = 2
+# Mean absolute difference (0–255) above which a cell counts as changed.
+# Solid-colour flips (spinner palette) must trip this — dHash alone does not.
+CELL_MAD_THRESHOLD = 6.0
+
+
+def grid_signatures(
+    image: "ScreenImage", *, cols: int = GRID_COLS, rows: int = GRID_ROWS, side: int = 8
+) -> list[tuple[float, ...]]:
+    """Per-cell content fingerprints (downscaled grayscale samples).
+
+    Unlike dHash, a uniform red cell and a uniform blue cell differ — required for
+    detecting solid-colour spinner / splash changes.
+    """
+    pil = image.pil().convert("L")
+    w, h = pil.size
+    cell_w = max(1, w // cols)
+    cell_h = max(1, h // rows)
+    out: list[tuple[float, ...]] = []
+    for gy in range(rows):
+        for gx in range(cols):
+            box = (gx * cell_w, gy * cell_h, (gx + 1) * cell_w, (gy + 1) * cell_h)
+            cell = pil.crop(box).resize((side, side), _RESAMPLE)
+            # Quantise a bit to ignore sub-pixel noise.
+            out.append(tuple(float(v) for v in cell.getdata()))
+    return out
+
+
+def cell_mad(a: tuple[float, ...], b: tuple[float, ...]) -> float:
+    """Mean absolute difference between two cell signatures."""
+    if not a or not b or len(a) != len(b):
+        return 255.0
+    return sum(abs(x - y) for x, y in zip(a, b, strict=True)) / len(a)
+
+
+def frame_signature(image: "ScreenImage", *, side: int = 16) -> tuple[float, ...]:
+    """Whole-frame coarse signature for 'did anything change?' checks."""
+    pil = image.pil().convert("L").resize((side, side), _RESAMPLE)
+    return tuple(float(v) for v in pil.getdata())
+
+
+def frames_differ(
+    a: tuple[float, ...], b: tuple[float, ...], *, threshold: float = 4.0
+) -> bool:
+    return cell_mad(a, b) >= threshold
+
+
+# Back-compat alias used by earlier drafts / tests.
+def grid_hashes(
+    image: "ScreenImage", *, cols: int = GRID_COLS, rows: int = GRID_ROWS
+) -> list[int]:
+    """Legacy int hashes derived from cell mean luminance (for simple equality checks)."""
+    sigs = grid_signatures(image, cols=cols, rows=rows)
+    return [int(sum(s) / max(1, len(s))) for s in sigs]
+
+
+class GridSettle:
+    """Stateful grid-based stability detector that tolerates live animations.
+
+    A cell that flips on every sample (spinner, video, Lottie) is masked out after
+    ``streak`` consecutive changes. The screen is "settled" when all non-masked cells
+    are unchanged vs the previous sample.
+    """
+
+    def __init__(
+        self,
+        *,
+        cols: int = GRID_COLS,
+        rows: int = GRID_ROWS,
+        streak: int = ANIMATION_STREAK,
+        mad_threshold: float = CELL_MAD_THRESHOLD,
+    ) -> None:
+        self.cols = cols
+        self.rows = rows
+        self.streak = streak
+        self.mad_threshold = mad_threshold
+        n = cols * rows
+        self._prev: list[tuple[float, ...]] | None = None
+        self._change_streak: list[int] = [0] * n
+        self._masked: list[bool] = [False] * n
+        self.samples = 0
+
+    @property
+    def masked_cells(self) -> list[int]:
+        """Indices of cells currently flagged as live animation."""
+        return [i for i, m in enumerate(self._masked) if m]
+
+    def feed(self, image: "ScreenImage") -> bool:
+        """Feed a new frame. Returns True if the non-animated portion is stable."""
+        sigs = grid_signatures(image, cols=self.cols, rows=self.rows)
+        self.samples += 1
+        if self._prev is None:
+            self._prev = sigs
+            return False
+        n = len(sigs)
+        all_stable = True
+        for i in range(n):
+            if self._masked[i]:
+                continue
+            changed = cell_mad(sigs[i], self._prev[i]) >= self.mad_threshold
+            if changed:
+                self._change_streak[i] += 1
+                if self._change_streak[i] >= self.streak:
+                    self._masked[i] = True
+                all_stable = False
+            else:
+                self._change_streak[i] = 0
+        self._prev = sigs
+        return all_stable
+
+
 # --------------------------------------------------------------------------- crop / scale
 
 
@@ -106,12 +225,12 @@ def parse_region(raw: str) -> Bounds:
 
 
 def crop_and_scale(
-    image: ScreenImage,
+    image: "ScreenImage",
     *,
     region: Bounds | None = None,
     scale: float | None = None,
     max_width: int | None = None,
-) -> ScreenImage:
+) -> "ScreenImage":
     """Return *image* cropped to *region* then downscaled, or itself when asked for nothing.
 
     ``region`` is clamped to the screen (an off-screen box is a usage error, not a crash).

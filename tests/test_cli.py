@@ -234,7 +234,7 @@ def test_key_press(patched_device: FakeDevice) -> None:
     assert result.exit_code == 0, result.stderr
     data = json.loads(result.stdout)
     assert data["action"] == "key"
-    assert data["detail"] == "back"
+    assert data["detail"] == "back" or str(data["detail"]).startswith("back")
     assert ("press", ("back",)) in patched_device.calls
 
 

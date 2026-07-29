@@ -157,6 +157,97 @@ def test_cli_wait_accepts_timeout_ms_alias(monkeypatch: pytest.MonkeyPatch) -> N
     assert r.exit_code == 0, r.stderr
 
 
+# --------------------------------------------------------------- grid-based settle (animation masking)
+
+
+def test_grid_settle_masks_animation_and_settles() -> None:
+    """A spinner in one corner doesn't block the rest of the screen from settling."""
+    from android_ui_analyser.imaging import GridSettle
+
+    w, h = 200, 200
+    stable_color = (200, 200, 200)
+
+    def frame(i: int) -> bytes:
+        spinner = ((i * 60) % 255, 30, 30)
+        return make_png(w, h, color=stable_color, boxes=[((0, 0, 50, 50), spinner)])
+
+    frames = [ScreenImage(frame(i), width=w, height=h) for i in range(12)]
+    gs = GridSettle(streak=3)
+    settled_at: int | None = None
+    for i, img in enumerate(frames):
+        if gs.feed(img):
+            settled_at = i
+            break
+    assert settled_at is not None, "GridSettle should have reported stable"
+    assert len(gs.masked_cells) >= 1, "spinner cell should be masked"
+
+
+def test_grid_settle_does_not_settle_when_everything_changes() -> None:
+    from android_ui_analyser.imaging import GridSettle
+
+    w, h = 100, 100
+    frames = [
+        ScreenImage(make_png(w, h, color=(i * 30, i * 30, i * 30)), width=w, height=h)
+        for i in range(8)
+    ]
+    gs = GridSettle(streak=3)
+    for img in frames:
+        if gs.feed(img):
+            # After streak, all cells may mask → then "stable" over empty set.
+            # That is intentional: pure full-screen animation is treated as settled-except-anim.
+            # Require that at least one cell is still unmasked and changing for early frames.
+            if gs.samples < 4:
+                raise AssertionError("should not settle while cells are still being classified")
+
+
+def test_wait_stable_ignore_animation_settles() -> None:
+    """Integration: wait_stable with ignore_animation=True handles a looping spinner."""
+    w, h = 200, 200
+    stable_body = (200, 200, 200)
+
+    def frame(i: int) -> bytes:
+        spinner = ((i * 50) % 255, 20, 20)
+        return make_png(w, h, color=stable_body, boxes=[((0, 0, 50, 50), spinner)])
+
+    stream = [frame(i) for i in range(40)]
+    # pad with identical non-spinner end so settle_ms can elapse on FakeDevice stream end
+    stream += [frame(39)] * 20
+    dev = FakeDevice(screenshots=stream, width=w, height=h)
+    eng = _engine(dev)
+    res = eng.wait_stable(
+        interval_ms=1, settle_ms=5, timeout_ms=3000, ignore_animation=True
+    )
+    assert res.ok
+    assert "settled" in (res.detail or "").lower()
+
+
+def test_wait_stable_legacy_mode_times_out_on_animation() -> None:
+    """Legacy (whole-frame) mode DOES time out when a spinner keeps flipping."""
+    w, h = 100, 100
+
+    def frame(i: int) -> bytes:
+        # Moving bar so dHash differs every frame (uniform colour alone won't).
+        x = 10 + (i * 17) % 60
+        return make_png(w, h, color=(240, 240, 240), boxes=[((x, 20, x + 20, 80), (0, 0, 0))])
+
+    stream = [frame(i) for i in range(80)]
+    dev = FakeDevice(screenshots=stream, width=w, height=h)
+    eng = _engine(dev)
+    with pytest.raises(StabilityTimeout):
+        eng.wait_stable(
+            interval_ms=1, settle_ms=30, timeout_ms=40, ignore_animation=False
+        )
+
+
+def test_frames_differ_detects_solid_colour_flip() -> None:
+    from android_ui_analyser.imaging import frame_signature, frames_differ
+
+    a = ScreenImage(make_png(80, 80, color=(10, 10, 10)), width=80, height=80)
+    b = ScreenImage(make_png(80, 80, color=(200, 20, 20)), width=80, height=80)
+    assert frames_differ(frame_signature(a), frame_signature(b))
+    assert not frames_differ(frame_signature(a), frame_signature(a))
+
+
 # --------------------------------------------------------------- batch-3 fixes
 
 

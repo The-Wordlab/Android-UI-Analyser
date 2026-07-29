@@ -159,15 +159,18 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "(tap/input/swipe/scroll-to/key) returns the next screen inline in `observation` "
         "(elements with fresh ids) — so you rarely need a separate `analyze`: `type → tap "
         "send` is two calls, not three, and `goto` returns the destination's `elements` too. "
-        "Pass `--no-observe` to skip it on action-only sequences. `observation` is a no-wait "
-        "snapshot taken right after the action — use a plain `analyze` (after `wait --for-stable`) "
-        "when the screen is still animating.",
+        "Pass `--no-observe` to skip it on action-only sequences. Action `observation` now "
+        "waits for a pixel change + idle (animation-aware) before dumping the tree — so you "
+        "usually get the *next* screen, not a mid-transition snapshot. Prefer "
+        "`wait --for \"<text>\"` for known targets; reserve `wait --for-stable` for "
+        "generation / loading / video.",
     ),
     (
         "Wait on state, never sleep",
         '`aua wait --for "<text>"` waits for text to appear; `aua wait --for-stable` returns once '
-        "the screen stops visually changing (cheap perceptual-hash over screenshots — ideal for "
-        "image generation / loading / video, works on opaque screens). Prefer these to fixed sleeps.",
+        "the screen stops visually changing (grid pixel-hash; looping spinners/video are "
+        "auto-masked so they don't block). Prefer goal waits over `--for-stable` after tabs/taps; "
+        "never fixed sleeps.",
     ),
     (
         "Stop the daemon when done",

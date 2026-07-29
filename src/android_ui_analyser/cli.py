@@ -1066,7 +1066,9 @@ def swipe(
         True, "--observe/--no-observe", help="Also return the post-swipe screen."
     ),
     verify: bool = typer.Option(
-        True, "--verify/--no-verify", help="Report whether the screen actually moved."
+        False,
+        "--verify/--no-verify",
+        help="Also probe whether the list moved (slower; default is cheap browse swipe).",
     ),
     with_image: str | None = typer.Option(
         None,
@@ -1455,8 +1457,10 @@ def wait(
     for_stable: bool = typer.Option(
         False, "--for-stable", help="Wait until the screen stops visually changing."
     ),
-    interval: int = typer.Option(200, "--interval", help="--for-stable: ms between screenshots."),
-    settle: int = typer.Option(600, "--settle", help="--for-stable: ms of no change to settle."),
+    interval: int = typer.Option(120, "--interval", help="--for-stable: ms between screenshots."),
+    settle: int = typer.Option(
+        200, "--settle", help="--for-stable: ms of no (non-animated) change to settle."
+    ),
     timeout: int | None = typer.Option(
         None, "--timeout", "--timeout-ms", help="Timeout in ms (default 5000; 30000 for --for-stable)."
     ),
