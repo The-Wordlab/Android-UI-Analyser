@@ -39,11 +39,28 @@ from __future__ import annotations
 
 import re
 import xml.etree.ElementTree as ET
+from typing import Any
 
 from .schema import Bounds, Element, Source, center_of
 
 # bounds look like "[x1,y1][x2,y2]"
 _BOUNDS_RE = re.compile(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]")
+
+_LXML: Any | None
+try:  # optional C-speed parser (perf.lxml / pip install lxml)
+    from lxml import etree as _LXML  # type: ignore[no-redef]
+except ImportError:  # pragma: no cover - optional dep
+    _LXML = None
+
+
+def _parse_xml_root(xml: str) -> Any:
+    """Parse hierarchy XML; prefer lxml when available."""
+    if _LXML is not None:
+        try:
+            return _LXML.fromstring(xml.encode("utf-8") if isinstance(xml, str) else xml)
+        except Exception:  # noqa: BLE001 — fall back to stdlib
+            pass
+    return ET.fromstring(xml)
 
 
 def _parse_bounds(raw: str | None) -> Bounds | None:
@@ -151,14 +168,17 @@ def parse_hierarchy(xml: str, screen_size: tuple[int, int] | None = None) -> lis
     See the module docstring for the filtering, roll-up, and ID-assignment rules.
     ``screen_size`` is ``(width, height)``; when provided, fully off-screen nodes are
     dropped. Returns an empty list if the XML is empty/blank.
+
+    Prefers ``lxml`` when installed (optional extra) for faster parsing of large dumps;
+    falls back to stdlib :mod:`xml.etree.ElementTree`.
     """
     if not xml or not xml.strip():
         return []
-    root = ET.fromstring(xml)
+    root = _parse_xml_root(xml)
 
     collected: list[tuple[Bounds, Element]] = []
 
-    def visit(node: ET.Element, actionable_ancestor: bool) -> None:
+    def visit(node: Any, actionable_ancestor: bool) -> None:
         bounds = _parse_bounds(node.get("bounds"))
         valid = (
             bounds is not None

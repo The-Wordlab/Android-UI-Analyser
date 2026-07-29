@@ -13,6 +13,7 @@ import contextlib
 import json
 import logging
 import re
+import threading
 import time
 from collections import Counter
 from collections.abc import Iterator, Sequence
@@ -250,6 +251,17 @@ class Engine:
         # ``_await_post_action_ready`` so observe does not return a mid-transition tree.
         self._pre_action_sig: tuple[float, ...] | None = None
         self._pre_action_tree_fp: tuple[str, ...] | None = None
+        from .perf import GateCache, HierarchyPrefetch, SettleProfiles
+
+        self._prefetch = HierarchyPrefetch()
+        self._settle_profiles = SettleProfiles()
+        self._gate_cache = GateCache()
+        self._last_mem_fp: str | None = None
+        self._last_known_screen: str | None = None
+        self._last_action_kind: str | None = None
+        self._last_analyze_elements: list[Element] | None = None
+        self._mem_lock = threading.Lock()
+        self._mem_thread: threading.Thread | None = None
 
     def _effective_with_image(self, with_image: bool | str | None) -> bool | str | None:
         """Per-call ``with_image`` overrides the session default; ``False`` forces off."""
@@ -284,16 +296,58 @@ class Engine:
     ) -> tuple[list[Element], str | None]:
         from . import hierarchy
 
-        xml = device.dump_hierarchy()
+        perf = self.config.perf
+        if perf.prefetch:
+            slot = self._prefetch.take()
+            if slot is not None:
+                return slot.elements, slot.package
+
+        compressed = bool(self.config.device.compressed_hierarchy)
+        xml = device.dump_hierarchy(compressed=compressed)
         pkg = _package_from_xml(xml, self.config.memory.ignore_packages)
         return hierarchy.parse_hierarchy(xml, (w, h)), pkg
+
+    def _kick_hierarchy_prefetch(self) -> None:
+        """Speculatively dump+parse the hierarchy for the next analyze."""
+        if not self.config.perf.prefetch:
+            return
+        if self._device is None:
+            return
+        from . import hierarchy
+
+        device = self._device
+        compressed = bool(self.config.device.compressed_hierarchy)
+        try:
+            w, h = device.window_size()
+        except Exception:  # pragma: no cover - device mid-disconnect
+            return
+
+        def dump() -> str:
+            return device.dump_hierarchy(compressed=compressed)
+
+        def parse(xml: str) -> tuple[list[Element], str | None]:
+            pkg = _package_from_xml(xml, self.config.memory.ignore_packages)
+            return hierarchy.parse_hierarchy(xml, (w, h)), pkg
+
+        self._prefetch.kick(dump, parse)
+
+    def _screenshot(self, *, max_reuse_ms: float = 50.0) -> ScreenImage:
+        """Prefer a fresh-enough capture-buffer frame; else take a device screenshot."""
+        perf = self.config.perf
+        if perf.reuse_capture_frames and self._capture is not None:
+            with contextlib.suppress(Exception):
+                age = self._capture.latest_age_ms()
+                img = self._capture.latest_frame()
+                if img is not None and age is not None and age <= max_reuse_ms:
+                    return img
+        return self.device.screenshot()
 
     def _run_vision(
         self, device: Device, *, with_ocr: bool | None, start_id: int = 0
     ) -> tuple[list[Element], list[str], ScreenImage]:
         from . import merge
 
-        img = device.screenshot()
+        img = self._screenshot(max_reuse_ms=80.0)
         providers_used: list[str] = []
         detections: list[DetBox] = []
         if self.factory.is_enabled("detection"):
@@ -417,8 +471,6 @@ class Engine:
         no_cache: bool,
         record: bool = True,
     ) -> AnalyzeResult:
-        from . import gate
-
         t0 = time.perf_counter()
         device, w, h = self._context()
         providers_used: list[str] = []
@@ -437,16 +489,16 @@ class Engine:
         use_vision = force_vision
         xml_dump: str | None = None
         if not force_vision and not force_hierarchy:
-            decision = gate.decide(
-                elements, package=package, activity=activity, cfg=self.config.perception.gate
-            )
+            decision = self._gate_decide(elements, package=package, activity=activity)
             if decision.use_vision and routing.allows(Tier.vision, ceiling):
                 # Prefer WebView DOM/a11y enrichment over OCR when the tree looks hollow.
                 wv_cfg = self.config.perception.webview
                 if wv_cfg.enabled:
                     from . import webview as webview_mod
 
-                    xml_dump = device.dump_hierarchy()
+                    xml_dump = device.dump_hierarchy(
+                        compressed=bool(self.config.device.compressed_hierarchy)
+                    )
                     if webview_mod.should_try_webview(elements, xml_dump):
                         shell = None
                         if wv_cfg.cdp:
@@ -498,6 +550,13 @@ class Engine:
             # let it pollute memory with a transient screen (it's just fresh ids for the agent).
             known_screen, hints = None, None
         annotated = self._maybe_annotate(annotate, device, elements, img)
+        ediff = None
+        if self.config.perf.differential and self._last_analyze_elements is not None:
+            from .perf import element_diff as _element_diff
+
+            with contextlib.suppress(Exception):
+                ediff = _element_diff(self._last_analyze_elements, elements)
+        self._last_analyze_elements = list(elements)
 
         result = AnalyzeResult(
             screen=Screen(
@@ -517,11 +576,35 @@ class Engine:
                 capture_hint=self._capture_hint(),
                 annotated_image=annotated,
                 device_serial=device.serial,
+                element_diff=ediff,
             ),
         )
         if not no_cache:
             self._write_cache(result)
+        if self.config.perf.prefetch:
+            self._kick_hierarchy_prefetch()
         return result
+
+    def _gate_decide(
+        self,
+        elements: list[Element],
+        *,
+        package: str | None,
+        activity: str | None,
+    ) -> Any:
+        from . import gate
+        from .perf import GateCache
+
+        cfg = self.config.perception.gate
+        if self.config.perf.gate_cache:
+            key = GateCache.key(elements, package=package, activity=activity)
+            hit = self._gate_cache.get(key)
+            if hit is not None:
+                return hit
+            decision = gate.decide(elements, package=package, activity=activity, cfg=cfg)
+            self._gate_cache.put(key, decision)
+            return decision
+        return gate.decide(elements, package=package, activity=activity, cfg=cfg)
 
     def _analyze_query(
         self,
@@ -535,8 +618,6 @@ class Engine:
         annotate: bool | str | None,
         no_cache: bool,
     ) -> AnalyzeResult:
-        from . import gate
-
         t0 = time.perf_counter()
         device, w, h = self._context()
         package: str | None = None
@@ -585,9 +666,7 @@ class Engine:
         # --- T3: vision, if allowed and useful ---
         want_vision = force_vision
         if not force_vision and routing.allows(Tier.vision, ceiling):
-            decision = gate.decide(
-                pool, package=package, activity=activity, cfg=self.config.perception.gate
-            )
+            decision = self._gate_decide(pool, package=package, activity=activity)
             kind = routing.classify_query(query)
             want_vision = decision.use_vision or kind is routing.QueryKind.visual or pin_grounding
 
@@ -862,17 +941,67 @@ class Engine:
         mem = self._memory
         if mem is None or not package:
             return None, None
+        perf = self.config.perf
         try:
-            known = mem.observe_screen(
-                device.serial,
-                package=package,
-                elements=elements,
-                activity=activity,
-                app_version=self._version_for(device, package),
-                tier=tier.value,
-                screen_height=height,
-            )
+            from .perf import elements_fingerprint
+
+            fp = elements_fingerprint(elements)
+            if perf.skip_unchanged_memory and fp == self._last_mem_fp:
+                mcfg = self.config.memory
+                hints = (
+                    mem.navigation_hints(
+                        device.serial,
+                        package,
+                        max_suggest=mcfg.suggest_max,
+                        half_life_days=mcfg.rank_half_life_days,
+                    )
+                    if mcfg.suggest
+                    else None
+                )
+                return self._last_known_screen, hints
+
+            def _do_record() -> str | None:
+                return mem.observe_screen(
+                    device.serial,
+                    package=package,
+                    elements=elements,
+                    activity=activity,
+                    app_version=self._version_for(device, package),
+                    tier=tier.value,
+                    screen_height=height,
+                )
+
             mcfg = self.config.memory
+            if perf.async_memory:
+                # Hints come from the map as it stands; the write happens off-path.
+                hints = (
+                    mem.navigation_hints(
+                        device.serial,
+                        package,
+                        max_suggest=mcfg.suggest_max,
+                        half_life_days=mcfg.rank_half_life_days,
+                    )
+                    if mcfg.suggest
+                    else None
+                )
+
+                def _bg() -> None:
+                    with self._mem_lock:
+                        try:
+                            known = _do_record()
+                            self._last_known_screen = known
+                            self._last_mem_fp = fp
+                        except Exception as exc:  # pragma: no cover - defensive
+                            logger.debug("async memory record failed: %s", exc)
+
+                t = threading.Thread(target=_bg, name="aua-mem-record", daemon=True)
+                self._mem_thread = t
+                t.start()
+                return self._last_known_screen, hints
+
+            known = _do_record()
+            self._last_known_screen = known
+            self._last_mem_fp = fp
             hints = (
                 mem.navigation_hints(
                     device.serial,
@@ -923,6 +1052,7 @@ class Engine:
         submit: bool = False,
     ) -> RouteStep:
         """The structured record of one action (selector + redacted label, never a value)."""
+        self._last_action_kind = kind
         label = redact_label(element, redact=self.config.memory.redact) if element else None
         return RouteStep(
             kind=kind,
@@ -2162,7 +2292,22 @@ class Engine:
             with contextlib.suppress(Exception):  # observation is a bonus; never fail the action
                 ready: dict[str, Any] | None = None
                 if settle:
-                    ready = self._await_post_action_ready()
+                    settle_ms, total_ms = 45, 1100
+                    if self.config.perf.settle_profiles and self._last_action_kind:
+                        settle_ms, total_ms = self._settle_profiles.budget(self._last_action_kind)
+                    ready = self._await_post_action_ready(
+                        settle_ms=settle_ms, total_timeout_ms=total_ms
+                    )
+                    if (
+                        ready
+                        and self.config.perf.settle_profiles
+                        and self._last_action_kind
+                        and ready.get("ms") is not None
+                    ):
+                        self._settle_profiles.observe(self._last_action_kind, float(ready["ms"]))
+                # Predictive: dump while the agent is about to read the result.
+                if self.config.perf.predictive_prefetch:
+                    self._kick_hierarchy_prefetch()
                 obs = self.analyze(
                     source="hierarchy",
                     record=False,
@@ -2192,6 +2337,8 @@ class Engine:
                             obs.meta.known_screen = known
         else:
             self._pre_action_sig = None
+            if self.config.perf.prefetch:
+                self._kick_hierarchy_prefetch()
         hint = self._capture_hint()
         if hint:
             result.capture_hint = hint
@@ -2210,8 +2357,8 @@ class Engine:
         Runs pixel settle and hierarchy double-sample in one loop so a Compose
         transition that updates the tree early can return before pixels fully idle.
         """
-        from . import imaging
         from . import hierarchy as hierarchy_mod
+        from . import imaging
 
         device = self.device
         pre = self._pre_action_sig
@@ -2231,7 +2378,7 @@ class Engine:
 
         while time.monotonic() < deadline:
             try:
-                img = device.screenshot()
+                img = self._screenshot(max_reuse_ms=35.0)
             except Exception:
                 break
             now = time.monotonic()
@@ -2274,7 +2421,9 @@ class Engine:
                 hier_checks += 1
                 next_hier_at = now + 0.09
                 with contextlib.suppress(Exception):
-                    xml = device.dump_hierarchy()
+                    xml = device.dump_hierarchy(
+                        compressed=bool(self.config.device.compressed_hierarchy)
+                    )
                     w, h = device.window_size()
                     els = hierarchy_mod.parse_hierarchy(xml, (w, h))
                     parts: list[str] = []
@@ -4041,7 +4190,7 @@ class Engine:
     # ----------------------------------------------------------------- annotate
 
     def _with_raw_image(self, result: AnalyzeResult, with_image: bool | str) -> AnalyzeResult:
-        img = self.device.screenshot()
+        img = self._screenshot(max_reuse_ms=80.0)
         out = (
             with_image
             if isinstance(with_image, str)
@@ -4063,7 +4212,7 @@ class Engine:
         from . import annotate as annotate_mod
 
         if img is None:
-            img = device.screenshot()
+            img = self._screenshot(max_reuse_ms=80.0)
         out = annotate if isinstance(annotate, str) else self._default_annotate_path(device.serial)
         return annotate_mod.annotate(img, elements, out)
 
@@ -4134,16 +4283,21 @@ class Engine:
         if buf is not None:
             with contextlib.suppress(Exception):
                 buf.mark(label or "action")
+        # Any speculative hierarchy dump is stale the moment we touch the device.
+        self._prefetch.invalidate()
         # Pixel fingerprint for settle-then-observe: must be taken BEFORE the gesture.
         with contextlib.suppress(Exception):
             from . import imaging
 
-            self._pre_action_sig = imaging.frame_signature(self.device.screenshot())
+            self._pre_action_sig = imaging.frame_signature(self._screenshot(max_reuse_ms=40.0))
         # Cheap tree fingerprint from the last analyze (no extra dump) — used to
         # early-accept observe once the accessibility tree has moved and stabilised.
         self._pre_action_tree_fp = self._tree_fingerprint()
         yield
         self._invalidate_cache()
+        # Speculative dump while the UI is settling / the agent thinks.
+        if self.config.perf.prefetch or self.config.perf.predictive_prefetch:
+            self._kick_hierarchy_prefetch()
 
     def _tree_fingerprint(self) -> tuple[str, ...] | None:
         """Stable-ish fingerprint of the last cached screen (rids + labels)."""
@@ -4197,11 +4351,14 @@ class Engine:
             if not self._capture.running:
                 self._capture.start()
             return self._capture.status()
+        shot = device.screenshot
+        if self.config.perf.capture_adb_screencap:
+            shot = getattr(device, "screencap_png", device.screenshot)
         buf = CaptureBuffer(
             root=root,
             serial=device.serial,
             cfg=view,
-            screenshot=device.screenshot,
+            screenshot=shot,
         )
         buf.start()
         self._capture = buf

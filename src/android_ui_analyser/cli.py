@@ -9,6 +9,7 @@ object to stderr with the mapped exit code. No perception logic lives here.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import shutil
 import sys
@@ -384,6 +385,12 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
     if getattr(cfg.daemon, "enabled", False):
         try:
             from . import daemon as daemon_mod
+
+            # Auto-start the warm daemon on first use so cold CLI calls don't pay
+            # Python+u2 connect on every subsequent invocation.
+            if getattr(cfg.perf, "auto_daemon", True) and not daemon_mod.is_running(cfg):
+                with contextlib.suppress(Exception):
+                    daemon_mod.start(cfg, serial=cfg.device.serial)
 
             ver = daemon_mod.running_version(cfg)
             # A daemon running OLDER code than this CLI can reject new args (e.g. a kwarg

@@ -213,6 +213,8 @@ class Meta(BaseModel):
     annotated_image: str | None = None
     raw_image: str | None = None  # unannotated screenshot saved on request (--with-image)
     device_serial: str | None = None
+    # Optional token-cheap delta vs the previous analyze (perf.differential).
+    element_diff: dict[str, Any] | None = None
 
 
 class AnalyzeResult(BaseModel):

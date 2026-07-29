@@ -38,6 +38,24 @@ class DeviceCfg(BaseModel):
     model_config = ConfigDict(extra="forbid")
     serial: str | None = None  # null = auto-detect
     backend: str = "uiautomator2"  # uiautomator2 | accessibility (future)
+    # Drop non-visible nodes in dump_hierarchy — smaller XML on deep trees.
+    compressed_hierarchy: bool = True
+
+
+class PerfCfg(BaseModel):
+    """Latency knobs — defaults favour the agent hot path (tap → observe → tap)."""
+
+    model_config = ConfigDict(extra="forbid")
+    prefetch: bool = True  # background hierarchy dump after actions
+    predictive_prefetch: bool = True  # kick prefetch during settle / from map edges
+    async_memory: bool = True  # record screens/edges off the analyze critical path
+    skip_unchanged_memory: bool = True  # skip map write when tree fingerprint unchanged
+    reuse_capture_frames: bool = True  # share capture JPEGs with --with-image / settle
+    capture_adb_screencap: bool = True  # capture loop prefers adb exec-out screencap
+    differential: bool = False  # meta.element_diff vs previous analyze (token-cheap)
+    auto_daemon: bool = True  # CLI auto-starts the warm daemon when enabled but down
+    settle_profiles: bool = True  # learn per-action settle budgets from history
+    gate_cache: bool = True  # memoize gate.decide for identical tree fingerprints
 
 
 class GateCfg(BaseModel):
@@ -282,6 +300,7 @@ class Config(BaseModel):
     cache: CacheCfg = Field(default_factory=CacheCfg)
     capture: CaptureCfg = Field(default_factory=CaptureCfg)
     memory: MemoryCfg = Field(default_factory=MemoryCfg)
+    perf: PerfCfg = Field(default_factory=PerfCfg)
     flags: FlagsCfg = Field(default_factory=FlagsCfg)
     profiles: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
@@ -504,6 +523,19 @@ def default_config_yaml() -> str:
 device:
   serial: null            # null = auto-detect the only/first device
   backend: uiautomator2   # uiautomator2 | accessibility (future)
+  compressed_hierarchy: true  # drop non-visible nodes (smaller dumps)
+
+perf:
+  prefetch: true              # background hierarchy dump after actions
+  predictive_prefetch: true   # also prefetch during settle / from map edges
+  async_memory: true          # record map off the analyze critical path
+  skip_unchanged_memory: true # skip map write when tree fingerprint unchanged
+  reuse_capture_frames: true  # share capture JPEGs with --with-image / settle
+  capture_adb_screencap: true # capture loop prefers adb exec-out screencap
+  differential: false         # meta.element_diff vs previous analyze
+  auto_daemon: true           # CLI auto-starts daemon when enabled but down
+  settle_profiles: true       # learn per-action settle budgets
+  gate_cache: true            # memoize gate.decide for identical trees
 
 perception:
   gate:

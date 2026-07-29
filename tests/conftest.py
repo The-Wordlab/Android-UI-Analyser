@@ -439,6 +439,10 @@ def make_config(**overrides: Any) -> Config:
         base["cache"]["dir"] = str(Path(state) / "cache")
         # Capture is always-on with a real daemon; keep unit tests quiet unless opted in.
         base["capture"]["enabled"] = False
+        # Deterministic memory assertions: record on the calling thread.
+        base["perf"]["async_memory"] = False
+        base["perf"]["prefetch"] = False
+        base["perf"]["auto_daemon"] = False
     merged = _deep_merge(base, overrides) if overrides else base
     return Config.model_validate(merged)
 
@@ -456,6 +460,9 @@ def _aua_isolate_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("AUA_CACHE__DIR", str(state / "cache"))
     # CLI commands run in-process (never reach a stray dev-machine daemon socket).
     monkeypatch.setenv("AUA_DAEMON__ENABLED", "false")
+    monkeypatch.setenv("AUA_PERF__ASYNC_MEMORY", "false")
+    monkeypatch.setenv("AUA_PERF__PREFETCH", "false")
+    monkeypatch.setenv("AUA_PERF__AUTO_DAEMON", "false")
     return state
 
 

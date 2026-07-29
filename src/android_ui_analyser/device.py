@@ -51,6 +51,13 @@ class Device(ABC):
     @abstractmethod
     def screenshot(self) -> ScreenImage: ...
 
+    def screencap_png(self) -> ScreenImage:
+        """Raw PNG via ``adb exec-out screencap -p`` when available; else :meth:`screenshot`.
+
+        Capture loops prefer this path — it skips the u2 Java instrumentation round-trip.
+        """
+        return self.screenshot()
+
     @abstractmethod
     def current_app(self) -> dict[str, str]: ...
 
@@ -397,6 +404,22 @@ class Uiautomator2Device(Device):
     def screenshot(self) -> ScreenImage:
         img = self._call("screenshot")  # PIL.Image by default
         return ScreenImage.from_pil(img)
+
+    def screencap_png(self) -> ScreenImage:
+        """Prefer ``adb exec-out screencap -p``; fall back to u2 on any failure."""
+        try:
+            proc = subprocess.run(  # noqa: S603
+                ["adb", "-s", self.serial, "exec-out", "screencap", "-p"],
+                check=True,
+                capture_output=True,
+                timeout=8,
+            )
+            raw = proc.stdout
+            if raw and raw[:8] == b"\x89PNG\r\n\x1a\n":
+                return ScreenImage(raw)
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            logger.debug("adb screencap failed (%s); using u2 screenshot", exc)
+        return self.screenshot()
 
     def current_app(self) -> dict[str, str]:
         info = self._call("app_current") or {}

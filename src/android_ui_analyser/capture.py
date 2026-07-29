@@ -75,6 +75,8 @@ class CaptureBuffer:
     _kept_since_action: int = 0
     _pending_action: str | None = None
     _seq: int = 0
+    _latest_img: Any = None
+    _latest_at: float = 0.0
 
     @property
     def dir(self) -> Path:
@@ -243,6 +245,17 @@ class CaptureBuffer:
         narration = local_narration(payload)
         return {**payload, "action": "capture-explain", "narration": narration}
 
+    def latest_frame(self) -> Any | None:
+        """Most recent ScreenImage from the sampler (may be identical to a prior hash)."""
+        with self._lock:
+            return self._latest_img
+
+    def latest_age_ms(self) -> float | None:
+        with self._lock:
+            if self._latest_img is None or self._latest_at <= 0:
+                return None
+            return (time.monotonic() - self._latest_at) * 1000.0
+
     def prune(self) -> dict[str, Any]:
         removed = self._prune()
         return {"ok": True, "action": "capture-prune", "removed": removed, **self.status()}
@@ -271,6 +284,10 @@ class CaptureBuffer:
         png = getattr(img, "png_bytes", None)
         if not png:
             return
+        now_mono = time.monotonic()
+        with self._lock:
+            self._latest_img = img
+            self._latest_at = now_mono
         gray, w, h = _downscale_gray(img)
         digest = frame_hash(gray)
         now_ms = int(time.time() * 1000)

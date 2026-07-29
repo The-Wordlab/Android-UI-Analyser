@@ -53,10 +53,12 @@ dev = [
     "types-PyYAML>=6.0",
 ]
 all = [
-    "android-ui-analyser[apple,rapidocr,paddle,tesseract,easyocr,yolo,omniparser,proxy]",
+    "android-ui-analyser[apple,rapidocr,paddle,tesseract,easyocr,yolo,omniparser,proxy,lxml]",
 ]
 # --- Headless HTTP mock / record-replay ---
 proxy = ["mitmproxy>=10.0"]
+# --- Faster XML parse for huge hierarchy dumps ---
+lxml = ["lxml>=5.0"]
 
 
 [project.scripts]

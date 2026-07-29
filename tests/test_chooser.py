@@ -65,7 +65,7 @@ def test_dismiss_chooser_taps_prefer() -> None:
 
     dumps = [CHOOSER_XML, CHOOSER_XML, APP_XML]
 
-    def rotating() -> str:
+    def rotating(*_args: object, **_kwargs: object) -> str:
         device.hierarchy_calls += 1
         if dumps:
             device._xml = dumps.pop(0)
