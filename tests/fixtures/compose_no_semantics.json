@@ -18,8 +18,15 @@
     "clickable": false,
     "enabled": true,
     "focused": false,
+    "checkable": false,
+    "checked": false,
+    "selected": false,
+    "scrollable": true,
+    "long_clickable": false,
+    "password": false,
     "source": "hierarchy",
-    "confidence": null
+    "confidence": null,
+    "stable_key": "geo:View:q52:de5bb20082"
   },
   {
     "id": 1,
@@ -40,8 +47,15 @@
     "clickable": false,
     "enabled": true,
     "focused": false,
+    "checkable": false,
+    "checked": false,
+    "selected": false,
+    "scrollable": false,
+    "long_clickable": false,
+    "password": false,
     "source": "hierarchy",
-    "confidence": null
+    "confidence": null,
+    "stable_key": "geo:View:q12:8e07d491cb"
   },
   {
     "id": 2,
@@ -62,8 +76,15 @@
     "clickable": true,
     "enabled": true,
     "focused": false,
+    "checkable": false,
+    "checked": false,
+    "selected": false,
+    "scrollable": false,
+    "long_clickable": false,
+    "password": false,
     "source": "hierarchy",
-    "confidence": null
+    "confidence": null,
+    "stable_key": "geo:View:q21:9a6692d844"
   },
   {
     "id": 3,
@@ -84,8 +105,15 @@
     "clickable": true,
     "enabled": true,
     "focused": false,
+    "checkable": false,
+    "checked": false,
+    "selected": false,
+    "scrollable": false,
+    "long_clickable": false,
+    "password": false,
     "source": "hierarchy",
-    "confidence": null
+    "confidence": null,
+    "stable_key": "geo:View:q22:5d19d4cddf"
   },
   {
     "id": 4,
@@ -106,7 +134,14 @@
     "clickable": false,
     "enabled": true,
     "focused": false,
+    "checkable": false,
+    "checked": false,
+    "selected": false,
+    "scrollable": false,
+    "long_clickable": false,
+    "password": false,
     "source": "hierarchy",
-    "confidence": null
+    "confidence": null,
+    "stable_key": "geo:View:q42:61d1f72a19"
   }
 ]

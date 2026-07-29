@@ -18,8 +18,15 @@
     "clickable": true,
     "enabled": true,
     "focused": false,
+    "checkable": false,
+    "checked": false,
+    "selected": false,
+    "scrollable": false,
+    "long_clickable": false,
+    "password": false,
     "source": "hierarchy",
-    "confidence": null
+    "confidence": null,
+    "stable_key": "rid:close_button"
   },
   {
     "id": 1,
@@ -40,8 +47,15 @@
     "clickable": false,
     "enabled": true,
     "focused": false,
+    "checkable": false,
+    "checked": false,
+    "selected": false,
+    "scrollable": false,
+    "long_clickable": false,
+    "password": false,
     "source": "hierarchy",
-    "confidence": null
+    "confidence": null,
+    "stable_key": "rid:title_url_bar"
   },
   {
     "id": 2,
@@ -62,8 +76,15 @@
     "clickable": false,
     "enabled": true,
     "focused": false,
+    "checkable": false,
+    "checked": false,
+    "selected": false,
+    "scrollable": true,
+    "long_clickable": false,
+    "password": false,
     "source": "hierarchy",
-    "confidence": null
+    "confidence": null,
+    "stable_key": "geo:WebView:q52:1a72b22ddd"
   },
   {
     "id": 3,
@@ -84,8 +105,15 @@
     "clickable": false,
     "enabled": true,
     "focused": false,
+    "checkable": false,
+    "checked": false,
+    "selected": false,
+    "scrollable": false,
+    "long_clickable": false,
+    "password": false,
     "source": "hierarchy",
-    "confidence": null
+    "confidence": null,
+    "stable_key": "tx:b8ba0321e7"
   },
   {
     "id": 4,
@@ -106,8 +134,15 @@
     "clickable": false,
     "enabled": true,
     "focused": false,
+    "checkable": false,
+    "checked": false,
+    "selected": false,
+    "scrollable": false,
+    "long_clickable": false,
+    "password": false,
     "source": "hierarchy",
-    "confidence": null
+    "confidence": null,
+    "stable_key": "tx:bbab768874"
   },
   {
     "id": 5,
@@ -128,8 +163,15 @@
     "clickable": true,
     "enabled": true,
     "focused": false,
+    "checkable": false,
+    "checked": false,
+    "selected": false,
+    "scrollable": false,
+    "long_clickable": false,
+    "password": false,
     "source": "hierarchy",
-    "confidence": null
+    "confidence": null,
+    "stable_key": "tx:113935f739"
   },
   {
     "id": 6,
@@ -150,8 +192,15 @@
     "clickable": true,
     "enabled": true,
     "focused": false,
+    "checkable": false,
+    "checked": false,
+    "selected": false,
+    "scrollable": false,
+    "long_clickable": false,
+    "password": false,
     "source": "hierarchy",
-    "confidence": null
+    "confidence": null,
+    "stable_key": "tx:69e73a7f5d"
   },
   {
     "id": 7,
@@ -172,8 +221,15 @@
     "clickable": false,
     "enabled": true,
     "focused": false,
+    "checkable": false,
+    "checked": false,
+    "selected": false,
+    "scrollable": false,
+    "long_clickable": false,
+    "password": false,
     "source": "hierarchy",
-    "confidence": null
+    "confidence": null,
+    "stable_key": "tx:4fe1cde196"
   },
   {
     "id": 8,
@@ -194,8 +250,15 @@
     "clickable": true,
     "enabled": true,
     "focused": false,
+    "checkable": false,
+    "checked": false,
+    "selected": false,
+    "scrollable": false,
+    "long_clickable": false,
+    "password": false,
     "source": "hierarchy",
-    "confidence": null
+    "confidence": null,
+    "stable_key": "tx:93195e282b"
   },
   {
     "id": 9,
@@ -216,8 +279,15 @@
     "clickable": true,
     "enabled": true,
     "focused": false,
+    "checkable": false,
+    "checked": false,
+    "selected": false,
+    "scrollable": false,
+    "long_clickable": false,
+    "password": false,
     "source": "hierarchy",
-    "confidence": null
+    "confidence": null,
+    "stable_key": "tx:f038596d25"
   },
   {
     "id": 10,
@@ -238,8 +308,15 @@
     "clickable": true,
     "enabled": true,
     "focused": false,
+    "checkable": false,
+    "checked": false,
+    "selected": false,
+    "scrollable": false,
+    "long_clickable": false,
+    "password": false,
     "source": "hierarchy",
-    "confidence": null
+    "confidence": null,
+    "stable_key": "tx:fb26cca437"
   },
   {
     "id": 11,
@@ -260,7 +337,14 @@
     "clickable": true,
     "enabled": true,
     "focused": false,
+    "checkable": false,
+    "checked": false,
+    "selected": false,
+    "scrollable": false,
+    "long_clickable": false,
+    "password": false,
     "source": "hierarchy",
-    "confidence": null
+    "confidence": null,
+    "stable_key": "tx:78a83d1337"
   }
 ]

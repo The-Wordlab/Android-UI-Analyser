@@ -113,6 +113,11 @@ class FakeDevice(Device):
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
         self.hierarchy_calls = 0
         self.screenshot_calls = 0
+        self._clipboard = ""
+        self._orientation = "n"
+        self._airplane = False
+        self._location: tuple[float, float] | None = None
+        self._recording: str | None = None
 
     # capture
     def window_size(self) -> tuple[int, int]:
@@ -164,8 +169,75 @@ class FakeDevice(Device):
     def stop_app(self, package: str) -> None:
         self.calls.append(("stop_app", (package,)))
 
-    def open_link(self, uri: str) -> None:
-        self.calls.append(("open_link", (uri,)))
+    def clear_app(self, package: str) -> None:
+        self.calls.append(("clear_app", (package,)))
+
+    def grant_permissions(self, package: str) -> None:
+        self.calls.append(("grant_permissions", (package,)))
+
+    def double_click(self, x: int, y: int) -> None:
+        self.calls.append(("double_click", (x, y)))
+
+    def hide_keyboard(self) -> None:
+        self.calls.append(("hide_keyboard", ()))
+
+    def set_clipboard(self, text: str) -> None:
+        self._clipboard = text
+        self.calls.append(("set_clipboard", (text,)))
+
+    def get_clipboard(self) -> str:
+        self.calls.append(("get_clipboard", ()))
+        return self._clipboard
+
+    def paste(self) -> None:
+        self.calls.append(("paste", ()))
+
+    def set_location(self, lat: float, lon: float) -> None:
+        self._location = (lat, lon)
+        self.calls.append(("set_location", (lat, lon)))
+
+    def set_orientation(self, mode: str) -> None:
+        self._orientation = mode
+        self.calls.append(("set_orientation", (mode,)))
+
+    def get_orientation(self) -> str:
+        self.calls.append(("get_orientation", ()))
+        return self._orientation
+
+    def set_airplane_mode(self, enabled: bool) -> None:
+        self._airplane = enabled
+        self.calls.append(("set_airplane_mode", (enabled,)))
+
+    def get_airplane_mode(self) -> bool | None:
+        self.calls.append(("get_airplane_mode", ()))
+        return self._airplane
+
+    def add_media(self, local_path: str, *, remote_dir: str = "/sdcard/DCIM/Camera") -> str:
+        from pathlib import Path
+
+        name = Path(local_path).name
+        remote = f"{remote_dir.rstrip('/')}/{name}"
+        self.calls.append(("add_media", (local_path, remote_dir)))
+        return remote
+
+    def start_recording(self, remote_path: str = "/sdcard/aua_recording.mp4") -> str:
+        self._recording = remote_path
+        self.calls.append(("start_recording", (remote_path,)))
+        return remote_path
+
+    def stop_recording(self, local_path: str) -> str:
+        self.calls.append(("stop_recording", (local_path,)))
+        self._recording = None
+        return local_path
+
+    def set_clock(self, timestamp_ms: int) -> None:
+        self.calls.append(("set_clock", (timestamp_ms,)))
+
+    def erase_chars(self, count: int) -> None:
+        self.calls.append(("erase_chars", (count,)))
+
+    def open_link(self, uri: str, *, package: str | None = None) -> None:
+        self.calls.append(("open_link", (uri,) if package is None else (uri, package)))
 
     def find_text(
         self,

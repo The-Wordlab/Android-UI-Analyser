@@ -153,6 +153,15 @@ aua analyze
 # Compact format (fewer tokens, drops null/default fields — best for agents)
 aua --format compact analyze
 
+# One element per line, tab-separated, status-bar noise already dropped — the
+# readable view; pick your own columns with --fields
+aua --format tsv analyze
+aua --format tsv analyze --fields id,text,rid,checked
+
+# Ask a narrower question instead of filtering the JSON yourself
+aua --format tsv analyze --region 0,0,1080,300 --clickable   # just the header
+aua --format tsv analyze --where-rid pushSwitch --fields id,checkable,checked
+
 # Is "Sign in" visible right now? Exit 0 = yes, 1 = no
 aua has "Sign in"
 
@@ -489,10 +498,17 @@ Each provider must implement `is_available() -> tuple[bool, str]` to declare whe
 The daemon holds a warm `uiautomator2` connection and loaded vision models, eliminating per-call cold-start overhead. The CLI auto-detects a running daemon via a unix socket and forwards requests to it; without a daemon it runs in-process (always correct, pays startup cost).
 
 ```bash
-aua daemon start    # start the background daemon
-aua daemon status   # check if running
-aua daemon stop     # stop the daemon
+aua daemon start          # start the background daemon (+ the app orientation blob)
+aua daemon start --quiet  # start it without the blob
+aua daemon status         # check if running
+aua daemon stop           # stop the daemon
+aua orient                # the orientation blob on demand, any time
 ```
+
+`daemon start` prints what the tool already knows about the foreground app — description,
+screens, routes, mined deeplinks, login recipes, quirks. That is genuinely useful the first
+time in a session and pure noise on every restart afterwards, so `--quiet` suppresses it and
+`aua orient` prints it whenever you actually want it.
 
 The daemon binds **only to a unix socket** (default `~/.cache/android-ui-analyser/daemon.sock`). No TCP port, no auth surface.
 
@@ -533,12 +549,59 @@ Use `aua` to inspect and drive the connected Android device.
 ### Getting elements on screen
 
 ```bash
+aua --format tsv analyze       # readable: one element per line, noise filtered out
 aua --format compact analyze   # get element IDs (smaller token footprint)
 aua analyze                    # full JSON with all fields
 ```
 
 Elements are returned with stable integer IDs. Always re-analyze after a
 state-changing action — IDs may change after navigation or screen transitions.
+
+### Asking for fewer rows and columns (don't post-process the JSON)
+
+Most of a screen is status-bar chrome and unlabelled containers, and you usually want
+four columns out of eighteen. Say so in the same call:
+
+```bash
+aua --format tsv analyze                                  # id, text, rid, clickable
+aua --format tsv analyze --fields id,text,rid,bounds      # your columns, your order
+aua --format tsv analyze --all                            # keep the noise too
+aua --format tsv analyze --region 0,0,1080,300 --clickable # the header's tap targets
+aua --format tsv analyze --where-text "Explore"           # case-insensitive substring
+aua --format tsv analyze --where-rid appsHubTab --limit 5
+aua --format tsv analyze --no-meta                        # no `#` comment lines at all
+aua --format compact analyze --fields id,rid --nonempty   # same views, JSON output
+```
+
+- `--fields` names: `id`, `type`, `text`, `rid` (short tail) / `resource_id` (full selector),
+  `desc` / `content_desc`, `bounds`, `center`, `clickable`, `enabled`, `focused`, `checkable`,
+  `checked`, `selected`, `scrollable`, `long_clickable`, `password`, `source`, `confidence`.
+  A wrong name exits **2** and lists the valid ones — before touching the device.
+- `--format tsv` implies `--nonempty --no-system` (drops rows with no text/id/desc, and
+  status-bar chrome). `--all` opts out. JSON formats filter **nothing** unless you ask.
+- Filters of different kinds AND together; repeating one kind ORs together
+  (`--region A --region B` = either box).
+- **IDs are never renumbered.** The id in a filtered row is the id `aua tap` takes.
+- `--meta <csv>` / `--no-meta` control the metadata (the route/deeplink suggestions are
+  worth reading once per session, not on every call).
+
+### Reading interaction state (is that switch on?)
+
+Every element carries the a11y interaction flags, so a boolean question needs no screenshot:
+
+```bash
+$ aua --format tsv analyze --where-rid switch_widget --fields id,type,checkable,checked
+# screen=accessibility package=com.android.settings 1080x2400
+# elements=24 shown=2 tier_used=hierarchy duration_ms=220
+id	type	checkable	checked
+16	Switch	true	true
+19	Switch	true	false
+```
+
+`selected` tells you which tab is active; `scrollable` tells you which container really
+scrolls. These are **tri-state**: `true`/`false` when the node reported the attribute, and
+**empty/`null` when genuinely unknown** (a vision-derived element has no a11y attributes),
+so *off* never masquerades as *unknown*.
 
 ### Acting on elements
 
@@ -573,6 +636,21 @@ aua analyze --source vision --annotate
 
 This runs detection + OCR and writes an annotated PNG (numbered boxes) to the
 path shown in `meta.annotated_image`. Element IDs work the same way.
+
+### When you must actually LOOK at the screen
+
+Reading a full 1080x2400 PNG is expensive. Capture only the part you need:
+
+```bash
+aua screenshot --out /tmp/header.png --region 0,0,1080,300   # crop before writing
+aua screenshot --out /tmp/small.png  --max-width 320         # downscale (never upscales)
+aua screenshot --out /tmp/half.png   --scale 0.5
+aua screenshot --annotate                                    # full screen + numbered marks
+```
+
+The written path comes back as `detail` (`aua screenshot … | jq -r .detail`). Regions are
+screen pixels and are clamped to the screen; a box that misses it entirely exits **2**.
+`--annotate` can't be combined with cropping — marks are placed in full-screen coordinates.
 
 ### Semantic / fuzzy target lookup
 
@@ -660,34 +738,46 @@ Errors print a structured object to stderr: `{"error": {"code": ..., "message": 
 
 ## Command reference
 
-Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--format`, `--serial`, `--config`, `--profile`, `--timeout`, `--log-level`, `--no-cache`) go **before** the subcommand.
+Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--format`, `--serial`, `--config`, `--profile`, `--timeout`, `--log-level`, `--no-cache`, `--with-image`) go **before** the subcommand.
 
 | Command | What it does |
 |---|---|
 | `aua doctor` | Check environment: adb, uiautomator2, devices, provider readiness |
 | `aua devices` | List attached devices/emulators |
 | `aua analyze` | Capture the screen → element list with IDs (the core command) |
+| `aua resolve <id\|key>` | Remap a prior id / `stable_key` onto the current screen |
 | `aua has "<text>"` | Exit 0 if text is on screen, 1 if not — cheap branch check |
+| `aua expect …` | Assert visibility / state (exit 8 on failure) |
 | `aua wait --for "<text>"` | Poll until text appears (or `--idle` / `--for-stable`) |
-| `aua tap <id>` / `aua click <id>` | Tap an element by ID |
+| `aua tap <id>` / `aua click <id>` | Tap an element by ID (also `--rid`/`--text`/`--desc`) |
+| `aua double-tap <id>` | Double-tap an element |
 | `aua long-press <id>` | Long-press an element by ID |
 | `aua input <id> "text"` | Focus an element and type (`--submit` fires the IME action) |
-| `aua clear <id>` | Clear a text field |
+| `aua clear <id>` / `aua erase` | Clear a field / backspace N chars |
+| `aua hide-keyboard` | Dismiss the IME without navigating away |
 | `aua swipe <up\|down\|left\|right>` | Swipe / scroll (`--from <id>` to scroll a container) |
-| `aua scroll-to "<text>"` | Scroll until text is found |
+| `aua scroll` / `aua scroll-to "<text>"` | Directional scroll / scroll until text is found |
 | `aua key <back\|home\|enter\|…>` | Press a hardware/navigation key |
-| `aua screenshot [path]` | Save a raw screenshot |
+| `aua open <uri> [--app pkg]` | Open a deeplink (pin package to skip "Open with…") |
+| `aua clipboard set\|get` / `paste` / `copy` | Clipboard helpers |
+| `aua location set LAT,LON` | Mock GPS |
+| `aua orientation set\|get` | Screen orientation |
+| `aua airplane on\|off\|toggle` | Airplane mode |
+| `aua media add PATH` | Push media into the gallery |
+| `aua record start\|stop PATH` | Screen recording |
+| `aua clock set --ms <unix-ms>` | Set device clock (emulator / rooted) |
+| `aua screenshot [path]` | Save a raw screenshot (`--region` / `--scale`) |
 | `aua inspect <id>` | Dump full details for one element |
-| `aua app <pkg>` | App control (launch/stop/current) |
+| `aua app launch\|stop\|kill\|clear\|grant` | App control (`launch --clear` = clearState) |
 | `aua map` | Show the learned map of the current app (`--find "<goal>"` for a route) |
 | `aua goto "<goal>"` | Drive the remembered route to a known screen — taps + verifies each hop (`--plan` previews, `--max-steps N`) |
-| `aua memory show\|path\|update\|forget` | Manage the per-app learned layout |
+| `aua memory show\|path\|update\|forget` | Manage the per-app learned layout (`memory.backend: sqlite` optional) |
 | `aua config init\|show\|path` | Manage configuration |
 | `aua daemon start\|status\|stop` | Manage the optional warm-state daemon |
 | `aua guide` | Print the agent operating manual (`--emit-skill` writes the Claude Code skill) |
 | `aua mcp` | Run the MCP server over stdio |
 
-All action commands (`tap`, `long-press`, `input`, `clear`, `swipe`, `scroll-to`, `key`) **return the post-action screen inline by default** (an `observation` with fresh element IDs), so you rarely need a follow-up `analyze`. Pass **`--no-observe`** to skip it.
+All action commands (`tap`, `long-press`, `input`, `clear`, `swipe`, `scroll-to`, `key`, …) **return the post-action screen inline by default** (an `observation` with fresh element IDs), so you rarely need a follow-up `analyze`. Pass **`--no-observe`** to skip it. Prefer **`aua --format tsv analyze`** when reading a screen; use global **`aua --with-image …`** only when you must see pixels.
 
 ---
 

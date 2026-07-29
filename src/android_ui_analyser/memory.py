@@ -153,7 +153,8 @@ class RouteStep(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
     kind: str  # tap | long-press | input | clear | key | swipe | scroll-to
-    #            (flows also: launch-app | wait-for | wait-stable | assert-visible | goto)
+    #            (flows also: launch-app | wait-for | wait-stable | assert-visible | goto |
+    #             repeat | retry | hide-keyboard | paste | …)
     label: str | None = None  # redacted-safe element label (may be '<redacted>')
     resource_id: str | None = None  # resource-id TAIL, the primary replay selector
     arg: str | None = None  # kind-specific: key name / swipe direction / query / package
@@ -162,6 +163,10 @@ class RouteStep(BaseModel):
     package: str | None = None  # package the step ran in; None = the journey's origin
     timeout_ms: int | None = None  # wait-for / wait-stable / assert-visible override
     by: str | None = None  # match target by: text (default) | id (resource-id) | desc
+    # Composite flow blocks (Maestro ``repeat`` / ``retry``).
+    substeps: list[RouteStep] = Field(default_factory=list)
+    repeat: int | None = None
+    max_retries: int | None = None
 
 
 class RouteEdge(BaseModel):
@@ -563,6 +568,14 @@ class AppMemoryStore:
 
     def __init__(self, cfg: MemoryCfg) -> None:
         self.cfg = cfg
+        self._sqlite = None
+        if cfg.backend == "sqlite":
+            from .memory_sqlite import SqliteMemoryBackend
+
+            self._sqlite = SqliteMemoryBackend(
+                Path(cfg.sqlite_path).expanduser(),
+                migrate_from=self.memory_root(),
+            )
 
     # -- paths (everything stays under memory.dir) ------------------------
 
@@ -588,6 +601,8 @@ class AppMemoryStore:
     # -- app map I/O ------------------------------------------------------
 
     def load(self, package: str) -> AppMap | None:
+        if self._sqlite is not None:
+            return self._sqlite.load_app(package)
         path = self.index_path(package)
         if not path.is_file():
             return None
@@ -598,12 +613,23 @@ class AppMemoryStore:
 
     def save(self, app: AppMap) -> None:
         app.schema_version = MEMORY_SCHEMA_VERSION  # older maps upgrade on first write
+        if self._sqlite is not None:
+            self._sqlite.save_app(app)
+            # Keep the human-readable MAP.md next to the legacy tree for `aua map` browsing.
+            d = self.app_dir(app.package)
+            d.mkdir(parents=True, exist_ok=True)
+            self.map_path(app.package).write_text(
+                render_map(app, detail="default"), encoding="utf-8"
+            )
+            return
         d = self.app_dir(app.package)
         d.mkdir(parents=True, exist_ok=True)
         self.index_path(app.package).write_text(app.model_dump_json(indent=2), encoding="utf-8")
         self.map_path(app.package).write_text(render_map(app, detail="default"), encoding="utf-8")
 
     def list_apps(self) -> list[str]:
+        if self._sqlite is not None:
+            return self._sqlite.list_apps()
         root = self.memory_root()
         if not root.is_dir():
             return []
@@ -612,6 +638,8 @@ class AppMemoryStore:
     # -- session I/O ------------------------------------------------------
 
     def load_session(self, serial: str) -> SessionState:
+        if self._sqlite is not None:
+            return self._sqlite.load_session(serial)
         path = self.session_path(serial)
         if path.is_file():
             try:
@@ -621,6 +649,9 @@ class AppMemoryStore:
         return SessionState()
 
     def save_session(self, serial: str, sess: SessionState) -> None:
+        if self._sqlite is not None:
+            self._sqlite.save_session(serial, sess)
+            return
         # Atomic replace: daemon + CLI may write concurrently (last-writer-wins is fine,
         # a torn/half-written JSON is not).
         path = self.session_path(serial)
@@ -1081,11 +1112,14 @@ class AppMemoryStore:
 
     def forget(self, package: str, screen: str | None = None) -> dict[str, str | None]:
         if screen is None:
+            deleted = False
+            if self._sqlite is not None:
+                deleted = self._sqlite.delete_app(package)
             d = self.app_dir(package)
             if d.is_dir():
                 shutil.rmtree(d)
-                return {"forgot": package}
-            return {"forgot": None}
+                deleted = True
+            return {"forgot": package if deleted else None}
         app = self.load(package)
         if app and screen in app.screens:
             del app.screens[screen]

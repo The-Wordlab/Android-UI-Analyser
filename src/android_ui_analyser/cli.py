@@ -29,9 +29,20 @@ from .config import (
     user_config_path,
 )
 from .engine import Engine
-from .errors import AuaError, ConfigError, DeviceError, ExitCode, UsageError, emit_error
+from .errors import (
+    AuaError,
+    ConfigError,
+    DeviceError,
+    ExitCode,
+    ExpectationFailed,
+    SelectorAmbiguousError,
+    SelectorNotFoundError,
+    UsageError,
+    emit_error,
+)
 from .memory import AppMap, AppMemoryStore, find_result, render_map
-from .schema import OutputFormat
+from .projection import Projection
+from .schema import ActionResult, OutputFormat
 
 logger = logging.getLogger("android_ui_analyser")
 
@@ -39,7 +50,7 @@ T = TypeVar("T")
 
 # Sentinel produced by an optional-value flag (``--annotate``/``--emit-skill``) given bare.
 ANNOTATE_DEFAULT = "\x00aua_annotate_default"
-_OPTIONAL_VALUE_OPTS = {"--annotate", "--emit-skill"}
+_OPTIONAL_VALUE_OPTS = {"--annotate", "--emit-skill", "--with-image"}
 
 _LOG_LEVELS = {
     "error": logging.ERROR,
@@ -91,6 +102,7 @@ class GlobalOpts:
     timeout: int | None = None
     log_level: str = "warn"
     no_cache: bool = False
+    with_image: bool = False
     _cfg: Config | None = field(default=None, repr=False)
 
     def cli_overrides(self) -> dict[str, Any]:
@@ -98,8 +110,13 @@ class GlobalOpts:
         overrides: dict[str, Any] = {}
         if self.serial is not None:
             overrides["device"] = {"serial": self.serial}
-        if self.format is not None:
-            overrides["output"] = {"format": self.format}
+        if self.format is not None or self.with_image:
+            out: dict[str, Any] = {}
+            if self.format is not None:
+                out["format"] = self.format
+            if self.with_image:
+                out["with_image"] = True
+            overrides["output"] = out
         if self.log_level is not None:
             overrides["log_level"] = self.log_level
         if self.timeout is not None:
@@ -157,9 +174,103 @@ def _run(ctx: typer.Context, fn: Callable[[Engine, OutputFormat], T]) -> T:
         raise
     except Exception as exc:  # pragma: no cover - defensive generic path
         generic = AuaError(str(exc), code="internal_error")
-        generic.exit_code = ExitCode(1)
+        generic.exit_code = ExitCode.INTERNAL
         emit_error(generic)
-        raise typer.Exit(1) from exc
+        raise typer.Exit(int(ExitCode.INTERNAL)) from exc
+
+
+# --------------------------------------------------------------------------- selectors
+
+_BY_KINDS = {"id": "rid", "text": "text", "desc": "desc"}
+
+# Shared selector options — the same six flags on every action, so `--rid` means one thing
+# everywhere. Typer copies an OptionInfo per command, so one instance is safe to reuse.
+_SEL_BY = typer.Option(
+    None, "--by", help="Read the positional as: id (resource-id) | text | desc."
+)
+_SEL_RID = typer.Option(None, "--rid", help="Target this resource-id (bare tail accepted).")
+_SEL_TEXT = typer.Option(None, "--text", help="Target this label (exact first, then substring).")
+_SEL_DESC = typer.Option(None, "--desc", help="Target this content-desc.")
+_SEL_INDEX = typer.Option(None, "--index", help="Take the nth (0-based) of several matches.")
+_SEL_FIRST = typer.Option(
+    False, "--first", help="Take the first of several matches instead of erroring."
+)
+
+
+def _selector(
+    *,
+    ident: str | None = None,
+    by: str | None = None,
+    rid: str | None = None,
+    text: str | None = None,
+    desc: str | None = None,
+    index: int | None = None,
+    first: bool = False,
+) -> dict[str, Any] | None:
+    """Build the engine selector, or ``None`` when the caller passed a plain element id.
+
+    Two spellings resolve to the same thing: ``--by id <positional>`` (reads like the
+    existing ``has``/``wait`` flag) and the one-shot ``--rid/--text/--desc <value>``.
+    """
+    if by is not None:
+        kind = _BY_KINDS.get(by.lower())
+        if kind is None:
+            raise UsageError(f"unknown --by '{by}'", hint="Choose one of: id, text, desc.")
+        if not ident:
+            raise UsageError(
+                f"--by {by} needs the value as the positional argument",
+                hint="e.g. `aua tap --by id appsHubTabEXPLORE`",
+            )
+        return {kind: ident, "index": index, "first": first}
+    if rid or text or desc:
+        return {"rid": rid, "text": text, "desc": desc, "index": index, "first": first}
+    return None
+
+
+def _exit_unless_ok(
+    result: Any, exit_code: ExitCode, *, code: str, hint: str | None = None
+) -> None:
+    """Turn ``ok: false`` into a non-zero exit, echoing why on stderr.
+
+    An agent branches on the exit status, so an action that did not achieve its goal must
+    never exit 0 — the JSON stays on stdout either way.
+    """
+    ok = result.get("ok") if isinstance(result, dict) else getattr(result, "ok", True)
+    if ok:
+        return
+    detail = result.get("detail") if isinstance(result, dict) else getattr(result, "detail", None)
+    err = AuaError(str(detail or "the action did not achieve its goal"), hint=hint, code=code)
+    err.exit_code = exit_code
+    emit_error(err)
+    raise typer.Exit(int(exit_code))
+
+
+def _element_id(ident: str | None, selector: dict[str, Any] | None) -> int | None:
+    """The positional as an element id — only meaningful when no selector is in play."""
+    if selector is not None or ident is None:
+        return None
+    try:
+        return int(ident)
+    except ValueError as exc:
+        raise UsageError(
+            f"'{ident}' is not an element id",
+            hint="Ids are integers from the last analyze. To address by name use "
+            "`--rid <resource-id>`, `--text <label>`, or `--by id <resource-id>`.",
+        ) from exc
+
+
+def _require_target(
+    verb: str, ident: str | None, selector: dict[str, Any] | None
+) -> int | None:
+    """Element id or selector — raise usage (exit 2) before any device connect."""
+    element_id = _element_id(ident, selector)
+    if element_id is None and selector is None:
+        raise UsageError(
+            f"{verb} needs an element id or a selector",
+            hint=f"e.g. `aua {verb} 4` or `aua {verb} --rid continue_btn` "
+            f"or `aua {verb} --text Continue`.",
+        )
+    return element_id
 
 
 def _emit(result: Any, fmt: OutputFormat) -> None:
@@ -167,11 +278,42 @@ def _emit(result: Any, fmt: OutputFormat) -> None:
     if hasattr(result, "render"):
         typer.echo(result.render(fmt))
         return
+    _echo_json(result, fmt)
+
+
+def _echo_json(data: Any, fmt: OutputFormat) -> None:
     import json
 
     indent = 2 if fmt is OutputFormat.pretty else None
     sep = None if indent else (",", ":")
-    typer.echo(json.dumps(result, indent=indent, separators=sep, ensure_ascii=False))
+    typer.echo(json.dumps(data, indent=indent, separators=sep, ensure_ascii=False))
+
+
+def _analyze_payload(result: Any) -> dict[str, Any] | None:
+    """The full (untrimmed) dict form of an analyze result, whatever produced it.
+
+    A projection must read fields the requested ``--format`` may have trimmed, and must
+    work identically for the in-process pydantic result and the daemon's dict response.
+    """
+    if hasattr(result, "model_dump"):
+        data = result.model_dump(mode="json")
+    elif isinstance(result, dict):
+        data = result
+    else:  # pragma: no cover - defensive
+        return None
+    return data if isinstance(data.get("elements"), list) else None
+
+
+def _emit_analyze(result: Any, fmt: OutputFormat, view: Projection) -> None:
+    """Emit an analyze result, through *view* when it asked for anything."""
+    payload = _analyze_payload(result) if view.active else None
+    if payload is None:
+        _emit(result, fmt)
+        return
+    if view.tsv:
+        typer.echo(view.render_tsv(payload))
+        return
+    _echo_json(view.apply(payload, fmt=fmt), fmt)
 
 
 # --------------------------------------------------------------------------- daemon route
@@ -198,6 +340,9 @@ def _daemon_error(err: dict[str, Any]) -> AuaError:
         "usage": UsageError,
         "device": DeviceError,
         "config": ConfigError,
+        "selector_not_found": SelectorNotFoundError,
+        "selector_ambiguous": SelectorAmbiguousError,
+        "expectation_failed": ExpectationFailed,
     }
     if code in mapping:
         return mapping[code](message, hint=hint)
@@ -281,13 +426,21 @@ def main(
         None, "--serial", help="Target device serial (default: only/first)."
     ),
     config: str | None = typer.Option(None, "--config", help="Explicit config file path."),
-    format: str | None = typer.Option(None, "--format", help="Output format: json|pretty|compact."),
+    format: str | None = typer.Option(
+        None, "--format", help="Output format: json|pretty|compact|tsv (tsv: analyze only)."
+    ),
     profile: str | None = typer.Option(None, "--profile", help="Named config profile to overlay."),
     timeout: int | None = typer.Option(None, "--timeout", help="Per-operation timeout in ms."),
     log_level: str = typer.Option(
         "warn", "--log-level", help="error|warn|info|debug (logs → stderr)."
     ),
     no_cache: bool = typer.Option(False, "--no-cache", help="Bypass the cached analyze result."),
+    with_image: bool = typer.Option(
+        False,
+        "--with-image",
+        help="Session default: save raw screenshots on analyze/actions "
+        "(override per-command with --with-image PATH or omit).",
+    ),
     version: bool = typer.Option(
         False,
         "--version",
@@ -307,7 +460,7 @@ def main(
     if format is not None and format not in {f.value for f in OutputFormat}:
         # Surface as a usage error (exit 2) before any command runs.
         err = UsageError(
-            f"invalid --format '{format}'", hint="Choose one of: json, pretty, compact."
+            f"invalid --format '{format}'", hint="Choose one of: json, pretty, compact, tsv."
         )
         emit_error(err)
         raise typer.Exit(int(err.exit_code))
@@ -319,6 +472,7 @@ def main(
         timeout=timeout,
         log_level=log_level,
         no_cache=no_cache,
+        with_image=with_image,
     )
 
 
@@ -344,6 +498,14 @@ def analyze(
     query: str | None = typer.Option(
         None, "--query", help="Return the single best-matching element."
     ),
+    with_image: str | None = typer.Option(
+        None,
+        "--with-image",
+        metavar="[PATH]",
+        help="Also save the raw screenshot; bare flag uses a timestamped default path.",
+        show_default=False,
+    ),
+
     deep: bool = typer.Option(False, "--deep", help="Raise the escalation ceiling for this call."),
     cheap: bool = typer.Option(
         False, "--cheap", help="Lower the escalation ceiling for this call."
@@ -356,10 +518,58 @@ def analyze(
     no_cache: bool = typer.Option(
         False, "--no-cache", help="Bypass / do not write the analyze cache."
     ),
+    fields: str | None = typer.Option(
+        None,
+        "--fields",
+        metavar="CSV",
+        help="Project elements to these keys: id,text,rid,desc,bounds,center,type,"
+        "clickable,enabled,checked,selected,scrollable,long_clickable,password.",
+    ),
+    nonempty: bool = typer.Option(
+        False, "--nonempty", help="Drop elements with no text, resource_id or content_desc."
+    ),
+    no_system: bool = typer.Option(
+        False, "--no-system", help="Drop status-bar / system chrome (systemui ids, battery…)."
+    ),
+    show_all: bool = typer.Option(
+        False, "--all", help="Keep every element (undoes tsv's implicit --nonempty --no-system)."
+    ),
+    where_text: list[str] | None = typer.Option(
+        None, "--where-text", metavar="SUBSTR", help="Keep elements whose text contains this."
+    ),
+    where_rid: list[str] | None = typer.Option(
+        None, "--where-rid", metavar="SUBSTR", help="Keep elements whose resource_id contains this."
+    ),
+    clickable: bool = typer.Option(False, "--clickable", help="Keep only clickable elements."),
+    region: list[str] | None = typer.Option(
+        None,
+        "--region",
+        metavar="x1,y1,x2,y2",
+        help="Keep elements intersecting this box (e.g. 0,0,1080,300 = the header).",
+    ),
+    limit: int | None = typer.Option(None, "--limit", help="Keep at most N elements."),
+    meta: str | None = typer.Option(
+        None, "--meta", metavar="CSV", help="Return only these meta keys."
+    ),
+    no_meta: bool = typer.Option(False, "--no-meta", help="Omit meta entirely."),
 ) -> None:
     """Emit Set-of-Marks JSON (§8) for the current screen."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
+        view = Projection.parse(
+            fmt=fmt,
+            fields=fields,
+            nonempty=nonempty,
+            no_system=no_system,
+            show_all=show_all,
+            where_text=where_text,
+            where_rid=where_rid,
+            clickable=clickable,
+            region=region,
+            limit=limit,
+            meta=meta,
+            no_meta=no_meta,
+        )
         nc = no_cache or _opts(ctx).no_cache
         result = _route(
             engine,
@@ -368,12 +578,13 @@ def analyze(
             with_ocr=with_ocr,
             query=query,
             annotate=_annotate_arg(annotate),
+            with_image=_annotate_arg(with_image),
             strategy=strategy,
             cheap=cheap,
             deep=deep,
             no_cache=nc,
         )
-        _emit(result, fmt)
+        _emit_analyze(result, fmt, view)
 
     _run(ctx, go)
 
@@ -382,12 +593,49 @@ def analyze(
 def screenshot(
     ctx: typer.Context,
     path: str | None = typer.Argument(None, help="Output PNG path (default under run dir)."),
+    out: str | None = typer.Option(None, "--out", "-o", help="Output PNG path (same as the arg)."),
     annotate: bool = typer.Option(False, "--annotate", help="Overlay Set-of-Marks numbers."),
+    region: str | None = typer.Option(
+        None,
+        "--region",
+        metavar="x1,y1,x2,y2",
+        help="Crop to this box before saving (e.g. 0,0,1080,300 = the header).",
+    ),
+    scale: float | None = typer.Option(
+        None, "--scale", help="Downscale by this factor (0.5 = half width)."
+    ),
+    max_width: int | None = typer.Option(
+        None, "--max-width", help="Downscale so the width is at most this many pixels."
+    ),
 ) -> None:
-    """Save a raw screenshot (PNG); ``--annotate`` overlays the last analyze marks."""
+    """Save a screenshot (PNG); crop/downscale it, or ``--annotate`` the last analyze marks.
+
+    ``--region``/``--scale``/``--max-width`` exist to keep an agent's context cheap: reading
+    a 1080x2400 PNG to check one header icon costs an order of magnitude more image tokens
+    than reading the strip it lives in. The written path is the last line of output.
+    """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(engine.screenshot(path, annotate=annotate), fmt)
+        target = out or path
+        narrowed = region is not None or scale is not None or max_width is not None
+        if not narrowed:
+            _emit(engine.screenshot(target, annotate=annotate), fmt)
+            return
+        if annotate:
+            raise UsageError(
+                "--annotate cannot be combined with --region/--scale/--max-width",
+                hint="Marks are placed in full-screen coordinates; crop a plain screenshot.",
+            )
+        from . import imaging
+
+        box = imaging.parse_region(region) if region else None
+        view = imaging.crop_and_scale(
+            engine.device.screenshot(), region=box, scale=scale, max_width=max_width
+        )
+        saved = view.save(
+            target or imaging.capture_path(engine.config.cache.dir, engine.device.serial)
+        )
+        _emit(ActionResult(ok=True, action="screenshot", detail=saved), fmt)
 
     _run(ctx, go)
 
@@ -455,80 +703,51 @@ def has(
 # --------------------------------------------------------------------------- actions
 
 
-@app.command()
+@app.command(cls=AnnotateCommand)
 def tap(
     ctx: typer.Context,
-    element_id: int = typer.Argument(..., metavar="ID", help="Element id to tap."),
+    ident: str | None = typer.Argument(
+        None, metavar="[ID]", help="Element id from the last analyze (or the selector value)."
+    ),
+    by: str | None = _SEL_BY,
+    rid: str | None = _SEL_RID,
+    text: str | None = _SEL_TEXT,
+    desc: str | None = _SEL_DESC,
+    index: int | None = _SEL_INDEX,
+    first: bool = _SEL_FIRST,
     observe: bool = typer.Option(
         True,
         "--observe/--no-observe",
         help="Also return the screen after the tap (skips a follow-up analyze).",
     ),
-) -> None:
-    """Tap an element (by id from the last analyze)."""
-
-    def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(_route(engine, "tap", element_id=element_id, observe=observe), fmt)
-
-    _run(ctx, go)
-
-
-@app.command(name="click")
-def click_cmd(
-    ctx: typer.Context,
-    element_id: int = typer.Argument(..., metavar="ID", help="Element id to tap (alias of tap)."),
-    observe: bool = typer.Option(
-        True, "--observe/--no-observe", help="Also return the post-tap screen."
+    with_image: str | None = typer.Option(
+        None,
+        "--with-image",
+        metavar="[PATH]",
+        help="Also save the raw screenshot; bare flag uses a timestamped default path.",
+        show_default=False,
     ),
 ) -> None:
-    """Alias of ``tap``."""
+    """Tap an element — by id from the last analyze, or by a one-shot selector.
+
+    `aua tap 9` · `aua tap --rid appsHubNotifications` · `aua tap --text "Create an app"` ·
+    `aua tap --by id appsHubTabEXPLORE`. A selector resolves on the live screen in this one
+    call; matching nothing exits 6 and matching several exits 7 with the candidates — it
+    never silently taps nothing.
+    """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(_route(engine, "tap", element_id=element_id, observe=observe), fmt)
-
-    _run(ctx, go)
-
-
-@app.command(name="long-press")
-def long_press(
-    ctx: typer.Context,
-    element_id: int = typer.Argument(..., metavar="ID", help="Element id to long-press."),
-    ms: int = typer.Option(600, "--ms", help="Press duration in milliseconds."),
-    observe: bool = typer.Option(
-        True, "--observe/--no-observe", help="Also return the post-action screen."
-    ),
-) -> None:
-    """Long-press an element."""
-
-    def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(_route(engine, "long_press", element_id=element_id, ms=ms, observe=observe), fmt)
-
-    _run(ctx, go)
-
-
-@app.command(name="input")
-def input_cmd(
-    ctx: typer.Context,
-    element_id: int = typer.Argument(..., metavar="ID", help="Element id to type into."),
-    text: str = typer.Argument(..., help="Text to type."),
-    submit: bool = typer.Option(False, "--submit", help="Send the IME action after typing."),
-    observe: bool = typer.Option(
-        True,
-        "--observe/--no-observe",
-        help="Also return the screen after typing (skips a follow-up analyze).",
-    ),
-) -> None:
-    """Focus an element and type text; ``--submit`` sends the IME action."""
-
-    def go(engine: Engine, fmt: OutputFormat) -> None:
+        selector = _selector(
+            ident=ident, by=by, rid=rid, text=text, desc=desc, index=index, first=first
+        )
         _emit(
             _route(
                 engine,
-                "input_text",
-                element_id=element_id,
-                text=text,
-                submit=submit,
+                "tap",
+                element_id=_require_target("tap", ident, selector),
+                selector=selector,
                 observe=observe,
+                with_image=_annotate_arg(with_image),
             ),
             fmt,
         )
@@ -536,28 +755,268 @@ def input_cmd(
     _run(ctx, go)
 
 
-@app.command()
-def clear(
+@app.command(name="click", cls=AnnotateCommand)
+def click_cmd(
     ctx: typer.Context,
-    element_id: int = typer.Argument(..., metavar="ID", help="Element id to clear."),
+    ident: str | None = typer.Argument(
+        None, metavar="[ID]", help="Element id to tap (alias of tap)."
+    ),
+    by: str | None = _SEL_BY,
+    rid: str | None = _SEL_RID,
+    text: str | None = _SEL_TEXT,
+    desc: str | None = _SEL_DESC,
+    index: int | None = _SEL_INDEX,
+    first: bool = _SEL_FIRST,
     observe: bool = typer.Option(
-        True, "--observe/--no-observe", help="Also return the post-action screen."
+        True, "--observe/--no-observe", help="Also return the post-tap screen."
+    ),
+    with_image: str | None = typer.Option(
+        None,
+        "--with-image",
+        metavar="[PATH]",
+        help="Also save the raw screenshot; bare flag uses a timestamped default path.",
+        show_default=False,
     ),
 ) -> None:
-    """Clear the text of an element."""
+    """Alias of ``tap``."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(_route(engine, "clear", element_id=element_id, observe=observe), fmt)
+        selector = _selector(
+            ident=ident, by=by, rid=rid, text=text, desc=desc, index=index, first=first
+        )
+        _emit(
+            _route(
+                engine,
+                "tap",
+                element_id=_require_target("tap", ident, selector),
+                selector=selector,
+                observe=observe,
+                with_image=_annotate_arg(with_image),
+            ),
+            fmt,
+        )
 
     _run(ctx, go)
 
 
-@app.command()
+@app.command(name="long-press", cls=AnnotateCommand)
+def long_press(
+    ctx: typer.Context,
+    ident: str | None = typer.Argument(
+        None, metavar="[ID]", help="Element id to long-press (or the selector value)."
+    ),
+    by: str | None = _SEL_BY,
+    rid: str | None = _SEL_RID,
+    text: str | None = _SEL_TEXT,
+    desc: str | None = _SEL_DESC,
+    index: int | None = _SEL_INDEX,
+    first: bool = _SEL_FIRST,
+    ms: int = typer.Option(600, "--ms", help="Press duration in milliseconds."),
+    observe: bool = typer.Option(
+        True, "--observe/--no-observe", help="Also return the post-action screen."
+    ),
+    with_image: str | None = typer.Option(
+        None,
+        "--with-image",
+        metavar="[PATH]",
+        help="Also save the raw screenshot; bare flag uses a timestamped default path.",
+        show_default=False,
+    ),
+) -> None:
+    """Long-press an element (id or selector, same as ``tap``)."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        selector = _selector(
+            ident=ident, by=by, rid=rid, text=text, desc=desc, index=index, first=first
+        )
+        _emit(
+            _route(
+                engine,
+                "long_press",
+                element_id=_element_id(ident, selector),
+                selector=selector,
+                ms=ms,
+                observe=observe,
+                with_image=_annotate_arg(with_image),
+            ),
+            fmt,
+        )
+
+    _run(ctx, go)
+
+
+@app.command(name="double-tap", cls=AnnotateCommand)
+def double_tap(
+    ctx: typer.Context,
+    ident: str | None = typer.Argument(
+        None, metavar="[ID]", help="Element id to double-tap (or the selector value)."
+    ),
+    by: str | None = _SEL_BY,
+    rid: str | None = _SEL_RID,
+    text: str | None = _SEL_TEXT,
+    desc: str | None = _SEL_DESC,
+    index: int | None = _SEL_INDEX,
+    first: bool = _SEL_FIRST,
+    observe: bool = typer.Option(
+        True, "--observe/--no-observe", help="Also return the post-action screen."
+    ),
+    with_image: str | None = typer.Option(
+        None,
+        "--with-image",
+        metavar="[PATH]",
+        help="Also save the raw screenshot; bare flag uses a timestamped default path.",
+        show_default=False,
+    ),
+) -> None:
+    """Double-tap an element (id or selector, same as ``tap``)."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        selector = _selector(
+            ident=ident, by=by, rid=rid, text=text, desc=desc, index=index, first=first
+        )
+        _emit(
+            _route(
+                engine,
+                "double_tap",
+                element_id=_element_id(ident, selector),
+                selector=selector,
+                observe=observe,
+                with_image=_annotate_arg(with_image),
+            ),
+            fmt,
+        )
+
+    _run(ctx, go)
+
+
+@app.command(name="input", cls=AnnotateCommand)
+def input_cmd(
+    ctx: typer.Context,
+    first_arg: str | None = typer.Argument(
+        None, metavar="[ID] TEXT", help="Element id then text — or just the text with --rid/--by."
+    ),
+    second_arg: str | None = typer.Argument(None, metavar="", help="", show_default=False),
+    by: str | None = _SEL_BY,
+    rid: str | None = _SEL_RID,
+    desc: str | None = _SEL_DESC,
+    index: int | None = _SEL_INDEX,
+    first: bool = _SEL_FIRST,
+    submit: bool = typer.Option(False, "--submit", help="Send the IME action after typing."),
+    observe: bool = typer.Option(
+        True,
+        "--observe/--no-observe",
+        help="Also return the screen after typing (skips a follow-up analyze).",
+    ),
+    with_image: str | None = typer.Option(
+        None,
+        "--with-image",
+        metavar="[PATH]",
+        help="Also save the raw screenshot; bare flag uses a timestamped default path.",
+        show_default=False,
+    ),
+) -> None:
+    """Focus an element and type text; ``--submit`` sends the IME action.
+
+    `aua input 9 "hello"` · `aua input --rid promptField "hello" --submit` ·
+    `aua input --by id promptField "hello"`. With ``--rid``/``--desc`` the single positional
+    is the text; with ``--by`` (or a plain id) the first positional addresses the field and
+    the second is the text. ``--text`` is not a selector here — it would read as the value.
+    """
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        selector = _selector(
+            ident=first_arg, by=by, rid=rid, desc=desc, index=index, first=first
+        )
+        # --rid/--desc address the field, so the lone positional is the text to type;
+        # --by consumes the first positional as the selector value.
+        typed = first_arg if (selector is not None and by is None) else second_arg
+        if selector is not None and by is None and second_arg is not None:
+            raise UsageError(
+                "with --rid/--desc, pass only the text to type",
+                hint='e.g. `aua input --rid promptField "hello"`',
+            )
+        if typed is None:
+            raise UsageError(
+                "input needs the text to type",
+                hint='e.g. `aua input 9 "hello"` or `aua input --rid promptField "hello"`',
+            )
+        _emit(
+            _route(
+                engine,
+                "input_text",
+                element_id=_element_id(first_arg, selector),
+                selector=selector,
+                text=typed,
+                submit=submit,
+                observe=observe,
+                with_image=_annotate_arg(with_image),
+            ),
+            fmt,
+        )
+
+    _run(ctx, go)
+
+
+@app.command(cls=AnnotateCommand)
+def clear(
+    ctx: typer.Context,
+    ident: str | None = typer.Argument(
+        None, metavar="[ID]", help="Element id to clear (or the selector value)."
+    ),
+    by: str | None = _SEL_BY,
+    rid: str | None = _SEL_RID,
+    text: str | None = _SEL_TEXT,
+    desc: str | None = _SEL_DESC,
+    index: int | None = _SEL_INDEX,
+    first: bool = _SEL_FIRST,
+    observe: bool = typer.Option(
+        True, "--observe/--no-observe", help="Also return the post-action screen."
+    ),
+    with_image: str | None = typer.Option(
+        None,
+        "--with-image",
+        metavar="[PATH]",
+        help="Also save the raw screenshot; bare flag uses a timestamped default path.",
+        show_default=False,
+    ),
+) -> None:
+    """Clear the text of an element (id or selector, same as ``tap``)."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        selector = _selector(
+            ident=ident, by=by, rid=rid, text=text, desc=desc, index=index, first=first
+        )
+        _emit(
+            _route(
+                engine,
+                "clear",
+                element_id=_element_id(ident, selector),
+                selector=selector,
+                observe=observe,
+                with_image=_annotate_arg(with_image),
+            ),
+            fmt,
+        )
+
+    _run(ctx, go)
+
+
+@app.command(cls=AnnotateCommand)
 def swipe(
     ctx: typer.Context,
-    direction: str | None = typer.Argument(None, help="up|down|left|right (or use --coords)."),
+    direction_arg: str | None = typer.Argument(
+        None, metavar="[DIRECTION]", help="up|down|left|right (or use --direction / --coords)."
+    ),
+    direction_opt: str | None = typer.Option(
+        None, "--direction", "-d", help="Same as the positional direction."
+    ),
     from_id: int | None = typer.Option(None, "--from", help="Anchor the swipe at this element."),
-    percent: int = typer.Option(50, "--percent", help="Swipe distance as a % of the screen."),
+    from_rid: str | None = typer.Option(
+        None, "--from-rid", help="Anchor the swipe at this resource-id (no analyze needed)."
+    ),
+    percent: int = typer.Option(
+        70, "--percent", help="Swipe distance as a % of the scrolled container."
+    ),
     coords: tuple[int, int, int, int] | None = typer.Option(
         None,
         "--coords",
@@ -566,8 +1025,25 @@ def swipe(
     observe: bool = typer.Option(
         True, "--observe/--no-observe", help="Also return the post-swipe screen."
     ),
+    verify: bool = typer.Option(
+        True, "--verify/--no-verify", help="Report whether the screen actually moved."
+    ),
+    with_image: str | None = typer.Option(
+        None,
+        "--with-image",
+        metavar="[PATH]",
+        help="Also save the raw screenshot; bare flag uses a timestamped default path.",
+        show_default=False,
+    ),
 ) -> None:
-    """Swipe in a direction (optionally from an element) or by explicit coordinates."""
+    """Swipe in a direction, from an element, or by explicit coordinates.
+
+    `aua swipe up` · `aua swipe --direction up` · `aua swipe --from-rid notificationList up`.
+    No anchor needed: the gesture is aimed at the scrollable container on screen rather than
+    the middle of the display, and ``detail`` reports ``moved``/``no-change`` so a swipe that
+    did nothing cannot look like a swipe that worked. For list scrolling prefer
+    ``aua scroll``, which turns that verdict into an exit code.
+    """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
         coord_tuple = tuple(coords) if coords is not None else None
@@ -575,11 +1051,14 @@ def swipe(
             _route(
                 engine,
                 "swipe",
-                direction=direction,
+                direction=direction_arg or direction_opt,
                 from_id=from_id,
+                selector=_selector(rid=from_rid),
                 percent=percent,
                 coords=coord_tuple,
                 observe=observe,
+                verify=verify,
+                with_image=_annotate_arg(with_image),
             ),
             fmt,
         )
@@ -587,10 +1066,80 @@ def swipe(
     _run(ctx, go)
 
 
-@app.command(name="scroll-to")
+@app.command(cls=AnnotateCommand)
+def scroll(
+    ctx: typer.Context,
+    direction_arg: str | None = typer.Argument(
+        None, metavar="[DIRECTION]", help="up|down|left|right (default: up, i.e. further down)."
+    ),
+    direction_opt: str | None = typer.Option(
+        None, "--direction", "-d", help="Same as the positional direction."
+    ),
+    pages: int = typer.Option(1, "--pages", help="Scroll this many screenfuls."),
+    to_end: bool = typer.Option(False, "--to-end", help="Scroll until nothing moves any more."),
+    to_start: bool = typer.Option(False, "--to-start", help="Scroll back to the top/start."),
+    from_id: int | None = typer.Option(None, "--from", help="Scroll the container at this element."),
+    in_rid: str | None = typer.Option(
+        None, "--in-rid", help="Scroll the container at this resource-id."
+    ),
+    percent: int = typer.Option(70, "--percent", help="Travel per step as a % of the container."),
+    max_steps: int = typer.Option(25, "--max-steps", help="Safety cap for --to-end/--to-start."),
+    observe: bool = typer.Option(
+        True, "--observe/--no-observe", help="Also return the screen after scrolling."
+    ),
+    with_image: str | None = typer.Option(
+        None,
+        "--with-image",
+        metavar="[PATH]",
+        help="Also save the raw screenshot; bare flag uses a timestamped default path.",
+        show_default=False,
+    ),
+) -> None:
+    """Scroll a container and say what happened — verified, with a real exit code.
+
+    `aua scroll up` · `aua scroll --pages 3` · `aua scroll --to-end` · `aua scroll --to-start`.
+    ``detail`` starts with the outcome: ``moved`` · ``reached-end`` · ``already-at-end``.
+    A scroll that moved nothing exits 6 (except with ``--to-end/--to-start``, where already
+    being at the end is success), so "nothing left to scroll" is never confused with
+    "my swipe missed the list".
+    """
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        result = _route(
+            engine,
+            "scroll",
+            direction=direction_arg or direction_opt,
+            pages=pages,
+            to_end=to_end,
+            to_start=to_start,
+            from_id=from_id,
+            selector=_selector(rid=in_rid),
+            percent=percent,
+            max_steps=max_steps,
+            observe=observe,
+            with_image=_annotate_arg(with_image),
+        )
+        _emit(result, fmt)
+        _exit_unless_ok(
+            result,
+            ExitCode.NOT_FOUND,
+            code="scroll_no_movement",
+            hint="`already-at-end` means there is nothing more in that direction; "
+            "`scrollable=false` means no scrollable container was found on this screen.",
+        )
+
+    _run(ctx, go)
+
+
+@app.command(name="scroll-to", cls=AnnotateCommand)
 def scroll_to(
     ctx: typer.Context,
-    text: str = typer.Argument(..., help="Text or resource-id to scroll to."),
+    text: str | None = typer.Argument(
+        None, metavar="[TEXT]", help="Text or resource-id to scroll to (or use --rid)."
+    ),
+    rid: str | None = typer.Option(
+        None, "--rid", help="Scroll to this resource-id (same as `--by id <TEXT>`)."
+    ),
     match: str = typer.Option("contains", "--match", help="exact|contains|regex."),
     ignore_case: bool = typer.Option(False, "--ignore-case", help="Case-insensitive match."),
     observe: bool = typer.Option(
@@ -599,27 +1148,122 @@ def scroll_to(
         help="Also return the screen after scrolling (skips a follow-up analyze).",
     ),
     by: str = typer.Option("text", "--by", help="Match by: text (default) | id | desc."),
+    direction: str = typer.Option("up", "--direction", "-d", help="Scroll this way while looking."),
+    max_swipes: int = typer.Option(10, "--max-swipes", help="Give up after this many steps."),
+    percent: int = typer.Option(70, "--percent", help="Travel per step as a % of the container."),
+    with_image: str | None = typer.Option(
+        None,
+        "--with-image",
+        metavar="[PATH]",
+        help="Also save the raw screenshot; bare flag uses a timestamped default path.",
+        show_default=False,
+    ),
 ) -> None:
-    """Scroll the container until an element appears (or the swipe limit is hit)."""
+    """Scroll until something is on screen, verifying every step actually moved.
+
+    `aua scroll-to "Red Square Tap"` · `aua scroll-to --rid notificationRow_7`.
+    ``detail`` starts with the outcome: ``already-visible`` · ``moved`` (with ``dy``) ·
+    ``already-at-end`` (nothing scrolled, so it is not on this screen) ·
+    ``target-not-found`` (scrolled the whole way, never saw it). The last two exit 6, so a
+    miss is no longer reported as a silent success.
+    """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(
-            _route(
-                engine,
-                "scroll_to",
-                query=text,
-                match=match,
-                ignore_case=ignore_case,
-                observe=observe,
-                by=by,
-            ),
-            fmt,
+        query = rid or text
+        if not query:
+            raise UsageError(
+                "scroll-to needs the text to look for (or --rid)",
+                hint='e.g. `aua scroll-to "Red Square Tap"`',
+            )
+        result = _route(
+            engine,
+            "scroll_to",
+            query=query,
+            match=match,
+            ignore_case=ignore_case,
+            observe=observe,
+            by="id" if rid else by,
+            direction=direction,
+            max_swipes=max_swipes,
+            percent=percent,
+            with_image=_annotate_arg(with_image),
+        )
+        _emit(result, fmt)
+        _exit_unless_ok(
+            result,
+            ExitCode.NOT_FOUND,
+            code="selector_not_found",
+            hint="`already-at-end` means the screen never scrolled (it is not there); "
+            "`target-not-found` means it scrolled the whole way without finding it.",
         )
 
     _run(ctx, go)
 
 
 @app.command()
+def expect(
+    ctx: typer.Context,
+    rid: str | None = typer.Option(None, "--rid", help="Assert about this resource-id."),
+    text: str | None = typer.Option(None, "--text", help="Assert about this label."),
+    desc: str | None = typer.Option(None, "--desc", help="Assert about this content-desc."),
+    exists: bool = typer.Option(False, "--exists", help="It must be on screen (the default)."),
+    absent: bool = typer.Option(False, "--absent", help="It must NOT be on screen."),
+    text_is: str | None = typer.Option(None, "--text-is", help="Its label must equal this."),
+    text_contains: str | None = typer.Option(
+        None, "--text-contains", help="Its label must contain this."
+    ),
+    checked: bool | None = typer.Option(
+        None, "--checked/--unchecked", help="Toggle/checkbox state."
+    ),
+    enabled: bool | None = typer.Option(None, "--enabled/--disabled", help="Enabled state."),
+    selected: bool | None = typer.Option(
+        None, "--selected/--unselected", help="Selected state (tabs)."
+    ),
+    index: int | None = _SEL_INDEX,
+    first: bool = _SEL_FIRST,
+    timeout: int = typer.Option(
+        0, "--timeout", "--timeout-ms", help="Poll until it holds, up to this many ms."
+    ),
+) -> None:
+    """Assert one thing about the screen. Exit 0 = pass, 8 = the assertion failed.
+
+    `aua expect --rid appsHubNotifications --exists` ·
+    `aua expect --text "Loading" --absent --timeout 5000` ·
+    `aua expect --rid creationDetailLike --text-is "7"` ·
+    `aua expect --rid notificationPushToggleActivitySwitch --checked`
+
+    One acceptance criterion per call, so a criteria list becomes a script instead of a pile
+    of eyeballed screenshots. Exit 8 is a *test* failure and stays distinct from 3 (device)
+    and 6 (a selector that matches nothing). On failure stderr says what was sought, what
+    was actually there, and the nearest candidates. ``--timeout`` polls — it is what
+    replaces a ``sleep`` guess.
+    """
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        result = _route(
+            engine,
+            "expect",
+            rid=rid,
+            text=text,
+            desc=desc,
+            exists=exists,
+            absent=absent,
+            text_is=text_is,
+            text_contains=text_contains,
+            checked=checked,
+            enabled=enabled,
+            selected=selected,
+            index=index,
+            first=first,
+            timeout_ms=timeout,
+        )
+        _emit(result, fmt)
+        _exit_unless_ok(result, ExitCode.ASSERTION, code="expectation_failed")
+
+    _run(ctx, go)
+
+
+@app.command(cls=AnnotateCommand)
 def key(
     ctx: typer.Context,
     name: str = typer.Argument(..., help="back|home|enter|recents|KEYCODE_*."),
@@ -628,32 +1272,129 @@ def key(
         "--observe/--no-observe",
         help="Also return the screen after the key (skips a follow-up analyze).",
     ),
+    with_image: str | None = typer.Option(
+        None,
+        "--with-image",
+        metavar="[PATH]",
+        help="Also save the raw screenshot; bare flag uses a timestamped default path.",
+        show_default=False,
+    ),
 ) -> None:
     """Press a hardware/navigation key."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(_route(engine, "key", name=name, observe=observe), fmt)
+        _emit(
+            _route(
+                engine,
+                "key",
+                name=name,
+                observe=observe,
+                with_image=_annotate_arg(with_image),
+            ),
+            fmt,
+        )
+
+    _run(ctx, go)
+
+
+@app.command(name="hide-keyboard", cls=AnnotateCommand)
+def hide_keyboard(
+    ctx: typer.Context,
+    observe: bool = typer.Option(
+        True,
+        "--observe/--no-observe",
+        help="Also return the screen after dismissing the keyboard.",
+    ),
+    with_image: str | None = typer.Option(
+        None,
+        "--with-image",
+        metavar="[PATH]",
+        help="Also save the raw screenshot; bare flag uses a timestamped default path.",
+        show_default=False,
+    ),
+) -> None:
+    """Dismiss the soft keyboard (prefer this over ``key back`` when the IME is up)."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(
+            _route(
+                engine,
+                "hide_keyboard",
+                observe=observe,
+                with_image=_annotate_arg(with_image),
+            ),
+            fmt,
+        )
+
+    _run(ctx, go)
+
+
+@app.command(cls=AnnotateCommand)
+def open(  # noqa: A001 - matches the user-facing verb `aua open`
+    ctx: typer.Context,
+    uri: str = typer.Argument(..., help="Deeplink URI, e.g. 'luzia-test://set-flags?foo=a'."),
+    app_pkg: str | None = typer.Option(
+        None,
+        "--app",
+        "--package",
+        help="Target package — skips the system 'Open with…' chooser when set.",
+    ),
+    prefer: str | None = typer.Option(
+        None,
+        "--prefer",
+        help="If a chooser still appears, auto-pick the row matching this package/label.",
+    ),
+    observe: bool = typer.Option(
+        True, "--observe/--no-observe", help="Also return the screen after opening."
+    ),
+    with_image: str | None = typer.Option(
+        None,
+        "--with-image",
+        metavar="[PATH]",
+        help="Also save the raw screenshot; bare flag uses a timestamped default path.",
+        show_default=False,
+    ),
+) -> None:
+    """Open a deeplink — jump straight to a screen or trigger an app action (latency shortcut).
+
+    Pass ``--app <package>`` to avoid Android's "Open with…" dialog on the emulator.
+    The deeplink is remembered in the app's playbook (`aua map`) so it can be reused.
+    """
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(
+            _route(
+                engine,
+                "open_link",
+                uri=uri,
+                package=app_pkg,
+                prefer=prefer,
+                observe=observe,
+                with_image=_annotate_arg(with_image),
+            ),
+            fmt,
+        )
 
     _run(ctx, go)
 
 
 @app.command()
-def open(  # noqa: A001 - matches the user-facing verb `aua open`
+def resolve(
     ctx: typer.Context,
-    uri: str = typer.Argument(..., help="Deeplink URI, e.g. 'luzia-test://set-flags?foo=a'."),
-    observe: bool = typer.Option(
-        True, "--observe/--no-observe", help="Also return the screen after opening."
+    target: str = typer.Argument(
+        ...,
+        help="Previous-frame element id (integer) or a stable_key (e.g. rid:continue_btn).",
     ),
 ) -> None:
-    """Open a deeplink — jump straight to a screen or trigger an app action (latency shortcut).
+    """Remap a prior id or ``stable_key`` onto the current screen (cross-frame binding).
 
-    The deeplink is remembered in the app's playbook (`aua map`) so it can be reused. Many
-    deeplinks (e.g. setting feature flags) need an app restart to take effect — follow with
-    `aua app stop <pkg>` + `aua app launch <pkg>` if the change doesn't appear.
+    Integer ids are rewritten every analyze; ``stable_key`` survives. Use this after a
+    state-changing action when you still hold an old id.
     """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(_route(engine, "open_link", uri=uri, observe=observe), fmt)
+        result = engine.resolve(target)
+        _emit(result, fmt)
 
     _run(ctx, go)
 
@@ -834,23 +1575,283 @@ def devices(ctx: typer.Context) -> None:
 @app.command(name="app")
 def app_cmd(
     ctx: typer.Context,
-    action: str = typer.Argument(..., metavar="ACTION", help="foreground|launch|stop|current."),
-    package: str | None = typer.Argument(None, metavar="[PKG]", help="Package for launch/stop."),
+    action: str = typer.Argument(
+        ...,
+        metavar="ACTION",
+        help="foreground|launch|stop|kill|clear|grant|current.",
+    ),
+    package: str | None = typer.Argument(
+        None, metavar="[PKG]", help="Package for launch/stop/kill/clear/grant."
+    ),
     activity: str | None = typer.Option(
         None,
         "--activity",
         help="launch: pin the entry Activity (e.g. .LaunchActivity) on multi-launcher builds.",
+    ),
+    clear_state: bool = typer.Option(
+        False,
+        "--clear",
+        help="launch: wipe app data first (Maestro launchApp clearState).",
     ),
 ) -> None:
     """Inspect or control the foreground app.
 
     Some dev builds have several launcher activities (a Dev Tools menu next to the real
     entry), so a bare `launch` opens the wrong one nondeterministically — pass
-    ``--activity`` to pin it.
+    ``--activity`` to pin it. ``clear`` wipes app data (Maestro ``clearState``); ``grant``
+    auto-grants declared runtime permissions so agents skip the system permission sheets.
     """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(engine.app(action, package=package, activity=activity), fmt)
+        _emit(
+            engine.app(
+                action, package=package, activity=activity, clear_state=clear_state
+            ),
+            fmt,
+        )
+
+    _run(ctx, go)
+
+
+clipboard_app = typer.Typer(help="Clipboard — Maestro setClipboard / copyTextFrom / pasteText.")
+app.add_typer(clipboard_app, name="clipboard")
+
+
+@clipboard_app.command("set")
+def clipboard_set(ctx: typer.Context, text: str = typer.Argument(..., help="Text to copy.")) -> None:
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.clipboard_set(text), fmt)
+
+    _run(ctx, go)
+
+
+@clipboard_app.command("get")
+def clipboard_get(ctx: typer.Context) -> None:
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.clipboard_get(), fmt)
+
+    _run(ctx, go)
+
+
+@app.command(cls=AnnotateCommand)
+def paste(
+    ctx: typer.Context,
+    observe: bool = typer.Option(True, "--observe/--no-observe"),
+    with_image: str | None = typer.Option(None, "--with-image", metavar="[PATH]", show_default=False),
+) -> None:
+    """Paste the clipboard into the focused field (Maestro pasteText)."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.paste(observe=observe, with_image=_annotate_arg(with_image)), fmt)
+
+    _run(ctx, go)
+
+
+@app.command(cls=AnnotateCommand)
+def copy(
+    ctx: typer.Context,
+    ident: str | None = typer.Argument(None, metavar="[ID]"),
+    by: str | None = _SEL_BY,
+    rid: str | None = _SEL_RID,
+    text: str | None = _SEL_TEXT,
+    desc: str | None = _SEL_DESC,
+    index: int | None = _SEL_INDEX,
+    first: bool = _SEL_FIRST,
+) -> None:
+    """Copy an element's text/content-desc to the clipboard (Maestro copyTextFrom)."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        selector = _selector(
+            ident=ident, by=by, rid=rid, text=text, desc=desc, index=index, first=first
+        )
+        _emit(
+            engine.copy_text(element_id=_element_id(ident, selector), selector=selector),
+            fmt,
+        )
+
+    _run(ctx, go)
+
+
+@app.command(cls=AnnotateCommand)
+def erase(
+    ctx: typer.Context,
+    ident: str | None = typer.Argument(None, metavar="[ID]"),
+    by: str | None = _SEL_BY,
+    rid: str | None = _SEL_RID,
+    text: str | None = _SEL_TEXT,
+    desc: str | None = _SEL_DESC,
+    index: int | None = _SEL_INDEX,
+    first: bool = _SEL_FIRST,
+    chars: int | None = typer.Option(
+        None, "--chars", help="Delete this many characters; omit to clear the whole field."
+    ),
+    observe: bool = typer.Option(True, "--observe/--no-observe"),
+    with_image: str | None = typer.Option(None, "--with-image", metavar="[PATH]", show_default=False),
+) -> None:
+    """Erase text in a field (Maestro eraseText)."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        selector = _selector(
+            ident=ident, by=by, rid=rid, text=text, desc=desc, index=index, first=first
+        )
+        _emit(
+            engine.erase(
+                _element_id(ident, selector),
+                selector=selector,
+                chars=chars,
+                observe=observe,
+                with_image=_annotate_arg(with_image),
+            ),
+            fmt,
+        )
+
+    _run(ctx, go)
+
+
+location_app = typer.Typer(help="GPS mock location (Maestro setLocation).")
+app.add_typer(location_app, name="location")
+
+
+@location_app.command("set")
+def location_set(
+    ctx: typer.Context,
+    coords: str = typer.Argument(..., help="LAT,LON (e.g. 37.42,-122.08)."),
+) -> None:
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        parts = [p.strip() for p in coords.split(",") if p.strip()]
+        if len(parts) != 2:
+            raise UsageError(
+                "location needs LAT,LON", hint="e.g. `aua location set 37.42,-122.08`"
+            )
+        lat, lon = float(parts[0]), float(parts[1])
+        _emit(engine.location_set(lat, lon), fmt)
+
+    _run(ctx, go)
+
+
+orientation_app = typer.Typer(help="Screen orientation (Maestro setOrientation).")
+app.add_typer(orientation_app, name="orientation")
+
+
+@orientation_app.command("set")
+def orientation_set_cmd(
+    ctx: typer.Context,
+    mode: str = typer.Argument(..., help="portrait|landscape|left|right|natural."),
+) -> None:
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.orientation_set(mode), fmt)
+
+    _run(ctx, go)
+
+
+@orientation_app.command("get")
+def orientation_get_cmd(ctx: typer.Context) -> None:
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.orientation_get(), fmt)
+
+    _run(ctx, go)
+
+
+airplane_app = typer.Typer(help="Airplane mode (Maestro setAirplaneMode).")
+app.add_typer(airplane_app, name="airplane")
+
+
+@airplane_app.command("on")
+def airplane_on(ctx: typer.Context) -> None:
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.airplane_set(True), fmt)
+
+    _run(ctx, go)
+
+
+@airplane_app.command("off")
+def airplane_off(ctx: typer.Context) -> None:
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.airplane_set(False), fmt)
+
+    _run(ctx, go)
+
+
+@airplane_app.command("toggle")
+def airplane_toggle_cmd(ctx: typer.Context) -> None:
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.airplane_toggle(), fmt)
+
+    _run(ctx, go)
+
+
+media_app = typer.Typer(help="Push media into the device gallery (Maestro addMedia).")
+app.add_typer(media_app, name="media")
+
+
+@media_app.command("add")
+def media_add_cmd(
+    ctx: typer.Context,
+    path: str = typer.Argument(..., help="Local image/video file to push."),
+    remote_dir: str = typer.Option(
+        "/sdcard/DCIM/Camera", "--dir", help="Remote folder under which to store the file."
+    ),
+) -> None:
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.media_add(path, remote_dir=remote_dir), fmt)
+
+    _run(ctx, go)
+
+
+record_app = typer.Typer(help="Screen recording (Maestro startRecording / stopRecording).")
+app.add_typer(record_app, name="record")
+
+
+@record_app.command("start")
+def record_start_cmd(
+    ctx: typer.Context,
+    remote: str = typer.Option(
+        "/sdcard/aua_recording.mp4", "--remote", help="Path on the device while recording."
+    ),
+) -> None:
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.record_start(remote), fmt)
+
+    _run(ctx, go)
+
+
+@record_app.command("stop")
+def record_stop_cmd(
+    ctx: typer.Context,
+    path: str = typer.Argument(..., help="Local path to save the MP4."),
+) -> None:
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.record_stop(path), fmt)
+
+    _run(ctx, go)
+
+
+clock_app = typer.Typer(help="Device clock (Maestro travel).")
+app.add_typer(clock_app, name="clock")
+
+
+@clock_app.command("set")
+def clock_set_cmd(
+    ctx: typer.Context,
+    ms: int = typer.Option(..., "--ms", help="Unix timestamp in milliseconds."),
+) -> None:
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.clock_set(timestamp_ms=ms), fmt)
+
+    _run(ctx, go)
+
+
+@app.command()
+def orient(ctx: typer.Context) -> None:
+    """What the tool already knows about the foreground app (playbook, deeplinks, recipes).
+
+    This is the orientation blob ``daemon start`` prints. It is worth reading once per
+    session and is pure noise afterwards, so it lives here too — start the daemon with
+    ``--quiet`` and call this when you actually want it.
+    """
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(_route(engine, "orient"), fmt)
 
     _run(ctx, go)
 
@@ -859,6 +1860,12 @@ def app_cmd(
 def daemon(
     ctx: typer.Context,
     action: str = typer.Argument(..., help="start|stop|status."),
+    quiet: bool = typer.Option(
+        False,
+        "--quiet",
+        "-q",
+        help="On start, skip the app orientation blob (get it later with `aua orient`).",
+    ),
 ) -> None:
     """Manage the optional warm-state daemon (§10)."""
 
@@ -883,11 +1890,13 @@ def daemon(
             }
             # Best-effort: surface what we already know about the foreground app, so an
             # agent that starts the daemon first immediately sees the map + top gotos.
-            if daemon_mod.is_running(cfg):
+            if daemon_mod.is_running(cfg) and not quiet:
                 try:
                     out["orientation"] = _route(engine, "orient")
                 except Exception:  # noqa: BLE001 - orientation is purely advisory
                     logger.debug("daemon-start orientation unavailable")
+            elif quiet:
+                out["hint"] = "orientation suppressed; run `aua orient` for the app playbook"
         elif a == "stop":
             daemon_mod.stop(cfg)
             out = {"ok": True, "action": "daemon-stop"}

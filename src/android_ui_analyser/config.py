@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
@@ -54,9 +54,19 @@ class GateCfg(BaseModel):
     soft_min_labeled_ratio: float = 0.3
 
 
+class WebviewCfg(BaseModel):
+    """Try WebView DOM/a11y enrichment before escalating hollow WebViews to OCR."""
+
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = True
+    cdp: bool = False  # probe Chrome DevTools on :9222 when hierarchy children are empty
+    min_elements: int = 3  # enrichment "good enough" to skip vision
+
+
 class PerceptionCfg(BaseModel):
     model_config = ConfigDict(extra="forbid")
     gate: GateCfg = Field(default_factory=GateCfg)
+    webview: WebviewCfg = Field(default_factory=WebviewCfg)
 
 
 class RoutingCfg(BaseModel):
@@ -77,6 +87,8 @@ class OutputCfg(BaseModel):
     model_config = ConfigDict(extra="forbid")
     format: OutputFormat = OutputFormat.json
     annotate: bool = False
+    # Session default for analyze/actions — per-call --with-image overrides when set.
+    with_image: bool | str = False
 
 
 class _ChainCfg(BaseModel):
@@ -135,6 +147,8 @@ class MemoryCfg(BaseModel):
     enabled: bool = True
     auto_record: bool = True  # record screens + route edges on every analyze/action
     dir: str = "~/.android-ui-analyser"
+    backend: Literal["json", "sqlite"] = "json"  # storage for AppMap + SessionState
+    sqlite_path: str = "~/.android-ui-analyser/memory.db"  # used when backend=sqlite
     drift_threshold: float = 0.3  # signature divergence that flags a screen stale
     redact: bool = True  # never store secrets / PII / EditText values verbatim
     suggest: bool = True  # push known_routes/suggested_gotos/map_hint inline into analyze

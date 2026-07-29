@@ -22,9 +22,15 @@ from typing import Any, NamedTuple
 from . import routing
 from .config import Config
 from .device import Device, connect, list_devices
-from .errors import ElementNotFoundError, ProviderError, StabilityTimeout, UsageError
+from .errors import (
+    ElementNotFoundError,
+    ProviderError,
+    SelectorAmbiguousError,
+    SelectorNotFoundError,
+    StabilityTimeout,
+    UsageError,
+)
 from .memory import (
-    REDACT_TOKENS,
     AppMemoryStore,
     NavHints,
     RouteStep,
@@ -47,11 +53,30 @@ from .schema import (
     MatchMode,
     Meta,
     PathKind,
+    ResolveResult,
     Screen,
     ScreenSource,
     Source,
     Tier,
     center_of,
+)
+from .scroll_geom import (
+    Box,
+    Sample,
+    _contains,
+    _iter_nodes,
+    _node_box,
+    region_probe,
+    scrollable_boxes,
+    travel,
+)
+from .selectors import (
+    _MAX_CANDIDATES,
+    _match_step,
+    element_digest,
+    match_selector,
+    nearest_elements,
+    selector_label,
 )
 
 logger = logging.getLogger("android_ui_analyser.engine")
@@ -92,42 +117,6 @@ def _parse_legacy_steps(action: str) -> list[RouteStep] | None:
     if m is None:
         return None
     return [RouteStep(kind="tap", label=m.group(1))]
-
-
-def _match_step(elements: list[Element], step: RouteStep) -> Element | None:
-    """Resolve a step's target element: resource-id tail first, then label.
-
-    Redacted labels never match — a step whose only identity was PII hands off rather
-    than guessing. Label matching keeps the legacy tolerance (exact, then
-    prefix/substring for truncation drift).
-    """
-    rid = (step.resource_id or "").lower()
-    if rid:
-        matches = [
-            e
-            for e in elements
-            if e.resource_id and e.resource_id.split("/")[-1].strip().lower() == rid
-        ]
-        if matches:
-            matches.sort(
-                key=lambda e: (
-                    not e.clickable,
-                    (e.bounds[2] - e.bounds[0]) * (e.bounds[3] - e.bounds[1]),
-                )
-            )
-            return matches[0]
-    label = (step.label or "").strip()
-    if not label or label in REDACT_TOKENS:
-        return None
-    for e in elements:  # exact text / content-desc match first
-        if (e.text or e.content_desc or "") == label:
-            return e
-    low = label.lower()
-    for e in elements:  # tolerate truncation / case drift on long labels
-        t = (e.text or e.content_desc or "").lower()
-        if t and (t.startswith(low) or low in t):
-            return e
-    return None
 
 
 class StepFailure(NamedTuple):
@@ -179,6 +168,29 @@ def _goto_handoff(
     return out
 
 
+def detail_tokens(outcome: str, **fields: Any) -> str:
+    """``"moved steps=3 dy=1420"`` — outcome first, then ``k=v`` pairs.
+
+    ``ActionResult`` is a frozen schema owned elsewhere, so scroll/expect verdicts ride in
+    ``detail``. Outcome-first keeps it greppable (``grep -q target-not-found``) and the
+    tokens keep it parseable; the exit code stays the primary signal.
+    """
+    parts = [outcome]
+    parts += [f"{k}={v}" for k, v in fields.items() if v is not None]
+    return " ".join(parts)
+
+
+# u2 accepts these names (plus KEYCODE_* / a numeric keycode); anything else reaches the
+# device as a no-op-or-crash, so it is rejected up front rather than looking like it worked.
+_KEY_NAMES = frozenset(
+    {
+        "home", "back", "left", "right", "up", "down", "center", "menu", "search",
+        "enter", "delete", "del", "recent", "recents", "volume_up", "volume_down",
+        "volume_mute", "camera", "power",
+    }
+)
+
+
 class Engine:
     def __init__(
         self,
@@ -192,6 +204,18 @@ class Engine:
         self.factory = factory or ProviderFactory(config)
         self._mem: AppMemoryStore | None = None
         self._version_cache: dict[str, str | None] = {}
+        # Session default for --with-image (CLI global / MCP configure); per-call wins.
+        self._default_with_image: bool | str | None = (
+            config.output.with_image if config.output.with_image else None
+        )
+
+    def _effective_with_image(self, with_image: bool | str | None) -> bool | str | None:
+        """Per-call ``with_image`` overrides the session default; ``False`` forces off."""
+        if with_image is False:
+            return None
+        if with_image is not None:
+            return with_image
+        return self._default_with_image
 
     # ----------------------------------------------------------------- device
 
@@ -286,12 +310,30 @@ class Engine:
         with_ocr: bool | None = None,
         query: str | None = None,
         annotate: bool | str | None = None,
+        with_image: bool | str | None = None,
         strategy: str | None = None,
         cheap: bool = False,
         deep: bool = False,
         no_cache: bool = False,
         record: bool = True,
     ) -> AnalyzeResult:
+        wi = self._effective_with_image(with_image)
+        if wi:
+            return self._with_raw_image(
+                self.analyze(
+                    source=source,
+                    with_ocr=with_ocr,
+                    query=query,
+                    annotate=annotate,
+                    strategy=strategy,
+                    cheap=cheap,
+                    deep=deep,
+                    no_cache=no_cache,
+                    record=record,
+                    with_image=False,  # already applying session/per-call image below
+                ),
+                wi,
+            )
         ceiling = routing.resolve_ceiling(self.config.routing.max_tier, cheap=cheap, deep=deep)
         force_hier, force_vis, pin_grounding = self._resolve_pins(source, strategy)
         # An explicit --strategy pin is a per-call opt-in: raise the ceiling so the pinned
@@ -351,13 +393,46 @@ class Engine:
             elements, package = self._capture_hierarchy(device, w, h)
 
         use_vision = force_vision
+        xml_dump: str | None = None
         if not force_vision and not force_hierarchy:
             decision = gate.decide(
                 elements, package=package, activity=activity, cfg=self.config.perception.gate
             )
             if decision.use_vision and routing.allows(Tier.vision, ceiling):
-                use_vision = True
-                logger.info("gate → vision: %s", decision.reason)
+                # Prefer WebView DOM/a11y enrichment over OCR when the tree looks hollow.
+                wv_cfg = self.config.perception.webview
+                if wv_cfg.enabled:
+                    from . import webview as webview_mod
+
+                    xml_dump = device.dump_hierarchy()
+                    if webview_mod.should_try_webview(elements, xml_dump):
+                        shell = None
+                        if wv_cfg.cdp:
+                            shell = lambda cmd: str(device.shell(cmd) if hasattr(device, "shell") else "")  # noqa: E731
+                        enriched = webview_mod.enrich(
+                            xml_dump,
+                            screen_size=(w, h),
+                            shell=shell,
+                            cdp=wv_cfg.cdp,
+                        )
+                        if len(enriched) >= wv_cfg.min_elements:
+                            elements = enriched
+                            screen_source = ScreenSource.hierarchy
+                            path = PathKind.hierarchy
+                            providers_used.append("webview")
+                            logger.info(
+                                "webview enrichment: %d elements (skipping vision)", len(enriched)
+                            )
+                            use_vision = False
+                        else:
+                            use_vision = True
+                            logger.info("gate → vision: %s", decision.reason)
+                    else:
+                        use_vision = True
+                        logger.info("gate → vision: %s", decision.reason)
+                else:
+                    use_vision = True
+                    logger.info("gate → vision: %s", decision.reason)
             elif decision.use_vision:
                 logger.info("gate wants vision but ceiling=%s; staying hierarchy", ceiling.value)
 
@@ -961,6 +1036,53 @@ class Engine:
                 if not self.has(s.arg, timeout_ms=s.timeout_ms or 0, by=s.by or "text").found:
                     return StepFailure("assert_failed", i, s), res
                 reanalyze = False  # pure check, screen unchanged
+            elif kind == "assert-not-visible":
+                if not s.arg:
+                    return StepFailure("unsupported_action", i, s), res
+                if self.has(s.arg, timeout_ms=s.timeout_ms or 0, by=s.by or "text").found:
+                    return StepFailure("assert_failed", i, s), res
+                reanalyze = False
+            elif kind == "hide-keyboard":
+                self.hide_keyboard(observe=False)
+            elif kind == "paste":
+                self.paste(observe=False)
+            elif kind == "repeat":
+                times = max(1, s.repeat or 1)
+                for _ in range(times):
+                    subfail, res = self._run_steps(
+                        s.substeps,
+                        origin_package=origin_package,
+                        allow_destructive=allow_destructive,
+                        allow_goto_steps=allow_goto_steps,
+                        scroll_fallback=scroll_fallback,
+                        res=res,
+                        executed=executed,
+                        flow_depth=flow_depth,
+                    )
+                    if subfail is not None:
+                        return subfail, res
+                reanalyze = False
+                settle = False
+            elif kind == "retry":
+                attempts = max(1, s.max_retries or 3)
+                subfail: StepFailure | None = StepFailure("assert_failed", i, s)
+                for _ in range(attempts):
+                    subfail, res = self._run_steps(
+                        s.substeps,
+                        origin_package=origin_package,
+                        allow_destructive=allow_destructive,
+                        allow_goto_steps=allow_goto_steps,
+                        scroll_fallback=scroll_fallback,
+                        res=res,
+                        executed=executed,
+                        flow_depth=flow_depth,
+                    )
+                    if subfail is None:
+                        break
+                if subfail is not None:
+                    return subfail, res
+                reanalyze = False
+                settle = False
             elif kind == "goto":
                 if not allow_goto_steps or not s.arg:
                     return StepFailure("unsupported_action", i, s), res
@@ -1889,7 +2011,9 @@ class Engine:
 
     # ----------------------------------------------------------------- actions
 
-    def _observe(self, result: ActionResult, observe: bool) -> ActionResult:
+    def _observe(
+        self, result: ActionResult, observe: bool, with_image: bool | str | None = None
+    ) -> ActionResult:
         """Attach the post-action screen so callers skip a separate ``analyze`` round-trip.
 
         The folded ``analyze`` also re-populates the id cache, so the agent can act on an id
@@ -1897,7 +2021,11 @@ class Engine:
         """
         if observe:
             with contextlib.suppress(Exception):  # observation is a bonus; never fail the action
-                obs = self.analyze(source="hierarchy", record=False)
+                obs = self.analyze(
+                    source="hierarchy",
+                    record=False,
+                    with_image=self._effective_with_image(with_image),
+                )
                 result.observation = obs
                 mem = self._memory
                 if mem is not None and self._device is not None:
@@ -1915,32 +2043,209 @@ class Engine:
                             obs.meta.known_screen = known
         return result
 
-    def tap(self, element_id: int, *, observe: bool = True) -> ActionResult:
-        el = self._resolve(element_id)
+    def resolve(
+        self,
+        target: str | int,
+        *,
+        fresh: bool = True,
+    ) -> ResolveResult:
+        """Remap a previous-frame id or ``stable_key`` onto the current screen.
+
+        Integer ids die on every re-analyze; ``stable_key`` (and this remapper) survive.
+        """
+        from .identity import find_by_stable_key, remap_ids, stable_key
+
+        cached = self._read_cache()
+        current = (
+            self.analyze(source="auto", record=False) if fresh or cached is None else cached
+        )
+
+        from_id: int | None = None
+        key: str | None = None
+        if isinstance(target, int) or (isinstance(target, str) and target.isdigit()):
+            from_id = int(target)
+            if cached is not None:
+                prev = cached.element_by_id(from_id)
+                if prev is not None:
+                    key = prev.stable_key or stable_key(prev)
+                    mapping = remap_ids(cached.elements, current.elements)
+                    if from_id in mapping:
+                        to_id = mapping[from_id]
+                        el = current.element_by_id(to_id)
+                        return ResolveResult(
+                            ok=True,
+                            from_id=from_id,
+                            to_id=to_id,
+                            stable_key=key,
+                            element=el,
+                        )
+            # Fall through: treat as missing and try key from fresh screen? No — id unknown.
+            raise ElementNotFoundError(
+                f"could not resolve id {from_id} onto the current screen",
+                hint="Re-analyze after the screen changes, or pass a stable_key (rid:…).",
+            )
+
+        key = str(target).strip()
+        hits = find_by_stable_key(current.elements, key)
+        if len(hits) == 1:
+            el = hits[0]
+            return ResolveResult(
+                ok=True, from_id=from_id, to_id=el.id, stable_key=key, element=el
+            )
+        if not hits:
+            raise ElementNotFoundError(
+                f"no element with stable_key {key!r} on the current screen",
+                hint="Run `aua analyze` and use the element's stable_key, or a prior id.",
+            )
+        raise SelectorAmbiguousError(
+            f"stable_key {key!r} matched {len(hits)} elements",
+            hint="Disambiguate with --rid/--text or inspect the screen.",
+        )
+
+    def resolve_selector(
+        self,
+        *,
+        rid: str | None = None,
+        text: str | None = None,
+        desc: str | None = None,
+        index: int | None = None,
+        first: bool = False,
+        fresh: bool = True,
+    ) -> Element:
+        """Resolve a one-shot selector to a single element, in this one call.
+
+        Element ids die the moment the screen changes, so ``analyze`` → grep → ``tap <id>``
+        is three round-trips whose middle step the caller has to hand-write. Resolving
+        server-side collapses that to one, and the re-analyze also refreshes the id cache
+        so ids in the returned observation are immediately usable.
+
+        Raises rather than guessing: :class:`SelectorNotFoundError` on no match (with the
+        nearest candidates), :class:`SelectorAmbiguousError` on several (with all of them).
+        A silent pick is indistinguishable from "the app ignored a valid tap".
+        """
+        selector = {"rid": rid, "text": text, "desc": desc}
+        given = [field for field, value in selector.items() if value]
+        if len(given) != 1:
+            raise UsageError(
+                "give exactly one selector: --rid <resource-id> | --text <label> | --desc <desc>",
+                hint="e.g. `aua tap --rid appsHubNotifications` or `aua tap --text 'Create an app'`",
+            )
+        cached = None if fresh else self._read_cache()
+        result = cached if cached is not None else self.analyze(source="hierarchy", record=False)
+        elements = result.elements
+        matches = match_selector(elements, rid=rid, text=text, desc=desc)
+        label = selector_label(selector)
+        if not matches:
+            needle = rid or text or desc or ""
+            near = nearest_elements(elements, needle)
+            raise SelectorNotFoundError(
+                f"no element matches {label} ({len(elements)} elements on screen)",
+                hint=(
+                    "nearest: " + " | ".join(element_digest(el) for el in near)
+                    if near
+                    else "Run `aua analyze` to see what is on screen."
+                ),
+            )
+        if len(matches) > 1:
+            if index is not None:
+                if not 0 <= index < len(matches):
+                    raise UsageError(
+                        f"--index {index} out of range: {label} matches {len(matches)} elements",
+                        hint="Indexes are 0-based and follow reading order (top-left first).",
+                    )
+                return matches[index]
+            if not first:
+                raise SelectorAmbiguousError(
+                    f"{label} matches {len(matches)} elements — "
+                    "disambiguate with --index <n> or take --first",
+                    hint="candidates: "
+                    + " | ".join(element_digest(el) for el in matches[:_MAX_CANDIDATES]),
+                )
+        return matches[0]
+
+    def _target(
+        self, element_id: int | None, selector: dict[str, Any] | None, *, verb: str = "tap"
+    ) -> Element:
+        """The element an action addresses: an id from the last analyze, or a selector."""
+        if selector:
+            return self.resolve_selector(**selector)
+        if element_id is None:
+            raise UsageError(
+                f"{verb} needs an element id or a selector",
+                hint=f"`aua {verb} 9`, `aua {verb} --rid someId`, or `aua {verb} --text 'Label'`",
+            )
+        return self._resolve(element_id)
+
+    def tap(
+        self,
+        element_id: int | None = None,
+        *,
+        selector: dict[str, Any] | None = None,
+        observe: bool = True,
+        with_image: bool | str | None = None,
+    ) -> ActionResult:
+        el = self._target(element_id, selector)
         cx, cy = el.center
         step = self._step("tap", el)  # built pre-action: needs the cached package
         self.device.click(cx, cy)
         self._invalidate_cache()
         self._record_action_safe(step)
         return self._observe(
-            ActionResult(ok=True, action="tap", id=element_id, target=[cx, cy]), observe
+            ActionResult(ok=True, action="tap", id=el.id, target=[cx, cy]), observe, with_image
         )
 
-    def long_press(self, element_id: int, *, ms: int = 600, observe: bool = True) -> ActionResult:
-        el = self._resolve(element_id)
+    def long_press(
+        self,
+        element_id: int | None = None,
+        *,
+        selector: dict[str, Any] | None = None,
+        ms: int = 600,
+        observe: bool = True,
+        with_image: bool | str | None = None,
+    ) -> ActionResult:
+        el = self._target(element_id, selector, verb="long-press")
         cx, cy = el.center
         step = self._step("long-press", el)
         self.device.long_click(cx, cy, ms)
         self._invalidate_cache()
         self._record_action_safe(step)
         return self._observe(
-            ActionResult(ok=True, action="long-press", id=element_id, target=[cx, cy]), observe
+            ActionResult(ok=True, action="long-press", id=el.id, target=[cx, cy]),
+            observe,
+            with_image,
+        )
+
+    def double_tap(
+        self,
+        element_id: int | None = None,
+        *,
+        selector: dict[str, Any] | None = None,
+        observe: bool = True,
+        with_image: bool | str | None = None,
+    ) -> ActionResult:
+        el = self._target(element_id, selector, verb="double-tap")
+        cx, cy = el.center
+        step = self._step("double-tap", el)
+        self.device.double_click(cx, cy)
+        self._invalidate_cache()
+        self._record_action_safe(step)
+        return self._observe(
+            ActionResult(ok=True, action="double-tap", id=el.id, target=[cx, cy]),
+            observe,
+            with_image,
         )
 
     def input_text(
-        self, element_id: int, text: str, *, submit: bool = False, observe: bool = True
+        self,
+        element_id: int | None = None,
+        text: str = "",
+        *,
+        selector: dict[str, Any] | None = None,
+        submit: bool = False,
+        observe: bool = True,
+        with_image: bool | str | None = None,
     ) -> ActionResult:
-        el = self._resolve(element_id)
+        el = self._target(element_id, selector, verb="input")
         cx, cy = el.center
         # The step records the field's SHAPE only — the typed value is never persisted
         # (PRD §6b privacy; observe_action strips `text` defensively too).
@@ -1949,27 +2254,119 @@ class Engine:
         self._invalidate_cache()
         self._record_action_safe(step)
         return self._observe(
-            ActionResult(ok=True, action="input", id=element_id, detail=text), observe
+            ActionResult(ok=True, action="input", id=el.id, detail=text), observe, with_image
         )
 
-    def clear(self, element_id: int, *, observe: bool = True) -> ActionResult:
-        el = self._resolve(element_id)
+    def clear(
+        self,
+        element_id: int | None = None,
+        *,
+        selector: dict[str, Any] | None = None,
+        observe: bool = True,
+        with_image: bool | str | None = None,
+    ) -> ActionResult:
+        el = self._target(element_id, selector, verb="clear")
         cx, cy = el.center
         step = self._step("clear", el)
         self.device.click(cx, cy)
         self.device.clear_text()
         self._invalidate_cache()
         self._record_action_safe(step)
-        return self._observe(ActionResult(ok=True, action="clear", id=element_id), observe)
+        return self._observe(
+            ActionResult(ok=True, action="clear", id=el.id), observe, with_image
+        )
+
+    # ------------------------------------------------------------- scroll internals
+
+    def _dump(self) -> str:
+        return self.device.dump_hierarchy()
+
+    def _scroll_box(
+        self, *, from_id: int | None = None, selector: dict[str, Any] | None = None, xml: str = ""
+    ) -> tuple[Box, bool]:
+        """``(box, is_real_container)`` — where a directional swipe should actually happen.
+
+        Swiping the middle of the *screen* is why scrolling "did nothing": on a screen whose
+        list occupies a sub-rectangle (a sheet, a tab body, a pane under a fixed header) the
+        gesture lands outside the scrollable and gets thrown away. So aim at the scrollable
+        container: the one under the anchor element when given, else the biggest on screen.
+        """
+        device = self.device
+        w, h = device.window_size()
+        screen: Box = (0, 0, w, h)
+        boxes = scrollable_boxes(xml or self._dump(), (w, h))
+        if not boxes:
+            return screen, False
+        anchor = None
+        if from_id is not None or selector:
+            anchor = self._target(from_id, selector, verb="swipe").center
+        if anchor is not None:
+            inside = [b for b in boxes if _contains(b, anchor)]
+            if inside:  # innermost container under the anchor wins (nested scrollables)
+                return min(inside, key=lambda b: (b[2] - b[0]) * (b[3] - b[1])), True
+            return (anchor[0], anchor[1], anchor[0], anchor[1]), False
+        return boxes[0], True
+
+    def _swipe_path(self, box: Box, direction: str, percent: int) -> tuple[int, int, int, int]:
+        """Swipe endpoints spanning *percent* of *box*, inset from its edges.
+
+        The inset matters: a gesture that starts on the very edge of a list is grabbed by
+        the system's back/notification gestures instead of the list.
+        """
+        w, h = self.device.window_size()
+        x1b, y1b, x2b, y2b = box
+        cx, cy = (x1b + x2b) // 2, (y1b + y2b) // 2
+        span_x = max(1, int((x2b - x1b) * min(percent, 90) / 200))
+        span_y = max(1, int((y2b - y1b) * min(percent, 90) / 200))
+        d = direction.lower()
+        if d == "up":
+            path = (cx, cy + span_y, cx, cy - span_y)
+        elif d == "down":
+            path = (cx, cy - span_y, cx, cy + span_y)
+        elif d == "left":
+            path = (cx + span_x, cy, cx - span_x, cy)
+        elif d == "right":
+            path = (cx - span_x, cy, cx + span_x, cy)
+        else:
+            raise UsageError(f"unknown swipe direction '{direction}'", hint="up|down|left|right")
+        x1, y1, x2, y2 = path
+        clamp = lambda v, lo, hi: max(lo, min(hi, v))  # noqa: E731
+        return (
+            clamp(x1, 1, w - 2),
+            clamp(y1, 1, h - 2),
+            clamp(x2, 1, w - 2),
+            clamp(y2, 1, h - 2),
+        )
+
+    def _settle_after_swipe(self) -> None:
+        """Let a fling finish before probing, or every scroll reads as "barely moved"."""
+        with contextlib.suppress(Exception):
+            self.device.wait_idle(1000)
+        time.sleep(0.25)
+
+    def _probe(self, box: Box) -> Sample:
+        return region_probe(self._dump(), box, ignore_packages=self.config.memory.ignore_packages)
+
+    def _swipe_once(self, box: Box, direction: str, percent: int) -> tuple[int, bool]:
+        """One verified swipe inside *box*: ``(distance_along_axis, moved)``."""
+        before = self._probe(box)
+        x1, y1, x2, y2 = self._swipe_path(box, direction, percent)
+        self.device.swipe(x1, y1, x2, y2)
+        self._settle_after_swipe()
+        dx, dy, moved = travel(before, self._probe(box))
+        return (dx if direction in ("left", "right") else dy), moved
 
     def swipe(
         self,
         direction: str | None = None,
         *,
         from_id: int | None = None,
-        percent: int = 50,
+        selector: dict[str, Any] | None = None,
+        percent: int = 70,
         coords: tuple[int, int, int, int] | None = None,
         observe: bool = True,
+        verify: bool = True,
+        with_image: bool | str | None = None,
     ) -> ActionResult:
         device = self.device
         if coords is not None:
@@ -1979,37 +2376,110 @@ class Engine:
             self._invalidate_cache()
             self._record_action_safe(step)
             return self._observe(
-                ActionResult(ok=True, action="swipe", target=[x1, y1, x2, y2]), observe
+                ActionResult(ok=True, action="swipe", target=[x1, y1, x2, y2]),
+                observe,
+                with_image,
             )
         if direction is None:
             raise UsageError("swipe needs a direction or --coords", hint="e.g. `aua swipe up`")
-        w, h = device.window_size()
-        if from_id is not None:
-            cx, cy = self._resolve(from_id).center
-        else:
-            cx, cy = w // 2, h // 2
-        ax = int(w * percent / 200)
-        ay = int(h * percent / 200)
         d = direction.lower()
-        if d == "up":
-            x1, y1, x2, y2 = cx, cy + ay, cx, cy - ay
-        elif d == "down":
-            x1, y1, x2, y2 = cx, cy - ay, cx, cy + ay
-        elif d == "left":
-            x1, y1, x2, y2 = cx + ax, cy, cx - ax, cy
-        elif d == "right":
-            x1, y1, x2, y2 = cx - ax, cy, cx + ax, cy
-        else:
-            raise UsageError(f"unknown swipe direction '{direction}'", hint="up|down|left|right")
-        clamp = lambda v, lo, hi: max(lo, min(hi, v))  # noqa: E731
-        x1, x2 = clamp(x1, 0, w - 1), clamp(x2, 0, w - 1)
-        y1, y2 = clamp(y1, 0, h - 1), clamp(y2, 0, h - 1)
+        box, real = self._scroll_box(from_id=from_id, selector=selector)
+        x1, y1, x2, y2 = self._swipe_path(box, d, percent)
         step = self._step("swipe", arg=d)
-        device.swipe(x1, y1, x2, y2)
+        if not verify:
+            device.swipe(x1, y1, x2, y2)
+            self._invalidate_cache()
+            self._record_action_safe(step)
+            return self._observe(
+                ActionResult(ok=True, action="swipe", target=[x1, y1, x2, y2]), observe, with_image
+            )
+        distance, moved = self._swipe_once(box, d, percent)
         self._invalidate_cache()
         self._record_action_safe(step)
+        # ok stays True — the gesture WAS performed, and a swipe is also used to dismiss or
+        # page things where "the screen did not move" is the expected outcome. The verdict
+        # is reported instead of swallowed; `aua scroll` is the strict-exit-code variant.
         return self._observe(
-            ActionResult(ok=True, action="swipe", target=[x1, y1, x2, y2]), observe
+            ActionResult(
+                ok=True,
+                action="swipe",
+                target=[x1, y1, x2, y2],
+                detail=detail_tokens(
+                    "moved" if moved else "no-change",
+                    dy=abs(distance) if moved and distance else None,
+                    scrollable=str(real).lower(),
+                ),
+            ),
+            observe,
+            with_image,
+        )
+
+    def scroll(
+        self,
+        direction: str | None = None,
+        *,
+        pages: int = 1,
+        to_end: bool = False,
+        to_start: bool = False,
+        from_id: int | None = None,
+        selector: dict[str, Any] | None = None,
+        percent: int = 70,
+        max_steps: int = 25,
+        observe: bool = True,
+        with_image: bool | str | None = None,
+    ) -> ActionResult:
+        """Scroll a container and report what actually happened.
+
+        Outcomes in ``detail`` (first token): ``moved`` · ``reached-end`` (moved, then ran
+        out of content) · ``already-at-end`` (the very first swipe changed nothing). The
+        first two are ``ok``; ``already-at-end`` is ``ok`` only for ``--to-end/--to-start``,
+        where being at the end IS the postcondition. Everywhere else a scroll that moved
+        nothing is a failure, because "nothing left to scroll" and "my swipe missed the
+        list" must not look the same to a caller looping until something appears.
+        """
+        if to_end and to_start:
+            raise UsageError("--to-end and --to-start are mutually exclusive")
+        if direction is None:
+            direction = "down" if to_start else "up"
+        d = direction.lower()
+        if d not in ("up", "down", "left", "right"):
+            raise UsageError(f"unknown scroll direction '{direction}'", hint="up|down|left|right")
+        limit = max_steps if (to_end or to_start) else max(1, pages)
+        box, real = self._scroll_box(from_id=from_id, selector=selector)
+        step = self._step("scroll", arg=d)
+        travelled = 0
+        steps = 0
+        for _ in range(limit):
+            dy, moved = self._swipe_once(box, d, percent)
+            if not moved:
+                break
+            steps += 1
+            travelled += abs(dy)
+        self._invalidate_cache()
+        self._record_action_safe(step)
+        at_end = steps < limit
+        if steps == 0:
+            outcome = "already-at-end"
+        elif at_end:
+            outcome = "reached-end"
+        else:
+            outcome = "moved"
+        ok = steps > 0 or to_end or to_start
+        return self._observe(
+            ActionResult(
+                ok=ok,
+                action="scroll",
+                target=list(box),
+                detail=detail_tokens(
+                    outcome,
+                    steps=steps,
+                    dy=travelled or None,
+                    direction=d,
+                    scrollable=str(real).lower(),
+                ),
+            ),
+            observe,
+            with_image,
         )
 
     def scroll_to(
@@ -2020,48 +2490,218 @@ class Engine:
         ignore_case: bool = False,
         observe: bool = True,
         by: str = "text",
+        direction: str = "up",
+        max_swipes: int = 10,
+        percent: int = 70,
+        with_image: bool | str | None = None,
     ) -> ActionResult:
+        """Scroll until *query* is on screen, verifying every swipe actually moved.
+
+        Outcomes in ``detail`` (first token): ``already-visible`` · ``moved`` (found it,
+        with ``dy``) · ``already-at-end`` (nothing scrolled, so the target is simply not on
+        this screen) · ``target-not-found`` (scrolled the whole way and never saw it).
+        Only the first two are ``ok`` — the old version returned ``ok:false`` with exit 0,
+        which is the same as saying nothing at all to an automated caller.
+        """
+        mode = MatchMode(match)
         step = self._step("scroll-to", arg=query)
-        found = self.device.scroll_to(
-            query, match=MatchMode(match), ignore_case=ignore_case, by=by
-        )
+
+        def locate() -> tuple[int, int, int, int] | None:
+            return self.device.find_text(query, match=mode, ignore_case=ignore_case, by=by)
+
+        found = locate()
+        if found is not None:
+            return self._observe(
+                ActionResult(
+                    ok=True,
+                    action="scroll-to",
+                    detail=detail_tokens("already-visible", target=query),
+                    target=list(found),
+                ),
+                observe,
+                with_image,
+            )
+        box, real = self._scroll_box()
+        travelled = 0
+        steps = 0
+        exhausted = True
+        for _ in range(max(1, max_swipes)):
+            dy, moved = self._swipe_once(box, direction, percent)
+            if moved:
+                steps += 1
+                travelled += abs(dy)
+            found = locate()
+            if found is not None or not moved:
+                exhausted = False
+                break
         self._invalidate_cache()
         self._record_action_safe(step)
+        if found is not None:
+            outcome = "moved"
+        elif steps == 0:
+            outcome = "already-at-end"
+        else:
+            outcome = "target-not-found"
         return self._observe(
             ActionResult(
                 ok=found is not None,
                 action="scroll-to",
-                detail=query,
+                detail=detail_tokens(
+                    outcome,
+                    target=query,
+                    steps=steps,
+                    dy=travelled or None,
+                    scrollable=str(real).lower(),
+                    exhausted="true" if (found is None and exhausted) else None,
+                ),
                 target=list(found) if found else None,
             ),
             observe,
+            with_image,
         )
 
-    def key(self, name: str, *, observe: bool = True) -> ActionResult:
+    def key(
+        self, name: str, *, observe: bool = True, with_image: bool | str | None = None
+    ) -> ActionResult:
+        candidate = name.strip()
+        known = (
+            candidate.lower() in _KEY_NAMES
+            or candidate.upper().startswith("KEYCODE_")
+            or candidate.isdigit()
+        )
+        if not known:
+            raise UsageError(
+                f"unknown key '{name}'",
+                hint="Valid: " + ", ".join(sorted(_KEY_NAMES)) + ", KEYCODE_*, or a keycode number.",
+            )
         step = self._step("key", arg=name)
         self.device.press(name)
         self._invalidate_cache()
         self._record_action_safe(step)
-        return self._observe(ActionResult(ok=True, action="key", detail=name), observe)
+        return self._observe(
+            ActionResult(ok=True, action="key", detail=name), observe, with_image
+        )
 
-    def open_link(self, uri: str, *, observe: bool = True) -> ActionResult:
-        """Open a deeplink URI (jump straight to a screen / trigger an app action).
+    def hide_keyboard(
+        self, *, observe: bool = True, with_image: bool | str | None = None
+    ) -> ActionResult:
+        """Dismiss the soft keyboard (Maestro ``hideKeyboard``).
 
-        A latency shortcut over tapping through the UI. The deeplink is remembered in the
-        app's playbook (§6b) so it can be suggested next time.
+        Prefer this over ``key back`` when the IME is covering the tree — back can
+        leave the screen; hide-keyboard aims to only dismiss the keyboard.
         """
-        step = self._step("open-link", arg=uri)
-        self.device.open_link(uri)
+        step = self._step("hide-keyboard")
+        self.device.hide_keyboard()
         self._invalidate_cache()
         self._record_action_safe(step)
-        self._remember_deeplink_safe(uri)
-        return self._observe(ActionResult(ok=True, action="open-link", detail=uri), observe)
+        return self._observe(
+            ActionResult(ok=True, action="hide-keyboard"), observe, with_image
+        )
 
-    def _remember_deeplink_safe(self, uri: str) -> None:
+    def open_link(
+        self,
+        uri: str,
+        *,
+        package: str | None = None,
+        prefer: str | None = None,
+        observe: bool = True,
+        with_image: bool | str | None = None,
+    ) -> ActionResult:
+        """Open a deeplink URI (jump straight to a screen / trigger an app action).
+
+        Pass ``package`` (or ``prefer``) to skip Android's "Open with…" chooser when
+        multiple apps handle the URI. After open, if a chooser is still showing, we
+        try to tap the preferred app row automatically.
+        """
+        target_pkg = package or prefer
+        step = self._step("open-link", arg=uri)
+        self.device.open_link(uri, package=target_pkg)
+        self._invalidate_cache()
+        # Chooser may still appear when package pinning is unsupported — dismiss it.
+        detail = uri
+        if self._dismiss_chooser(prefer=target_pkg):
+            detail = f"{uri} (chooser→{target_pkg or 'first'})"
+        self._record_action_safe(step)
+        self._remember_deeplink_safe(uri, package=target_pkg)
+        return self._observe(
+            ActionResult(ok=True, action="open-link", detail=detail), observe, with_image
+        )
+
+    def _dismiss_chooser(self, *, prefer: str | None = None) -> bool:
+        """If the system 'Open with…' resolver is foreground, pick an app and continue."""
+        device = self.device
+        try:
+            app = device.current_app() or {}
+        except Exception:
+            return False
+        pkg = (app.get("package") or "").lower()
+        activity = (app.get("activity") or "").lower()
+        chooserish = (
+            "resolver" in activity
+            or "intentresolver" in pkg
+            or pkg in {"android", "com.android.intentresolver", "com.android.internal.app"}
+        )
+        if not chooserish:
+            # Heuristic: hierarchy contains "Open with" / "Just once".
+            try:
+                xml = device.dump_hierarchy()
+            except Exception:
+                return False
+            if "Open with" not in xml and "Just once" not in xml and "Always" not in xml:
+                return False
+        # Prefer an explicit package label match, else tap "Just once" on first row.
+        try:
+            result = self.analyze(source="hierarchy", record=False)
+        except Exception:
+            return False
+        prefer_tail = (prefer or "").rsplit(".", 1)[-1].lower() if prefer else ""
+        candidates = [
+            el
+            for el in result.elements
+            if el.clickable
+            and (
+                (prefer_tail and prefer_tail in (el.text or el.content_desc or "").lower())
+                or (el.text or "").strip() not in {"Just once", "Always", "Open with"}
+            )
+        ]
+        target = None
+        if prefer_tail:
+            for el in candidates:
+                hay = f"{el.text or ''} {el.content_desc or ''}".lower()
+                if prefer_tail in hay or (prefer or "").lower() in hay:
+                    target = el
+                    break
+        if target is None:
+            # First non-chrome row that looks like an app
+            for el in result.elements:
+                label = (el.text or el.content_desc or "").strip()
+                if (
+                    label
+                    and label not in {"Just once", "Always", "Open with", "Cancel"}
+                    and el.clickable
+                ):
+                    target = el
+                    break
+        if target is None:
+            return False
+        x, y = target.center
+        device.click(x, y)
+        # Confirm "Just once" if still on chooser.
+        time.sleep(0.3)
+        with contextlib.suppress(Exception):
+            again = self.analyze(source="hierarchy", record=False)
+            for el in again.elements:
+                if (el.text or "").strip() == "Just once" and el.clickable:
+                    device.click(*el.center)
+                    break
+        self._invalidate_cache()
+        return True
+
+    def _remember_deeplink_safe(self, uri: str, *, package: str | None = None) -> None:
         mem = self._memory
         if mem is None or self._device is None:
             return
-        pkg = self._cached_package() or self.current_package()
+        pkg = package or self._cached_package() or self.current_package()
         if not pkg:
             return
         with contextlib.suppress(Exception):  # playbook is a bonus; never fail the action
@@ -2114,8 +2754,278 @@ class Engine:
         # `analyze` — attached even on a MISS, so a failed wait is diagnosable in one call.
         return self._observe(result, observe)
 
+    # ----------------------------------------------------------------- expect
+
+    def _node_state(self, xml: str, el: Element) -> dict[str, Any]:
+        """Interaction state for *el*, from the parsed element plus the raw dump.
+
+        ``Element`` carries optional ``checked``/``selected``/… fields, but until every
+        parse path fills them the a11y attributes are read straight off the node with the
+        same bounds. A Compose row commonly holds the label while a *descendant* holds the
+        switch, so when the element itself is not checkable the checkable descendant is what
+        ``checked`` reports — otherwise every toggle assertion reads False.
+        """
+        state: dict[str, Any] = {
+            "checkable": False,
+            "checked": False,
+            "enabled": el.enabled,
+            "selected": False,
+            "focused": el.focused,
+            "text": el.text,
+            "content_desc": el.content_desc,
+        }
+        node = next((n for n in _iter_nodes(xml) if _node_box(n) == tuple(el.bounds)), None)
+        if node is not None:
+            holder = node
+            if node.get("checkable") != "true":
+                holder = next(
+                    (n for n in node.iter("node") if n.get("checkable") == "true"), node
+                )
+            state.update(
+                checkable=holder.get("checkable") == "true",
+                checked=holder.get("checked") == "true",
+                enabled=node.get("enabled") == "true",
+                selected=node.get("selected") == "true",
+                focused=node.get("focused") == "true",
+            )
+        if el.checkable:  # the element itself is the toggle — its own parsed state wins
+            state["checkable"] = True
+            state["checked"] = bool(el.checked)
+        if el.selected is not None:
+            state["selected"] = el.selected
+        return state
+
+    def _check_predicates(
+        self, el: Element, state: dict[str, Any], predicates: dict[str, Any]
+    ) -> list[str]:
+        """Names of the predicates that do NOT hold, as ``expected!=actual`` strings."""
+        labels = [v for v in (state["text"], state["content_desc"]) if v]
+        failures: list[str] = []
+        for name, want in predicates.items():
+            if name in ("exists", "absent"):
+                continue
+            if name == "text_is":
+                if not any(v.strip() == want for v in labels):
+                    failures.append(f"text_is={want!r}!=actual={labels or None!r}")
+            elif name == "text_contains":
+                if not any(want.lower() in v.lower() for v in labels):
+                    failures.append(f"text_contains={want!r}!=actual={labels or None!r}")
+            else:
+                actual = state.get(name)
+                if bool(actual) is not bool(want):
+                    failures.append(f"{name}={str(want).lower()}!=actual={str(actual).lower()}")
+        return failures
+
+    def _expect_once(
+        self, selector: dict[str, Any], predicates: dict[str, Any], *, index: int | None, first: bool
+    ) -> tuple[bool, str]:
+        """One evaluation pass: ``(ok, detail)``. One hierarchy dump, no screenshots."""
+        from . import hierarchy
+
+        xml = self._dump()
+        w, h = self.device.window_size()
+        elements = hierarchy.parse_hierarchy(xml, (w, h))
+        label = selector_label(selector)
+        matches = match_selector(elements, **selector)
+        if predicates.get("absent"):
+            if not matches:
+                return True, detail_tokens("pass", sought=label, predicate="absent")
+            return False, detail_tokens(
+                "fail", sought=label, predicate="absent", actual="present"
+            ) + " | found: " + " | ".join(element_digest(el) for el in matches[:_MAX_CANDIDATES])
+        if not matches:
+            near = nearest_elements(elements, selector.get("rid") or selector.get("text") or "")
+            detail = detail_tokens(
+                "fail", sought=label, predicate="exists", actual="absent", on_screen=len(elements)
+            )
+            if near:
+                detail += " | nearest: " + " | ".join(element_digest(el) for el in near)
+            return False, detail
+        state_only = [k for k in predicates if k not in ("exists", "absent")]
+        if len(matches) > 1 and state_only and index is None and not first:
+            raise SelectorAmbiguousError(
+                f"{label} matches {len(matches)} elements — "
+                "disambiguate with --index <n> or --first before asserting on its state",
+                hint="candidates: "
+                + " | ".join(element_digest(el) for el in matches[:_MAX_CANDIDATES]),
+            )
+        el = matches[index] if index is not None and index < len(matches) else matches[0]
+        failures = self._check_predicates(el, self._node_state(xml, el), predicates)
+        if failures:
+            return False, detail_tokens("fail", sought=label, id=el.id) + " | " + "; ".join(
+                failures
+            )
+        checks = ",".join(predicates) or "exists"
+        return True, detail_tokens("pass", sought=label, id=el.id, checks=checks)
+
+    def expect(
+        self,
+        *,
+        rid: str | None = None,
+        text: str | None = None,
+        desc: str | None = None,
+        exists: bool = False,
+        absent: bool = False,
+        text_is: str | None = None,
+        text_contains: str | None = None,
+        checked: bool | None = None,
+        enabled: bool | None = None,
+        selected: bool | None = None,
+        focused: bool | None = None,
+        index: int | None = None,
+        first: bool = False,
+        timeout_ms: int = 0,
+        poll_ms: int = 250,
+        observe: bool = False,
+    ) -> ActionResult:
+        """Assert something about the screen; ``ok=False`` means the assertion failed.
+
+        This is the primitive that turns an acceptance-criteria list into a script: one
+        criterion per call, exit code per criterion. ``timeout_ms`` polls until the
+        assertion holds, which is what replaces a ``sleep`` guess — the flakiness the
+        project's own testing guidance warns about.
+        """
+        selector = {"rid": rid, "text": text, "desc": desc}
+        if len([v for v in selector.values() if v]) != 1:
+            raise UsageError(
+                "expect needs exactly one of --rid / --text / --desc",
+                hint="e.g. `aua expect --rid appsHubNotifications --exists`",
+            )
+        if absent and exists:
+            raise UsageError("--exists and --absent are mutually exclusive")
+        predicates: dict[str, Any] = {}
+        if absent:
+            predicates["absent"] = True
+        for name, value in (
+            ("text_is", text_is),
+            ("text_contains", text_contains),
+            ("checked", checked),
+            ("enabled", enabled),
+            ("selected", selected),
+            ("focused", focused),
+        ):
+            if value is not None:
+                predicates[name] = value
+        if not predicates or exists:
+            predicates.setdefault("exists", True)
+        deadline = time.monotonic() + max(0, timeout_ms) / 1000.0
+        while True:
+            ok, detail = self._expect_once(selector, predicates, index=index, first=first)
+            if ok or time.monotonic() >= deadline:
+                return self._observe(
+                    ActionResult(ok=ok, action="expect", detail=detail), observe, None
+                )
+            time.sleep(max(0.05, poll_ms / 1000.0))
+
+    # ----------------------------------------------------------------- device extras
+
+    def clipboard_set(self, text: str) -> ActionResult:
+        self.device.set_clipboard(text)
+        return ActionResult(ok=True, action="clipboard-set", detail=text)
+
+    def clipboard_get(self) -> ActionResult:
+        text = self.device.get_clipboard()
+        return ActionResult(ok=True, action="clipboard-get", detail=text)
+
+    def paste(self, *, observe: bool = True, with_image: bool | str | None = None) -> ActionResult:
+        self.device.paste()
+        self._invalidate_cache()
+        return self._observe(ActionResult(ok=True, action="paste"), observe, with_image)
+
+    def copy_text(
+        self,
+        element_id: int | None = None,
+        *,
+        selector: dict[str, Any] | None = None,
+    ) -> ActionResult:
+        el = self._target(element_id, selector, verb="copy")
+        text = (el.text or el.content_desc or "").strip()
+        if not text:
+            raise UsageError(
+                "element has no text or content-desc to copy",
+                hint="Pick a labelled element, or use `clipboard set` for a literal.",
+            )
+        self.device.set_clipboard(text)
+        return ActionResult(ok=True, action="copy", id=el.id, detail=text)
+
+    def location_set(self, lat: float, lon: float) -> ActionResult:
+        self.device.set_location(lat, lon)
+        return ActionResult(ok=True, action="location-set", detail=f"{lat},{lon}")
+
+    def orientation_set(self, mode: str) -> ActionResult:
+        self.device.set_orientation(mode)
+        self._invalidate_cache()
+        return ActionResult(ok=True, action="orientation-set", detail=mode)
+
+    def orientation_get(self) -> ActionResult:
+        mode = self.device.get_orientation()
+        return ActionResult(ok=True, action="orientation-get", detail=mode)
+
+    def airplane_set(self, enabled: bool) -> ActionResult:
+        self.device.set_airplane_mode(enabled)
+        return ActionResult(ok=True, action="airplane-set", detail="on" if enabled else "off")
+
+    def airplane_toggle(self) -> ActionResult:
+        cur = self.device.get_airplane_mode()
+        enabled = not cur if cur is not None else True
+        self.device.set_airplane_mode(enabled)
+        return ActionResult(ok=True, action="airplane-toggle", detail="on" if enabled else "off")
+
+    def media_add(self, path: str, *, remote_dir: str = "/sdcard/DCIM/Camera") -> ActionResult:
+        remote = self.device.add_media(path, remote_dir=remote_dir)
+        return ActionResult(ok=True, action="media-add", detail=remote)
+
+    def record_start(self, path: str | None = None) -> ActionResult:
+        remote = self.device.start_recording(path or "/sdcard/aua_recording.mp4")
+        return ActionResult(ok=True, action="record-start", detail=remote)
+
+    def record_stop(self, local_path: str) -> ActionResult:
+        saved = self.device.stop_recording(local_path)
+        return ActionResult(ok=True, action="record-stop", detail=saved)
+
+    def clock_set(self, *, timestamp_ms: int | None = None) -> ActionResult:
+        if timestamp_ms is None:
+            raise UsageError("clock set needs --ms <unix-ms>")
+        self.device.set_clock(timestamp_ms)
+        return ActionResult(ok=True, action="clock-set", detail=str(timestamp_ms))
+
+    def erase(
+        self,
+        element_id: int | None = None,
+        *,
+        selector: dict[str, Any] | None = None,
+        chars: int | None = None,
+        observe: bool = True,
+        with_image: bool | str | None = None,
+    ) -> ActionResult:
+        """Erase text in a field (Maestro ``eraseText``): focus + delete *chars* or clear all."""
+        el = (
+            self._target(element_id, selector, verb="erase")
+            if (element_id is not None or selector)
+            else None
+        )
+        if el is not None:
+            cx, cy = el.center
+            self.device.click(cx, cy)
+        if chars is None or chars <= 0:
+            self.device.clear_text()
+        else:
+            self.device.erase_chars(chars)
+        self._invalidate_cache()
+        detail = "all" if not chars or chars <= 0 else str(chars)
+        return self._observe(
+            ActionResult(ok=True, action="erase", id=el.id if el else None, detail=detail),
+            observe,
+            with_image,
+        )
+
     def app(
-        self, action: str, *, package: str | None = None, activity: str | None = None
+        self,
+        action: str,
+        *,
+        package: str | None = None,
+        activity: str | None = None,
+        clear_state: bool = False,
     ) -> ActionResult:
         device = self.device
         a = action.lower()
@@ -2125,19 +3035,43 @@ class Engine:
         if a == "launch":
             if not package:
                 raise UsageError("app launch needs a package name")
+            if clear_state:
+                device.clear_app(package)
             # --activity pins the entry Activity — some builds have multiple launcher
             # activities (e.g. a Dev Tools menu) and default resolution is nondeterministic.
             device.launch_app(package, activity=activity)
             self._invalidate_cache()
             detail = f"{package}/{activity}" if activity else package
+            if clear_state:
+                detail = f"{detail} (cleared)"
             return ActionResult(ok=True, action="app-launch", detail=detail)
+        if a in ("kill", "force-stop"):
+            if not package:
+                raise UsageError("app kill needs a package name")
+            device.stop_app(package)
+            self._invalidate_cache()
+            return ActionResult(ok=True, action="app-kill", detail=package)
         if a == "stop":
             if not package:
                 raise UsageError("app stop needs a package name")
             device.stop_app(package)
             self._invalidate_cache()
             return ActionResult(ok=True, action="app-stop", detail=package)
-        raise UsageError(f"unknown app action '{action}'", hint="foreground|launch|stop|current")
+        if a in ("clear", "clear-state", "clear_state"):
+            if not package:
+                raise UsageError("app clear needs a package name")
+            device.clear_app(package)
+            self._invalidate_cache()
+            return ActionResult(ok=True, action="app-clear", detail=package)
+        if a in ("grant", "grant-permissions", "grant_permissions"):
+            if not package:
+                raise UsageError("app grant needs a package name")
+            device.grant_permissions(package)
+            return ActionResult(ok=True, action="app-grant", detail=package)
+        raise UsageError(
+            f"unknown app action '{action}'",
+            hint="foreground|launch|stop|kill|clear|grant|current",
+        )
 
     # ----------------------------------------------------------------- doctor
 
@@ -2175,6 +3109,17 @@ class Engine:
 
     # ----------------------------------------------------------------- annotate
 
+    def _with_raw_image(self, result: AnalyzeResult, with_image: bool | str) -> AnalyzeResult:
+        img = self.device.screenshot()
+        out = (
+            with_image
+            if isinstance(with_image, str)
+            else self._default_annotate_path(self.device.serial, suffix="screen", timestamped=True)
+        )
+        img.save(out)
+        result.meta.raw_image = out
+        return result
+
     def _maybe_annotate(
         self,
         annotate: bool | str | None,
@@ -2191,10 +3136,16 @@ class Engine:
         out = annotate if isinstance(annotate, str) else self._default_annotate_path(device.serial)
         return annotate_mod.annotate(img, elements, out)
 
-    def _default_annotate_path(self, serial: str, *, suffix: str = "annotated") -> str:
+    def _default_annotate_path(
+        self, serial: str, *, suffix: str = "annotated", timestamped: bool = False
+    ) -> str:
         run_dir = Path(self.config.cache.dir).expanduser() / "runs"
         run_dir.mkdir(parents=True, exist_ok=True)
         safe = serial.replace(":", "_")
+        if timestamped:
+            # Sequential captures (before/after an action) must never clobber each other.
+            stamp = time.strftime("%Y%m%d-%H%M%S") + f"-{time.time_ns() % 1_000_000_000:09d}"
+            return str(run_dir / f"{safe}_{suffix}_{stamp}.png")
         return str(run_dir / f"{safe}_{suffix}.png")
 
     # ----------------------------------------------------------------- cache
