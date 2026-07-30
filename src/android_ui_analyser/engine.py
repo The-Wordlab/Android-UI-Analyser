@@ -10,6 +10,7 @@ cleanly. The CLI, MCP server, and daemon are all thin adapters over this class.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
 import re
@@ -267,6 +268,8 @@ class Engine:
         self._last_known_screen: str | None = None
         self._last_action_kind: str | None = None
         self._last_analyze_elements: list[Element] | None = None
+        self._last_hierarchy_hash: str | None = None
+        self._last_analyze_result: AnalyzeResult | None = None
         self._mem_lock = threading.Lock()
         self._mem_thread: threading.Thread | None = None
 
@@ -300,19 +303,21 @@ class Engine:
 
     def _capture_hierarchy(
         self, device: Device, w: int, h: int
-    ) -> tuple[list[Element], str | None]:
+    ) -> tuple[list[Element], str | None, str]:
         from . import hierarchy
 
         perf = self.config.perf
         if perf.prefetch:
             slot = self._prefetch.take()
             if slot is not None:
-                return slot.elements, slot.package
+                xml_hash = hashlib.sha1(slot.xml.encode()).hexdigest()
+                return slot.elements, slot.package, xml_hash
 
         compressed = bool(self.config.device.compressed_hierarchy)
         xml = device.dump_hierarchy(compressed=compressed)
+        xml_hash = hashlib.sha1(xml.encode()).hexdigest()
         pkg = _package_from_xml(xml, self.config.memory.ignore_packages)
-        return hierarchy.parse_hierarchy(xml, (w, h)), pkg
+        return hierarchy.parse_hierarchy(xml, (w, h)), pkg, xml_hash
 
     def _kick_hierarchy_prefetch(self) -> None:
         """Speculatively dump+parse the hierarchy for the next analyze."""
@@ -491,7 +496,39 @@ class Engine:
         path = PathKind.hierarchy
 
         if not force_vision:
-            elements, package = self._capture_hierarchy(device, w, h)
+            elements, package, xml_hash = self._capture_hierarchy(device, w, h)
+            if (
+                self.config.perf.skip_unchanged_analyze
+                and xml_hash
+                and xml_hash == self._last_hierarchy_hash
+                and self._last_analyze_result is not None
+                and not no_cache
+            ):
+                prev = self._last_analyze_result
+                reused = prev.model_copy(
+                    update={
+                        "meta": prev.meta.model_copy(
+                            update={
+                                "duration_ms": int((time.perf_counter() - t0) * 1000),
+                                "unchanged": True,
+                                "fingerprint": xml_hash,
+                                "via": "hierarchy-unchanged",
+                                "element_diff": {
+                                    "added": [],
+                                    "removed": [],
+                                    "changed": [],
+                                    "prev_count": len(prev.elements),
+                                    "curr_count": len(prev.elements),
+                                }
+                                if self.config.perf.differential
+                                else prev.meta.element_diff,
+                            }
+                        )
+                    }
+                )
+                return reused
+        else:
+            xml_hash = None
 
         use_vision = force_vision
         xml_dump: str | None = None
@@ -565,6 +602,13 @@ class Engine:
                 ediff = _element_diff(self._last_analyze_elements, elements)
         self._last_analyze_elements = list(elements)
 
+        from .perf import elements_fingerprint
+
+        fp = xml_hash
+        if not fp:
+            with contextlib.suppress(Exception):
+                fp = elements_fingerprint(elements)
+
         result = AnalyzeResult(
             screen=Screen(
                 width=w, height=h, package=package, activity=activity, source=screen_source
@@ -585,8 +629,14 @@ class Engine:
                 annotated_image=annotated,
                 device_serial=device.serial,
                 element_diff=ediff,
+                unchanged=False,
+                fingerprint=fp,
+                via=path.value if hasattr(path, "value") else str(path),
             ),
         )
+        if xml_hash:
+            self._last_hierarchy_hash = xml_hash
+        self._last_analyze_result = result
         if not no_cache:
             self._write_cache(result)
         if self.config.perf.prefetch:
@@ -643,7 +693,7 @@ class Engine:
 
         # --- T1/T2: satisfy from the hierarchy first (cheap-first) ---
         if not force_vision:
-            pool, package = self._capture_hierarchy(device, w, h)
+            pool, package, _xml_hash = self._capture_hierarchy(device, w, h)
             tier_used = Tier.selector
             known_screen, hints = self._record_screen_safe(
                 device, package, activity, pool, Tier.hierarchy, h
@@ -1175,7 +1225,7 @@ class Engine:
         if mem is None:
             raise UsageError("memory is disabled", hint="Set `memory.enabled: true` in config.")
         device, w, h = self._context()
-        elements, package = self._capture_hierarchy(device, w, h)
+        elements, package, _xml_hash = self._capture_hierarchy(device, w, h)
         app = device.current_app()
         package = app.get("package") or package
         if not package:
@@ -3486,6 +3536,53 @@ class Engine:
         # `analyze` — attached even on a MISS, so a failed wait is diagnosable in one call.
         # settle=False: wait already blocked on the condition; don't pay pixel-settle again.
         return self._observe(result, observe, settle=False)
+
+    def hierarchy_fingerprint(self) -> str | None:
+        """Cheap SHA1 of the current hierarchy dump (no parse). Used by watch/push."""
+        device = self.device
+        compressed = bool(self.config.device.compressed_hierarchy)
+        try:
+            xml = device.dump_hierarchy(compressed=compressed)
+        except Exception:  # pragma: no cover
+            return None
+        return hashlib.sha1(xml.encode()).hexdigest()
+
+    def wait_changed(
+        self,
+        *,
+        timeout_ms: int = 15000,
+        interval_ms: int | None = None,
+        observe: bool = False,
+    ) -> ActionResult:
+        """Block until the hierarchy fingerprint changes (or timeout).
+
+        Host-polled stand-in for AccessibilityEvent push (phase 2). Prefer this over
+        busy ``analyze`` loops when waiting for *any* UI change.
+        """
+        interval = interval_ms if interval_ms is not None else int(self.config.daemon.watch_interval_ms)
+        baseline = self.hierarchy_fingerprint()
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        samples = 0
+        while time.monotonic() < deadline:
+            time.sleep(max(0.05, interval / 1000.0))
+            samples += 1
+            fp = self.hierarchy_fingerprint()
+            if fp and baseline and fp != baseline:
+                return self._observe(
+                    ActionResult(
+                        ok=True,
+                        action="wait-changed",
+                        detail=f"changed after {samples} samples fingerprint={fp[:12]}",
+                    ),
+                    observe,
+                    settle=False,
+                )
+            if fp and baseline is None:
+                baseline = fp
+        raise StabilityTimeout(
+            f"hierarchy did not change within {timeout_ms} ms ({samples} samples)",
+            hint="Increase --timeout, or the screen is idle. Use `aua wait --for` for a label.",
+        )
 
     def _wait_timeout_message(
         self,

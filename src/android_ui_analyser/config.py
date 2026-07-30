@@ -52,7 +52,8 @@ class PerfCfg(BaseModel):
     skip_unchanged_memory: bool = True  # skip map write when tree fingerprint unchanged
     reuse_capture_frames: bool = True  # share capture JPEGs with --with-image / settle
     capture_adb_screencap: bool = True  # capture loop prefers adb exec-out screencap
-    differential: bool = False  # meta.element_diff vs previous analyze (token-cheap)
+    differential: bool = True  # meta.element_diff vs previous analyze (token-cheap)
+    skip_unchanged_analyze: bool = True  # reuse last result when hierarchy XML hash matches
     auto_daemon: bool = True  # CLI auto-starts the warm daemon when enabled but down
     settle_profiles: bool = True  # learn per-action settle budgets from history
     gate_cache: bool = True  # memoize gate.decide for identical tree fingerprints
@@ -150,6 +151,10 @@ class DaemonCfg(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool = True
     socket: str = "~/.cache/android-ui-analyser/daemon.sock"
+    # When set (>0), daemon also serves screen-changed WebSocket push on 127.0.0.1:port.
+    push_ws_port: int = 0
+    # Poll interval for the push / wait_changed fingerprint watcher (host-side).
+    watch_interval_ms: int = 150
 
 
 class CacheCfg(BaseModel):
@@ -242,7 +247,7 @@ def _default_models() -> dict[str, dict[str, Any]]:
         "yolo": {"weights": None, "device": "mps", "conf": 0.25},
         "omniparser": {"device": "mps", "accept_agpl": False, "box_threshold": 0.05},
         # ocr
-        "apple_vision": {"recognition_level": "accurate"},
+        "apple_vision": {"recognition_level": "fast"},  # Neural Engine hot path; use accurate if needed
         "rapidocr": {"lang": "en"},
         "paddleocr": {"lang": "en"},
         "tesseract": {"lang": "eng"},
@@ -547,7 +552,8 @@ perf:
   skip_unchanged_memory: true # skip map write when tree fingerprint unchanged
   reuse_capture_frames: true  # share capture JPEGs with --with-image / settle
   capture_adb_screencap: true # capture loop prefers adb exec-out screencap
-  differential: false         # meta.element_diff vs previous analyze
+  differential: true          # meta.element_diff vs previous analyze
+  skip_unchanged_analyze: true  # skip re-parse when hierarchy XML hash matches
   auto_daemon: true           # CLI auto-starts daemon when enabled but down
   settle_profiles: true       # learn per-action settle budgets
   gate_cache: true            # memoize gate.decide for identical trees
@@ -590,7 +596,7 @@ planner:
 models:
   yolo:         { weights: null, device: mps, conf: 0.25 }   # set weights to enable YOLO
   omniparser:   { device: mps, accept_agpl: false }          # MUST be true to run (AGPL-3.0!)
-  apple_vision: { recognition_level: accurate }
+  apple_vision: { recognition_level: fast }     # accurate is slower; override if needed
   rapidocr:     { lang: en }
   local_vllm:   { base_url: "http://localhost:8000/v1", model: "Hcompany/Holo1.5-7B" }
   openai:       { model: gpt-5, api_key_env: OPENAI_API_KEY }
@@ -601,6 +607,10 @@ models:
 daemon:
   enabled: true
   socket: "~/.cache/android-ui-analyser/daemon.sock"
+  # Per-serial sockets: when device.serial / --serial is set, the live path is
+  # ``<socket>.<sanitized-serial>`` so multiple warm daemons can coexist.
+  push_ws_port: 0         # >0 → localhost WebSocket push of screen_changed events
+  watch_interval_ms: 150  # host fingerprint poll for wait_changed / push
 
 capture:
   enabled: true           # rolling screencap while daemon is warm

@@ -198,6 +198,20 @@ def _tool_definitions() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="wait_changed",
+            description="Block until the accessibility hierarchy fingerprint changes "
+            "(any UI tree change). Host-polled stand-in for a11y event push.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "timeout_ms": {"type": "integer", "default": 15000},
+                    "interval_ms": {"type": "integer", "default": 150},
+                    "observe": _OBSERVE_PROP,
+                },
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
             name="screenshot",
             description="Save a screenshot; set annotate=true to overlay Set-of-Marks numbers.",
             inputSchema={
@@ -965,6 +979,14 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 for_=args.get("for_"),
                 idle=args.get("idle", False),
                 timeout_ms=args.get("timeout", 5000),
+            )
+        )
+    if name == "wait_changed":
+        return _dump(
+            engine.wait_changed(
+                timeout_ms=int(args.get("timeout_ms", 15000)),
+                interval_ms=args.get("interval_ms"),
+                observe=args.get("observe", False),
             )
         )
     if name == "screenshot":

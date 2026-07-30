@@ -579,7 +579,7 @@ def main(
     ),
     config: str | None = typer.Option(None, "--config", help="Explicit config file path."),
     format: str | None = typer.Option(
-        None, "--format", help="Output format: json|pretty|compact|tsv (tsv: analyze only)."
+        None, "--format", help="Output format: json|pretty|compact|tsv|delta|msgpack (tsv/delta/msgpack: analyze)."
     ),
     profile: str | None = typer.Option(None, "--profile", help="Named config profile to overlay."),
     timeout: int | None = typer.Option(None, "--timeout", help="Per-operation timeout in ms."),
@@ -612,7 +612,8 @@ def main(
     if format is not None and format not in {f.value for f in OutputFormat}:
         # Surface as a usage error (exit 2) before any command runs.
         err = UsageError(
-            f"invalid --format '{format}'", hint="Choose one of: json, pretty, compact, tsv."
+            f"invalid --format '{format}'",
+            hint="Choose one of: json, pretty, compact, tsv, delta, msgpack.",
         )
         emit_error(err)
         raise typer.Exit(int(err.exit_code))
@@ -1586,12 +1587,20 @@ def wait(
     for_stable: bool = typer.Option(
         False, "--for-stable", help="Wait until the screen stops visually changing."
     ),
-    interval: int = typer.Option(120, "--interval", help="--for-stable: ms between screenshots."),
+    changed: bool = typer.Option(
+        False,
+        "--changed",
+        help="Wait until the hierarchy fingerprint changes (any UI tree change).",
+    ),
+    interval: int = typer.Option(120, "--interval", help="--for-stable/--changed: poll interval ms."),
     settle: int = typer.Option(
         200, "--settle", help="--for-stable: ms of no (non-animated) change to settle."
     ),
     timeout: int | None = typer.Option(
-        None, "--timeout", "--timeout-ms", help="Timeout in ms (default 5000; 30000 for --for-stable)."
+        None,
+        "--timeout",
+        "--timeout-ms",
+        help="Timeout in ms (default 5000; 30000 for --for-stable; 15000 for --changed).",
     ),
     match: str = typer.Option("contains", "--match", help="exact|contains|regex."),
     ignore_case: bool = typer.Option(False, "--ignore-case", help="Case-insensitive match."),
@@ -1609,7 +1618,8 @@ def wait(
 
     ``--for-stable`` polls cheap screenshots (a perceptual-hash "settled" check — no OCR,
     no hierarchy parse; works on opaque screens) and returns once the screen stops changing
-    for ``--settle`` ms. Ideal for waiting on image generation / loading. ``--observe``
+    for ``--settle`` ms. Ideal for waiting on image generation / loading. ``--changed`` waits
+    for any hierarchy-tree change (host-polled stand-in for a11y event push). ``--observe``
     folds in the post-wait screen so you can act on what you waited for in one fewer call.
     """
 
@@ -1627,6 +1637,17 @@ def wait(
                 ),
                 fmt,
             )
+            return
+        if changed:
+            eff = timeout if timeout is not None else 15000
+            result = _route(
+                engine,
+                "wait_changed",
+                timeout_ms=eff,
+                interval_ms=interval,
+                observe=observe,
+            )
+            _emit(result, fmt)
             return
         eff = timeout if timeout is not None else 5000
         result = _route(
@@ -1758,6 +1779,76 @@ def devices(ctx: typer.Context) -> None:
         typer.echo(json.dumps(payload, indent=indent, separators=sep, ensure_ascii=False))
 
     _run(ctx, go)
+
+
+@app.command()
+def fanout(
+    ctx: typer.Context,
+    command: list[str] = typer.Argument(..., help="Subcommand + args, e.g. analyze or has Sign."),
+    serials: str | None = typer.Option(
+        None,
+        "--serials",
+        help="Comma-separated serials (default: every online device from `aua devices`).",
+    ),
+    parallel: bool = typer.Option(True, "--parallel/--serial", help="Run devices concurrently."),
+) -> None:
+    """Run one aua subcommand on many devices and gather JSON results (phase 5).
+
+    Each serial gets its own warm-daemon socket (``daemon.sock.<serial>``). Example::
+
+        aua fanout --serials emulator-5554,emulator-5556 analyze
+        aua fanout has "Sign in"
+    """
+    import json
+    import subprocess
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from .device import list_devices as _list
+
+    opts = _opts(ctx)
+    targets = [s.strip() for s in (serials or "").split(",") if s.strip()]
+    if not targets:
+        targets = [d.serial for d in _list() if getattr(d, "state", "device") == "device"]
+    if not targets:
+        raise UsageError(
+            "no devices for fanout",
+            hint="Attach emulators or pass --serials emulator-5554,emulator-5556.",
+        )
+
+    def one(ser: str) -> dict[str, Any]:
+        cmd = ["aua", "--serial", ser, "--format", "compact", *command]
+        if opts.config:
+            cmd[1:1] = ["--config", opts.config]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            return {"serial": ser, "ok": False, "error": "timeout"}
+        out = proc.stdout.strip()
+        payload: Any
+        try:
+            payload = json.loads(out) if out else None
+        except json.JSONDecodeError:
+            payload = out
+        return {
+            "serial": ser,
+            "ok": proc.returncode == 0,
+            "exit_code": proc.returncode,
+            "result": payload,
+            "stderr": proc.stderr.strip() or None,
+        }
+
+    results: list[dict[str, Any]] = []
+    if parallel and len(targets) > 1:
+        with ThreadPoolExecutor(max_workers=min(8, len(targets))) as pool:
+            futs = {pool.submit(one, s): s for s in targets}
+            for fut in as_completed(futs):
+                results.append(fut.result())
+        results.sort(key=lambda r: targets.index(r["serial"]))
+    else:
+        results = [one(s) for s in targets]
+    typer.echo(json.dumps({"ok": all(r["ok"] for r in results), "devices": results}, indent=2))
+    if not all(r["ok"] for r in results):
+        raise typer.Exit(1)
 
 
 emulator_app = typer.Typer(

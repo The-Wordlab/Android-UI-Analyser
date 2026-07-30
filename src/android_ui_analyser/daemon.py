@@ -54,9 +54,22 @@ _START_TIMEOUT = 5.0  # max seconds to wait after spawning
 # --------------------------------------------------------------------------- helpers
 
 
-def socket_path(config: Config) -> str:
-    """Return the expanded unix-socket path from *config*."""
-    return os.path.expanduser(config.daemon.socket)
+def socket_path(config: Config, serial: str | None = None) -> str:
+    """Return the expanded unix-socket path from *config*.
+
+    When a device serial is known (explicit arg, ``config.device.serial``, or
+    ``AUA_SERIAL``), append ``.<sanitized-serial>`` so multiple warm daemons can
+    coexist — one per emulator. ``AUA_DAEMON_SOCKET`` still wins outright.
+    """
+    env = os.environ.get("AUA_DAEMON_SOCKET")
+    if env:
+        return os.path.expanduser(env)
+    base = os.path.expanduser(config.daemon.socket)
+    ser = serial or getattr(config.device, "serial", None) or os.environ.get("AUA_SERIAL")
+    if not ser:
+        return base
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in ser)
+    return f"{base}.{safe}"
 
 
 # --------------------------------------------------------------------------- dispatch
@@ -234,6 +247,13 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
         elif cmd == "wait_stable":
             result = engine.wait_stable(**args)
             return _result_ok(result.model_dump(mode="json"))
+
+        elif cmd == "wait_changed":
+            result = engine.wait_changed(**args)
+            return _result_ok(result.model_dump(mode="json"))
+
+        elif cmd == "hierarchy_fingerprint":
+            return _result_ok({"fingerprint": engine.hierarchy_fingerprint()})
 
         elif cmd == "memory_update":
             # Returns a plain dict (not a pydantic model).
@@ -415,6 +435,22 @@ def serve(
             with contextlib.suppress(Exception):
                 engine.capture_start()
                 logger.info("capture buffer started")
+        push_hub = None
+        push_port = int(getattr(engine.config.daemon, "push_ws_port", 0) or 0)
+        if push_port > 0:
+            from .push import PushHub
+
+            push_hub = PushHub()
+            with contextlib.suppress(Exception):
+                push_hub.start(push_port)
+                push_hub.start_watcher(
+                    engine.hierarchy_fingerprint,
+                    interval_ms=int(engine.config.daemon.watch_interval_ms),
+                    serial=getattr(engine.device, "serial", None)
+                    if engine._device is not None
+                    else engine.config.device.serial,
+                )
+                logger.info("push WebSocket on 127.0.0.1:%d", push_port)
         if ready_event is not None:
             ready_event.set()
 
@@ -438,6 +474,9 @@ def serve(
     finally:
         # Release the device + its on-device uiautomator2 server so the UiAutomation slot
         # is free for adb/Maestro after the daemon exits (otherwise it leaks).
+        with contextlib.suppress(Exception):
+            if "push_hub" in locals() and push_hub is not None:
+                push_hub.stop()
         with contextlib.suppress(Exception):
             engine.close()
         srv.close()
@@ -513,8 +552,17 @@ class DaemonClient:
         request = {"cmd": cmd, "args": args}
         payload = json.dumps(request, ensure_ascii=False).encode() + b"\n"
 
+        # Long-poll commands need a client timeout above their own deadline.
+        timeout = self._timeout
+        if cmd in {"wait", "wait_stable", "wait_changed", "goto", "flow_run", "navigate"}:
+            ms = args.get("timeout_ms")
+            if isinstance(ms, (int, float)) and ms > 0:
+                timeout = max(timeout, ms / 1000.0 + 5.0)
+            else:
+                timeout = max(timeout, 60.0)
+
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(self._timeout)
+        sock.settimeout(timeout)
         try:
             sock.connect(self._sock_path)
             sock.sendall(payload)
@@ -614,7 +662,7 @@ def start(config: Config, *, serial: str | None = None) -> dict[str, Any]:
 
     Returns a dict with keys ``running``, ``pid``, and ``socket``.
     """
-    sock = socket_path(config)
+    sock = socket_path(config, serial=serial)
 
     if is_running(config):
         return {"running": True, "pid": None, "socket": sock, "status": "already_running"}
