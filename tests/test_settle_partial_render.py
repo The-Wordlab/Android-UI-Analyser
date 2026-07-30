@@ -14,6 +14,7 @@ because `analyze` ran against the header-only frame. Every action observed on de
 from __future__ import annotations
 
 import io
+import time
 from functools import cache
 
 from PIL import Image, ImageDraw
@@ -51,14 +52,14 @@ def _frame(rows_drawn: int, *, w: int = 320, h: int = 640) -> bytes:
 def _rows(n: int) -> str:
     """A list screen with *n* rows — the body arrives progressively on a real device."""
     return _hier(
-        _node("android.widget.TextView", text="App language", rid="x:id/title", b="[40,120][1040,210]"),
+        _node("android.widget.TextView", text="App language", rid="x:id/title", b="[20,20][300,70]"),
         *(
             _node(
                 "android.widget.TextView",
                 text=f"Language {i}",
                 rid=f"x:id/lang{i}",
                 clk=True,
-                b=f"[40,{300 + i * 140}][1040,{400 + i * 140}]",
+                b=f"[20,{120 + i * 70}][300,{170 + i * 70}]",
             )
             for i in range(n)
         ),
@@ -72,7 +73,7 @@ PREVIOUS_SCREEN = _hier(
             text=f"Setting {i}",
             rid=f"x:id/row{i}",
             clk=True,
-            b=f"[40,{200 + i * 140}][1040,{300 + i * 140}]",
+            b=f"[20,{40 + i * 70}][300,{90 + i * 70}]",
         )
         for i in range(8)
     )
@@ -88,11 +89,14 @@ class RenderingDevice(FakeDevice):
     allows it tests an impossible case and flakes.
     """
 
-    def __init__(self, *, paint_frames: int = 0, rows: int = 5, **kw: object) -> None:
+    def __init__(
+        self, *, paint_frames: int = 0, rows: int = 5, dump_delay_s: float = 0.0, **kw: object
+    ) -> None:
         super().__init__(hierarchy_xml=_rows(rows), **kw)  # type: ignore[arg-type]
         self._paint_frames = paint_frames
         self._rows = rows
         self._frames_served = 0
+        self._dump_delay_s = dump_delay_s
 
     def _drawn(self) -> int:
         """Rows painted so far — one per frame, so every frame differs until it is done.
@@ -112,6 +116,8 @@ class RenderingDevice(FakeDevice):
 
     def dump_hierarchy(self, compressed: bool = False) -> str:  # type: ignore[override]
         self.hierarchy_calls += 1
+        if self._dump_delay_s:
+            time.sleep(self._dump_delay_s)
         self.last_tree_served = _rows(self._rows if self._drawn() >= self._rows else 0)
         return self.last_tree_served
 
@@ -162,3 +168,19 @@ def test_a_finished_screen_still_takes_the_fast_path() -> None:
     assert ready["via"] == "hierarchy-fast", ready
     assert ready["timeout"] is False
     assert dev.hierarchy_calls == 1, "a drawn screen must not pay a confirming dump"
+
+
+def test_a_slow_dumping_device_pays_nothing_for_the_check() -> None:
+    """The check is only worth its cost where a dump can outrun the render.
+
+    A dump slower than the render (measured 600-1200ms windowed, vs rows present in the first
+    sample every time) cannot catch a half-attached tree, so paying a confirming one there was
+    pure latency: +614ms per action, most of them hitting the deadline instead of returning.
+    """
+    dev = RenderingDevice(
+        paint_frames=6, dump_delay_s=0.30, package=PKG, width=320, height=640
+    )
+    eng = _engine(dev)
+    ready = _await(eng, _tree_of(PREVIOUS_SCREEN, eng))
+    assert ready["via"] == "hierarchy-fast", ready
+    assert dev.hierarchy_calls == 1, "a slow-dumping device must not be made slower"

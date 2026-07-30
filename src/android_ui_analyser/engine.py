@@ -92,6 +92,10 @@ QUERY_CONFIDENT = 1.0  # all salient tokens / exact phrase present
 QUERY_SOFT = 0.5  # best-effort threshold when escalation is exhausted
 _ASSIST_MAX_STEPS = 6  # bound on planner actions per recovery attempt (opt-in only)
 _MAX_FLOW_DEPTH = 5  # bound on nested `flow:` sub-flow composition (cycle backstop)
+# A hierarchy dump quicker than this can outrun the screen it is reading, so a post-action
+# sample may catch a half-attached tree; a slower one cannot (the render has finished by the
+# time it returns). Measured ~150ms headless vs 600-1200ms windowed on the same emulator.
+_FAST_DUMP_MS = 250.0
 _FLAGS_VERIFY_DEADLINE_S = 2.0  # how long a flag write gets to reach the app's prefs file
 _FLAGS_ENTRY_TIMEOUT_S = 3.0  # how long a pinned entry Activity gets before the default one
 _FLAGS_FOREGROUND_TIMEOUT_S = 6.0  # how long the relaunched app gets to reach the foreground
@@ -2541,9 +2545,11 @@ class Engine:
                 hier_checks += 1
                 next_hier_at = now + 0.06
                 with contextlib.suppress(Exception):
+                    dump_started = time.monotonic()
                     xml = device.dump_hierarchy(
                         compressed=bool(self.config.device.compressed_hierarchy)
                     )
+                    dump_ms = (time.monotonic() - dump_started) * 1000.0
                     w, h = device.window_size()
                     els = hierarchy_mod.parse_hierarchy(xml, (w, h))
                     parts: list[str] = []
@@ -2576,36 +2582,49 @@ class Engine:
                         s_cur, s_pre = set(cur), set(pre_tree)
                         delta = len(s_cur ^ s_pre)
                         union = max(1, len(s_cur | s_pre))
-                        # Neither tree test alone proves the new screen finished drawing, so
-                        # both require pixels to have stopped moving:
+                        # A big delta is measured against the PRE-action tree, so it only says we
+                        # LEFT the old screen — a header-only frame differs from where we came
+                        # from maximally, and accepting it on sight handed the caller an
+                        # observation with the list body missing (measured on a fast device: one
+                        # run in four read zero rows off a screen that has five).
                         #
-                        # - a big delta is measured against the PRE-action tree, so it only says
-                        #   we LEFT the old screen; a header-only frame differs from where we
-                        #   came from maximally and used to be accepted on sight.
-                        # - two identical trees can both be the SAME partial tree, because a
-                        #   header stays put while the list is still arriving.
+                        # "Arrived" is distinguished from "still painting" by the tree having
+                        # stopped GROWING, which takes two samples to see. Whether that second
+                        # sample is affordable depends entirely on the device: a hierarchy dump
+                        # measured ~150ms headless but ~600-1200ms windowed, and on the slow one
+                        # the render has always finished before the first dump even returns. So
+                        # spend a confirming dump only when the remaining budget can absorb one —
+                        # otherwise take what we have. Requiring it unconditionally turned 662ms
+                        # actions into 1276ms ones with 9 of 12 hitting the deadline, which buys
+                        # nothing on a device whose dumps are already slower than its rendering.
+                        # A tree that is a small fraction of the one we left is the shape of a
+                        # half-drawn screen — a header whose body has not been attached yet.
+                        # That, not "differs from before", is what has to hold us.
                         #
-                        # Either way the caller got an observation with the body missing and
-                        # read zero rows off a screen that has them. Pixel-idle is the evidence
-                        # that rendering is actually done; the tree tests then only buy back the
-                        # `settle_ms` dwell the pure pixel path waits out.
-                        if visually_idle:
-                            if delta >= max(4, union // 3):
-                                return {
-                                    "changed": True,
-                                    "masked": len(gs.masked_cells),
-                                    "ms": int((time.monotonic() - t0) * 1000),
-                                    "timeout": False,
-                                    "via": "hierarchy-fast",
-                                }
-                            if cur == last_tree:
-                                return {
-                                    "changed": True,
-                                    "masked": len(gs.masked_cells),
-                                    "ms": int((time.monotonic() - t0) * 1000),
-                                    "timeout": False,
-                                    "via": "hierarchy",
-                                }
+                        # Only devices with FAST dumps can land in that state: a dump measured
+                        # ~150ms headless but 600-1200ms windowed, and on the slow one the render
+                        # has always finished before the first dump even returns (measured: rows
+                        # present in the first sample every time, 807-1205ms after the tap). So
+                        # the confirming sample is worth its cost exactly when dumps are cheap;
+                        # spending it anywhere else buys nothing and cost +614ms per action.
+                        thin = len(pre_tree) >= 6 and len(cur) * 2 < len(pre_tree)
+                        settled = visually_idle or not thin or dump_ms > _FAST_DUMP_MS
+                        if settled and delta >= max(4, union // 3):
+                            return {
+                                "changed": True,
+                                "masked": len(gs.masked_cells),
+                                "ms": int((time.monotonic() - t0) * 1000),
+                                "timeout": False,
+                                "via": "hierarchy-fast",
+                            }
+                        if settled and cur == last_tree:
+                            return {
+                                "changed": True,
+                                "masked": len(gs.masked_cells),
+                                "ms": int((time.monotonic() - t0) * 1000),
+                                "timeout": False,
+                                "via": "hierarchy",
+                            }
                         last_tree = cur
             time.sleep(poll_ms / 1000.0)
 
