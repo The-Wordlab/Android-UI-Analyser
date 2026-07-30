@@ -187,9 +187,11 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "(tap/input/swipe/scroll-to/key) returns the next screen inline in `observation` "
         "(elements with fresh ids) — so you rarely need a separate `analyze`: `type → tap "
         "send` is two calls, not three, and `goto` returns the destination's `elements` too. "
-        "Pass `--no-observe` to skip it on action-only sequences. Action `observation` now "
-        "waits for a pixel change + idle (animation-aware) before dumping the tree — so you "
-        "usually get the *next* screen, not a mid-transition snapshot. Prefer "
+        "Pass `--no-observe` to skip it on action-only sequences. Action `observation` waits "
+        "for a pixel change + idle (animation-aware) before dumping the tree, and a screen "
+        "whose content is still streaming in has to hold still for one confirming sample — so "
+        "you get the *next* screen, not a mid-transition snapshot with the list body missing. "
+        "Prefer "
         "`wait --for \"<text>\"` for known targets; reserve `wait --for-stable` for "
         "generation / loading / video.",
     ),

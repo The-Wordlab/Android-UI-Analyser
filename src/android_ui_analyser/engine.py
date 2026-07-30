@@ -2576,23 +2576,36 @@ class Engine:
                         s_cur, s_pre = set(cur), set(pre_tree)
                         delta = len(s_cur ^ s_pre)
                         union = max(1, len(s_cur | s_pre))
-                        # Big tree rewrite (tab / screen change): accept on first sample.
-                        if delta >= max(4, union // 3):
-                            return {
-                                "changed": True,
-                                "masked": len(gs.masked_cells),
-                                "ms": int((time.monotonic() - t0) * 1000),
-                                "timeout": False,
-                                "via": "hierarchy-fast",
-                            }
-                        if cur == last_tree:
-                            return {
-                                "changed": True,
-                                "masked": len(gs.masked_cells),
-                                "ms": int((time.monotonic() - t0) * 1000),
-                                "timeout": False,
-                                "via": "hierarchy",
-                            }
+                        # Neither tree test alone proves the new screen finished drawing, so
+                        # both require pixels to have stopped moving:
+                        #
+                        # - a big delta is measured against the PRE-action tree, so it only says
+                        #   we LEFT the old screen; a header-only frame differs from where we
+                        #   came from maximally and used to be accepted on sight.
+                        # - two identical trees can both be the SAME partial tree, because a
+                        #   header stays put while the list is still arriving.
+                        #
+                        # Either way the caller got an observation with the body missing and
+                        # read zero rows off a screen that has them. Pixel-idle is the evidence
+                        # that rendering is actually done; the tree tests then only buy back the
+                        # `settle_ms` dwell the pure pixel path waits out.
+                        if visually_idle:
+                            if delta >= max(4, union // 3):
+                                return {
+                                    "changed": True,
+                                    "masked": len(gs.masked_cells),
+                                    "ms": int((time.monotonic() - t0) * 1000),
+                                    "timeout": False,
+                                    "via": "hierarchy-fast",
+                                }
+                            if cur == last_tree:
+                                return {
+                                    "changed": True,
+                                    "masked": len(gs.masked_cells),
+                                    "ms": int((time.monotonic() - t0) * 1000),
+                                    "timeout": False,
+                                    "via": "hierarchy",
+                                }
                         last_tree = cur
             time.sleep(poll_ms / 1000.0)
 
