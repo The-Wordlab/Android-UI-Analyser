@@ -505,6 +505,20 @@ class Engine:
                 and not no_cache
             ):
                 prev = self._last_analyze_result
+                # Reusing the PAYLOAD is fine — the tree really is identical — but the memory
+                # side-effects are not the tree's properties and must still run:
+                #  - `known_screen`: the map learns between calls, so the first analyze of a new
+                #    screen answers None and every later one would repeat that None forever.
+                #  - a pending route deferred by a mid-transition observe snapshot is drawn by
+                #    the NEXT recording analyze; skipping it dropped the edge silently, so the
+                #    map stopped learning exactly when the screen sat still.
+                # `_record_screen_safe` has its own unchanged-screen fast path, so this is a
+                # map read rather than a re-record.
+                known = prev.meta.known_screen
+                if record:
+                    known, _hints = self._record_screen_safe(
+                        device, package, activity, prev.elements, tier_used, h
+                    )
                 reused = prev.model_copy(
                     update={
                         "meta": prev.meta.model_copy(
@@ -512,6 +526,7 @@ class Engine:
                                 "duration_ms": int((time.perf_counter() - t0) * 1000),
                                 "unchanged": True,
                                 "fingerprint": xml_hash,
+                                "known_screen": known,
                                 "via": "hierarchy-unchanged",
                                 "element_diff": {
                                     "added": [],
@@ -526,6 +541,12 @@ class Engine:
                         )
                     }
                 )
+                # Reusing the payload must not skip the side effect callers depend on: every
+                # action invalidates the id cache, so an unchanged screen returned straight
+                # from memory left NOTHING on disk and the next `tap <id>` died with "no
+                # cached analyze result". The ids are only usable because analyze persists them.
+                if not no_cache:
+                    self._write_cache(reused)
                 return reused
         else:
             xml_hash = None

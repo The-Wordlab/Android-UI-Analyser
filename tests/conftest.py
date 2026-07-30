@@ -471,6 +471,30 @@ def _aua_isolate_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return state
 
 
+@pytest.fixture(autouse=True)
+def _aua_never_kill_a_real_emulator(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make `adb emu kill` unreachable from the suite.
+
+    `emulator.stop` terminates emulators for real, and a test exercising it only needs the
+    device list faked to look plausible — the kill still went out. `test_emulator_stop_guard`
+    faked `emulator-5554`/`emulator-5556`, the serials a developer actually runs, and stubbed
+    the kill in one test out of four (against a name that did not exist, so it stubbed
+    nothing). Every full-suite run killed the live emulators mid-session.
+
+    A test that wants to observe kills patches this same seam itself, which wins over this
+    fixture; nothing has to remember to add protection.
+    """
+    from android_ui_analyser import emulator as emulator_mod
+
+    def _refuse(serial: str) -> None:
+        raise AssertionError(
+            f"a unit test tried to kill emulator {serial!r} for real; "
+            "patch emulator._adb_emu_kill in the test if you meant to observe the call"
+        )
+
+    monkeypatch.setattr(emulator_mod, "_adb_emu_kill", _refuse)
+
+
 def make_engine(
     *,
     config: Config | None = None,

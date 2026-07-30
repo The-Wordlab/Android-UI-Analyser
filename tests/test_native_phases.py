@@ -6,7 +6,7 @@ import base64
 from pathlib import Path
 
 from android_ui_analyser.binary_dump import pack_analyze_dict, unpack_b64, unpack_frame
-from android_ui_analyser.config import Config, DaemonCfg, load_config
+from android_ui_analyser.config import Config, DaemonCfg
 from android_ui_analyser.daemon import socket_path
 from android_ui_analyser.schema import (
     AnalyzeResult,
@@ -82,9 +82,19 @@ def test_per_serial_socket_path(tmp_path: Path) -> None:
     assert socket_path(cfg, serial="bad/serial:1").endswith("daemon.sock.bad_serial_1")
 
 
-def test_apple_vision_default_is_fast() -> None:
-    cfg = load_config(cli_overrides={})
-    assert cfg.models["apple_vision"]["recognition_level"] == "fast"
+def test_ocr_default_favours_accuracy_and_yolo_uses_the_gpu() -> None:
+    """Assert the CODE defaults, not whatever this machine's config files resolve to.
+
+    `load_config()` layers in the real user + project configs, so this passed or failed by
+    developer machine: a checked-out `.android-ui-analyser.yaml` pinning a value made it fail
+    with nothing wrong in the code.
+
+    `apple_vision` deliberately defaults to `accurate`: OCR only runs when the accessibility
+    tree could not read the screen, so it has no fallback behind it, and `fast` truncates —
+    the repo's own smoke image reads "Hello" as "Hel".
+    """
+    cfg = Config()
+    assert cfg.models["apple_vision"]["recognition_level"] == "accurate"
     assert cfg.models["yolo"]["device"] == "mps"
     assert cfg.perf.differential is True
     assert cfg.perf.skip_unchanged_analyze is True

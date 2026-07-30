@@ -247,7 +247,11 @@ def _default_models() -> dict[str, dict[str, Any]]:
         "yolo": {"weights": None, "device": "mps", "conf": 0.25},
         "omniparser": {"device": "mps", "accept_agpl": False, "box_threshold": 0.05},
         # ocr
-        "apple_vision": {"recognition_level": "fast"},  # Neural Engine hot path; use accurate if needed
+        # OCR only runs when the accessibility tree could not see the screen, so it is the one
+        # reader with no fallback behind it. `fast` measurably truncates: the repo's own smoke
+        # image reads "Hello" as "Hel". Milliseconds are not worth a wrong word here — set
+        # `recognition_level: fast` per-project if a surface is latency-bound and text-tolerant.
+        "apple_vision": {"recognition_level": "accurate"},
         "rapidocr": {"lang": "en"},
         "paddleocr": {"lang": "en"},
         "tesseract": {"lang": "eng"},
@@ -596,7 +600,7 @@ planner:
 models:
   yolo:         { weights: null, device: mps, conf: 0.25 }   # set weights to enable YOLO
   omniparser:   { device: mps, accept_agpl: false }          # MUST be true to run (AGPL-3.0!)
-  apple_vision: { recognition_level: fast }     # accurate is slower; override if needed
+  apple_vision: { recognition_level: accurate }  # fast is quicker but truncates text
   rapidocr:     { lang: en }
   local_vllm:   { base_url: "http://localhost:8000/v1", model: "Hcompany/Holo1.5-7B" }
   openai:       { model: gpt-5, api_key_env: OPENAI_API_KEY }

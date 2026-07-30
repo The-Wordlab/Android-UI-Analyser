@@ -278,7 +278,11 @@ class AnalyzeResult(BaseModel):
                 "meta": {
                     k: v
                     for k, v in self.meta.model_dump(mode="json").items()
-                    if v not in (None, [], False)
+                    # `v not in (None, [], False)` compares with ==, and 0 == False, so a
+                    # `duration_ms` of 0 was dropped — the payload then failed its own schema
+                    # (duration_ms is required), and only on FAST calls, i.e. the ones the
+                    # trimming exists for. Test `False` by identity.
+                    if v is not None and v != [] and v is not False
                 },
             }
         return self.model_dump(mode="json")

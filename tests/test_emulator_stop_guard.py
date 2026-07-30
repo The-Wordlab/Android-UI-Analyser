@@ -16,15 +16,29 @@ import pytest
 from android_ui_analyser import emulator as emulator_mod
 from android_ui_analyser.errors import ExitCode, UsageError
 
+# Serials outside the real emulator port range (5554-5682, even ports only), so that even a
+# bug in this file's stubbing cannot reach a device someone is using.
+SER_A = "emulator-9998"
+SER_B = "emulator-9996"
+
 RUNNING = [
-    {"serial": "emulator-5554", "model": "pixel", "android_version": "16", "state": "device"},
-    {"serial": "emulator-5556", "model": "pixel", "android_version": "16", "state": "device"},
+    {"serial": SER_A, "model": "pixel", "android_version": "16", "state": "device"},
+    {"serial": SER_B, "model": "pixel", "android_version": "16", "state": "device"},
 ]
 
 
 @pytest.fixture(autouse=True)
-def _fake_running(monkeypatch: pytest.MonkeyPatch) -> None:
+def _fake_running(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Fake the device list AND neutralise the kill for every test in this module.
+
+    Autouse and unconditional on purpose: this suite exercises `stop`, whose whole job is to
+    terminate emulators. A per-test stub is one forgotten decorator away from `adb emu kill`
+    running for real — which is exactly what happened, repeatedly, against a live session.
+    """
     monkeypatch.setattr(emulator_mod, "running_emulators", lambda: list(RUNNING))
+    killed: list[str] = []
+    monkeypatch.setattr(emulator_mod, "_adb_emu_kill", killed.append)
+    return killed
 
 
 def test_untargeted_stop_is_refused(tmp_path: Path) -> None:
@@ -32,14 +46,13 @@ def test_untargeted_stop_is_refused(tmp_path: Path) -> None:
         emulator_mod.stop(cache_dir=tmp_path)
     assert err.value.exit_code == ExitCode.USAGE
     # The message must name what WOULD have died, so the caller can pick one.
-    assert "emulator-5554" in (err.value.hint or "")
+    assert SER_A in (err.value.hint or "")
     assert "--all" in str(err.value)
 
 
-def test_untargeted_stop_kills_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_untargeted_stop_kills_nothing(tmp_path: Path, _fake_running: list[str]) -> None:
     """The refusal must happen BEFORE any kill is issued."""
-    killed: list[str] = []
-    monkeypatch.setattr(emulator_mod, "_adb_emu_kill", lambda s: killed.append(s), raising=False)
+    killed = _fake_running
     with pytest.raises(UsageError):
         emulator_mod.stop(cache_dir=tmp_path)
     assert killed == [], "refused, so nothing may have been signalled"
@@ -54,7 +67,7 @@ def test_all_is_accepted_as_an_explicit_choice(tmp_path: Path) -> None:
 
 
 def test_serial_still_scopes_to_one(tmp_path: Path) -> None:
-    out = emulator_mod.stop(serial="emulator-5554", cache_dir=tmp_path)
+    out = emulator_mod.stop(serial=SER_A, cache_dir=tmp_path)
     assert out["ok"] is True
     stopped = [s if isinstance(s, str) else s.get("serial") for s in out.get("stopped") or []]
-    assert "emulator-5556" not in stopped, "a scoped stop must not touch the other emulator"
+    assert SER_B not in stopped, "a scoped stop must not touch the other emulator"

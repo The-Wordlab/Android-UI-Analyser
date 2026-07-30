@@ -5,7 +5,7 @@ bounding boxes with a *bottom-left* origin; we convert to pixel coords with a
 *top-left* origin before returning TextBox objects.
 
 Tunable via ``models.apple_vision`` config block:
-  recognition_level: "fast" (default, Neural Engine hot path) | "accurate"
+  recognition_level: "accurate" (default) | "fast" (Neural Engine hot path, truncates)
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ class AppleVisionOcrProvider(OcrProvider):
         handler = Vision.VNImageRequestHandler.alloc().initWithData_options_(ns_data, {})
 
         # Determine recognition level from settings
-        level_str = self.settings.get("recognition_level", "fast")
+        level_str = self.settings.get("recognition_level", "accurate")
         if level_str == "accurate":
             level = Vision.VNRequestTextRecognitionLevelAccurate
         else:

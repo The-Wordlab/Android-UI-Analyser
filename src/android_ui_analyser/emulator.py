@@ -187,6 +187,22 @@ def _wait_for_boot(shell: Callable[[str], str], *, timeout_s: float = 90.0) -> b
     return False
 
 
+def _adb_emu_kill(serial: str) -> None:
+    """Terminate one emulator. A named seam, so a test can stub it and MEAN it.
+
+    This used to be an inline `subprocess.run` inside `stop`, with no way to intercept it.
+    A test that patched `_adb_emu_kill` (which did not exist) silently patched nothing and
+    ran the real kill against the serials in its fixture — `emulator-5554`/`emulator-5556`,
+    i.e. whatever the developer actually had running. Every full-suite run killed them.
+    """
+    subprocess.run(  # noqa: S603
+        [adb_bin(), "-s", serial, "emu", "kill"],
+        check=False,
+        capture_output=True,
+        timeout=20,
+    )
+
+
 def start(
     avd: str | None = None,
     *,
@@ -399,17 +415,11 @@ def stop(
             hint="`aua emulator status` lists live serials; pass --serial emulator-5554.",
         )
 
-    adb = adb_bin()
     stopped: list[str] = []
     for t in targets:
         ser = t["serial"]
         try:
-            subprocess.run(  # noqa: S603
-                [adb, "-s", ser, "emu", "kill"],
-                check=False,
-                capture_output=True,
-                timeout=20,
-            )
+            _adb_emu_kill(ser)
             stopped.append(ser)
         except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
             logger.debug("emu kill %s failed: %s", ser, exc)
