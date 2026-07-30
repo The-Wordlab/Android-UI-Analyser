@@ -42,10 +42,13 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "If `aua devices` is empty and you need to **verify a change without bothering the "
         "user** (no emulator window on their desktop), boot one quietly: "
         "`aua emulator start --headless` (uses `-no-window`; pick `--avd <name>` when several "
-        "AVDs exist — `aua emulator list`). Then analyze/drive as usual. Prefer an already "
-        "running device when one is attached; don't kill the user's headed emulator unless "
-        "they asked. Create AVDs once outside aua (Android Studio / avdmanager) — aua only "
-        "boots/stops them. `aua emulator status` / `aua emulator stop` for lifecycle.",
+        "AVDs exist — `aua emulator list`). Prefer an already running device when one is "
+        "attached; don't kill the user's headed emulator unless they asked. For **HTTPS "
+        "proxy / mock record** you need a *rootable* Google APIs AVD (Play Store images "
+        "refuse `adb root`): `aua emulator recommend-proxy` suggests a small package, "
+        "`aua emulator ensure-proxy` downloads + creates `aua_proxy`, then "
+        "`aua emulator start --avd aua_proxy --headless`. `aua emulator status` / `stop` "
+        "for lifecycle.",
     ),
     (
         "Start the warm daemon",
@@ -269,9 +272,11 @@ KEY_FLAGS: list[tuple[str, str]] = [
     ),
     (
         "emulator",
-        "`emulator list|status|start [--avd NAME] [--headless|--windowed] [--wait N]|stop "
-        "[--serial emulator-5554|--avd NAME]` — boot a headless AVD for unattended verify; "
-        "does **not** create AVDs (Android Studio / avdmanager does that once)",
+        "`emulator list|status|recommend-proxy|ensure-proxy [--name aua_proxy] [--api 30] "
+        "[--force] [--start]|start [--avd NAME] [--headless|--windowed] [--wait N]|stop "
+        "[--serial emulator-5554|--avd NAME]` — boot headless for unattended verify; "
+        "`ensure-proxy` creates a small rootable google_apis AVD (needed for HTTPS proxy "
+        "system CA — Play Store AVDs refuse `adb root`)",
     ),
     (
         "has",
@@ -561,12 +566,19 @@ def render_markdown(*, brief: bool = False) -> str:
         "**not** see an emulator window pop up — prefer a headless AVD:\n"
         "```bash\n"
         "aua devices                          # already have a device? use it\n"
-        "aua emulator list                    # which AVDs exist on this machine\n"
+        "aua emulator list                    # marks Play Store vs rootable\n"
         "aua emulator start --headless        # -no-window; waits until adb is ready\n"
         "aua daemon start --quiet\n"
         "aua --format compact analyze         # same analyze path as a headed emulator\n"
         "# … drive the flow under test …\n"
-        "aua emulator stop                    # optional cleanup when you started it\n"
+        "aua emulator stop --avd <name>       # optional cleanup when you started it\n"
+        "```\n"
+        "For **proxy / mock HTTPS** (apps that only trust system CAs), Play Store AVDs "
+        "will not work — create a small rootable one:\n"
+        "```bash\n"
+        "aua emulator recommend-proxy         # package + why (no download)\n"
+        "aua emulator ensure-proxy --start    # download google_apis image + boot aua_proxy\n"
+        "aua --serial <serial> proxy start\n"
         "```\n"
         "Analyze/tap/wait work identically; hierarchy + screenshots do not need a visible "
         "window. Never wipe or stop an emulator the user already had open unless they asked."

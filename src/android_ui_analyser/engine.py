@@ -3926,8 +3926,11 @@ class Engine:
         safe = str(serial).replace(":", "_")
         return Path(self.config.cache.dir).expanduser() / f"devopts_backup_{safe}.json"
 
-    def _proxy_port(self) -> int:
-        return 8080
+    def _proxy_port(self) -> int | None:
+        """Listen port of the running mitm, or ``None`` if none has been chosen yet."""
+        from . import proxy_mock as pm
+
+        return pm.load_listen_port(Path(self.config.cache.dir).expanduser())
 
     def dev_show(self) -> dict[str, Any]:
         from . import devopts
@@ -4195,35 +4198,77 @@ class Engine:
             prefs_file=prefs_file,
         )
 
-    def proxy_start(self, *, port: int | None = None) -> dict[str, Any]:
+    def proxy_start(
+        self,
+        *,
+        port: int | None = None,
+        install_ca: bool = True,
+    ) -> dict[str, Any]:
         from . import proxy_mock as pm
 
-        p = int(port or self._proxy_port())
         cache = Path(self.config.cache.dir).expanduser()
-        pid = pm.start_mitm(cache_dir=cache, port=p, mode="map")
-        self.device.adb_reverse(p, p)
-        self.device.set_http_proxy(f"127.0.0.1:{p}")
-        return {
+        # Touch the device first so a dead serial does not leave a stray mitmdump.
+        device = self.device
+        ca_info: dict[str, Any] | None = None
+        if install_ca:
+            try:
+                ca_info = pm.install_system_ca(device.serial)
+            except (DeviceError, UsageError) as exc:
+                # Still start the proxy — but surface why HTTPS will likely fail.
+                ca_info = {"ok": False, "error": str(exc), "hint": getattr(exc, "hint", None)}
+                logger.warning("system CA install failed: %s", exc)
+        # ``port<=0`` / omitted → random free high port (never hardcodes 8080).
+        preferred = port if port and port > 0 else None
+        pid, listen = pm.start_mitm(cache_dir=cache, port=preferred, mode="map")
+        try:
+            device.adb_reverse(listen, listen)
+            device.set_http_proxy(f"127.0.0.1:{listen}")
+        except Exception:
+            with contextlib.suppress(Exception):
+                pm.stop_mitm(cache)
+            raise
+        # Relaunching the foreground app makes it inherit Zygote CA mounts.
+        pkg = None
+        with contextlib.suppress(Exception):
+            pkg = (device.current_app() or {}).get("package")
+        if pkg and ca_info and ca_info.get("ok"):
+            with contextlib.suppress(Exception):
+                device.stop_app(pkg)
+                device.launch_app(pkg)
+        out: dict[str, Any] = {
             "ok": True,
             "action": "proxy-start",
             "pid": pid,
-            "port": p,
+            "port": listen,
+            "ca": ca_info,
             "hint": (
-                "Install the mitmproxy CA on the device once (Settings → Security → "
-                "Install from storage), or trust user CAs for debug builds."
+                f"Device http_proxy is 127.0.0.1:{listen} (via adb reverse). "
+                + (
+                    "System CA installed — force-stop/relaunch done for foreground app."
+                    if ca_info and ca_info.get("ok")
+                    else "CA install failed or skipped: HTTPS apps that only trust system "
+                    "CAs (e.g. Luzia) will produce EMPTY cassettes until the mitm CA is a "
+                    "system trust anchor. Fix: `aua emulator ensure-proxy` → start "
+                    "`aua_proxy` → `aua proxy start` on that serial."
+                )
             ),
         }
+        if pkg:
+            out["relaunched"] = pkg
+        return out
 
     def proxy_stop(self) -> dict[str, Any]:
         from . import proxy_mock as pm
 
+        cache = Path(self.config.cache.dir).expanduser()
         p = self._proxy_port()
         with contextlib.suppress(Exception):
             self.device.set_http_proxy(None)
-        with contextlib.suppress(Exception):
-            self.device.adb_reverse_remove(p)
-        stopped = pm.stop_mitm(Path(self.config.cache.dir).expanduser())
-        return {"ok": True, "action": "proxy-stop", "stopped": stopped}
+        if p is not None:
+            with contextlib.suppress(Exception):
+                self.device.adb_reverse_remove(p)
+        stopped = pm.stop_mitm(cache)
+        return {"ok": True, "action": "proxy-stop", "stopped": stopped, "port": p}
 
     def mock_map(
         self,
@@ -4257,13 +4302,19 @@ class Engine:
             env_mode.write_text("record", encoding="utf-8")
             (cache / "mock_record_name.txt").write_text(name, encoding="utf-8")
             # Live addon reads AUA_MOCK_MODE from process env — restart to flip mode.
+            # Keep the same listen port when one is already bound so adb reverse stays valid.
+            prev = pm.load_listen_port(cache)
             pm.stop_mitm(cache)
-            port = self._proxy_port()
-            pm.start_mitm(cache_dir=cache, port=port, mode="record")
+            _pid, listen = pm.start_mitm(cache_dir=cache, port=prev, mode="record")
             with contextlib.suppress(Exception):
-                self.device.adb_reverse(port, port)
-                self.device.set_http_proxy(f"127.0.0.1:{port}")
-            return {"ok": True, "action": "mock-record-start", "name": name}
+                self.device.adb_reverse(listen, listen)
+                self.device.set_http_proxy(f"127.0.0.1:{listen}")
+            return {
+                "ok": True,
+                "action": "mock-record-start",
+                "name": name,
+                "port": listen,
+            }
         if a == "stop":
             name_path = cache / "mock_record_name.txt"
             rec_name = name or (
@@ -4284,15 +4335,34 @@ class Engine:
                     entries = []
             dest = pm.cassette_dir(self.config.memory.dir) / f"{rec_name}.yaml"
             pm.save_cassette(dest, rec_name, entries)
+            # Flip back to map mode on the same port.
+            prev = pm.load_listen_port(cache)
             pm.stop_mitm(cache)
-            pm.start_mitm(cache_dir=cache, port=self._proxy_port(), mode="map")
-            return {
+            _pid, listen = pm.start_mitm(cache_dir=cache, port=prev, mode="map")
+            with contextlib.suppress(Exception):
+                self.device.adb_reverse(listen, listen)
+                self.device.set_http_proxy(f"127.0.0.1:{listen}")
+            out: dict[str, Any] = {
                 "ok": True,
                 "action": "mock-record-stop",
                 "name": rec_name,
                 "path": str(dest),
                 "entries": len(entries),
+                "port": listen,
             }
+            if not entries:
+                tls = pm.tls_failures_in_log(cache)
+                out["ok"] = False
+                out["code"] = "proxy_tls"
+                out["hint"] = (
+                    "Recorded 0 HTTP flows. Mitm saw CONNECTs but TLS failed — the app "
+                    "does not trust the mitm CA (Luzia NSC is system-only). "
+                    "Re-run `aua proxy start` on a rootable emulator so the system CA "
+                    "overlay is installed, then force-stop + relaunch the app."
+                )
+                if tls:
+                    out["tls_errors"] = tls
+            return out
         raise UsageError(
             f"unknown mock record action {action!r}",
             hint="Use `aua mock record start NAME` or `aua mock record stop`.",

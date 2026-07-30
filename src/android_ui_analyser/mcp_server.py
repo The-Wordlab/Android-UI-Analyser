@@ -840,7 +840,13 @@ def _tool_definitions() -> list[types.Tool]:
             description="Start headless mitmproxy + device http_proxy (needs [proxy] extra).",
             inputSchema={
                 "type": "object",
-                "properties": {"port": {"type": "integer", "default": 8080}},
+                "properties": {
+                    "port": {
+                        "type": "integer",
+                        "default": 0,
+                        "description": "mitmdump listen port; 0 = free random high port.",
+                    }
+                },
                 "additionalProperties": False,
             },
         ),
@@ -1312,7 +1318,7 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         except (ValueError, OSError) as exc:
             raise AuaError(str(exc), code="usage") from exc
     if name == "proxy_start":
-        return _dump(engine.proxy_start(port=args.get("port")))
+        return _dump(engine.proxy_start(port=args.get("port") or None))
     if name == "proxy_stop":
         return _dump(engine.proxy_stop())
     if name == "mock_replay":

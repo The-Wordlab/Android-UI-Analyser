@@ -46,9 +46,71 @@ def test_proxy_start_missing_mitm(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     device = FakeDevice()
     engine = Engine(make_config(cache={"dir": str(tmp_path)}), device=device)
 
-    def boom(**kwargs: Any) -> int:
+    def boom(**kwargs: Any) -> tuple[int, int]:
         raise UsageError("mitmproxy is not installed", hint="install [proxy]")
 
     monkeypatch.setattr(pm, "start_mitm", boom)
+    monkeypatch.setattr(pm, "install_system_ca", lambda *_a, **_k: {"ok": True})
     with pytest.raises(UsageError, match="mitmproxy"):
-        engine.proxy_start()
+        engine.proxy_start(install_ca=False)
+
+
+def test_pick_listen_port_avoids_8080_and_persists(tmp_path: Path) -> None:
+    port = pm.pick_listen_port()
+    assert port != 8080
+    assert 1024 < port < 65536
+    pm.save_listen_port(tmp_path, port)
+    assert pm.load_listen_port(tmp_path) == port
+    pm.clear_listen_port(tmp_path)
+    assert pm.load_listen_port(tmp_path) is None
+
+
+def test_proxy_start_uses_random_port(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    device = FakeDevice()
+    cache = tmp_path / "cache"
+    engine = Engine(make_config(cache={"dir": str(cache)}), device=device)
+
+    def fake_start(*, cache_dir: Path, port: int | None = None, mode: str = "map") -> tuple[int, int]:
+        listen = pm.pick_listen_port(preferred=port)
+        pm.save_listen_port(cache_dir, listen)
+        (cache_dir / "mitmproxy.pid").write_text("12345", encoding="utf-8")
+        return 12345, listen
+
+    monkeypatch.setattr(pm, "start_mitm", fake_start)
+    monkeypatch.setattr(pm, "install_system_ca", lambda *_a, **_k: {"ok": True, "hash": "abc"})
+    out = engine.proxy_start(install_ca=True)
+    assert out["port"] != 8080
+    assert pm.load_listen_port(cache) == out["port"]
+    # Record must reuse the same port, not fall back to 8080.
+    seen: list[int | None] = []
+
+    def fake_start2(*, cache_dir: Path, port: int | None = None, mode: str = "map") -> tuple[int, int]:
+        seen.append(port)
+        listen = port or 54321
+        pm.save_listen_port(cache_dir, listen)
+        return 99, listen
+
+    monkeypatch.setattr(pm, "start_mitm", fake_start2)
+    monkeypatch.setattr(pm, "stop_mitm", lambda _c: True)
+    rec = engine.mock_record("start", "hub")
+    assert seen == [out["port"]]
+    assert rec["port"] == out["port"]
+
+
+def test_tls_failures_in_log(tmp_path: Path) -> None:
+    log = tmp_path / "mitmdump.log"
+    log.write_text(
+        "info\nClient TLS handshake failed. The client does not trust the proxy's certificate "
+        "for luzia-api.staging.thewordlab.net\nok\n",
+        encoding="utf-8",
+    )
+    hits = pm.tls_failures_in_log(tmp_path)
+    assert hits and "does not trust" in hits[0]
+
+
+def test_mitmdump_bin_prefers_venv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    fake = tmp_path / "mitmdump"
+    fake.write_text("#!/bin/sh\n", encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setattr(pm.sys, "executable", str(tmp_path / "python"))
+    assert pm.mitmdump_bin() == str(fake)

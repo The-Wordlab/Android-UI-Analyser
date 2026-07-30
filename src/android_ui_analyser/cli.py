@@ -1870,11 +1870,89 @@ def _emulator_emit(payload: dict[str, Any], ctx: typer.Context) -> None:
 
 @emulator_app.command("list")
 def emulator_list_cmd(ctx: typer.Context) -> None:
-    """List configured AVD names (does not start anything)."""
+    """List configured AVDs (marks Play Store vs rootable Google APIs)."""
     from . import emulator as emulator_mod
 
     try:
         _emulator_emit(emulator_mod.list_avds(), ctx)
+    except AuaError as err:
+        emit_error(err)
+        raise typer.Exit(int(err.exit_code)) from err
+
+
+@emulator_app.command("recommend-proxy")
+def emulator_recommend_proxy_cmd(
+    ctx: typer.Context,
+    name: str = typer.Option(
+        "aua_proxy", "--name", help="Suggested AVD name for ensure-proxy."
+    ),
+    api: int = typer.Option(
+        30,
+        "--api",
+        help="API level for the google_apis system image (30 = small/fast default).",
+    ),
+) -> None:
+    """Suggest a small rootable Google APIs AVD for HTTPS proxy / system CA install.
+
+    Google Play images refuse `adb root`, so mitm system-CA install fails. This prints
+    the package + commands; does not download or create anything.
+    """
+    from . import emulator as emulator_mod
+
+    try:
+        _emulator_emit(emulator_mod.recommend_proxy_avd(api=api, name=name), ctx)
+    except AuaError as err:
+        emit_error(err)
+        raise typer.Exit(int(err.exit_code)) from err
+
+
+@emulator_app.command("ensure-proxy")
+def emulator_ensure_proxy_cmd(
+    ctx: typer.Context,
+    name: str = typer.Option(
+        "aua_proxy", "--name", help="AVD name to create or reuse."
+    ),
+    api: int = typer.Option(
+        30,
+        "--api",
+        help="API level (google_apis, not Play Store). Lower = smaller/faster.",
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Recreate even if the AVD already exists."
+    ),
+    start_after: bool = typer.Option(
+        False,
+        "--start/--no-start",
+        help="Boot the AVD headless after create/reuse.",
+    ),
+    wait: int = typer.Option(
+        180, "--wait", help="Seconds to wait for adb when --start is set."
+    ),
+) -> None:
+    """Install a small google_apis system image (if needed) and create a rootable AVD.
+
+    Needed for `aua proxy` HTTPS capture when the app only trusts system CAs. Prefer this
+    over Google Play AVDs — those block `adb root`. Downloads can take several minutes.
+    """
+    from . import emulator as emulator_mod
+
+    opts = _opts(ctx)
+    cfg = opts.load()
+    try:
+        payload = emulator_mod.ensure_proxy_avd(name=name, api=api, force=force)
+        if start_after:
+            boot = emulator_mod.start(
+                name,
+                headless=True,
+                wait_s=float(wait),
+                cache_dir=cfg.cache.dir,
+            )
+            payload["started"] = boot
+            payload["hint"] = (
+                f"Booted {boot.get('serial')}. Next: "
+                f"`aua --serial {boot.get('serial')} proxy start`."
+            )
+        _emulator_emit(payload, ctx)
     except AuaError as err:
         emit_error(err)
         raise typer.Exit(int(err.exit_code)) from err
@@ -2502,9 +2580,18 @@ def _build_doctor_report(engine: Engine) -> dict[str, Any]:
             "detail": {
                 "binary": emu.get("emulator"),
                 "avds": emu.get("avds") or [],
+                "rootable": emu.get("rootable") or [],
+                "play_store": emu.get("play_store") or [],
                 "running": emu.get("running") or [],
             },
         }
+        if emu.get("hint"):
+            checks["emulator"]["hint"] = emu["hint"]
+        elif (emu.get("play_store") or []) and not (emu.get("rootable") or []):
+            checks["emulator"]["hint"] = (
+                "Only Google Play AVDs — HTTPS proxy needs a rootable image: "
+                "`aua emulator ensure-proxy`."
+            )
     except Exception as exc:  # pragma: no cover - defensive
         checks["emulator"] = {"ok": False, "detail": str(exc)}
 
@@ -3815,12 +3902,21 @@ app.add_typer(proxy_app, name="proxy")
 @proxy_app.command("start")
 def proxy_start_cmd(
     ctx: typer.Context,
-    port: int = typer.Option(8080, "--port", help="mitmdump listen port."),
+    port: int = typer.Option(
+        0,
+        "--port",
+        help="mitmdump listen port (0 = pick a free random high port; never defaults to 8080).",
+    ),
+    install_ca: bool = typer.Option(
+        True,
+        "--install-ca/--no-install-ca",
+        help="Install mitm CA as a system trust anchor (needs rootable emulator).",
+    ),
 ) -> None:
-    """Start mitmdump, adb-reverse, and set the device HTTP proxy."""
+    """Start mitmdump, adb-reverse, set device HTTP proxy, and (by default) install the CA."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(engine.proxy_start(port=port), fmt)
+        _emit(engine.proxy_start(port=port or None, install_ca=install_ca), fmt)
 
     _run(ctx, go)
 
@@ -3831,6 +3927,18 @@ def proxy_stop_cmd(ctx: typer.Context) -> None:
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
         _emit(engine.proxy_stop(), fmt)
+
+    _run(ctx, go)
+
+
+@proxy_app.command("ca-install")
+def proxy_ca_install_cmd(ctx: typer.Context) -> None:
+    """Install the mitm CA into the system trust store (Android 14+ zygote overlay)."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        from . import proxy_mock as pm
+
+        _emit(pm.install_system_ca(engine.device.serial), fmt)
 
     _run(ctx, go)
 
