@@ -1983,6 +1983,12 @@ def emulator_start_cmd(
         "--headless/--windowed",
         help="Headless (-no-window) so agents can verify without stealing the desktop UI.",
     ),
+    gpu: str | None = typer.Option(
+        None,
+        "--gpu",
+        help="Emulator -gpu mode (default: host on Mac/Windows, swiftshader on headless Linux CI). "
+        "Never use swiftshader on a laptop unless you must — it pegs the CPU.",
+    ),
     animations: bool = typer.Option(
         False,
         "--animations/--no-animations",
@@ -2002,9 +2008,11 @@ def emulator_start_cmd(
         _emulator_emit(
             emulator_mod.start(
                 avd,
-                headless=headless, animations=animations,
+                headless=headless,
+                animations=animations,
                 wait_s=float(wait),
                 cache_dir=cfg.cache.dir,
+                gpu=gpu,
             ),
             ctx,
         )
@@ -2020,15 +2028,19 @@ def emulator_stop_cmd(
         None, "--serial", help="Emulator serial to kill (e.g. emulator-5554)."
     ),
     avd: str | None = typer.Option(None, "--avd", help="Stop the AVD AUA started by name."),
+    mine: bool = typer.Option(
+        False,
+        "--mine",
+        help="Stop only emulators aua recorded as started (safe agent cleanup).",
+    ),
     all_devices: bool = typer.Option(
-        False, "--all", help="Kill EVERY running emulator (needed when no --serial/--avd)."
+        False, "--all", help="Kill EVERY running emulator (needed when no --serial/--avd/--mine)."
     ),
 ) -> None:
     """Stop a running emulator (`adb emu kill`).
 
     Needs an explicit target: an emulator may hold a signed-in session or seeded data, and
-    killing it cannot be undone, so an untargeted call is refused rather than assumed to
-    mean "all". Pass `--all` to say it deliberately.
+    killing it cannot be undone. Prefer `--mine` when you started the AVD with aua.
     """
     from . import emulator as emulator_mod
 
@@ -2037,7 +2049,11 @@ def emulator_stop_cmd(
     try:
         _emulator_emit(
             emulator_mod.stop(
-                serial=serial, avd=avd, all_devices=all_devices, cache_dir=cfg.cache.dir
+                serial=serial,
+                avd=avd,
+                all_devices=all_devices,
+                mine=mine,
+                cache_dir=cfg.cache.dir,
             ),
             ctx,
         )

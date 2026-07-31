@@ -16,6 +16,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -578,6 +579,24 @@ def _adb_emu_kill(serial: str) -> None:
     )
 
 
+def default_gpu_mode(*, headless: bool) -> str:
+    """Pick a GPU backend that does not melt the host CPU.
+
+    Older aua always used ``swiftshader_indirect`` for ``-no-window``. That is a
+    *software* GLES renderer — fine for Linux CI without a GPU, but on a Mac laptop it
+    pegs the CPU, spins the fans, and drains the battery while a windowed emulator
+    (``-gpu host`` / Metal) stays quiet. Desktop hosts can use hardware GPU even with
+    ``-no-window``; only fall back to SwiftShader when there is clearly no display.
+    """
+    if not headless:
+        return "auto"
+    if sys.platform in ("darwin", "win32"):
+        return "host"
+    if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+        return "host"
+    return "swiftshader"
+
+
 def start(
     avd: str | None = None,
     *,
@@ -586,11 +605,15 @@ def start(
     wait_s: float = _DEFAULT_WAIT_S,
     cache_dir: str | Path,
     extra_args: list[str] | None = None,
+    gpu: str | None = None,
 ) -> dict[str, Any]:
     """Boot an AVD (headless by default) and wait until adb sees ``state=device``.
 
     If *avd* is omitted and exactly one AVD exists, that one is used. Does not steal
     focus when ``headless=True`` (``-no-window``). Creating AVDs is ``ensure_proxy_avd``.
+
+    *gpu* defaults via :func:`default_gpu_mode` — ``host`` on Mac/Windows so headless
+    does not fall back to CPU SwiftShader.
     """
     listed = list_avds()
     names: list[str] = list(listed["avds"])
@@ -615,9 +638,12 @@ def start(
 
     before = {d["serial"] for d in running_emulators()}
     bin_path = emulator_bin()
+    gpu_mode = (gpu or default_gpu_mode(headless=headless)).strip() or "auto"
     cmd = [bin_path, "-avd", avd]
     if headless:
-        cmd += ["-no-window", "-no-audio", "-gpu", "swiftshader_indirect"]
+        cmd += ["-no-window", "-no-audio", "-no-boot-anim", "-gpu", gpu_mode]
+    else:
+        cmd += ["-gpu", gpu_mode]
     if extra_args:
         cmd += list(extra_args)
 
@@ -638,9 +664,11 @@ def start(
         "avd": avd,
         "pid": proc.pid,
         "headless": headless,
+        "gpu": gpu_mode,
         "cmd": cmd,
         "log": str(log_path),
         "started_at": time.time(),
+        "started_by_aua": True,
     }
     (_pid_dir(cache_dir) / f"{avd}.json").write_text(
         json.dumps(meta, indent=2) + "\n", encoding="utf-8"
@@ -691,9 +719,14 @@ def start(
         "serial": serial,
         "pid": proc.pid,
         "headless": headless,
+        "gpu": gpu_mode,
         "animations_disabled": animations_disabled,
         "log": str(log_path),
-        "hint": f"Use `aua --serial {serial} analyze` (or `aua daemon start`) next.",
+        "hint": (
+            f"Use `aua --serial {serial} analyze` (or `aua daemon start`) next. "
+            f"When finished, stop THIS emulator: `aua emulator stop --avd {avd}` "
+            "(or `aua emulator stop --mine`) — leaving it running burns CPU/battery."
+        ),
     }
 
 
@@ -712,31 +745,75 @@ def _wait_for_new_emulator(before: set[str], *, timeout_s: float) -> str | None:
     return str(ready[0]["serial"]) if ready else None
 
 
+def _aua_started_records(cache_dir: str | Path) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for path in _pid_dir(cache_dir).glob("*.json"):
+        try:
+            meta = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(meta, dict):
+            continue
+        meta = dict(meta)
+        meta["_path"] = str(path)
+        out.append(meta)
+    return out
+
+
 def stop(
     *,
     serial: str | None = None,
     avd: str | None = None,
     all_devices: bool = False,
+    mine: bool = False,
     cache_dir: str | Path,
 ) -> dict[str, Any]:
-    """Stop a running emulator (``adb emu kill``), scoped by serial/AVD.
+    """Stop a running emulator (``adb emu kill``), scoped by serial/AVD/mine.
 
-    An untargeted call is refused rather than treated as "all". `aua emulator stop` reads
-    like "stop the one I started", but an emulator can be holding a logged-in session, a
-    seeded database, or belong to something else entirely on the same machine — and killing
-    it is not undoable. ``--all`` says so explicitly, matching how ``app clear`` requires
-    ``--yes`` for the same reason.
+    An untargeted call is refused rather than treated as "all". ``--all`` kills every
+    emulator; ``--mine`` only kills AVDs recorded under aua's cache (what agents started).
     """
     targets = running_emulators()
-    if not serial and avd is None and not all_devices:
+    if not serial and avd is None and not all_devices and not mine:
         raise UsageError(
-            "emulator stop needs a target: --serial, --avd, or --all",
+            "emulator stop needs a target: --serial, --avd, --mine, or --all",
             hint=(
                 "running: "
                 + (", ".join(t["serial"] for t in targets) or "none")
-                + ". Killing an emulator is not undoable — it may hold a signed-in session."
+                + ". Agents: `aua emulator stop --mine` for AVDs you started with aua."
             ),
         )
+
+    if mine and not serial and avd is None and not all_devices:
+        records = _aua_started_records(cache_dir)
+        if not records:
+            return {
+                "ok": True,
+                "action": "emulator-stop",
+                "stopped": [],
+                "detail": "no aua-started emulator records in cache",
+            }
+        stopped_mine: list[str] = []
+        for meta in records:
+            ser = meta.get("serial")
+            if isinstance(ser, str) and ser:
+                with contextlib.suppress(Exception):
+                    _adb_emu_kill(ser)
+                    stopped_mine.append(ser)
+            pid = meta.get("pid")
+            if isinstance(pid, int):
+                with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                    os.killpg(pid, signal.SIGTERM)
+            path = Path(str(meta.get("_path") or ""))
+            if path.is_file():
+                path.unlink(missing_ok=True)
+        return {
+            "ok": True,
+            "action": "emulator-stop",
+            "stopped": stopped_mine,
+            "detail": "stopped emulators recorded as started by aua",
+        }
+
     if serial:
         targets = [t for t in targets if t["serial"] == serial]
 
@@ -787,7 +864,8 @@ def stop(
     if not targets:
         raise DeviceError(
             "no matching running emulator to stop",
-            hint="`aua emulator status` lists live serials; pass --serial emulator-5554.",
+            hint="`aua emulator status` lists live serials; pass --serial emulator-5554 "
+            "or `aua emulator stop --mine`.",
         )
 
     stopped: list[str] = []

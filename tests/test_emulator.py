@@ -75,9 +75,44 @@ def test_start_headless_waits_for_serial(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert out["serial"] == "emulator-5554"
     assert out["headless"] is True
     assert out["avd"] == "only"
+    assert out["gpu"] == "host" or out["gpu"] == "swiftshader" or out["gpu"] == "auto"
     meta = json.loads((tmp_path / "emulator" / "only.json").read_text(encoding="utf-8"))
     assert meta["pid"] == 4242
     assert "-no-window" in meta["cmd"]
+    assert "-gpu" in meta["cmd"]
+    assert "swiftshader_indirect" not in meta["cmd"]
+    assert meta.get("started_by_aua") is True
+
+
+def test_default_gpu_mode_mac_uses_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    from android_ui_analyser import emulator as emu
+
+    monkeypatch.setattr(emu.sys, "platform", "darwin")
+    assert emu.default_gpu_mode(headless=True) == "host"
+    monkeypatch.setattr(emu.sys, "platform", "linux")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    assert emu.default_gpu_mode(headless=True) == "swiftshader"
+
+
+def test_stop_mine_kills_recorded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from android_ui_analyser import emulator as emu
+
+    rec = tmp_path / "emulator"
+    rec.mkdir()
+    (rec / "only.json").write_text(
+        json.dumps({"avd": "only", "serial": "emulator-5554", "pid": 99}),
+        encoding="utf-8",
+    )
+    killed: list[str] = []
+    monkeypatch.setattr(emu, "_adb_emu_kill", lambda s: killed.append(s))
+    monkeypatch.setattr(emu, "running_emulators", lambda: [])
+    out = emu.stop(mine=True, cache_dir=tmp_path)
+    assert killed == ["emulator-5554"]
+    assert out["stopped"] == ["emulator-5554"]
+    assert not (rec / "only.json").exists()
 
 
 def test_cli_emulator_list(monkeypatch: pytest.MonkeyPatch) -> None:
