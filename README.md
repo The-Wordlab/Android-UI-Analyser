@@ -1020,3 +1020,11 @@ All action commands (`tap`, `long-press`, `input`, `clear`, `swipe`, `scroll-to`
 - [`PRD.md`](PRD.md) — the full product requirements document.
 - [`SMOKE.md`](SMOKE.md) — manual smoke-test checklist against a live device.
 - [`.claude/skills/android-ui-analyser/SKILL.md`](.claude/skills/android-ui-analyser/SKILL.md) — the operating manual an AI agent loads (also via `aua guide`).
+
+---
+
+## Author
+
+Created and maintained by **[Eiliya](https://github.com/eiliya-luzia)** ([eiliya@luzia.com](mailto:eiliya@luzia.com)) at [The Wordlab](https://github.com/The-Wordlab) — design, architecture, and direction. Parts of the implementation were written with AI coding assistants (Claude Code, Cursor); those contributions are recorded as `Co-Authored-By` trailers in the commit history.
+
+Issues and ideas: [The-Wordlab/Android-UI-Analyser](https://github.com/The-Wordlab/Android-UI-Analyser/issues).

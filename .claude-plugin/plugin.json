@@ -4,8 +4,9 @@
   "version": "0.6.0",
   "description": "Drive and inspect an Android app's UI via the `aua` CLI — act on stable element IDs, not pixels. Hierarchy-first, with OCR/detection/grounding vision fallbacks.",
   "author": {
-    "name": "The Wordlab",
-    "url": "https://github.com/The-Wordlab/Android-UI-Analyser"
+    "name": "Eiliya",
+    "email": "eiliya@luzia.com",
+    "url": "https://github.com/eiliya-luzia"
   },
   "homepage": "https://github.com/The-Wordlab/Android-UI-Analyser",
   "repository": "https://github.com/The-Wordlab/Android-UI-Analyser",

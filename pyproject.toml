@@ -9,7 +9,8 @@ description = "Fast, configurable CLI that gives an AI agent structured 'what's 
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "android-ui-analyser" }]
+authors = [{ name = "Eiliya", email = "eiliya@luzia.com" }]
+maintainers = [{ name = "Eiliya", email = "eiliya@luzia.com" }]
 keywords = ["android", "ui-testing", "uiautomator2", "set-of-marks", "accessibility", "ocr", "agent"]
 
 # Base install is intentionally light. Heavy perception backends live in extras and
