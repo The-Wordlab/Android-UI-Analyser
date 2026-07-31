@@ -91,6 +91,8 @@ cd ~ && command -v aua && aua --version
 | `easyocr` | `easyocr` | Optional OCR engine |
 | `yolo` | `ultralytics`, `torch` | UI element detection with user-supplied weights |
 | `omniparser` | `ultralytics`, `torch`, `huggingface-hub` | OmniParser detection — **AGPL-3.0, opt-in** |
+| `proxy` | `mitmproxy` | Headless HTTPS mock / record / replay (`aua proxy`, `aua mock`) |
+| `lxml` | `lxml` | Faster XML parse for huge hierarchy dumps |
 | `dev` | pytest, ruff, mypy, respx | Development and test tooling |
 | `all` | All of the above | Full install |
 
@@ -104,22 +106,26 @@ Heavy deps are **lazy-imported** — a missing optional extra never breaks the c
 
 ### Option A — Emulator (AVD)
 
-With Android Studio (or the standalone command-line tools) installed, you can create and boot an emulator from the terminal:
+Prefer an already-running device when one is attached. Otherwise `aua` can boot (and, for proxy work, create) an AVD:
 
 ```bash
-emulator -list-avds                 # list existing AVDs
-
-# No AVD yet? Create one. The system image is installed via Android Studio's SDK Manager
-# or:  sdkmanager "system-images;android-34;google_apis;arm64-v8a"
-avdmanager create avd -n pixel7 -k "system-images;android-34;google_apis;arm64-v8a" -d pixel_7
-
-emulator -avd pixel7                # boot it (GUI)
-# Or let aua boot headless for unattended agent verify (no window on the desktop):
-#   aua emulator start --headless [--avd pixel7]
-#   aua --format compact analyze
+aua emulator list                   # marks Play Store vs rootable Google APIs
+aua emulator start --headless       # -no-window; Mac/Windows use -gpu host (not CPU SwiftShader)
+aua --format compact analyze
+# … drive the flow …
+aua emulator stop --mine            # agents: always stop AVDs you started
 ```
 
-`emulator`, `avdmanager`, and `sdkmanager` live under `~/Library/Android/sdk/emulator` and `~/Library/Android/sdk/cmdline-tools/latest/bin` (macOS) — add those to your `PATH` too if you want them globally. `aua emulator list|start|status|stop` wraps boot/stop only — it does **not** create AVDs.
+**HTTPS proxy / mock** needs a *rootable* Google APIs image — Google Play AVDs refuse `adb root`, so the mitm CA cannot be installed as a system trust and HTTPS recording stays empty:
+
+```bash
+aua emulator recommend-proxy        # suggests a small package (no download)
+aua emulator ensure-proxy --start   # downloads google_apis image + boots aua_proxy
+aua --serial <serial> proxy start   # needs: pip/uv install with [proxy]
+aua emulator stop --mine
+```
+
+You can still create AVDs by hand (`sdkmanager` / `avdmanager` / Android Studio). Prefer SDK `cmdline-tools/latest` under `$ANDROID_HOME` over stale Homebrew copies. On Mac, headless defaults to **host GPU** so fans stay quiet; override with `--gpu swiftshader` only for CI without a display.
 
 ### Option B — Physical device
 
@@ -185,6 +191,10 @@ aua analyze
 # Compact format (fewer tokens, drops null/default fields — best for agents)
 aua --format compact analyze
 
+# Unchanged-screen / binary dumps (warm daemon + native host path)
+aua --format delta analyze          # skip payload when hierarchy hash unchanged
+aua --format msgpack analyze        # compact binary frame (AUA1)
+
 # One element per line, tab-separated, status-bar noise already dropped — the
 # readable view; pick your own columns with --fields
 aua --format tsv analyze
@@ -197,10 +207,17 @@ aua --format tsv analyze --where-rid settingsSwitch --fields id,checkable,checke
 # Is "Sign in" visible right now? Exit 0 = yes, 1 = no
 aua has "Sign in"
 
+# Wait on state (don't sleep) — including any hierarchy change
+aua wait --for "Sign in"
+aua wait --changed                  # any tree fingerprint change
+
 # Act on elements by ID from the last analyze
 aua tap 4
 aua input 2 "hello@example.com"
 aua swipe up
+
+# Multi-emulator: same command on several serials
+# aua fanout --serials emulator-5554,emulator-5556 analyze
 
 # Force the vision fallback + write an annotated screenshot (numbered boxes)
 aua analyze --source vision --annotate
@@ -600,7 +617,12 @@ screens, routes, mined deeplinks, login recipes, quirks. That is genuinely usefu
 time in a session and pure noise on every restart afterwards, so `--quiet` suppresses it and
 `aua orient` prints it whenever you actually want it.
 
-The daemon binds **only to a unix socket** (default `~/.cache/android-ui-analyser/daemon.sock`). No TCP port, no auth surface.
+The daemon binds **only to a unix socket** (default `~/.cache/android-ui-analyser/daemon.sock`;
+per-serial sockets when multiple devices are in play). No TCP port, no auth surface.
+
+Optional: set `daemon.push_ws_port` in config to push `screen_changed` events over a
+localhost WebSocket so agents can wait without polling. Unchanged screens short-circuit via
+`meta.via=hierarchy-unchanged` / `--format delta` when `perf.skip_unchanged_analyze` is on.
 
 ### Optional: `aua-fast` (C thin client)
 
@@ -617,8 +639,32 @@ aua-fast has "Sign in"            # exit 0/1
 ```
 
 Hot commands: `ping`, `analyze`, `devices`, `has`, `tap`, `key`, `input`, `swipe`, `wait`.
-Everything else (and any unknown flags) exec's the full Python CLI. Longer-term native ideas
-live in [`docs/NATIVE_ROADMAP.md`](docs/NATIVE_ROADMAP.md).
+Everything else (and any unknown flags) exec's the full Python CLI. Host-side speedups
+(incremental analyze, delta/msgpack, WS push, fanout, vision defaults) are summarized in
+[`docs/NATIVE_ROADMAP.md`](docs/NATIVE_ROADMAP.md).
+
+---
+
+## Proxy / mock (HTTPS record & replay)
+
+Optional extra: `pip`/`uv` install with `[proxy]` (pulls `mitmproxy`). Apps whose Network
+Security Config trusts **system CAs only** need a rootable emulator and a system CA install
+(see [Emulator](#option-a--emulator-avd)):
+
+```bash
+aua emulator ensure-proxy --start
+aua --serial <serial> proxy start          # random high port + system CA by default
+aua mock record start login_flow
+# … drive the app …
+aua mock record stop login_flow            # cassette under memory.dir/cassettes/
+aua mock map GET /v1/foo --status 200 --body '{"ok":true}'
+aua mock replay login_flow
+aua proxy stop
+aua emulator stop --mine
+```
+
+Empty cassettes almost always mean TLS rejected the forged cert (Play Store AVD / no system
+CA) — not “no traffic”.
 
 ---
 
@@ -626,7 +672,12 @@ live in [`docs/NATIVE_ROADMAP.md`](docs/NATIVE_ROADMAP.md).
 
 `aua mcp` runs an MCP server over stdio, exposing the same tools as the CLI. It is a thin adapter over the engine — no separate perception logic.
 
-Tools exposed: `analyze_screen`, `tap`, `long_press`, `input`, `swipe`, `scroll_to`, `key`, `wait`, `wait_stable`, `has`, `screenshot`, `inspect`, `goto`, `flow_run`, `list_devices`.
+Tools include (non-exhaustive): `analyze_screen`, `tap`, `double_tap`, `long_press`, `input`,
+`clear`, `swipe`, `scroll`, `scroll_to`, `key`, `wait`, `wait_stable`, `wait_changed`, `has`,
+`expect`, `screenshot`, `inspect`, `goto`, `flow_run`, `navigate`, `list_devices`, `open_link`,
+`app`, `resolve`, clipboard/paste/copy/erase, location/orientation/airplane/media/record/clock,
+`capture_*`, `dev_profile`, `a11y_scroll`, `flags_apply`, map/`reconcile_*`/`knowledge_*`,
+`proxy_start` / `proxy_stop` / `mock_replay`, `configure`.
 
 Example MCP client config (Claude Desktop / `claude_desktop_config.json`):
 
@@ -833,7 +884,10 @@ Prefer `goto` over manual tapping whenever your target is listed in `suggested_g
 }
 ```
 
-`compact` format drops null fields and verbose defaults for the smallest token footprint. `pretty` is indented JSON. All formats validate against the same pydantic schema.
+`compact` format drops null fields and verbose defaults for the smallest token footprint.
+`pretty` is indented JSON. `tsv` is one element per line. `delta` / `msgpack` are for warm-
+daemon / native hot paths (unchanged hierarchy → tiny payload). All formats validate against
+the same pydantic schema where applicable.
 
 ### Exit codes
 
@@ -856,13 +910,14 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 
 | Command | What it does |
 |---|---|
-| `aua doctor` | Check environment: adb, uiautomator2, devices, provider readiness |
+| `aua doctor` | Check environment: adb, uiautomator2, devices, provider readiness, emulator tooling |
 | `aua devices` | List attached devices/emulators |
 | `aua analyze` | Capture the screen → element list with IDs (the core command) |
 | `aua resolve <id\|key>` | Remap a prior id / `stable_key` onto the current screen |
 | `aua has "<text>"` | Exit 0 if text is on screen, 1 if not — cheap branch check |
 | `aua expect …` | Assert visibility / state (exit 8 on failure) |
-| `aua wait --for "<text>"` | Poll until text appears (or `--idle` / `--for-stable`) |
+| `aua wait --for "<text>"` | Poll until text appears (`--idle` / `--for-stable` / `--changed`) |
+| `aua fanout …` | Run a command across multiple `--serials` |
 | `aua tap <id>` / `aua click <id>` | Tap an element by ID (also `--rid`/`--text`/`--desc`) |
 | `aua double-tap <id>` | Double-tap an element |
 | `aua long-press <id>` | Long-press an element by ID |
@@ -883,11 +938,21 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 | `aua screenshot [path]` | Save a raw screenshot (`--region` / `--scale`) |
 | `aua inspect <id>` | Dump full details for one element |
 | `aua app launch\|stop\|kill\|clear\|grant` | App control (`launch --clear` = clearState) |
+| `aua emulator list\|status\|start\|stop` | Boot/stop AVDs (`--headless`, `--gpu`, `--mine`) |
+| `aua emulator recommend-proxy\|ensure-proxy` | Suggest/create a small rootable Google APIs AVD |
+| `aua flags set\|apply` | Feature-flag writes with verify/restart |
+| `aua proxy start\|stop` / `aua mock …` | HTTPS mitm record/map/replay (`[proxy]` extra) |
+| `aua capture …` | Session capture / export / explain |
+| `aua logcat` / `aua suite` | Device-clock log windows / scripted suites |
+| `aua dev` / `aua a11y` | Dev options helpers / a11y scroll |
 | `aua map` | Show the active-context map (`--all-contexts`, `--audit`, or `--find "<goal>"`) |
 | `aua goto "<goal>"` | Drive the remembered route to a known screen — taps + verifies each hop (`--plan` previews, `--max-steps N`) |
+| `aua flow run\|save\|list\|…` | Maestro-style YAML journeys |
+| `aua navigate "<goal>"` | Opt-in planner drive (needs `planner.enabled`) |
 | `aua memory show\|path\|update\|forget` | Manage the per-app learned layout (`memory.backend: sqlite` optional) |
 | `aua knowledge list\|show\|add\|stale` | Manage scoped, provenance-bearing learned facts |
 | `aua reconcile plan\|submit\|status\|apply\|rollback` | Research and transactionally correct a map |
+| `aua about` / `aua remember` / `aua orient` | App playbook + orientation blob |
 | `aua config init\|show\|path` | Manage configuration |
 | `aua daemon start\|status\|stop` | Manage the optional warm-state daemon |
 | `aua guide` | Print the agent operating manual (`--emit-skill` writes the Claude Code skill) |
@@ -902,7 +967,7 @@ All action commands (`tap`, `long-press`, `input`, `clear`, `swipe`, `scroll-to`
 | Symptom | Fix |
 |---|---|
 | `aua doctor` shows **adb: FAIL / not found on PATH** | Install platform-tools and add them to `PATH` — see [Installing adb](#installing-adb-platform-tools). |
-| `no device found` (exit 3) | Start an emulator or attach a phone; confirm with `adb devices`. |
+| `no device found` (exit 3) | Start an emulator or attach a phone; confirm with `adb devices`. Or `aua emulator start --headless`. |
 | Device shows as **`unauthorized`** | Accept the "Allow USB debugging" prompt on the device. If it never appears: `adb kill-server && adb start-server`, then reconnect. |
 | Device shows as **`offline`** | Re-plug the cable / cold-boot the emulator; `adb reconnect`. |
 | `multiple devices attached` | Pass `--serial <id>` (get the id from `aua devices`). |
@@ -910,12 +975,16 @@ All action commands (`tap`, `long-press`, `input`, `clear`, `swipe`, `scroll-to`
 | `uiautomator2 is not installed` | Reinstall the package — `uiautomator2` is a base dependency, not an extra. |
 | `analyze` returns few/no elements | The hierarchy is empty (Compose/Flutter/WebView/canvas). Force vision: `aua --format compact analyze --source vision --annotate`. |
 | Typing does nothing on Android 14+ | Handled automatically (accessibility `set_text` on the focused field); make sure the field is actually focused first. |
+| Headless emulator pegs CPU / fans | Old default was SwiftShader (CPU). Current Mac/Windows headless uses `-gpu host`. Stop orphans with `aua emulator stop --mine`. |
+| `proxy` / empty HTTPS cassettes | Need `[proxy]` extra + **rootable** Google APIs AVD (`aua emulator ensure-proxy`). Play Store images refuse `adb root` → system CA install fails → TLS handshake fails. |
+| `sdkmanager` / `ensure-proxy` fails | Prefer `$ANDROID_HOME/cmdline-tools/latest/bin` over outdated Homebrew cmdline-tools. |
 
 ---
 
 ## Further reading
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — design decisions and the hierarchy-first thesis.
+- [`docs/NATIVE_ROADMAP.md`](docs/NATIVE_ROADMAP.md) — `aua-fast`, delta/msgpack, WS push, fanout, vision defaults.
 - [`docs/RESEARCH.md`](docs/RESEARCH.md) — landscape research behind the approach.
 - [`PRD.md`](PRD.md) — the full product requirements document.
 - [`SMOKE.md`](SMOKE.md) — manual smoke-test checklist against a live device.
