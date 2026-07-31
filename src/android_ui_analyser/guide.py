@@ -44,12 +44,26 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "`aua emulator start --headless` (uses `-no-window` + **host GPU** on Mac — not "
         "SwiftShader; pick `--avd <name>` when several AVDs exist — `aua emulator list`). "
         "Prefer an already running device when one is attached; don't kill the user's headed "
-        "emulator unless they asked. **If YOU started an emulator, stop it when done**: "
-        "`aua emulator stop --mine` (or `--avd <name>`) — orphaned headless AVDs burn CPU/"
-        "battery. For **HTTPS proxy / mock record** you need a *rootable* Google APIs AVD "
-        "(Play Store images refuse `adb root`): `aua emulator recommend-proxy` suggests a "
-        "small package, `aua emulator ensure-proxy` downloads + creates `aua_proxy`, then "
-        "`aua emulator start --avd aua_proxy --headless`. `aua emulator status` for lifecycle.",
+        "emulator unless they asked. For **HTTPS proxy / mock record** you need a *rootable* "
+        "Google APIs AVD (Play Store images refuse `adb root`): "
+        "`aua emulator recommend-proxy` / `ensure-proxy`, then "
+        "`aua emulator start --avd aua_proxy --headless`. "
+        "**Parallel agents on one host:** each boots with "
+        "`aua emulator start --headless --parallel` (unique `-port` + `-read-only` + owner "
+        "tag); pin every later command with the returned `serial` "
+        "(`aua --serial …` / `AUA_SERIAL`); tear down only yours with "
+        "`aua emulator stop --serial <yours>` or `AUA_OWNER=… aua emulator stop --mine`.",
+    ),
+    (
+        "ALWAYS stop headless emulators YOU started",
+        "**Hard requirement before you end the session** (not optional, not 'if convenient'): "
+        "`aua emulator stop --serial <yours>` (safest with parallel agents) or "
+        "`AUA_OWNER=… aua emulator stop --mine` / `--avd <name>`. Orphaned headless AVDs burn "
+        "CPU and battery. Do this even if the test failed. "
+        "Safety nets (do not rely on them alone): idle watchdog auto-stops after "
+        "`--idle-stop` seconds of no aua activity (default 900); MCP `emulator_start` "
+        "tracks serials and stops them when the MCP process exits. "
+        "`aua emulator status` shows what aua started (including `owner` / `port`).",
     ),
     (
         "Start the warm daemon",
@@ -275,10 +289,13 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "emulator",
         "`emulator list|status|recommend-proxy|ensure-proxy [--name aua_proxy] [--api 30] "
         "[--force] [--start]|start [--avd NAME] [--headless|--windowed] [--gpu host|…] "
-        "[--wait N]|stop [--serial emulator-5554|--avd NAME|--mine|--all]` — boot headless "
-        "for unattended verify (Mac defaults to `-gpu host` so CPU stays cool); "
-        "**always `stop --mine` when you started it**; `ensure-proxy` creates a small "
-        "rootable google_apis AVD (HTTPS proxy system CA — Play Store AVDs refuse `adb root`)",
+        "[--parallel] [--port N] [--read-only] [--owner TAG] [--idle-stop 900] [--wait N]|"
+        "stop [--serial emulator-5554|--avd NAME|--owner TAG|--mine|--all]` — boot headless "
+        "for unattended verify (Mac defaults to `-gpu host`); **`--parallel` for multi-agent** "
+        "(unique port + read-only + owner); **always stop yours** (`--serial` / "
+        "`AUA_OWNER=… --mine`); idle watchdog auto-stops after `--idle-stop` as backup; "
+        "`ensure-proxy` creates a small rootable google_apis AVD "
+        "(HTTPS proxy system CA — Play Store AVDs refuse `adb root`)",
     ),
     (
         "has",
@@ -346,7 +363,16 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "export PATH.gif|explain [--llm]|on|off|prune|sidecar start|stop` — always-on "
         "rolling screencap with the daemon (deduped frames + diff summary / GIF); see "
         "`meta.capture_hint` / action `capture_hint` after fast transitions; suite failures "
-        "attach `capture last --since last-action`",
+        "attach `capture last --since last-action`. Sneak-peek a headless agent live: "
+        "`aua dashboard` (separate process — enables capture via daemon or sidecar, "
+        "opens http://127.0.0.1:8765; **grid** when multiple agents/emulators are online)",
+    ),
+    (
+        "dashboard",
+        "`dashboard [--serial …] [--grid] [--port 8765] [--no-open] [--poll-ms 500]` — "
+        "localhost sneak-peek; auto **grid of live screens** when several emulators are "
+        "online (click a tile for journal/map); enables capture; does not stop the agent "
+        "(Ctrl-C closes the dashboard only)",
     ),
     (
         "dev",
@@ -573,11 +599,19 @@ def render_markdown(*, brief: bool = False) -> str:
         "aua daemon start --quiet\n"
         "aua --format compact analyze         # same analyze path as a headed emulator\n"
         "# … drive the flow under test …\n"
-        "aua emulator stop --avd <name>       # or: aua emulator stop --mine\n"
+        "aua emulator stop --serial <serial>  # REQUIRED — or: stop --mine / --avd <name>\n"
         "```\n"
-        "Headless on Mac uses **host GPU** (Metal), same as a windowed emulator — older aua "
-        "used SwiftShader which rendered on the CPU and spun fans. Agents must stop AVDs they "
-        "started; orphaned emulators keep burning battery.\n"
+        "**Parallel agents on one host** (each owns one emulator):\n"
+        "```bash\n"
+        "aua emulator start --headless --parallel --avd Pixel_7\n"
+        "# → {serial, port, owner}; pin: export AUA_SERIAL=<serial> AUA_OWNER=<owner>\n"
+        "aua --format compact analyze\n"
+        "# …\n"
+        "aua emulator stop --serial \"$AUA_SERIAL\"   # only yours — never bare stop --all\n"
+        "```\n"
+        "Sneak-peek all of them: `aua dashboard` (auto **grid** when multiple are online).\n"
+        "Headless on Mac uses **host GPU** (Metal). **Always stop AVDs you started** before "
+        "ending — idle `--idle-stop` (default 900s) and MCP exit cleanup are backups only.\n"
         "For **proxy / mock HTTPS** (apps that only trust system CAs), Play Store AVDs "
         "will not work — create a small rootable one:\n"
         "```bash\n"

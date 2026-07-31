@@ -487,6 +487,41 @@ def serve(
         logger.info("daemon stopped, socket removed: %s", sock_path)
 
 
+def _journal_dispatch(
+    engine: Engine,
+    request: dict[str, Any],
+    response: dict[str, Any],
+    *,
+    duration_ms: float,
+    source: str = "daemon",
+) -> None:
+    cmd = str(request.get("cmd") or "")
+    if request.get("journal") is False:
+        return
+    if cmd in {"ping", "capture_status"}:
+        return
+    serial = None
+    with contextlib.suppress(Exception):
+        serial = getattr(engine.device, "serial", None) if engine._device is not None else None
+    if not serial:
+        with contextlib.suppress(Exception):
+            serial = engine.config.device.serial
+    from . import journal as journal_mod
+
+    ok = bool(response.get("ok"))
+    journal_mod.record(
+        cache_dir=engine.config.cache.dir,
+        serial=serial,
+        source=source,
+        cmd=cmd,
+        args=request.get("args") if isinstance(request.get("args"), dict) else {},
+        ok=ok,
+        duration_ms=duration_ms,
+        result=response.get("result") if ok else None,
+        error=response.get("error") if not ok else None,
+    )
+
+
 def _handle_connection(engine: Engine, conn: socket.socket) -> None:
     """Read newline-delimited JSON requests and write newline-delimited JSON responses."""
     buf = b""
@@ -508,12 +543,21 @@ def _handle_connection(engine: Engine, conn: socket.socket) -> None:
                 line = line.strip()
                 if not line:
                     continue
+                t0 = time.monotonic()
                 try:
                     request = json.loads(line)
                 except json.JSONDecodeError as exc:
                     response = _result_err("parse_error", f"invalid JSON: {exc}")
+                    request = {"cmd": "?", "args": {}}
                 else:
                     response = dispatch(engine, request)
+                with contextlib.suppress(Exception):
+                    _journal_dispatch(
+                        engine,
+                        request if isinstance(request, dict) else {},
+                        response,
+                        duration_ms=(time.monotonic() - t0) * 1000.0,
+                    )
 
                 resp_bytes = json.dumps(response, ensure_ascii=False).encode() + b"\n"
                 conn.sendall(resp_bytes)
@@ -548,8 +592,13 @@ class DaemonClient:
         """Send one request and return the parsed response dict.
 
         Does NOT raise on ok=False — caller decides what to do.
+
+        Pass ``journal=False`` to skip the agent I/O journal (dashboard / internal polls).
         """
-        request = {"cmd": cmd, "args": args}
+        journal = args.pop("journal", True)
+        request: dict[str, Any] = {"cmd": cmd, "args": args}
+        if journal is False:
+            request["journal"] = False
         payload = json.dumps(request, ensure_ascii=False).encode() + b"\n"
 
         # Long-poll commands need a client timeout above their own deadline.

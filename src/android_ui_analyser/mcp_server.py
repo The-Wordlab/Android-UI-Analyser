@@ -349,6 +349,80 @@ def _tool_definitions() -> list[types.Tool]:
             inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
         ),
         types.Tool(
+            name="emulator_list",
+            description="List configured Android Virtual Devices (AVD names, Play Store vs rootable).",
+            inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
+        ),
+        types.Tool(
+            name="emulator_status",
+            description="SDK/AVD tooling + running emulator serials + what aua started "
+            "(owner/port for parallel agents).",
+            inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
+        ),
+        types.Tool(
+            name="emulator_start",
+            description="Boot an AVD headless (default) for unattended verify. "
+            "Use parallel=true when multiple agents share a host (unique port + read-only + owner). "
+            "Pin later tools with configure/device serial from the response. "
+            "REQUIRED: call emulator_stop when done (or stop_mine) — orphaned AVDs burn CPU. "
+            "Idle auto-stop is only a safety net.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "avd": {"type": "string", "description": "AVD name (omit if only one exists)."},
+                    "headless": {"type": "boolean", "default": True},
+                    "parallel": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Safe multi-agent boot: free -port, -read-only, owner tag.",
+                    },
+                    "owner": {
+                        "type": "string",
+                        "description": "Owner tag for scoped stop (default $AUA_OWNER or auto).",
+                    },
+                    "port": {
+                        "type": "integer",
+                        "description": "Even console port 5554–5682 (auto with parallel).",
+                    },
+                    "read_only": {"type": "boolean"},
+                    "gpu": {"type": "string"},
+                    "idle_stop": {
+                        "type": "integer",
+                        "default": 900,
+                        "description": "Auto-stop after N seconds idle (0=never). Headless only.",
+                    },
+                    "wait": {"type": "integer", "default": 120},
+                    "animations": {"type": "boolean", "default": False},
+                },
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="emulator_stop",
+            description="Stop emulator(s) aua started. ALWAYS call before ending a session that "
+            "booted an AVD. Prefer serial= for parallel agents; mine=true stops aua-started "
+            "(scoped by owner / $AUA_OWNER when set).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "serial": {"type": "string", "description": "Kill this emulator serial only."},
+                    "avd": {"type": "string"},
+                    "owner": {"type": "string", "description": "Stop only this owner's instances."},
+                    "mine": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Stop aua-started records (filter by owner if set).",
+                    },
+                    "all": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Kill EVERY running emulator (dangerous).",
+                    },
+                },
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
             name="double_tap",
             description="Double-tap the element with the given id.",
             inputSchema={
@@ -1054,6 +1128,59 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         )
     if name == "list_devices":
         return [d.model_dump(mode="json") for d in engine.list_devices()]
+    if name == "emulator_list":
+        from . import emulator as emulator_mod
+
+        return emulator_mod.list_avds()
+    if name == "emulator_status":
+        from . import emulator as emulator_mod
+
+        return emulator_mod.status(cache_dir=engine.config.cache.dir)
+    if name == "emulator_start":
+        from . import emulator as emulator_mod
+
+        headless = bool(args.get("headless", True))
+        idle = args.get("idle_stop")
+        if idle is None:
+            idle = 900 if headless else 0
+        out = emulator_mod.start(
+            args.get("avd"),
+            headless=headless,
+            animations=bool(args.get("animations", False)),
+            wait_s=float(args.get("wait", 120)),
+            cache_dir=engine.config.cache.dir,
+            gpu=args.get("gpu"),
+            idle_timeout_s=float(idle) if headless else 0.0,
+            parallel=bool(args.get("parallel", False)),
+            port=args.get("port"),
+            read_only=args.get("read_only"),
+            owner=args.get("owner"),
+        )
+        # Track for MCP process exit cleanup (agents that forget emulator_stop).
+        ser = out.get("serial") if isinstance(out, dict) else None
+        if isinstance(ser, str) and ser:
+            _mcp_started_serials().add(ser)
+            if out.get("owner"):
+                # Also remember owner so --mine scoped cleanup works at exit.
+                _mcp_started_owners().add(str(out["owner"]))
+        return out
+    if name == "emulator_stop":
+        from . import emulator as emulator_mod
+
+        out = emulator_mod.stop(
+            serial=args.get("serial"),
+            avd=args.get("avd"),
+            owner=args.get("owner"),
+            mine=bool(args.get("mine", False)),
+            all_devices=bool(args.get("all", False)),
+            cache_dir=engine.config.cache.dir,
+        )
+        stopped = out.get("stopped") if isinstance(out, dict) else None
+        if isinstance(stopped, list):
+            tracked = _mcp_started_serials()
+            for s in stopped:
+                tracked.discard(s)
+        return out
     if name == "double_tap":
         return _dump(
             engine.double_tap(
@@ -1372,6 +1499,45 @@ def _image_block(name: str, payload: Any) -> types.ImageContent | None:
 # --------------------------------------------------------------------------- server
 
 
+# Emulators started via MCP in this process — stopped on stdio exit if the agent forgot.
+_MCP_STARTED_SERIALS: set[str] = set()
+_MCP_STARTED_OWNERS: set[str] = set()
+
+
+def _mcp_started_serials() -> set[str]:
+    return _MCP_STARTED_SERIALS
+
+
+def _mcp_started_owners() -> set[str]:
+    return _MCP_STARTED_OWNERS
+
+
+def cleanup_mcp_emulators(cache_dir: str | Path | None = None) -> dict[str, Any]:
+    """Best-effort stop of emulators this MCP process started and forgot to tear down."""
+    import contextlib
+
+    from . import emulator as emulator_mod
+    from .config import load_config
+
+    cache = cache_dir or load_config().cache.dir
+    stopped: list[str] = []
+    serials = list(_MCP_STARTED_SERIALS)
+    for ser in serials:
+        with contextlib.suppress(Exception):
+            out = emulator_mod.stop(serial=ser, cache_dir=cache)
+            if isinstance(out, dict):
+                stopped.extend(str(s) for s in (out.get("stopped") or []))
+        _MCP_STARTED_SERIALS.discard(ser)
+    # Owner-scoped leftover (parallel) if serial kill missed a record.
+    for owner in list(_MCP_STARTED_OWNERS):
+        with contextlib.suppress(Exception):
+            out = emulator_mod.stop(mine=True, owner=owner, cache_dir=cache)
+            if isinstance(out, dict):
+                stopped.extend(str(s) for s in (out.get("stopped") or []))
+        _MCP_STARTED_OWNERS.discard(owner)
+    return {"ok": True, "action": "mcp-emulator-cleanup", "stopped": stopped}
+
+
 def build_server(engine: Engine) -> Server:
     """Build a low-level MCP :class:`Server` bound to ``engine`` (for stdio + tests)."""
     server: Server = Server(SERVER_NAME)
@@ -1404,17 +1570,32 @@ def build_default_engine() -> Engine:
 
 def run_stdio() -> None:
     """Run the MCP server over stdio — the entry point used by ``aua mcp``."""
+    import atexit
+    import contextlib
+
     import anyio
     from mcp.server.stdio import stdio_server
 
     engine = build_default_engine()
     server = build_server(engine)
+    # If the MCP client disconnects without emulator_stop, tear down what we started.
+    atexit.register(cleanup_mcp_emulators, engine.config.cache.dir)
 
     async def _serve() -> None:
         async with stdio_server() as (read_stream, write_stream):
             await server.run(read_stream, write_stream, server.create_initialization_options())
 
-    anyio.run(_serve)
+    try:
+        anyio.run(_serve)
+    finally:
+        with contextlib.suppress(Exception):
+            cleanup_mcp_emulators(engine.config.cache.dir)
 
 
-__all__ = ["SERVER_NAME", "build_default_engine", "build_server", "run_stdio"]
+__all__ = [
+    "SERVER_NAME",
+    "build_default_engine",
+    "build_server",
+    "cleanup_mcp_emulators",
+    "run_stdio",
+]

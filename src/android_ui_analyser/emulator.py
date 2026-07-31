@@ -28,6 +28,9 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_WAIT_S = 120.0
 _POLL_S = 1.0
+# Headless AVDs aua starts auto-stop after this much idle (no journal / no touch).
+# Agents must still call `stop --mine`; this is the safety net when they forget.
+_DEFAULT_HEADLESS_IDLE_STOP_S = 900.0  # 15 minutes
 
 # Small + rootable default for HTTPS proxy / system-CA work. API 30 boots faster than
 # 34/36 and still supports classic /system/etc/security/cacerts remount.
@@ -447,6 +450,95 @@ def _pid_dir(cache_dir: str | Path) -> Path:
     return d
 
 
+# Console ports the Android emulator binds (even numbers only → serial emulator-{port}).
+_EMULATOR_PORT_MIN = 5554
+_EMULATOR_PORT_MAX = 5682
+
+
+def instance_id(avd: str, port: int) -> str:
+    """Stable meta-file stem for one running instance (``{avd}.p{port}``)."""
+    return f"{avd}.p{int(port)}"
+
+
+def _serial_for_port(port: int) -> str:
+    return f"emulator-{int(port)}"
+
+
+def _port_from_serial(serial: str) -> int | None:
+    m = re.fullmatch(r"emulator-(\d+)", serial.strip())
+    if not m:
+        return None
+    port = int(m.group(1))
+    return port if port % 2 == 0 else None
+
+
+def _used_console_ports(*, cache_dir: str | Path | None = None) -> set[int]:
+    used: set[int] = set()
+    with contextlib.suppress(Exception):
+        for d in running_emulators():
+            p = _port_from_serial(str(d.get("serial") or ""))
+            if p is not None:
+                used.add(p)
+    if cache_dir is not None:
+        for meta in _aua_started_records(cache_dir):
+            raw = meta.get("port")
+            if isinstance(raw, int):
+                used.add(raw)
+            elif isinstance(meta.get("serial"), str):
+                p = _port_from_serial(str(meta["serial"]))
+                if p is not None:
+                    used.add(p)
+    return used
+
+
+def allocate_console_port(
+    preferred: int | None = None, *, cache_dir: str | Path | None = None
+) -> int:
+    """Pick a free even emulator console port (5554–5682)."""
+    used = _used_console_ports(cache_dir=cache_dir)
+    if preferred is not None:
+        port = int(preferred)
+        if port % 2 != 0:
+            raise UsageError(
+                f"emulator console port must be even (got {port})",
+                hint="Use 5554, 5556, … — serial becomes emulator-{port}.",
+            )
+        if port < _EMULATOR_PORT_MIN or port > _EMULATOR_PORT_MAX:
+            raise UsageError(
+                f"emulator port {port} out of range "
+                f"{_EMULATOR_PORT_MIN}–{_EMULATOR_PORT_MAX}",
+            )
+        if port in used:
+            raise DeviceError(
+                f"emulator port {port} already in use",
+                hint="Omit --port to auto-allocate, or pick a free even port "
+                f"(used: {', '.join(str(p) for p in sorted(used)) or 'none'}).",
+            )
+        return port
+    for port in range(_EMULATOR_PORT_MIN, _EMULATOR_PORT_MAX + 1, 2):
+        if port not in used:
+            return port
+    raise DeviceError(
+        "no free emulator console ports left",
+        hint=f"All even ports {_EMULATOR_PORT_MIN}–{_EMULATOR_PORT_MAX} are taken — "
+        "`aua emulator stop --mine` (or `--owner`) to free some.",
+    )
+
+
+def resolve_owner(explicit: str | None = None) -> str | None:
+    """Owner tag for parallel agents: ``--owner``, else ``$AUA_OWNER``, else None."""
+    if explicit is not None and str(explicit).strip():
+        return str(explicit).strip()
+    env = (os.environ.get("AUA_OWNER") or "").strip()
+    return env or None
+
+
+def _default_parallel_owner() -> str:
+    import uuid
+
+    return f"aua-{uuid.uuid4().hex[:8]}"
+
+
 def list_avds() -> dict[str, Any]:
     """Return configured AVD names (does not start anything)."""
     bin_path = emulator_bin()
@@ -579,6 +671,62 @@ def _adb_emu_kill(serial: str) -> None:
     )
 
 
+def touch_activity(cache_dir: str | Path, serial: str | None) -> None:
+    """Bump ``last_activity`` on any aua-started emulator record matching *serial*."""
+    if not serial:
+        return
+    for path in _pid_dir(cache_dir).glob("*.json"):
+        try:
+            meta = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(meta, dict):
+            continue
+        if meta.get("serial") != serial and path.stem != serial:
+            continue
+        meta["last_activity"] = time.time()
+        with contextlib.suppress(OSError):
+            path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+
+
+def _kill_watchdog(meta: dict[str, Any] | None) -> None:
+    if not isinstance(meta, dict):
+        return
+    wpid = meta.get("watchdog_pid")
+    # Skip self: the idle watchdog may call stop() and must not SIGTERM mid-cleanup.
+    if isinstance(wpid, int) and wpid != os.getpid():
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.kill(wpid, signal.SIGTERM)
+
+
+def _spawn_idle_watchdog(*, cache_dir: Path, instance: str) -> int | None:
+    """Detach a watchdog that stops this instance after idle_timeout_s. Returns pid or None."""
+    log = cache_dir / "emulator" / f"{instance}.watchdog.log"
+    cache_dir.joinpath("emulator").mkdir(parents=True, exist_ok=True)
+    cmd = [
+        sys.executable,
+        "-m",
+        "android_ui_analyser.emulator_watchdog",
+        "--cache",
+        str(cache_dir),
+        "--instance",
+        instance,
+    ]
+    try:
+        with open(log, "a", encoding="utf-8") as fh:  # noqa: SIM115
+            proc = subprocess.Popen(  # noqa: S603
+                cmd,
+                stdout=fh,
+                stderr=fh,
+                start_new_session=True,
+                close_fds=True,
+            )
+        return int(proc.pid)
+    except OSError as exc:
+        logger.warning("could not spawn emulator watchdog: %s", exc)
+        return None
+
+
 def default_gpu_mode(*, headless: bool) -> str:
     """Pick a GPU backend that does not melt the host CPU.
 
@@ -606,6 +754,11 @@ def start(
     cache_dir: str | Path,
     extra_args: list[str] | None = None,
     gpu: str | None = None,
+    idle_timeout_s: float | None = None,
+    port: int | None = None,
+    read_only: bool | None = None,
+    parallel: bool = False,
+    owner: str | None = None,
 ) -> dict[str, Any]:
     """Boot an AVD (headless by default) and wait until adb sees ``state=device``.
 
@@ -614,6 +767,14 @@ def start(
 
     *gpu* defaults via :func:`default_gpu_mode` — ``host`` on Mac/Windows so headless
     does not fall back to CPU SwiftShader.
+
+    *idle_timeout_s*: for headless starts, auto-stop after this many seconds without
+    aua activity (default 900). Pass ``0`` to disable. Windowed defaults to disabled.
+
+    *parallel*: allocate a free console port, pass ``-read-only`` so multiple agents can
+    boot the same AVD name concurrently, tag with *owner* (or ``$AUA_OWNER``, or an
+    auto id). Pin later commands with the returned ``serial``; stop with
+    ``stop --serial`` / ``--owner`` / ``--mine`` (scoped by ``$AUA_OWNER``).
     """
     listed = list_avds()
     names: list[str] = list(listed["avds"])
@@ -636,6 +797,47 @@ def start(
             hint=f"Known AVDs: {', '.join(names)} (`aua emulator list`).",
         )
 
+    # Parallel / multi-instance: unique port + read-only so the AVD file lock does not block.
+    same_avd_running = any(m.get("avd") == avd for m in _aua_started_records(cache_dir))
+    if (parallel or same_avd_running) and read_only is None:
+        read_only = True
+    if not parallel and port is None and same_avd_running:
+        # Implicit parallel when re-starting an AVD that aua already has recorded.
+        parallel = True
+
+    console_port: int | None = None
+    if parallel or port is not None:
+        console_port = allocate_console_port(port, cache_dir=cache_dir)
+
+    if read_only is None:
+        read_only = False
+
+    owner_tag = resolve_owner(owner)
+    if parallel and not owner_tag:
+        owner_tag = _default_parallel_owner()
+
+    inst = instance_id(avd, console_port) if console_port is not None else avd
+    expected_serial = _serial_for_port(console_port) if console_port is not None else None
+
+    # Reserve the instance meta early so a concurrent --parallel start does not pick the
+    # same console port between allocate and Popen.
+    meta_path = _pid_dir(cache_dir) / f"{inst}.json"
+    if console_port is not None and not meta_path.is_file():
+        reserve = {
+            "avd": avd,
+            "instance": inst,
+            "port": console_port,
+            "serial": expected_serial,
+            "started_by_aua": True,
+            "reserving": True,
+            "started_at": time.time(),
+            "last_activity": time.time(),
+        }
+        if owner_tag:
+            reserve["owner"] = owner_tag
+        with contextlib.suppress(OSError):
+            meta_path.write_text(json.dumps(reserve, indent=2) + "\n", encoding="utf-8")
+
     before = {d["serial"] for d in running_emulators()}
     bin_path = emulator_bin()
     gpu_mode = (gpu or default_gpu_mode(headless=headless)).strip() or "auto"
@@ -644,10 +846,18 @@ def start(
         cmd += ["-no-window", "-no-audio", "-no-boot-anim", "-gpu", gpu_mode]
     else:
         cmd += ["-gpu", gpu_mode]
+    if console_port is not None:
+        cmd += ["-port", str(console_port)]
+    if read_only:
+        cmd += ["-read-only"]
     if extra_args:
         cmd += list(extra_args)
 
-    log_path = _pid_dir(cache_dir) / f"{avd}.log"
+    if idle_timeout_s is None:
+        idle_timeout_s = _DEFAULT_HEADLESS_IDLE_STOP_S if headless else 0.0
+    idle_timeout_s = max(0.0, float(idle_timeout_s))
+
+    log_path = _pid_dir(cache_dir) / f"{inst}.log"
     log_fh = open(log_path, "a")  # noqa: SIM115 — kept for child lifetime
     try:
         proc = subprocess.Popen(  # noqa: S603
@@ -660,35 +870,53 @@ def start(
     finally:
         log_fh.close()
 
-    meta = {
+    now = time.time()
+    meta: dict[str, Any] = {
         "avd": avd,
+        "instance": inst,
         "pid": proc.pid,
         "headless": headless,
         "gpu": gpu_mode,
         "cmd": cmd,
         "log": str(log_path),
-        "started_at": time.time(),
+        "started_at": now,
+        "last_activity": now,
         "started_by_aua": True,
+        "idle_timeout_s": idle_timeout_s,
+        "read_only": bool(read_only),
+        "parallel": bool(parallel),
     }
-    (_pid_dir(cache_dir) / f"{avd}.json").write_text(
-        json.dumps(meta, indent=2) + "\n", encoding="utf-8"
-    )
+    if console_port is not None:
+        meta["port"] = console_port
+        meta["serial"] = expected_serial
+    if owner_tag:
+        meta["owner"] = owner_tag
+    meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
 
-    serial = _wait_for_new_emulator(before, timeout_s=wait_s)
+    if expected_serial is not None:
+        serial = _wait_for_serial(expected_serial, timeout_s=wait_s)
+    else:
+        serial = _wait_for_new_emulator(before, timeout_s=wait_s)
     if serial is None:
         with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
             os.killpg(proc.pid, signal.SIGTERM)
         with open(log_path, encoding="utf-8", errors="replace") as fh:
             tail = fh.read()[-800:]
+        meta_path.unlink(missing_ok=True)
         raise DeviceError(
             f"emulator {avd!r} did not become ready within {int(wait_s)}s",
             hint=f"Check the log: {log_path}\n{tail}",
         )
 
     meta["serial"] = serial
-    (_pid_dir(cache_dir) / f"{avd}.json").write_text(
-        json.dumps(meta, indent=2) + "\n", encoding="utf-8"
-    )
+    meta["last_activity"] = time.time()
+    watchdog_pid = None
+    if headless and idle_timeout_s > 0:
+        watchdog_pid = _spawn_idle_watchdog(
+            cache_dir=Path(cache_dir).expanduser(), instance=inst
+        )
+        meta["watchdog_pid"] = watchdog_pid
+    meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
     # Animations off by default. Measured on a windowed AVD: a tap settles in 272ms instead
     # of 357ms, and the spread narrows from 225ms to 69ms — the predictability matters more
     # than the mean, because every wait-for-settle is sized by the worst case. Scoped to an
@@ -705,29 +933,65 @@ def start(
             # and a `settings put` made in between is undone as the system finishes booting —
             # which looked like success while the scales stayed at 1.0.
             _wait_for_boot(shell, timeout_s=min(90.0, wait_s))
-            state = devopts.anim_off(shell, _pid_dir(cache_dir) / f"{avd}.anim.json")
+            state = devopts.anim_off(shell, _pid_dir(cache_dir) / f"{inst}.anim.json")
             # Read back rather than assume: claiming this without checking is the same
             # false-success the wait above was hiding.
             anim = (state or {}).get("anim") or {}
             animations_disabled = bool(anim) and all(
                 str(v) in ("0", "0.0") for v in anim.values()
             )
+    stop_hint = (
+        f"`aua emulator stop --serial {serial}`"
+        if owner_tag
+        else f"`aua emulator stop --mine` (or `--avd {avd}` / `--serial {serial}`)"
+    )
+    if owner_tag:
+        stop_hint = (
+            f"`AUA_OWNER={owner_tag} aua emulator stop --mine` "
+            f"or `aua emulator stop --serial {serial}` / `--owner {owner_tag}`"
+        )
     return {
         "ok": True,
         "action": "emulator-start",
         "avd": avd,
+        "instance": inst,
         "serial": serial,
+        "port": console_port,
+        "owner": owner_tag,
+        "read_only": bool(read_only),
+        "parallel": bool(parallel),
         "pid": proc.pid,
         "headless": headless,
         "gpu": gpu_mode,
         "animations_disabled": animations_disabled,
+        "idle_timeout_s": idle_timeout_s,
+        "watchdog_pid": watchdog_pid,
         "log": str(log_path),
         "hint": (
-            f"Use `aua --serial {serial} analyze` (or `aua daemon start`) next. "
-            f"When finished, stop THIS emulator: `aua emulator stop --avd {avd}` "
-            "(or `aua emulator stop --mine`) — leaving it running burns CPU/battery."
+            f"Pin with `aua --serial {serial} …` (or `export AUA_SERIAL={serial}`"
+            + (f" AUA_OWNER={owner_tag}" if owner_tag else "")
+            + "). "
+            f"**Required when finished:** {stop_hint}. "
+            + (
+                f"Safety net: auto-stops after {int(idle_timeout_s)}s idle."
+                if idle_timeout_s > 0
+                else "Idle auto-stop disabled."
+            )
         ),
     }
+
+
+def _wait_for_serial(serial: str, *, timeout_s: float) -> str | None:
+    deadline = time.monotonic() + max(5.0, timeout_s)
+    while time.monotonic() < deadline:
+        for d in running_emulators():
+            if d.get("state") == "device" and d["serial"] == serial:
+                return serial
+        time.sleep(_POLL_S)
+    for d in running_emulators():
+        if d.get("state") == "device" and d["serial"] == serial:
+            return serial
+    return None
 
 
 def _wait_for_new_emulator(before: set[str], *, timeout_s: float) -> str | None:
@@ -766,32 +1030,46 @@ def stop(
     avd: str | None = None,
     all_devices: bool = False,
     mine: bool = False,
+    owner: str | None = None,
     cache_dir: str | Path,
 ) -> dict[str, Any]:
-    """Stop a running emulator (``adb emu kill``), scoped by serial/AVD/mine.
+    """Stop a running emulator (``adb emu kill``), scoped by serial/AVD/owner/mine.
 
     An untargeted call is refused rather than treated as "all". ``--all`` kills every
-    emulator; ``--mine`` only kills AVDs recorded under aua's cache (what agents started).
+    emulator; ``--mine`` kills AVDs recorded under aua's cache (optionally filtered by
+    ``owner`` / ``$AUA_OWNER`` so parallel agents only tear down their own).
     """
     targets = running_emulators()
-    if not serial and avd is None and not all_devices and not mine:
+    owner_tag = resolve_owner(owner)
+    if not serial and avd is None and not all_devices and not mine and not owner_tag:
         raise UsageError(
-            "emulator stop needs a target: --serial, --avd, --mine, or --all",
+            "emulator stop needs a target: --serial, --avd, --owner, --mine, or --all",
             hint=(
                 "running: "
                 + (", ".join(t["serial"] for t in targets) or "none")
-                + ". Agents: `aua emulator stop --mine` for AVDs you started with aua."
+                + ". Parallel agents: `aua emulator stop --serial <yours>` or "
+                "`AUA_OWNER=… aua emulator stop --mine`."
             ),
         )
 
-    if mine and not serial and avd is None and not all_devices:
+    # --owner alone (or with --mine): stop matching aua records.
+    if (mine or owner_tag) and not serial and avd is None and not all_devices:
         records = _aua_started_records(cache_dir)
+        if owner_tag:
+            records = [m for m in records if m.get("owner") == owner_tag]
+            detail = f"stopped emulators owned by {owner_tag!r}"
+        else:
+            detail = "stopped emulators recorded as started by aua"
         if not records:
             return {
                 "ok": True,
                 "action": "emulator-stop",
                 "stopped": [],
-                "detail": "no aua-started emulator records in cache",
+                "owner": owner_tag,
+                "detail": (
+                    "no aua-started emulator records"
+                    + (f" for owner {owner_tag!r}" if owner_tag else " in cache")
+                ),
             }
         stopped_mine: list[str] = []
         for meta in records:
@@ -804,6 +1082,7 @@ def stop(
             if isinstance(pid, int):
                 with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
                     os.killpg(pid, signal.SIGTERM)
+            _kill_watchdog(meta)
             path = Path(str(meta.get("_path") or ""))
             if path.is_file():
                 path.unlink(missing_ok=True)
@@ -811,13 +1090,43 @@ def stop(
             "ok": True,
             "action": "emulator-stop",
             "stopped": stopped_mine,
-            "detail": "stopped emulators recorded as started by aua",
+            "owner": owner_tag,
+            "detail": detail,
         }
 
     if serial:
         targets = [t for t in targets if t["serial"] == serial]
 
     if avd is not None:
+        # Match legacy `{avd}.json` and parallel `{avd}.p{port}.json` records.
+        matched = [
+            m
+            for m in _aua_started_records(cache_dir)
+            if m.get("avd") == avd or Path(str(m.get("_path") or "")).stem == avd
+        ]
+        if matched:
+            stopped_avd: list[str] = []
+            for meta in matched:
+                ser = meta.get("serial")
+                if isinstance(ser, str) and ser:
+                    with contextlib.suppress(Exception):
+                        _adb_emu_kill(ser)
+                        stopped_avd.append(ser)
+                pid = meta.get("pid")
+                if isinstance(pid, int):
+                    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                        os.killpg(pid, signal.SIGTERM)
+                _kill_watchdog(meta)
+                path = Path(str(meta.get("_path") or ""))
+                if path.is_file():
+                    path.unlink(missing_ok=True)
+            return {
+                "ok": True,
+                "action": "emulator-stop",
+                "stopped": stopped_avd,
+                "detail": f"stopped aua instances of avd {avd}",
+            }
+        # Fall through: maybe a live emulator whose serial we don't have recorded.
         meta_path = _pid_dir(cache_dir) / f"{avd}.json"
         if meta_path.is_file():
             try:
@@ -827,17 +1136,6 @@ def stop(
             ser = meta.get("serial")
             if ser:
                 targets = [t for t in running_emulators() if t["serial"] == ser] or targets
-            pid = meta.get("pid")
-            if isinstance(pid, int) and not targets:
-                with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-                    os.killpg(pid, signal.SIGTERM)
-                meta_path.unlink(missing_ok=True)
-                return {
-                    "ok": True,
-                    "action": "emulator-stop",
-                    "stopped": [],
-                    "detail": f"signalled pid {pid} for avd {avd}",
-                }
 
     if not targets and serial is None and avd is None:
         stopped_pids: list[int] = []
@@ -852,6 +1150,7 @@ def stop(
                 with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
                     os.killpg(pid, signal.SIGTERM)
                     stopped_pids.append(pid)
+            _kill_watchdog(meta)
             path.unlink(missing_ok=True)
         return {
             "ok": True,
@@ -865,7 +1164,7 @@ def stop(
         raise DeviceError(
             "no matching running emulator to stop",
             hint="`aua emulator status` lists live serials; pass --serial emulator-5554 "
-            "or `aua emulator stop --mine`.",
+            "or `aua emulator stop --mine` / `--owner`.",
         )
 
     stopped: list[str] = []
@@ -883,7 +1182,8 @@ def stop(
         except json.JSONDecodeError:
             path.unlink(missing_ok=True)
             continue
-        if meta.get("serial") in stopped or (avd and path.stem == avd):
+        if meta.get("serial") in stopped or (avd and meta.get("avd") == avd):
+            _kill_watchdog(meta)
             path.unlink(missing_ok=True)
 
     return {"ok": True, "action": "emulator-stop", "stopped": stopped}

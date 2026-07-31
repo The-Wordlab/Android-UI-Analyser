@@ -70,18 +70,237 @@ def test_start_headless_waits_for_serial(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
     monkeypatch.setattr(emu.subprocess, "Popen", lambda *a, **k: FakeProc())
     monkeypatch.setattr(emu.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(emu, "_spawn_idle_watchdog", lambda **k: 7777)
 
     out = emu.start(headless=True, wait_s=5, cache_dir=tmp_path)
     assert out["serial"] == "emulator-5554"
     assert out["headless"] is True
     assert out["avd"] == "only"
     assert out["gpu"] == "host" or out["gpu"] == "swiftshader" or out["gpu"] == "auto"
+    assert out["idle_timeout_s"] == 900.0
+    assert out["watchdog_pid"] == 7777
     meta = json.loads((tmp_path / "emulator" / "only.json").read_text(encoding="utf-8"))
     assert meta["pid"] == 4242
+    assert meta["watchdog_pid"] == 7777
+    assert meta["idle_timeout_s"] == 900.0
     assert "-no-window" in meta["cmd"]
     assert "-gpu" in meta["cmd"]
     assert "swiftshader_indirect" not in meta["cmd"]
     assert meta.get("started_by_aua") is True
+
+
+def test_start_idle_stop_zero_skips_watchdog(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from android_ui_analyser import emulator as emu
+
+    monkeypatch.setattr(emu, "emulator_bin", lambda: "/fake/emulator")
+    monkeypatch.setattr(
+        emu, "list_avds", lambda: {"ok": True, "avds": ["only"], "count": 1, "emulator": "x"}
+    )
+    calls = {"n": 0}
+
+    def running() -> list[dict[str, Any]]:
+        calls["n"] += 1
+        if calls["n"] < 2:
+            return []
+        return [
+            {
+                "serial": "emulator-5554",
+                "state": "device",
+                "model": "x",
+                "android_version": "14",
+            }
+        ]
+
+    monkeypatch.setattr(emu, "running_emulators", running)
+
+    class FakeProc:
+        pid = 4242
+
+    spawned: list[Any] = []
+    monkeypatch.setattr(emu.subprocess, "Popen", lambda *a, **k: FakeProc())
+    monkeypatch.setattr(emu.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(
+        emu, "_spawn_idle_watchdog", lambda **k: spawned.append(k) or 1
+    )
+
+    out = emu.start(headless=True, wait_s=5, cache_dir=tmp_path, idle_timeout_s=0)
+    assert out["idle_timeout_s"] == 0.0
+    assert out["watchdog_pid"] is None
+    assert spawned == []
+
+
+def test_start_parallel_allocates_port_and_owner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from android_ui_analyser import emulator as emu
+
+    monkeypatch.setattr(emu, "emulator_bin", lambda: "/fake/emulator")
+    monkeypatch.setattr(
+        emu, "list_avds", lambda: {"ok": True, "avds": ["only"], "count": 1, "emulator": "x"}
+    )
+    calls = {"n": 0}
+
+    def running() -> list[dict[str, Any]]:
+        calls["n"] += 1
+        if calls["n"] < 2:
+            return []
+        return [
+            {
+                "serial": "emulator-5554",
+                "state": "device",
+                "model": "x",
+                "android_version": "14",
+            }
+        ]
+
+    monkeypatch.setattr(emu, "running_emulators", running)
+
+    class FakeProc:
+        pid = 4242
+
+    cmds: list[list[str]] = []
+
+    def fake_popen(cmd: list[str], **_k: Any) -> FakeProc:
+        cmds.append(list(cmd))
+        return FakeProc()
+
+    monkeypatch.setattr(emu.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(emu.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(emu, "_spawn_idle_watchdog", lambda **k: 7777)
+
+    out = emu.start(
+        headless=True,
+        wait_s=5,
+        cache_dir=tmp_path,
+        parallel=True,
+        owner="agent-a",
+        idle_timeout_s=0,
+    )
+    assert out["port"] == 5554
+    assert out["serial"] == "emulator-5554"
+    assert out["owner"] == "agent-a"
+    assert out["read_only"] is True
+    assert out["instance"] == "only.p5554"
+    assert "-port" in cmds[0] and "5554" in cmds[0]
+    assert "-read-only" in cmds[0]
+    meta = json.loads((tmp_path / "emulator" / "only.p5554.json").read_text(encoding="utf-8"))
+    assert meta["owner"] == "agent-a"
+    assert meta["port"] == 5554
+
+
+def test_parallel_second_instance_gets_next_port(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from android_ui_analyser import emulator as emu
+
+    # First instance already recorded on 5554.
+    rec = tmp_path / "emulator"
+    rec.mkdir()
+    (rec / "only.p5554.json").write_text(
+        json.dumps(
+            {
+                "avd": "only",
+                "instance": "only.p5554",
+                "port": 5554,
+                "serial": "emulator-5554",
+                "owner": "agent-a",
+                "started_by_aua": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(emu, "emulator_bin", lambda: "/fake/emulator")
+    monkeypatch.setattr(
+        emu, "list_avds", lambda: {"ok": True, "avds": ["only"], "count": 1, "emulator": "x"}
+    )
+    calls = {"n": 0}
+
+    def running() -> list[dict[str, Any]]:
+        calls["n"] += 1
+        base = [
+            {
+                "serial": "emulator-5554",
+                "state": "device",
+                "model": "x",
+                "android_version": "14",
+            }
+        ]
+        if calls["n"] < 3:
+            return base
+        return base + [
+            {
+                "serial": "emulator-5556",
+                "state": "device",
+                "model": "x",
+                "android_version": "14",
+            }
+        ]
+
+    monkeypatch.setattr(emu, "running_emulators", running)
+
+    class FakeProc:
+        pid = 99
+
+    monkeypatch.setattr(emu.subprocess, "Popen", lambda *a, **k: FakeProc())
+    monkeypatch.setattr(emu.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(emu, "_spawn_idle_watchdog", lambda **k: None)
+
+    out = emu.start(
+        headless=True,
+        wait_s=5,
+        cache_dir=tmp_path,
+        parallel=True,
+        owner="agent-b",
+        idle_timeout_s=0,
+    )
+    assert out["port"] == 5556
+    assert out["serial"] == "emulator-5556"
+    assert out["owner"] == "agent-b"
+    assert (tmp_path / "emulator" / "only.p5556.json").is_file()
+
+
+def test_stop_mine_scoped_by_owner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from android_ui_analyser import emulator as emu
+
+    rec = tmp_path / "emulator"
+    rec.mkdir()
+    (rec / "a.p5554.json").write_text(
+        json.dumps(
+            {
+                "avd": "a",
+                "serial": "emulator-5554",
+                "pid": 1,
+                "owner": "agent-a",
+                "started_by_aua": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (rec / "a.p5556.json").write_text(
+        json.dumps(
+            {
+                "avd": "a",
+                "serial": "emulator-5556",
+                "pid": 2,
+                "owner": "agent-b",
+                "started_by_aua": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    killed: list[str] = []
+    monkeypatch.setattr(emu, "_adb_emu_kill", lambda s: killed.append(s))
+    monkeypatch.setattr(emu, "running_emulators", lambda: [])
+    monkeypatch.setattr(emu.os, "killpg", lambda *a, **k: None)
+    out = emu.stop(mine=True, owner="agent-a", cache_dir=tmp_path)
+    assert killed == ["emulator-5554"]
+    assert out["stopped"] == ["emulator-5554"]
+    assert not (rec / "a.p5554.json").exists()
+    assert (rec / "a.p5556.json").exists()
 
 
 def test_default_gpu_mode_mac_uses_host(monkeypatch: pytest.MonkeyPatch) -> None:

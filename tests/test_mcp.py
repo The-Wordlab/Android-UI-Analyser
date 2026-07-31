@@ -9,6 +9,7 @@ ones are present) and call ``analyze_screen`` against an :class:`Engine` backed 
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import anyio
 import pytest
@@ -80,6 +81,10 @@ def test_mcp_lists_core_tools() -> None:
         "flow_run",
         "navigate",
         "list_devices",
+        "emulator_list",
+        "emulator_status",
+        "emulator_start",
+        "emulator_stop",
         "double_tap",
         "clear",
         "scroll",
@@ -326,3 +331,26 @@ def test_mcp_resolve_dispatch_stub() -> None:
 
     data = anyio.run(run)
     assert data["ok"] is True and data.get("to_id") == 2
+
+
+def test_mcp_emulator_cleanup_tracks_serials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from android_ui_analyser import mcp_server as mcp
+
+    mcp._MCP_STARTED_SERIALS.clear()
+    mcp._MCP_STARTED_OWNERS.clear()
+    mcp._MCP_STARTED_SERIALS.add("emulator-9998")
+    stopped: list[str] = []
+
+    def fake_stop(**kwargs):  # type: ignore[no-untyped-def]
+        ser = kwargs.get("serial")
+        if ser:
+            stopped.append(str(ser))
+            return {"ok": True, "stopped": [ser]}
+        return {"ok": True, "stopped": []}
+
+    monkeypatch.setattr("android_ui_analyser.emulator.stop", fake_stop)
+    out = mcp.cleanup_mcp_emulators(tmp_path)
+    assert "emulator-9998" in out["stopped"]
+    assert "emulator-9998" not in mcp._MCP_STARTED_SERIALS

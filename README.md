@@ -113,7 +113,13 @@ aua emulator list                   # marks Play Store vs rootable Google APIs
 aua emulator start --headless       # -no-window; Mac/Windows use -gpu host (not CPU SwiftShader)
 aua --format compact analyze
 # … drive the flow …
-aua emulator stop --mine            # agents: always stop AVDs you started
+aua emulator stop --mine            # agents: ALWAYS stop AVDs you started
+# Safety net: headless auto-stops after --idle-stop seconds of no aua activity (default 900)
+
+# Parallel agents on one host (each gets its own serial; tear down only yours):
+aua emulator start --headless --parallel --avd Pixel_7
+# → {serial, port, owner, …}; then: aua --serial <serial> analyze …
+aua emulator stop --serial <serial> # or: AUA_OWNER=<owner> aua emulator stop --mine
 ```
 
 **HTTPS proxy / mock** needs a *rootable* Google APIs image — Google Play AVDs refuse `adb root`, so the mitm CA cannot be installed as a system trust and HTTPS recording stays empty:
@@ -668,13 +674,37 @@ CA) — not “no traffic”.
 
 ---
 
+## Dashboard (sneak-peek headless runs)
+
+Agents often drive a **headless** emulator with no window. To watch live without interrupting
+them, run a separate process:
+
+```bash
+# One agent / one device:
+aua dashboard --serial emulator-5554
+# → opens http://127.0.0.1:8765  (enables capture via daemon or sidecar)
+
+# Multiple parallel agents (auto grid of live screens):
+aua dashboard            # several emulators online → tile grid
+aua dashboard --grid     # force grid even with one device
+# Click a tile → detail (journal / map / logcat) for that serial
+```
+
+The page live-polls capture frames + recent action marks. Ctrl-C stops only the dashboard.
+If no warm daemon is present, aua starts the capture **sidecar** (single-device) or uses adb
+screencap per tile (grid).
+
+---
+
 ## MCP server
 
 `aua mcp` runs an MCP server over stdio, exposing the same tools as the CLI. It is a thin adapter over the engine — no separate perception logic.
 
 Tools include (non-exhaustive): `analyze_screen`, `tap`, `double_tap`, `long_press`, `input`,
 `clear`, `swipe`, `scroll`, `scroll_to`, `key`, `wait`, `wait_stable`, `wait_changed`, `has`,
-`expect`, `screenshot`, `inspect`, `goto`, `flow_run`, `navigate`, `list_devices`, `open_link`,
+`expect`, `screenshot`, `inspect`, `goto`, `flow_run`, `navigate`, `list_devices`,
+`emulator_list` / `emulator_status` / `emulator_start` / `emulator_stop` (stop before exit —
+MCP also auto-stops emulators it started when the server process ends), `open_link`,
 `app`, `resolve`, clipboard/paste/copy/erase, location/orientation/airplane/media/record/clock,
 `capture_*`, `dev_profile`, `a11y_scroll`, `flags_apply`, map/`reconcile_*`/`knowledge_*`,
 `proxy_start` / `proxy_stop` / `mock_replay`, `configure`.
@@ -938,11 +968,12 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 | `aua screenshot [path]` | Save a raw screenshot (`--region` / `--scale`) |
 | `aua inspect <id>` | Dump full details for one element |
 | `aua app launch\|stop\|kill\|clear\|grant` | App control (`launch --clear` = clearState) |
-| `aua emulator list\|status\|start\|stop` | Boot/stop AVDs (`--headless`, `--gpu`, `--mine`) |
+| `aua emulator list\|status\|start\|stop` | Boot/stop AVDs (`--headless`, `--parallel`, `--gpu`, `--mine`/`--owner`) |
 | `aua emulator recommend-proxy\|ensure-proxy` | Suggest/create a small rootable Google APIs AVD |
 | `aua flags set\|apply` | Feature-flag writes with verify/restart |
 | `aua proxy start\|stop` / `aua mock …` | HTTPS mitm record/map/replay (`[proxy]` extra) |
 | `aua capture …` | Session capture / export / explain |
+| `aua dashboard` | Live browser sneak-peek (`--grid` for multi-agent tiles; works with headless) |
 | `aua logcat` / `aua suite` | Device-clock log windows / scripted suites |
 | `aua dev` / `aua a11y` | Dev options helpers / a11y scroll |
 | `aua map` | Show the active-context map (`--all-contexts`, `--audit`, or `--find "<goal>"`) |
@@ -975,7 +1006,7 @@ All action commands (`tap`, `long-press`, `input`, `clear`, `swipe`, `scroll-to`
 | `uiautomator2 is not installed` | Reinstall the package — `uiautomator2` is a base dependency, not an extra. |
 | `analyze` returns few/no elements | The hierarchy is empty (Compose/Flutter/WebView/canvas). Force vision: `aua --format compact analyze --source vision --annotate`. |
 | Typing does nothing on Android 14+ | Handled automatically (accessibility `set_text` on the focused field); make sure the field is actually focused first. |
-| Headless emulator pegs CPU / fans | Old default was SwiftShader (CPU). Current Mac/Windows headless uses `-gpu host`. Stop orphans with `aua emulator stop --mine`. |
+| Headless emulator pegs CPU / fans | Old default was SwiftShader (CPU). Current Mac/Windows headless uses `-gpu host`. Stop orphans with `aua emulator stop --mine`. Headless also auto-stops after `--idle-stop` (default 900s) with no aua activity. |
 | `proxy` / empty HTTPS cassettes | Need `[proxy]` extra + **rootable** Google APIs AVD (`aua emulator ensure-proxy`). Play Store images refuse `adb root` → system CA install fails → TLS handshake fails. |
 | `sdkmanager` / `ensure-proxy` fails | Prefer `$ANDROID_HOME/cmdline-tools/latest/bin` over outdated Homebrew cmdline-tools. |
 

@@ -13,6 +13,7 @@ import contextlib
 import logging
 import shutil
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -546,8 +547,41 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
             raise
         except Exception as exc:  # pragma: no cover - daemon optional / unreachable
             logger.debug("daemon route unavailable, running in-process: %s", exc)
-    _warm(engine)
-    return getattr(engine, method)(**kwargs)
+    # In-process path — journal here (daemon path is journaled inside the daemon).
+    from . import journal as journal_mod
+
+    t0 = time.monotonic()
+    serial = None
+    with contextlib.suppress(Exception):
+        serial = engine.device.serial
+    try:
+        _warm(engine)
+        result = getattr(engine, method)(**kwargs)
+        with contextlib.suppress(Exception):
+            journal_mod.record(
+                cache_dir=cfg.cache.dir,
+                serial=serial,
+                source="cli",
+                cmd=_DAEMON_CMD.get(method, method),
+                args=kwargs,
+                ok=True,
+                duration_ms=(time.monotonic() - t0) * 1000.0,
+                result=result,
+            )
+        return result
+    except AuaError as err:
+        with contextlib.suppress(Exception):
+            journal_mod.record(
+                cache_dir=cfg.cache.dir,
+                serial=serial,
+                source="cli",
+                cmd=_DAEMON_CMD.get(method, method),
+                args=kwargs,
+                ok=False,
+                duration_ms=(time.monotonic() - t0) * 1000.0,
+                error=err.to_dict().get("error"),
+            )
+        raise
 
 # --------------------------------------------------------------------------- app
 
@@ -854,8 +888,10 @@ def has(
     """
     def go(engine: Engine, fmt: OutputFormat) -> None:
         target, target_by = _has_target(text, by=by, rid=rid, text_sel=text_sel, desc=desc)
-        result = engine.has(
-            target,
+        result = _route(
+            engine,
+            "has",
+            text=target,
             match=match,
             ignore_case=ignore_case,
             ocr_fallback=ocr_fallback,
@@ -864,7 +900,8 @@ def has(
             by=target_by,
         )
         _emit(result, fmt)
-        if not result.found:
+        found = result.get("found") if isinstance(result, dict) else getattr(result, "found", False)
+        if not found:
             raise typer.Exit(1)
 
     _run(ctx, go)
@@ -1998,6 +2035,35 @@ def emulator_start_cmd(
     wait: int = typer.Option(
         120, "--wait", help="Seconds to wait for adb state=device after boot."
     ),
+    idle_stop: int = typer.Option(
+        900,
+        "--idle-stop",
+        help="Auto-stop headless AVD after N seconds with no aua activity (0=never). "
+        "Safety net when agents forget `aua emulator stop --mine`.",
+    ),
+    parallel: bool = typer.Option(
+        False,
+        "--parallel",
+        help="Safe for concurrent agents: allocate a free -port, pass -read-only, tag an owner. "
+        "Pin later commands with the returned serial; stop with --serial or AUA_OWNER=… --mine.",
+    ),
+    port: int | None = typer.Option(
+        None,
+        "--port",
+        help="Emulator console port (even, 5554–5682). Implies a fixed serial emulator-{port}. "
+        "Auto-allocated with --parallel.",
+    ),
+    read_only: bool | None = typer.Option(
+        None,
+        "--read-only/--no-read-only",
+        help="Pass -read-only so the same AVD can run multiple times (default on with --parallel).",
+    ),
+    owner: str | None = typer.Option(
+        None,
+        "--owner",
+        help="Owner tag for parallel cleanup (default: $AUA_OWNER, or auto id with --parallel). "
+        "Then `AUA_OWNER=… aua emulator stop --mine` only kills yours.",
+    ),
 ) -> None:
     """Boot an AVD and wait until adb sees it (headless by default)."""
     from . import emulator as emulator_mod
@@ -2013,6 +2079,11 @@ def emulator_start_cmd(
                 wait_s=float(wait),
                 cache_dir=cfg.cache.dir,
                 gpu=gpu,
+                idle_timeout_s=float(idle_stop) if headless else 0.0,
+                parallel=parallel,
+                port=port,
+                read_only=read_only,
+                owner=owner,
             ),
             ctx,
         )
@@ -2028,10 +2099,15 @@ def emulator_stop_cmd(
         None, "--serial", help="Emulator serial to kill (e.g. emulator-5554)."
     ),
     avd: str | None = typer.Option(None, "--avd", help="Stop the AVD AUA started by name."),
+    owner: str | None = typer.Option(
+        None,
+        "--owner",
+        help="Stop only instances tagged with this owner (or set $AUA_OWNER).",
+    ),
     mine: bool = typer.Option(
         False,
         "--mine",
-        help="Stop only emulators aua recorded as started (safe agent cleanup).",
+        help="Stop emulators aua recorded as started. With $AUA_OWNER/--owner, only yours.",
     ),
     all_devices: bool = typer.Option(
         False, "--all", help="Kill EVERY running emulator (needed when no --serial/--avd/--mine)."
@@ -2040,7 +2116,8 @@ def emulator_stop_cmd(
     """Stop a running emulator (`adb emu kill`).
 
     Needs an explicit target: an emulator may hold a signed-in session or seeded data, and
-    killing it cannot be undone. Prefer `--mine` when you started the AVD with aua.
+    killing it cannot be undone. Prefer `--serial` or `--mine` (scoped by `$AUA_OWNER` when
+    parallel agents share a host).
     """
     from . import emulator as emulator_mod
 
@@ -2053,6 +2130,7 @@ def emulator_stop_cmd(
                 avd=avd,
                 all_devices=all_devices,
                 mine=mine,
+                owner=owner,
                 cache_dir=cfg.cache.dir,
             ),
             ctx,
@@ -2392,6 +2470,53 @@ def orient(ctx: typer.Context) -> None:
         _emit(_route(engine, "orient"), fmt)
 
     _run(ctx, go)
+
+
+@app.command()
+def dashboard(
+    ctx: typer.Context,
+    serial: str | None = typer.Option(
+        None, "--serial", help="Device serial (detail view). Omit with multiple devices for grid."
+    ),
+    grid: bool = typer.Option(
+        False,
+        "--grid",
+        help="Force multi-device grid (live screens). Auto-on when several emulators are online.",
+    ),
+    port: int = typer.Option(8765, "--port", help="Preferred localhost port (tries nearby if busy)."),
+    open_browser: bool = typer.Option(
+        True, "--open/--no-open", help="Open the page in your default browser."
+    ),
+    poll_ms: int = typer.Option(
+        500, "--poll-ms", help="Browser refresh interval for the live frame."
+    ),
+) -> None:
+    """Sneak-peek a headless agent run in the browser (separate process).
+
+    Enables capture if needed (warm daemon buffer, or host sidecar), then serves a
+    localhost page with live frames + recent action marks. With multiple online
+    emulators, opens a **grid** of screens (click a tile for journal/map). Does not
+    stop the agent. Ctrl-C exits the dashboard only.
+    """
+    from . import dashboard as dash
+
+    opts = _opts(ctx)
+    cfg = opts.load()
+    if serial:
+        cfg.device.serial = serial
+    try:
+        dash.run(
+            serial=serial,
+            port=port,
+            config=cfg,
+            open_browser=open_browser,
+            poll_ms=poll_ms,
+            grid=grid,
+            block=True,
+        )
+    except AuaError as err:
+        emit_error(err)
+        raise typer.Exit(int(err.exit_code)) from err
 
 
 @app.command()
