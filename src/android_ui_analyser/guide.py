@@ -773,8 +773,9 @@ def render_markdown(*, brief: bool = False) -> str:
     p.append(
         "`aua ask` is provider-neutral: configure `grounding.chain: [gemini, openai]`. The factory "
         "tries that order and skips providers whose API-key env var is absent, so one config works "
-        "with either key. Reverse the list to prefer OpenAI when both exist. Apple Vision OCR keeps "
-        "the original screenshot; only the remote question path uses a compressed preview."
+        "with either key. Reverse the list to prefer OpenAI when both exist. On macOS, Apple "
+        "Vision OCR and hierarchy capture run concurrently; both raw element sets are returned. "
+        "OCR works on a 720px preview and maps boxes back to original screen coordinates."
     )
     return "\n".join(p) + "\n"
 

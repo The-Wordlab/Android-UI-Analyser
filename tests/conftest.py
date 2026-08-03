@@ -448,6 +448,9 @@ def make_config(**overrides: Any) -> Config:
         base["perf"]["async_memory"] = False
         base["perf"]["prefetch"] = False
         base["perf"]["auto_daemon"] = False
+        # Most tests exercise hierarchy semantics, not host OCR. Production defaults to
+        # augmentation; focused OCR tests opt in explicitly.
+        base["ocr"]["augment_hierarchy"] = False
     merged = _deep_merge(base, overrides) if overrides else base
     return Config.model_validate(merged)
 

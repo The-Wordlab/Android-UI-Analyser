@@ -18,6 +18,8 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Iterator, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -47,7 +49,7 @@ from .memory import (
     resolve_goal,
     step_display,
 )
-from .providers.base import DetBox, Point, ScreenAnalysisResult, ScreenImage, TextBox
+from .providers.base import DetBox, OcrProvider, Point, ScreenAnalysisResult, ScreenImage, TextBox
 from .providers.registry import ProviderFactory, registered_names, run_chain
 from .schema import (
     ActionResult,
@@ -103,6 +105,26 @@ _FLAGS_ENTRY_TIMEOUT_S = 3.0  # how long a pinned entry Activity gets before the
 _FLAGS_FOREGROUND_TIMEOUT_S = 6.0  # how long the relaunched app gets to reach the foreground
 
 _PACKAGE_RE = re.compile(r'package="([^"]+)"')
+
+
+class _PendingOcr(NamedTuple):
+    """Apple Vision work running while the main thread captures the hierarchy."""
+
+    image: ScreenImage
+    provider: OcrProvider
+    future: Future[list[TextBox]]
+    executor: ThreadPoolExecutor
+    started_at: float
+
+
+class _HierarchyObservation(NamedTuple):
+    elements: list[Element]
+    package: str | None
+    xml_hash: str
+    ocr_texts: list[TextBox]
+    ocr_elements: list[Element]
+    ocr_provider: str | None
+    image: ScreenImage | None
 
 
 def _action_mark(verb: str, el: Element) -> str:
@@ -379,12 +401,113 @@ class Engine:
                     return img
         return self.device.screenshot()
 
+    def _start_hierarchy_ocr(self, *, with_ocr: bool | None) -> _PendingOcr | None:
+        """Start the macOS OCR augmenter before the hierarchy capture begins.
+
+        This intentionally selects only Apple Vision from the configured OCR chain. A
+        heavyweight cross-platform OCR fallback must not silently run on every hierarchy
+        call; those providers remain available to the ordinary vision fallback.
+        """
+        want_ocr = self.config.ocr.enabled if with_ocr is None else with_ocr
+        if (
+            not want_ocr
+            or not self.config.ocr.augment_hierarchy
+            or not self.factory.is_enabled("ocr")
+        ):
+            return None
+        chain = self.factory.build_chain("ocr")
+        provider = next(
+            (
+                item
+                for item in chain.providers
+                if item.name == "apple_vision" and isinstance(item, OcrProvider)
+            ),
+            None,
+        )
+        if provider is None or not provider.is_available().ok:
+            return None
+        try:
+            # The daemon's rolling capture normally makes this a memory read. Keeping the
+            # screenshot on the caller thread avoids concurrent ADB/uiautomator RPCs.
+            image = self._screenshot(max_reuse_ms=250.0)
+        except Exception as exc:
+            logger.info("parallel hierarchy OCR could not capture a screenshot: %s", exc)
+            return None
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="aua-apple-ocr")
+        started_at = time.perf_counter()
+        future = executor.submit(provider.recognize, image)
+        return _PendingOcr(image, provider, future, executor, started_at)
+
+    def _finish_hierarchy_ocr(
+        self, pending: _PendingOcr | None
+    ) -> tuple[list[TextBox], str | None, ScreenImage | None]:
+        if pending is None:
+            return [], None, None
+        timed_out = False
+        try:
+            elapsed = time.perf_counter() - pending.started_at
+            timeout = max(0.0, self.config.timeouts.vision_ms / 1000.0 - elapsed)
+            texts = pending.future.result(timeout=timeout)
+            return texts, pending.provider.name, pending.image
+        except FuturesTimeout:
+            timed_out = True
+            pending.future.cancel()
+            logger.warning("parallel hierarchy OCR timed out")
+            return [], None, pending.image
+        except Exception as exc:
+            logger.info("parallel hierarchy OCR unavailable: %s", exc)
+            return [], None, pending.image
+        finally:
+            pending.executor.shutdown(wait=not timed_out, cancel_futures=timed_out)
+
+    def _capture_hierarchy_with_ocr(
+        self,
+        device: Device,
+        w: int,
+        h: int,
+        *,
+        with_ocr: bool | None,
+    ) -> _HierarchyObservation:
+        """Capture hierarchy + Apple OCR concurrently and return one fused observation."""
+        pending = self._start_hierarchy_ocr(with_ocr=with_ocr)
+        try:
+            elements, package, xml_hash = self._capture_hierarchy(device, w, h)
+        except BaseException:
+            if pending is not None:
+                pending.future.cancel()
+                pending.executor.shutdown(wait=False, cancel_futures=True)
+            raise
+        texts, provider, image = self._finish_hierarchy_ocr(pending)
+        ocr_elements: list[Element] = []
+        if provider is not None:
+            from . import merge
+
+            start_id = max((element.id for element in elements), default=-1) + 1
+            # Keep both observations intact. Matching hierarchy/OCR labels are deliberately
+            # not deduplicated: source provenance lets the caller reconcile the evidence.
+            ocr_elements = merge.merge_vision([], texts, start_id=start_id)
+        return _HierarchyObservation(
+            elements,
+            package,
+            xml_hash,
+            texts,
+            ocr_elements,
+            provider,
+            image,
+        )
+
     def _run_vision(
-        self, device: Device, *, with_ocr: bool | None, start_id: int = 0
+        self,
+        device: Device,
+        *,
+        with_ocr: bool | None,
+        start_id: int = 0,
+        image: ScreenImage | None = None,
+        ocr_result: tuple[list[TextBox], str] | None = None,
     ) -> tuple[list[Element], list[str], ScreenImage]:
         from . import merge
 
-        img = self._screenshot(max_reuse_ms=80.0)
+        img = image or self._screenshot(max_reuse_ms=80.0)
         providers_used: list[str] = []
         detections: list[DetBox] = []
         if self.factory.is_enabled("detection"):
@@ -402,7 +525,10 @@ class Engine:
 
         texts: list[TextBox] = []
         want_ocr = self.config.ocr.enabled if with_ocr is None else with_ocr
-        if want_ocr and self.factory.is_enabled("ocr"):
+        if ocr_result is not None:
+            texts, name = ocr_result
+            providers_used.append(name)
+        elif want_ocr and self.factory.is_enabled("ocr"):
             chain = self.factory.build_chain("ocr")
             if chain.providers:
                 try:
@@ -430,10 +556,7 @@ class Engine:
         Costs one OCR pass (~145ms with apple_vision) and only when something is actually
         broken. Returns how many labels were repaired and which provider performed it.
         """
-        broken = [
-            e for e in elements
-            if isinstance(getattr(e, "text", None), str) and "\ufffd" in e.text
-        ]
+        broken = [e for e in elements if e.text is not None and "\ufffd" in e.text]
         if not broken:
             return 0, None
         try:
@@ -498,11 +621,15 @@ class Engine:
 
         t0 = time.perf_counter()
         device, width, height = self._context()
-        elements, package, _xml_hash = self._capture_hierarchy(device, width, height)
+        observation = self._capture_hierarchy_with_ocr(
+            device, width, height, with_ocr=None
+        )
+        elements = observation.elements + observation.ocr_elements
+        package = observation.package
         app = device.current_app()
         package = app.get("package") or package
         activity = app.get("activity") or None
-        image = self._screenshot(max_reuse_ms=80.0)
+        image = observation.image or self._screenshot(max_reuse_ms=80.0)
         graph: list[dict[str, Any]] = []
         for element in elements:
             item: dict[str, Any] = {
@@ -516,6 +643,10 @@ class Engine:
                 item["desc"] = element.content_desc
             if element.resource_id:
                 item["rid"] = _id_tail(element.resource_id)
+            if element.source is not Source.hierarchy:
+                item["source"] = element.source.value
+            if element.confidence is not None:
+                item["confidence"] = round(element.confidence, 4)
             for flag in ("clickable", "checkable", "checked", "selected", "scrollable"):
                 value = getattr(element, flag)
                 if value:
@@ -539,6 +670,9 @@ class Engine:
             },
             "provider": provider,
             "model": result.model,
+            "perception_providers": (
+                [observation.ocr_provider] if observation.ocr_provider else []
+            ),
             "duration_ms": round((time.perf_counter() - t0) * 1000),
             "usage": result.usage,
             "input_image": result.input_image,
@@ -644,18 +778,33 @@ class Engine:
         activity: str | None = None
 
         elements: list[Element] = []
+        hierarchy_elements: list[Element] = []
+        hierarchy_observation: _HierarchyObservation | None = None
         screen_source = ScreenSource.hierarchy
         tier_used = Tier.hierarchy
         path = PathKind.hierarchy
 
         if not force_vision:
-            elements, package, xml_hash = self._capture_hierarchy(device, w, h)
+            hierarchy_observation = self._capture_hierarchy_with_ocr(
+                device, w, h, with_ocr=with_ocr
+            )
+            hierarchy_elements = hierarchy_observation.elements
+            elements = hierarchy_elements + hierarchy_observation.ocr_elements
+            package = hierarchy_observation.package
+            xml_hash = hierarchy_observation.xml_hash
+            img = hierarchy_observation.image
+            if hierarchy_observation.ocr_provider:
+                providers_used.append(hierarchy_observation.ocr_provider)
+                screen_source = ScreenSource.mixed
             if (
                 self.config.perf.skip_unchanged_analyze
                 and xml_hash
                 and xml_hash == self._last_hierarchy_hash
                 and self._last_analyze_result is not None
                 and not no_cache
+                # Identical accessibility XML does not imply identical pixels (canvas,
+                # charts, video, custom rendering). Current OCR must reach the caller.
+                and not hierarchy_observation.ocr_provider
             ):
                 prev = self._last_analyze_result
                 # Reusing the PAYLOAD is fine — the tree really is identical — but the memory
@@ -707,7 +856,9 @@ class Engine:
         use_vision = force_vision
         xml_dump: str | None = None
         if not force_vision and not force_hierarchy:
-            decision = self._gate_decide(elements, package=package, activity=activity)
+            decision = self._gate_decide(
+                hierarchy_elements, package=package, activity=activity
+            )
             if decision.use_vision and routing.allows(Tier.vision, ceiling):
                 # Prefer WebView DOM/a11y enrichment over OCR when the tree looks hollow.
                 wv_cfg = self.config.perception.webview
@@ -717,7 +868,7 @@ class Engine:
                     xml_dump = device.dump_hierarchy(
                         compressed=bool(self.config.device.compressed_hierarchy)
                     )
-                    if webview_mod.should_try_webview(elements, xml_dump):
+                    if webview_mod.should_try_webview(hierarchy_elements, xml_dump):
                         shell = None
                         if wv_cfg.cdp:
                             shell = lambda cmd: str(device.shell(cmd) if hasattr(device, "shell") else "")  # noqa: E731
@@ -728,8 +879,18 @@ class Engine:
                             cdp=wv_cfg.cdp,
                         )
                         if len(enriched) >= wv_cfg.min_elements:
-                            elements = enriched
-                            screen_source = ScreenSource.hierarchy
+                            hierarchy_elements = enriched
+                            elements = enriched + (
+                                hierarchy_observation.ocr_elements
+                                if hierarchy_observation is not None
+                                else []
+                            )
+                            screen_source = (
+                                ScreenSource.mixed
+                                if hierarchy_observation is not None
+                                and hierarchy_observation.ocr_provider
+                                else ScreenSource.hierarchy
+                            )
                             path = PathKind.hierarchy
                             providers_used.append("webview")
                             logger.info(
@@ -753,9 +914,32 @@ class Engine:
             app = device.current_app()
             package = app.get("package") or package
             activity = app.get("activity") or None
-            vis_elements, providers_used, img = self._run_vision(device, with_ocr=with_ocr)
-            elements = vis_elements
-            screen_source = ScreenSource.vision
+            precomputed_ocr = None
+            if hierarchy_observation is not None and hierarchy_observation.ocr_provider:
+                precomputed_ocr = (
+                    hierarchy_observation.ocr_texts,
+                    hierarchy_observation.ocr_provider,
+                )
+            start_id = max((element.id for element in elements), default=-1) + 1
+            vis_elements, vision_providers, img = self._run_vision(
+                device,
+                with_ocr=with_ocr,
+                start_id=start_id,
+                image=img,
+                ocr_result=precomputed_ocr,
+            )
+            for provider in vision_providers:
+                if provider not in providers_used:
+                    providers_used.append(provider)
+            if hierarchy_observation is not None:
+                # OCR already exists as its own raw pool. Keep detection elements (including
+                # labels associated from OCR), but do not append the same OCR boxes a third time.
+                vis_elements = [el for el in vis_elements if el.source is not Source.ocr]
+                elements = elements + vis_elements
+                screen_source = ScreenSource.mixed
+            else:
+                elements = vis_elements
+                screen_source = ScreenSource.vision
             tier_used = Tier.vision
             path = PathKind.vision
 
@@ -778,20 +962,40 @@ class Engine:
 
         from .perf import elements_fingerprint
 
-        fp = xml_hash
+        fp = (
+            None
+            if hierarchy_observation is not None and hierarchy_observation.ocr_provider
+            else xml_hash
+        )
         if not fp:
             with contextlib.suppress(Exception):
                 fp = elements_fingerprint(elements)
 
         # Auto-recover before reporting: a fast answer that is not usable is not an answer.
         # Only pays the OCR cost when the tree actually handed back broken text.
+        # When parallel OCR ran, keep the hierarchy text untouched and expose raw OCR boxes
+        # alongside it. The older repair fallback remains for hosts without Apple Vision.
         _repaired, _repair_provider = (
-            self._repair_lossy_text(device, elements) if not use_vision else (0, None)
+            self._repair_lossy_text(device, elements)
+            if not use_vision
+            and not (
+                hierarchy_observation is not None and hierarchy_observation.ocr_provider
+            )
+            else (0, None)
         )
         if _repair_provider and _repair_provider not in providers_used:
             # Provenance matters: text that came from OCR is not text the app exposed.
             providers_used.append(_repair_provider)
         _lossy, _lossy_hint = _detect_lossy_text(elements)
+        if (
+            _lossy
+            and hierarchy_observation is not None
+            and hierarchy_observation.ocr_provider
+        ):
+            _lossy_hint = (
+                "The hierarchy contains unrepresentable text; raw Apple Vision OCR elements "
+                "are included alongside it with source=ocr. Compare both observations."
+            )
         result = AnalyzeResult(
             screen=Screen(
                 width=w, height=h, package=package, activity=activity, source=screen_source
@@ -868,6 +1072,8 @@ class Engine:
         activity: str | None = None
         providers_used: list[str] = []
         pool: list[Element] = []
+        hierarchy_elements: list[Element] = []
+        hierarchy_observation: _HierarchyObservation | None = None
         img: ScreenImage | None = None
         tier_used = Tier.hierarchy
         screen_source = ScreenSource.hierarchy
@@ -879,7 +1085,16 @@ class Engine:
 
         # --- T1/T2: satisfy from the hierarchy first (cheap-first) ---
         if not force_vision:
-            pool, package, _xml_hash = self._capture_hierarchy(device, w, h)
+            hierarchy_observation = self._capture_hierarchy_with_ocr(
+                device, w, h, with_ocr=with_ocr
+            )
+            hierarchy_elements = hierarchy_observation.elements
+            pool = hierarchy_elements + hierarchy_observation.ocr_elements
+            package = hierarchy_observation.package
+            img = hierarchy_observation.image
+            if hierarchy_observation.ocr_provider:
+                providers_used.append(hierarchy_observation.ocr_provider)
+                screen_source = ScreenSource.mixed
             tier_used = Tier.selector
             known_screen, hints = self._record_screen_safe(
                 device, package, activity, pool, Tier.hierarchy, h
@@ -894,7 +1109,7 @@ class Engine:
                     h,
                     package,
                     activity,
-                    ScreenSource.hierarchy,
+                    screen_source,
                     Tier.selector,
                     PathKind.hierarchy,
                     providers_used,
@@ -910,7 +1125,9 @@ class Engine:
         # --- T3: vision, if allowed and useful ---
         want_vision = force_vision
         if not force_vision and routing.allows(Tier.vision, ceiling):
-            decision = self._gate_decide(pool, package=package, activity=activity)
+            decision = self._gate_decide(
+                hierarchy_elements, package=package, activity=activity
+            )
             kind = routing.classify_query(query)
             want_vision = decision.use_vision or kind is routing.QueryKind.visual or pin_grounding
 
@@ -918,10 +1135,25 @@ class Engine:
             app = device.current_app()
             package = app.get("package") or package
             activity = app.get("activity") or None
+            precomputed_ocr = None
+            if hierarchy_observation is not None and hierarchy_observation.ocr_provider:
+                precomputed_ocr = (
+                    hierarchy_observation.ocr_texts,
+                    hierarchy_observation.ocr_provider,
+                )
+            start_id = max((element.id for element in pool), default=-1) + 1
             vis_elements, vprov, img = self._run_vision(
-                device, with_ocr=with_ocr, start_id=len(pool)
+                device,
+                with_ocr=with_ocr,
+                start_id=start_id,
+                image=img,
+                ocr_result=precomputed_ocr,
             )
-            providers_used.extend(vprov)
+            for provider in vprov:
+                if provider not in providers_used:
+                    providers_used.append(provider)
+            if hierarchy_observation is not None:
+                vis_elements = [el for el in vis_elements if el.source is not Source.ocr]
             pool = pool + vis_elements
             screen_source = ScreenSource.mixed if pool and vis_elements else ScreenSource.vision
             tier_used = Tier.vision

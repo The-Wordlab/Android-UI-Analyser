@@ -89,12 +89,13 @@ def test_ocr_default_favours_accuracy_and_yolo_uses_the_gpu() -> None:
     developer machine: a checked-out `.android-ui-analyser.yaml` pinning a value made it fail
     with nothing wrong in the code.
 
-    `apple_vision` deliberately defaults to `accurate`: OCR only runs when the accessibility
-    tree could not read the screen, so it has no fallback behind it, and `fast` truncates —
-    the repo's own smoke image reads "Hello" as "Hel".
+    `apple_vision` keeps accurate recognition while downscaling the working image; returned
+    boxes are still mapped to original screen coordinates.
     """
     cfg = Config()
     assert cfg.models["apple_vision"]["recognition_level"] == "accurate"
+    assert cfg.models["apple_vision"]["max_width"] == 720
+    assert cfg.ocr.augment_hierarchy is True
     assert cfg.models["yolo"]["device"] == "mps"
     assert cfg.perf.differential is True
     assert cfg.perf.skip_unchanged_analyze is True

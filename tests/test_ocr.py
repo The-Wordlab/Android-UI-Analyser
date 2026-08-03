@@ -177,6 +177,19 @@ class TestAppleVisionCoordConversion:
 
         assert result == []
 
+    def test_downscale_maps_boxes_back_to_original_screen(self) -> None:
+        image = _make_screen_image(width=1080, height=2400)
+        obs = _make_fake_obs("Test", 0.9, norm_x=0.1, norm_y=0.6, norm_w=0.5, norm_h=0.2)
+        mock_vision, mock_quartz, _mock_req = _make_vision_mocks([obs])
+        provider = AppleVisionOcrProvider(settings={"max_width": 720})
+
+        with patch.dict(sys.modules, {"Vision": mock_vision, "Quartz": mock_quartz}):
+            result = provider.recognize(image)
+
+        encoded = mock_quartz.CFDataCreate.call_args.args[1]
+        assert Image.open(io.BytesIO(encoded)).size == (720, 1600)
+        assert result[0].bounds == (108, 480, 648, 960)
+
     def test_recognition_level_fast_setting(self) -> None:
         """settings['recognition_level'] = 'fast' sets the correct Vision constant."""
         image = _make_screen_image(width=100, height=50)

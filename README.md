@@ -508,6 +508,7 @@ set -a; source .env; set +a   # export entries so `aua` and its daemon inherit t
 # .android-ui-analyser.yaml  (or aua config init to write the full commented version)
 ocr:
   chain: [apple_vision, rapidocr]   # macOS: apple first; cross-platform: just [rapidocr]
+  augment_hierarchy: true           # return raw hierarchy + OCR elements on every analyze
 
 grounding:
   enabled: true
@@ -516,6 +517,7 @@ grounding:
   chain: [gemini, openai]
 
 models:
+  apple_vision: { recognition_level: accurate, max_width: 720 }
   gemini: { model: gemini-2.5-flash, api_key_env: GEMINI_API_KEY }
   openai: { model: gpt-5.6-luna, api_key_env: OPENAI_API_KEY,
             reasoning_effort: none, screen_image_detail: high,
@@ -526,8 +528,9 @@ The grounding factory tries providers in chain order. A provider whose `api_key_
 missing is skipped, as are request failures or empty answers. With only `GEMINI_API_KEY`,
 Gemini runs; with only `OPENAI_API_KEY`, Luna runs; with both, the first configured provider
 wins. `aua ask "…"` uses the same provider-neutral interface and reports the provider/model
-that answered. Apple Vision OCR remains local and always receives the original screenshot;
-only remote screen-analysis calls receive the moderately compressed JPEG preview.
+that answered. Apple Vision OCR remains local; it downsizes wide screenshots to 720px for
+recognition and maps boxes back to original coordinates. Hierarchy and OCR run concurrently,
+and both raw element sets are returned. Remote screen-analysis calls use a compressed preview.
 
 ### Profiles
 

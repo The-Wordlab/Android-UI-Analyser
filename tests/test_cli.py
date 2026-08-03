@@ -80,13 +80,14 @@ def test_version_prints_and_exits_zero() -> None:
 
 
 def test_analyze_prints_schema_valid_json(patched_device: FakeDevice) -> None:
-    # Force the hierarchy path for a deterministic, provider-independent result.
+    # Force the hierarchy path. On macOS the default parallel Apple OCR augmenter makes
+    # aggregate provenance mixed; hosts without Apple Vision remain hierarchy-only.
     result = runner.invoke(app, ["--no-cache", "analyze", "--source", "hierarchy"])
     assert result.exit_code == 0, result.stderr
     data = json.loads(result.stdout)
     assert set(data) == {"schema_version", "screen", "elements", "meta"}
     assert data["schema_version"] == 1
-    assert data["screen"]["source"] == "hierarchy"
+    assert data["screen"]["source"] in {"hierarchy", "mixed"}
     assert {"width", "height", "source"} <= set(data["screen"])
     assert len(data["elements"]) == 3
     first = data["elements"][0]

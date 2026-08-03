@@ -6,6 +6,7 @@ bounding boxes with a *bottom-left* origin; we convert to pixel coords with a
 
 Tunable via ``models.apple_vision`` config block:
   recognition_level: "accurate" (default) | "fast" (Neural Engine hot path, truncates)
+  max_width: downscale wider screenshots before OCR, then map boxes to original pixels
 """
 
 from __future__ import annotations
@@ -46,7 +47,18 @@ class AppleVisionOcrProvider(OcrProvider):
         import Quartz
         import Vision
 
-        png_bytes = image.png_bytes
+        original_w = image.width
+        original_h = image.height
+        working = image
+        max_width = int(self.settings.get("max_width", 720) or 0)
+        if max_width > 0 and image.width > max_width:
+            from PIL import Image
+
+            height = max(1, round(image.height * max_width / image.width))
+            resized = image.pil().resize((max_width, height), Image.Resampling.LANCZOS)
+            working = ScreenImage.from_pil(resized)
+
+        png_bytes = working.png_bytes
         ns_data = Quartz.CFDataCreate(None, png_bytes, len(png_bytes))
         handler = Vision.VNImageRequestHandler.alloc().initWithData_options_(ns_data, {})
 
@@ -68,8 +80,10 @@ class AppleVisionOcrProvider(OcrProvider):
         if not observations:
             return []
 
-        w = image.width
-        h = image.height
+        w = working.width
+        h = working.height
+        scale_x = original_w / w
+        scale_y = original_h / h
         boxes: list[TextBox] = []
         for obs in observations:
             candidates = obs.topCandidates_(1)
@@ -86,10 +100,10 @@ class AppleVisionOcrProvider(OcrProvider):
 
             # Vision uses normalised coords, bottom-left origin → convert to
             # pixel coords with top-left origin.
-            x1 = int(origin.x * w)
-            y2 = int((1.0 - origin.y) * h)
-            x2 = int((origin.x + size.width) * w)
-            y1 = int((1.0 - origin.y - size.height) * h)
+            x1 = round(origin.x * w * scale_x)
+            y2 = round((1.0 - origin.y) * h * scale_y)
+            x2 = round((origin.x + size.width) * w * scale_x)
+            y1 = round((1.0 - origin.y - size.height) * h * scale_y)
 
             boxes.append(
                 TextBox(

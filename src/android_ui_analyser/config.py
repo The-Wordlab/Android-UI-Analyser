@@ -119,6 +119,8 @@ class _ChainCfg(BaseModel):
 class OcrCfg(_ChainCfg):
     enabled: bool = True
     chain: list[str] = Field(default_factory=lambda: ["apple_vision", "rapidocr"])
+    # On macOS, overlap Apple Vision with hierarchy capture and fuse both observations.
+    augment_hierarchy: bool = True
 
 
 class DetectionCfg(_ChainCfg):
@@ -254,11 +256,9 @@ def _default_models() -> dict[str, dict[str, Any]]:
         "yolo": {"weights": None, "device": "mps", "conf": 0.25},
         "omniparser": {"device": "mps", "accept_agpl": False, "box_threshold": 0.05},
         # ocr
-        # OCR only runs when the accessibility tree could not see the screen, so it is the one
-        # reader with no fallback behind it. `fast` measurably truncates: the repo's own smoke
-        # image reads "Hello" as "Hel". Milliseconds are not worth a wrong word here — set
-        # `recognition_level: fast` per-project if a surface is latency-bound and text-tolerant.
-        "apple_vision": {"recognition_level": "accurate"},
+        # Keep accurate recognition, but reduce pixel work. Boxes are mapped back to original
+        # screen coordinates, and 720px retained the visible labels in the benchmark fixture.
+        "apple_vision": {"recognition_level": "accurate", "max_width": 720},
         "rapidocr": {"lang": "en"},
         "paddleocr": {"lang": "en"},
         "tesseract": {"lang": "eng"},
@@ -595,6 +595,7 @@ output:
 ocr:
   enabled: true
   chain: [apple_vision, rapidocr]     # apple_vision is macOS-only; rapidocr is the fallback
+  augment_hierarchy: true             # run Apple OCR alongside every hierarchy observation
 
 detection:
   enabled: true
@@ -612,7 +613,7 @@ planner:
 models:
   yolo:         { weights: null, device: mps, conf: 0.25 }   # set weights to enable YOLO
   omniparser:   { device: mps, accept_agpl: false }          # MUST be true to run (AGPL-3.0!)
-  apple_vision: { recognition_level: accurate }  # fast is quicker but truncates text
+  apple_vision: { recognition_level: accurate, max_width: 720 }  # downscale, keep coordinates
   rapidocr:     { lang: en }
   local_vllm:   { base_url: "http://localhost:8000/v1", model: "Hcompany/Holo1.5-7B" }
   openai:       { model: gpt-5.6-luna, api_key_env: OPENAI_API_KEY, reasoning_effort: none,
