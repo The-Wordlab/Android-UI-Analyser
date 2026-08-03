@@ -1003,7 +1003,7 @@ def start(
     meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
 
     if expected_serial is not None:
-        serial = _wait_for_serial(expected_serial, timeout_s=wait_s)
+        serial = _wait_for_serial(expected_serial, timeout_s=wait_s, expect_avd=avd)
     else:
         serial = _wait_for_new_emulator(before, timeout_s=wait_s)
     if serial is None:
@@ -1097,15 +1097,48 @@ def start(
     }
 
 
-def _wait_for_serial(serial: str, *, timeout_s: float) -> str | None:
+def avd_name_of_serial(serial: str) -> str | None:
+    """Ask the running emulator which AVD it is, via its console (``emu avd name``)."""
+    try:
+        out = subprocess.run(  # noqa: S603
+            [adb_bin(), "-s", serial, "emu", "avd", "name"],
+            capture_output=True, text=True, timeout=10, check=False,
+        ).stdout
+    except Exception:
+        return None
+    for line in (out or "").splitlines():
+        line = line.strip()
+        if line and line.upper() != "OK":
+            return line
+    return None
+
+
+def _wait_for_serial(serial: str, *, timeout_s: float, expect_avd: str | None = None) -> str | None:
+    """Wait for ``serial`` to appear, optionally proving it is the AVD we launched.
+
+    ``expect_avd`` guards against answering to somebody else's device: if two instances
+    ever contend for one console port, the port's real owner satisfies this wait and the
+    caller would happily drive a device it does not own. Verifying the AVD name turns that
+    silent mix-up into a hard failure.
+    """
+
+    def _match(d: dict[str, Any]) -> bool:
+        if d.get("state") != "device" or d.get("serial") != serial:
+            return False
+        if expect_avd is None:
+            return True
+        actual = avd_name_of_serial(serial)
+        # An emulator that will not answer its console yet is not a mismatch; keep waiting.
+        return actual is None or actual == expect_avd
+
     deadline = time.monotonic() + max(5.0, timeout_s)
     while time.monotonic() < deadline:
         for d in running_emulators():
-            if d.get("state") == "device" and d["serial"] == serial:
+            if _match(d):
                 return serial
         time.sleep(_POLL_S)
     for d in running_emulators():
-        if d.get("state") == "device" and d["serial"] == serial:
+        if _match(d):
             return serial
     return None
 
