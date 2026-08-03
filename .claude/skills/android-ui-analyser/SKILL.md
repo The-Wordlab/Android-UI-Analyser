@@ -77,6 +77,7 @@ description: >-
 ```bash
 aua --format tsv analyze         # READ the screen: one element per line, no noise
 aua --format compact analyze     # same screen as JSON, when you need it machine-readable
+aua ask "describe this screen top-to-bottom"  # screenshot + element graph via VLM
 aua tap 4                        # act by id (alias: click)
 aua input 2 "hello@example.com"  # focus id 2 and type (--submit fires the IME action)
 aua --format tsv analyze         # RE-ANALYZE: ids are invalidated after any action
@@ -230,3 +231,4 @@ Errors print `{"error":{"code","message","hint"}}` to **stderr**; JSON results g
 
 ## Config & providers (only if asked to change perception)
 Config is the nearest `.android-ui-analyser.yaml` (project) → user config; inspect with `aua config show` / `aua config path`, scaffold with `aua config init`. Swap a model with one line (e.g. `ocr.chain: [apple_vision, rapidocr]`). **Secrets are env-var names only** (`api_key_env: OPENAI_API_KEY`); set the env var — never paste keys. Check readiness with `aua doctor` (it never prints secret values).
+`aua ask` is provider-neutral: configure `grounding.chain: [gemini, openai]`. The factory tries that order and skips providers whose API-key env var is absent, so one config works with either key. Reverse the list to prefer OpenAI when both exist. Apple Vision OCR keeps the original screenshot; only the remote question path uses a compressed preview.

@@ -143,6 +143,21 @@ def test_default_yaml_documents_planner() -> None:
     Config.model_validate(yaml.safe_load(text))
 
 
+def test_grounding_defaults_keep_gemini_and_add_key_aware_openai_fallback() -> None:
+    cfg = Config()
+    assert cfg.grounding.chain == ["local_vllm", "gemini", "openai"]
+    assert cfg.models["gemini"]["model"] == "gemini-2.5-flash"
+    assert cfg.models["openai"] == {
+        "model": "gpt-5.6-luna",
+        "api_key_env": "OPENAI_API_KEY",
+        "base_url": "https://api.openai.com/v1",
+        "reasoning_effort": "none",
+        "screen_image_detail": "high",
+        "screen_preview_max_width": 720,
+        "screen_preview_jpeg_quality": 55,
+    }
+
+
 def test_registry_and_doctor_know_planner_kind() -> None:
     from android_ui_analyser.providers.registry import _KINDS
 

@@ -14,8 +14,7 @@ import httpx
 
 from ...config import read_env_secret
 from ..base import PlannerDecision, PlannerProvider, ScreenImage
-from ..grounding._common import image_b64
-from ..grounding.openai import _commercial_availability
+from ..grounding._common import commercial_availability, image_b64
 from ..registry import register_planner
 from ._common import SYSTEM_PROMPT, build_user_prompt, parse_planner_json
 
@@ -27,7 +26,7 @@ class GeminiFlashPlanner(PlannerProvider):
     """Gemini Flash Lite planner (goal + elements -> next action)."""
 
     def is_available(self) -> Any:
-        return _commercial_availability(self.settings)
+        return commercial_availability(self.settings)
 
     def _timeout_s(self) -> float:
         return float(self.settings.get("timeout_s", DEFAULT_TIMEOUT_S))

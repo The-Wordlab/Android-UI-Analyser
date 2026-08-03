@@ -23,7 +23,8 @@ import base64
 import json
 from typing import TYPE_CHECKING, Any
 
-from ..base import DetBox, Point
+from ...config import read_env_secret
+from ..base import Availability, DetBox, Point
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..base import ScreenImage
@@ -59,6 +60,16 @@ def image_data_url(image: ScreenImage) -> str:
 def image_b64(image: ScreenImage) -> str:
     """Raw base64 PNG (no data-URL prefix; for Anthropic/Gemini inline blocks)."""
     return base64.b64encode(image.png_bytes).decode("ascii")
+
+
+def commercial_availability(settings: dict[str, Any]) -> Availability:
+    """Check commercial-provider credentials without making a network request."""
+    env_name = settings.get("api_key_env")
+    if not env_name:
+        return Availability(False, "api_key_env not configured")
+    if read_env_secret(env_name) is None:
+        return Availability(False, f"{env_name} not set")
+    return Availability(True, "ok")
 
 
 # --------------------------------------------------------------------------- parsing

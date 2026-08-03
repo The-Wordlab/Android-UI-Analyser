@@ -16,7 +16,7 @@ Errors::
 
 Supported commands
 ------------------
-ping, analyze, has, inspect, screenshot, tap, long_press, input, clear,
+ping, analyze, ask_screen, has, inspect, screenshot, tap, long_press, input, clear,
 swipe, scroll_to, key, open_link, wait, wait_stable, memory_update, goto,
 flow_run, flow_save, navigate, orient, list_devices, app, logcat,
 logcat_mark, suite_run
@@ -146,6 +146,10 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
         elif cmd == "analyze":
             result: Any = engine.analyze(**args)
             return _result_ok(result.model_dump(mode="json"))
+
+        elif cmd == "ask_screen":
+            result = engine.ask_screen(**args)
+            return _result_ok(result)
 
         elif cmd == "has":
             result = engine.has(**args)

@@ -517,6 +517,7 @@ def render_markdown(*, brief: bool = False) -> str:
     p.append("```bash")
     p.append("aua --format tsv analyze         # READ the screen: one element per line, no noise")
     p.append("aua --format compact analyze     # same screen as JSON, when you need it machine-readable")
+    p.append('aua ask "describe this screen top-to-bottom"  # screenshot + element graph via VLM')
     p.append("aua tap 4                        # act by id (alias: click)")
     p.append(
         'aua input 2 "hello@example.com"  # focus id 2 and type (--submit fires the IME action)'
@@ -768,6 +769,12 @@ def render_markdown(*, brief: bool = False) -> str:
         "one line (e.g. `ocr.chain: [apple_vision, rapidocr]`). **Secrets are env-var names only** "
         "(`api_key_env: OPENAI_API_KEY`); set the env var — never paste keys. Check readiness with "
         "`aua doctor` (it never prints secret values)."
+    )
+    p.append(
+        "`aua ask` is provider-neutral: configure `grounding.chain: [gemini, openai]`. The factory "
+        "tries that order and skips providers whose API-key env var is absent, so one config works "
+        "with either key. Reverse the list to prefer OpenAI when both exist. Apple Vision OCR keeps "
+        "the original screenshot; only the remote question path uses a compressed preview."
     )
     return "\n".join(p) + "\n"
 

@@ -46,7 +46,7 @@ from .memory import (
     resolve_goal,
     step_display,
 )
-from .providers.base import DetBox, Point, ScreenImage, TextBox
+from .providers.base import DetBox, Point, ScreenAnalysisResult, ScreenImage, TextBox
 from .providers.registry import ProviderFactory, registered_names, run_chain
 from .schema import (
     ActionResult,
@@ -417,7 +417,6 @@ class Engine:
         elements = merge.merge_vision(detections, texts, iou_threshold=0.5, start_id=start_id)
         return elements, providers_used, img
 
-
     def _repair_lossy_text(self, device: Device, elements: list[Element]) -> tuple[int, str | None]:
         """Fill in hierarchy labels the accessibility tree could not represent, using OCR.
 
@@ -428,7 +427,7 @@ class Engine:
         elements that are broken, matched by geometric overlap.
 
         Costs one OCR pass (~145ms with apple_vision) and only when something is actually
-        broken. Returns how many labels were repaired.
+        broken. Returns how many labels were repaired and which provider performed it.
         """
         broken = [
             e for e in elements
@@ -484,6 +483,67 @@ class Engine:
         if repaired:
             logger.info("repaired %d lossy label(s) with OCR (%s)", repaired, name)
         return repaired, (name if repaired else None)
+
+    def ask_screen(self, question: str) -> dict[str, Any]:
+        """Ask the configured grounding model about screenshot + current element graph."""
+        question = question.strip()
+        if not question:
+            raise UsageError("ask needs a non-empty screen question")
+        if not self.factory.is_enabled("grounding"):
+            raise UsageError(
+                "screen questions need grounding.enabled: true",
+                hint="Enable grounding and configure a screen-analysis provider such as gemini or openai.",
+            )
+
+        t0 = time.perf_counter()
+        device, width, height = self._context()
+        elements, package, _xml_hash = self._capture_hierarchy(device, width, height)
+        app = device.current_app()
+        package = app.get("package") or package
+        activity = app.get("activity") or None
+        image = self._screenshot(max_reuse_ms=80.0)
+        graph: list[dict[str, Any]] = []
+        for element in elements:
+            item: dict[str, Any] = {
+                "id": element.id,
+                "type": element.type,
+                "bounds": list(element.bounds),
+            }
+            if element.text:
+                item["text"] = element.text
+            if element.content_desc:
+                item["desc"] = element.content_desc
+            if element.resource_id:
+                item["rid"] = _id_tail(element.resource_id)
+            for flag in ("clickable", "checkable", "checked", "selected", "scrollable"):
+                value = getattr(element, flag)
+                if value:
+                    item[flag] = True
+            graph.append(item)
+        chain = self.factory.build_chain("grounding")
+        result, provider = run_chain(
+            chain,
+            lambda item: item.ask(image, question, graph),  # type: ignore[attr-defined]
+            timeout_s=self.config.timeouts.grounding_ms / 1000.0,
+        )
+        if not isinstance(result, ScreenAnalysisResult):  # pragma: no cover - contract guard
+            raise ProviderError("grounding", [(provider, "invalid screen-analysis result")])
+        return {
+            "question": question,
+            "screen": {
+                "width": width,
+                "height": height,
+                "package": package,
+                "activity": activity,
+            },
+            "provider": provider,
+            "model": result.model,
+            "duration_ms": round((time.perf_counter() - t0) * 1000),
+            "usage": result.usage,
+            "input_image": result.input_image,
+            "graph_elements": len(graph),
+            "analysis": result.analysis,
+        }
 
     # ----------------------------------------------------------------- analyze
 

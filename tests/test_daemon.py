@@ -112,6 +112,20 @@ def test_dispatch_analyze_returns_schema_keys() -> None:
     assert "meta" in result
 
 
+def test_dispatch_ask_screen(monkeypatch) -> None:
+    engine = make_engine(device=FakeDevice())
+    monkeypatch.setattr(
+        engine,
+        "ask_screen",
+        lambda question: {"question": question, "analysis": {"answer": "top-right"}},
+    )
+    resp = dispatch(engine, {"cmd": "ask_screen", "args": {"question": "Where?"}})
+    assert resp == {
+        "ok": True,
+        "result": {"question": "Where?", "analysis": {"answer": "top-right"}},
+    }
+
+
 def test_dispatch_has_found() -> None:
     device = FakeDevice(text_index={"Settings": (10, 20, 100, 60)})
     engine = make_engine(device=device)

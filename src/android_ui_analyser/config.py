@@ -128,7 +128,7 @@ class DetectionCfg(_ChainCfg):
 
 class GroundingCfg(_ChainCfg):
     enabled: bool = False  # opt-in (PRD §7.2)
-    chain: list[str] = Field(default_factory=lambda: ["local_vllm", "gemini"])
+    chain: list[str] = Field(default_factory=lambda: ["local_vllm", "gemini", "openai"])
 
 
 class PlannerCfg(_ChainCfg):
@@ -266,9 +266,13 @@ def _default_models() -> dict[str, dict[str, Any]]:
         # grounding (referenced only if grounding.enabled)
         "local_vllm": {"base_url": "http://localhost:8000/v1", "model": "Hcompany/Holo1.5-7B"},
         "openai": {
-            "model": "gpt-5",
+            "model": "gpt-5.6-luna",
             "api_key_env": "OPENAI_API_KEY",
             "base_url": "https://api.openai.com/v1",
+            "reasoning_effort": "none",
+            "screen_image_detail": "high",
+            "screen_preview_max_width": 720,
+            "screen_preview_jpeg_quality": 55,
         },
         "anthropic": {
             "model": "claude-opus-4-8",
@@ -598,7 +602,8 @@ detection:
 
 grounding:
   enabled: false                      # opt-in; off by default
-  chain: [local_vllm, gemini]
+  # Ordered fallback: providers without configured API keys are skipped automatically.
+  chain: [local_vllm, gemini, openai]
 
 planner:
   enabled: false                      # opt-in LLM navigator; also needs --assist / `aua navigate`
@@ -610,7 +615,9 @@ models:
   apple_vision: { recognition_level: accurate }  # fast is quicker but truncates text
   rapidocr:     { lang: en }
   local_vllm:   { base_url: "http://localhost:8000/v1", model: "Hcompany/Holo1.5-7B" }
-  openai:       { model: gpt-5, api_key_env: OPENAI_API_KEY }
+  openai:       { model: gpt-5.6-luna, api_key_env: OPENAI_API_KEY, reasoning_effort: none,
+                  screen_image_detail: high, screen_preview_max_width: 720,
+                  screen_preview_jpeg_quality: 55 }
   anthropic:    { model: claude-opus-4-8, api_key_env: ANTHROPIC_API_KEY }
   gemini:       { model: gemini-2.5-flash, api_key_env: GEMINI_API_KEY }
   gemini_flash: { model: gemini-2.5-flash-lite, api_key_env: GEMINI_API_KEY }

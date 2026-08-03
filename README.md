@@ -233,6 +233,10 @@ aua analyze --source vision --annotate
 aua analyze --query "the Submit button"
 aua analyze --query "the Submit button" --deep    # force grounding escalation
 aua analyze --query "the Submit button" --cheap   # forbid escalation beyond hierarchy
+
+# Ask a vision model about the whole screen. It receives screenshot + element graph,
+# and returns structured regions, elements, graph ids, bounds, latency, and token usage.
+aua ask "Describe this screen from top to bottom and say where each control is"
 ```
 
 The **analyze → act → analyze** loop is the core workflow:
@@ -494,8 +498,8 @@ For convenience, keep a gitignored `.env` file and source it before running `aua
 
 ```bash
 echo "GEMINI_API_KEY=..." >> .env
-echo ".env" >> .gitignore
-source .env
+# Or add OPENAI_API_KEY instead. `.env` is already gitignored.
+set -a; source .env; set +a   # export entries so `aua` and its daemon inherit them
 ```
 
 ### Example config
@@ -507,13 +511,23 @@ ocr:
 
 grounding:
   enabled: true
-  chain: [gemini]
+  # Ordered fallback. Missing keys are skipped automatically; reverse this list
+  # if you prefer OpenAI whenever both keys exist.
+  chain: [gemini, openai]
 
 models:
   gemini: { model: gemini-2.5-flash, api_key_env: GEMINI_API_KEY }
+  openai: { model: gpt-5.6-luna, api_key_env: OPENAI_API_KEY,
+            reasoning_effort: none, screen_image_detail: high,
+            screen_preview_max_width: 720, screen_preview_jpeg_quality: 55 }
 ```
 
-Swap a model with **one line**: change `ocr.chain: [apple_vision, rapidocr]` to `[rapidocr]`, or `grounding.chain: [gemini]` to `[openai]`.
+The grounding factory tries providers in chain order. A provider whose `api_key_env` is
+missing is skipped, as are request failures or empty answers. With only `GEMINI_API_KEY`,
+Gemini runs; with only `OPENAI_API_KEY`, Luna runs; with both, the first configured provider
+wins. `aua ask "…"` uses the same provider-neutral interface and reports the provider/model
+that answered. Apple Vision OCR remains local and always receives the original screenshot;
+only remote screen-analysis calls receive the moderately compressed JPEG preview.
 
 ### Profiles
 
@@ -562,7 +576,7 @@ aua config path          # print the resolved config file path
 | Provider | License | Config key | Notes |
 |---|---|---|---|
 | `local_vllm` | Apache-2.0 (Holo1.5-7B) | `local_vllm` | OpenAI-compatible endpoint; e.g. vLLM, Ollama, LM Studio |
-| `openai` | Commercial | `openai` | GPT-class vision; key via `OPENAI_API_KEY` |
+| `openai` | Commercial | `openai` | GPT-5.6 Luna vision by default; key via `OPENAI_API_KEY` |
 | `anthropic` | Commercial | `anthropic` | Claude vision; key via `ANTHROPIC_API_KEY` |
 | `gemini` | Commercial | `gemini` | Gemini vision; key via `GEMINI_API_KEY` |
 
@@ -585,7 +599,8 @@ Three steps, zero changes to `engine.py` or `cli.py`:
 1. **Subclass** the relevant abstract base from `providers/base.py`:
    - `OcrProvider` — implement `recognize(image) -> list[TextBox]`
    - `DetectionProvider` — implement `detect(image) -> list[Box]`
-   - `GroundingProvider` — implement `locate(image, instruction) -> Point|Box`
+   - `GroundingProvider` — implement `locate(image, instruction) -> Point|Box`; optionally
+     implement `ask(image, question, elements) -> ScreenAnalysisResult` for `aua ask`
 
 2. **Register** with the decorator from `providers/registry.py`:
    ```python

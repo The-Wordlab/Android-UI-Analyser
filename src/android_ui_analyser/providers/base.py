@@ -1,11 +1,12 @@
 """Provider Strategy interfaces + shared value objects (PRD §7.1).
 
-Three provider *kinds*, each an abstract base class (a Strategy):
+Four provider *kinds*, each an abstract base class (a Strategy):
 
     OcrProvider.recognize(image)            -> list[TextBox]
     DetectionProvider.detect(image)         -> list[DetBox]
     GroundingProvider.locate(image, instr)  -> Point | DetBox | None
     GroundingProvider.parse(image)          -> list[DetBox] | None   (optional)
+    GroundingProvider.ask(image, question, elements) -> ScreenAnalysisResult | None
     PlannerProvider.decide(objective, els)  -> PlannerDecision | None
 
 The engine depends ONLY on these interfaces and on the factory (registry.py). It never
@@ -149,11 +150,24 @@ class Point:
     confidence: float | None = None
 
 
+@dataclass(frozen=True)
+class ScreenAnalysisResult:
+    """Provider-neutral result for a screenshot + UI-graph question.
+
+    Providers keep their HTTP request/response details private and return this common
+    shape to the engine. ``analysis`` is the structured screen answer; the remaining
+    fields are diagnostic metadata exposed by ``aua ask``.
+    """
+
+    analysis: dict[str, Any]
+    model: str | None = None
+    usage: dict[str, Any] = field(default_factory=dict)
+    input_image: dict[str, Any] = field(default_factory=dict)
+
+
 # The action vocabulary a planner may emit. ``done``/``give-up`` are terminal; the rest
 # name a state-changing action the engine already knows how to perform.
-PLANNER_ACTIONS = frozenset(
-    {"tap", "input", "key", "swipe", "scroll-to", "done", "give-up"}
-)
+PLANNER_ACTIONS = frozenset({"tap", "input", "key", "swipe", "scroll-to", "done", "give-up"})
 
 
 @dataclass(frozen=True)
@@ -237,6 +251,19 @@ class GroundingProvider(Provider):
 
         Default ``None`` means "this provider does not support parse"; the engine then
         skips it for the vision-parse path.
+        """
+        return None
+
+    def ask(
+        self,
+        image: ScreenImage,
+        question: str,
+        elements: list[dict[str, Any]],
+    ) -> ScreenAnalysisResult | None:
+        """Answer a free-form screen question using pixels plus the element graph.
+
+        This is optional so coordinate-only grounding providers remain valid. Implementors
+        return the common result type so the engine never depends on provider response shapes.
         """
         return None
 

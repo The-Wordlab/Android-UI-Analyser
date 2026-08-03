@@ -673,6 +673,21 @@ def main(
 # --------------------------------------------------------------------------- perception
 
 
+@app.command()
+def ask(
+    ctx: typer.Context,
+    question: str = typer.Argument(
+        ..., help="Question for the configured vision model about the current screen."
+    ),
+) -> None:
+    """Ask about the current screenshot fused with AUA's element graph."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(_route(engine, "ask_screen", question=question), fmt)
+
+    _run(ctx, go)
+
+
 @app.command(cls=AnnotateCommand)
 def analyze(
     ctx: typer.Context,

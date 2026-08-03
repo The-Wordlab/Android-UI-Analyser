@@ -20,18 +20,19 @@ import httpx
 import pytest
 import respx
 
-from android_ui_analyser.providers.base import DetBox, Point
+from android_ui_analyser.providers.base import DetBox, Point, ScreenAnalysisResult
 from android_ui_analyser.providers.grounding._common import (
     build_user_prompt,
     image_b64,
     parse_grounding_json,
 )
+from android_ui_analyser.providers.grounding._screen_analysis import prepare_screen_preview
 from android_ui_analyser.providers.grounding.anthropic import AnthropicGrounding
 from android_ui_analyser.providers.grounding.gemini import GeminiGrounding
 from android_ui_analyser.providers.grounding.local_vllm import LocalVllmGrounding
 from android_ui_analyser.providers.grounding.openai import OpenAiGrounding
-from android_ui_analyser.providers.registry import get_provider_class
-from conftest import make_screen_image
+from android_ui_analyser.providers.registry import ProviderFactory, get_provider_class, run_chain
+from conftest import make_config, make_screen_image
 
 DUMMY_KEY = "sk-test-DUMMY-do-not-log-12345"
 IMG_W, IMG_H = 200, 400
@@ -114,18 +115,117 @@ def test_openai_request_shape_carries_key_and_image(monkeypatch):
     route = respx.post("https://api.openai.com/v1/chat/completions").mock(
         return_value=httpx.Response(200, json=_openai_body('{"found": false}'))
     )
-    provider = OpenAiGrounding({"model": "gpt-5", "api_key_env": "OPENAI_API_KEY"})
+    provider = OpenAiGrounding(
+        {
+            "model": "gpt-5.6-luna",
+            "api_key_env": "OPENAI_API_KEY",
+            "reasoning_effort": "none",
+        }
+    )
     provider.locate(_img(), "anything")
 
     request = route.calls.last.request
     assert request.headers["Authorization"] == f"Bearer {DUMMY_KEY}"
     body = json.loads(request.content)
-    assert body["model"] == "gpt-5"
+    assert body["model"] == "gpt-5.6-luna"
+    assert body["reasoning_effort"] == "none"
     # image present as a data URL inside the user content parts
     user = body["messages"][-1]
     image_parts = [p for p in user["content"] if p.get("type") == "image_url"]
     assert image_parts and image_parts[0]["image_url"]["url"].startswith("data:image/png;base64,")
     assert image_b64(_img()) in image_parts[0]["image_url"]["url"]
+
+
+def test_openai_omits_reasoning_effort_when_unconfigured():
+    provider = OpenAiGrounding({"model": "gpt-5", "api_key_env": "OPENAI_API_KEY"})
+    assert "reasoning_effort" not in provider._payload(_img(), "anything")
+
+
+@respx.mock
+def test_openai_ask_fuses_image_and_element_graph(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", DUMMY_KEY)
+    analysis = {
+        "answer": "A header with a back button and centered title.",
+        "screen_summary": "App detail screen",
+        "regions": [{"name": "header", "bounds": [0, 0, 200, 80]}],
+        "elements": [
+            {
+                "graph_id": 4,
+                "role": "back button",
+                "text": None,
+                "bounds": [0, 0, 40, 40],
+                "position": "top-left",
+                "evidence": "both",
+            }
+        ],
+        "uncertainties": [],
+    }
+    route = respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                **_openai_body(json.dumps(analysis)),
+                "model": "gpt-5.6-luna",
+                "usage": {"prompt_tokens": 100, "completion_tokens": 40, "total_tokens": 140},
+            },
+        )
+    )
+    provider = OpenAiGrounding(
+        {
+            "model": "gpt-5.6-luna",
+            "api_key_env": "OPENAI_API_KEY",
+            "reasoning_effort": "none",
+            "screen_image_detail": "low",
+            "screen_preview_max_width": 100,
+            "screen_preview_jpeg_quality": 30,
+        }
+    )
+    result = provider.ask(
+        _img(),
+        "Describe the header",
+        [{"id": 4, "type": "ImageButton", "bounds": [0, 0, 40, 40], "clickable": True}],
+    )
+
+    assert result is not None
+    assert isinstance(result, ScreenAnalysisResult)
+    assert result.model == "gpt-5.6-luna"
+    assert result.analysis == analysis
+    assert result.usage["total_tokens"] == 140
+    body = json.loads(route.calls.last.request.content)
+    assert body["reasoning_effort"] == "none"
+    assert body["response_format"]["type"] == "json_schema"
+    assert body["response_format"]["json_schema"]["strict"] is True
+    assert body["max_completion_tokens"] == 1200
+    user_parts = body["messages"][-1]["content"]
+    assert "Describe the header" in user_parts[0]["text"]
+    assert '"id":4' in user_parts[0]["text"]
+    assert user_parts[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+    assert user_parts[1]["image_url"]["detail"] == "low"
+    assert result.input_image == {
+        "original_width": 200,
+        "original_height": 400,
+        "width": 100,
+        "height": 200,
+        "bytes": result.input_image["bytes"],
+        "format": "jpeg",
+        "quality": 30,
+        "detail": "low",
+    }
+    assert result.input_image["bytes"] < len(_img().png_bytes)
+
+
+def test_screen_preview_defaults_relax_quality_without_using_original_size():
+    image = make_screen_image(1080, 2400)
+    _data, metadata = prepare_screen_preview(image, {})
+    assert metadata == {
+        "original_width": 1080,
+        "original_height": 2400,
+        "width": 720,
+        "height": 1600,
+        "bytes": metadata["bytes"],
+        "format": "jpeg",
+        "quality": 55,
+    }
 
 
 # --------------------------------------------------------------------------- AC6: gemini
@@ -179,6 +279,142 @@ def test_gemini_key_in_header_not_url(monkeypatch):
     parts = body["contents"][0]["parts"]
     inline = [p for p in parts if "inline_data" in p]
     assert inline and inline[0]["inline_data"]["data"] == image_b64(_img())
+
+
+@respx.mock
+def test_gemini_ask_uses_shared_screen_analysis_contract(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", DUMMY_KEY)
+    base = "https://generativelanguage.googleapis.com/v1beta"
+    analysis = {
+        "answer": "The settings control is in the top-right.",
+        "screen_summary": "Chats screen",
+        "regions": [{"name": "header", "bounds": [0, 0, 200, 80], "description": "Top bar"}],
+        "elements": [],
+        "uncertainties": [],
+    }
+    route = respx.post(f"{base}/models/gemini-2.5-flash:generateContent").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                **_gemini_body(json.dumps(analysis)),
+                "modelVersion": "gemini-2.5-flash-001",
+                "usageMetadata": {
+                    "promptTokenCount": 90,
+                    "candidatesTokenCount": 30,
+                    "totalTokenCount": 120,
+                },
+            },
+        )
+    )
+    provider = GeminiGrounding(
+        {
+            "model": "gemini-2.5-flash",
+            "api_key_env": "GEMINI_API_KEY",
+            "base_url": base,
+            "screen_preview_max_width": 100,
+            "screen_preview_jpeg_quality": 50,
+        }
+    )
+    result = provider.ask(
+        _img(),
+        "Where is Settings?",
+        [{"id": 25, "type": "ImageButton", "bounds": [170, 0, 200, 40]}],
+    )
+
+    assert result is not None
+    assert result.model == "gemini-2.5-flash-001"
+    assert result.analysis == analysis
+    assert result.usage == {
+        "prompt_tokens": 90,
+        "completion_tokens": 30,
+        "total_tokens": 120,
+    }
+    body = json.loads(route.calls.last.request.content)
+    assert body["generationConfig"]["responseMimeType"] == "application/json"
+    assert body["generationConfig"]["responseJsonSchema"]["required"] == [
+        "answer",
+        "screen_summary",
+        "regions",
+        "elements",
+        "uncertainties",
+    ]
+    parts = body["contents"][0]["parts"]
+    assert "Where is Settings?" in parts[0]["text"]
+    assert '"id":25' in parts[0]["text"]
+    assert parts[1]["inline_data"]["mime_type"] == "image/jpeg"
+    assert result.input_image["quality"] == 50
+
+
+@respx.mock
+def test_grounding_factory_falls_through_to_openai_when_only_openai_key_exists(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", DUMMY_KEY)
+    route = respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json=_openai_body(
+                json.dumps(
+                    {
+                        "answer": "OpenAI answered",
+                        "screen_summary": "screen",
+                        "regions": [],
+                        "elements": [],
+                        "uncertainties": [],
+                    }
+                )
+            ),
+        )
+    )
+    cfg = make_config(
+        grounding={"enabled": True, "chain": ["gemini", "openai"]},
+    )
+    result, provider = run_chain(
+        ProviderFactory(cfg).build_chain("grounding"),
+        lambda item: item.ask(_img(), "Describe it", []),  # type: ignore[attr-defined]
+    )
+
+    assert provider == "openai"
+    assert isinstance(result, ScreenAnalysisResult)
+    assert result.analysis["answer"] == "OpenAI answered"
+    assert route.call_count == 1
+
+
+@respx.mock
+def test_grounding_factory_uses_configured_order_when_both_keys_exist(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", DUMMY_KEY)
+    monkeypatch.setenv("OPENAI_API_KEY", DUMMY_KEY)
+    gemini_route = respx.post(
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+    ).mock(
+        return_value=httpx.Response(
+            200,
+            json=_gemini_body(
+                json.dumps(
+                    {
+                        "answer": "Gemini answered",
+                        "screen_summary": "screen",
+                        "regions": [],
+                        "elements": [],
+                        "uncertainties": [],
+                    }
+                )
+            ),
+        )
+    )
+    openai_route = respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=httpx.Response(500, json={"error": "must not be called"})
+    )
+    cfg = make_config(grounding={"enabled": True, "chain": ["gemini", "openai"]})
+    result, provider = run_chain(
+        ProviderFactory(cfg).build_chain("grounding"),
+        lambda item: item.ask(_img(), "Describe it", []),  # type: ignore[attr-defined]
+    )
+
+    assert provider == "gemini"
+    assert isinstance(result, ScreenAnalysisResult)
+    assert result.analysis["answer"] == "Gemini answered"
+    assert gemini_route.call_count == 1
+    assert openai_route.call_count == 0
 
 
 # --------------------------------------------------------------------------- anthropic

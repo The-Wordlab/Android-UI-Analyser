@@ -106,6 +106,26 @@ def test_analyze_compact_is_single_line(patched_device: FakeDevice) -> None:
     AnalyzeResult.model_validate(data)
 
 
+def test_ask_prints_screen_analysis(patched_device: FakeDevice, monkeypatch) -> None:
+    monkeypatch.setattr(
+        engine_mod.Engine,
+        "ask_screen",
+        lambda self, question: {
+            "question": question,
+            "provider": "openai",
+            "model": "gpt-5.6-luna",
+            "duration_ms": 123,
+            "usage": {"total_tokens": 42},
+            "analysis": {"answer": "The header is at the top."},
+        },
+    )
+    result = runner.invoke(app, ["ask", "Where is the header?"])
+    assert result.exit_code == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["question"] == "Where is the header?"
+    assert data["analysis"]["answer"] == "The header is at the top."
+
+
 # --------------------------------------------------------------------------- AC11 has
 
 
