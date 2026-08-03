@@ -192,6 +192,13 @@ def _parse_step(item: Any, index: int) -> RouteStep:
     elif kind in ("launch-app", "stop-app"):
         # Optional arg: a bare `stop_app`/`launch_app` targets the flow's own app.
         kw["arg"] = v.pop(_ARG_ALIAS[kind], None) or v.pop("arg", None)
+        # `launch_app: {activity: ...}` pins the entry Activity. Needed on builds that
+        # declare more than one MAIN/LAUNCHER component (a dev flavour shipping a
+        # developer-tools launcher alongside the product one), where letting the system
+        # resolve the launcher is a coin toss and the following wait then times out on a
+        # screen the flow never meant to be on.
+        if kind == "launch-app":
+            kw["activity"] = v.pop("activity", None)
     else:
         alias = _ARG_ALIAS[kind]
         kw["arg"] = v.pop(alias, None) or v.pop("arg", None)

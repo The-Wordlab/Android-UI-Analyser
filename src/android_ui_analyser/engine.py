@@ -1353,7 +1353,8 @@ class Engine:
                 pkg = s.arg or origin_package  # bare launch_app → the flow's own app
                 if not pkg:
                     return StepFailure("unsupported_action", i, s), res
-                self.app("launch", package=pkg)
+                # `activity:` pins the entry component on multi-launcher builds.
+                self.app("launch", package=pkg, activity=s.activity)
             elif kind == "stop-app":
                 pkg = s.arg or origin_package
                 if not pkg:

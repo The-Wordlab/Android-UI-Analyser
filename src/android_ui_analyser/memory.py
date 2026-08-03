@@ -226,6 +226,7 @@ class RouteStep(BaseModel):
     text: str | None = None  # input value — FLOWS ONLY, never set by auto-recording
     submit: bool = False  # input: fire the IME action after typing
     package: str | None = None  # package the step ran in; None = the journey's origin
+    activity: str | None = None  # launch-app: pin the entry Activity on multi-launcher builds
     timeout_ms: int | None = None  # wait-for / wait-stable / assert-visible override
     by: str | None = None  # match target by: text (default) | id (resource-id) | desc
     # Composite flow blocks (Maestro ``repeat`` / ``retry``).
@@ -351,7 +352,14 @@ def step_display(step: RouteStep) -> str:
     if kind == "swipe":
         return f"swipe {step.arg}"
     if kind in ("launch-app", "stop-app", "open-link", "goto", "flow"):
-        return f"{kind} {step.arg}"
+        # Show a pinned entry Activity: on a multi-launcher build it is the difference
+        # between landing in the product and landing in a developer menu, so a dry run
+        # must not hide it.
+        if kind == "launch-app" and step.activity:
+            return f"{kind} {step.arg or ''}/{step.activity}".lstrip()
+        # A bare launch_app/stop_app targets the flow's own app, so arg is legitimately
+        # unset — rendering it as the literal "None" reads as a broken step in a dry run.
+        return f"{kind} {step.arg}" if step.arg else kind
     return kind  # wait-stable and future kinds
 
 
