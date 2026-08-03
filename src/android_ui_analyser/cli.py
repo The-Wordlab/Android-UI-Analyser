@@ -1636,6 +1636,12 @@ def wait(
         "--changed",
         help="Wait until the hierarchy fingerprint changes (any UI tree change).",
     ),
+    after_change: bool = typer.Option(
+        False,
+        "--after-change",
+        help="Wait for the screen to CHANGE and then settle. Use for network-driven content "
+        "(AI replies, image generation): plain --for-stable can return before anything starts.",
+    ),
     interval: int = typer.Option(120, "--interval", help="--for-stable/--changed: poll interval ms."),
     settle: int = typer.Option(
         200, "--settle", help="--for-stable: ms of no (non-animated) change to settle."
@@ -1662,12 +1668,39 @@ def wait(
 
     ``--for-stable`` polls cheap screenshots (a perceptual-hash "settled" check — no OCR,
     no hierarchy parse; works on opaque screens) and returns once the screen stops changing
-    for ``--settle`` ms. Ideal for waiting on image generation / loading. ``--changed`` waits
-    for any hierarchy-tree change (host-polled stand-in for a11y event push). ``--observe``
-    folds in the post-wait screen so you can act on what you waited for in one fewer call.
+    for ``--settle`` ms. ``--changed`` waits for any hierarchy-tree change (host-polled
+    stand-in for a11y event push). ``--observe`` folds in the post-wait screen so you can act
+    on what you waited for in one fewer call.
+
+    For anything network-driven — an AI reply, image generation, a slow load — use
+    ``--after-change``, NOT ``--for-stable`` on its own. Immediately after you tap send the
+    screen has not started changing yet, so it is already "stable" and ``--for-stable``
+    returns at once (measured: 1.2s, before the reply existed) leaving you to discover the
+    emptiness and wait again. ``--after-change`` waits for the first change, then for the
+    screen to settle (measured on the same reply: 22s, and the answer was there).
     """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
+        if after_change:
+            # First wait for something to happen, then for it to finish happening. Either half
+            # alone is a trap: --changed returns mid-stream, --for-stable returns before the
+            # stream starts.
+            eff_change = timeout if timeout is not None else 30000
+            _route(engine, "wait_changed", timeout_ms=eff_change, interval_ms=interval, observe=False)
+            _emit(
+                _route(
+                    engine,
+                    "wait_stable",
+                    interval_ms=interval,
+                    # A 200ms settle is fine for an animation but far too eager for streamed
+                    # text; require a real pause unless the caller asked for something else.
+                    settle_ms=settle if settle != 200 else 1200,
+                    timeout_ms=timeout if timeout is not None else 60000,
+                    observe=observe,
+                ),
+                fmt,
+            )
+            return
         if for_stable:
             eff = timeout if timeout is not None else 30000
             _emit(

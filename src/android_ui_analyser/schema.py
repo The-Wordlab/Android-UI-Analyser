@@ -213,6 +213,12 @@ class Meta(BaseModel):
     research_tasks: list[str] = Field(default_factory=list)
     map_hint: str | None = None  # e.g. "12 screens mapped — run `aua map`"
     capture_hint: str | None = None  # rolling buffer saw post-action change
+    # The hierarchy handed us text it could not represent (U+FFFD). Silence here is worse
+    # than slowness: an agent reads "Divide both sides by 2 to solve for <?>: <?>", cannot
+    # see the formula, and either reports a wrong observation or falls back to eyeballing
+    # screenshots on its own. Say so, and name the flag that recovers it.
+    lossy_text: bool = False
+    lossy_hint: str | None = None
     annotated_image: str | None = None
     raw_image: str | None = None  # unannotated screenshot saved on request (--with-image)
     device_serial: str | None = None

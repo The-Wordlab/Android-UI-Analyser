@@ -625,6 +625,49 @@ def render_markdown(*, brief: bool = False) -> str:
     )
 
     p.append("")
+    p.append("## Speed: what actually costs time (measured)")
+    p.append("")
+    p.append(
+        "Your own round trips dominate a run, not this tool. Measured on a real 6-scenario "
+        "lane: 1348s wall clock, 239 aua calls, and only ~33s (2.5%) inside aua. Agent turns "
+        "were ~48%, and blind `sleep` calls burned 251s (19%). Optimise round trips, not aua."
+    )
+    p.append("")
+    p.append(_md_table(
+        ["Don't", "Do", "Why it matters"],
+        [
+            ("`tap --rid x --no-observe` then `analyze`",
+             "`tap --rid x`",
+             "A tap RETURNS the resulting screen by default. The two-call habit doubled a lane's "
+             "round trips: 66 taps followed by 52 analyzes."),
+            ("`sleep 8` after an action",
+             "`wait --for <text|id> --observe`",
+             "Returns the moment it appears, and hands you the screen. A sleep is slower when "
+             "short and wrong when the screen is not ready."),
+            ("`wait --for-stable` after tapping send",
+             "`wait --after-change`",
+             "Nothing has changed yet, so the screen is already 'stable': --for-stable returned in "
+             "1.6s with NO answer on screen; --after-change returned in 4.9s WITH it. Measured."),
+            ("`sleep 30` for image generation",
+             "`wait --after-change` (or `--for-stable --settle 1500`)",
+             "Same trap, bigger waste. Wait on the condition, never the clock."),
+            ("One shell call per assertion",
+             "Group independent checks in one call",
+             "Each extra call is another agent turn, ~6s of wall clock."),
+            ("Screenshot every step",
+             "Screenshot what you will cite",
+             "68 screenshots in one lane; most were never referenced."),
+            ("Trust hierarchy text containing `?`",
+             "Re-read with `analyze --source vision`",
+             "U+FFFD means the glyph never reached you. `meta.lossy_text` now flags it. A formula "
+             "answer read as 'solve for <?>: <?>' in hierarchy; OCR read '2x = 8' correctly."),
+            ("`--parallel` to prepare an AVD you will install into",
+             "`--parallel --no-read-only`",
+             "--parallel implies -read-only, so an `adb install` lands in a discarded overlay and "
+             "reports Success. The app is simply gone after stop."),
+        ],
+    ))
+    p.append("")
     p.append("## Worked examples")
     p.append("```bash")
     p.append("# No device attached? Boot headless so you don't bother the user:")

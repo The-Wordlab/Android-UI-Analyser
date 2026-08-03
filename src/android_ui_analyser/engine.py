@@ -236,6 +236,30 @@ _KEY_NAMES = frozenset(
 )
 
 
+def _detect_lossy_text(elements: list[Any]) -> tuple[bool, str | None]:
+    """Did the accessibility tree hand us text it could not represent?
+
+    A U+FFFD in a label means the real glyph never reached us. It happens on
+    formula/equation rendering, some custom fonts, and WebView content: prose survives,
+    the interesting part becomes "?". Returning that silently is the worst outcome - the
+    agent believes it read the screen, reports an observation that omits the very thing
+    under test, or starts eyeballing screenshots on its own. Flag it and name the recovery.
+    """
+    hits = 0
+    for e in elements:
+        for attr in ("text", "content_desc"):
+            v = getattr(e, attr, None)
+            if isinstance(v, str) and "\ufffd" in v:
+                hits += v.count("\ufffd")
+    if not hits:
+        return False, None
+    return True, (
+        f"{hits} unrepresentable character(s) in hierarchy text (U+FFFD): formula/WebView "
+        "content did not survive the accessibility tree. Re-read with "
+        "`aua analyze --source vision` (OCR) before judging anything that depends on that text."
+    )
+
+
 class Engine:
     def __init__(
         self,
@@ -630,6 +654,7 @@ class Engine:
             with contextlib.suppress(Exception):
                 fp = elements_fingerprint(elements)
 
+        _lossy, _lossy_hint = _detect_lossy_text(elements)
         result = AnalyzeResult(
             screen=Screen(
                 width=w, height=h, package=package, activity=activity, source=screen_source
@@ -647,6 +672,8 @@ class Engine:
                 research_tasks=hints.research_tasks if hints else [],
                 map_hint=hints.map_hint if hints else None,
                 capture_hint=self._capture_hint(),
+                lossy_text=_lossy,
+                lossy_hint=_lossy_hint,
                 annotated_image=annotated,
                 device_serial=device.serial,
                 element_diff=ediff,
