@@ -101,7 +101,7 @@ def test_tls_failures_in_log(tmp_path: Path) -> None:
     log = tmp_path / "mitmdump.log"
     log.write_text(
         "info\nClient TLS handshake failed. The client does not trust the proxy's certificate "
-        "for luzia-api.staging.thewordlab.net\nok\n",
+        "for api.staging.example.com\nok\n",
         encoding="utf-8",
     )
     hits = pm.tls_failures_in_log(tmp_path)

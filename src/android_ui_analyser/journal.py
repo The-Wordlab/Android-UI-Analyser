@@ -223,10 +223,9 @@ def read_since(
                     continue
                 if since_ms is not None and int(row.get("ts_ms") or 0) < since_ms:
                     continue
+                # keep host events without a serial; drop other devices
                 if serial and row.get("serial") not in (None, serial, ""):
-                    # keep host events without serial; drop other devices
-                    if row.get("serial") != serial:
-                        continue
+                    continue
                 events.append(row)
     events.sort(key=lambda e: int(e.get("ts_ms") or 0))
     return events[-limit:]

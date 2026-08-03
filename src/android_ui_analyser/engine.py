@@ -4247,7 +4247,7 @@ class Engine:
                     "System CA installed — force-stop/relaunch done for foreground app."
                     if ca_info and ca_info.get("ok")
                     else "CA install failed or skipped: HTTPS apps that only trust system "
-                    "CAs (e.g. Luzia) will produce EMPTY cassettes until the mitm CA is a "
+                    "CAs will produce EMPTY cassettes until the mitm CA is a "
                     "system trust anchor. Fix: `aua emulator ensure-proxy` → start "
                     "`aua_proxy` → `aua proxy start` on that serial."
                 )
@@ -4356,7 +4356,7 @@ class Engine:
                 out["code"] = "proxy_tls"
                 out["hint"] = (
                     "Recorded 0 HTTP flows. Mitm saw CONNECTs but TLS failed — the app "
-                    "does not trust the mitm CA (Luzia NSC is system-only). "
+                    "does not trust the mitm CA (its NSC is system-only). "
                     "Re-run `aua proxy start` on a rootable emulator so the system CA "
                     "overlay is installed, then force-stop + relaunch the app."
                 )

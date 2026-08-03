@@ -399,8 +399,8 @@ def _adb(serial: str, *args: str, check: bool = True, timeout: float = 60) -> su
 def install_system_ca(serial: str, *, pem: Path | None = None) -> dict[str, Any]:
     """Install the mitm CA into the *system* trust store (emulator / rooted device).
 
-    Android 7+ apps ignore user CAs unless their NSC opts in. Luzia's NSC only lists
-    ``src="system"``, so user-store installs are useless — we must overlay the system
+    Android 7+ apps ignore user CAs unless their NSC opts in. An NSC that lists only
+    ``src="system"`` makes user-store installs useless — we must overlay the system
     store. On API 34+ that means a tmpfs + zygote ``nsenter`` bind (HTTP Toolkit recipe).
     The overlay is runtime-only and must be re-applied after reboot.
     """

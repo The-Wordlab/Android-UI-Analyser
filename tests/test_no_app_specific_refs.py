@@ -38,6 +38,16 @@ _BANNED_IDS = (
 
 _BANNED = _BANNED_NAMES + _BANNED_IDS
 
+# The author's own contact details collide with a banned name (email domain, GitHub
+# handle). Those are a deliberate credit, not leaked product structure. Only these exact
+# strings are removed from a line before it is checked — so a real package id added to
+# pyproject.toml or the README later is still caught, which a file-level allowlist entry
+# would have hidden. Bracketed like the patterns above so this file never self-matches.
+_AUTHOR_IDENTITY = re.compile(
+    r"eiliya@luzi[a]\.com|eiliya-luzi[a]",
+    re.IGNORECASE,
+)
+
 # Repo-relative path -> why it may still name an app. Expected to stay empty; entries are
 # self-expiring (see test_allowlist_has_no_stale_entries), so an exemption cannot outlive
 # its reason.
@@ -86,7 +96,7 @@ def _references_in(rel: str, pattern: re.Pattern[str]) -> list[str]:
     return [
         f"{rel}:{lineno}: {line.strip()[:120]}"
         for lineno, line in enumerate(text.splitlines(), 1)
-        if pattern.search(line)
+        if pattern.search(_AUTHOR_IDENTITY.sub("", line))
     ]
 
 
