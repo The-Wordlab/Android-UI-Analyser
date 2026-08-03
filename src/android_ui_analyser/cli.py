@@ -643,6 +643,13 @@ def main(
         format="%(levelname)s %(name)s: %(message)s",
         force=True,
     )
+    # Normalise adb discovery before any command (or adbutils) looks at PATH: the SDK's
+    # adb is often off PATH in non-interactive shells, which used to make `doctor` fail
+    # on a working machine. Cheap, stdlib-only, and a no-op when adb is already on PATH.
+    from . import emulator as emulator_mod
+
+    emulator_mod.ensure_adb_on_path()
+
     if format is not None and format not in {f.value for f in OutputFormat}:
         # Surface as a usage error (exit 2) before any command runs.
         err = UsageError(

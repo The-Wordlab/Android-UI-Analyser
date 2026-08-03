@@ -89,6 +89,34 @@ def adb_bin() -> str:
     )
 
 
+def ensure_adb_on_path() -> str | None:
+    """Publish the SDK's ``adb`` on ``PATH`` so PATH-only consumers agree with us.
+
+    ``adb_bin`` already falls back to ``$ANDROID_HOME``/the macOS default SDK, but
+    third-party libraries do not: ``adbutils`` (which backs device listing) and any
+    subprocess we spawn only search ``PATH``. A stock Android Studio install keeps
+    ``adb`` inside the SDK and off a non-interactive shell's ``PATH``, so on a perfectly
+    working machine ``aua doctor`` reported three failures — adb, devices, emulator —
+    while every AUA-resolved call succeeded. That false negative is what unattended
+    setup gates on, so normalise it once, before any command runs.
+
+    Returns the resolved ``adb`` path, or ``None`` when there is genuinely none.
+    """
+    found = shutil.which("adb")
+    if found:
+        return found
+    root = sdk_root()
+    if root is None:
+        return None
+    candidate = root / "platform-tools" / "adb"
+    if not (candidate.is_file() and os.access(candidate, os.X_OK)):
+        return None
+    os.environ["PATH"] = f"{candidate.parent}{os.pathsep}{os.environ.get('PATH', '')}"
+    # adbutils honours this explicitly; set it too so it never re-scans a stale PATH.
+    os.environ.setdefault("ADBUTILS_ADB_PATH", str(candidate))
+    return str(candidate)
+
+
 def _sdk_tool(name: str) -> str | None:
     """Resolve ``sdkmanager`` / ``avdmanager``.
 
