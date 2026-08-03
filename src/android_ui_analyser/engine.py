@@ -25,6 +25,7 @@ from . import routing
 from .config import Config
 from .device import Device, connect, list_devices
 from .errors import (
+    AuaError,
     DeviceError,
     ElementNotFoundError,
     ProviderError,
@@ -2940,6 +2941,7 @@ class Engine:
         index: int | None = None,
         first: bool = False,
         fresh: bool = True,
+        vision_fallback: bool = True,
     ) -> Element:
         """Resolve a one-shot selector to a single element, in this one call.
 
@@ -2971,6 +2973,8 @@ class Engine:
             container = self._resolve_container_rid(rid)
             if container is not None:
                 return container
+        if not matches and text and vision_fallback:
+            matches, elements = self._match_by_vision(elements, text)
         if not matches:
             needle = rid or text or desc or ""
             near = nearest_elements(elements, needle)
@@ -2999,6 +3003,32 @@ class Engine:
                     + " | ".join(element_digest(el) for el in matches[:_MAX_CANDIDATES]),
                 )
         return matches[0]
+
+    def _match_by_vision(self, elements: list[Element], text: str) -> tuple[list[Element], list[Element]]:
+        """Look again with vision when the hierarchy has no element carrying ``text``.
+
+        Web content publishes almost nothing to the accessibility tree, so `--text Continue`
+        fails on an OAuth consent page, a Google sign-in form or an in-app Terms screen where
+        "Continue" is plainly on screen. Because vision element ids do not survive between CLI
+        invocations, the only way through used to be a raw coordinate tap — the single thing
+        this tool exists to remove.
+
+        Only a label falls back. A resource-id is a property of the tree and pixels cannot
+        supply one; a content-desc is likewise unobservable, so `--desc` stays strict.
+
+        Returns the matches and the element list to describe the screen with, so that on a
+        miss the "nearest" hint names what is *visible* rather than an empty WebView node.
+        """
+        try:
+            seen = self.analyze(source="vision", record=False)
+        except AuaError as exc:  # vision unavailable is not a selector error
+            logger.debug("vision fallback for %r unavailable: %s", text, exc)
+            return [], elements
+        matches = match_selector(seen.elements, text=text)
+        if matches:
+            logger.info("resolved --text %r by vision; the hierarchy had no match", text)
+            return matches, seen.elements
+        return [], elements + [el for el in seen.elements if el not in elements]
 
     def _resolve_container_rid(self, rid: str) -> Element | None:
         """A pruned container, addressed by resource-id via the device itself.
