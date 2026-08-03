@@ -9,7 +9,9 @@ before failing. Tests supply a fake conforming to the same ABC — no device req
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
+import os
 import re
 import signal
 import subprocess
@@ -704,21 +706,51 @@ class Uiautomator2Device(Device):
         )
         return remote
 
-    def start_recording(self, remote_path: str = "/sdcard/aua_recording.mp4") -> str:
-        if self._recording_remote is not None:
+    def _recording_state_path(self) -> Path:
+        """Where an in-flight recording is noted on disk, keyed by serial.
+
+        Recording state cannot live only in process memory. The normal usage is
+        ``aua record start`` … many separate ``aua`` calls … ``aua record stop``, so an
+        in-memory handle makes that sequence fail with "no screen recording in progress"
+        and silently loses the evidence — worse than never recording. Honour
+        ``AUA_CACHE__DIR`` so per-worker caches stay isolated, exactly as the proxy does.
+        """
+        base = os.environ.get("AUA_CACHE__DIR") or "~/.cache/android-ui-analyser"
+        d = Path(base).expanduser() / "recordings"
+        d.mkdir(parents=True, exist_ok=True)
+        return d / f"{self.serial.replace(':', '_')}.json"
+
+    def start_recording(
+        self, remote_path: str = "/sdcard/aua_recording.mp4", *, time_limit_s: int = 1800
+    ) -> str:
+        state = self._recording_state_path()
+        if self._recording_remote is not None or state.exists():
             raise DeviceError(
                 "a screen recording is already in progress",
-                hint="Run `aua record stop` before starting another.",
+                hint="Run `aua record stop <path>` before starting another.",
             )
         self._recording_remote = remote_path
+        # `screenrecord` defaults to a 180s limit and then exits *silently*: a longer journey
+        # loses its recording with no error anywhere. Pass the limit explicitly and default it
+        # well past a realistic scenario so evidence is not truncated by surprise.
         self._recording_proc = subprocess.Popen(  # noqa: S603
-            ["adb", "-s", self.serial, "shell", "screenrecord", remote_path],
+            [
+                "adb", "-s", self.serial, "shell", "screenrecord",
+                "--time-limit", str(int(time_limit_s)), remote_path,
+            ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        with contextlib.suppress(Exception):
+            state.write_text(json.dumps({"remote": remote_path, "time_limit_s": int(time_limit_s)}))
         return remote_path
 
     def stop_recording(self, local_path: str) -> str:
+        state_file = self._recording_state_path()
+        if self._recording_remote is None and state_file.exists():
+            # Started by an earlier `aua` invocation — recover the handle from disk.
+            with contextlib.suppress(Exception):
+                self._recording_remote = json.loads(state_file.read_text()).get("remote")
         if self._recording_remote is None:
             raise DeviceError(
                 "no screen recording in progress", hint="Start one with `aua record start`."
@@ -727,6 +759,8 @@ class Uiautomator2Device(Device):
         proc = self._recording_proc
         self._recording_remote = None
         self._recording_proc = None
+        with contextlib.suppress(Exception):
+            state_file.unlink()
         try:
             subprocess.run(  # noqa: S603
                 ["adb", "-s", self.serial, "shell", "pkill", "-l", "2", "screenrecord"],
