@@ -418,7 +418,7 @@ class Engine:
         return elements, providers_used, img
 
 
-    def _repair_lossy_text(self, device: Device, elements: list[Element]) -> int:
+    def _repair_lossy_text(self, device: Device, elements: list[Element]) -> tuple[int, str | None]:
         """Fill in hierarchy labels the accessibility tree could not represent, using OCR.
 
         The tree sometimes hands back U+FFFD instead of the real glyphs - formula and
@@ -435,12 +435,12 @@ class Engine:
             if isinstance(getattr(e, "text", None), str) and "\ufffd" in e.text
         ]
         if not broken:
-            return 0
+            return 0, None
         try:
             img = self._screenshot(max_reuse_ms=250.0)
             chain = self.factory.build_chain("ocr")
             if not chain.providers:
-                return 0
+                return 0, None
             texts, name = run_chain(
                 chain,
                 lambda p: p.recognize(img),  # type: ignore[attr-defined]
@@ -448,7 +448,7 @@ class Engine:
             )
         except Exception as exc:  # never let a repair attempt break the analyze
             logger.info("lossy-text repair unavailable: %s", exc)
-            return 0
+            return 0, None
 
         def overlap(a: Any, b: Any) -> float:
             ax1, ay1, ax2, ay2 = a
@@ -483,7 +483,7 @@ class Engine:
                 repaired += 1
         if repaired:
             logger.info("repaired %d lossy label(s) with OCR (%s)", repaired, name)
-        return repaired
+        return repaired, (name if repaired else None)
 
     # ----------------------------------------------------------------- analyze
 
@@ -724,7 +724,12 @@ class Engine:
 
         # Auto-recover before reporting: a fast answer that is not usable is not an answer.
         # Only pays the OCR cost when the tree actually handed back broken text.
-        _repaired = self._repair_lossy_text(device, elements) if not use_vision else 0
+        _repaired, _repair_provider = (
+            self._repair_lossy_text(device, elements) if not use_vision else (0, None)
+        )
+        if _repair_provider and _repair_provider not in providers_used:
+            # Provenance matters: text that came from OCR is not text the app exposed.
+            providers_used.append(_repair_provider)
         _lossy, _lossy_hint = _detect_lossy_text(elements)
         result = AnalyzeResult(
             screen=Screen(
