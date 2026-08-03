@@ -481,6 +481,9 @@ def _pid_dir(cache_dir: str | Path) -> Path:
 # Console ports the Android emulator binds (even numbers only → serial emulator-{port}).
 _EMULATOR_PORT_MIN = 5554
 _EMULATOR_PORT_MAX = 5682
+# How long a port reservation is honoured. Only has to cover the gap between choosing a
+# port and the emulator binding it; after that the instance is visible to adb.
+_RESERVATION_TTL_S = 300
 
 
 def instance_id(avd: str, port: int) -> str:
@@ -519,11 +522,84 @@ def _used_console_ports(*, cache_dir: str | Path | None = None) -> set[int]:
     return used
 
 
+def _reservation_dir() -> Path:
+    """Global port-reservation directory, deliberately NOT under ``AUA_CACHE__DIR``.
+
+    Parallel agents are told to keep separate caches so proxy rules cannot leak between
+    them, which means a per-cache record is invisible to every other worker. Port
+    allocation is the one thing that must be coordinated process-wide, so its bookkeeping
+    lives at a fixed path regardless of the caller's cache.
+    """
+    d = Path.home() / ".cache/android-ui-analyser/portlocks"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _reserved_console_ports() -> set[int]:
+    """Ports claimed by a starting instance, dropping reservations that went stale.
+
+    A reservation only has to survive the gap between choosing a port and the emulator
+    binding it. Anything older than the window is either booted (and therefore visible to
+    adb) or dead, so it must not block the range forever.
+    """
+    import time as _time
+
+    out: set[int] = set()
+    for f in _reservation_dir().glob("*.port"):
+        try:
+            port = int(f.stem)
+        except ValueError:
+            with contextlib.suppress(Exception):
+                f.unlink()
+            continue
+        try:
+            age = _time.time() - f.stat().st_mtime
+        except OSError:
+            continue
+        if age > _RESERVATION_TTL_S:
+            with contextlib.suppress(Exception):
+                f.unlink()
+            continue
+        out.add(port)
+    return out
+
+
+def _claim_console_port(port: int) -> bool:
+    """Atomically claim ``port``. False means another process already holds it."""
+    target = _reservation_dir() / f"{int(port)}.port"
+    try:
+        fd = os.open(str(target), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        return False
+    except OSError:
+        return True  # cannot coordinate; do not block the caller
+    with contextlib.suppress(Exception):
+        os.write(fd, f"{os.getpid()}\n".encode())
+    with contextlib.suppress(Exception):
+        os.close(fd)
+    return True
+
+
+def release_console_port(port: int | None) -> None:
+    """Drop a port reservation once the instance owns the port (or failed to start)."""
+    if port is None:
+        return
+    with contextlib.suppress(Exception):
+        (_reservation_dir() / f"{int(port)}.port").unlink()
+
+
 def allocate_console_port(
     preferred: int | None = None, *, cache_dir: str | Path | None = None
 ) -> int:
-    """Pick a free even emulator console port (5554–5682)."""
-    used = _used_console_ports(cache_dir=cache_dir)
+    """Pick a free even emulator console port (5554–5682), and reserve it.
+
+    The reservation matters: adb cannot see an emulator that is still booting, so two
+    agents starting at the same moment used to read an identical "used" set, pick the same
+    port, and race. The loser bound no console port at all - it stayed alive but invisible
+    to adb, while its serial actually belonged to the winner's AVD. Two agents then drove
+    one device believing they each had their own.
+    """
+    used = _used_console_ports(cache_dir=cache_dir) | _reserved_console_ports()
     if preferred is not None:
         port = int(preferred)
         if port % 2 != 0:
@@ -542,9 +618,14 @@ def allocate_console_port(
                 hint="Omit --port to auto-allocate, or pick a free even port "
                 f"(used: {', '.join(str(p) for p in sorted(used)) or 'none'}).",
             )
+        _claim_console_port(port)
         return port
     for port in range(_EMULATOR_PORT_MIN, _EMULATOR_PORT_MAX + 1, 2):
-        if port not in used:
+        if port in used:
+            continue
+        # Claim before returning: the check above is a snapshot, and a concurrent caller
+        # may be between its own check and its emulator binding the port.
+        if _claim_console_port(port):
             return port
     raise DeviceError(
         "no free emulator console ports left",
@@ -931,10 +1012,17 @@ def start(
         with open(log_path, encoding="utf-8", errors="replace") as fh:
             tail = fh.read()[-800:]
         meta_path.unlink(missing_ok=True)
+        # Hand the port back: this instance never bound it, so holding the reservation
+        # would shrink the range for everyone else.
+        release_console_port(console_port)
         raise DeviceError(
             f"emulator {avd!r} did not become ready within {int(wait_s)}s",
             hint=f"Check the log: {log_path}\n{tail}",
         )
+
+    # The instance is up and adb can see it, so the reservation has done its job and the
+    # normal used-port detection takes over from here.
+    release_console_port(console_port)
 
     meta["serial"] = serial
     meta["last_activity"] = time.time()
