@@ -417,6 +417,74 @@ class Engine:
         elements = merge.merge_vision(detections, texts, iou_threshold=0.5, start_id=start_id)
         return elements, providers_used, img
 
+
+    def _repair_lossy_text(self, device: Device, elements: list[Element]) -> int:
+        """Fill in hierarchy labels the accessibility tree could not represent, using OCR.
+
+        The tree sometimes hands back U+FFFD instead of the real glyphs - formula and
+        WebView content especially. Element *structure* is fine, only the text is lost, so
+        replacing the whole observation with a vision pass would be wasteful and would
+        double the payload. Instead run OCR once and graft the recognised text onto the
+        elements that are broken, matched by geometric overlap.
+
+        Costs one OCR pass (~145ms with apple_vision) and only when something is actually
+        broken. Returns how many labels were repaired.
+        """
+        broken = [
+            e for e in elements
+            if isinstance(getattr(e, "text", None), str) and "\ufffd" in e.text
+        ]
+        if not broken:
+            return 0
+        try:
+            img = self._screenshot(max_reuse_ms=250.0)
+            chain = self.factory.build_chain("ocr")
+            if not chain.providers:
+                return 0
+            texts, name = run_chain(
+                chain,
+                lambda p: p.recognize(img),  # type: ignore[attr-defined]
+                timeout_s=self.config.timeouts.vision_ms / 1000.0,
+            )
+        except Exception as exc:  # never let a repair attempt break the analyze
+            logger.info("lossy-text repair unavailable: %s", exc)
+            return 0
+
+        def overlap(a: Any, b: Any) -> float:
+            ax1, ay1, ax2, ay2 = a
+            bx1, by1, bx2, by2 = b
+            ix = max(0, min(ax2, bx2) - max(ax1, bx1))
+            iy = max(0, min(ay2, by2) - max(ay1, by1))
+            inter = ix * iy
+            if inter <= 0:
+                return 0.0
+            area_b = max(1, (bx2 - bx1) * (by2 - by1))
+            return inter / area_b
+
+        repaired = 0
+        for el in broken:
+            box = getattr(el, "bounds", None)
+            if not box:
+                continue
+            hits = []
+            for tb in texts:
+                tbb = getattr(tb, "bounds", None) or getattr(tb, "box", None)
+                if not tbb:
+                    continue
+                # Keep OCR text whose box sits mostly inside the broken element.
+                if overlap(tuple(box), tuple(tbb)) >= 0.5 and (tb.text or "").strip():
+                    hits.append((tbb[1], tbb[0], tb.text.strip()))
+            if not hits:
+                continue
+            hits.sort()  # reading order: top-to-bottom, then left-to-right
+            merged = " ".join(h[2] for h in hits)
+            if merged and merged != el.text:
+                el.text = merged
+                repaired += 1
+        if repaired:
+            logger.info("repaired %d lossy label(s) with OCR (%s)", repaired, name)
+        return repaired
+
     # ----------------------------------------------------------------- analyze
 
     def _resolve_pins(self, source: str | None, strategy: str | None) -> tuple[bool, bool, bool]:
@@ -654,6 +722,9 @@ class Engine:
             with contextlib.suppress(Exception):
                 fp = elements_fingerprint(elements)
 
+        # Auto-recover before reporting: a fast answer that is not usable is not an answer.
+        # Only pays the OCR cost when the tree actually handed back broken text.
+        _repaired = self._repair_lossy_text(device, elements) if not use_vision else 0
         _lossy, _lossy_hint = _detect_lossy_text(elements)
         result = AnalyzeResult(
             screen=Screen(
@@ -674,6 +745,7 @@ class Engine:
                 capture_hint=self._capture_hint(),
                 lossy_text=_lossy,
                 lossy_hint=_lossy_hint,
+                ocr_repaired=_repaired,
                 annotated_image=annotated,
                 device_serial=device.serial,
                 element_diff=ediff,

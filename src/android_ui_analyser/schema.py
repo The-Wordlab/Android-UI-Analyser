@@ -219,6 +219,8 @@ class Meta(BaseModel):
     # screenshots on its own. Say so, and name the flag that recovers it.
     lossy_text: bool = False
     lossy_hint: str | None = None
+    # How many broken labels OCR successfully repaired in place on this analyze.
+    ocr_repaired: int = 0
     annotated_image: str | None = None
     raw_image: str | None = None  # unannotated screenshot saved on request (--with-image)
     device_serial: str | None = None
