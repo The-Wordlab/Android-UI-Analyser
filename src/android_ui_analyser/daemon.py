@@ -49,6 +49,35 @@ logger = logging.getLogger("android_ui_analyser.daemon")
 _SOCKET_BACKLOG = 5
 _START_POLL_INTERVAL = 0.1  # seconds between is_running checks
 _START_TIMEOUT = 5.0  # max seconds to wait after spawning
+_LOG_ROLL_BYTES = 8 * 1024 * 1024
+
+
+class _Activity:
+    """Last-request clock, shared by the accept loop and the idle policy."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._at = time.monotonic()
+
+    def touch(self) -> None:
+        with self._lock:
+            self._at = time.monotonic()
+
+    def idle_s(self) -> float:
+        with self._lock:
+            return time.monotonic() - self._at
+
+
+def _idle_tick(engine: Engine, activity: _Activity) -> bool:
+    """Apply the idle policy; return True when the daemon should shut itself down."""
+    idle = activity.idle_s()
+    pause_after = int(getattr(engine.config.capture, "idle_pause_s", 0) or 0)
+    if pause_after > 0 and idle >= pause_after:
+        with contextlib.suppress(Exception):
+            if engine.capture_idle_pause():
+                logger.info("capture paused after %.0fs idle (frames kept)", idle)
+    ttl = int(getattr(engine.config.daemon, "idle_ttl_s", 0) or 0)
+    return ttl > 0 and idle >= ttl
 
 
 # --------------------------------------------------------------------------- helpers
@@ -429,8 +458,7 @@ def serve(
         srv.settimeout(0.5)  # non-blocking so we can check _stop_event
 
         logger.info("daemon listening on %s", sock_path)
-        with contextlib.suppress(OSError):  # pidfile so `daemon stop` can signal this process
-            Path(sock_path + ".pid").write_text(str(os.getpid()))
+        write_pidfile(sock_path + ".pid")  # so `daemon stop` / `daemon reap` can find us
         if engine.config.capture.enabled:
             with contextlib.suppress(Exception):
                 engine.capture_start()
@@ -454,6 +482,7 @@ def serve(
         if ready_event is not None:
             ready_event.set()
 
+        activity = _Activity()
         while True:
             if _stop_event is not None and _stop_event.is_set():
                 break
@@ -461,10 +490,17 @@ def serve(
             try:
                 conn, _ = srv.accept()
             except TimeoutError:
+                if _idle_tick(engine, activity):
+                    logger.info("daemon idle for %.0fs; shutting down", activity.idle_s())
+                    break
                 continue
 
+            activity.touch()
+            with contextlib.suppress(Exception):
+                engine.capture_idle_resume()
+
             try:
-                _handle_connection(engine, conn)
+                _handle_connection(engine, conn, activity)
             except Exception:  # noqa: BLE001
                 logger.exception("error handling connection")
             finally:
@@ -522,7 +558,9 @@ def _journal_dispatch(
     )
 
 
-def _handle_connection(engine: Engine, conn: socket.socket) -> None:
+def _handle_connection(
+    engine: Engine, conn: socket.socket, activity: _Activity | None = None
+) -> None:
     """Read newline-delimited JSON requests and write newline-delimited JSON responses."""
     buf = b""
     conn.settimeout(30.0)
@@ -543,6 +581,8 @@ def _handle_connection(engine: Engine, conn: socket.socket) -> None:
                 line = line.strip()
                 if not line:
                     continue
+                if activity is not None:
+                    activity.touch()
                 t0 = time.monotonic()
                 try:
                     request = json.loads(line)
@@ -688,13 +728,96 @@ def _aua_version() -> str:
 # --------------------------------------------------------------------------- lifecycle
 
 
-def is_running(config: Config) -> bool:
-    """Return True if a daemon is live at *config*'s socket path."""
+def _roll_log(path: Path) -> None:
+    """Roll daemon.log once it gets large — it is raw stdout/stderr, so nothing bounds it."""
+    with contextlib.suppress(OSError):
+        if path.exists() and path.stat().st_size > _LOG_ROLL_BYTES:
+            path.replace(path.with_name(path.name + ".1"))
+
+
+def _socket_alive(sock: str) -> bool:
+    """Return True if a daemon answers at the explicit socket path *sock*."""
     try:
-        with DaemonClient(socket_path(config), timeout=2.0) as client:
+        with DaemonClient(sock, timeout=2.0) as client:
             return client.ping()
     except OSError:
         return False
+
+
+def is_running(config: Config) -> bool:
+    """Return True if a daemon is live at *config*'s socket path."""
+    return _socket_alive(socket_path(config))
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def write_pidfile(path: str | Path) -> None:
+    """Record pid + interpreter so :func:`reap` can recognise our own orphans later."""
+    with contextlib.suppress(OSError):
+        Path(path).write_text(json.dumps({"pid": os.getpid(), "exe": sys.executable}))
+
+
+def read_pidfile(path: str | Path) -> tuple[int | None, str | None]:
+    """Return ``(pid, interpreter)``; interpreter is None for legacy bare-int pidfiles."""
+    try:
+        raw = Path(path).read_text().strip()
+    except OSError:
+        return None, None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None, None
+    # A legacy pidfile is a bare integer, which is itself valid JSON.
+    if isinstance(data, int):
+        return data, None
+    if not isinstance(data, dict):
+        return None, None
+    pid = data.get("pid")
+    exe = data.get("exe")
+    return (int(pid) if isinstance(pid, int) else None), (exe if isinstance(exe, str) else None)
+
+
+def reap(config: Config) -> dict[str, Any]:
+    """Clean up daemons that outlived the session that spawned them.
+
+    Drops pid/socket pairs whose process is gone, and terminates live daemons whose
+    interpreter no longer exists — an agent's throwaway venv is deleted long before the
+    daemon it spawned notices, and the survivor keeps polling the device forever.
+
+    The interpreter path comes from the pidfile the daemon wrote about itself, not from
+    ``ps``: ``comm`` truncates, and a truncated path that fails to resolve would read as an
+    orphan and kill a healthy daemon. A legacy pidfile carries no interpreter, so a live
+    process behind one is always left alone.
+    """
+    cache_dir = Path(config.cache.dir).expanduser()
+    reaped: list[dict[str, Any]] = []
+    for pid_file in sorted(cache_dir.glob("daemon.sock*.pid")):
+        sock = str(pid_file)[: -len(".pid")]
+        pid, exe = read_pidfile(pid_file)
+        if pid is None:
+            continue
+        alive = _pid_alive(pid)
+        orphaned = alive and exe is not None and not Path(exe).exists()
+        if alive and not orphaned:
+            continue
+        if alive:
+            with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                os.kill(pid, signal.SIGTERM)
+        for path in (sock, str(pid_file)):
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(path)
+        reaped.append(
+            {"pid": pid, "socket": sock, "reason": "orphaned_venv" if alive else "dead"}
+        )
+    return {"ok": True, "action": "daemon-reap", "reaped": reaped, "count": len(reaped)}
 
 
 def running_version(config: Config) -> str | None | bool:
@@ -713,12 +836,19 @@ def start(config: Config, *, serial: str | None = None) -> dict[str, Any]:
     """
     sock = socket_path(config, serial=serial)
 
-    if is_running(config):
+    # Adopt on the socket we are about to bind, not on the config-derived one: with an
+    # explicit --serial those differ, and checking the wrong one spawns a second daemon
+    # for a device that already has one.
+    if _socket_alive(sock):
         return {"running": True, "pid": None, "socket": sock, "status": "already_running"}
+
+    with contextlib.suppress(Exception):
+        reap(config)
 
     cache_dir = Path(config.cache.dir).expanduser()
     cache_dir.mkdir(parents=True, exist_ok=True)
     log_path = cache_dir / "daemon.log"
+    _roll_log(log_path)
 
     cmd = [sys.executable, "-m", "android_ui_analyser.daemon", "--socket", sock]
     if serial:
@@ -736,12 +866,13 @@ def start(config: Config, *, serial: str | None = None) -> dict[str, Any]:
     finally:
         log_fh.close()
 
-    # Wait until daemon is live or timeout.
+    # Wait until daemon is live or timeout. Poll the socket we spawned, at the poll
+    # interval — the old arithmetic slept a flat 5s per turn, so the loop ran once and
+    # reported "timeout" for a daemon that had in fact come up, and the caller spawned again.
     deadline = time.monotonic() + _START_TIMEOUT
     while time.monotonic() < deadline:
-        if is_running(config):
+        if _socket_alive(sock):
             return {"running": True, "pid": proc.pid, "socket": sock, "status": "started"}
-        time.sleep(_SOCKET_BACKLOG * _START_POLL_INTERVAL / _START_POLL_INTERVAL)
         time.sleep(_START_POLL_INTERVAL)
 
     return {"running": False, "pid": proc.pid, "socket": sock, "status": "timeout"}
@@ -761,10 +892,7 @@ def stop(config: Config) -> dict[str, Any]:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(path)
         return {"running": False, "socket": sock, "status": "not_running"}
-    try:
-        pid = int(Path(pid_file).read_text().strip())
-    except (OSError, ValueError):
-        pid = None
+    pid, _ = read_pidfile(pid_file)
     if pid is not None:
         with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
             os.kill(pid, signal.SIGTERM)
@@ -796,6 +924,14 @@ if __name__ == "__main__":
     parser.add_argument("--socket", required=True, help="unix socket path")
     parser.add_argument("--serial", default=None, help="device serial")
     ns = parser.parse_args()
+
+    # The parent redirects our stdout/stderr into daemon.log, but nothing ever configured a
+    # level — so the lifecycle (startup, idle pause, idle shutdown) was invisible in the one
+    # file you would go read to find out why a daemon is gone.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
 
     overrides: dict[str, Any] = {"daemon": {"socket": ns.socket}}
     if ns.serial:

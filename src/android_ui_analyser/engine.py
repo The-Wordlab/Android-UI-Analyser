@@ -4817,6 +4817,22 @@ class Engine:
         self._capture.pause()
         return self._capture.status()
 
+    def capture_idle_pause(self) -> bool:
+        """Stop sampling because the client went quiet; frames already kept stay readable."""
+        buf = self._capture
+        if buf is None or not buf.running or buf.paused:
+            return False
+        buf.pause("idle")
+        return True
+
+    def capture_idle_resume(self) -> bool:
+        """Resume a buffer that idle-paused. An explicit ``capture off`` stays off."""
+        buf = self._capture
+        if buf is None or not buf.paused:
+            return False
+        buf.resume(only_if_idle=True)
+        return not buf.paused
+
     def capture_status(self) -> dict[str, Any]:
         if self._capture is None:
             return {

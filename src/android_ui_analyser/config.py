@@ -155,6 +155,9 @@ class DaemonCfg(BaseModel):
     push_ws_port: int = 0
     # Poll interval for the push / wait_changed fingerprint watcher (host-side).
     watch_interval_ms: int = 150
+    # Exit after this long with no client request (0 = never). Agent sessions end without
+    # stopping their daemon, and every survivor keeps polling a device forever.
+    idle_ttl_s: int = 1800
 
 
 class CacheCfg(BaseModel):
@@ -177,6 +180,10 @@ class CaptureCfg(BaseModel):
     jpeg_quality: int = 70
     hint: bool = True  # push meta.capture_hint after post-action pixel change
     sidecar: bool = True  # allow host capture sidecar when daemon is off
+    # Pause sampling after this long with no client request (0 = never). Frames already on
+    # disk stay readable, so `capture last` still works minutes after the agent went quiet;
+    # only the screencap load stops. The next request resumes it.
+    idle_pause_s: int = 120
 
 
 class MemoryCfg(BaseModel):

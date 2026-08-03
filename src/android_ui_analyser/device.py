@@ -25,6 +25,18 @@ from .schema import DeviceInfo, MatchMode
 
 logger = logging.getLogger("android_ui_analyser.device")
 
+_RECONNECT_WARN_WINDOW_S = 30.0
+_last_reconnect_warn: dict[str, float] = {}
+
+
+def _warn_reconnect(name: str, exc: Exception) -> None:
+    """One line per op per window: a detached device retries forever and floods the log."""
+    now = time.monotonic()
+    if now - _last_reconnect_warn.get(name, 0.0) < _RECONNECT_WARN_WINDOW_S:
+        return
+    _last_reconnect_warn[name] = now
+    logger.warning("device op '%s' failed (%s); reconnecting once", name, exc)
+
 
 def _bounds_from_info(info: dict[str, Any]) -> Bounds | None:
     b = info.get("bounds") if isinstance(info, dict) else None
@@ -399,7 +411,7 @@ class Uiautomator2Device(Device):
         try:
             return invoke()
         except Exception as exc:
-            logger.warning("device op '%s' failed (%s); reconnecting once", name, exc)
+            _warn_reconnect(name, exc)
             try:
                 self._connect()
                 return invoke()

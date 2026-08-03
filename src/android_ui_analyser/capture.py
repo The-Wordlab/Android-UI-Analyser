@@ -26,6 +26,9 @@ logger = logging.getLogger(__name__)
 
 ScreenshotFn = Callable[[], Any]  # returns ScreenImage-like with .png_bytes / .pil()
 
+_BASE_BACKOFF_S = 1.0
+_MAX_BACKOFF_S = 30.0
+
 
 @dataclass
 class CaptureCfgView:
@@ -68,6 +71,7 @@ class CaptureBuffer:
     _stop: threading.Event = field(default_factory=threading.Event, repr=False)
     _thread: threading.Thread | None = field(default=None, repr=False)
     _paused: bool = False
+    _pause_reason: str | None = None
     _last_hash: str | None = None
     _entries: list[FrameEntry] = field(default_factory=list)
     _burst_until: float = 0.0
@@ -104,6 +108,7 @@ class CaptureBuffer:
             return
         self._stop.clear()
         self._paused = False
+        self._pause_reason = None
         self._thread = threading.Thread(target=self._loop, name="aua-capture", daemon=True)
         self._thread.start()
         logger.info("capture started session=%s dir=%s", self.session_id, self.dir)
@@ -120,11 +125,18 @@ class CaptureBuffer:
             if self.dir.is_dir() and not any((self.dir / "frames").glob("*.jpg")):
                 shutil.rmtree(self.dir, ignore_errors=True)
 
-    def pause(self) -> None:
-        self._paused = True
+    def pause(self, reason: str = "manual") -> None:
+        with self._lock:
+            self._paused = True
+            self._pause_reason = reason
 
-    def resume(self) -> None:
-        self._paused = False
+    def resume(self, *, only_if_idle: bool = False) -> None:
+        """Resume sampling. With *only_if_idle*, an explicit ``capture off`` stays off."""
+        with self._lock:
+            if only_if_idle and self._pause_reason != "idle":
+                return
+            self._paused = False
+            self._pause_reason = None
 
     @property
     def running(self) -> bool:
@@ -159,6 +171,7 @@ class CaptureBuffer:
             last_action = self._last_action_ms
             kept_since = self._kept_since_action
             paused = self._paused
+            pause_reason = self._pause_reason
         disk = self._disk_bytes()
         age_span: list[int] | None = None
         if entries:
@@ -168,6 +181,7 @@ class CaptureBuffer:
             "action": "capture-status",
             "running": self.running,
             "paused": paused,
+            "pause_reason": pause_reason,
             "mode": "burst" if burst else "idle",
             "session_id": self.session_id,
             "dir": str(self.dir),
@@ -263,6 +277,7 @@ class CaptureBuffer:
     # -- sampler -----------------------------------------------------------
 
     def _loop(self) -> None:
+        failures = 0
         while not self._stop.is_set():
             if self._paused:
                 self._stop.wait(0.2)
@@ -271,7 +286,15 @@ class CaptureBuffer:
             try:
                 self._tick()
             except Exception:  # noqa: BLE001 — never kill the daemon for a bad frame
-                logger.debug("capture tick failed", exc_info=True)
+                failures += 1
+                logger.debug("capture tick failed (%d in a row)", failures, exc_info=True)
+            else:
+                failures = 0
+            if failures:
+                # A detached device fails every tick. Backing off keeps a dead daemon from
+                # spending the device's CPU (and the log's disk) at full sampling rate.
+                self._stop.wait(min(_MAX_BACKOFF_S, _BASE_BACKOFF_S * (2 ** (failures - 1))))
+                continue
             with self._lock:
                 bursting = time.time() < self._burst_until
             fps = self.cfg.burst_fps if bursting else self.cfg.idle_fps

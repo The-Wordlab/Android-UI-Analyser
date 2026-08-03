@@ -2522,7 +2522,7 @@ def dashboard(
 @app.command()
 def daemon(
     ctx: typer.Context,
-    action: str = typer.Argument(..., help="start|stop|status."),
+    action: str = typer.Argument(..., help="start|stop|status|reap."),
     quiet: bool = typer.Option(
         False,
         "--quiet",
@@ -2570,8 +2570,12 @@ def daemon(
                 "running": daemon_mod.is_running(cfg),
                 "detail": daemon_mod.status(cfg),
             }
+        elif a == "reap":
+            out = daemon_mod.reap(cfg)
         else:
-            raise UsageError(f"unknown daemon action '{action}'", hint="start|stop|status")
+            raise UsageError(
+                f"unknown daemon action '{action}'", hint="start|stop|status|reap"
+            )
         indent = 2 if fmt is OutputFormat.pretty else None
         sep = None if indent else (",", ":")
         typer.echo(json.dumps(out, indent=indent, separators=sep, ensure_ascii=False, default=str))
