@@ -349,6 +349,11 @@ class ActionResult(BaseModel):
     observation: AnalyzeResult | None = None
     # Rolling capture saw a post-action pixel change — pull `aua capture last`.
     capture_hint: str | None = None
+    # Did the action's effect get *observed*, as opposed to merely attempted?
+    # True  = read back and confirmed, False = read back and provably did not happen,
+    # None  = not checked, or checked and genuinely ambiguous. Absent from output when None,
+    # so `ok` keeps its meaning for actions that cannot verify themselves.
+    verified: bool | None = None
 
     def render(self, fmt: OutputFormat | str = OutputFormat.json) -> str:
         fmt = OutputFormat(fmt)

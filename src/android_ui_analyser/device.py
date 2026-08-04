@@ -228,6 +228,14 @@ class Device(ABC):
     def stop_recording(self, local_path: str) -> str:
         raise DeviceError("screen recording requires a real device")
 
+    def focused_text(self) -> str | None:
+        """Current value of the focused text field, or None when it cannot be read.
+
+        None means "unknown", never "empty" — the caller must not treat an unreadable
+        field as an unchanged one.
+        """
+        return None
+
     def instance_token(self) -> str | None:
         """Identity of *this boot* of this device, or None when it cannot be read.
 
@@ -492,6 +500,15 @@ class Uiautomator2Device(Device):
 
     def long_click(self, x: int, y: int, duration_ms: int = 600) -> None:
         self._call("long_click", x, y, duration_ms / 1000.0)
+
+    def focused_text(self) -> str | None:
+        """Read back the focused field's value, so `input` can check its own effect."""
+        try:
+            value = self._d(focused=True).get_text()
+        except Exception as exc:
+            logger.debug("could not read the focused field (%s)", exc)
+            return None
+        return value if isinstance(value, str) else None
 
     def send_text(self, text: str, *, clear: bool = True) -> None:
         """Type *text* into the focused field, preferring fast one-shot paths.

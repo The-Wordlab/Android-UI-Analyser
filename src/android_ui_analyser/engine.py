@@ -195,7 +195,7 @@ class Restart(NamedTuple):
 class StepFailure(NamedTuple):
     """Why (and where) a step sequence stopped — the executor's divergence signal."""
 
-    code: str  # destructive_step | input_required | element_not_found |
+    code: str  # destructive_step | input_required | input_not_applied | element_not_found |
     #            unsupported_action | wait_timeout | assert_failed
     at: int  # failing step index within the executed list
     step: RouteStep
@@ -1877,7 +1877,13 @@ class Engine:
                 elif kind == "clear":
                     self.clear(el.id, observe=False)
                 else:
-                    self.input_text(el.id, s.text or "", submit=s.submit, observe=False)
+                    # A step that typed nothing must diverge, not pass quietly: a flow whose
+                    # input never landed goes on to assert against a screen it never reached,
+                    # and reports the app's fault instead of its own.
+                    if not self.input_text(
+                        el.id, s.text or "", submit=s.submit, observe=False
+                    ).ok:
+                        return StepFailure("input_not_applied", i, s), res
             elif kind == "key":
                 if not s.arg:
                     return StepFailure("unsupported_action", i, s), res
@@ -3652,12 +3658,60 @@ class Engine:
         # The step records the field's SHAPE only — the typed value is never persisted
         # (PRD §6b privacy; observe_action strips `text` defensively too).
         step = self._step("input", el, submit=submit)
+        before = el.text
         with self._acting(_action_mark("input", el)):
             self.device.input_text(cx, cy, text, clear=True, submit=submit)
         self._record_action_safe(step)
+        verified = self._typed_text_landed(before, text, submit=submit)
         return self._observe(
-            ActionResult(ok=True, action="input", id=el.id, detail=text), observe, with_image
+            ActionResult(
+                ok=verified is not False,
+                action="input",
+                id=el.id,
+                detail=text,
+                verified=verified,
+            ),
+            observe,
+            with_image,
         )
+
+    def _typed_text_landed(self, before: str | None, text: str, *, submit: bool) -> bool | None:
+        """Did the text actually go in? ``True`` / ``False`` / ``None`` for "cannot tell".
+
+        `input` was the last command that could report `ok:true` having done nothing at all —
+        the family the rest of this tool has already closed off (`tap` re-analyzes, `record`
+        consults `ps`, `emulator stop` checks the running list). It was seen repeatedly across
+        a sweep: a field that never took the text, reported as success, and the lane read the
+        empty result as the product ignoring it.
+
+        Only one situation is unambiguous enough to *fail*: the field is readable, it still
+        holds exactly what it held before, and it does not contain what we typed. Everything
+        else stays `ok` with an honest ``None``, because plenty of fields legitimately do not
+        read back what you typed:
+
+        - ``submit=True`` sends the value and leaves the field empty — the common case for a
+          chat composer, and failing it would be far worse than the bug;
+        - password fields report a mask, or nothing at all;
+        - fields that reformat as you type (phone numbers, card numbers, dates) or truncate
+          at ``maxLength`` hold a *transformed* value, which is still a successful input.
+
+        An unreadable field is ``None``, never "unchanged" — the same rule as everywhere else
+        here: never turn a failed observation into a verdict.
+        """
+        if not text or submit:
+            return None
+        after = self.device.focused_text()
+        if after is None:
+            return None
+        if text in after:
+            return True
+        if after == (before or ""):
+            logger.warning(
+                "input did not change the field (still %d chars); reporting the truth",
+                len(after),
+            )
+            return False
+        return None
 
     def clear(
         self,
