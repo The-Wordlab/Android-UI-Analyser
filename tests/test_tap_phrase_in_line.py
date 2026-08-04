@@ -65,7 +65,7 @@ def test_a_multiline_block_is_left_alone():
     block = Element(
         id=2,
         type="TextView",
-        text="By continuing you agree to the Terms of use and the Privacy policy of Luzia",
+        text="By continuing you agree to the Terms of use and the Privacy policy",
         bounds=[40, 900, 680, 1100],  # 640x200 - not a single line
         center=[360, 1000],
     )
