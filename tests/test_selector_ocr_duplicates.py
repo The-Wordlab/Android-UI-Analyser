@@ -241,3 +241,32 @@ def test_real_app_text_does_count_as_ocr_helping():
     button = _node(68, "Continue", [700, 2020, 870, 2060], source="ocr")
 
     assert ocr_added_app_content([webview, button]) is True
+
+
+def test_offset_reading_matches_the_node_it_came_from():
+    """Recognised glyphs sit lower and wider than the text view that produced them.
+
+    Real geometry from a 720x1280 screen: the tree had "Apps" at y 64-88 and OCR returned it
+    at y 76-122. Centre-containment put the box in the card underneath, compared the reading
+    against that card's text, found no match, and kept a duplicate. Overlap is the honest
+    test - the box plainly covers the header.
+    """
+    header = _node(9, "Apps", [32, 64, 143, 88])
+    card = _node(10, "Sport Your personalised exercise routine", [32, 88, 352, 374])
+    reading = _node(60, "Apps", [30, 76, 144, 122], source="ocr")
+
+    out = drop_redundant_ocr([header, card, reading])
+
+    assert [el.id for el in out] == [9, 10], "the offset reading is still a duplicate"
+
+
+def test_overlap_alone_never_drops_a_reading():
+    """A neighbour that merely touches the box must not cause a drop.
+
+    Overlap widens the candidate set, so the text test has to carry the decision. If a box
+    grazing an unrelated card were enough, genuinely new content would vanish.
+    """
+    card = _node(10, "Sport Your personalised exercise routine", [32, 88, 352, 374])
+    reading = _node(61, "Beat maker", [30, 76, 144, 122], source="ocr")
+
+    assert 61 in [el.id for el in drop_redundant_ocr([card, reading])]

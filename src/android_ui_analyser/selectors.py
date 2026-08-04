@@ -181,7 +181,15 @@ def drop_redundant_ocr(elements: Sequence[Element]) -> list[Element]:
 
     **Never drops a repair of lossy text.** When the tree could not represent a character it
     emits U+FFFD, and then the OCR reading is the only correct account of that text - the
-    opposite of redundant. Such an enclosure is skipped rather than matched against.
+    opposite of redundant. Such a neighbour is skipped rather than matched against.
+
+    **Overlap, not centre-containment.** An OCR box rarely lines up with the node that
+    produced it - recognised glyphs sit lower and wider than the text view's bounds. Measured
+    on a real screen: the tree had "Apps" at y 64-88 and OCR returned it at y 76-122, so the
+    box's *centre* landed in the card underneath and the reading was compared against the
+    wrong element's text. It then survived as a duplicate. Any overlapping node is a
+    candidate now; the text test still does the deciding, so a neighbour that merely touches
+    the box cannot cause a drop unless it already says the same thing.
     """
     solid = [el for el in elements if el.source != "ocr"]
     if not solid:
@@ -191,10 +199,11 @@ def drop_redundant_ocr(elements: Sequence[Element]) -> list[Element]:
         seen = (el.text or "").strip().casefold()
         if not seen:
             return False
-        cx, cy = el.center
+        box = el.bounds
         for h in solid:
-            if not (h.bounds[0] <= cx <= h.bounds[2] and h.bounds[1] <= cy <= h.bounds[3]):
-                continue
+            b = h.bounds
+            if b[2] < box[0] or b[0] > box[2] or b[3] < box[1] or b[1] > box[3]:
+                continue  # no overlap at all
             known = f"{h.text or ''} {h.content_desc or ''}"
             if "�" in known:
                 continue  # the tree lost characters here; OCR is the repair, not a copy
