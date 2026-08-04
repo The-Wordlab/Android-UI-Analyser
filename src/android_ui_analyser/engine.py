@@ -1694,6 +1694,24 @@ class Engine:
             return "auto"
         return "hierarchy"
 
+    def _analyze_route_step(
+        self,
+        steps: list[RouteStep],
+        index: int,
+        origin_package: str | None,
+        *,
+        hierarchy_ocr: bool,
+    ) -> AnalyzeResult:
+        """Observe between route steps without taxing ordinary native hops with OCR.
+
+        Foreign/transit screens keep ``source=auto`` and its normal OCR behavior. Inside
+        the origin app, ``goto`` can request hierarchy-only observations and explicitly
+        retry OCR only when a remembered selector is absent.
+        """
+        source = self._source_for(steps, index, origin_package)
+        with_ocr = None if hierarchy_ocr or source == "auto" else False
+        return self.analyze(source=source, with_ocr=with_ocr)
+
     def _run_steps(
         self,
         steps: list[RouteStep],
@@ -1705,6 +1723,7 @@ class Engine:
         res: AnalyzeResult | None = None,
         executed: list[dict[str, Any]] | None = None,
         flow_depth: int = 0,
+        hierarchy_ocr: bool = True,
     ) -> tuple[StepFailure | None, AnalyzeResult]:
         """Execute *steps* with selector matching, settle waits, and re-perception.
 
@@ -1716,7 +1735,9 @@ class Engine:
         ``(failure | None, last analyze result)``.
         """
         if res is None:
-            res = self.analyze(source=self._source_for(steps, 0, origin_package))
+            res = self._analyze_route_step(
+                steps, 0, origin_package, hierarchy_ocr=hierarchy_ocr
+            )
         lexicon = self.config.memory.destructive_labels
         for i, s in enumerate(steps):
             if is_destructive_step(s, lexicon) and not allow_destructive:
@@ -1729,9 +1750,20 @@ class Engine:
                     # auto-recorded inputs never store the value — the caller supplies it
                     return StepFailure("input_required", i, s), res
                 el = _match_step(res.elements, s)
+                if el is None and not hierarchy_ocr:
+                    source = self._source_for(steps, i, origin_package)
+                    if source == "hierarchy":
+                        # Known native routes stay hierarchy-fast. OCR is paid only when
+                        # the remembered selector is not present in accessibility data.
+                        retry = self.analyze(source="hierarchy", with_ocr=True)
+                        retry_el = _match_step(retry.elements, s)
+                        if retry_el is not None:
+                            res, el = retry, retry_el
                 if el is None and scroll_fallback and (s.label or s.resource_id):
                     self.scroll_to(s.label or s.resource_id or "", observe=False)
-                    res = self.analyze(source=self._source_for(steps, i, origin_package))
+                    res = self._analyze_route_step(
+                        steps, i, origin_package, hierarchy_ocr=hierarchy_ocr
+                    )
                     el = _match_step(res.elements, s)
                 if el is None:
                     return StepFailure("element_not_found", i, s), res
@@ -1841,6 +1873,7 @@ class Engine:
                         res=res,
                         executed=executed,
                         flow_depth=flow_depth,
+                        hierarchy_ocr=hierarchy_ocr,
                     )
                     if subfail is not None:
                         return subfail, res
@@ -1859,6 +1892,7 @@ class Engine:
                         res=res,
                         executed=executed,
                         flow_depth=flow_depth,
+                        hierarchy_ocr=hierarchy_ocr,
                     )
                     if subfail is None:
                         break
@@ -1892,6 +1926,7 @@ class Engine:
                     res=res,
                     executed=executed,
                     flow_depth=flow_depth + 1,
+                    hierarchy_ocr=hierarchy_ocr,
                 )
                 if subfail is not None:
                     return StepFailure(subfail.code, i, s), res  # surface sub-failure here
@@ -1905,7 +1940,9 @@ class Engine:
                 if settle:
                     with contextlib.suppress(StabilityTimeout):
                         self.wait_stable(settle_ms=500, timeout_ms=8000)
-                res = self.analyze(source=self._source_for(steps, i + 1, origin_package))
+                res = self._analyze_route_step(
+                    steps, i + 1, origin_package, hierarchy_ocr=hierarchy_ocr
+                )
         return None, res
 
     # ----------------------------------------------------------------- planner (§7.3)
@@ -2046,7 +2083,9 @@ class Engine:
         mem = self._memory
         if mem is None:
             raise UsageError("memory is disabled", hint="Set `memory.enabled: true` in config.")
-        res = self.analyze(source="hierarchy")  # perceive current screen (writes the id cache)
+        # Known routes normally replay stable hierarchy selectors. Keep the happy path free
+        # of OCR; `_run_steps` retries with it only when a remembered label is absent.
+        res = self.analyze(source="hierarchy", with_ocr=False)
         serial = res.meta.device_serial or self.device.serial
         package = res.screen.package or self.current_package()
         if not package:
@@ -2205,6 +2244,7 @@ class Engine:
                 origin_package=package,
                 allow_destructive=allow_destructive,
                 res=res,
+                hierarchy_ocr=False,
             )
             if fail is not None:
                 if assist:
@@ -2225,6 +2265,13 @@ class Engine:
                     hint=self._assist_suggestion(assist),
                 )
             reached = res.meta.known_screen
+            if reached != edge.to_screen and "apple_vision" not in res.meta.providers_used:
+                # A custom-rendered destination may not be recognisable from accessibility
+                # alone. Pay for one OCR retry before declaring that the route diverged.
+                retry = self.analyze(source="hierarchy", with_ocr=True)
+                if retry.meta.known_screen == edge.to_screen:
+                    res = retry
+                    reached = retry.meta.known_screen
             hops.append(
                 {
                     "action": edge.action,

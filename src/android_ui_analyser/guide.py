@@ -129,7 +129,9 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         '`aua goto "<goal>"` replays the remembered steps of each route edge — by resource-id '
         "first, then label — verifying every hop, including cross-app auth legs (Google sign-in "
         "through Chrome/GMS is folded into one edge). Prefer it whenever `suggested_gotos` lists "
-        "your target. `--plan` prints the annotated route (steps, replayable, destructive) "
+        "your target. Known in-app hops skip OCR and retry it only when hierarchy cannot match "
+        "a selector or verify arrival; transit screens keep automatic OCR. `--plan` prints the "
+        "annotated route (steps, replayable, destructive) "
         "without acting. Steps matching `memory.destructive_labels` (delete/sign out/pay/…) are "
         "refused without `--allow-destructive`. On divergence it hands back the failing step, "
         "the remaining steps, and the current elements — finish that one step manually, then "
