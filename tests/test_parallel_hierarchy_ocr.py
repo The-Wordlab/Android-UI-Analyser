@@ -92,7 +92,10 @@ def test_hierarchy_and_apple_ocr_run_in_parallel_and_both_survive() -> None:
     engine = make_engine(config=cfg, device=device, factory=_Factory(provider))  # type: ignore[arg-type]
 
     started = time.perf_counter()
-    result = engine.analyze(source="hierarchy")
+    # with_ocr=True is what keeps the parallel overlap. Auto mode captures the hierarchy
+    # first and then decides whether OCR is worth running at all, so it cannot be used to
+    # test concurrency - the barrier would wait for a second party that never arrives.
+    result = engine.analyze(source="hierarchy", with_ocr=True)
     elapsed = time.perf_counter() - started
 
     submit = [element for element in result.elements if element.text == "Submit"]
@@ -127,7 +130,7 @@ def test_redundant_readings_can_be_kept_for_inspection() -> None:
     )
     engine = make_engine(config=cfg, device=device, factory=_Factory(provider))  # type: ignore[arg-type]
 
-    result = engine.analyze(source="hierarchy")
+    result = engine.analyze(source="hierarchy", with_ocr=True)
 
     submit = [element for element in result.elements if element.text == "Submit"]
     assert {element.source for element in submit} == {Source.hierarchy, Source.ocr}
