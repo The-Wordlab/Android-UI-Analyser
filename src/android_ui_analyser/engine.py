@@ -81,6 +81,7 @@ from .selectors import (
     _MAX_CANDIDATES,
     _match_step,
     app_elements,
+    drop_redundant_ocr,
     element_digest,
     match_selector,
     nearest_elements,
@@ -3196,7 +3197,9 @@ class Engine:
         cached = None if fresh else self._read_cache()
         result = cached if cached is not None else self.analyze(source="hierarchy", record=False)
         elements = result.elements
-        matches = match_selector(elements, rid=rid, text=text, desc=desc)
+        # Fused OCR readings of text the tree already reports would break tiering: see
+        # drop_redundant_ocr. Must happen before matching, not after.
+        matches = match_selector(drop_redundant_ocr(elements), rid=rid, text=text, desc=desc)
         label = selector_label(selector)
         if not matches and rid:
             # The element list prunes unlabeled, non-actionable containers, so a real

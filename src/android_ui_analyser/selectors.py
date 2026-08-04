@@ -97,6 +97,52 @@ def match_selector(
     return tiers[min(tiers)] if tiers else []
 
 
+def drop_redundant_ocr(elements: Sequence[Element]) -> list[Element]:
+    """*elements* without OCR readings of text the hierarchy already reports.
+
+    On macOS every hierarchy observation is fused with an Apple Vision pass, so text the
+    tree already describes is described a second time as recognised pixels. For ``analyze``
+    both are wanted. For a one-shot selector the second copy is destructive, in two ways:
+
+    * A plain duplicate makes ``tap --text Settings`` raise "matches 2 elements" on a screen
+      with one Settings tab.
+    * Worse, OCR reads by visual line, so a composite label splits into words. A card
+      labelled "Settings and privacy options" yields a fragment reading exactly
+      ``Settings``, which is an *exact* match and therefore ties with the real tab - even
+      though the hierarchy would have ranked that card below it as a mere substring. Tiering
+      is what makes short labels usable, and an OCR fragment silently defeats it.
+
+    Observed on a real bottom-bar layout: 7 of one screen's labels affected, every tab among
+    them. So this runs before matching, not after - by the time tiers are computed the
+    fragment has already been promoted and the damage is done.
+
+    A reading is redundant when some non-OCR element both encloses it and already carries
+    that text. Both conditions matter: enclosure alone would discard a genuine second
+    occurrence elsewhere on screen, and text alone would discard web content that happens
+    to repeat a word from the surrounding tree. Where the hierarchy is silent - a Chrome
+    Custom Tab, a Flutter surface - nothing is enclosing and describing the text, so OCR
+    survives untouched and remains the only witness there is.
+    """
+    solid = [el for el in elements if el.source != "ocr"]
+    if not solid:
+        return list(elements)
+
+    def redundant(el: Element) -> bool:
+        seen = (el.text or "").strip().casefold()
+        if not seen:
+            return False
+        cx, cy = el.center
+        for h in solid:
+            if not (h.bounds[0] <= cx <= h.bounds[2] and h.bounds[1] <= cy <= h.bounds[3]):
+                continue
+            known = f"{h.text or ''} {h.content_desc or ''}".casefold()
+            if seen in known:
+                return True
+        return False
+
+    return [el for el in elements if el.source != "ocr" or not redundant(el)]
+
+
 def app_elements(elements: Sequence[Element]) -> list[Element]:
     """*elements* minus system chrome (``com.android.systemui`` & friends).
 
