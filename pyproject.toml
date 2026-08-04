@@ -63,7 +63,7 @@ lxml = ["lxml>=5.0"]
 
 
 [project.scripts]
-aua = "android_ui_analyser.cli:app"
+aua = "android_ui_analyser.cli:run"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/android_ui_analyser"]

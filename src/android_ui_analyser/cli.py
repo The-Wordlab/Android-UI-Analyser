@@ -4304,5 +4304,97 @@ def mcp(ctx: typer.Context) -> None:
     mcp_server.run_stdio()
 
 
-if __name__ == "__main__":  # pragma: no cover
+# ------------------------------------------------------------------- entry point
+
+# Options declared on the top-level callback rather than on a command. Written out
+# rather than introspected because the value has to be known before Click parses.
+_GLOBAL_OPTS: dict[str, bool] = {  # name -> takes a value
+    "--serial": True,
+    "--config": True,
+    "--format": True,
+    "--profile": True,
+    "--timeout": True,
+    "--log-level": True,
+    "--no-cache": False,
+    "--with-image": False,
+}
+
+
+def _defines_option(argv: list[str], name: str) -> bool:
+    """Does the subcommand *argv* addresses declare *name* itself?
+
+    Several commands legitimately reuse a global name for their own purpose - `emulator
+    stop --serial` names the emulator to kill, and an export command's `--format` means
+    gif|mp4. Those must keep winning, so the option is only moved when the target command
+    has no opinion about it.
+    """
+    try:
+        import click
+        import typer.main
+
+        cmd: Any = typer.main.get_command(app)
+        for token in argv:
+            if token.startswith("-"):
+                break
+            if not isinstance(cmd, click.Group):
+                break
+            nxt = cmd.get_command(click.Context(cmd), token)
+            if nxt is None:
+                break
+            cmd = nxt
+        params = getattr(cmd, "params", [])
+        return any(name in getattr(p, "opts", []) for p in params)
+    except Exception:  # introspection must never break the CLI
+        return True
+
+
+def hoist_global_options(argv: list[str]) -> list[str]:
+    """Move top-level options that were written after the subcommand to the front.
+
+    `aua analyze --format json` is the single most repeated mistake in this project -
+    across sessions, models and a documented warning. Click is right that `--format` binds
+    to the group, but being right costs an agent a failed call, a wasted turn, and a detour
+    into `--help`; the intent was never ambiguous. So accept both spellings.
+
+    Only moves an option the target command does not define itself, and stops at `--` so a
+    literal argument is never touched.
+    """
+    if not argv:
+        return argv
+    end = argv.index("--") if "--" in argv else len(argv)
+    head, tail = argv[:end], argv[end:]
+
+    # Everything before the first subcommand token is already global.
+    first_cmd = next((i for i, tok in enumerate(head) if not tok.startswith("-")), None)
+    if first_cmd is None:
+        return argv
+
+    hoisted: list[str] = []
+    kept: list[str] = []
+    i = 0
+    while i < len(head):
+        tok = head[i]
+        base, eq, inline = tok.partition("=")
+        if i > first_cmd and base in _GLOBAL_OPTS and not _defines_option(head[first_cmd:], base):
+            takes_value = _GLOBAL_OPTS[base]
+            if eq:
+                hoisted.append(tok)
+            elif takes_value and i + 1 < len(head) and not head[i + 1].startswith("-"):
+                hoisted.extend([base, head[i + 1]])
+                i += 1
+            else:
+                hoisted.append(base)
+        else:
+            kept.append(tok)
+        i += 1
+    return hoisted + kept + tail
+
+
+def run() -> None:
+    """Console-script entry point: tolerate misplaced global options, then dispatch."""
+    sys.argv[1:] = hoist_global_options(sys.argv[1:])
     app()
+
+
+if __name__ == "__main__":  # pragma: no cover
+    run()

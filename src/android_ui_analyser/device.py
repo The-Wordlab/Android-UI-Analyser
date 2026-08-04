@@ -1085,7 +1085,49 @@ def connect(serial: str | None = None) -> Device:
                 hint="Pass --serial <id> to choose one.",
             )
         serial = online[0].serial
+    else:
+        _require_attached(serial)
     return Uiautomator2Device(serial)
+
+
+_MISSING_SERIAL_GRACE_S = 1.0
+
+
+def _require_attached(serial: str) -> None:
+    """Fail immediately when *serial* is not attached at all.
+
+    Without this, a pinned serial goes straight to uiautomator2, which retries its way to
+    the same conclusion in about 29 seconds - to report something adb answers in 20 ms. It
+    matters because losing a device mid-run is routine, not exotic: an emulator hits its
+    idle-stop, a CI job runs `pkill -f qemu-system`, a parallel worker tears down the wrong
+    instance. An agent then pays half a minute per call, several calls in a row, before it
+    can even see that the device is what broke.
+
+    Only a *completely absent* serial fails fast. One that is attached but not yet ready
+    (``offline``, ``unauthorized``, still booting) is handed to uiautomator2 as before, so
+    the ordinary start-up race keeps working - a booting emulator appears in adb long before
+    it is usable. The single short retry covers the narrow window where a just-launched
+    emulator has not yet bound its console port.
+    """
+    for attempt in (0, 1):
+        try:
+            attached = {d.serial: d.state for d in list_devices()}
+        except DeviceError:
+            return  # adb itself is the problem; let the normal path report it
+        if serial in attached:
+            return
+        if attempt == 0:
+            time.sleep(_MISSING_SERIAL_GRACE_S)
+
+    listing = ", ".join(f"{s} ({st})" for s, st in sorted(attached.items())) or "none"
+    raise DeviceError(
+        f"device {serial!r} is not attached (attached: {listing})",
+        hint=(
+            "The device went away or was never started. If a worker owns it, restart it with "
+            "`aua emulator start --avd <name>`; `aua devices` lists what adb can see. A "
+            "headless emulator also auto-stops after its --idle-stop window."
+        ),
+    )
 
 
 def list_devices() -> list[DeviceInfo]:
