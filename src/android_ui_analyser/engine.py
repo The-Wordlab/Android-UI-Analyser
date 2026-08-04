@@ -97,6 +97,11 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 logger = logging.getLogger("android_ui_analyser.engine")
 
+# A run of text one line tall measures roughly two to three average character widths
+# in height; a wrapped paragraph measures many. Used to decide whether aiming at a
+# phrase inside an element can only move horizontally.
+_SINGLE_LINE_HEIGHT_RATIO = 3.5
+
 QUERY_CONFIDENT = 1.0  # all salient tokens / exact phrase present
 QUERY_SOFT = 0.5  # best-effort threshold when escalation is exhausted
 _ASSIST_MAX_STEPS = 6  # bound on planner actions per recovery attempt (opt-in only)
@@ -1896,6 +1901,15 @@ class Engine:
                 if s.arg not in ("up", "down", "left", "right"):
                     return StepFailure("unsupported_action", i, s), res
                 self.swipe(s.arg, observe=False)
+            elif kind == "scroll":
+                # A recorded scroll used to be unsaveable *and* unreplayable: the engine
+                # records kind="scroll", the flow schema had no such kind, and rendering it
+                # raised KeyError('scroll') - surfacing as `internal_error: 'scroll'` out of
+                # `flow save`. Any journey containing a scroll therefore could not be
+                # captured at all, which is most journeys worth capturing.
+                if s.arg not in ("up", "down", "left", "right"):
+                    return StepFailure("unsupported_action", i, s), res
+                self.scroll(s.arg, observe=False)
             elif kind == "scroll-to":
                 if not s.arg:
                     return StepFailure("unsupported_action", i, s), res
@@ -3467,6 +3481,7 @@ class Engine:
         first: bool = False,
         fresh: bool = True,
         vision_fallback: bool = True,
+        prefer_clickable: bool = False,
     ) -> Element:
         """Resolve a one-shot selector to a single element, in this one call.
 
@@ -3522,6 +3537,24 @@ class Engine:
                         hint="Indexes are 0-based and follow reading order (top-left first).",
                     )
                 return matches[index]
+            if prefer_clickable:
+                # Compose routinely renders a clickable icon tile and a caption beneath it
+                # carrying the same text, as two separate accessibility nodes with no
+                # overlap - measured on a real sheet: the tile at y 840-1000 and the caption
+                # at y 1016-1051. So `tap --text "Attach Photos"` matches two elements and
+                # both are genuine; no dedup rule can help, because neither is a duplicate
+                # reading of the other. But only one of them can be tapped, and the caller
+                # said tap. Choosing it is not guessing - it is the only interpretation that
+                # can be carried out. Two tappable matches stay ambiguous, as they should.
+                tappable = [el for el in matches if el.clickable]
+                if len(tappable) == 1:
+                    logger.info(
+                        "%s matched %d elements; taking the only clickable one (id=%s)",
+                        label,
+                        len(matches),
+                        tappable[0].id,
+                    )
+                    return tappable[0]
             if not first:
                 raise SelectorAmbiguousError(
                     f"{label} matches {len(matches)} elements — "
@@ -3580,13 +3613,63 @@ class Engine:
     ) -> Element:
         """The element an action addresses: an id from the last analyze, or a selector."""
         if selector:
-            return self.resolve_selector(**selector)
+            # A verb that needs something tappable may break a tie on clickability.
+            return self.resolve_selector(
+                **selector, prefer_clickable=verb in ("tap", "long-press")
+            )
         if element_id is None:
             raise UsageError(
                 f"{verb} needs an element id or a selector",
                 hint=f"`aua {verb} 9`, `aua {verb} --rid someId`, or `aua {verb} --text 'Label'`",
             )
         return self._resolve(element_id)
+
+    def _tap_point(self, el: Element, needle: str | None) -> tuple[int, int]:
+        """Where to tap for *el*, aiming at *needle* when it is only part of one line.
+
+        Two links can share a single line: "Terms of use and Privacy policy" is one
+        underlined run where each phrase is its own tappable span. Android does not publish
+        a ClickableSpan as a separate node, and OCR groups by visual line, so both the tree
+        and the pixels describe that line as **one** element. Tapping its centre lands
+        between the two links - on neither - and the only workaround left was a measured
+        coordinate tap, which is exactly what this tool exists to remove.
+
+        So when the matched element's text merely *contains* the phrase asked for, and the
+        element is a single line, aim proportionally: estimate the phrase's horizontal share
+        of the line and tap the middle of that. Character widths vary, so this is an
+        estimate - but an estimate inside the right phrase beats the exact centre of the
+        wrong one.
+
+        Falls back to the element centre whenever the assumption does not hold: no needle,
+        an exact match, a multi-line box, or a phrase not found in the text.
+        """
+        cx, cy = el.center
+        text = (el.text or "").strip()
+        want = (needle or "").strip()
+        if not want or not text or len(want) >= len(text):
+            return cx, cy
+        start = text.casefold().find(want.casefold())
+        if start < 0:
+            return cx, cy
+        x1, y1, x2, y2 = el.bounds
+        width, height = x2 - x1, y2 - y1
+        if width <= 0 or height <= 0:
+            return cx, cy
+        # Is this one line? Aspect ratio does not answer that - a 640x200 paragraph is still
+        # wider than it is tall. Comparing the height to the average character width does,
+        # and is independent of screen density: one line of text is roughly two to three
+        # character-widths tall, a paragraph is many. Guessing wrong here would aim at the
+        # right horizontal offset on the wrong line, which is worse than the centre.
+        avg_char_width = width / len(text)
+        if height > _SINGLE_LINE_HEIGHT_RATIO * avg_char_width:
+            return cx, cy
+        mid_char = start + len(want) / 2.0
+        x = int(x1 + width * (mid_char / len(text)))
+        x = max(x1 + 1, min(x, x2 - 1))
+        logger.info(
+            "aiming at %r inside %r: x=%d instead of the line centre %d", want, text[:40], x, cx
+        )
+        return x, cy
 
     def tap(
         self,
@@ -3597,7 +3680,14 @@ class Engine:
         with_image: bool | str | None = None,
     ) -> ActionResult:
         el = self._target(element_id, selector)
-        cx, cy = self._aim(el)
+        # Two independent corrections to the naive `el.center`, composed on separate axes.
+        # `_tap_point` aims x at a named phrase inside a single line, so two links on one line
+        # are separately reachable. `_aim` moves y out of the system navigation bar, whose
+        # docstring states it never second-guesses x for exactly this reason. Take x from the
+        # first and y from the second; `_aim` still raises when nothing of the element is
+        # visible, which must survive rather than being swallowed here.
+        cx, _ = self._tap_point(el, (selector or {}).get("text"))
+        _, cy = self._aim(el)
         step = self._step("tap", el)  # built pre-action: needs the cached package
         with self._acting(_action_mark("tap", el)):
             self.device.click(cx, cy)
