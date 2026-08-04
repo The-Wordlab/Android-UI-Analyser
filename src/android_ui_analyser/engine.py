@@ -2540,18 +2540,37 @@ class Engine:
         (opt-in planner), a divergence triggers one recovery attempt (dismiss a blocking
         dialog) then resumes from the failed step before handing off.
         """
-        from .flows import FlowStore, parse_flow_yaml, resolve_params
+        from .flows import FlowStore, anchor_paths, parse_flow_yaml, resolve_params
 
+        base_dir: Path | None = None
         if file:
             path = Path(file).expanduser()
             if not path.is_file():
-                raise UsageError(f"no flow file at {path}")
+                # Name the absolute location, always. Reporting the relative path back is
+                # what hid this bug: "no flow file at flows/x.yaml" looks like a typo, while
+                # "no flow file at /Users/daemon-was-started-here/flows/x.yaml" tells you
+                # immediately that the lookup happened somewhere you did not expect.
+                raise UsageError(
+                    f"no flow file at {path.resolve()}",
+                    hint=(
+                        "That is where a relative path resolves for the process running the "
+                        "flow, which is not always the shell you typed in."
+                    )
+                    if not path.is_absolute()
+                    else None,
+                )
             flow = parse_flow_yaml(path.read_text(encoding="utf-8"), name=path.stem)
+            base_dir = path.resolve().parent
         elif name:
-            flow = FlowStore(self.config.memory).load(name)
+            store = FlowStore(self.config.memory)
+            flow = store.load(name)
+            base_dir = store.flows_dir()
         else:
             raise UsageError("flow run needs a NAME or --file", hint="see `aua flow list`")
         steps = resolve_params(flow, params or {})
+        if base_dir is not None:
+            # A path *inside* a flow belongs to the flow, not to the caller's cwd.
+            steps = anchor_paths(steps, base_dir)
         if not 0 <= from_step < len(steps):
             raise UsageError(
                 f"--from-step {from_step} out of range (flow has {len(steps)} steps)"

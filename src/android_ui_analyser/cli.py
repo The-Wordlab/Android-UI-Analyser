@@ -3545,11 +3545,17 @@ def flow_run_cmd(
     """Replay a whole journey in one call; on divergence returns a resumable step index."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
+        # Make the path absolute *here*, in the process the user invoked. `_route` may hand
+        # this call to the warm daemon, whose working directory is wherever it happened to
+        # be started — so a relative `--file` was looked up against a directory the caller
+        # has never seen, and reported as missing even though `cwd` plainly contained it.
+        # An absolute path always worked, which is exactly the shape of this bug.
+        resolved = str(Path(file).expanduser().resolve()) if file else None
         result = _route(
             engine,
             "flow_run",
             name=name,
-            file=file,
+            file=resolved,
             params=_parse_params(param),
             dry_run=dry_run,
             from_step=from_step,

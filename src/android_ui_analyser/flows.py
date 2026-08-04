@@ -345,6 +345,39 @@ def resolve_params(flow: Flow, given: dict[str, str]) -> list[RouteStep]:
     return steps
 
 
+# Step kinds whose `arg` is a host filesystem path rather than a name or a label.
+# `mock-replay`, `flow` and `dev-profile` take *names*, so they must not be touched.
+_PATH_KINDS = frozenset({"flags-apply"})
+
+
+def anchor_paths(steps: list[RouteStep], base_dir: Path) -> list[RouteStep]:
+    """Resolve a step's relative host path against *base_dir* — the flow file's directory.
+
+    A flow that says ``flags_apply: flags/guest.yaml`` means "next to me". It cannot mean
+    "relative to whatever directory the caller happened to be in", and it certainly cannot
+    mean "relative to the daemon's cwd", which is what it got: the reporting lane had to
+    rewrite the reference to an absolute path to make the flow run at all.
+
+    Anchoring here also makes a flow directory portable — it can be checked in, moved, and
+    run from anywhere, which is the whole point of keeping flows in a repository.
+
+    Call this *after* param substitution, so `${DIR}/flags.yaml` anchors the value the
+    caller supplied rather than the placeholder.
+    """
+
+    def fix(step: RouteStep) -> RouteStep:
+        update: dict[str, Any] = {}
+        if step.kind in _PATH_KINDS and step.arg:
+            path = Path(step.arg).expanduser()
+            if not path.is_absolute():
+                update["arg"] = str((base_dir / path).resolve())
+        if step.substeps:
+            update["substeps"] = [fix(sub) for sub in step.substeps]
+        return step.model_copy(update=update) if update else step
+
+    return [fix(s) for s in steps]
+
+
 def steps_from_recent(recent: list[RouteStep]) -> tuple[list[RouteStep], dict[str, str]]:
     """Materialize recorded steps for ``flow save``: redacted values → ``${PARAM_n}``.
 
