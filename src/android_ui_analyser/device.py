@@ -764,15 +764,63 @@ class Uiautomator2Device(Device):
         d.mkdir(parents=True, exist_ok=True)
         return d / f"{self.serial.replace(':', '_')}.json"
 
+    def _live_recording(self) -> tuple[bool, str | None]:
+        """Ask the *device* whether a ``screenrecord`` is running: ``(observed, remote)``.
+
+        The on-disk handle is not authoritative and cannot be, because it is addressed by
+        two things that both move underneath it:
+
+        - **the cache directory.** The handle lives under ``AUA_CACHE__DIR``, so a worker
+          that exports a per-worker cache dir *between* its ``record start`` and its
+          ``record stop`` looks somewhere else at stop time and finds nothing — reporting
+          "no screen recording in progress" for a recording that plainly ran, and losing
+          the video rather than truncating it.
+        - **the serial.** Console ports are recycled within minutes, so a handle orphaned
+          by a killed worker makes the *next* worker's first ``record start`` fail with
+          "already in progress" before it has started anything.
+
+        ``ps`` describes this boot of this device, so it answers both. The first element
+        distinguishes "nothing is recording" from "``ps`` could not be read" — without
+        that, an unreadable ``ps`` would look like an idle device and we would clear a live
+        handle and start a second recorder over the top of the first.
+        """
+        try:
+            text = self.shell("ps -A -o ARGS")
+        except DeviceError:
+            return False, None
+        for line in text.splitlines():
+            if "screenrecord" not in line:
+                continue
+            # `screenrecord [options] <remote.mp4>` — the destination is the trailing
+            # argument. Match on shape rather than position so an added option (or a
+            # recorder started by something other than aua) is still recognised.
+            tail = line.split()[-1] if line.split() else ""
+            return True, tail if tail.startswith("/") else None
+        return True, None
+
     def start_recording(
         self, remote_path: str = "/sdcard/aua_recording.mp4", *, time_limit_s: int = 1800
     ) -> str:
         state = self._recording_state_path()
-        if self._recording_remote is not None or state.exists():
+        observed, live_remote = self._live_recording()
+        if self._recording_remote is not None or live_remote is not None:
             raise DeviceError(
                 "a screen recording is already in progress",
                 hint="Run `aua record stop <path>` before starting another.",
             )
+        if state.exists():
+            if not observed:
+                # `ps` unreadable: fall back to trusting the handle, as before. Refusing on
+                # an unverifiable handle risks a duplicate recorder; that is the safer error.
+                raise DeviceError(
+                    "a screen recording is already in progress",
+                    hint="Run `aua record stop <path>` before starting another.",
+                )
+            # The device says nothing is recording, so this handle is an orphan from a
+            # previous instance on this serial. Drop it rather than refusing the caller.
+            logger.info("clearing an orphaned recording handle at %s", state)
+            with contextlib.suppress(Exception):
+                state.unlink()
         self._recording_remote = remote_path
         # `screenrecord` refuses anything above 180s - "Time limit 1800s outside acceptable
         # range [1,180]" - and exits immediately. An earlier attempt to defeat the platform's
@@ -826,6 +874,13 @@ class Uiautomator2Device(Device):
             # Started by an earlier `aua` invocation — recover the handle from disk.
             with contextlib.suppress(Exception):
                 self._recording_remote = json.loads(state_file.read_text()).get("remote")
+        if self._recording_remote is None:
+            # No handle here — but the recording may still be running, started under a
+            # different cache directory. The device knows where it is writing.
+            _, live_remote = self._live_recording()
+            if live_remote is not None:
+                logger.info("recovered a running recording from the device: %s", live_remote)
+                self._recording_remote = live_remote
         if self._recording_remote is None:
             raise DeviceError(
                 "no screen recording in progress", hint="Start one with `aua record start`."
