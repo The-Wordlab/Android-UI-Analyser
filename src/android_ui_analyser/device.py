@@ -27,6 +27,10 @@ from .schema import DeviceInfo, MatchMode
 
 logger = logging.getLogger("android_ui_analyser.device")
 
+# `screenrecord` rejects a --time-limit above this and exits at once, so asking for
+# more records nothing. The platform also stops at this limit on its own.
+_SCREENRECORD_MAX_S = 180
+
 _RECONNECT_WARN_WINDOW_S = 30.0
 _last_reconnect_warn: dict[str, float] = {}
 
@@ -770,20 +774,51 @@ class Uiautomator2Device(Device):
                 hint="Run `aua record stop <path>` before starting another.",
             )
         self._recording_remote = remote_path
-        # `screenrecord` defaults to a 180s limit and then exits *silently*: a longer journey
-        # loses its recording with no error anywhere. Pass the limit explicitly and default it
-        # well past a realistic scenario so evidence is not truncated by surprise.
+        # `screenrecord` refuses anything above 180s - "Time limit 1800s outside acceptable
+        # range [1,180]" - and exits immediately. An earlier attempt to defeat the platform's
+        # silent 180s truncation by asking for 1800 therefore recorded *nothing at all*, while
+        # `record start` still reported ok. Two lanes of a sweep lost their video to it. Clamp
+        # to what the platform accepts, and say what the effective limit was.
+        limit = max(1, min(int(time_limit_s), _SCREENRECORD_MAX_S))
         self._recording_proc = subprocess.Popen(  # noqa: S603
             [
                 "adb", "-s", self.serial, "shell", "screenrecord",
-                "--time-limit", str(int(time_limit_s)), remote_path,
+                "--time-limit", str(limit), remote_path,
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        # Confirm it is actually recording before claiming success. `screenrecord` writes its
+        # container header straight away, so the file appearing is the signal; without this
+        # check any future rejection is silent again, which is the whole defect.
+        if not self._wait_for_remote_file(remote_path, timeout_s=4.0):
+            self._recording_remote = None
+            with contextlib.suppress(Exception):
+                self._recording_proc.kill()
+            self._recording_proc = None
+            raise DeviceError(
+                f"screen recording did not start (no {remote_path} on device)",
+                hint=(
+                    "Check `adb -s <serial> shell screenrecord --time-limit "
+                    f"{limit} {remote_path}` by hand; some emulator images and headless GPU "
+                    "modes refuse to encode. Screenshots remain a valid evidence fallback."
+                ),
+            )
         with contextlib.suppress(Exception):
-            state.write_text(json.dumps({"remote": remote_path, "time_limit_s": int(time_limit_s)}))
+            state.write_text(json.dumps({"remote": remote_path, "time_limit_s": limit}))
         return remote_path
+
+    def _wait_for_remote_file(self, remote_path: str, *, timeout_s: float) -> bool:
+        """True once *remote_path* exists on the device, within *timeout_s*."""
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            with contextlib.suppress(Exception):
+                out = self._d.shell(f"ls -l {remote_path} 2>/dev/null")
+                text = out if isinstance(out, str) else getattr(out, "output", "")
+                if remote_path.split("/")[-1] in str(text):
+                    return True
+            time.sleep(0.25)
+        return False
 
     def stop_recording(self, local_path: str) -> str:
         state_file = self._recording_state_path()
@@ -815,7 +850,30 @@ class Uiautomator2Device(Device):
                     proc.wait(timeout=5)
         dest = Path(local_path).expanduser().resolve()
         dest.parent.mkdir(parents=True, exist_ok=True)
+        # `adb pull` of a remote path that does not exist creates a *directory* at the
+        # destination and returns success, so a failed recording used to land as an empty
+        # `evidence.mp4/` folder while `record stop` reported ok. Check before pulling, and
+        # check what arrived, because an empty directory named .mp4 is worse than an error:
+        # the agent files it as evidence and nobody looks inside.
+        if not self._wait_for_remote_file(remote, timeout_s=2.0):
+            raise DeviceError(
+                f"no recording found on the device at {remote}",
+                hint=(
+                    "The recording never started, or the platform stopped it. Nothing was "
+                    "written locally. Screenshots remain a valid evidence fallback."
+                ),
+            )
         self._call("pull", remote, str(dest))
+        if dest.is_dir() or not dest.is_file() or dest.stat().st_size == 0:
+            with contextlib.suppress(Exception):
+                if dest.is_dir():
+                    dest.rmdir()
+                elif dest.is_file():
+                    dest.unlink()
+            raise DeviceError(
+                f"pulling the recording produced nothing usable at {dest}",
+                hint="Try `adb -s <serial> pull` by hand; the device file may be zero-length.",
+            )
         with contextlib.suppress(Exception):
             self._d.shell(f"rm {remote}")
         return str(dest)
