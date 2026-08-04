@@ -481,17 +481,57 @@ class Uiautomator2Device(Device):
         self._call("long_click", x, y, duration_ms / 1000.0)
 
     def send_text(self, text: str, *, clear: bool = True) -> None:
-        # Prefer accessibility ACTION_SET_TEXT on the focused field: it replaces the
-        # content in one shot with no input injection, so it works on Android 14+ where
-        # u2's injectKeyEvent-based clear hits NoSuchMethodException
-        # (InputManager.getInstance removed). Fall back to the IME send_keys path.
+        """Type *text* into the focused field, preferring fast one-shot paths.
+
+        Order:
+        1. Accessibility ``ACTION_SET_TEXT`` via u2 ``set_text`` (replace) — fastest when it works.
+        2. Clipboard set + ``KEYCODE_PASTE`` (previous clipboard restored) — fast for long strings
+           and when ``set_text`` is unavailable; used for append when ``clear=False``.
+        3. IME ``send_keys`` — last resort (slow / char-by-char on some devices).
+        """
         if clear:
             try:
                 self._d(focused=True).set_text(text)
                 return
             except Exception as exc:
-                logger.debug("set_text on focused field failed (%s); using send_keys", exc)
+                logger.debug("set_text on focused field failed (%s); trying clipboard paste", exc)
+            if self._paste_via_clipboard(text, clear=True):
+                return
+            try:
+                self.clear_text()
+            except Exception as exc:
+                logger.debug("clear before send_keys failed (%s)", exc)
+            self._call("send_keys", text, clear=False)
+            return
+
+        # Append: set_text would replace, so skip straight to paste / keys.
+        if self._paste_via_clipboard(text, clear=False):
+            return
         self._call("send_keys", text, clear=False)
+
+    def _paste_via_clipboard(self, text: str, *, clear: bool) -> bool:
+        """Set clipboard → optional clear → paste → restore clipboard. Returns False on failure."""
+        previous: str | None
+        try:
+            previous = self.get_clipboard()
+        except Exception:
+            previous = None
+        try:
+            if clear:
+                try:
+                    self.clear_text()
+                except Exception as exc:
+                    logger.debug("clear_text before paste failed (%s)", exc)
+            self.set_clipboard(text)
+            self.paste()
+            return True
+        except Exception as exc:
+            logger.debug("clipboard paste path failed (%s)", exc)
+            return False
+        finally:
+            if previous is not None:
+                with contextlib.suppress(Exception):
+                    self.set_clipboard(previous)
 
     def clear_text(self) -> None:
         try:

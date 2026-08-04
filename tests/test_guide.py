@@ -33,6 +33,8 @@ def test_markdown_covers_required_topics() -> None:
         "known_screen",
         "schema",
         "exit codes",
+        "agent best practices",
+        "clipboard paste",
     ]:
         assert needle in low, needle
 

@@ -196,6 +196,10 @@ class ScreenRecord(BaseModel):
     signature: str
     anchors: list[str] = Field(default_factory=list)
     tier: str = "hierarchy"
+    # Perception evidence for experience-based OCR skip (not the same as latest ``tier`` —
+    # a hierarchy-tier observation may still have run Apple Vision augmentation).
+    hierarchy_only_ok: int = 0  # visits where hierarchy alone was enough (no kept OCR els)
+    ocr_helped: int = 0  # visits where OCR contributed kept elements
     key_elements: list[KeyElement] = Field(default_factory=list)
     dynamic: list[str] = Field(default_factory=list)  # shapes, e.g. "row list (dynamic)"
     notes: list[str] = Field(default_factory=list)
@@ -205,6 +209,22 @@ class ScreenRecord(BaseModel):
     last_verified: str
     visit_count: int = 1
     stale: bool = False
+
+
+def screen_skips_ocr(rec: ScreenRecord, *, min_hierarchy_ok: int = 3) -> bool:
+    """True when past visits say hierarchy alone is enough — skip parallel OCR.
+
+    Conservative: only native/form surfaces with enough hierarchy-only successes and
+    zero recorded OCR contributions. Canvas/webview and any prior OCR help stay on.
+    """
+    if rec.stale:
+        return False
+    if rec.ocr_helped > 0:
+        return False
+    if rec.hierarchy_only_ok < min_hierarchy_ok:
+        return False
+    surface = (rec.surface or "native").lower()
+    return surface in ("native", "form")
 
 
 class RouteStep(BaseModel):
@@ -1312,6 +1332,7 @@ class AppMemoryStore:
         context_id: str = DEFAULT_CONTEXT_ID,
         context_flags: dict[str, str] | None = None,
         context_verified: bool = False,
+        ocr_helped: bool | None = None,
     ) -> RecordOutcome:
         """Record/update the current screen; return how it was identified."""
         if not self.cfg.enabled:
@@ -1392,6 +1413,8 @@ class AppMemoryStore:
                 first_seen=now,
                 last_seen=now,
                 last_verified=now,
+                hierarchy_only_ok=1 if ocr_helped is False else 0,
+                ocr_helped=1 if ocr_helped is True else 0,
             )
         else:
             if name_hint and slug(name_hint) and slug(name_hint) != name:
@@ -1439,6 +1462,10 @@ class AppMemoryStore:
                 rec.anchors = sorted(anchors)
                 rec.tier = tier
                 rec.surface = surface
+                if ocr_helped is True:
+                    rec.ocr_helped += 1
+                elif ocr_helped is False:
+                    rec.hierarchy_only_ok += 1
                 if ke := key_elements(elements, redact=self.cfg.redact, height=screen_height):
                     rec.key_elements = ke
                 if dyn := detect_dynamic(elements):
@@ -1761,6 +1788,7 @@ class AppMemoryStore:
         app_version: str | None = None,
         tier: str = "hierarchy",
         screen_height: int | None = None,
+        ocr_helped: bool | None = None,
     ) -> str | None:
         """Record the current screen + any pending route edge. Returns ``known_screen``.
 
@@ -1806,6 +1834,7 @@ class AppMemoryStore:
             context_id=context_id,
             context_flags=context_flags,
             context_verified=context_verified,
+            ocr_helped=ocr_helped,
         )
         if in_transit:
             # The origin journey continues through this screen — session untouched.

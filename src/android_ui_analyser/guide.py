@@ -135,7 +135,10 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "without acting. Steps matching `memory.destructive_labels` (delete/sign out/pay/…) are "
         "refused without `--allow-destructive`. On divergence it hands back the failing step, "
         "the remaining steps, and the current elements — finish that one step manually, then "
-        "just re-run `aua goto`: it resumes mid-route, even mid-auth.",
+        "re-run `aua goto \"…\" --from-here` to resume mid-edge (skips steps that already match "
+        "the current screen; also covers mid-auth). Plain `aua goto` still starts from the "
+        "current *screen* on the map; `--from-here` is for mid-*edge* (you already tapped some "
+        "of the recorded steps yourself).",
     ),
     (
         "Replay whole journeys in one call (flows)",
@@ -410,7 +413,8 @@ KEY_FLAGS: list[tuple[str, str]] = [
     (
         "goto",
         "`<goal>` (fuzzy), `--plan` (annotated route, no taps), `--max-steps N`, "
-        "`--allow-destructive`, `--assist` (opt-in planner recovery)",
+        "`--allow-destructive`, `--assist` (opt-in planner recovery), `--from-here` "
+        "(resume mid-edge after a manual hop / divergence)",
     ),
     (
         "flow",
@@ -463,6 +467,125 @@ KEY_FLAGS: list[tuple[str, str]] = [
 ]
 
 
+# Don't / Do / Why — agent operating contract (full guide + skill).
+AGENT_BEST_PRACTICES_PERCEPTION: list[tuple[str, str, str]] = [
+    (
+        "Drive with raw `adb` + screenshots + pixel taps",
+        "Drive with `aua` (`analyze` / `--rid` / `tap` / `input` / `has` / `wait`)",
+        "Pixels break on density/layout; ids and resource-ids do not. Discovery via screenshots "
+        "is minutes; aua discovery is seconds.",
+    ),
+    (
+        "`analyze` after every `tap`/`input` (or always `--no-observe` then re-analyze)",
+        "Let the action return `observation` (default); only re-analyze when you need a fresh "
+        "filtered view",
+        "Post-action observation already has fresh ids. Extra analyzes double round trips.",
+    ),
+    (
+        "Force `--source vision` / `--with-ocr` on every screen",
+        "Stay on hierarchy (`analyze` default / `--rid` / `has`); escalate vision only when "
+        "the tree misses content (Compose/canvas/game, or `meta.lossy_text`)",
+        "View-based apps (many production UIs) are hierarchy-fast. Parallel OCR on every call "
+        "adds cost without helping when rids already exist.",
+    ),
+    (
+        "Guess coordinates or scrape `uiautomator dump` yourself",
+        "Act with integer `id` from analyze, or stable `--rid <tail>` / `has --rid`",
+        "That is the whole point of aua — selectors, not geometry.",
+    ),
+    (
+        "`aua input` for long strings when speed matters (clipboard paste by hand)",
+        "Just `aua input <id|--rid …> \"…\"` — aua already prefers one-shot `set_text`, then "
+        "clipboard paste (clipboard restored), then IME keys",
+        "Agents should not hand-roll `clipboard set` + `paste`; `input` owns the fast path.",
+    ),
+    (
+        "Use `key back` to dismiss the keyboard",
+        "`aua hide-keyboard`",
+        "`key back` often navigates away from the screen instead of only closing the IME.",
+    ),
+]
+
+AGENT_BEST_PRACTICES_MEMORY: list[tuple[str, str, str]] = [
+    (
+        "Re-explore an app from scratch every session",
+        "Read `aua about`, follow `meta.suggested_gotos` / `suggested_deeplinks`, use "
+        '`aua goto "<goal>"` / `aua map --find`',
+        "The map is the previous agent's gift. Ignoring it re-pays discovery cost.",
+    ),
+    (
+        "Tap through 5 screens to reach a known destination",
+        '`aua open "<deeplink>"` or `aua goto "<goal>"` / `aua goto "<goal>" --from-here` / '
+        "a saved `aua flow run`",
+        "One call beats a hand-rolled path; `--from-here` continues after you already opened "
+        "part of the journey. Flows collapse whole journeys.",
+    ),
+    (
+        "Keep discoveries only in the chat transcript",
+        "`aua remember` / `aua knowledge add` (and fix bad names with `memory update`)",
+        "The next agent (or you tomorrow) will not see this chat — write it into the playbook.",
+    ),
+    (
+        "Start timed work before the daemon is warm",
+        "`aua daemon start` (optional: `aua-fast` for hot commands)",
+        "Cold Python/connect startup dwarfs hierarchy dump cost on short commands.",
+    ),
+]
+
+AGENT_BEST_PRACTICES_SPEED: list[tuple[str, str, str]] = [
+    (
+        "`tap --rid x --no-observe` then `analyze`",
+        "`tap --rid x`",
+        "A tap RETURNS the resulting screen by default. The two-call habit doubled a lane's "
+        "round trips: 66 taps followed by 52 analyzes.",
+    ),
+    (
+        "`sleep 8` after an action",
+        "`wait --for <text|id> --observe`",
+        "Returns the moment it appears, and hands you the screen. A sleep is slower when "
+        "short and wrong when the screen is not ready.",
+    ),
+    (
+        "`wait --for-stable` after tapping send",
+        "`wait --after-change`",
+        "Nothing has changed yet, so the screen is already 'stable': --for-stable returned in "
+        "1.6s with NO answer on screen; --after-change returned in 4.9s WITH it. Measured.",
+    ),
+    (
+        "`sleep 30` for image generation",
+        "`wait --after-change` (or `--for-stable --settle 1500`)",
+        "Same trap, bigger waste. Wait on the condition, never the clock.",
+    ),
+    (
+        "One shell call per assertion",
+        "Group independent checks in one call",
+        "Each extra call is another agent turn, ~6s of wall clock.",
+    ),
+    (
+        "Screenshot every step",
+        "Screenshot what you will cite",
+        "68 screenshots in one lane; most were never referenced.",
+    ),
+    (
+        "Trust hierarchy text containing `?`",
+        "Re-read with `analyze --source vision`",
+        "U+FFFD means the glyph never reached you. `meta.lossy_text` now flags it. A formula "
+        "answer read as 'solve for <?>: <?>' in hierarchy; OCR read '2x = 8' correctly.",
+    ),
+    (
+        "`--parallel` to prepare an AVD you will install into",
+        "`--parallel --no-read-only`",
+        "--parallel implies -read-only, so an `adb install` lands in a discarded overlay and "
+        "reports Success. The app is simply gone after stop.",
+    ),
+    (
+        "Block the suite on an LLM/chat reply you do not assert on",
+        "Assert the UI affordance you need (`has --rid sendButton` / favorite), or mock the API",
+        "Model latency is app time, not tool time — waiting for a full answer inflates every run.",
+    ),
+]
+
+
 def _md_table(headers: list[str], rows: Sequence[tuple[str, ...]]) -> str:
     out = ["| " + " | ".join(headers) + " |", "|" + "|".join(["---"] * len(headers)) + "|"]
     out += ["| " + " | ".join(r) + " |" for r in rows]
@@ -490,6 +613,16 @@ def render_markdown(*, brief: bool = False) -> str:
         p.append(f"{i}. **{title}.** {body}")
 
     if brief:
+        p.append("")
+        p.append("## Agent best practices (short)")
+        p.append(
+            "**Do:** act by id/`--rid`, use action `observation`, `wait --for` (never `sleep`), "
+            "`about`/`goto`/deeplinks/flows, escalate vision only when hierarchy misses, "
+            "`aua input` (built-in fast typing). "
+            "**Don't:** raw `adb`+screenshots+pixels, `analyze` after every tap, force OCR/vision "
+            "on every screen, `key back` to dismiss IME, hand-rolled clipboard paste for typing. "
+            "Full tables: `aua guide` (no `--brief`)."
+        )
         p.append("")
         p.append("## Escalation (automatic)")
         p.append(
@@ -628,48 +761,28 @@ def render_markdown(*, brief: bool = False) -> str:
     )
 
     p.append("")
-    p.append("## Speed: what actually costs time (measured)")
+    p.append("## Agent best practices (do / don't)")
     p.append("")
     p.append(
-        "Your own round trips dominate a run, not this tool. Measured on a real 6-scenario "
-        "lane: 1348s wall clock, 239 aua calls, and only ~33s (2.5%) inside aua. Agent turns "
-        "were ~48%, and blind `sleep` calls burned 251s (19%). Optimise round trips, not aua."
+        "Other agents: treat this as the operating contract. Most wall-clock on a real run is "
+        "**your** round trips, sleeps, and pixel guessing — not aua. Follow the **Do** column; "
+        "the **Don't** column is how agents usually make aua look slow."
     )
     p.append("")
-    p.append(_md_table(
-        ["Don't", "Do", "Why it matters"],
-        [
-            ("`tap --rid x --no-observe` then `analyze`",
-             "`tap --rid x`",
-             "A tap RETURNS the resulting screen by default. The two-call habit doubled a lane's "
-             "round trips: 66 taps followed by 52 analyzes."),
-            ("`sleep 8` after an action",
-             "`wait --for <text|id> --observe`",
-             "Returns the moment it appears, and hands you the screen. A sleep is slower when "
-             "short and wrong when the screen is not ready."),
-            ("`wait --for-stable` after tapping send",
-             "`wait --after-change`",
-             "Nothing has changed yet, so the screen is already 'stable': --for-stable returned in "
-             "1.6s with NO answer on screen; --after-change returned in 4.9s WITH it. Measured."),
-            ("`sleep 30` for image generation",
-             "`wait --after-change` (or `--for-stable --settle 1500`)",
-             "Same trap, bigger waste. Wait on the condition, never the clock."),
-            ("One shell call per assertion",
-             "Group independent checks in one call",
-             "Each extra call is another agent turn, ~6s of wall clock."),
-            ("Screenshot every step",
-             "Screenshot what you will cite",
-             "68 screenshots in one lane; most were never referenced."),
-            ("Trust hierarchy text containing `?`",
-             "Re-read with `analyze --source vision`",
-             "U+FFFD means the glyph never reached you. `meta.lossy_text` now flags it. A formula "
-             "answer read as 'solve for <?>: <?>' in hierarchy; OCR read '2x = 8' correctly."),
-            ("`--parallel` to prepare an AVD you will install into",
-             "`--parallel --no-read-only`",
-             "--parallel implies -read-only, so an `adb install` lands in a discarded overlay and "
-             "reports Success. The app is simply gone after stop."),
-        ],
-    ))
+    p.append("### Perception & action")
+    p.append(_md_table(["Don't", "Do", "Why"], AGENT_BEST_PRACTICES_PERCEPTION))
+    p.append("")
+    p.append("### Memory, map, and shortcuts")
+    p.append(_md_table(["Don't", "Do", "Why"], AGENT_BEST_PRACTICES_MEMORY))
+    p.append("")
+    p.append("### Waiting & speed (measured)")
+    p.append(
+        "Measured on a real 6-scenario lane: 1348s wall clock, 239 aua calls, and only ~33s "
+        "(2.5%) inside aua. Agent turns were ~48%; blind `sleep` burned 251s (19%). Optimise "
+        "round trips, not aua internals."
+    )
+    p.append("")
+    p.append(_md_table(["Don't", "Do", "Why"], AGENT_BEST_PRACTICES_SPEED))
     p.append("")
     p.append("## Worked examples")
     p.append("```bash")
@@ -696,6 +809,7 @@ def render_markdown(*, brief: bool = False) -> str:
     p.append("# including cross-app auth legs):")
     p.append('aua goto "image creator"')
     p.append('aua goto "settings" --plan          # just print the route, take no action')
+    p.append('aua goto "settings" --from-here     # resume mid-edge after a manual step')
     p.append("")
     p.append("# Replay a whole journey (authored or recorded) in ONE call:")
     p.append('aua flow run reset_account_google_login --param ACCOUNT="Engineering Team"')
@@ -776,11 +890,14 @@ def render_markdown(*, brief: bool = False) -> str:
         "`aua ask` is provider-neutral: configure `grounding.chain: [gemini, openai]`. The factory "
         "tries that order and skips providers whose API-key env var is absent, so one config works "
         "with either key. Reverse the list to prefer OpenAI when both exist. On macOS, Apple "
-        "Vision OCR and hierarchy capture run concurrently and fuse into one observation, so web "
-        "content inside a Custom Tab is visible to a plain `analyze`. Readings that only repeat "
-        "text the tree already reports are withheld (`ocr.drop_redundant`); pixel-only text always "
-        "survives. "
-        "OCR works on a 720px preview and maps boxes back to original screen coordinates."
+        "Vision OCR and hierarchy capture fuse into one observation (parallel when OCR is forced; "
+        "auto mode consults the map first). Screens the map has seen hierarchy-only enough times "
+        "(and never needed OCR) skip OCR on later visits — cheaper analyze without risking "
+        "unknown screens. Web content inside a Custom Tab stays visible to a plain `analyze`. "
+        "Readings that only repeat text the tree already reports are withheld "
+        "(`ocr.drop_redundant`); pixel-only text always survives. OCR works on a 720px preview "
+        "and maps boxes back to original screen coordinates. Route replay settles on the next "
+        "step's known selector when possible instead of a full pixel `wait_stable`."
     )
     return "\n".join(p) + "\n"
 
@@ -866,6 +983,18 @@ def render_json() -> dict[str, object]:
         },
         "exit_codes": [{"code": c, "meaning": d} for c, d in EXIT_CODES],
         "key_flags": [{"scope": s, "flags": f} for s, f in KEY_FLAGS],
+        "agent_best_practices": {
+            "perception": [
+                {"dont": a, "do": b, "why": c}
+                for a, b, c in AGENT_BEST_PRACTICES_PERCEPTION
+            ],
+            "memory": [
+                {"dont": a, "do": b, "why": c} for a, b, c in AGENT_BEST_PRACTICES_MEMORY
+            ],
+            "speed": [
+                {"dont": a, "do": b, "why": c} for a, b, c in AGENT_BEST_PRACTICES_SPEED
+            ],
+        },
     }
 
 

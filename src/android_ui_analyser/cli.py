@@ -1144,7 +1144,10 @@ def input_cmd(
         show_default=False,
     ),
 ) -> None:
-    """Focus an element and type text; ``--submit`` sends the IME action.
+    """Focus an element and type text (fast path built-in); ``--submit`` sends the IME action.
+
+    Prefers accessibility ``set_text``, then clipboard paste (clipboard restored), then IME
+    keys — no need for a manual ``clipboard set`` + ``paste`` workaround.
 
     `aua input 9 "hello"` · `aua input --rid promptField "hello" --submit` ·
     `aua input --by id promptField "hello"`. With ``--rid``/``--desc`` the single positional
@@ -1787,6 +1790,12 @@ def goto(
         "--assist",
         help="On divergence, let the opt-in planner LLM try to recover (needs planner.enabled).",
     ),
+    from_here: bool = typer.Option(
+        False,
+        "--from-here",
+        help="Resume mid-edge: you already opened part of the journey; skip steps that "
+        "already match the current screen (same idea as mid-auth resume).",
+    ),
 ) -> None:
     """Navigate to a known screen using app memory — drives and verifies each hop (§6b).
 
@@ -1795,6 +1804,7 @@ def goto(
     every hop. Stops and returns the remaining route/steps + current screen if anything
     diverges. ``--plan`` prints the annotated route only; destructive steps are refused
     without ``--allow-destructive``. ``--assist`` lets a fast model recover a divergence.
+    ``--from-here`` resumes mid-edge when you already navigated part of the way yourself.
     """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
@@ -1806,6 +1816,7 @@ def goto(
             max_steps=max_steps,
             allow_destructive=allow_destructive,
             assist=assist,
+            from_here=from_here,
         )
         _emit(result, fmt)
         if isinstance(result, dict) and result.get("ok") is False:

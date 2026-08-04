@@ -284,7 +284,8 @@ def _tool_definitions() -> list[types.Tool]:
             "the recorded steps of each route edge (including cross-app auth legs) and "
             "verifies each hop; hands back remaining steps on divergence. plan=true "
             "previews without acting. assist=true lets the opt-in planner recover a "
-            "divergence (needs planner.enabled).",
+            "divergence (needs planner.enabled). from_here=true resumes mid-edge when "
+            "you already navigated part of the way.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -296,6 +297,12 @@ def _tool_definitions() -> list[types.Tool]:
                     "max_steps": {"type": "integer", "default": 8},
                     "allow_destructive": {"type": "boolean", "default": False},
                     "assist": {"type": "boolean", "default": False},
+                    "from_here": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Resume mid-edge from the first matching step on "
+                        "the current screen.",
+                    },
                 },
                 "required": ["goal"],
                 "additionalProperties": False,
@@ -1108,6 +1115,7 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
             max_steps=int(args.get("max_steps", 8)),
             allow_destructive=args.get("allow_destructive", False),
             assist=args.get("assist", False),
+            from_here=args.get("from_here", False),
         )
     if name == "flow_run":
         return engine.flow_run(

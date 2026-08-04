@@ -1062,7 +1062,7 @@ All action commands (`tap`, `long-press`, `input`, `clear`, `swipe`, `scroll-to`
 | First command is slow / times out | `uiautomator2` is pushing its helper agent on first connect — retry once it settles, then use `aua daemon start` to keep the connection warm. |
 | `uiautomator2 is not installed` | Reinstall the package — `uiautomator2` is a base dependency, not an extra. |
 | `analyze` returns few/no elements | The hierarchy is empty (Compose/Flutter/WebView/canvas). Force vision: `aua --format compact analyze --source vision --annotate`. |
-| Typing does nothing on Android 14+ | Handled automatically (accessibility `set_text` on the focused field); make sure the field is actually focused first. |
+| Typing does nothing / is slow on Android 14+ | `aua input` prefers accessibility `set_text`, then clipboard paste (restores clipboard), then IME keys. Focus the field first. |
 | Headless emulator pegs CPU / fans | Old default was SwiftShader (CPU). Current Mac/Windows headless uses `-gpu host`. Stop orphans with `aua emulator stop --mine`. Headless also auto-stops after `--idle-stop` (default 900s) with no aua activity. |
 | `proxy` / empty HTTPS cassettes | Need `[proxy]` extra + **rootable** Google APIs AVD (`aua emulator ensure-proxy`). Play Store images refuse `adb root` → system CA install fails → TLS handshake fails. |
 | `sdkmanager` / `ensure-proxy` fails | Prefer `$ANDROID_HOME/cmdline-tools/latest/bin` over outdated Homebrew cmdline-tools. |

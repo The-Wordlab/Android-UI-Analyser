@@ -25,7 +25,7 @@ description: >-
 6. **Take shortcuts with deeplinks.** `aua open "<uri>"` fires a deeplink — jump straight to a screen or trigger an app action (e.g. set a feature flag) instead of tapping through the UI. Far faster than navigating. When an app has known deeplinks, every `analyze` offers the best ones inline in `meta.suggested_deeplinks` (e.g. `open myapp://home`) — so to reach the screen under test, open the shortcut instead of navigating to it. Some deeplinks need an app restart to take effect (`aua app stop <pkg>` + `aua app launch <pkg>`). Don't know the app's deeplinks? `aua explore mine <repo> --app <pkg>` harvests them from the source once (then they ride inline + show in `aua about`).
 7. **Index an app you don't know yet.** `aua explore plan` returns a prioritized worklist — mined deeplinks to probe, dead-end screens to expand. Run the tasks with normal `aua` commands; the results auto-record into the map + playbook, and re-running the plan shows what's left. This is how you (the agent) index an app for aua to remember.
 8. **Feed research back and correct the map.** `aua knowledge add` stores an experience with source/agent/session/evidence so future runs inherit it. AUA also creates research tasks automatically when a new map entry is ambiguous or a route is provisional/unreplayable. Research `meta.research_tasks` (or run `aua reconcile plan`) in source/runtime, then submit the canonical JSON report. AUA does not spawn the research agent. `verdict=apply` commits every operation transactionally and returns a rollback id; `review` queues it and `reject` retains the feedback.
-9. **Jump to a known screen in one call.** `aua goto "<goal>"` replays the remembered steps of each route edge — by resource-id first, then label — verifying every hop, including cross-app auth legs (Google sign-in through Chrome/GMS is folded into one edge). Prefer it whenever `suggested_gotos` lists your target. Known in-app hops skip OCR and retry it only when hierarchy cannot match a selector or verify arrival; transit screens keep automatic OCR. `--plan` prints the annotated route (steps, replayable, destructive) without acting. Steps matching `memory.destructive_labels` (delete/sign out/pay/…) are refused without `--allow-destructive`. On divergence it hands back the failing step, the remaining steps, and the current elements — finish that one step manually, then just re-run `aua goto`: it resumes mid-route, even mid-auth.
+9. **Jump to a known screen in one call.** `aua goto "<goal>"` replays the remembered steps of each route edge — by resource-id first, then label — verifying every hop, including cross-app auth legs (Google sign-in through Chrome/GMS is folded into one edge). Prefer it whenever `suggested_gotos` lists your target. Known in-app hops skip OCR and retry it only when hierarchy cannot match a selector or verify arrival; transit screens keep automatic OCR. `--plan` prints the annotated route (steps, replayable, destructive) without acting. Steps matching `memory.destructive_labels` (delete/sign out/pay/…) are refused without `--allow-destructive`. On divergence it hands back the failing step, the remaining steps, and the current elements — finish that one step manually, then re-run `aua goto "…" --from-here` to resume mid-edge (skips steps that already match the current screen; also covers mid-auth). Plain `aua goto` still starts from the current *screen* on the map; `--from-here` is for mid-*edge* (you already tapped some of the recorded steps yourself).
 10. **Replay whole journeys in one call (flows).** A flow is a Maestro-style YAML journey you can AUTHOR directly (no walking needed) or record: `aua flow save <name> --last N` materializes your recent actions (typed values become required `${PARAM_n}` placeholders — fill them in the file). `aua flow run <name> --param K=V` drives the whole journey — launch, taps, waits, asserts, cross-app auth, even `goto:` steps — and on divergence returns the failing step index + remaining steps; fix and resume with `--from-step N`. Flows live under `<memory.dir>/flows/*.yaml` (`aua flow list|show|delete`); `--dry-run` previews. Use a flow for any setup you repeat (reset account, log in, reach the screen under test) — one call instead of a dozen.
 11. **Optional: let a fast model recover or explore (opt-in).** If `planner.enabled` is set (+ an API key like GEMINI_API_KEY), you get two extras. (1) On a `goto`/`flow` divergence, add `--assist` and a fast planner LLM tries to recover in the same call (dismiss a popup, find the moved element) before handing off — the divergence hint tells you when it's worth trying. (2) `aua navigate "<goal>"` drives to a goal with no prior map AND records the path, so the next `aua goto` is a free deterministic replay. It's OFF by default and never touches the fast path; destructive taps still need `--allow-destructive`.
 12. **Drive by element ID.** `aua --format compact analyze` → a list of elements each with an integer `id` + bounds. Act on the id: `aua tap <id>`, `aua input <id> "text"`, `aua swipe up`, `aua key back`. Use `aua has "<text>"` (exit 0/1) to branch cheaply without parsing JSON.
@@ -63,7 +63,7 @@ description: >-
 - _flags_: `flags set <pkg> KEY=VAL…`, `flags apply file.yaml` — needs a `flags.templates` entry for the package (set-flags schemes are app-specific). Writes, then **verifies** against the app's shared_prefs (`applied`/`ignored`; a dropped key exits 8, `--no-verify` to skip) and **restarts** the app (`--no-restart` to skip) because flags read at cold start ignore a live-process override. A successful restart activates a deterministic map context carrying the verified flags. When `flags.prefs_files` or `flags.context_keys` is configured, ordinary `analyze` also discovers already-active experiment/treatment/variant/flag values and switches map context automatically.
 - _proxy / mock_: `proxy start|stop`, `mock map METHOD PATH [--status N --body '{…}']`, `mock record start|stop NAME`, `mock replay NAME` (optional `[proxy]` extra)
 - _map_: `--app <pkg>`, `--brief`, `--screen <name>`, `--depth N`, `--find "<goal>"`, `--context <id>`, `--all-contexts`, `--audit`, `--json`
-- _goto_: `<goal>` (fuzzy), `--plan` (annotated route, no taps), `--max-steps N`, `--allow-destructive`, `--assist` (opt-in planner recovery)
+- _goto_: `<goal>` (fuzzy), `--plan` (annotated route, no taps), `--max-steps N`, `--allow-destructive`, `--assist` (opt-in planner recovery), `--from-here` (resume mid-edge after a manual hop / divergence)
 - _flow_: `run <name> [--param K=V] [--file PATH] [--dry-run] [--from-step N] [--no-allow-destructive] [--assist]`, `save <name> [--last N] [--force]`, `list|show|delete`. Steps incl. `launch_app`/`stop_app`/`open_link`/`goto`/`flow` / `dev_profile` / `a11y_scroll` / `flags_apply` / `proxy_start`/`stop` / `mock_replay` (a `flow:` step runs a saved flow inline — reuse a shared `login` recipe).
 - _open / about / remember_: `open <uri>` deeplink; `about` app playbook; `remember …` teach it
 - _knowledge / reconcile_: `knowledge list|show|add|stale`; `reconcile plan|submit|status|apply|rollback` (external-agent JSON contract, transactional correction)
@@ -136,11 +136,32 @@ aua emulator stop --mine             # cleanup when done
 ```
 Analyze/tap/wait work identically; hierarchy + screenshots do not need a visible window. Never wipe or stop an emulator the user already had open unless they asked.
 
-## Speed: what actually costs time (measured)
+## Agent best practices (do / don't)
 
-Your own round trips dominate a run, not this tool. Measured on a real 6-scenario lane: 1348s wall clock, 239 aua calls, and only ~33s (2.5%) inside aua. Agent turns were ~48%, and blind `sleep` calls burned 251s (19%). Optimise round trips, not aua.
+Other agents: treat this as the operating contract. Most wall-clock on a real run is **your** round trips, sleeps, and pixel guessing — not aua. Follow the **Do** column; the **Don't** column is how agents usually make aua look slow.
 
-| Don't | Do | Why it matters |
+### Perception & action
+| Don't | Do | Why |
+|---|---|---|
+| Drive with raw `adb` + screenshots + pixel taps | Drive with `aua` (`analyze` / `--rid` / `tap` / `input` / `has` / `wait`) | Pixels break on density/layout; ids and resource-ids do not. Discovery via screenshots is minutes; aua discovery is seconds. |
+| `analyze` after every `tap`/`input` (or always `--no-observe` then re-analyze) | Let the action return `observation` (default); only re-analyze when you need a fresh filtered view | Post-action observation already has fresh ids. Extra analyzes double round trips. |
+| Force `--source vision` / `--with-ocr` on every screen | Stay on hierarchy (`analyze` default / `--rid` / `has`); escalate vision only when the tree misses content (Compose/canvas/game, or `meta.lossy_text`) | View-based apps (many production UIs) are hierarchy-fast. Parallel OCR on every call adds cost without helping when rids already exist. |
+| Guess coordinates or scrape `uiautomator dump` yourself | Act with integer `id` from analyze, or stable `--rid <tail>` / `has --rid` | That is the whole point of aua — selectors, not geometry. |
+| `aua input` for long strings when speed matters (clipboard paste by hand) | Just `aua input <id|--rid …> "…"` — aua already prefers one-shot `set_text`, then clipboard paste (clipboard restored), then IME keys | Agents should not hand-roll `clipboard set` + `paste`; `input` owns the fast path. |
+| Use `key back` to dismiss the keyboard | `aua hide-keyboard` | `key back` often navigates away from the screen instead of only closing the IME. |
+
+### Memory, map, and shortcuts
+| Don't | Do | Why |
+|---|---|---|
+| Re-explore an app from scratch every session | Read `aua about`, follow `meta.suggested_gotos` / `suggested_deeplinks`, use `aua goto "<goal>"` / `aua map --find` | The map is the previous agent's gift. Ignoring it re-pays discovery cost. |
+| Tap through 5 screens to reach a known destination | `aua open "<deeplink>"` or `aua goto "<goal>"` / `aua goto "<goal>" --from-here` / a saved `aua flow run` | One call beats a hand-rolled path; `--from-here` continues after you already opened part of the journey. Flows collapse whole journeys. |
+| Keep discoveries only in the chat transcript | `aua remember` / `aua knowledge add` (and fix bad names with `memory update`) | The next agent (or you tomorrow) will not see this chat — write it into the playbook. |
+| Start timed work before the daemon is warm | `aua daemon start` (optional: `aua-fast` for hot commands) | Cold Python/connect startup dwarfs hierarchy dump cost on short commands. |
+
+### Waiting & speed (measured)
+Measured on a real 6-scenario lane: 1348s wall clock, 239 aua calls, and only ~33s (2.5%) inside aua. Agent turns were ~48%; blind `sleep` burned 251s (19%). Optimise round trips, not aua internals.
+
+| Don't | Do | Why |
 |---|---|---|
 | `tap --rid x --no-observe` then `analyze` | `tap --rid x` | A tap RETURNS the resulting screen by default. The two-call habit doubled a lane's round trips: 66 taps followed by 52 analyzes. |
 | `sleep 8` after an action | `wait --for <text|id> --observe` | Returns the moment it appears, and hands you the screen. A sleep is slower when short and wrong when the screen is not ready. |
@@ -150,6 +171,7 @@ Your own round trips dominate a run, not this tool. Measured on a real 6-scenari
 | Screenshot every step | Screenshot what you will cite | 68 screenshots in one lane; most were never referenced. |
 | Trust hierarchy text containing `?` | Re-read with `analyze --source vision` | U+FFFD means the glyph never reached you. `meta.lossy_text` now flags it. A formula answer read as 'solve for <?>: <?>' in hierarchy; OCR read '2x = 8' correctly. |
 | `--parallel` to prepare an AVD you will install into | `--parallel --no-read-only` | --parallel implies -read-only, so an `adb install` lands in a discarded overlay and reports Success. The app is simply gone after stop. |
+| Block the suite on an LLM/chat reply you do not assert on | Assert the UI affordance you need (`has --rid sendButton` / favorite), or mock the API | Model latency is app time, not tool time — waiting for a full answer inflates every run. |
 
 ## Worked examples
 ```bash
@@ -176,6 +198,7 @@ aua screenshot --region 0,0,1080,300 --out /tmp/header.png   # then read that fi
 # including cross-app auth legs):
 aua goto "image creator"
 aua goto "settings" --plan          # just print the route, take no action
+aua goto "settings" --from-here     # resume mid-edge after a manual step
 
 # Replay a whole journey (authored or recorded) in ONE call:
 aua flow run reset_account_google_login --param ACCOUNT="Engineering Team"
@@ -231,4 +254,4 @@ Errors print `{"error":{"code","message","hint"}}` to **stderr**; JSON results g
 
 ## Config & providers (only if asked to change perception)
 Config is the nearest `.android-ui-analyser.yaml` (project) → user config; inspect with `aua config show` / `aua config path`, scaffold with `aua config init`. Swap a model with one line (e.g. `ocr.chain: [apple_vision, rapidocr]`). **Secrets are env-var names only** (`api_key_env: OPENAI_API_KEY`); set the env var — never paste keys. Check readiness with `aua doctor` (it never prints secret values).
-`aua ask` is provider-neutral: configure `grounding.chain: [gemini, openai]`. The factory tries that order and skips providers whose API-key env var is absent, so one config works with either key. Reverse the list to prefer OpenAI when both exist. On macOS, Apple Vision OCR and hierarchy capture run concurrently and fuse into one observation, so web content inside a Custom Tab is visible to a plain `analyze`. Readings that only repeat text the tree already reports are withheld (`ocr.drop_redundant`); pixel-only text always survives. OCR works on a 720px preview and maps boxes back to original screen coordinates.
+`aua ask` is provider-neutral: configure `grounding.chain: [gemini, openai]`. The factory tries that order and skips providers whose API-key env var is absent, so one config works with either key. Reverse the list to prefer OpenAI when both exist. On macOS, Apple Vision OCR and hierarchy capture fuse into one observation (parallel when OCR is forced; auto mode consults the map first). Screens the map has seen hierarchy-only enough times (and never needed OCR) skip OCR on later visits — cheaper analyze without risking unknown screens. Web content inside a Custom Tab stays visible to a plain `analyze`. Readings that only repeat text the tree already reports are withheld (`ocr.drop_redundant`); pixel-only text always survives. OCR works on a 720px preview and maps boxes back to original screen coordinates. Route replay settles on the next step's known selector when possible instead of a full pixel `wait_stable`.

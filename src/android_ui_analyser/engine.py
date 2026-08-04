@@ -37,8 +37,10 @@ from .errors import (
     UsageError,
 )
 from .memory import (
+    AppMap,
     AppMemoryStore,
     NavHints,
+    RouteEdge,
     RouteStep,
     _id_tail,
     _shortest_path,
@@ -47,6 +49,7 @@ from .memory import (
     matches_any,
     redact_label,
     resolve_goal,
+    screen_skips_ocr,
     step_display,
 )
 from .providers.base import DetBox, OcrProvider, Point, ScreenAnalysisResult, ScreenImage, TextBox
@@ -225,7 +228,9 @@ def _goto_handoff(
             for e in res.elements
             if (e.text or e.content_desc)
         ][:20],
-        "hint": hint or "route diverged — continue with `aua analyze` + `aua tap`",
+        "hint": hint
+        or "route diverged — finish the failed step, then `aua goto \"…\" --from-here` "
+        "(or continue with `aua analyze` + `aua tap`)",
     }
     if failed_step is not None:
         out["step"] = {"display": step_display(failed_step), **failed_step.model_dump()}
@@ -461,23 +466,14 @@ class Engine:
         finally:
             pending.executor.shutdown(wait=not timed_out, cancel_futures=timed_out)
 
-    def _capture_hierarchy_with_ocr(
+    def _fuse_hierarchy_ocr(
         self,
-        device: Device,
-        w: int,
-        h: int,
-        *,
-        with_ocr: bool | None,
+        elements: list[Element],
+        package: str | None,
+        xml_hash: str | None,
+        pending: _PendingOcr | None,
     ) -> _HierarchyObservation:
-        """Capture hierarchy + Apple OCR concurrently and return one fused observation."""
-        pending = self._start_hierarchy_ocr(with_ocr=with_ocr)
-        try:
-            elements, package, xml_hash = self._capture_hierarchy(device, w, h)
-        except BaseException:
-            if pending is not None:
-                pending.future.cancel()
-                pending.executor.shutdown(wait=False, cancel_futures=True)
-            raise
+        """Finish a pending OCR job and fuse kept boxes onto the hierarchy elements."""
         texts, provider, image = self._finish_hierarchy_ocr(pending)
         ocr_elements: list[Element] = []
         if provider is not None:
@@ -505,6 +501,71 @@ class Engine:
             provider,
             image,
         )
+
+    def _capture_hierarchy_with_ocr(
+        self,
+        device: Device,
+        w: int,
+        h: int,
+        *,
+        with_ocr: bool | None,
+    ) -> _HierarchyObservation:
+        """Capture hierarchy, optionally fused with Apple OCR.
+
+        ``with_ocr=True`` keeps the parallel overlap (OCR starts before hierarchy).
+        Auto mode (``None``) captures hierarchy first, then skips OCR entirely when the
+        map already knows this screen is hierarchy-sufficient — experience-based cheap
+        analyze without risking unknown screens. Forced ``False`` is hierarchy-only.
+        """
+        if with_ocr is False:
+            elements, package, xml_hash = self._capture_hierarchy(device, w, h)
+            return _HierarchyObservation(elements, package, xml_hash, [], [], None, None)
+
+        if with_ocr is True:
+            # Caller forced OCR — overlap screenshot OCR with the hierarchy dump.
+            pending = self._start_hierarchy_ocr(with_ocr=True)
+            try:
+                elements, package, xml_hash = self._capture_hierarchy(device, w, h)
+            except BaseException:
+                if pending is not None:
+                    pending.future.cancel()
+                    pending.executor.shutdown(wait=False, cancel_futures=True)
+                raise
+            return self._fuse_hierarchy_ocr(elements, package, xml_hash, pending)
+
+        # Auto: hierarchy first so we can consult the map before paying for OCR.
+        elements, package, xml_hash = self._capture_hierarchy(device, w, h)
+        if self._map_skips_ocr(device, package, elements, h):
+            return _HierarchyObservation(elements, package, xml_hash, [], [], None, None)
+        pending = self._start_hierarchy_ocr(with_ocr=True)
+        return self._fuse_hierarchy_ocr(elements, package, xml_hash, pending)
+
+    def _map_skips_ocr(
+        self,
+        device: Device,
+        package: str | None,
+        elements: list[Element],
+        height: int,
+    ) -> bool:
+        """Skip parallel OCR only when map evidence says this known screen never needed it."""
+        mem = self._memory
+        if mem is None or not package:
+            return False
+        try:
+            name = mem.recognize_screen(
+                device.serial,
+                package=package,
+                elements=elements,
+                screen_height=height,
+            )
+            if not name:
+                return False
+            app = mem.load(package)
+            rec = app.screens.get(name) if app else None
+            return bool(rec and screen_skips_ocr(rec))
+        except Exception as exc:
+            logger.debug("map OCR-skip check failed: %s", exc)
+            return False
 
     def _run_vision(
         self,
@@ -954,8 +1015,22 @@ class Engine:
             path = PathKind.vision
 
         if record:
+            ocr_helped: bool | None = None
+            if hierarchy_observation is not None and with_ocr is not False:
+                # Evidence for experience-based OCR skip: only count visits where OCR was
+                # allowed. Forced hierarchy-only paths (goto hops) must not inflate the score.
+                if hierarchy_observation.ocr_provider is not None:
+                    ocr_helped = bool(hierarchy_observation.ocr_elements)
+                else:
+                    ocr_helped = False  # skipped (map) or unavailable → hierarchy alone
             known_screen, hints = self._record_screen_safe(
-                device, package, activity, elements, tier_used, h
+                device,
+                package,
+                activity,
+                elements,
+                tier_used,
+                h,
+                ocr_helped=ocr_helped,
             )
         else:
             # An observe snapshot taken right after an action can be mid-transition; never
@@ -1470,12 +1545,16 @@ class Engine:
         elements: list[Element],
         tier: Tier,
         height: int | None = None,
+        *,
+        ocr_helped: bool | None = None,
     ) -> tuple[str | None, NavHints | None]:
         """Auto-record the current screen + derive navigation hints; never break analyze.
 
         Returns ``(known_screen, hints)``. ``hints`` carries the inline affordances
         (known_routes / suggested_gotos / map_hint) so the agent gets them on the analyze
         it already runs, instead of having to remember to call ``aua map``.
+        ``ocr_helped`` records whether parallel OCR contributed kept elements (for
+        experience-based OCR skip on later visits).
         """
         mem = self._memory
         if mem is None or not package:
@@ -1517,6 +1596,7 @@ class Engine:
                     app_version=self._version_for(device, package),
                     tier=tier.value,
                     screen_height=height,
+                    ocr_helped=ocr_helped,
                 )
 
             mcfg = self.config.memory
@@ -1938,12 +2018,78 @@ class Engine:
                 executed.append({"index": i, "step": step_display(s)})
             if reanalyze:
                 if settle:
-                    with contextlib.suppress(StabilityTimeout):
-                        self.wait_stable(settle_ms=500, timeout_ms=8000)
+                    nxt = steps[i + 1] if i + 1 < len(steps) else None
+                    if not self._settle_for_next_step(nxt):
+                        with contextlib.suppress(StabilityTimeout):
+                            self.wait_stable(settle_ms=500, timeout_ms=8000)
                 res = self._analyze_route_step(
                     steps, i + 1, origin_package, hierarchy_ocr=hierarchy_ocr
                 )
         return None, res
+
+    def _settle_for_next_step(self, nxt: RouteStep | None) -> bool:
+        """Synchronize on the next step's known selector instead of a full pixel settle.
+
+        Returns True when the next target already appeared (caller skips ``wait_stable``).
+        Falls back to False for swipes/keys/unknown labels so the conservative settle runs.
+        """
+        if nxt is None:
+            return False
+        timeout_ms = min(int(nxt.timeout_ms or 3000), 4000)
+        if nxt.kind in ("wait-for", "assert-visible") and nxt.arg:
+            return self.has(
+                nxt.arg, timeout_ms=timeout_ms, by=nxt.by or "text"
+            ).found
+        if nxt.kind in ("tap", "long-press", "input", "clear", "a11y-scroll"):
+            if nxt.resource_id:
+                return self.has(nxt.resource_id, timeout_ms=timeout_ms, by="id").found
+            label = nxt.label
+            if label and label not in ("<filled>", "<redacted>"):
+                return self.has(label, timeout_ms=timeout_ms, by="text").found
+        return False
+
+    def _mid_edge_path(
+        self,
+        app: AppMap,
+        target: str,
+        elements: list[Element],
+        *,
+        context_id: str | None = None,
+    ) -> tuple[list[RouteEdge], int] | None:
+        """Find a multi-step edge to *target* whose steps already match the current UI.
+
+        Used by ``--from-here`` when recognition has already named a mid-journey screen
+        (so shortest-path from that screen is empty) but a remembered edge still has
+        remaining steps visible — e.g. edge home→images ``[Apps, Images]`` while the
+        map now says ``apps``.
+        """
+        from .memory import DEFAULT_CONTEXT_ID, LEGACY_CONTEXT_ID
+
+        best: tuple[RouteEdge, int, int] | None = None  # edge, resume_from, remaining
+        for edge in app.routes:
+            if edge.to_screen != target:
+                continue
+            if context_id and edge.context_id not in (
+                context_id,
+                DEFAULT_CONTEXT_ID,
+                LEGACY_CONTEXT_ID,
+            ):
+                continue
+            steps = edge.steps or _parse_legacy_steps(edge.action)
+            if not steps:
+                continue
+            matches = [j for j, s in enumerate(steps) if _match_step(elements, s)]
+            if not matches:
+                continue
+            resume = matches[-1]
+            remaining = len(steps) - resume
+            if best is None or remaining < best[2] or (
+                remaining == best[2] and resume > best[1]
+            ):
+                best = (edge, resume, remaining)
+        if best is None:
+            return None
+        return [best[0]], best[1]
 
     # ----------------------------------------------------------------- planner (§7.3)
 
@@ -2070,6 +2216,7 @@ class Engine:
         max_steps: int = 8,
         allow_destructive: bool = False,
         assist: bool = False,
+        from_here: bool = False,
     ) -> dict[str, Any]:
         """Drive to a remembered screen via the app map (PRD §6b).
 
@@ -2079,6 +2226,12 @@ class Engine:
         screen, so the caller can continue manually. ``plan=True`` returns the annotated
         route without acting. Destructive steps (config ``memory.destructive_labels``)
         are refused unless *allow_destructive*.
+
+        ``from_here=True`` (``--from-here``): you already opened part of the journey —
+        scan the first edge for the last step that still matches the *current* screen and
+        resume from there (same idea as mid-auth transit resume, but for any route). When
+        recognition already named a mid-journey screen so shortest-path is empty, also
+        search multi-step edges that still lead to the goal and resume mid-edge.
         """
         mem = self._memory
         if mem is None:
@@ -2153,6 +2306,17 @@ class Engine:
         path = _shortest_path(
             app, target, start=current, context_id=sess.active_context_id
         )
+        resume_from = 0
+        from_here_preset = False
+        if not path and from_here and not transit_resume:
+            # Recognition may already name a mid-journey screen while a multi-step edge
+            # toward the goal still has remaining selectors on screen.
+            mid = self._mid_edge_path(
+                app, target, res.elements, context_id=sess.active_context_id
+            )
+            if mid is not None:
+                path, resume_from = mid
+                from_here_preset = True
         route = [{"from": e.from_screen, "action": e.action, "to": e.to_screen} for e in path]
         if not path:
             return {
@@ -2162,7 +2326,12 @@ class Engine:
                 "target": target,
                 "package": package,
                 "current_screen": current,
-                "hint": "no known route from here — explore with `aua analyze`",
+                "hint": (
+                    "no known route from here — try `aua goto \"…\" --from-here` if you "
+                    "already opened part of a remembered edge, or explore with `aua analyze`"
+                    if not from_here
+                    else "no known route / mid-edge match from here — explore with `aua analyze`"
+                ),
             }
         lexicon = self.config.memory.destructive_labels
         if plan:
@@ -2191,37 +2360,52 @@ class Engine:
                 "route": annotated,
                 "note": "not executed (--plan)",
             }
-        resume_from = 0
-        if transit_resume:
-            first_steps = path[0].steps or _parse_legacy_steps(path[0].action)
-            if first_steps is None:
-                return _goto_handoff(
-                    goal,
-                    target,
-                    "unsupported_action",
-                    [],
-                    route,
-                    res,
-                    hint="mid-transit on a pre-v2 edge — finish manually, then re-run goto",
-                )
-            res = self.analyze(source="auto")  # transit screens may be vision-tier
-            matched = next(
-                (j for j, s in enumerate(first_steps) if _match_step(res.elements, s)),
-                None,
-            )
-            if matched is None:
-                return _goto_handoff(
-                    goal,
-                    target,
-                    "element_not_found",
-                    [],
-                    route,
-                    res,
-                    remaining_steps=first_steps,
-                    hint="mid-transit, but no remembered step matches this screen — "
-                    "finish it manually (`aua analyze` + `aua tap`), then re-run `aua goto`",
-                )
-            resume_from = matched
+        if not from_here_preset:
+            resume_from = 0
+            if transit_resume or from_here:
+                first_steps = path[0].steps or _parse_legacy_steps(path[0].action)
+                if first_steps is None:
+                    return _goto_handoff(
+                        goal,
+                        target,
+                        "unsupported_action",
+                        [],
+                        route,
+                        res,
+                        hint=(
+                            "mid-transit on a pre-v2 edge — finish manually, then re-run goto"
+                            if transit_resume
+                            else "first edge is not replayable — walk it once to re-record, "
+                            "or author a flow"
+                        ),
+                    )
+                if transit_resume:
+                    res = self.analyze(source="auto")  # transit screens may be vision-tier
+                matches = [
+                    j for j, s in enumerate(first_steps) if _match_step(res.elements, s)
+                ]
+                if not matches:
+                    if transit_resume:
+                        return _goto_handoff(
+                            goal,
+                            target,
+                            "element_not_found",
+                            [],
+                            route,
+                            res,
+                            remaining_steps=first_steps,
+                            hint="mid-transit, but no remembered step matches this screen — "
+                            "finish it manually (`aua analyze` + `aua tap`), then re-run `aua goto`",
+                        )
+                    # --from-here with no matching step: still try from the start of the edge
+                    # (current screen is the edge's from_screen). Agents that are mid-edge
+                    # with no selector visible yet fall through to full replay.
+                    resume_from = 0
+                else:
+                    # Transit: first match is the auth step to perform now.
+                    # --from-here: last match skips already-passed prefix taps when several
+                    # remembered selectors are still on screen (e.g. Apps + Settings).
+                    resume_from = matches[0] if transit_resume else matches[-1]
         hops: list[dict[str, Any]] = []
         for i, edge in enumerate(path):
             if i >= max_steps:
