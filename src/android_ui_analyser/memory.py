@@ -374,8 +374,8 @@ def step_display(step: RouteStep) -> str:
         return "input '<filled>'" + (" + send" if step.submit else "")
     if kind in ("key", "scroll-to", "wait-for", "assert-visible"):
         return f"{kind} '{step.arg}'"
-    if kind == "swipe":
-        return f"swipe {step.arg}"
+    if kind in ("swipe", "scroll"):
+        return f"{kind} {step.arg}"
     if kind in ("launch-app", "stop-app", "open-link", "goto", "flow"):
         # Show a pinned entry Activity: on a multi-launcher build it is the difference
         # between landing in the product and landing in a developer menu, so a dry run

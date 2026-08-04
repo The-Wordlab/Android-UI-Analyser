@@ -47,6 +47,7 @@ _KINDS = {
     "clear": "clear",
     "key": "key",
     "swipe": "swipe",
+    "scroll": "scroll",
     "scroll_to": "scroll-to",
     "wait_for": "wait-for",
     "wait_stable": "wait-stable",
@@ -73,6 +74,7 @@ _ELEMENT_KINDS = ("tap", "long-press", "clear")
 _ARG_ALIAS = {
     "key": "name",
     "swipe": "direction",
+    "scroll": "direction",
     "scroll-to": "text",
     "wait-for": "text",
     "assert-visible": "text",
