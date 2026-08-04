@@ -482,11 +482,11 @@ AGENT_BEST_PRACTICES_PERCEPTION: list[tuple[str, str, str]] = [
         "Post-action observation already has fresh ids. Extra analyzes double round trips.",
     ),
     (
-        "Force `--source vision` / `--with-ocr` on every screen",
-        "Stay on hierarchy (`analyze` default / `--rid` / `has`); escalate vision only when "
-        "the tree misses content (Compose/canvas/game, or `meta.lossy_text`)",
-        "View-based apps (many production UIs) are hierarchy-fast. Parallel OCR on every call "
-        "adds cost without helping when rids already exist.",
+        "Force `--source vision` / `--with-ocr` / `--no-ocr` on every screen",
+        "Leave `analyze` defaults alone; escalate vision only when the tree misses content "
+        "(Compose/canvas/game, or `meta.lossy_text`)",
+        "Parallel OCR is cheap (~100ms) and prevents empty/broken reads. The map skips OCR "
+        "automatically once a screen has enough hierarchy-only evidence — do not second-guess it.",
     ),
     (
         "Guess coordinates or scrape `uiautomator dump` yourself",
@@ -494,10 +494,10 @@ AGENT_BEST_PRACTICES_PERCEPTION: list[tuple[str, str, str]] = [
         "That is the whole point of aua — selectors, not geometry.",
     ),
     (
-        "`aua input` for long strings when speed matters (clipboard paste by hand)",
-        "Just `aua input <id|--rid …> \"…\"` — aua already prefers one-shot `set_text`, then "
-        "clipboard paste (clipboard restored), then IME keys",
-        "Agents should not hand-roll `clipboard set` + `paste`; `input` owns the fast path.",
+        "Hand-roll `clipboard set` + `paste` (or IME keys) for typing speed",
+        'Just `aua input <id|--rid …> "…"` — prefers one-shot `set_text`, then clipboard paste '
+        "(clipboard restored), then IME keys",
+        "`input` owns the fast path; agents should not reinvent it.",
     ),
     (
         "Use `key back` to dismiss the keyboard",
@@ -515,10 +515,14 @@ AGENT_BEST_PRACTICES_MEMORY: list[tuple[str, str, str]] = [
     ),
     (
         "Tap through 5 screens to reach a known destination",
-        '`aua open "<deeplink>"` or `aua goto "<goal>"` / `aua goto "<goal>" --from-here` / '
-        "a saved `aua flow run`",
-        "One call beats a hand-rolled path; `--from-here` continues after you already opened "
-        "part of the journey. Flows collapse whole journeys.",
+        '`aua open "<deeplink>"` or `aua goto "<goal>"` / a saved `aua flow run`',
+        "One call beats a hand-rolled path. Flows collapse whole journeys.",
+    ),
+    (
+        "After a goto handoff / mid-path manual hop, re-walk from the start or invent the rest",
+        '`aua goto "<goal>" --from-here`',
+        "Skips remembered steps that already match the current screen (mid-edge resume). "
+        "Plain `goto` starts from the map's current *screen*; `--from-here` is for mid-*edge*.",
     ),
     (
         "Keep discoveries only in the chat transcript",
@@ -544,6 +548,12 @@ AGENT_BEST_PRACTICES_SPEED: list[tuple[str, str, str]] = [
         "`wait --for <text|id> --observe`",
         "Returns the moment it appears, and hands you the screen. A sleep is slower when "
         "short and wrong when the screen is not ready.",
+    ),
+    (
+        "Extra `wait --for-stable` / sleeps between hops of `goto` / `flow run`",
+        "Just run `goto` / `flow` — route replay already settles on the next known selector "
+        "(`has` on rid/label) before falling back to pixel settle",
+        "Smarter settle is built in; agent-side waits only add turns.",
     ),
     (
         "`wait --for-stable` after tapping send",
@@ -617,10 +627,11 @@ def render_markdown(*, brief: bool = False) -> str:
         p.append("## Agent best practices (short)")
         p.append(
             "**Do:** act by id/`--rid`, use action `observation`, `wait --for` (never `sleep`), "
-            "`about`/`goto`/deeplinks/flows, escalate vision only when hierarchy misses, "
-            "`aua input` (built-in fast typing). "
-            "**Don't:** raw `adb`+screenshots+pixels, `analyze` after every tap, force OCR/vision "
-            "on every screen, `key back` to dismiss IME, hand-rolled clipboard paste for typing. "
+            "`about`/`goto`/`goto --from-here`/deeplinks/flows, leave OCR auto (map skips when "
+            "sure), `aua input` (built-in fast typing). "
+            "**Don't:** raw `adb`+screenshots+pixels, `analyze` after every tap, force "
+            "`--with-ocr`/`--no-ocr`/vision on every screen, re-walk a goto after a mid-path hop, "
+            "sleep between goto hops, `key back` to dismiss IME, hand-rolled clipboard paste. "
             "Full tables: `aua guide` (no `--brief`)."
         )
         p.append("")

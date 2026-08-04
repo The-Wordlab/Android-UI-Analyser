@@ -35,6 +35,8 @@ def test_markdown_covers_required_topics() -> None:
         "exit codes",
         "agent best practices",
         "clipboard paste",
+        "from-here",
+        "hierarchy-only",
     ]:
         assert needle in low, needle
 

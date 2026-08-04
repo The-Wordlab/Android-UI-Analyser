@@ -145,16 +145,17 @@ Other agents: treat this as the operating contract. Most wall-clock on a real ru
 |---|---|---|
 | Drive with raw `adb` + screenshots + pixel taps | Drive with `aua` (`analyze` / `--rid` / `tap` / `input` / `has` / `wait`) | Pixels break on density/layout; ids and resource-ids do not. Discovery via screenshots is minutes; aua discovery is seconds. |
 | `analyze` after every `tap`/`input` (or always `--no-observe` then re-analyze) | Let the action return `observation` (default); only re-analyze when you need a fresh filtered view | Post-action observation already has fresh ids. Extra analyzes double round trips. |
-| Force `--source vision` / `--with-ocr` on every screen | Stay on hierarchy (`analyze` default / `--rid` / `has`); escalate vision only when the tree misses content (Compose/canvas/game, or `meta.lossy_text`) | View-based apps (many production UIs) are hierarchy-fast. Parallel OCR on every call adds cost without helping when rids already exist. |
+| Force `--source vision` / `--with-ocr` / `--no-ocr` on every screen | Leave `analyze` defaults alone; escalate vision only when the tree misses content (Compose/canvas/game, or `meta.lossy_text`) | Parallel OCR is cheap (~100ms) and prevents empty/broken reads. The map skips OCR automatically once a screen has enough hierarchy-only evidence — do not second-guess it. |
 | Guess coordinates or scrape `uiautomator dump` yourself | Act with integer `id` from analyze, or stable `--rid <tail>` / `has --rid` | That is the whole point of aua — selectors, not geometry. |
-| `aua input` for long strings when speed matters (clipboard paste by hand) | Just `aua input <id|--rid …> "…"` — aua already prefers one-shot `set_text`, then clipboard paste (clipboard restored), then IME keys | Agents should not hand-roll `clipboard set` + `paste`; `input` owns the fast path. |
+| Hand-roll `clipboard set` + `paste` (or IME keys) for typing speed | Just `aua input <id|--rid …> "…"` — prefers one-shot `set_text`, then clipboard paste (clipboard restored), then IME keys | `input` owns the fast path; agents should not reinvent it. |
 | Use `key back` to dismiss the keyboard | `aua hide-keyboard` | `key back` often navigates away from the screen instead of only closing the IME. |
 
 ### Memory, map, and shortcuts
 | Don't | Do | Why |
 |---|---|---|
 | Re-explore an app from scratch every session | Read `aua about`, follow `meta.suggested_gotos` / `suggested_deeplinks`, use `aua goto "<goal>"` / `aua map --find` | The map is the previous agent's gift. Ignoring it re-pays discovery cost. |
-| Tap through 5 screens to reach a known destination | `aua open "<deeplink>"` or `aua goto "<goal>"` / `aua goto "<goal>" --from-here` / a saved `aua flow run` | One call beats a hand-rolled path; `--from-here` continues after you already opened part of the journey. Flows collapse whole journeys. |
+| Tap through 5 screens to reach a known destination | `aua open "<deeplink>"` or `aua goto "<goal>"` / a saved `aua flow run` | One call beats a hand-rolled path. Flows collapse whole journeys. |
+| After a goto handoff / mid-path manual hop, re-walk from the start or invent the rest | `aua goto "<goal>" --from-here` | Skips remembered steps that already match the current screen (mid-edge resume). Plain `goto` starts from the map's current *screen*; `--from-here` is for mid-*edge*. |
 | Keep discoveries only in the chat transcript | `aua remember` / `aua knowledge add` (and fix bad names with `memory update`) | The next agent (or you tomorrow) will not see this chat — write it into the playbook. |
 | Start timed work before the daemon is warm | `aua daemon start` (optional: `aua-fast` for hot commands) | Cold Python/connect startup dwarfs hierarchy dump cost on short commands. |
 
@@ -165,6 +166,7 @@ Measured on a real 6-scenario lane: 1348s wall clock, 239 aua calls, and only ~3
 |---|---|---|
 | `tap --rid x --no-observe` then `analyze` | `tap --rid x` | A tap RETURNS the resulting screen by default. The two-call habit doubled a lane's round trips: 66 taps followed by 52 analyzes. |
 | `sleep 8` after an action | `wait --for <text|id> --observe` | Returns the moment it appears, and hands you the screen. A sleep is slower when short and wrong when the screen is not ready. |
+| Extra `wait --for-stable` / sleeps between hops of `goto` / `flow run` | Just run `goto` / `flow` — route replay already settles on the next known selector (`has` on rid/label) before falling back to pixel settle | Smarter settle is built in; agent-side waits only add turns. |
 | `wait --for-stable` after tapping send | `wait --after-change` | Nothing has changed yet, so the screen is already 'stable': --for-stable returned in 1.6s with NO answer on screen; --after-change returned in 4.9s WITH it. Measured. |
 | `sleep 30` for image generation | `wait --after-change` (or `--for-stable --settle 1500`) | Same trap, bigger waste. Wait on the condition, never the clock. |
 | One shell call per assertion | Group independent checks in one call | Each extra call is another agent turn, ~6s of wall clock. |
