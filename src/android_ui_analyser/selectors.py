@@ -100,6 +100,28 @@ def match_selector(
 
 _NEAR = 0.88  # similarity above which an OCR reading is the same text, misread
 _NEAR_MIN_LEN = 6  # below this, a near match is more likely a different word
+_GLYPH_MAX_LEN = 2  # an edge token this short is an icon read as letters, not a word
+
+
+def _strip_glyph_tokens(text: str) -> str:
+    """*text* without one- or two-character tokens at either end.
+
+    OCR reads an icon sitting next to a label as a letter, so a button captioned
+    "Continue with Google" with the Google mark beside it comes back as "G Continue with
+    Google". That reading is *longer* than the tree's text, so a containment test - even a
+    fuzzy one - keeps it, and the screen carries a duplicate that differs from the truth
+    only by a glyph.
+
+    Only the ends are trimmed, and only tokens too short to be words, so a reading that
+    adds real content keeps it: "Save all changes" against a tree that says "Save" still
+    survives, because "all" and "changes" are words.
+    """
+    parts = text.split()
+    while parts and len(parts[0]) <= _GLYPH_MAX_LEN:
+        parts.pop(0)
+    while parts and len(parts[-1]) <= _GLYPH_MAX_LEN:
+        parts.pop()
+    return " ".join(parts)
 
 
 def _near_contained(needle: str, haystack: str) -> bool:
@@ -177,11 +199,46 @@ def drop_redundant_ocr(elements: Sequence[Element]) -> list[Element]:
             if "�" in known:
                 continue  # the tree lost characters here; OCR is the repair, not a copy
             known = known.casefold()
-            if seen in known or _near_contained(seen, known):
-                return True
+            for candidate in (seen, _strip_glyph_tokens(seen)):
+                if candidate and (candidate in known or _near_contained(candidate, known)):
+                    return True
         return False
 
     return [el for el in elements if el.source != "ocr" or not redundant(el)]
+
+
+def ocr_added_app_content(elements: Sequence[Element]) -> bool:
+    """Did the OCR pass contribute anything about the *app*, rather than system chrome?
+
+    This is the evidence behind the experience-based OCR skip, so it has to mean what it
+    says. Asking "were any OCR elements kept?" does not: the status-bar clock is read on
+    every single screen, its digits never match the tree's, and it therefore survives every
+    redundancy test. One clock reading is enough to score every visit as "OCR helped", which
+    leaves `hierarchy_only_ok` at zero forever and quietly prevents the skip from ever
+    engaging - the optimisation is then dead code that still pays for itself on every call.
+
+    A reading counts as system chrome when a system element encloses it, which is exactly
+    how the clock, the battery and the signal icons present. Anything in app territory, or
+    over no tree element at all, counts as real.
+    """
+    from .projection import is_system_rid
+
+    chrome = [
+        el
+        for el in elements
+        if el.source != "ocr" and (is_system_rid(el.resource_id) or el.window == "system")
+    ]
+    for el in elements:
+        if el.source != "ocr" or not (el.text or "").strip():
+            continue
+        cx, cy = el.center
+        inside_chrome = any(
+            c.bounds[0] <= cx <= c.bounds[2] and c.bounds[1] <= cy <= c.bounds[3]
+            for c in chrome
+        )
+        if not inside_chrome:
+            return True
+    return False
 
 
 def app_elements(elements: Sequence[Element]) -> list[Element]:

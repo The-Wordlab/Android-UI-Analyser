@@ -194,3 +194,50 @@ def test_lossy_text_repair_is_never_dropped():
     out = drop_redundant_ocr([lossy, repair])
 
     assert 70 in [el.id for el in out], "dropping this re-breaks the lossy-text repair"
+
+
+# ---- glyph artifacts, and what "OCR helped" is allowed to mean ----
+
+from android_ui_analyser.selectors import ocr_added_app_content  # noqa: E402
+
+
+def test_icon_read_as_a_letter_is_still_redundant():
+    """The Google mark beside a button comes back as a leading "G".
+
+    The reading is *longer* than the tree's text, so containment - even fuzzy - keeps it,
+    and the screen carries a duplicate differing only by a glyph. Worse than cosmetic: it
+    keeps `ocr_helped` true forever, which pins `hierarchy_only_ok` at zero and disables
+    the experience-based OCR skip on that screen for good.
+    """
+    button = _node(9, "Continue with Google", [60, 700, 1020, 840])
+    reading = _node(60, "G Continue with Google", [80, 750, 900, 790], source="ocr")
+
+    assert drop_redundant_ocr([button, reading]) == [button]
+
+
+def test_a_reading_that_adds_real_words_survives():
+    """Only short edge tokens are trimmed, so added content is never discarded."""
+    node = _node(1, "Save", [60, 300, 600, 420])
+    more = _node(9, "Save all changes", [80, 330, 500, 380], source="ocr")
+
+    assert len(drop_redundant_ocr([node, more])) == 2
+
+
+def test_clock_alone_does_not_count_as_ocr_helping():
+    """The status-bar clock is read on every screen and never matches the tree's digits.
+
+    Counting it would score every visit as "OCR helped", which is how an optimisation ends
+    up dead code that still costs a pass on every call.
+    """
+    clock = _node(0, "1:18", [11, 49, 115, 92], rid="com.android.systemui:id/clock")
+    clock.window = "system"
+    reading = _node(50, "10:19 A", [38, 56, 154, 91], source="ocr")
+
+    assert ocr_added_app_content([clock, reading]) is False
+
+
+def test_real_app_text_does_count_as_ocr_helping():
+    webview = _node(30, "Sign in - Google Accounts", [0, 142, 1080, 2175])
+    button = _node(68, "Continue", [700, 2020, 870, 2060], source="ocr")
+
+    assert ocr_added_app_content([webview, button]) is True

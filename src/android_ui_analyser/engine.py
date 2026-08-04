@@ -88,6 +88,7 @@ from .selectors import (
     element_digest,
     match_selector,
     nearest_elements,
+    ocr_added_app_content,
     selector_label,
 )
 
@@ -1020,7 +1021,13 @@ class Engine:
                 # Evidence for experience-based OCR skip: only count visits where OCR was
                 # allowed. Forced hierarchy-only paths (goto hops) must not inflate the score.
                 if hierarchy_observation.ocr_provider is not None:
-                    ocr_helped = bool(hierarchy_observation.ocr_elements)
+                    # Not `bool(ocr_elements)`: the status-bar clock is read on every
+                    # screen and never matches the tree's digits, so it survives every
+                    # redundancy test and would score every visit as "OCR helped" -
+                    # pinning hierarchy_only_ok at zero and disabling the skip forever.
+                    ocr_helped = ocr_added_app_content(
+                        [*hierarchy_observation.elements, *hierarchy_observation.ocr_elements]
+                    )
                 else:
                     ocr_helped = False  # skipped (map) or unavailable → hierarchy alone
             known_screen, hints = self._record_screen_safe(
