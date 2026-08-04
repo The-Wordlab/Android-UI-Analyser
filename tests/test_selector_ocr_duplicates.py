@@ -2,8 +2,8 @@
 
 The bug this guards: on macOS every hierarchy observation is fused with an Apple Vision pass,
 so `tap --text Apps` raised "matches 2 elements - disambiguate with --index" on a screen with
-exactly one Apps tab. Measured on the Luzia hub: 7 labels affected, including every
-bottom-bar tab, which is the navigation idiom the whole QA suite is written in.
+exactly one Apps tab. Observed on a real app's home screen: 7 labels affected, every
+bottom-bar tab among them - which is how a test suite navigates.
 
 Two distinct failures hide behind that one message:
 
@@ -43,7 +43,7 @@ def _node(
     )
 
 
-# Real geometry, captured from the Luzia hub on aua_plus (1080x2424).
+# Real geometry, captured from an app's home screen on a 1080x2424 device.
 TAB_APPS = _node(4, "Apps", [874, 2193, 1069, 2319], rid="bottomBarTools")
 OCR_ON_TAB = _node(51, "Apps", [922, 2280, 1017, 2318], source="ocr")
 CARD_APPS = _node(9, "Apps Tools to make your life easier", [32, 1180, 1048, 1320])
@@ -153,3 +153,44 @@ def test_resolve_selector_still_raises_on_real_ambiguity():
     )
     with pytest.raises(SelectorAmbiguousError):
         engine.resolve_selector(text="Continue")
+
+
+# ---- near matches: an OCR misreading is the same text, not a new claim ----
+
+
+def test_letterform_misread_is_still_redundant():
+    """OCR read the capital I in "AI" as a lowercase L.
+
+    An exact-substring test keeps precisely the readings that are *wrong*, so the fused
+    screen ends up carrying a subtly incorrect label for text the tree had right.
+    """
+    card = _node(9, "Chat Talk to AI personalities", [42, 863, 1038, 1010])
+    misread = _node(60, "Talk to Al personalities", [186, 950, 560, 990], source="ocr")
+
+    assert drop_redundant_ocr([card, misread]) == [card]
+
+
+def test_different_labels_are_not_folded_together():
+    """The near test must not become a fuzzy search. "Sale" is not "Save"."""
+    node = _node(1, "Save changes now", [60, 300, 500, 380])
+    other = _node(9, "Sale changes now", [700, 1800, 1000, 1850], source="ocr")
+
+    assert len(drop_redundant_ocr([node, other])) == 2, "different text, and not enclosed"
+
+
+def test_short_strings_do_not_near_match():
+    """Below the length floor a one-character difference is usually a different word."""
+    node = _node(1, "Maps", [60, 300, 300, 380])
+    ocr = _node(9, "Apps", [100, 320, 200, 360], source="ocr")
+
+    assert len(drop_redundant_ocr([node, ocr])) == 2
+
+
+def test_lossy_text_repair_is_never_dropped():
+    """Where the tree emitted U+FFFD, the OCR reading is the only correct account."""
+    lossy = _node(5, "Divide both sides by 2 to solve for �: �", [42, 500, 1038, 600])
+    repair = _node(70, "Divide both sides by 2 to solve for x: 5", [50, 520, 900, 580], source="ocr")
+
+    out = drop_redundant_ocr([lossy, repair])
+
+    assert 70 in [el.id for el in out], "dropping this re-breaks the lossy-text repair"

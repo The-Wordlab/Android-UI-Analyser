@@ -1,4 +1,11 @@
-"""Parallel Apple Vision + hierarchy observations keep both raw data sources."""
+"""Parallel Apple Vision + hierarchy: keep what OCR adds, withhold what it merely repeats.
+
+The two observations run concurrently and are fused. What survives the fusion changed once
+the fused list started feeding one-shot selectors: a reading that only repeats text the tree
+already reports is not evidence to reconcile, and keeping it made `tap --text Submit` raise
+"matches 2 elements" on a screen with one Submit button. Pixel-only text always survives -
+that is what the OCR pass is for.
+"""
 
 from __future__ import annotations
 
@@ -53,9 +60,12 @@ class _ParallelApple(OcrProvider):
         self._barrier.wait(timeout=1.0)
         time.sleep(0.08)
         return [
-            # Deliberately duplicates hierarchy text: both observations must survive.
+            # Sits on top of the hierarchy's Submit button and says the same thing, so it
+            # is withheld by default: a second copy of text already described is not
+            # evidence, and it made `tap --text Submit` ambiguous.
             TextBox(text="Submit", bounds=(105, 205, 295, 255), confidence=0.99),
-            # Pixel-only text absent from the hierarchy.
+            # Pixel-only text absent from the hierarchy. This is what OCR is for, and it
+            # must always survive.
             TextBox(text="Canvas total 42", bounds=(40, 400, 300, 450), confidence=0.91),
         ]
 
@@ -86,16 +96,41 @@ def test_hierarchy_and_apple_ocr_run_in_parallel_and_both_survive() -> None:
     elapsed = time.perf_counter() - started
 
     submit = [element for element in result.elements if element.text == "Submit"]
-    assert {element.source for element in submit} == {Source.hierarchy, Source.ocr}
+    assert {element.source for element in submit} == {Source.hierarchy}, (
+        "the OCR reading of Submit is a second copy of text the tree already reports; "
+        "keeping it made `tap --text Submit` raise 'matches 2 elements'"
+    )
     assert any(
         element.text == "Canvas total 42" and element.source is Source.ocr
         for element in result.elements
-    )
+    ), "pixel-only text is the whole point of the OCR pass and must survive"
     assert result.screen.source is ScreenSource.mixed
     assert result.meta.providers_used == ["apple_vision"]
     assert provider.calls == 1
     # Each side sleeps for 80ms; a sequential implementation would take at least 160ms.
     assert elapsed < 0.15
+
+
+def test_redundant_readings_can_be_kept_for_inspection() -> None:
+    """`ocr.drop_redundant: false` returns the unfiltered pass, for debugging OCR itself."""
+    barrier = threading.Barrier(2)
+    provider = _ParallelApple(barrier)
+    device = _ParallelDevice(barrier)
+    cfg = make_config(
+        ocr={
+            "enabled": True,
+            "chain": ["apple_vision"],
+            "augment_hierarchy": True,
+            "drop_redundant": False,
+        },
+        perf={"skip_unchanged_analyze": False},
+    )
+    engine = make_engine(config=cfg, device=device, factory=_Factory(provider))  # type: ignore[arg-type]
+
+    result = engine.analyze(source="hierarchy")
+
+    submit = [element for element in result.elements if element.text == "Submit"]
+    assert {element.source for element in submit} == {Source.hierarchy, Source.ocr}
 
 
 def test_explicit_no_ocr_keeps_hierarchy_only() -> None:

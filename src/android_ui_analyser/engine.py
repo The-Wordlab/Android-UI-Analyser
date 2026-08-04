@@ -484,9 +484,18 @@ class Engine:
             from . import merge
 
             start_id = max((element.id for element in elements), default=-1) + 1
-            # Keep both observations intact. Matching hierarchy/OCR labels are deliberately
-            # not deduplicated: source provenance lets the caller reconcile the evidence.
             ocr_elements = merge.merge_vision([], texts, start_id=start_id)
+            if self.config.ocr.drop_redundant:
+                # Withhold readings of text the tree already reports. Provenance is worth
+                # keeping where OCR *adds* something - web content, a lossy-text repair, a
+                # surface the tree cannot see - but a second copy of text already described
+                # is not evidence to reconcile. Measured on one app screen: 14 of 16
+                # readings were pure duplication, and one of the remaining two was a misread
+                # ("Al" for "AI") that survived only because it differed from the truth.
+                # Those cost tokens on every observation and let a wrong label be quoted as
+                # fact. See selectors.drop_redundant_ocr for what counts as redundant.
+                keep = {id(el) for el in drop_redundant_ocr([*elements, *ocr_elements])}
+                ocr_elements = [el for el in ocr_elements if id(el) in keep]
         return _HierarchyObservation(
             elements,
             package,

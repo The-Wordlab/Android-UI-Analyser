@@ -24,6 +24,20 @@ from android_ui_analyser.providers.ocr.rapidocr import RapidOcrProvider
 from android_ui_analyser.providers.ocr.tesseract import TesseractOcrProvider
 
 # ---------------------------------------------------------------------------
+# Optional-extra gates
+# ---------------------------------------------------------------------------
+# apple_vision and rapidocr are optional extras, so `uv run pytest tests` on a plain
+# checkout has neither. Tests that need one must skip, not fail: a red suite that means
+# "you did not install an optional extra" trains everyone to ignore red, and it hid a real
+# regression here once - a genuine failure was dismissed as this same noise.
+
+_APPLE_OK = AppleVisionOcrProvider().is_available().ok
+_RAPID_OK = RapidOcrProvider().is_available().ok
+
+needs_apple = pytest.mark.skipif(_APPLE_OK is False, reason="extra not installed: [apple]")
+needs_rapid = pytest.mark.skipif(_RAPID_OK is False, reason="extra not installed: rapidocr")
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -203,6 +217,7 @@ class TestAppleVisionCoordConversion:
         mock_req.setRecognitionLevel_.assert_called_once_with(1)
 
 
+@needs_rapid
 class TestRapidOcrCoordConversion:
     """Monkeypatch the cached _engine on RapidOcrProvider to return a known raw
     result, then assert that recognize() converts the 4-point polygon correctly.
@@ -280,11 +295,13 @@ class TestRealAvailability:
     """On this macOS/arm64 host with pyobjc Vision and rapidocr-onnxruntime installed,
     both providers must report available."""
 
+    @needs_apple
     def test_apple_vision_available(self) -> None:
         provider = AppleVisionOcrProvider()
         avail = provider.is_available()
         assert avail.ok is True, f"Expected apple_vision available, got: {avail.reason}"
 
+    @needs_rapid
     def test_rapidocr_available(self) -> None:
         provider = RapidOcrProvider()
         avail = provider.is_available()

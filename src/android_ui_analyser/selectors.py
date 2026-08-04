@@ -6,6 +6,7 @@ Public entry points used by the engine and re-exported from :mod:`engine` for
 
 from __future__ import annotations
 
+import difflib
 from collections.abc import Sequence
 from typing import Any
 
@@ -97,6 +98,30 @@ def match_selector(
     return tiers[min(tiers)] if tiers else []
 
 
+_NEAR = 0.88  # similarity above which an OCR reading is the same text, misread
+_NEAR_MIN_LEN = 6  # below this, a near match is more likely a different word
+
+
+def _near_contained(needle: str, haystack: str) -> bool:
+    """Is *needle* a slightly-misread copy of some window of *haystack*?
+
+    Both arguments are already casefolded. Compares only equal-length windows, because a
+    misreading changes characters rather than length; that keeps this a same-text test
+    rather than a general fuzzy search.
+    """
+    n = len(needle)
+    if n < _NEAR_MIN_LEN or n > len(haystack):
+        return False
+    matcher = difflib.SequenceMatcher(a=needle, autojunk=False)
+    for start in range(len(haystack) - n + 1):
+        matcher.set_seq2(haystack[start : start + n])
+        if matcher.real_quick_ratio() < _NEAR or matcher.quick_ratio() < _NEAR:
+            continue
+        if matcher.ratio() >= _NEAR:
+            return True
+    return False
+
+
 def drop_redundant_ocr(elements: Sequence[Element]) -> list[Element]:
     """*elements* without OCR readings of text the hierarchy already reports.
 
@@ -122,6 +147,19 @@ def drop_redundant_ocr(elements: Sequence[Element]) -> list[Element]:
     to repeat a word from the surrounding tree. Where the hierarchy is silent - a Chrome
     Custom Tab, a Flutter surface - nothing is enclosing and describing the text, so OCR
     survives untouched and remains the only witness there is.
+
+    **Near matches count as redundant too**, above ``_NEAR`` similarity. OCR confuses
+    letterforms - a capital I read as a lowercase L turns "Talk to AI personalities" into
+    "Talk to Al personalities" - and an exact-substring test keeps precisely those, so the
+    fused screen ends up carrying a subtly *wrong* label for text the tree had right. A
+    misreading that survives because it is wrong is the worst of both worlds: an agent
+    quoting screen copy, or a scenario asserting exact wording, reports it as fact. The
+    threshold is high and short strings are exempt, so genuinely different labels
+    ("Save" against "Sale") stay separate.
+
+    **Never drops a repair of lossy text.** When the tree could not represent a character it
+    emits U+FFFD, and then the OCR reading is the only correct account of that text - the
+    opposite of redundant. Such an enclosure is skipped rather than matched against.
     """
     solid = [el for el in elements if el.source != "ocr"]
     if not solid:
@@ -135,8 +173,11 @@ def drop_redundant_ocr(elements: Sequence[Element]) -> list[Element]:
         for h in solid:
             if not (h.bounds[0] <= cx <= h.bounds[2] and h.bounds[1] <= cy <= h.bounds[3]):
                 continue
-            known = f"{h.text or ''} {h.content_desc or ''}".casefold()
-            if seen in known:
+            known = f"{h.text or ''} {h.content_desc or ''}"
+            if "�" in known:
+                continue  # the tree lost characters here; OCR is the repair, not a copy
+            known = known.casefold()
+            if seen in known or _near_contained(seen, known):
                 return True
         return False
 

@@ -121,6 +121,10 @@ class OcrCfg(_ChainCfg):
     chain: list[str] = Field(default_factory=lambda: ["apple_vision", "rapidocr"])
     # On macOS, overlap Apple Vision with hierarchy capture and fuse both observations.
     augment_hierarchy: bool = True
+    # Withhold OCR readings of text the hierarchy already reports. Measured on one app
+    # screen: 14 of 16 readings were pure duplication, one was the clock, and one was a
+    # misread of a label the tree had right. Set false to see the unfiltered OCR pass.
+    drop_redundant: bool = True
 
 
 class DetectionCfg(_ChainCfg):

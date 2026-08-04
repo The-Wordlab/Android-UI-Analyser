@@ -774,7 +774,10 @@ def render_markdown(*, brief: bool = False) -> str:
         "`aua ask` is provider-neutral: configure `grounding.chain: [gemini, openai]`. The factory "
         "tries that order and skips providers whose API-key env var is absent, so one config works "
         "with either key. Reverse the list to prefer OpenAI when both exist. On macOS, Apple "
-        "Vision OCR and hierarchy capture run concurrently; both raw element sets are returned. "
+        "Vision OCR and hierarchy capture run concurrently and fuse into one observation, so web "
+        "content inside a Custom Tab is visible to a plain `analyze`. Readings that only repeat "
+        "text the tree already reports are withheld (`ocr.drop_redundant`); pixel-only text always "
+        "survives. "
         "OCR works on a 720px preview and maps boxes back to original screen coordinates."
     )
     return "\n".join(p) + "\n"

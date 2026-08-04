@@ -62,6 +62,39 @@ Global install (no extras):
 uv tool install .        # or:  pipx install .
 ```
 
+**If you are going to edit the source, install it editable — once:**
+
+```bash
+uv tool install --force --reinstall --editable .
+```
+
+`aua` then resolves straight to your working tree, so every edit is live and there is no
+re-install step to forget. Confirm with
+`python -c "import android_ui_analyser.selectors as m; print(m.__file__)"` — it should print a
+path inside your clone.
+
+**If you install non-editable, re-installing needs `--reinstall`:**
+
+```bash
+uv tool install --force --reinstall .        # picks up your working tree
+uv tool install --force .                    # does NOT - silently reuses a cached build
+```
+
+`--force` only means "replace the existing tool entry"; uv still resolves `.` from its build
+cache, so the second command reports `Installed 1 executable: aua` and leaves the **old** code
+in place. Nothing warns you. The failure mode is invisible: you edit, install, test, and measure
+the previous build while believing it is the new one - which is how a working fix got recorded
+as a fix that did nothing. If a change seems to have had no effect, verify what is actually
+installed before doubting the change:
+
+```bash
+grep -c my_new_symbol "$(uv tool dir)"/android-ui-analyser/lib/python*/site-packages/android_ui_analyser/*.py
+```
+
+And restart the daemon afterwards (`aua daemon stop && aua daemon start`) - a running daemon
+keeps serving the code and the config it started with, so a fresh install or an env override
+does not reach it.
+
 ### Put `aua` on your PATH (works from any directory)
 
 Like `adb`, the `aua` binary must resolve from **any** directory — you (and your agents)
@@ -508,7 +541,8 @@ set -a; source .env; set +a   # export entries so `aua` and its daemon inherit t
 # .android-ui-analyser.yaml  (or aua config init to write the full commented version)
 ocr:
   chain: [apple_vision, rapidocr]   # macOS: apple first; cross-platform: just [rapidocr]
-  augment_hierarchy: true           # return raw hierarchy + OCR elements on every analyze
+  augment_hierarchy: true           # fuse an Apple OCR pass into every hierarchy analyze
+  drop_redundant: true              # withhold readings of text the hierarchy already reports
 
 grounding:
   enabled: true
@@ -530,7 +564,12 @@ Gemini runs; with only `OPENAI_API_KEY`, Luna runs; with both, the first configu
 wins. `aua ask "…"` uses the same provider-neutral interface and reports the provider/model
 that answered. Apple Vision OCR remains local; it downsizes wide screenshots to 720px for
 recognition and maps boxes back to original coordinates. Hierarchy and OCR run concurrently,
-and both raw element sets are returned. Remote screen-analysis calls use a compressed preview.
+and the two are fused into one observation, so web content inside a Chrome Custom Tab is visible
+to a plain `analyze`. Readings that merely repeat text the hierarchy already reports are
+withheld (`ocr.drop_redundant`, default true): they cost tokens on every observation, they made
+`tap --text` ambiguous, and a misread of text the tree had right is worse than no reading at
+all. Pixel-only text - and any repair of lossy `U+FFFD` labels - always survives. Remote
+screen-analysis calls use a compressed preview.
 
 ### Profiles
 
