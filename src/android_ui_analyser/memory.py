@@ -26,6 +26,7 @@ Design notes
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import re
 import shutil
@@ -41,6 +42,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .config import MemoryCfg
     from .schema import Element
+
+logger = logging.getLogger("android_ui_analyser.memory")
 
 MEMORY_SCHEMA_VERSION = 4
 LEGACY_CONTEXT_ID = "legacy-default"
@@ -326,6 +329,8 @@ class SessionState(BaseModel):
     active_flags: dict[str, str] = Field(default_factory=dict)
     pending_flags: dict[str, str] = Field(default_factory=dict)
     context_verified: bool = False
+    # Which boot of the device this cursor describes; see MemoryStore.claim_session.
+    instance: str | None = None
 
     @field_validator("pending", "recent", mode="before")
     @classmethod
@@ -1095,6 +1100,49 @@ class AppMemoryStore:
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(sess.model_dump_json(), encoding="utf-8")
         os.replace(tmp, path)
+
+    def claim_session(self, serial: str, instance: str | None) -> bool:
+        """Bind *serial*'s cursor to a device instance, discarding another instance's.
+
+        `aua flow save --last N` returned steps **no lane had performed** — an `open_link`
+        to a screen it never opened, a consent tap, a flag cycle it never ran, a tap
+        labelled from a different test's content. Three lanes reported it independently,
+        and one nearly filed a hand-written flow containing another test's journey.
+
+        The action journal is keyed by serial, and serials come from a small pool that is
+        handed out and reclaimed as workers come and go: `emulator-5554` may be one AVD,
+        then a second, then that second one again for a *different* run, inside an hour.
+        Per-worker `AUA_CACHE__DIR` isolation cannot help, because the memory directory is
+        deliberately shared so learned routes accumulate across workers — and it should stay
+        that way. Only the *session* is instance-specific.
+
+        So the cursor now records which boot it belongs to, and a mismatch discards it.
+        Everything in SessionState is instance state (cursor, pending/recent steps, active
+        flag context); the learned AppMap lives elsewhere and is untouched, so a fresh
+        worker still inherits every route the pool has learned.
+
+        Returns True when a foreign session was discarded. An unreadable *instance* (None)
+        changes nothing: the same rule as everywhere else here — never destroy state on the
+        strength of an observation we could not make.
+        """
+        if instance is None:
+            return False
+        sess = self.load_session(serial)
+        if sess.instance == instance:
+            return False
+        if sess.instance is None and not sess.recent and not sess.pending and not sess.package:
+            # An empty cursor is nobody's; just stamp it so the next call is a no-op.
+            sess.instance = instance
+            self.save_session(serial, sess)
+            return False
+        logger.info(
+            "%s is a new device instance; discarding a cursor from %s (%d recorded steps)",
+            serial,
+            sess.instance or "an unstamped session",
+            len(sess.recent),
+        )
+        self.save_session(serial, SessionState(instance=instance))
+        return True
 
     def latest_session(self, package: str) -> SessionState | None:
         """Most recently written cursor for *package* (keeps offline ``map --app`` contextual)."""

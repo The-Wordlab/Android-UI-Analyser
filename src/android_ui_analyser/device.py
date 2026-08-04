@@ -228,6 +228,15 @@ class Device(ABC):
     def stop_recording(self, local_path: str) -> str:
         raise DeviceError("screen recording requires a real device")
 
+    def instance_token(self) -> str | None:
+        """Identity of *this boot* of this device, or None when it cannot be read.
+
+        A serial is not an identity: console ports are recycled, so `emulator-5554` may be
+        three different devices in an hour. Anything cached against a serial needs to know
+        when the thing behind it was replaced.
+        """
+        return None
+
     def set_clock(self, timestamp_ms: int) -> None:
         raise DeviceError("clock travel requires a real device")
 
@@ -763,6 +772,19 @@ class Uiautomator2Device(Device):
         d = Path(base).expanduser() / "recordings"
         d.mkdir(parents=True, exist_ok=True)
         return d / f"{self.serial.replace(':', '_')}.json"
+
+    def instance_token(self) -> str | None:
+        """The kernel's boot id — a fresh UUID for every boot, so it names this instance.
+
+        Measured at ~10ms on the emulator pool, which is why the caller can afford to ask
+        once per invocation rather than inventing a heuristic about elapsed time.
+        """
+        with contextlib.suppress(Exception):
+            token = self.shell("cat /proc/sys/kernel/random/boot_id").strip()
+            # Guard against a shell that answers with an error page rather than failing.
+            if 30 <= len(token) <= 40 and token.count("-") == 4:
+                return token
+        return None
 
     def _live_recording(self) -> tuple[bool, str | None]:
         """Ask the *device* whether a ``screenrecord`` is running: ``(observed, remote)``.

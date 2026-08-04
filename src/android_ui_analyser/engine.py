@@ -1481,6 +1481,22 @@ class Engine:
             return None
         if self._mem is None:
             self._mem = AppMemoryStore(self.config.memory)
+            # Claim the serial's cursor for *this* device instance before anything reads it.
+            # Session state is keyed by serial and serials are recycled from a small pool,
+            # so without this a worker inherits its predecessor's action journal and
+            # `flow save` hands back steps from another scenario. One ~10ms device read per
+            # invocation, done here because this is the only place the store is built.
+            #
+            # `self._device`, deliberately, not `self.device`: the latter would *connect*,
+            # and offline commands (`aua map --app …`) read memory with no device attached —
+            # making them wait out a uiautomator2 connect timeout to learn nothing. Every
+            # path that has a session worth protecting has already connected, because the
+            # earliest readers here are handed a live `device` by their caller.
+            if self._device is not None:
+                with contextlib.suppress(Exception):
+                    self._mem.claim_session(
+                        self._device.serial, self._device.instance_token()
+                    )
         return self._mem
 
     def _version_for(self, device: Device, package: str) -> str | None:
