@@ -100,6 +100,10 @@ logger = logging.getLogger("android_ui_analyser.engine")
 QUERY_CONFIDENT = 1.0  # all salient tokens / exact phrase present
 QUERY_SOFT = 0.5  # best-effort threshold when escalation is exhausted
 _ASSIST_MAX_STEPS = 6  # bound on planner actions per recovery attempt (opt-in only)
+# A bottom system bar starts within this fraction of the screen height. Wide enough for a
+# tall three-button bar, narrow enough that a systemui sheet or the expanded notification
+# shade can never be mistaken for it (see Engine._system_bar_top).
+_SYSTEM_BAR_BAND = 0.85
 _MAX_FLOW_DEPTH = 5  # bound on nested `flow:` sub-flow composition (cycle backstop)
 # A hierarchy dump quicker than this can outrun the screen it is reading, so a post-action
 # sample may catch a half-attached tree; a slower one cannot (the render has finished by the
@@ -3593,7 +3597,7 @@ class Engine:
         with_image: bool | str | None = None,
     ) -> ActionResult:
         el = self._target(element_id, selector)
-        cx, cy = el.center
+        cx, cy = self._aim(el)
         step = self._step("tap", el)  # built pre-action: needs the cached package
         with self._acting(_action_mark("tap", el)):
             self.device.click(cx, cy)
@@ -3612,7 +3616,7 @@ class Engine:
         with_image: bool | str | None = None,
     ) -> ActionResult:
         el = self._target(element_id, selector, verb="long-press")
-        cx, cy = el.center
+        cx, cy = self._aim(el)
         step = self._step("long-press", el)
         with self._acting(_action_mark("long-press", el)):
             self.device.long_click(cx, cy, ms)
@@ -3632,7 +3636,7 @@ class Engine:
         with_image: bool | str | None = None,
     ) -> ActionResult:
         el = self._target(element_id, selector, verb="double-tap")
-        cx, cy = el.center
+        cx, cy = self._aim(el)
         step = self._step("double-tap", el)
         with self._acting(_action_mark("double-tap", el)):
             self.device.double_click(cx, cy)
@@ -3654,7 +3658,7 @@ class Engine:
         with_image: bool | str | None = None,
     ) -> ActionResult:
         el = self._target(element_id, selector, verb="input")
-        cx, cy = el.center
+        cx, cy = self._aim(el)
         # The step records the field's SHAPE only — the typed value is never persisted
         # (PRD §6b privacy; observe_action strips `text` defensively too).
         step = self._step("input", el, submit=submit)
@@ -3674,6 +3678,93 @@ class Engine:
             observe,
             with_image,
         )
+
+    def _system_bar_top(self) -> int | None:
+        """Top edge of the bottom system bar, or None when it cannot be established.
+
+        Read from the elements of the last analyze, so this costs no device call. The nav
+        bar's *background* node carries no label and does not survive parsing, but its
+        buttons do — Back / Home / Overview are clickable nodes with content-descriptions
+        on the ``system`` window layer, sitting flush against the bottom edge. The
+        shallowest of those is the bar's top.
+
+        Returns None on gesture navigation (no buttons to find) and whenever the analyze
+        cache has no system elements — for instance after ``analyze --no-system``. None
+        means "do not adjust anything", so the worst case is the old behaviour, never a
+        differently-wrong aim point.
+        """
+        cached = self._read_cache()
+        if cached is None or not cached.elements:
+            return None
+        try:
+            _w, height = self.device.window_size()
+        except Exception:  # pragma: no cover - best effort
+            return None
+        if height <= 0:
+            return None
+        # Flush with the bottom edge, and starting inside the bottom band. The band matters:
+        # a full-screen system overlay (the expanded shade) or a systemui dialog must not be
+        # mistaken for the bar, or we would "clamp" taps in the middle of the screen.
+        floor = height * _SYSTEM_BAR_BAND
+        tops = [
+            el.bounds[1]
+            for el in cached.elements
+            if el.window == "system" and el.bounds[3] >= height - 2 and el.bounds[1] >= floor
+        ]
+        return min(tops) if tops else None
+
+    def _aim(self, el: Element) -> tuple[int, int]:
+        """Where to touch *el*: its centre, unless the centre is under the system nav bar.
+
+        11 controls across 6 apps in one sweep published accessibility bounds extending
+        *below* the nav bar window, which starts at y=1184 on this pool. A touch at the
+        element's centre then lands on the bar, and does one of two things, neither of them
+        the caller's intent:
+
+        - it is delivered to **Home**, which backgrounds the app under test and loses any
+          unsaved input — a state-corrupting side effect, reported as success;
+        - it is swallowed while the app stays foregrounded, so "the app is still in the
+          foreground" is not evidence that the touch landed.
+
+        Both were silent, which is what makes them expensive: a run loses its journey and
+        then reports that the *product* ignored it.
+
+        So aim at the middle of the part of the element that is actually visible above the
+        bar. Only ``y`` moves — the horizontal aim is never second-guessed here, so this
+        composes with phrase-aiming, which only moves ``x``. When nothing of the element is
+        visible, there is no honest aim point and this raises rather than touching the bar:
+        an error the caller can act on beats a success that backgrounded the app.
+
+        The element's own layer is checked first. A caller that resolved the system Back or
+        Home button *means* the bar, and clamping that would break the one case where the
+        centre is right.
+        """
+        cx, cy = el.center
+        if el.window == "system":
+            return cx, cy
+        bar_top = self._system_bar_top()
+        if bar_top is None or cy < bar_top:
+            return cx, cy
+        top = el.bounds[1]
+        if top >= bar_top - 1:
+            raise ElementNotFoundError(
+                f"element {el.id} lies entirely under the system navigation bar "
+                f"(element starts at y={top}, the bar starts at y={bar_top})",
+                hint=(
+                    "Nothing of it is touchable: a tap there goes to the navigation bar and "
+                    "can background the app. Scroll it into view, dismiss what is covering "
+                    "it, or act on a visible element instead."
+                ),
+            )
+        aimed = (top + bar_top - 1) // 2
+        logger.info(
+            "element %s extends under the system bar (y=%d); aiming at y=%d instead of %d",
+            el.id,
+            bar_top,
+            aimed,
+            cy,
+        )
+        return cx, aimed
 
     def _typed_text_landed(self, before: str | None, text: str, *, submit: bool) -> bool | None:
         """Did the text actually go in? ``True`` / ``False`` / ``None`` for "cannot tell".
