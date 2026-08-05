@@ -478,6 +478,28 @@ def _pid_dir(cache_dir: str | Path) -> Path:
     return d
 
 
+def _is_instance_record(meta: object) -> bool:
+    """True for an emulator instance record, false for anything else in the pid directory.
+
+    ``_pid_dir`` is not exclusively ours: ``anim_off`` writes a settings snapshot beside the instance
+    records as ``<inst>.anim.json``, so the device's animation and dialog settings can be restored
+    later. Two readers globbed ``*.json`` and treated every file as an instance, so on a machine that
+    had been running for two days ``emulator status`` reported **24 "started" emulators that were all
+    settings snapshots** - and a caller deciding whether an AVD was free could not parse any of it.
+
+    Nothing was cleaned up either: a snapshot carries no ``serial``/``pid``/``avd``, so the stop and
+    cleanup paths skip it, which is why they accumulate. That is a leak rather than a correctness bug,
+    and it is what made this visible.
+
+    The three other globs over this directory are guarded by accident rather than design - they match
+    on ``serial``, ``pid`` or ``avd``, none of which a snapshot carries. Stating the distinction here
+    means a future reader does not have to work out which sites were safe and why.
+
+    An instance record always carries ``avd``; see the reservation payload written at start.
+    """
+    return isinstance(meta, dict) and bool(meta.get("avd"))
+
+
 # Console ports the Android emulator binds (even numbers only → serial emulator-{port}).
 _EMULATOR_PORT_MIN = 5554
 _EMULATOR_PORT_MAX = 5682
@@ -731,9 +753,11 @@ def status(*, cache_dir: str | Path | None = None) -> dict[str, Any]:
         for path in _pid_dir(cache_dir).glob("*.json"):
             with path.open(encoding="utf-8") as fh:
                 try:
-                    started.append(json.load(fh))
+                    meta = json.load(fh)
                 except json.JSONDecodeError:
                     continue
+            if _is_instance_record(meta):
+                started.append(meta)
         info["started_by_aua"] = started
     return info
 
@@ -1165,7 +1189,7 @@ def _aua_started_records(cache_dir: str | Path) -> list[dict[str, Any]]:
             meta = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             continue
-        if not isinstance(meta, dict):
+        if not _is_instance_record(meta):
             continue
         meta = dict(meta)
         meta["_path"] = str(path)
