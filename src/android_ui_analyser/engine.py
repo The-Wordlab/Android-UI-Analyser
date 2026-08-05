@@ -120,6 +120,58 @@ _FLAGS_FOREGROUND_TIMEOUT_S = 6.0  # how long the relaunched app gets to reach t
 
 _PACKAGE_RE = re.compile(r'package="([^"]+)"')
 
+_AWAIT_PREFIXES = {"text": "text", "rid": "rid", "id": "rid", "desc": "desc"}
+
+
+class _AwaitTerm(NamedTuple):
+    """One condition in an ``await`` predicate: a selector, and whether it must be absent."""
+
+    text: str  # as written, for echoing back
+    by: str  # text | rid | desc — the same vocabulary every selector uses
+    value: str
+    negated: bool
+
+
+def _parse_await_terms(predicate: str) -> list[_AwaitTerm]:
+    """``"rid:resultCard,!text:Generating"`` → two terms, ANDed.
+
+    A deliberately tiny grammar rather than an expression language. What a lane needs is
+    "this appeared and that went away"; a general evaluator would add a second place for a
+    predicate to be quietly wrong about the screen, which is the failure this list exists to
+    remove. Unknown prefixes are refused rather than treated as literal text, for the same
+    reason an unrecognised ``--by`` token is.
+    """
+    raw = (predicate or "").strip()
+    if not raw:
+        raise UsageError(
+            "await needs a predicate",
+            hint="e.g. `aua await 'rid:resultCard,!text:Generating'` — comma-separated terms, "
+            "all of which must hold; `!` means must be absent.",
+        )
+    terms: list[_AwaitTerm] = []
+    for chunk in raw.split(","):
+        piece = chunk.strip()
+        if not piece:
+            continue
+        negated = piece.startswith("!")
+        body = piece[1:].strip() if negated else piece
+        prefix, sep, value = body.partition(":")
+        if not sep or not value.strip():
+            raise UsageError(
+                f"await term {piece!r} needs a <field>:<value> form",
+                hint="fields: " + ", ".join(sorted(_AWAIT_PREFIXES)) + " (prefix with ! for absent)",
+            )
+        by = _AWAIT_PREFIXES.get(prefix.strip().lower())
+        if by is None:
+            raise UsageError(
+                f"await term {piece!r} names an unknown field {prefix.strip()!r}",
+                hint="fields: " + ", ".join(sorted(_AWAIT_PREFIXES)) + " (prefix with ! for absent)",
+            )
+        terms.append(_AwaitTerm(text=piece, by=by, value=value.strip(), negated=negated))
+    if not terms:
+        raise UsageError("await needs at least one term", hint="e.g. `text:Done`")
+    return terms
+
 
 class _PendingOcr(NamedTuple):
     """Apple Vision work running while the main thread captures the hierarchy."""
@@ -4710,6 +4762,121 @@ class Engine:
             return
         with contextlib.suppress(Exception):  # playbook is a bonus; never fail the action
             mem.remember_deeplink(pkg, uri, probed=True)
+
+    def await_predicate(
+        self,
+        predicate: str,
+        *,
+        timeout_ms: int = 60_000,
+        poll_ms: int = 500,
+        match: str = "contains",
+        ignore_case: bool = False,
+        observe: bool = False,
+    ) -> ActionResult:
+        """Wait until *predicate* holds, and say **which** of three things ended the wait.
+
+        Observed: image-editing round trips run 2-4 minutes each; one lane watched a GET hang 48
+        seconds before cancelling, another a 3-minute stall that resolved on retry. With nothing
+        to wait *on*, lanes polled every 15s, waited fixed intervals, or concluded "stuck" from a
+        stale frame. A coordinator twice had to ask a lane "is that a hang or a slow backend?"
+        because nothing in the output distinguished them. That distinction is the whole value
+        here, so the outcome is a named field rather than something inferred from `ok`:
+
+        * ``satisfied`` — every term held.
+        * ``screen-changed`` — the foreground activity or package moved while waiting and the
+          predicate is still unmet. Returns immediately instead of burning the budget: the
+          surface being waited on is gone, so more waiting cannot help. This is the outcome that
+          separates "we got kicked out / an error dialog took over" from "still working".
+        * ``timeout`` — budget spent, predicate unmet, still on the same screen.
+
+        **Not** network idle, which is what was originally asked for. This app is never network
+        idle — opening the app hub fires a fire-and-forget play call, analytics post continuously,
+        chat surfaces stream — so idleness would be a flaky proxy for "this is ready". A predicate
+        says what is actually wanted.
+
+        ``screen-changed`` is keyed on the resumed activity/package and deliberately not on the
+        element tree: a streaming surface rewrites its tree constantly, so a tree-change trigger
+        would abort every legitimate wait on exactly the screens this exists for.
+
+        Per-term results are always returned, satisfied or not, because *which* term is missing is
+        how a reader tells a failed load from a slow one: spinner gone but results absent is a
+        failure, spinner still present is progress.
+        """
+        terms = _parse_await_terms(predicate)
+        device = self.device
+        mode = MatchMode(match)
+
+        def snapshot() -> tuple[str, str]:
+            try:
+                info = device.current_app() or {}
+            except Exception:  # a device hiccup must not be read as a navigation
+                return ("", "")
+            return (str(info.get("package") or ""), str(info.get("activity") or ""))
+
+        def evaluate() -> list[dict[str, Any]]:
+            out: list[dict[str, Any]] = []
+            for term in terms:
+                hit = device.find_text(
+                    term.value, match=mode, ignore_case=ignore_case, by=term.by
+                )
+                present = hit is not None
+                out.append(
+                    {
+                        "term": term.text,
+                        "present": present,
+                        "satisfied": (not present) if term.negated else present,
+                    }
+                )
+            return out
+
+        started_at = time.monotonic()
+        origin = snapshot()
+        deadline = started_at + max(0.0, timeout_ms / 1000.0)
+        checks = 0
+        results = evaluate()
+        while True:
+            checks += 1
+            if all(t["satisfied"] for t in results):
+                return self._await_result("satisfied", results, started_at, checks, origin, origin,
+                                          observe)
+            now = snapshot()
+            if now != origin and any(now):
+                return self._await_result("screen-changed", results, started_at, checks, origin,
+                                          now, observe)
+            if time.monotonic() >= deadline:
+                return self._await_result("timeout", results, started_at, checks, origin, now,
+                                          observe)
+            time.sleep(max(0.01, poll_ms / 1000.0))
+            results = evaluate()
+
+    def _await_result(
+        self,
+        outcome: str,
+        terms: list[dict[str, Any]],
+        started_at: float,
+        checks: int,
+        origin: tuple[str, str],
+        now: tuple[str, str],
+        observe: bool,
+    ) -> ActionResult:
+        elapsed = int((time.monotonic() - started_at) * 1000)
+        unmet = [t["term"] for t in terms if not t["satisfied"]]
+        detail = f"{outcome} after {elapsed}ms ({checks} checks)"
+        if unmet:
+            detail += "; unmet: " + ", ".join(unmet)
+        if outcome == "screen-changed":
+            detail += f"; now on {now[0]}/{now[1]} (was {origin[0]}/{origin[1]})"
+        result = ActionResult(
+            ok=outcome == "satisfied",
+            action="await",
+            detail=detail,
+            # `outcome` rides in `acting`-style structured form so a caller branches on a field
+            # rather than parsing prose. `ok` alone cannot carry three states.
+            await_outcome=outcome,
+            await_terms=terms,
+            elapsed_ms=elapsed,
+        )
+        return self._observe(result, observe, settle=False)
 
     def wait(
         self,

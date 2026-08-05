@@ -376,6 +376,14 @@ class ActionResult(BaseModel):
     # the click on an inner Box and renders the title outside it — so "I acted on what you
     # named" and "I acted on its sibling" must not look the same in output.
     acting: dict[str, Any] | None = None
+    # `await`: which of three things ended the wait — satisfied | screen-changed | timeout. A
+    # bare `ok` cannot carry three states, and "is that a hang or a slow backend?" is exactly
+    # the question a coordinator could not answer from the old output.
+    await_outcome: str | None = None
+    # Per-term results, reported satisfied or not: *which* term is missing is how a reader
+    # tells a failed load from a slow one.
+    await_terms: list[dict[str, Any]] | None = None
+    elapsed_ms: int | None = None
 
     def render(self, fmt: OutputFormat | str = OutputFormat.json) -> str:
         fmt = OutputFormat(fmt)

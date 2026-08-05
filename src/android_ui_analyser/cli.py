@@ -1020,6 +1020,61 @@ def tap(
     _run(ctx, go)
 
 
+@app.command(name="await")
+def await_cmd(
+    ctx: typer.Context,
+    predicate: str = typer.Argument(
+        ...,
+        metavar="PREDICATE",
+        help="Comma-separated terms, all of which must hold: `text:Done`, `rid:resultCard`, "
+        "`desc:Play`; prefix a term with `!` to require absence.",
+    ),
+    timeout: int = typer.Option(60000, "--timeout-ms", help="Give up after this long."),
+    poll: int = typer.Option(500, "--poll-ms", help="How often to re-check the predicate."),
+    match: str = typer.Option("contains", "--match", help="exact|contains|regex."),
+    ignore_case: bool = typer.Option(False, "--ignore-case", help="Case-insensitive match."),
+    observe: bool = typer.Option(
+        False, "--observe/--no-observe", help="Also return the screen when the wait ends."
+    ),
+) -> None:
+    """Wait for a *condition*, and say which of three things ended the wait.
+
+    `await_outcome` is `satisfied`, `screen-changed` (the foreground activity moved while
+    waiting — the surface is gone, so more waiting cannot help) or `timeout`. That distinction
+    is the point: a coordinator twice had to ask a lane "is that a hang or a slow backend?"
+    because nothing in the output could tell them apart. Per-term results come back either way,
+    so "spinner gone but results absent" reads differently from "spinner still spinning".
+
+        aua await 'rid:resultCard,!text:Generating' --timeout-ms 240000
+
+    Deliberately not network idle: this app never is (analytics post continuously, chat
+    streams), so idleness would be a flaky proxy for readiness.
+    """
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        result = _route(
+            engine,
+            "await_predicate",
+            predicate=predicate,
+            timeout_ms=timeout,
+            poll_ms=poll,
+            match=match,
+            ignore_case=ignore_case,
+            observe=observe,
+        )
+        _emit(result, fmt)
+        # A wait that did not get what it was told to wait for must not exit 0.
+        _exit_unless_ok(
+            result,
+            ExitCode.NOT_FOUND,
+            code="await_unsatisfied",
+            hint="`await_outcome` says which: `screen-changed` means the surface moved on, "
+            "`timeout` means it never arrived.",
+        )
+
+    _run(ctx, go)
+
+
 @app.command(name="target")
 def target_cmd(
     ctx: typer.Context,
