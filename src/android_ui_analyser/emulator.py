@@ -883,6 +883,7 @@ def start(
     *,
     headless: bool = True,
     animations: bool = False,
+    audio: bool = False,
     wait_s: float = _DEFAULT_WAIT_S,
     cache_dir: str | Path,
     extra_args: list[str] | None = None,
@@ -976,7 +977,16 @@ def start(
     gpu_mode = (gpu or default_gpu_mode(headless=headless)).strip() or "auto"
     cmd = [bin_path, "-avd", avd]
     if headless:
-        cmd += ["-no-window", "-no-audio", "-no-boot-anim", "-gpu", gpu_mode]
+        cmd += ["-no-window", "-no-boot-anim", "-gpu", gpu_mode]
+        # A headless start silenced the device unconditionally, so the pool had no audio
+        # device at all and a scenario about sound could not ask for one. Off stays the
+        # default - it is one less subsystem on a machine running five workers - but it is
+        # now a choice. Note this never made audio *unverifiable*: `dumpsys audio` reports
+        # AudioPlaybackConfiguration state within ~30ms of a play tap, and
+        # `dumpsys media.audio_flinger` distinguishes real output from an idle stream.
+        # Only microphone input is genuinely unobservable.
+        if not audio:
+            cmd += ["-no-audio"]
     else:
         cmd += ["-gpu", gpu_mode]
     if console_port is not None:

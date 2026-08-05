@@ -2128,6 +2128,12 @@ def emulator_start_cmd(
         help="Emulator -gpu mode (default: host on Mac/Windows, swiftshader on headless Linux CI). "
         "Never use swiftshader on a laptop unless you must — it pegs the CPU.",
     ),
+    audio: bool = typer.Option(
+        False,
+        "--audio/--no-audio",
+        help="Give a headless emulator a real audio device. Off by default; a scenario that "
+        "checks sound needs it (playback state is readable via dumpsys either way).",
+    ),
     animations: bool = typer.Option(
         False,
         "--animations/--no-animations",
@@ -2178,6 +2184,7 @@ def emulator_start_cmd(
                 avd,
                 headless=headless,
                 animations=animations,
+                audio=audio,
                 wait_s=float(wait),
                 cache_dir=cfg.cache.dir,
                 gpu=gpu,
