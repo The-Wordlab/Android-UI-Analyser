@@ -2797,7 +2797,7 @@ class Engine:
         Redacted inputs/labels become required ``${PARAM_n}`` placeholders — typed
         values are never recorded, so the agent fills them in the saved YAML.
         """
-        from .flows import Flow, FlowStore, steps_from_recent
+        from .flows import Flow, FlowStore, check_saveable, steps_from_recent
 
         mem = self._memory
         if mem is None:
@@ -2817,8 +2817,9 @@ class Engine:
             params=params,
             steps=steps,
         )
+        warnings = check_saveable(flow)  # refuses outright if the flow could not run
         path = FlowStore(self.config.memory).save(flow, force=force)
-        return {
+        out = {
             "ok": True,
             "action": "flow-save",
             "flow": name,
@@ -2827,6 +2828,9 @@ class Engine:
             "params_needed": sorted(params),
             "hint": "edit the YAML to fill ${PARAM_n} values / trim steps, then `aua flow run`",
         }
+        if warnings:
+            out["warnings"] = warnings
+        return out
 
     def navigate(
         self,

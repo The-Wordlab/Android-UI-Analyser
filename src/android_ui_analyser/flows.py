@@ -402,6 +402,80 @@ def steps_from_recent(recent: list[RouteStep]) -> tuple[list[RouteStep], dict[st
     return out, params
 
 
+# ------------------------------------------------------------------- save validation
+
+# A selector built from any of these will match on the visit that recorded it and never
+# again: a clock reading, a rendered file size, or a backend-generated identifier. They
+# come from list rows that put volatile detail in the content-desc — a document picker
+# publishing "report.pdf, 1.4 MB, 09:42" is one selector that is really three facts, two
+# of which change.
+_VOLATILE_SELECTOR = (
+    (re.compile(r"\b\d{1,2}:\d{2}(?::\d{2})?\b"), "a wall-clock time"),
+    (re.compile(r"\b\d{4}-\d{2}-\d{2}\b"), "a date"),
+    (re.compile(r"\b\d+(?:[.,]\d+)?\s?[KMGT]?B\b"), "a file size"),
+    (re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b"), "a uuid"),
+    (re.compile(r"\b(?=[0-9a-z]*\d)[0-9a-f]{16,}\b"), "a backend-looking id"),
+)
+
+
+def _selector_warnings(steps: list[RouteStep], where: str = "") -> list[str]:
+    out: list[str] = []
+    for i, s in enumerate(steps, start=1):
+        at = f"{where}step {i}" if where else f"step {i}"
+        for value in (s.label, s.resource_id):
+            if not value:
+                continue
+            for pattern, what in _VOLATILE_SELECTOR:
+                if pattern.search(value):
+                    out.append(f"{at}: selector contains {what} and will not match on a later run")
+                    break
+        if s.substeps:
+            out.extend(_selector_warnings(s.substeps, f"{at} > "))
+    return out
+
+
+def check_saveable(flow: Flow) -> list[str]:
+    """Reject a flow that cannot execute; return warnings for one that merely might not.
+
+    ``flow save`` used to write whatever it had recorded, so a capture could produce a file
+    that read plausibly and died on first use — which is worse than no file, because the
+    capture step reports success either way.
+    """
+    try:
+        reparsed = parse_flow_yaml(render_flow_yaml(flow), name=flow.name)
+    except UsageError as exc:
+        raise UsageError(
+            f"refusing to save a flow that cannot be loaded back: {exc}",
+            hint="the recorded step is missing a selector `flow run` needs — drive it again",
+        ) from exc
+
+    declared = set(reparsed.params)
+    referenced: set[str] = set()
+
+    def scan(steps: list[RouteStep]) -> None:
+        for s in steps:
+            for value in (s.label, s.text, s.arg):
+                if value:
+                    referenced.update(_PARAM_RE.findall(value))
+            if s.substeps:
+                scan(s.substeps)
+
+    scan(reparsed.steps)
+    if undeclared := sorted(referenced - declared):
+        raise UsageError(
+            "refusing to save a flow with unbound parameter(s): " + ", ".join(undeclared),
+            hint="nothing can supply them, so `flow run` would fail before touching the device",
+        )
+
+    warnings = _selector_warnings(reparsed.steps)
+    if empty := sorted(k for k in declared if reparsed.params[k] == ""):
+        warnings.append(
+            "declared with no value, so `flow run` fails until each is filled in or passed "
+            "with --param: " + ", ".join(empty)
+        )
+    return warnings
+
+
 # --------------------------------------------------------------------------- store
 
 
@@ -447,6 +521,7 @@ class FlowStore:
         return parse_flow_yaml(path.read_text(encoding="utf-8"), name=name)
 
     def save(self, flow: Flow, *, force: bool = False) -> Path:
+        check_saveable(flow)  # never write an artefact that cannot run
         path = self.path(flow.name)
         if path.exists() and not force:
             raise UsageError(f"flow '{flow.name}' already exists", hint="pass --force to overwrite")
