@@ -195,6 +195,10 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
             result = engine.expect(**args)
             return _result_ok(result.model_dump(mode="json"))
 
+        elif cmd == "target_report":
+            # Already a plain dict, not a model — it reports two nodes, not one result.
+            return _result_ok(engine.target_report(**args))
+
         elif cmd == "key":
             result = engine.key(**args)
             return _result_ok(result.model_dump(mode="json"))

@@ -27,7 +27,8 @@
     "source": "hierarchy",
     "confidence": null,
     "stable_key": "rid:close_button",
-    "window": "app"
+    "window": "app",
+    "parent": null
   },
   {
     "id": 1,
@@ -57,7 +58,8 @@
     "source": "hierarchy",
     "confidence": null,
     "stable_key": "rid:title_url_bar",
-    "window": "app"
+    "window": "app",
+    "parent": null
   },
   {
     "id": 2,
@@ -87,7 +89,8 @@
     "source": "hierarchy",
     "confidence": null,
     "stable_key": "geo:WebView:q52:1a72b22ddd",
-    "window": "app"
+    "window": "app",
+    "parent": null
   },
   {
     "id": 3,
@@ -117,7 +120,8 @@
     "source": "hierarchy",
     "confidence": null,
     "stable_key": "tx:b8ba0321e7",
-    "window": "app"
+    "window": "app",
+    "parent": 2
   },
   {
     "id": 4,
@@ -147,7 +151,8 @@
     "source": "hierarchy",
     "confidence": null,
     "stable_key": "tx:3e5969cf9b",
-    "window": "app"
+    "window": "app",
+    "parent": 2
   },
   {
     "id": 5,
@@ -177,7 +182,8 @@
     "source": "hierarchy",
     "confidence": null,
     "stable_key": "tx:113935f739",
-    "window": "app"
+    "window": "app",
+    "parent": 2
   },
   {
     "id": 6,
@@ -207,7 +213,8 @@
     "source": "hierarchy",
     "confidence": null,
     "stable_key": "tx:69e73a7f5d",
-    "window": "app"
+    "window": "app",
+    "parent": 2
   },
   {
     "id": 7,
@@ -237,7 +244,8 @@
     "source": "hierarchy",
     "confidence": null,
     "stable_key": "tx:ecbeec6fce",
-    "window": "app"
+    "window": "app",
+    "parent": 2
   },
   {
     "id": 8,
@@ -267,7 +275,8 @@
     "source": "hierarchy",
     "confidence": null,
     "stable_key": "tx:93195e282b",
-    "window": "app"
+    "window": "app",
+    "parent": 2
   },
   {
     "id": 9,
@@ -297,7 +306,8 @@
     "source": "hierarchy",
     "confidence": null,
     "stable_key": "tx:f038596d25",
-    "window": "app"
+    "window": "app",
+    "parent": 2
   },
   {
     "id": 10,
@@ -327,7 +337,8 @@
     "source": "hierarchy",
     "confidence": null,
     "stable_key": "tx:fb26cca437",
-    "window": "app"
+    "window": "app",
+    "parent": 2
   },
   {
     "id": 11,
@@ -357,6 +368,7 @@
     "source": "hierarchy",
     "confidence": null,
     "stable_key": "tx:78a83d1337",
-    "window": "app"
+    "window": "app",
+    "parent": 2
   }
 ]

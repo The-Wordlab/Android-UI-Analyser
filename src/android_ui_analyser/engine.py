@@ -3768,6 +3768,89 @@ class Engine:
             )
         return self._resolve(element_id)
 
+    def target_report(
+        self,
+        *,
+        rid: str | None = None,
+        text: str | None = None,
+        desc: str | None = None,
+        index: int | None = None,
+        first: bool = False,
+    ) -> dict[str, Any]:
+        """Answer "what does this label actually address?" without touching the device.
+
+        This is the half of the acting-node problem that cost a verdict. A lane did not tap
+        and misread the result — it *read state*: the tile's title reported
+        ``clickable:false, enabled:true`` and it concluded the control was broken. Nothing in
+        the output said that node carries no click action, so its ``enabled`` flag described a
+        caption rather than a control, and the pair looks **identical whether the real control
+        is enabled or disabled**. So there has to be a way to ask before believing.
+
+        Returns the node named, the node that acts, their relation, the state that actually
+        belongs to the control, and the point a tap would use.
+        """
+        from .selectors import acting_node, acting_report
+
+        named = self.resolve_selector(
+            rid=rid, text=text, desc=desc, index=index, first=first, prefer_clickable=False
+        )
+        cached = self._read_cache()
+        pool = list(cached.elements) if cached is not None else [named]
+        if all(other.id != named.id for other in pool):
+            pool.append(named)
+        found = acting_node(pool, named)
+        acted = found.element if found.redirected else named
+        aim_x, _ = self._tap_point(acted, text if acted.id == named.id else None)
+        _, aim_y = self._aim(acted)
+        return {
+            "ok": True,
+            "action": "target",
+            "named": named.compact(),
+            "acts": found.relation == "self",
+            "acting": acting_report(found),
+            "control": {
+                "id": acted.id,
+                "type": acted.type,
+                "clickable": bool(acted.clickable),
+                "enabled": bool(acted.enabled),
+                "checkable": acted.checkable,
+                "checked": acted.checked,
+                "long_clickable": acted.long_clickable,
+                "bounds": list(acted.bounds),
+            },
+            "tap_point": [aim_x, aim_y],
+            "hint": (
+                None
+                if found.relation == "self"
+                else "`enabled`/`clickable` on the node you named describe a caption, not the "
+                "control — read them off `control` instead."
+            ),
+        }
+
+    def _acting_target(self, el: Element) -> tuple[Element, dict[str, Any]]:
+        """The node that will receive the interaction, plus the report of that choice.
+
+        Retargets **only when the named node carries no interaction at all**, which is the
+        deliberate boundary. A node that is itself clickable is left exactly as it was, so the
+        overwhelming majority of existing taps are untouched — the danger a change to `tap`
+        carries is silently wrong results, and this narrows the blast radius to the case that
+        is already broken. Tapping a non-clickable node's centre today dispatches into
+        whatever is under it and usually does nothing (the observed tile returned ok:true and
+        did not act), so redirecting there can only improve on a coin flip.
+
+        Also refuses to move when the choice would be a guess: several candidate controls, or
+        none, leave the target alone and say so in the report.
+        """
+        from .selectors import acting_node, acting_report
+
+        cached = self._read_cache()
+        pool = list(cached.elements) if cached is not None else [el]
+        if all(other.id != el.id for other in pool):
+            pool.append(el)
+        found = acting_node(pool, el)
+        report = acting_report(found)
+        return (found.element if found.redirected else el), report
+
     def _tap_point(self, el: Element, needle: str | None) -> tuple[int, int]:
         """Where to tap for *el*, aiming at *needle* when it is only part of one line.
 
@@ -3823,21 +3906,30 @@ class Engine:
         observe: bool = True,
         with_image: bool | str | None = None,
     ) -> ActionResult:
-        el = self._target(element_id, selector)
+        named = self._target(element_id, selector)
+        # The label a caller names is often not the node that acts — see `_acting_target`.
+        # Resolve that first, then aim, so both corrections apply to the control rather than
+        # to the caption sitting below it.
+        el, acting = self._acting_target(named)
         # Two independent corrections to the naive `el.center`, composed on separate axes.
         # `_tap_point` aims x at a named phrase inside a single line, so two links on one line
         # are separately reachable. `_aim` moves y out of the system navigation bar, whose
         # docstring states it never second-guesses x for exactly this reason. Take x from the
         # first and y from the second; `_aim` still raises when nothing of the element is
         # visible, which must survive rather than being swallowed here.
-        cx, _ = self._tap_point(el, (selector or {}).get("text"))
+        # The phrase-aiming needle belongs to the *named* node's text, so it is only
+        # meaningful when the named node is the one being tapped.
+        needle = (selector or {}).get("text") if el.id == named.id else None
+        cx, _ = self._tap_point(el, needle)
         _, cy = self._aim(el)
         step = self._step("tap", el)  # built pre-action: needs the cached package
         with self._acting(_action_mark("tap", el)):
             self.device.click(cx, cy)
         self._record_action_safe(step)
         return self._observe(
-            ActionResult(ok=True, action="tap", id=el.id, target=[cx, cy]), observe, with_image
+            ActionResult(ok=True, action="tap", id=el.id, target=[cx, cy], acting=acting),
+            observe,
+            with_image,
         )
 
     def tap_point(
@@ -3878,14 +3970,15 @@ class Engine:
         observe: bool = True,
         with_image: bool | str | None = None,
     ) -> ActionResult:
-        el = self._target(element_id, selector, verb="long-press")
+        named = self._target(element_id, selector, verb="long-press")
+        el, acting = self._acting_target(named)
         cx, cy = self._aim(el)
         step = self._step("long-press", el)
         with self._acting(_action_mark("long-press", el)):
             self.device.long_click(cx, cy, ms)
         self._record_action_safe(step)
         return self._observe(
-            ActionResult(ok=True, action="long-press", id=el.id, target=[cx, cy]),
+            ActionResult(ok=True, action="long-press", id=el.id, target=[cx, cy], acting=acting),
             observe,
             with_image,
         )

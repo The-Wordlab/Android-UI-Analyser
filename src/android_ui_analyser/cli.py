@@ -1020,6 +1020,56 @@ def tap(
     _run(ctx, go)
 
 
+@app.command(name="target")
+def target_cmd(
+    ctx: typer.Context,
+    ident: str | None = typer.Argument(
+        None, metavar="[VALUE]", help="Selector value; pair with --by, or use --rid/--text/--desc."
+    ),
+    by: str | None = _SEL_BY,
+    rid: str | None = _SEL_RID,
+    text: str | None = _SEL_TEXT,
+    desc: str | None = _SEL_DESC,
+    index: int | None = _SEL_INDEX,
+    first: bool = _SEL_FIRST,
+) -> None:
+    """What does this label actually address? Reads the screen; touches nothing.
+
+    A visible title is often *not* the node that acts. A design-system tile puts the click on
+    an inner Box and renders the caption outside those bounds, so the caption reports
+    `clickable:false` and its `enabled` describes a caption rather than a control — the same
+    pair of values whether the real control is enabled or disabled. A lane read that as a
+    broken product and filed a critical failure against a working one.
+
+    Prints the node named, the node that acts, their relation, the state that belongs to the
+    control, and the point a tap would use.
+    """
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        selector = _selector(
+            ident=ident, by=by, rid=rid, text=text, desc=desc, index=index, first=first
+        )
+        if not selector:
+            raise UsageError(
+                "target needs a selector",
+                hint="`aua target --text 'Beat Painter'` or `aua target --by id tileHit`",
+            )
+        _emit(
+            _route(
+                engine,
+                "target_report",
+                rid=selector.get("rid"),
+                text=selector.get("text"),
+                desc=selector.get("desc"),
+                index=selector.get("index"),
+                first=bool(selector.get("first")),
+            ),
+            fmt,
+        )
+
+    _run(ctx, go)
+
+
 @app.command(name="click", cls=AnnotateCommand)
 def click_cmd(
     ctx: typer.Context,

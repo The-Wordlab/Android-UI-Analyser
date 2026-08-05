@@ -176,9 +176,13 @@ def parse_hierarchy(xml: str, screen_size: tuple[int, int] | None = None) -> lis
         return []
     root = _parse_xml_root(xml)
 
-    collected: list[tuple[Bounds, Element]] = []
+    # (bounds, element, slot of the nearest collected ancestor). The slot is the index in this
+    # list, i.e. pre-sort order; it is remapped to the final ids below. Parentage has to be
+    # recorded here because it is not recoverable afterwards: the acting control of a
+    # design-system tile is a sibling of the label that names it, outside its bounds.
+    collected: list[tuple[Bounds, Element, int | None]] = []
 
-    def visit(node: Any, actionable_ancestor: bool) -> None:
+    def visit(node: Any, actionable_ancestor: bool, parent_slot: int | None = None) -> None:
         bounds = _parse_bounds(node.get("bounds"))
         valid = (
             bounds is not None
@@ -218,8 +222,10 @@ def parse_hierarchy(xml: str, screen_size: tuple[int, int] | None = None) -> lis
         # app resource-id the agent needs to address.
         absorbed = actionable_ancestor and not actionable and not has_app_id
 
+        own_slot = parent_slot
         if valid and interesting and not absorbed:
             assert bounds is not None
+            own_slot = len(collected)
             label = text
             if actionable and not has_own_label:
                 label = _gather_descendant_text(node)
@@ -242,20 +248,32 @@ def parse_hierarchy(xml: str, screen_size: tuple[int, int] | None = None) -> lis
                         window=classify_window(node.get("package")),
                         **state,
                     ),
+                    parent_slot,
                 )
             )
 
         child_ancestor = actionable_ancestor or actionable
         for child in children:
-            visit(child, child_ancestor)
+            visit(child, child_ancestor, own_slot)
 
     for top in root.findall("node"):
         visit(top, False)
 
     # stable top-to-bottom, then left-to-right
-    collected.sort(key=lambda pair: (pair[0][1], pair[0][0]))
+    order = sorted(range(len(collected)), key=lambda i: (collected[i][0][1], collected[i][0][0]))
+    slot_to_id = {slot: new_id for new_id, slot in enumerate(order)}
     from .identity import attach_stable_keys
 
     return attach_stable_keys(
-        [element.model_copy(update={"id": i}) for i, (_b, element) in enumerate(collected)]
+        [
+            collected[slot][1].model_copy(
+                update={
+                    "id": new_id,
+                    "parent": slot_to_id.get(collected[slot][2])
+                    if collected[slot][2] is not None
+                    else None,
+                }
+            )
+            for new_id, slot in enumerate(order)
+        ]
     )

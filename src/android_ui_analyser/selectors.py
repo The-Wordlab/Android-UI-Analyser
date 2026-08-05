@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import difflib
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, NamedTuple
 
 from .memory import REDACT_TOKENS, RouteStep, _id_tail
 from .schema import Element
@@ -96,6 +96,189 @@ def match_selector(
         if tier is not None:
             tiers.setdefault(tier, []).append(el)
     return tiers[min(tiers)] if tiers else []
+
+
+# --------------------------------------------------------------- the node that acts
+
+# How far up the tree to look for the control a label belongs to. Three levels reaches the
+# label -> row -> card shapes real design systems build, and stops well short of turning a
+# whole screen into "the control".
+_MAX_ACTING_HOPS = 3
+
+
+class ActingNode(NamedTuple):
+    """The node that will receive an interaction, and how it relates to the one named.
+
+    ``relation`` is one of ``self`` (the named node acts), ``ancestor``, ``descendant``,
+    ``sibling-subtree`` (the control is a relative under a shared ancestor — the tile case),
+    ``ambiguous`` (several candidates; deliberately unresolved) or ``none`` (nothing nearby
+    can act). Only ``self`` means the named node is the whole story.
+    """
+
+    element: Element
+    relation: str
+    named: Element
+    candidates: tuple[int, ...] = ()
+
+    @property
+    def redirected(self) -> bool:
+        return self.relation in {"ancestor", "descendant", "sibling-subtree"}
+
+
+def can_act(el: Element) -> bool:
+    """Does this node carry an interaction, regardless of whether it is currently enabled?
+
+    ``enabled`` is deliberately not part of this test. A *disabled* clickable node is still
+    the acting node, and saying so — with its real ``enabled: false`` — is the answer the
+    caller wanted. Conflating the two is how a working control got filed as broken.
+    """
+    return bool(el.clickable or el.long_clickable or el.checkable)
+
+
+def _children_by_parent(elements: Sequence[Element]) -> dict[int, list[Element]]:
+    out: dict[int, list[Element]] = {}
+    for el in elements:
+        if el.parent is not None:
+            out.setdefault(el.parent, []).append(el)
+    return out
+
+
+def _subtree(root_id: int, kids: dict[int, list[Element]]) -> list[Element]:
+    out: list[Element] = []
+    stack = list(kids.get(root_id, ()))
+    while stack:
+        el = stack.pop()
+        out.append(el)
+        stack.extend(kids.get(el.id, ()))
+    return out
+
+
+def _one_obvious(cands: Sequence[Element]) -> Element | None:
+    """The one obvious candidate, or None when the choice would be a guess.
+
+    Preference follows the vocabulary a semantic test would use: a resource-id (which is
+    where a Compose ``testTag`` surfaces when ``testTagsAsResourceId`` is set), then a
+    content-description. Anything still tied is left unresolved on purpose — picking the
+    first of several equals is the class of quiet guess this whole change exists to remove.
+    """
+    if not cands:
+        return None
+    if len(cands) == 1:
+        return cands[0]
+    for keyed in ([c for c in cands if c.resource_id], [c for c in cands if c.content_desc]):
+        if len(keyed) == 1:
+            return keyed[0]
+    # Same standing: the smallest box is the most specific control, but only if it is
+    # strictly smaller than every other, so "smallest" is never a coin toss either.
+    def area(el: Element) -> int:
+        x1, y1, x2, y2 = el.bounds
+        return max(0, x2 - x1) * max(0, y2 - y1)
+
+    ranked = sorted(cands, key=area)
+    if len(ranked) > 1 and area(ranked[0]) < area(ranked[1]):
+        return ranked[0]
+    return None
+
+
+def acting_node(elements: Sequence[Element], named: Element) -> ActingNode:
+    """Resolve *named* to the node that actually carries the interaction.
+
+    Observed: a lane filed `FAIL_CRITICAL` against a product because a bottom-sheet tile
+    reported ``clickable:false, enabled:true``. The control was enabled and working. The
+    design-system tile puts the click on an inner ``Box``, and the visible title exists only
+    as *non-clickable* nodes **outside** those bounds — ``Modifier.clickable`` does not merge
+    descendants. So matching by visible text returns a node with no click action and no
+    ``disabled()`` semantics: the same pair of nodes **whether the control is enabled or
+    disabled**. The label's centre also sits ~110px below the clickable bounds, so a tap
+    there dispatches, returns ok, and does nothing. It took two devices and a luminance
+    measurement to retract the finding.
+
+    Note what this means for geometry: the label is *outside* the control, so bounds
+    containment cannot get from one to the other in either direction. Only the tree can,
+    which is why :attr:`Element.parent` exists.
+
+    Search order — self, nearest acting ancestor, acting descendant, then an acting relative
+    under a shared ancestor — each bounded by :data:`_MAX_ACTING_HOPS`, and each refusing to
+    choose between equals. Returning ``ambiguous`` or ``none`` is a real answer here; a
+    plausible guess about which node acts would recreate the bug with better manners.
+    """
+    if can_act(named):
+        return ActingNode(named, "self", named)
+
+    by_id = {el.id: el for el in elements}
+    kids = _children_by_parent(elements)
+
+    # 1. Nearest acting ancestor: the ordinary Android list-row shape.
+    ancestors: list[Element] = []
+    cursor = named.parent
+    while cursor is not None and len(ancestors) < _MAX_ACTING_HOPS:
+        parent = by_id.get(cursor)
+        if parent is None:
+            break
+        ancestors.append(parent)
+        if can_act(parent):
+            return ActingNode(parent, "ancestor", named)
+        cursor = parent.parent
+
+    # 2. An acting descendant: a labelled container wrapping the real control.
+    inner = [el for el in _subtree(named.id, kids) if can_act(el)]
+    if inner:
+        chosen = _one_obvious(inner)
+        if chosen is not None:
+            return ActingNode(chosen, "descendant", named)
+        return ActingNode(named, "ambiguous", named, tuple(sorted(el.id for el in inner)))
+
+    # 3. An acting relative under a shared ancestor — the tile: click on a sibling Box, the
+    #    title rendered outside it. Nearest ancestor first, so the smallest shared scope wins.
+    own = {named.id, *(el.id for el in _subtree(named.id, kids))}
+    for anc in ancestors:
+        siblings = [el for el in _subtree(anc.id, kids) if el.id not in own and can_act(el)]
+        if not siblings:
+            continue
+        chosen = _one_obvious(siblings)
+        if chosen is not None:
+            return ActingNode(chosen, "sibling-subtree", named)
+        return ActingNode(named, "ambiguous", named, tuple(sorted(el.id for el in siblings)))
+
+    return ActingNode(named, "none", named)
+
+
+def acting_report(found: ActingNode) -> dict[str, Any]:
+    """The acting resolution as output — always says which node was used, and why.
+
+    Reported unconditionally rather than only on a redirect: "the node you named is the node
+    that acts" is itself the fact a reader needs, and a field that appears only sometimes
+    gets read as "nothing to see" when it is missing for the other reason.
+    """
+    acted, named = found.element, found.named
+    out: dict[str, Any] = {"id": acted.id, "relation": found.relation}
+    if found.relation == "self":
+        out["detail"] = "the element named is the one that acts"
+        return out
+    out["named_id"] = named.id
+    out["named_acts"] = False
+    if found.redirected:
+        out["clickable"] = bool(acted.clickable)
+        out["enabled"] = bool(acted.enabled)
+        out["detail"] = (
+            f"id={named.id} ({named.type}) carries no interaction; acting on its "
+            f"{found.relation} id={acted.id} ({acted.type}), enabled={bool(acted.enabled)}"
+        )
+        return out
+    if found.relation == "ambiguous":
+        out["candidates"] = list(found.candidates)
+        out["detail"] = (
+            f"id={named.id} carries no interaction and several nearby nodes do "
+            f"({', '.join(str(c) for c in found.candidates)}) — name one of those instead. "
+            "Not guessing which of them acts."
+        )
+        return out
+    out["detail"] = (
+        f"id={named.id} ({named.type}) carries no interaction and no node within "
+        f"{_MAX_ACTING_HOPS} levels does either, so its enabled/clickable flags say nothing "
+        "about whether the control works."
+    )
+    return out
 
 
 _NEAR = 0.88  # similarity above which an OCR reading is the same text, misread

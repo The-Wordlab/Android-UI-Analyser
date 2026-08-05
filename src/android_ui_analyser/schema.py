@@ -133,6 +133,12 @@ class Element(BaseModel):
     stable_key: str | None = None
     # Window layer: app | ime | system | overlay (hierarchy package heuristics).
     window: str | None = None
+    # ``id`` of the nearest *collected* ancestor, or None for a root / vision element. Kept
+    # because the acting control is often not a geometric container of the label that names
+    # it: a design-system tile puts the click on an inner Box and renders the title as a
+    # sibling **outside** those bounds, so containment cannot find one from the other and
+    # only the tree can. See :func:`selectors.acting_node`.
+    parent: int | None = None
 
     def compact(self) -> dict[str, Any]:
         """Token-minimal dict: drop nulls and default-valued verbose fields."""
@@ -163,6 +169,8 @@ class Element(BaseModel):
             out["stable_key"] = self.stable_key
         if self.window is not None:
             out["window"] = self.window
+        if self.parent is not None:
+            out["parent"] = self.parent
         return out
 
     def _compact_state(self) -> dict[str, Any]:
@@ -363,6 +371,11 @@ class ActionResult(BaseModel):
     # None  = not checked, or checked and genuinely ambiguous. Absent from output when None,
     # so `ok` keeps its meaning for actions that cannot verify themselves.
     verified: bool | None = None
+    # Which node actually received the interaction, and how it relates to the one named. The
+    # control a label belongs to is frequently a different node — a design-system tile puts
+    # the click on an inner Box and renders the title outside it — so "I acted on what you
+    # named" and "I acted on its sibling" must not look the same in output.
+    acting: dict[str, Any] | None = None
 
     def render(self, fmt: OutputFormat | str = OutputFormat.json) -> str:
         fmt = OutputFormat(fmt)

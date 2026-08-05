@@ -27,6 +27,7 @@
     "source": "hierarchy",
     "confidence": null,
     "stable_key": "rid:surface",
-    "window": "app"
+    "window": "app",
+    "parent": null
   }
 ]

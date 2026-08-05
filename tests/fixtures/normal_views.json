@@ -27,7 +27,8 @@
     "source": "hierarchy",
     "confidence": null,
     "stable_key": "rid:title",
-    "window": "app"
+    "window": "app",
+    "parent": null
   },
   {
     "id": 1,
@@ -57,7 +58,8 @@
     "source": "hierarchy",
     "confidence": null,
     "stable_key": "rid:email",
-    "window": "app"
+    "window": "app",
+    "parent": null
   },
   {
     "id": 2,
@@ -87,7 +89,8 @@
     "source": "hierarchy",
     "confidence": null,
     "stable_key": "rid:password",
-    "window": "app"
+    "window": "app",
+    "parent": null
   },
   {
     "id": 3,
@@ -117,7 +120,8 @@
     "source": "hierarchy",
     "confidence": null,
     "stable_key": "rid:remember",
-    "window": "app"
+    "window": "app",
+    "parent": null
   },
   {
     "id": 4,
@@ -147,7 +151,8 @@
     "source": "hierarchy",
     "confidence": null,
     "stable_key": "rid:login_btn",
-    "window": "app"
+    "window": "app",
+    "parent": null
   },
   {
     "id": 5,
@@ -177,6 +182,7 @@
     "source": "hierarchy",
     "confidence": null,
     "stable_key": "rid:forgot",
-    "window": "app"
+    "window": "app",
+    "parent": null
   }
 ]
