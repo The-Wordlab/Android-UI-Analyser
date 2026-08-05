@@ -141,6 +141,20 @@ class _HierarchyObservation(NamedTuple):
     image: ScreenImage | None
 
 
+def _parse_point(arg: str | None) -> tuple[int, int] | None:
+    """``"x,y"`` → ``(x, y)``; None when it is not a usable pair of coordinates."""
+    if not arg:
+        return None
+    parts = arg.replace(" ", "").split(",")
+    if len(parts) != 2:
+        return None
+    try:
+        x, y = (int(round(float(p))) for p in parts)
+    except ValueError:
+        return None
+    return (x, y) if x >= 0 and y >= 0 else None
+
+
 def _action_mark(verb: str, el: Element) -> str:
     """Compact capture timeline label — verb + best human/id token."""
     label = el.text or el.content_desc or _id_tail(el.resource_id) or el.id
@@ -1893,6 +1907,11 @@ class Engine:
                         el.id, s.text or "", submit=s.submit, observe=False
                     ).ok:
                         return StepFailure("input_not_applied", i, s), res
+            elif kind == "tap-point":
+                point = _parse_point(s.arg)
+                if point is None:
+                    return StepFailure("unsupported_action", i, s), res
+                self.tap_point(*point, observe=False)
             elif kind == "key":
                 if not s.arg:
                     return StepFailure("unsupported_action", i, s), res
@@ -3698,6 +3717,35 @@ class Engine:
         self._record_action_safe(step)
         return self._observe(
             ActionResult(ok=True, action="tap", id=el.id, target=[cx, cy]), observe, with_image
+        )
+
+    def tap_point(
+        self,
+        x: int,
+        y: int,
+        *,
+        observe: bool = True,
+        with_image: bool | str | None = None,
+    ) -> ActionResult:
+        """Tap an exact screen coordinate, and record it like any other action.
+
+        For a canvas, or a grid that publishes one accessibility node per row with nothing
+        per cell, a coordinate is the *correct* address rather than a workaround — there is
+        no element to name. The alternative a runner is left with is `adb shell input tap`,
+        which cannot be recorded, so any journey crossing such a surface becomes uncapturable.
+
+        Both of `tap`'s aim corrections are deliberately bypassed: `_tap_point` moves x
+        toward a named phrase and `_aim` moves y out of the system navigation bar, and each
+        exists to guess better than `el.center`. Here the caller has already said exactly
+        where, so guessing on either axis would be wrong — including the nav-bar lift, since
+        tapping the bar itself is a legitimate thing to ask for.
+        """
+        step = self._step("tap-point", arg=f"{x},{y}")
+        with self._acting(f"tap-point:{x},{y}"):
+            self.device.click(x, y)
+        self._record_action_safe(step)
+        return self._observe(
+            ActionResult(ok=True, action="tap-point", target=[x, y]), observe, with_image
         )
 
     def long_press(

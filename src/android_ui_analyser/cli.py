@@ -31,7 +31,7 @@ from .config import (
     load_config,
     user_config_path,
 )
-from .engine import Engine
+from .engine import Engine, _parse_point
 from .errors import (
     AuaError,
     ConfigError,
@@ -944,6 +944,12 @@ def tap(
     desc: str | None = _SEL_DESC,
     index: int | None = _SEL_INDEX,
     first: bool = _SEL_FIRST,
+    point: str | None = typer.Option(
+        None,
+        "--point",
+        metavar="X,Y",
+        help="Tap this exact coordinate instead of an element (for a canvas or cell-less grid).",
+    ),
     observe: bool = typer.Option(
         True,
         "--observe/--no-observe",
@@ -963,9 +969,36 @@ def tap(
     `aua tap --by id homeTabBROWSE`. A selector resolves on the live screen in this one
     call; matching nothing exits 6 and matching several exits 7 with the candidates — it
     never silently taps nothing.
+
+    `aua tap --point 412,733` addresses a coordinate directly, for a canvas or a grid whose
+    cells publish no node of their own. It is recorded like any other action, so a journey
+    across such a surface can still be captured as a flow.
     """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
+        if point is not None:
+            if ident or rid or text or desc:
+                raise UsageError(
+                    "--point taps a coordinate, so it cannot be combined with a selector",
+                    hint="drop the selector, or drop --point and address the element",
+                )
+            xy = _parse_point(point)
+            if xy is None:
+                raise UsageError(
+                    f"--point wants two non-negative numbers like 412,733 — got {point!r}"
+                )
+            _emit(
+                _route(
+                    engine,
+                    "tap_point",
+                    x=xy[0],
+                    y=xy[1],
+                    observe=observe,
+                    with_image=_annotate_arg(with_image),
+                ),
+                fmt,
+            )
+            return
         selector = _selector(
             ident=ident, by=by, rid=rid, text=text, desc=desc, index=index, first=first
         )

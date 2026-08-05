@@ -42,6 +42,7 @@ _PARAM_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 # YAML step key (snake_case) → RouteStep.kind (kebab-case).
 _KINDS = {
     "tap": "tap",
+    "tap_point": "tap-point",
     "long_press": "long-press",
     "input": "input",
     "clear": "clear",
@@ -72,6 +73,7 @@ _KEYS = {kind: key for key, kind in _KINDS.items()}
 _ELEMENT_KINDS = ("tap", "long-press", "clear")
 # For arg-carrying kinds, the natural mapping-form key name.
 _ARG_ALIAS = {
+    "tap-point": "point",
     "key": "name",
     "swipe": "direction",
     "scroll": "direction",
