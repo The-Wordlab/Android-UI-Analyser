@@ -210,8 +210,10 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "Act, then read the screen the action gives back",
         "IDs are only valid until the screen changes. By default every state-changing action "
         "(tap/input/swipe/scroll-to/key) returns the next screen inline in `observation` "
-        "(elements with fresh ids) — so you rarely need a separate `analyze`: `type → tap "
-        "send` is two calls, not three, and `goto` returns the destination's `elements` too. "
+        "(elements with fresh ids). This is the default agent contract: action + `observation` "
+        "covers the normal readback path, so you should skip `analyze` unless you need another "
+        "filtered view. `type → tap send` is two calls, not three, and `goto` returns the "
+        "destination's `elements` too. "
         "Pass `--no-observe` to skip it on action-only sequences. Action `observation` waits "
         "for a pixel change + idle (animation-aware) before dumping the tree, and a screen "
         "whose content is still streaming in has to hold still for one confirming sample — so "
@@ -668,7 +670,9 @@ def render_markdown(*, brief: bool = False) -> str:
     p.append(
         'aua input 2 "hello@example.com"  # focus id 2 and type (--submit fires the IME action)'
     )
-    p.append("aua --format tsv analyze         # RE-ANALYZE: ids are invalidated after any action")
+    p.append(
+        "aua --format tsv analyze         # only if you need a narrower/fresher filtered view"
+    )
     p.append("```")
     p.append(
         'Cheap presence check to branch on: `aua has "Sign in"` (exit 0 found / 1 not). '

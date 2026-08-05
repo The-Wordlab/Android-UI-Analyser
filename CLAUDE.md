@@ -63,6 +63,8 @@ aua has "<text>"               # exit 0 if present, 1 if not — cheap branch ch
 aua wait --for "<text>"        # wait on state, don't sleep
 ```
 
-Re-analyze after every state-changing action — IDs are invalidated once the screen changes.
+No separate `re-analyze` is required after every state-changing action. By default, each action
+returns the post-action screen in `observation` with fresh IDs. Re-run `analyze` only when you
+need a different view (`--fields`/`--where-*`, `source vision`, etc.).
 Full manual + flag placement rules: run `aua guide`, or read
 `.claude/skills/android-ui-analyser/SKILL.md`.

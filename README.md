@@ -800,8 +800,9 @@ aua --format compact analyze   # get element IDs (smaller token footprint)
 aua analyze                    # full JSON with all fields
 ```
 
-Elements are returned with stable integer IDs. Always re-analyze after a
-state-changing action — IDs may change after navigation or screen transitions.
+Elements are returned with stable integer IDs. By default, action commands already return the next
+screen in `observation` with fresh IDs, so you usually do not need a separate `analyze` immediately
+after state-changing actions.
 
 ### Asking for fewer rows and columns (don't post-process the JSON)
 
