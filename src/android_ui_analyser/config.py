@@ -93,6 +93,12 @@ class WebviewCfg(BaseModel):
 
 
 class PerceptionCfg(BaseModel):
+    # Let a folded post-action observation escalate to vision when the hierarchy cannot describe
+    # the screen. Without it the fold is hierarchy-only, so a canvas/WebView screen returns an
+    # empty observation and the caller must spend a second `analyze --source auto` — the exact
+    # round trip act-and-observe removes everywhere else. Gated by the same `gate.decide` a normal
+    # `analyze` uses, so ordinary screens pay nothing.
+    observe_escalates_to_vision: bool = True
     model_config = ConfigDict(extra="forbid")
     gate: GateCfg = Field(default_factory=GateCfg)
     webview: WebviewCfg = Field(default_factory=WebviewCfg)

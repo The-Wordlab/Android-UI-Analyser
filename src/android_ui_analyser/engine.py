@@ -3535,6 +3535,36 @@ class Engine:
                     record=False,
                     with_image=self._effective_with_image(with_image),
                 )
+                # Hierarchy first because it is tens of milliseconds and answers for most screens.
+                # But pinning it here meant the fold could never do what a bare `analyze` does by
+                # default: self-route to vision when the tree cannot describe the screen. On a
+                # Compose/canvas/WebView surface — every mini app in this suite — a tap therefore
+                # returned an observation with nothing usable in it and the caller was *forced*
+                # into a second `analyze --source auto`. That is the round trip act-and-observe
+                # exists to remove, and it was guaranteed to happen precisely where perception is
+                # hardest. Escalate once, using the same gate a normal `analyze` consults, so the
+                # cost is paid only on screens that would otherwise have cost a whole extra call.
+                if self.config.perception.observe_escalates_to_vision:
+                    with contextlib.suppress(Exception):
+                        decision = self._gate_decide(
+                            obs.elements,
+                            package=obs.screen.package,
+                            activity=obs.screen.activity,
+                        )
+                        # Attribute access, not getattr-with-default: `GateDecision.use_vision` is
+                        # the contract, and if it is ever renamed this must break loudly rather
+                        # than silently deciding "no escalation needed" forever.
+                        if decision.use_vision:
+                            richer = self.analyze(
+                                source="auto",
+                                record=False,
+                                with_image=self._effective_with_image(with_image),
+                            )
+                            # Only take it if it actually saw more — an escalation that returns
+                            # the same thin tree is cost without information, and swapping it in
+                            # would hide the fact that this screen is still unreadable.
+                            if len(richer.elements) > len(obs.elements):
+                                obs = richer
                 result.observation = obs
                 with contextlib.suppress(Exception):
                     result.change = self._change_summary(before_state, obs)
