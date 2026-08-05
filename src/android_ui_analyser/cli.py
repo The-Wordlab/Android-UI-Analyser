@@ -53,7 +53,7 @@ from .memory import (
     find_result,
     render_map,
 )
-from .projection import Projection
+from .projection import Projection, trim_observation_payload
 from .reconcile import ReconciliationStore, ResearchReport, audit_map
 from .schema import ActionResult, AnalyzeResult, OutputFormat
 
@@ -432,26 +432,7 @@ def _project_observation(result: Any, fmt: OutputFormat) -> dict[str, Any] | Non
     payload = data.get("observation") if isinstance(data, dict) else None
     if not isinstance(payload, dict) or not isinstance(payload.get("elements"), list):
         return None
-    projected = view.apply(payload, fmt=fmt)
-    data["observation"] = projected
-    # ``stable_elements`` is derived from the same tree, so an unprojected copy re-adds every
-    # system-bar node the view just dropped — the status bar alone accounted for a third of it.
-    kept = {e.get("id") for e in projected.get("elements", []) if isinstance(e, dict)}
-    stable = data.get("stable_elements")
-    if isinstance(stable, list):
-        data["stable_elements"] = [
-            s for s in stable if isinstance(s, dict) and s.get("id") in kept
-        ]
-    # ``next_actions`` names ids from that same tree. Leaving it unprojected tells the caller to
-    # tap controls that are absent from the response it was given — exactly the kind of mismatch
-    # that makes an agent distrust the folded observation and call ``analyze`` again.
-    next_actions = data.get("next_actions")
-    if isinstance(next_actions, list):
-        data["next_actions"] = [
-            action
-            for action in next_actions
-            if isinstance(action, dict) and action.get("id") in kept
-        ]
+    data = trim_observation_payload(data, view, fmt=fmt)
     return data
 
 

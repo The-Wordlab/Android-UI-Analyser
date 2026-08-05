@@ -22,6 +22,8 @@ from mcp.server.lowlevel import Server
 from .config import load_config
 from .engine import Engine
 from .errors import AuaError, UsageError
+from .projection import Projection, trim_observation_payload
+from .schema import OutputFormat
 
 SERVER_NAME = "android-ui-analyser"
 
@@ -53,6 +55,15 @@ def _dump(result: Any) -> Any:
 _WITH_IMAGE_PROP: dict[str, Any] = {
     "type": "boolean",
     "description": "Also attach a post-action screenshot (overrides configure default).",
+}
+_OBSERVE_FIELDS_PROP: dict[str, Any] = {
+    "type": "string",
+    "description": (
+        "Columns to keep in the returned `observation` ('all' = full dump). Defaults to a "
+        "compact view. This is the cost dial the renamed tools kept instead of `observe`: the "
+        "screen always comes back — that is the point of the name — but you choose how much of "
+        "it, which is what the CLI's --observe-fields already offered."
+    ),
 }
 _OBSERVE_PROP: dict[str, Any] = {
     "type": "boolean",
@@ -103,6 +114,9 @@ def _as_analyzed_tool(tool: types.Tool) -> types.Tool:
     schema = dict(tool.inputSchema)
     properties = dict(schema.get("properties") or {})
     properties.pop("observe", None)
+    # `observe` contradicted the name; a *width* control does not. Without it MCP had no cost
+    # control at all and returned the whole tree on every action, while the CLI trimmed by default.
+    properties["observe_fields"] = _OBSERVE_FIELDS_PROP
     schema["properties"] = properties
     return types.Tool(
         name=public_name,
@@ -1079,9 +1093,11 @@ def _tool_definitions() -> list[types.Tool]:
 def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
     """Call the engine method for ``name`` and return a JSON-serialisable payload."""
     internal_name = _ANALYZED_TOOL_BASES.get(name)
+    observe_fields: str | None = None
     if internal_name is not None:
         name = internal_name
         args = {**args, "observe": True}
+        observe_fields = args.pop("observe_fields", None)
     elif name in _ANALYZED_TOOL_NAMES:
         raise UsageError(
             f"MCP tool '{name}' was renamed to '{_ANALYZED_TOOL_NAMES[name]}'",
@@ -1666,7 +1682,18 @@ def build_server(engine: Engine) -> Server:
     @server.call_tool()
     async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.ContentBlock]:
         try:
-            payload = _dispatch(engine, name, arguments or {})
+            args_in = arguments or {}
+            payload = _dispatch(engine, name, args_in)
+            # Trim the folded observation the same way the CLI does. Applied here, at the one
+            # boundary every tool returns through, rather than at ~40 `_dump` sites — and via the
+            # shared helper, because these two surfaces had already drifted once: MCP was
+            # returning every field of every element on every action while the CLI trimmed.
+            if isinstance(payload, dict) and name in _ANALYZED_TOOL_BASES:
+                spec = args_in.get("observe_fields")
+                if spec is None:
+                    spec = getattr(engine.config.output, "observation_fields", None)
+                view = Projection.for_observation(spec, fmt=OutputFormat.json)
+                payload = trim_observation_payload(payload, view, fmt=OutputFormat.json)
             text = json.dumps(payload, ensure_ascii=False)
         except AuaError as err:
             text = json.dumps(err.to_dict(), ensure_ascii=False)

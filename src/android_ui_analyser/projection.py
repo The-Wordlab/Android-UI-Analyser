@@ -537,3 +537,36 @@ def _in_status_band(bounds: Any, screen_height: int) -> bool:
     if not screen_height or not isinstance(bounds, (list, tuple)) or len(bounds) != 4:
         return False
     return int(bounds[3]) <= max(1, round(screen_height * _STATUS_BAND_FRACTION))
+
+
+def trim_observation_payload(
+    data: dict[str, Any],
+    view: Projection | None,
+    *,
+    fmt: OutputFormat | str = OutputFormat.json,
+) -> dict[str, Any]:
+    """Trim a nested ``observation`` in an action payload, keeping derived lists consistent.
+
+    Shared by the CLI and the MCP server on purpose. These two surfaces had already drifted: the
+    CLI trimmed the folded observation while MCP returned every field of every element on every
+    action, so the measured cost win ("37 taps produced 73 separate analyze calls") applied to one
+    caller and not the other. One implementation means a future change lands on both.
+
+    ``stable_elements`` and ``next_actions`` are both derived from the same tree, so they are
+    filtered to the ids that survived. Leaving them whole re-adds exactly the nodes the view just
+    dropped — the status bar alone was a third of `stable_elements` — and worse, lets
+    ``next_actions`` name an id that is not in the observation the caller was given.
+    """
+    if view is None or not isinstance(data, dict):
+        return data
+    payload = data.get("observation")
+    if not isinstance(payload, dict) or not isinstance(payload.get("elements"), list):
+        return data
+    projected = view.apply(payload, fmt=fmt)
+    data["observation"] = projected
+    kept = {e.get("id") for e in projected.get("elements", []) if isinstance(e, dict)}
+    for key in ("stable_elements", "next_actions"):
+        rows = data.get(key)
+        if isinstance(rows, list):
+            data[key] = [r for r in rows if not isinstance(r, dict) or r.get("id") in kept]
+    return data
