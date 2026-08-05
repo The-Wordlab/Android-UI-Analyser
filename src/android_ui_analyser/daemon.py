@@ -186,7 +186,19 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
             result = engine.long_press(**args)
             return _result_ok(result.model_dump(mode="json"))
 
-        elif cmd == "input":
+        elif cmd == "tap_point":
+            # The CLI's `--point` path dispatches this name. It was absent here, so
+            # `tap-and-analyze --point` worked in-process and raised `unknown_command: tap_point`
+            # whenever a daemon was warm — the configuration the skill guide recommends for speed.
+            # `_route` deliberately raises a structured daemon error rather than falling back, so
+            # the feature was simply invisible to anyone following that advice. Two sweep4 lanes hit
+            # it and both dropped to `adb shell input tap`, losing the recorded step.
+            result = engine.tap_point(**args)
+            return _result_ok(result.model_dump(mode="json"))
+
+        elif cmd in ("input", "input_text"):
+            # Two names for one call: the CLI sends `input` from one path and `input_text` from
+            # another (cli.py:1568). Only the first was handled.
             result = engine.input_text(**args)
             return _result_ok(result.model_dump(mode="json"))
 
