@@ -70,6 +70,13 @@ _OBSERVE_PROP: dict[str, Any] = {
     "default": True,
     "description": "Also return the post-action screen analysis.",
 }
+_DATABASE_PARAMS_PROP: dict[str, Any] = {
+    "oneOf": [
+        {"type": "array"},
+        {"type": "object", "additionalProperties": True},
+    ],
+    "description": "SQLite bind parameters as a JSON array or object.",
+}
 _SELECTOR_PROPS: dict[str, Any] = {
     "rid": {"type": "string", "description": "Match by resource-id."},
     "text": {"type": "string", "description": "Match by visible text."},
@@ -1054,6 +1061,126 @@ def _tool_definitions() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="database_list",
+            description="List a debuggable package's private SQLite databases and WAL/SHM sizes.",
+            inputSchema={
+                "type": "object",
+                "properties": {"package": {"type": "string"}},
+                "required": ["package"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="database_schema",
+            description="Return tables/views, columns, indexes, foreign keys, and CREATE SQL.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "package": {"type": "string"},
+                    "database": {"type": "string"},
+                    "table": {"type": "string"},
+                    "restart": {"type": "boolean", "default": True},
+                },
+                "required": ["package", "database"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="database_query",
+            description=(
+                "Run one read-only SQLite statement against a coherent private-database "
+                "snapshot and return columns plus JSON rows."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "package": {"type": "string"},
+                    "database": {"type": "string"},
+                    "sql": {"type": "string"},
+                    "parameters": _DATABASE_PARAMS_PROP,
+                    "limit": {"type": "integer", "default": 100, "minimum": 1, "maximum": 1000},
+                    "timeout_ms": {"type": "integer", "default": 5000, "minimum": 1},
+                    "restart": {"type": "boolean", "default": True},
+                },
+                "required": ["package", "database", "sql"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="database_execute",
+            description=(
+                "Execute confirmed INSERT/UPDATE/DELETE/REPLACE/WITH statements. Stops the "
+                "app, creates a restore point, validates integrity/foreign keys, replaces the "
+                "database without stale sidecars, and relaunches by default."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "package": {"type": "string"},
+                    "database": {"type": "string"},
+                    "sql": {"type": "string"},
+                    "parameters": _DATABASE_PARAMS_PROP,
+                    "timeout_ms": {"type": "integer", "default": 5000, "minimum": 1},
+                    "restart": {"type": "boolean", "default": True},
+                    "confirmed": {
+                        "type": "boolean",
+                        "description": "Must be true after reviewing the data mutation.",
+                    },
+                },
+                "required": ["package", "database", "sql", "confirmed"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="database_backup",
+            description="Create a private host restore point with the database and sidecars.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "package": {"type": "string"},
+                    "database": {"type": "string"},
+                    "restart": {"type": "boolean", "default": True},
+                },
+                "required": ["package", "database"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="database_backups",
+            description="List restore points scoped to this device, package, and database.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "package": {"type": "string"},
+                    "database": {"type": "string"},
+                },
+                "required": ["package", "database"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="database_restore",
+            description=(
+                "Restore a confirmed database backup after preserving the current state as a "
+                "new safety backup."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "package": {"type": "string"},
+                    "database": {"type": "string"},
+                    "backup_id": {"type": "string"},
+                    "restart": {"type": "boolean", "default": True},
+                    "confirmed": {
+                        "type": "boolean",
+                        "description": "Must be true after reviewing the restore point id.",
+                    },
+                },
+                "required": ["package", "database", "backup_id", "confirmed"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
             name="resolve",
             description="Remap a previous-frame id or stable_key onto the current screen.",
             inputSchema={
@@ -1591,6 +1718,51 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 observe=True,
                 with_image=img,
             )
+        )
+    if name == "database_list":
+        return engine.database_list(args["package"])
+    if name == "database_schema":
+        return engine.database_schema(
+            args["package"],
+            args["database"],
+            table=args.get("table"),
+            restart=args.get("restart", True),
+        )
+    if name == "database_query":
+        return engine.database_query(
+            args["package"],
+            args["database"],
+            args["sql"],
+            parameters=args.get("parameters"),
+            limit=int(args.get("limit", 100)),
+            timeout_ms=int(args.get("timeout_ms", 5000)),
+            restart=args.get("restart", True),
+        )
+    if name == "database_execute":
+        return engine.database_execute(
+            args["package"],
+            args["database"],
+            args["sql"],
+            parameters=args.get("parameters"),
+            timeout_ms=int(args.get("timeout_ms", 5000)),
+            restart=args.get("restart", True),
+            confirmed=args.get("confirmed", False),
+        )
+    if name == "database_backup":
+        return engine.database_backup(
+            args["package"],
+            args["database"],
+            restart=args.get("restart", True),
+        )
+    if name == "database_backups":
+        return engine.database_backups(args["package"], args["database"])
+    if name == "database_restore":
+        return engine.database_restore(
+            args["package"],
+            args["database"],
+            args["backup_id"],
+            restart=args.get("restart", True),
+            confirmed=args.get("confirmed", False),
         )
     if name == "resolve":
         # Engine.resolve may land soon; call through getattr so MCP stays ahead of the method.

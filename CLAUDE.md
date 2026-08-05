@@ -61,7 +61,18 @@ aua input <id> "text"          # focus + type (--submit fires the IME action)
 aua swipe up · aua key back    # directional swipe / hardware key
 aua has "<text>"               # exit 0 if present, 1 if not — cheap branch check
 aua wait --for "<text>"        # wait on state, don't sleep
+aua db list <pkg>              # discover private SQLite databases (debuggable builds)
+aua db query <pkg> <db> "SELECT …"   # coherent host-side snapshot → JSON rows
+aua db execute <pkg> <db> "UPDATE …" --yes  # backup + validate + replace + relaunch
 ```
+
+Database access still uses adb internally, but agents should use the structured `aua db`
+surface. Android images often omit `sqlite3`; AUA stops the app, copies the database plus
+WAL/SHM through `run-as`, operates with host SQLite, and relaunches by default. Mutations are
+data-only, require `--yes`, create a restore point, validate integrity/foreign keys, and remove
+stale sidecars before launch. `aua db backups|restore` provides rollback.
+The detail view in `aua dashboard` exposes the same database service for human inspection;
+browser execute/restore actions add server-verified typed confirmation phrases.
 
 No separate `re-analyze` is required after every state-changing action. By default, each action
 returns the post-action screen in `observation` with fresh IDs. Re-run `analyze` only when you

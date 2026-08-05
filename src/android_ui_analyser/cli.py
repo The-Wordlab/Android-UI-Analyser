@@ -2707,6 +2707,254 @@ def app_cmd(
     _run(ctx, go)
 
 
+database_app = typer.Typer(
+    help="Inspect, mutate, back up, and restore debuggable app SQLite databases.",
+    no_args_is_help=True,
+)
+app.add_typer(database_app, name="db")
+
+_DATABASE_RESTART = typer.Option(
+    True,
+    "--restart/--no-restart",
+    help="Relaunch the package after the coherent stop-and-snapshot operation.",
+)
+
+
+def _database_sql(sql: str | None, file: str | None) -> str:
+    if sql is not None and file is not None:
+        raise UsageError("pass SQL as an argument or with --file, not both")
+    if file is not None:
+        path = Path(file).expanduser()
+        try:
+            value = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise UsageError(f"could not read SQL file {path}: {exc}") from exc
+    else:
+        value = sql or ""
+    if not value.strip():
+        raise UsageError("a SQL statement is required (argument or --file PATH)")
+    return value
+
+
+def _database_parameters(raw: str | None) -> dict[str, Any] | list[Any] | None:
+    if raw is None:
+        return None
+    import json
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise UsageError(f"--params must be valid JSON: {exc}") from exc
+    if not isinstance(parsed, (dict, list)):
+        raise UsageError("--params must be a JSON object or array")
+    return parsed
+
+
+@database_app.command("list")
+def database_list_cmd(
+    ctx: typer.Context,
+    package: str = typer.Argument(..., help="Debuggable app package id."),
+) -> None:
+    """List private database files and WAL/SHM sidecar sizes."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(_route(engine, "database_list", package=package), fmt)
+
+    _run(ctx, go)
+
+
+@database_app.command("schema")
+def database_schema_cmd(
+    ctx: typer.Context,
+    package: str = typer.Argument(..., help="Debuggable app package id."),
+    database: str = typer.Argument(..., help="Database basename from `aua db list`."),
+    table: str | None = typer.Option(None, "--table", help="Inspect one table or view."),
+    restart: bool = _DATABASE_RESTART,
+) -> None:
+    """Return tables/views with columns, indexes, foreign keys, and CREATE SQL."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(
+            _route(
+                engine,
+                "database_schema",
+                package=package,
+                database=database,
+                table=table,
+                restart=restart,
+            ),
+            fmt,
+        )
+
+    _run(ctx, go)
+
+
+@database_app.command("query")
+def database_query_cmd(
+    ctx: typer.Context,
+    package: str = typer.Argument(..., help="Debuggable app package id."),
+    database: str = typer.Argument(..., help="Database basename from `aua db list`."),
+    sql: str | None = typer.Argument(None, help="One read-only SQLite statement."),
+    file: str | None = typer.Option(None, "--file", help="Read SQL from a UTF-8 file."),
+    params: str | None = typer.Option(
+        None,
+        "--params",
+        help='JSON object/array bound as SQLite parameters, e.g. {"id":"abc"}.',
+    ),
+    limit: int = typer.Option(100, "--limit", help="Maximum rows returned (1-1000)."),
+    timeout_ms: int = typer.Option(
+        5000,
+        "--sql-timeout",
+        help="Abort host-side SQLite work after this many milliseconds.",
+    ),
+    restart: bool = _DATABASE_RESTART,
+) -> None:
+    """Run one read-only query against a coherent host-side snapshot."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(
+            _route(
+                engine,
+                "database_query",
+                package=package,
+                database=database,
+                sql=_database_sql(sql, file),
+                parameters=_database_parameters(params),
+                limit=limit,
+                timeout_ms=timeout_ms,
+                restart=restart,
+            ),
+            fmt,
+        )
+
+    _run(ctx, go)
+
+
+@database_app.command("execute")
+def database_execute_cmd(
+    ctx: typer.Context,
+    package: str = typer.Argument(..., help="Debuggable app package id."),
+    database: str = typer.Argument(..., help="Database basename from `aua db list`."),
+    sql: str | None = typer.Argument(None, help="INSERT/UPDATE/DELETE/REPLACE/WITH SQL."),
+    file: str | None = typer.Option(
+        None, "--file", help="Read one or more statements from a file."
+    ),
+    params: str | None = typer.Option(
+        None,
+        "--params",
+        help="JSON object/array; supported when executing one statement.",
+    ),
+    timeout_ms: int = typer.Option(
+        5000,
+        "--sql-timeout",
+        help="Abort host-side SQLite work after this many milliseconds.",
+    ),
+    restart: bool = _DATABASE_RESTART,
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        help="Required: confirms direct app-data mutation after an automatic backup.",
+    ),
+) -> None:
+    """Execute guarded data mutations, verify integrity, and keep a restore point."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(
+            _route(
+                engine,
+                "database_execute",
+                package=package,
+                database=database,
+                sql=_database_sql(sql, file),
+                parameters=_database_parameters(params),
+                timeout_ms=timeout_ms,
+                restart=restart,
+                confirmed=yes,
+            ),
+            fmt,
+        )
+
+    _run(ctx, go)
+
+
+@database_app.command("backup")
+def database_backup_cmd(
+    ctx: typer.Context,
+    package: str = typer.Argument(..., help="Debuggable app package id."),
+    database: str = typer.Argument(..., help="Database basename from `aua db list`."),
+    restart: bool = _DATABASE_RESTART,
+) -> None:
+    """Create a private host restore point containing the database and sidecars."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(
+            _route(
+                engine,
+                "database_backup",
+                package=package,
+                database=database,
+                restart=restart,
+            ),
+            fmt,
+        )
+
+    _run(ctx, go)
+
+
+@database_app.command("backups")
+def database_backups_cmd(
+    ctx: typer.Context,
+    package: str = typer.Argument(..., help="Debuggable app package id."),
+    database: str = typer.Argument(..., help="Database basename from `aua db list`."),
+) -> None:
+    """List restore points for this device, package, and database."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(
+            _route(
+                engine,
+                "database_backups",
+                package=package,
+                database=database,
+            ),
+            fmt,
+        )
+
+    _run(ctx, go)
+
+
+@database_app.command("restore")
+def database_restore_cmd(
+    ctx: typer.Context,
+    package: str = typer.Argument(..., help="Debuggable app package id."),
+    database: str = typer.Argument(..., help="Database basename from `aua db list`."),
+    backup_id: str = typer.Argument(..., help="Restore point from `aua db backups`."),
+    restart: bool = _DATABASE_RESTART,
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        help="Required: confirms replacing the current database with this restore point.",
+    ),
+) -> None:
+    """Restore a backup after first preserving the current database as another backup."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(
+            _route(
+                engine,
+                "database_restore",
+                package=package,
+                database=database,
+                backup_id=backup_id,
+                restart=restart,
+                confirmed=yes,
+            ),
+            fmt,
+        )
+
+    _run(ctx, go)
+
+
 clipboard_app = typer.Typer(help="Clipboard — Maestro setClipboard / copyTextFrom / pasteText.")
 app.add_typer(clipboard_app, name="clipboard")
 

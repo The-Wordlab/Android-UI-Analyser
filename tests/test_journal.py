@@ -7,6 +7,19 @@ from pathlib import Path
 from android_ui_analyser import journal
 
 
+def test_database_sql_and_parameters_are_never_journaled() -> None:
+    redacted = journal.redact_args(
+        {
+            "sql": "UPDATE users SET token = 'private-value'",
+            "parameters": {"token": "another-private-value"},
+        }
+    )
+    assert redacted == {
+        "sql": "<redacted SQL: 40 chars>",
+        "parameters": "<redacted>",
+    }
+
+
 def test_record_and_read_since(tmp_path: Path) -> None:
     import time
 

@@ -131,6 +131,28 @@ Global options (apply to all commands; override config):
 - `aua app <foreground|launch <pkg>|stop <pkg>|current>`
 - `aua daemon <start|stop|status>` (§10)
 
+### Private app databases (debuggable builds)
+- `aua db list <pkg>` → list database primaries and WAL/SHM/journal sizes through
+  `run-as`; no on-device `sqlite3` dependency.
+- `aua db schema <pkg> <db> [--table NAME]` and `aua db query <pkg> <db> <SQL>
+  [--params JSON] [--limit N]` → stop the app, copy a coherent main+sidecar snapshot,
+  query with host Python SQLite under `query_only` + timeout, then relaunch by default.
+  Results are bounded `{columns, rows, truncated}` JSON; blobs are base64 metadata.
+- `aua db execute <pkg> <db> <SQL> --yes` → accept data mutation only
+  (`INSERT|UPDATE|DELETE|REPLACE|WITH`), automatically persist a private restore point,
+  execute one transaction, reject schema/PRAGMA/ATTACH/transaction control, verify schema
+  stability + new foreign-key violations + `integrity_check`, consolidate WAL state,
+  atomically replace the primary, remove stale sidecars, and relaunch. No confirmation means
+  no stop/read/write side effect.
+- `aua db backup|backups|restore` → explicit restore points scoped by device/package/database;
+  restore requires `--yes` and first backs up the state it is about to replace.
+- Database snapshots/backups can contain user data. They stay in AUA's private cache with
+  restrictive permissions; journal entries redact SQL and bind parameters.
+- The single-device dashboard detail view exposes the same list/schema/query/backup/execute/
+  restore service. Query results are bounded; browser writes use a per-dashboard request token,
+  and execute/restore require server-verified typed confirmation phrases before the engine is
+  called.
+
 ### Config
 - `aua config init` → write a commented default config to the user config path
 - `aua config show [--effective]` → print config (effective = after precedence merge)
@@ -583,7 +605,9 @@ sensitive and bind only to the socket (never a TCP port by default).
 `wait_stable(interval?, settle?, timeout?)`, `has(text, match?, ignore_case?,
 ocr_fallback?)`, `screenshot(annotate?)`, `inspect(id)`,
 `goto(goal, plan?, max_steps?, allow_destructive?)`, `flow_run(name, params?, dry_run?,
-from_step?, allow_destructive?)`, `list_devices()`. Tool results are the
+from_step?, allow_destructive?)`, `list_devices()`, and the `database_list`,
+`database_schema`, `database_query`, `database_execute`, `database_backup`,
+`database_backups`, and `database_restore` equivalents. Tool results are the
 same pydantic-validated JSON as the CLI. The MCP layer must be a **thin** adapter over
 the engine — no perception logic of its own.
 
@@ -625,6 +649,13 @@ the engine — no perception logic of its own.
   is a strict subset; `pretty` round-trips.
 - **AC8** **MCP**: an in-process MCP client lists the tools and calls `analyze_screen`
   against a mocked device, receiving schema-valid JSON.
+- **AC8b** **App databases**: a fake debuggable device serves a SQLite main/WAL/SHM
+  snapshot; list/schema/query work without an on-device SQLite binary; query cannot write;
+  execute requires confirmation, creates a restore point, mutates data while preserving the
+  schema and foreign keys, removes stale sidecars, and restore recovers the original rows while
+  preserving the replaced state as a second backup. CLI, daemon, and MCP route to the same
+  engine methods, command journaling stores neither SQL literals nor bind values, and the
+  dashboard database workspace enforces request-token plus typed-confirmation mutation guards.
 - **AC9** **`aua doctor`** runs with no device and reports each subsystem's
   availability + reason, leaking no secrets.
 - **AC10** Unit coverage for merge/dedup (IoU), ID assignment ordering, annotation

@@ -6363,6 +6363,128 @@ class Engine:
             hint="foreground|launch|stop|kill|clear|grant|current",
         )
 
+    # ----------------------------------------------------------------- app databases
+
+    def database_list(self, package: str) -> dict[str, Any]:
+        from . import app_database
+
+        return app_database.list_databases(self.device, package)
+
+    def database_schema(
+        self,
+        package: str,
+        database: str,
+        *,
+        table: str | None = None,
+        restart: bool = True,
+    ) -> dict[str, Any]:
+        from . import app_database
+
+        return app_database.database_schema(
+            self.device,
+            package,
+            database,
+            table=table,
+            restart=restart,
+        )
+
+    def database_query(
+        self,
+        package: str,
+        database: str,
+        sql: str,
+        *,
+        parameters: dict[str, Any] | list[Any] | None = None,
+        limit: int = 100,
+        timeout_ms: int = 5000,
+        restart: bool = True,
+    ) -> dict[str, Any]:
+        from . import app_database
+
+        return app_database.query_database(
+            self.device,
+            package,
+            database,
+            sql,
+            parameters=parameters,
+            limit=limit,
+            timeout_ms=timeout_ms,
+            restart=restart,
+        )
+
+    def database_execute(
+        self,
+        package: str,
+        database: str,
+        sql: str,
+        *,
+        parameters: dict[str, Any] | list[Any] | None = None,
+        timeout_ms: int = 5000,
+        restart: bool = True,
+        confirmed: bool = False,
+    ) -> dict[str, Any]:
+        from . import app_database
+
+        return app_database.execute_database(
+            self.device,
+            self.config.cache.dir,
+            package,
+            database,
+            sql,
+            parameters=parameters,
+            timeout_ms=timeout_ms,
+            restart=restart,
+            confirmed=confirmed,
+        )
+
+    def database_backup(
+        self,
+        package: str,
+        database: str,
+        *,
+        restart: bool = True,
+    ) -> dict[str, Any]:
+        from . import app_database
+
+        return app_database.backup_database(
+            self.device,
+            self.config.cache.dir,
+            package,
+            database,
+            restart=restart,
+        )
+
+    def database_backups(self, package: str, database: str) -> dict[str, Any]:
+        from . import app_database
+
+        return app_database.list_backups(
+            self.device,
+            self.config.cache.dir,
+            package,
+            database,
+        )
+
+    def database_restore(
+        self,
+        package: str,
+        database: str,
+        backup_id: str,
+        *,
+        restart: bool = True,
+        confirmed: bool = False,
+    ) -> dict[str, Any]:
+        from . import app_database
+
+        return app_database.restore_database(
+            self.device,
+            self.config.cache.dir,
+            package,
+            database,
+            backup_id,
+            restart=restart,
+            confirmed=confirmed,
+        )
+
     # ----------------------------------------------------------------- logcat / suite
 
     def logcat_mark(self, name: str = "default", *, clear: bool = False) -> dict[str, Any]:

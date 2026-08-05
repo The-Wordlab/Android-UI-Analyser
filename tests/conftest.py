@@ -99,12 +99,14 @@ class FakeDevice(Device):
         clock_skew_ms: int = 0,
         utc_offset: int = 0,
         prefs: dict[str, dict[str, str]] | None = None,
+        app_files: dict[str, bytes] | None = None,
         run_as_error: str | None = None,
     ) -> None:
         self.serial = serial
         # shared_prefs XML the app "owns": filename → {key: value}, served over `run-as`
         # exactly as Android writes it (so the real parser is under test, not a stub).
         self.prefs = {k: dict(v) for k, v in (prefs or {}).items()}
+        self.app_files = dict(app_files or {})
         self.run_as_error = run_as_error
         self._xml = hierarchy_xml
         self._w = width
@@ -330,6 +332,13 @@ class FakeDevice(Device):
         argv = shlex.split(command)[2:]
         verb, args = argv[0], argv[1:]
         if verb == "ls":
+            if args and args[-1].rstrip("/").endswith("databases"):
+                rows = ["total 0"]
+                for path, data in sorted(self.app_files.items()):
+                    if path.startswith("databases/") and "/" not in path[len("databases/") :]:
+                        name = path.rsplit("/", 1)[-1]
+                        rows.append(f"-rw------- 1 u0_a1 u0_a1 {len(data)} 2026-01-01 00:00 {name}")
+                return "\n".join(rows)
             return "\n".join(sorted(self.prefs))
         names = [a.rsplit("/", 1)[-1] for a in args if a.endswith(".xml")]
         if verb == "grep":
@@ -368,6 +377,21 @@ class FakeDevice(Device):
             self._settings.pop((parts[2], parts[3]), None)
             return ""
         return ""
+
+    def read_app_file(self, package: str, path: str) -> bytes:
+        self.calls.append(("read_app_file", (package, path)))
+        if path not in self.app_files:
+            raise OSError(f"missing app file: {path}")
+        return self.app_files[path]
+
+    def write_app_file(self, package: str, path: str, data: bytes) -> None:
+        self.calls.append(("write_app_file", (package, path, len(data))))
+        self.app_files[path] = data
+
+    def remove_app_files(self, package: str, paths: list[str]) -> None:
+        self.calls.append(("remove_app_files", (package, tuple(paths))))
+        for path in paths:
+            self.app_files.pop(path, None)
 
     def a11y_action(self, x: int, y: int, action: str) -> None:
         self.calls.append(("a11y_action", (x, y, action)))

@@ -792,9 +792,54 @@ aua dashboard --grid     # force grid even with one device
 # Click a tile → detail (journal / map / logcat) for that serial
 ```
 
-The page live-polls capture frames + recent action marks. Ctrl-C stops only the dashboard.
-If no warm daemon is present, aua starts the capture **sidecar** (single-device) or uses adb
-screencap per tile (grid).
+The page live-polls capture frames + recent action marks. In a device detail view, the
+**App database workspace** discovers databases for the foreground package, browses schema,
+runs bounded read-only SQL, creates/lists restore points, and exposes guarded mutation and
+restore actions. Mutation requires typing `MUTATE <database>`; restore requires typing
+`RESTORE <backup-id>`. Both keep the same server-side backup and integrity protections as
+the CLI. Ctrl-C stops only the dashboard. If no warm daemon is present, aua starts the
+capture **sidecar** (single-device) or uses adb screencap per tile (grid).
+
+---
+
+## App database inspection and mutation
+
+For an installed **debuggable** build, use AUA instead of composing `adb run-as`, DB/WAL
+copies, host SQLite, and push-back commands yourself:
+
+```bash
+aua db list com.example.app
+aua db schema com.example.app app.db
+aua db schema com.example.app app.db --table messages
+aua db query com.example.app app.db \
+  "SELECT id, state FROM messages WHERE chatId = :chat" \
+  --params '{"chat":"abc"}' --limit 100
+```
+
+Android system images frequently omit the `sqlite3` executable. AUA stops the package,
+copies the selected database plus any WAL/SHM sidecars through `run-as`, operates on a private
+host snapshot with Python SQLite, and relaunches the package by default. Pass `--no-restart`
+only when the next step expects the app to remain stopped. Queries run with SQLite
+`query_only`, a row limit, and a timeout; blobs are returned as base64 metadata.
+
+Data mutation is explicit and recoverable:
+
+```bash
+aua db execute com.example.app app.db \
+  "UPDATE messages SET state = :state WHERE id = :id" \
+  --params '{"state":"FAILED","id":"m1"}' --yes
+
+aua db backups com.example.app app.db
+aua db restore com.example.app app.db <backup-id> --yes
+```
+
+`execute` accepts data statements (`INSERT`, `UPDATE`, `DELETE`, `REPLACE`, `WITH`) and
+refuses schema changes, PRAGMA, ATTACH, and transaction control. It always creates a restore
+point first, executes one transaction, checks schema stability, foreign keys, and
+`integrity_check`, consolidates WAL state, replaces the app database, removes stale sidecars,
+then relaunches. `restore` first preserves the current state as another safety backup.
+Restore points are device/package/database scoped under AUA's private cache and can contain
+user data; query only the rows needed and handle backups accordingly.
 
 ---
 
@@ -812,6 +857,8 @@ Tools include (non-exhaustive): `analyze_screen`, `tap_and_analyze`,
 MCP also auto-stops emulators it started when the server process ends), `open_link_and_analyze`,
 `app`, `resolve`, clipboard/paste/copy/erase, location/orientation/airplane/media/record/clock,
 `capture_*`, `dev_profile`, `a11y_scroll_and_analyze`, `flags_apply_and_analyze`,
+`database_list` / `database_schema` / `database_query` / `database_execute` /
+`database_backup` / `database_backups` / `database_restore`,
 map/`reconcile_*`/`knowledge_*`,
 `proxy_start` / `proxy_stop` / `mock_replay`, `configure`.
 
@@ -1105,6 +1152,8 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 | `aua screenshot [path]` | Save a raw screenshot (`--region` / `--scale`) |
 | `aua inspect <id>` | Dump full details for one element |
 | `aua app launch\|stop\|kill\|clear\|grant` | App control (`launch --clear` = clearState) |
+| `aua db list\|schema\|query` | Structured private SQLite inspection for debuggable apps |
+| `aua db execute\|backup\|backups\|restore` | Confirmed, backed-up data mutation and rollback |
 | `aua emulator list\|status\|start\|stop` | Boot/stop AVDs (`--headless`, `--parallel`, `--gpu`, `--mine`/`--owner`) |
 | `aua emulator recommend-proxy\|ensure-proxy` | Suggest/create a small rootable Google APIs AVD |
 | `aua flags set\|apply` | Feature-flag writes with verify/restart |

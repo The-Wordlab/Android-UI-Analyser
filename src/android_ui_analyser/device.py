@@ -306,6 +306,18 @@ class Device(ABC):
         """Run a shell command on the device; return combined stdout text."""
         raise DeviceError("shell requires a real device")
 
+    def read_app_file(self, package: str, path: str) -> bytes:
+        """Read one private app file as bytes through Android ``run-as``."""
+        raise DeviceError("private app file reads require a real device")
+
+    def write_app_file(self, package: str, path: str, data: bytes) -> None:
+        """Atomically replace one private app file through Android ``run-as``."""
+        raise DeviceError("private app file writes require a real device")
+
+    def remove_app_files(self, package: str, paths: list[str]) -> None:
+        """Remove private app files through Android ``run-as``."""
+        raise DeviceError("private app file removal requires a real device")
+
     def a11y_action(self, x: int, y: int, action: str) -> None:
         """Perform an accessibility action on the node at *(x, y)*."""
         raise DeviceError("a11y action requires a real device")
@@ -1056,6 +1068,79 @@ class Uiautomator2Device(Device):
                 hint="Check the device is online (`adb devices`) and the command is valid.",
             ) from exc
         return out if isinstance(out, str) else str(getattr(out, "output", out) or "")
+
+    def read_app_file(self, package: str, path: str) -> bytes:
+        try:
+            result = subprocess.run(  # noqa: S603
+                ["adb", "-s", self.serial, "exec-out", "run-as", package, "cat", path],
+                check=False,
+                capture_output=True,
+                timeout=60,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            raise DeviceError(f"could not read {package}/{path}: {exc}") from exc
+        if result.returncode != 0:
+            detail = result.stderr.decode("utf-8", errors="replace").strip()
+            raise DeviceError(f"could not read {package}/{path}: {detail or 'adb failed'}")
+        return result.stdout
+
+    def write_app_file(self, package: str, path: str, data: bytes) -> None:
+        from shlex import quote
+
+        target = Path(path)
+        temporary = str(target.with_name(f".aua-{target.name}-{os.getpid()}-{time.time_ns()}"))
+        script = f"umask 077; cat > {quote(temporary)}"
+        try:
+            result = subprocess.run(  # noqa: S603
+                ["adb", "-s", self.serial, "exec-in", "run-as", package, "sh", "-c", script],
+                input=data,
+                check=False,
+                capture_output=True,
+                timeout=60,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            raise DeviceError(f"could not write {package}/{path}: {exc}") from exc
+        if result.returncode != 0:
+            with contextlib.suppress(Exception):
+                self.remove_app_files(package, [temporary])
+            detail = result.stderr.decode("utf-8", errors="replace").strip()
+            raise DeviceError(f"could not write {package}/{path}: {detail or 'adb failed'}")
+        try:
+            moved = subprocess.run(  # noqa: S603
+                ["adb", "-s", self.serial, "shell", "run-as", package, "mv", temporary, path],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            with contextlib.suppress(Exception):
+                self.remove_app_files(package, [temporary])
+            raise DeviceError(f"could not replace {package}/{path}: {exc}") from exc
+        if moved.returncode != 0:
+            with contextlib.suppress(Exception):
+                self.remove_app_files(package, [temporary])
+            detail = (moved.stderr or moved.stdout).strip()
+            raise DeviceError(f"could not replace {package}/{path}: {detail or 'adb failed'}")
+
+    def remove_app_files(self, package: str, paths: list[str]) -> None:
+        if not paths:
+            return
+        try:
+            result = subprocess.run(  # noqa: S603
+                ["adb", "-s", self.serial, "shell", "run-as", package, "rm", "-f", *paths],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            raise DeviceError(f"could not remove private files for {package}: {exc}") from exc
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            raise DeviceError(
+                f"could not remove private files for {package}: {detail or 'adb failed'}"
+            )
 
     def a11y_action(self, x: int, y: int, action: str) -> None:
         """Resolve the smallest hierarchy node containing *(x, y)* and perform *action*."""

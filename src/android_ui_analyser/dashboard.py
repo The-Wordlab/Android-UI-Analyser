@@ -13,6 +13,7 @@ import logging
 import mimetypes
 import os
 import re
+import secrets
 import socket
 import subprocess
 import threading
@@ -23,7 +24,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from .errors import DeviceError, UsageError
+from .errors import AuaError, DeviceError, UsageError
 
 logger = logging.getLogger(__name__)
 
@@ -399,6 +400,56 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     margin-top: 0.4rem; font-size: 0.7rem; color: var(--muted);
     display: flex; gap: 0.6rem; flex-wrap: wrap;
   }
+  .database-workspace { max-width: 1600px; margin: 0 auto 0.85rem; padding: 0 0.85rem; }
+  .db-toolbar, .db-actions {
+    display: flex; gap: 0.55rem; align-items: end; flex-wrap: wrap;
+  }
+  .db-field { display: grid; gap: 0.2rem; color: var(--muted); font-size: 0.68rem; }
+  .db-field.grow { flex: 1 1 260px; }
+  .db-input, .db-select, .db-sql {
+    color: var(--text); background: #0e1118; border: 1px solid var(--border);
+    border-radius: 6px; padding: 0.42rem 0.52rem; font: inherit; min-width: 0;
+  }
+  .db-input:focus, .db-select:focus, .db-sql:focus {
+    outline: 1px solid var(--accent); border-color: var(--accent);
+  }
+  .db-select { min-width: 190px; }
+  .db-sql {
+    width: 100%; min-height: 8.5rem; resize: vertical;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; line-height: 1.4;
+  }
+  .db-button {
+    color: var(--text); background: var(--panel2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 0.43rem 0.65rem; cursor: pointer; font: inherit;
+  }
+  .db-button:hover:not(:disabled) { border-color: var(--accent); }
+  .db-button.primary { color: #06130c; background: var(--accent); border-color: var(--accent); font-weight: 650; }
+  .db-button.danger { color: #fff; background: #873a34; border-color: var(--danger); }
+  .db-button:disabled { opacity: 0.45; cursor: not-allowed; }
+  .db-note, .db-status { color: var(--muted); font-size: 0.74rem; line-height: 1.45; }
+  .db-status { min-height: 1.2rem; margin: 0.55rem 0; }
+  .db-status.ok { color: var(--accent); }
+  .db-status.bad { color: var(--danger); }
+  .db-grid { display: grid; grid-template-columns: 0.85fr 1.35fr; gap: 0.85rem; }
+  @media (max-width: 980px) { .db-grid { grid-template-columns: 1fr; } }
+  .db-subpanel { background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 0.7rem; min-width: 0; }
+  .db-subpanel h3 { margin: 0 0 0.5rem; font-size: 0.78rem; }
+  .db-schema-object, .db-backup {
+    border-bottom: 1px solid var(--border); padding: 0.45rem 0; font-size: 0.75rem;
+  }
+  .db-schema-object:last-child, .db-backup:last-child { border-bottom: 0; }
+  .db-object-name { color: var(--accent); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; cursor: pointer; }
+  .db-columns { color: var(--muted); margin-top: 0.22rem; word-break: break-word; }
+  .db-table-wrap { overflow: auto; max-height: 25rem; border: 1px solid var(--border); border-radius: 6px; }
+  table.db-results { width: 100%; border-collapse: collapse; font-size: 0.72rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  table.db-results th, table.db-results td { text-align: left; padding: 0.34rem 0.45rem; border-bottom: 1px solid var(--border); white-space: pre-wrap; vertical-align: top; max-width: 32rem; overflow-wrap: anywhere; }
+  table.db-results th { color: var(--accent); position: sticky; top: 0; background: #10141b; }
+  .db-options { display: flex; gap: 0.7rem; align-items: center; flex-wrap: wrap; margin: 0.5rem 0; }
+  .db-options label { color: var(--muted); font-size: 0.7rem; }
+  dialog.db-dialog { color: var(--text); background: var(--panel); border: 1px solid var(--danger); border-radius: 10px; width: min(560px, calc(100% - 2rem)); padding: 1rem; }
+  dialog.db-dialog::backdrop { background: rgba(0,0,0,0.72); }
+  .db-dialog h3 { margin-top: 0; }
+  .db-dialog code { color: var(--warn); }
   .hidden { display: none !important; }
 </style>
 </head>
@@ -476,17 +527,86 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     <ul id="marks" class="scroll sm"><li class="empty">—</li></ul>
   </section>
 </div>
+<div class="database-workspace">
+  <section class="panel">
+    <h2>App database workspace</h2>
+    <p class="db-note">
+      Inspect SQLite data through the app's debuggable <code>run-as</code> sandbox.
+      Schema, queries, backups, mutations, and restores briefly stop the app to capture a
+      coherent snapshot; keep “restart app” selected to relaunch it afterward.
+    </p>
+    <div class="db-toolbar">
+      <label class="db-field grow">Package
+        <input id="db-package" class="db-input" placeholder="com.example.debug" autocomplete="off"/>
+      </label>
+      <button id="db-refresh" class="db-button">Find databases</button>
+      <label class="db-field">Database
+        <select id="db-database" class="db-select"><option value="">— select —</option></select>
+      </label>
+      <button id="db-schema-button" class="db-button" disabled>Load schema</button>
+      <button id="db-backup-button" class="db-button" disabled>Create backup</button>
+    </div>
+    <div class="db-options">
+      <label><input id="db-restart" type="checkbox" checked/> restart app after operation</label>
+      <span id="db-status" class="db-status">Waiting for a foreground debuggable package…</span>
+    </div>
+    <div class="db-grid">
+      <div>
+        <section class="db-subpanel">
+          <h3>Schema</h3>
+          <div id="db-schema" class="scroll md"><div class="empty">Load a database schema to browse tables and views.</div></div>
+        </section>
+        <section class="db-subpanel" style="margin-top:0.85rem">
+          <div class="db-actions">
+            <h3 style="margin-right:auto">Restore points</h3>
+            <button id="db-backups-refresh" class="db-button" disabled>Refresh</button>
+          </div>
+          <div id="db-backups" class="scroll sm"><div class="empty">Select a database.</div></div>
+        </section>
+      </div>
+      <section class="db-subpanel">
+        <h3>SQL</h3>
+        <textarea id="db-sql" class="db-sql" spellcheck="false">SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') ORDER BY name;</textarea>
+        <div class="db-options">
+          <label class="db-field grow">Parameters (JSON object or array; optional)
+            <input id="db-params" class="db-input" placeholder='{"id": 42}' autocomplete="off"/>
+          </label>
+          <label class="db-field">Row limit
+            <input id="db-limit" class="db-input" type="number" min="1" max="1000" value="100" style="width:6.5rem"/>
+          </label>
+        </div>
+        <div class="db-actions">
+          <button id="db-query-button" class="db-button primary" disabled>Run read-only query</button>
+          <button id="db-execute-button" class="db-button danger" disabled>Execute mutation…</button>
+        </div>
+        <div id="db-result-meta" class="db-status">No query run yet.</div>
+        <div id="db-results" class="db-table-wrap"><div class="empty" style="padding:0.6rem">Results appear here.</div></div>
+      </section>
+    </div>
+  </section>
+</div>
+<dialog id="db-confirm-dialog" class="db-dialog">
+  <h3 id="db-confirm-title">Confirm database operation</h3>
+  <p id="db-confirm-message" class="db-note"></p>
+  <p class="db-note">Type <code id="db-confirm-phrase"></code> to continue.</p>
+  <input id="db-confirm-input" class="db-input" style="width:100%" autocomplete="off"/>
+  <div class="db-actions" style="justify-content:flex-end;margin-top:0.8rem">
+    <button id="db-confirm-cancel" class="db-button">Cancel</button>
+    <button id="db-confirm-submit" class="db-button danger" disabled>Confirm</button>
+  </div>
+</dialog>
 <footer>
   Live sneak-peek for headless agent runs. Frames from the capture ring buffer
   (daemon or sidecar); journal from cache/journal. Close this tab anytime — the agent keeps running.
 </footer>
 </div>
 
-<script>
+<script nonce="__DATABASE_TOKEN__">
 const POLL_MS = __POLL_MS__;
 const MAP_MS = Math.max(POLL_MS * 4, 2000);
 const BOOT_MODE = '__MODE__';
 const BOOT_SERIAL = '__SERIAL__';
+const DATABASE_TOKEN = '__DATABASE_TOKEN__';
 const params = new URLSearchParams(location.search);
 const focusSerial = params.get('serial') || (BOOT_MODE === 'detail' ? BOOT_SERIAL : '');
 const isGrid = !focusSerial && BOOT_MODE === 'grid';
@@ -652,6 +772,11 @@ async function tickStatus() {
     fp.textContent = 'fails ' + fc;
     fp.className = 'pill ' + (fc ? 'bad' : 'ok');
     document.getElementById('pkg').textContent = 'pkg ' + (s.package || '—');
+    if (s.package && !dbPackage.value && !databaseBootstrapped) {
+      dbPackage.value = s.package;
+      databaseBootstrapped = true;
+      loadDatabases();
+    }
     document.getElementById('session').textContent = 'session ' + (s.session_id || '—');
     document.getElementById('fps').textContent = 'poll ' + (POLL_MS / 1000) + 's';
 
@@ -764,6 +889,353 @@ async function tickLogcat() {
   } catch (e) {}
 }
 
+const dbPackage = document.getElementById('db-package');
+const dbDatabase = document.getElementById('db-database');
+const dbStatus = document.getElementById('db-status');
+const dbSchema = document.getElementById('db-schema');
+const dbBackups = document.getElementById('db-backups');
+const dbResults = document.getElementById('db-results');
+const dbResultMeta = document.getElementById('db-result-meta');
+const dbSql = document.getElementById('db-sql');
+const dbParams = document.getElementById('db-params');
+const dbLimit = document.getElementById('db-limit');
+const dbRestart = document.getElementById('db-restart');
+const dbConfirmDialog = document.getElementById('db-confirm-dialog');
+const dbConfirmInput = document.getElementById('db-confirm-input');
+const dbConfirmSubmit = document.getElementById('db-confirm-submit');
+let databaseBootstrapped = false;
+let databaseBusy = false;
+let pendingDatabaseConfirmation = null;
+
+function databaseSelection() {
+  return {
+    serial: focusSerial,
+    package: dbPackage.value.trim(),
+    database: dbDatabase.value,
+    restart: dbRestart.checked,
+  };
+}
+
+function databaseError(data, fallback) {
+  const err = data && data.error;
+  if (typeof err === 'string') return err;
+  if (err && err.message) return err.message + (err.hint ? ' — ' + err.hint : '');
+  return fallback || 'database operation failed';
+}
+
+function setDatabaseStatus(message, kind) {
+  dbStatus.textContent = message;
+  dbStatus.className = 'db-status' + (kind ? ' ' + kind : '');
+}
+
+function updateDatabaseControls() {
+  const selected = Boolean(dbPackage.value.trim() && dbDatabase.value);
+  document.getElementById('db-refresh').disabled = databaseBusy;
+  document.getElementById('db-schema-button').disabled = databaseBusy || !selected;
+  document.getElementById('db-backup-button').disabled = databaseBusy || !selected;
+  document.getElementById('db-backups-refresh').disabled = databaseBusy || !selected;
+  document.getElementById('db-query-button').disabled = databaseBusy || !selected;
+  document.getElementById('db-execute-button').disabled = databaseBusy || !selected;
+}
+
+async function databaseRequest(action, payload) {
+  databaseBusy = true;
+  updateDatabaseControls();
+  try {
+    const response = await fetch('/api/database/' + action, {
+      method: 'POST',
+      cache: 'no-store',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-AUA-Dashboard-Token': DATABASE_TOKEN,
+      },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json();
+    if (!response.ok || data.ok === false) throw new Error(databaseError(data));
+    return data;
+  } finally {
+    databaseBusy = false;
+    updateDatabaseControls();
+  }
+}
+
+function parseDatabaseParameters() {
+  const raw = dbParams.value.trim();
+  if (!raw) return null;
+  const parsed = JSON.parse(raw);
+  if (!Array.isArray(parsed) && (parsed === null || typeof parsed !== 'object')) {
+    throw new Error('Parameters must be a JSON object or array.');
+  }
+  return parsed;
+}
+
+function renderDatabaseTable(columns, rows) {
+  dbResults.innerHTML = '';
+  if (!columns || !columns.length) {
+    dbResults.innerHTML = '<div class="empty" style="padding:0.6rem">No tabular result.</div>';
+    return;
+  }
+  const table = document.createElement('table');
+  table.className = 'db-results';
+  const thead = document.createElement('thead');
+  const headRow = document.createElement('tr');
+  columns.forEach(column => {
+    const th = document.createElement('th');
+    th.textContent = column;
+    headRow.appendChild(th);
+  });
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+  const tbody = document.createElement('tbody');
+  (rows || []).forEach(row => {
+    const tr = document.createElement('tr');
+    row.forEach(value => {
+      const td = document.createElement('td');
+      td.textContent = value === null ? 'NULL' :
+        (typeof value === 'object' ? JSON.stringify(value) : String(value));
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  dbResults.appendChild(table);
+}
+
+async function loadDatabases() {
+  const selection = databaseSelection();
+  if (!selection.package) {
+    setDatabaseStatus('Enter an Android package name.', 'bad');
+    return;
+  }
+  setDatabaseStatus('Discovering databases…');
+  try {
+    const data = await databaseRequest('list', selection);
+    const previous = dbDatabase.value;
+    dbDatabase.innerHTML = '<option value="">— select —</option>';
+    (data.databases || []).forEach(database => {
+      const option = document.createElement('option');
+      option.value = database.name;
+      const sidecars = database.wal_size_bytes != null ? ' + WAL' : '';
+      option.textContent = database.name + ' (' + database.size_bytes + ' bytes' + sidecars + ')';
+      dbDatabase.appendChild(option);
+    });
+    if ((data.databases || []).some(database => database.name === previous)) {
+      dbDatabase.value = previous;
+    } else if ((data.databases || []).length) {
+      dbDatabase.value = data.databases[0].name;
+    }
+    updateDatabaseControls();
+    setDatabaseStatus(
+      data.count ? 'Found ' + data.count + ' database' + (data.count === 1 ? '.' : 's.') :
+        'No databases found. The package must be installed and debuggable.',
+      data.count ? 'ok' : ''
+    );
+    if (dbDatabase.value) loadBackups();
+  } catch (error) {
+    setDatabaseStatus(error.message, 'bad');
+  }
+}
+
+function renderSchema(objects) {
+  dbSchema.innerHTML = '';
+  if (!objects.length) {
+    dbSchema.innerHTML = '<div class="empty">No tables or views.</div>';
+    return;
+  }
+  objects.forEach(object => {
+    const item = document.createElement('div');
+    item.className = 'db-schema-object';
+    const name = document.createElement('div');
+    name.className = 'db-object-name';
+    name.textContent = object.type + ' · ' + object.name;
+    name.title = 'Prepare a SELECT query for this object';
+    name.addEventListener('click', () => {
+      const quoted = '"' + object.name.replaceAll('"', '""') + '"';
+      dbSql.value = 'SELECT * FROM ' + quoted + ' LIMIT 100;';
+    });
+    const columns = document.createElement('div');
+    columns.className = 'db-columns';
+    columns.textContent = (object.columns || []).map(column =>
+      column.name + (column.type ? ' ' + column.type : '') + (column.primary_key ? ' PK' : '')
+    ).join(' · ') || '(no columns)';
+    item.appendChild(name);
+    item.appendChild(columns);
+    dbSchema.appendChild(item);
+  });
+}
+
+async function loadSchema() {
+  setDatabaseStatus('Capturing a coherent database snapshot and reading schema…');
+  try {
+    const data = await databaseRequest('schema', databaseSelection());
+    renderSchema(data.objects || []);
+    setDatabaseStatus('Loaded ' + data.count + ' schema object' + (data.count === 1 ? '.' : 's.'), 'ok');
+  } catch (error) {
+    setDatabaseStatus(error.message, 'bad');
+  }
+}
+
+async function runDatabaseQuery() {
+  let parameters;
+  try {
+    parameters = parseDatabaseParameters();
+  } catch (error) {
+    setDatabaseStatus(error.message, 'bad');
+    return;
+  }
+  setDatabaseStatus('Running read-only query against a coherent snapshot…');
+  try {
+    const data = await databaseRequest('query', {
+      ...databaseSelection(),
+      sql: dbSql.value,
+      parameters: parameters,
+      limit: Number(dbLimit.value || 100),
+    });
+    renderDatabaseTable(data.columns, data.rows);
+    dbResultMeta.textContent = data.row_count + ' row' + (data.row_count === 1 ? '' : 's') +
+      (data.truncated ? ' (truncated)' : '') + ' · ' + data.duration_ms + ' ms';
+    setDatabaseStatus('Read-only query completed.', 'ok');
+  } catch (error) {
+    setDatabaseStatus(error.message, 'bad');
+  }
+}
+
+function renderBackups(backups) {
+  dbBackups.innerHTML = '';
+  if (!backups.length) {
+    dbBackups.innerHTML = '<div class="empty">No restore points yet.</div>';
+    return;
+  }
+  backups.forEach(backup => {
+    const item = document.createElement('div');
+    item.className = 'db-backup';
+    const actions = document.createElement('div');
+    actions.className = 'db-actions';
+    const label = document.createElement('span');
+    label.style.marginRight = 'auto';
+    label.textContent = backup.id + ' · ' + (backup.reason || 'backup');
+    label.title = backup.created_at || '';
+    const restore = document.createElement('button');
+    restore.className = 'db-button danger';
+    restore.textContent = 'Restore…';
+    restore.addEventListener('click', () => openDatabaseConfirmation('restore', backup.id));
+    actions.appendChild(label);
+    actions.appendChild(restore);
+    item.appendChild(actions);
+    dbBackups.appendChild(item);
+  });
+}
+
+async function loadBackups() {
+  if (!dbDatabase.value) return;
+  try {
+    const data = await databaseRequest('backups', databaseSelection());
+    renderBackups(data.backups || []);
+  } catch (error) {
+    dbBackups.textContent = error.message;
+  }
+}
+
+async function createDatabaseBackup() {
+  setDatabaseStatus('Creating restore point…');
+  try {
+    const data = await databaseRequest('backup', databaseSelection());
+    setDatabaseStatus('Created backup ' + data.backup.id + '.', 'ok');
+    loadBackups();
+  } catch (error) {
+    setDatabaseStatus(error.message, 'bad');
+  }
+}
+
+function openDatabaseConfirmation(action, backupId) {
+  let parameters = null;
+  if (action === 'execute') {
+    try {
+      parameters = parseDatabaseParameters();
+    } catch (error) {
+      setDatabaseStatus(error.message, 'bad');
+      return;
+    }
+  }
+  const phrase = action === 'execute' ? 'MUTATE ' + dbDatabase.value : 'RESTORE ' + backupId;
+  pendingDatabaseConfirmation = {action: action, backupId: backupId, parameters: parameters, phrase: phrase};
+  document.getElementById('db-confirm-title').textContent =
+    action === 'execute' ? 'Execute database mutation?' : 'Restore database backup?';
+  document.getElementById('db-confirm-message').textContent = action === 'execute' ?
+    'AUA will create an automatic restore point, run the SQL in one transaction, verify schema, foreign keys, and integrity, then replace the app database.' :
+    'AUA will preserve the current database as a new safety backup before installing this restore point.';
+  document.getElementById('db-confirm-phrase').textContent = phrase;
+  dbConfirmInput.value = '';
+  dbConfirmSubmit.disabled = true;
+  dbConfirmDialog.showModal();
+  dbConfirmInput.focus();
+}
+
+async function submitDatabaseConfirmation() {
+  const pending = pendingDatabaseConfirmation;
+  if (!pending || dbConfirmInput.value !== pending.phrase) return;
+  dbConfirmDialog.close();
+  setDatabaseStatus(pending.action === 'execute' ? 'Executing guarded mutation…' : 'Restoring backup…');
+  try {
+    if (pending.action === 'execute') {
+      const data = await databaseRequest('execute', {
+        ...databaseSelection(),
+        sql: dbSql.value,
+        parameters: pending.parameters,
+        confirmation: pending.phrase,
+      });
+      const columns = ['statement', 'kind', 'changes', 'rowcount', 'lastrowid'];
+      const rows = (data.statements || []).map(item => columns.map(column => item[column]));
+      renderDatabaseTable(columns, rows);
+      dbResultMeta.textContent = data.changes + ' change' + (data.changes === 1 ? '' : 's') +
+        ' · backup ' + data.backup.id + ' · ' + data.duration_ms + ' ms';
+      setDatabaseStatus('Mutation completed and verified.', 'ok');
+    } else {
+      const data = await databaseRequest('restore', {
+        ...databaseSelection(),
+        backup_id: pending.backupId,
+        confirmation: pending.phrase,
+      });
+      setDatabaseStatus(
+        'Restored ' + data.restored_backup.id + '; safety backup ' + data.safety_backup.id + '.',
+        'ok'
+      );
+    }
+    loadBackups();
+  } catch (error) {
+    setDatabaseStatus(error.message, 'bad');
+  } finally {
+    pendingDatabaseConfirmation = null;
+  }
+}
+
+document.getElementById('db-refresh').addEventListener('click', loadDatabases);
+document.getElementById('db-schema-button').addEventListener('click', loadSchema);
+document.getElementById('db-query-button').addEventListener('click', runDatabaseQuery);
+document.getElementById('db-execute-button').addEventListener('click', () => openDatabaseConfirmation('execute', null));
+document.getElementById('db-backup-button').addEventListener('click', createDatabaseBackup);
+document.getElementById('db-backups-refresh').addEventListener('click', loadBackups);
+dbDatabase.addEventListener('change', () => {
+  updateDatabaseControls();
+  dbSchema.innerHTML = '<div class="empty">Load the selected database schema.</div>';
+  loadBackups();
+});
+dbPackage.addEventListener('input', () => {
+  databaseBootstrapped = true;
+  updateDatabaseControls();
+});
+dbConfirmInput.addEventListener('input', () => {
+  dbConfirmSubmit.disabled = !pendingDatabaseConfirmation ||
+    dbConfirmInput.value !== pendingDatabaseConfirmation.phrase;
+});
+document.getElementById('db-confirm-cancel').addEventListener('click', () => {
+  pendingDatabaseConfirmation = null;
+  dbConfirmDialog.close();
+});
+dbConfirmSubmit.addEventListener('click', submitDatabaseConfirmation);
+updateDatabaseControls();
+
 if (isGrid) {
   tickGrid();
   setInterval(tickGrid, Math.max(POLL_MS, 800));
@@ -804,6 +1276,8 @@ class _DashboardState:
         self._fallback_lock = threading.Lock()
         self._pkg_cache: dict[str, tuple[str | None, float]] = {}
         self._map_cache: dict[str, tuple[dict[str, Any], float]] = {}
+        self.database_token = secrets.token_urlsafe(32)
+        self._database_lock = threading.Lock()
 
     @property
     def serial(self) -> str | None:
@@ -856,6 +1330,133 @@ class _DashboardState:
             pkg = _pkg_from_dumpsys(ser)
         self._pkg_cache[ser] = (pkg or None, now)
         return pkg or None
+
+    @staticmethod
+    def _database_text(payload: dict[str, Any], name: str) -> str:
+        value = payload.get(name)
+        if not isinstance(value, str) or not value.strip():
+            raise UsageError(f"dashboard database request needs {name!r}")
+        return value.strip()
+
+    @staticmethod
+    def _database_bool(payload: dict[str, Any], name: str, default: bool) -> bool:
+        value = payload.get(name, default)
+        if not isinstance(value, bool):
+            raise UsageError(f"dashboard database field {name!r} must be a boolean")
+        return value
+
+    @staticmethod
+    def _database_int(
+        payload: dict[str, Any], name: str, default: int, *, maximum: int
+    ) -> int:
+        value = payload.get(name, default)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise UsageError(f"dashboard database field {name!r} must be a positive integer")
+        if value > maximum:
+            raise UsageError(
+                f"dashboard database field {name!r} must be at most {maximum}"
+            )
+        return value
+
+    def database_operation(self, action: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Run one dashboard database request through the guarded database service."""
+        from . import app_database
+        from .device import connect
+
+        serial = self._database_text(payload, "serial") if payload.get("serial") else self.focus
+        if not serial:
+            raise UsageError("dashboard database request needs a device serial")
+        if serial not in self.serials:
+            raise UsageError(
+                f"device {serial!r} is not part of this dashboard session",
+                code="dashboard_device_scope",
+            )
+        package = self._database_text(payload, "package")
+        restart = self._database_bool(payload, "restart", True)
+        device = connect(serial)
+
+        with self._database_lock:
+            if action == "list":
+                return app_database.list_databases(device, package)
+
+            database = self._database_text(payload, "database")
+            if action == "schema":
+                table = payload.get("table")
+                if table is not None and not isinstance(table, str):
+                    raise UsageError("dashboard database field 'table' must be a string")
+                return app_database.database_schema(
+                    device,
+                    package,
+                    database,
+                    table=table.strip() if table and table.strip() else None,
+                    restart=restart,
+                )
+            if action == "query":
+                return app_database.query_database(
+                    device,
+                    package,
+                    database,
+                    self._database_text(payload, "sql"),
+                    parameters=payload.get("parameters"),
+                    limit=self._database_int(payload, "limit", 100, maximum=1000),
+                    timeout_ms=self._database_int(
+                        payload, "timeout_ms", 5000, maximum=60_000
+                    ),
+                    restart=restart,
+                )
+            if action == "backup":
+                return app_database.backup_database(
+                    device,
+                    self.cache_dir,
+                    package,
+                    database,
+                    restart=restart,
+                )
+            if action == "backups":
+                return app_database.list_backups(
+                    device,
+                    self.cache_dir,
+                    package,
+                    database,
+                )
+            if action == "execute":
+                expected = f"MUTATE {database}"
+                if payload.get("confirmation") != expected:
+                    raise UsageError(
+                        f"type {expected!r} to confirm this database mutation",
+                        code="database_confirmation_required",
+                    )
+                return app_database.execute_database(
+                    device,
+                    self.cache_dir,
+                    package,
+                    database,
+                    self._database_text(payload, "sql"),
+                    parameters=payload.get("parameters"),
+                    timeout_ms=self._database_int(
+                        payload, "timeout_ms", 5000, maximum=60_000
+                    ),
+                    restart=restart,
+                    confirmed=True,
+                )
+            if action == "restore":
+                backup_id = self._database_text(payload, "backup_id")
+                expected = f"RESTORE {backup_id}"
+                if payload.get("confirmation") != expected:
+                    raise UsageError(
+                        f"type {expected!r} to confirm this database restore",
+                        code="database_confirmation_required",
+                    )
+                return app_database.restore_database(
+                    device,
+                    self.cache_dir,
+                    package,
+                    database,
+                    backup_id,
+                    restart=restart,
+                    confirmed=True,
+                )
+        raise UsageError(f"unknown dashboard database operation: {action!r}")
 
     def journal_bundle(
         self, serial: str | None = None, *, since_ms: int | None = None, limit: int = 150
@@ -1102,6 +1703,16 @@ def _make_handler(state: _DashboardState) -> type[BaseHTTPRequestHandler]:
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header(
+                "Content-Security-Policy",
+                "default-src 'self'; img-src 'self' data:; "
+                "style-src 'self' 'unsafe-inline'; "
+                f"script-src 'nonce-{state.database_token}'; connect-src 'self'; "
+                "object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+            )
             self.end_headers()
             self.wfile.write(body)
 
@@ -1125,6 +1736,7 @@ def _make_handler(state: _DashboardState) -> type[BaseHTTPRequestHandler]:
                     _DASHBOARD_HTML.replace("__POLL_MS__", str(state.poll_ms))
                     .replace("__MODE__", mode if focus else state.mode)
                     .replace("__SERIAL__", serial_boot)
+                    .replace("__DATABASE_TOKEN__", state.database_token)
                 )
                 self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
                 return
@@ -1180,6 +1792,74 @@ def _make_handler(state: _DashboardState) -> type[BaseHTTPRequestHandler]:
                 self._send(200, target.read_bytes(), mime)
                 return
             self._send(404, b"not found", "text/plain")
+
+        def do_POST(self) -> None:  # noqa: N802
+            parsed = urlparse(self.path)
+            prefix = "/api/database/"
+            if not parsed.path.startswith(prefix):
+                self._send(404, b"not found", "text/plain")
+                return
+            supplied = self.headers.get("X-AUA-Dashboard-Token", "")
+            if not secrets.compare_digest(supplied, state.database_token):
+                self._json(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "dashboard_token",
+                            "message": "invalid dashboard request token",
+                        },
+                    },
+                    403,
+                )
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                length = 0
+            if length <= 0 or length > 1_000_000:
+                self._json(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "dashboard_request",
+                            "message": "database request body must be between 1 byte and 1 MB",
+                        },
+                    },
+                    400,
+                )
+                return
+            try:
+                payload = json.loads(self.rfile.read(length))
+                if not isinstance(payload, dict):
+                    raise UsageError("dashboard database request body must be a JSON object")
+                action = parsed.path[len(prefix) :]
+                result = state.database_operation(action, payload)
+                self._json(result)
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                self._json(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "dashboard_json",
+                            "message": f"invalid JSON request: {exc}",
+                        },
+                    },
+                    400,
+                )
+            except AuaError as exc:
+                self._json({"ok": False, **exc.to_dict()}, 400)
+            except Exception as exc:  # noqa: BLE001 — dashboard must stay available
+                logger.exception("dashboard database request failed")
+                self._json(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "internal_error",
+                            "message": str(exc),
+                        },
+                    },
+                    500,
+                )
 
     return Handler
 

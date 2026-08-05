@@ -63,7 +63,13 @@ def redact_args(args: dict[str, Any] | None) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for k, v in (args or {}).items():
         lk = str(k).lower()
-        if lk in _REDACT_KEYS or any(p in lk for p in ("password", "secret", "token")):
+        if lk == "sql" and isinstance(v, str):
+            out[k] = f"<redacted SQL: {len(v)} chars>"
+        elif (
+            lk in ("params", "parameters")
+            or lk in _REDACT_KEYS
+            or any(p in lk for p in ("password", "secret", "token"))
+        ):
             out[k] = "<redacted>"
         elif k in ("text", "body", "value") and isinstance(v, str) and len(v) > 80:
             out[k] = v[:80] + "…"

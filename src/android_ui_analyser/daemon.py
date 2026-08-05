@@ -19,7 +19,8 @@ Supported commands
 ping, analyze, ask_screen, has, inspect, screenshot, tap, long_press, input, clear,
 swipe, scroll_to, key, open_link, wait, wait_stable, memory_update, goto,
 flow_run, flow_save, navigate, orient, list_devices, app, logcat,
-logcat_mark, suite_run
+logcat_mark, suite_run, database_list, database_schema, database_query,
+database_execute, database_backup, database_backups, database_restore
 """
 
 from __future__ import annotations
@@ -347,6 +348,27 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
             result = engine.app(**args)
             return _result_ok(result.model_dump(mode="json"))
 
+        elif cmd == "database_list":
+            return _result_ok(engine.database_list(**args))
+
+        elif cmd == "database_schema":
+            return _result_ok(engine.database_schema(**args))
+
+        elif cmd == "database_query":
+            return _result_ok(engine.database_query(**args))
+
+        elif cmd == "database_execute":
+            return _result_ok(engine.database_execute(**args))
+
+        elif cmd == "database_backup":
+            return _result_ok(engine.database_backup(**args))
+
+        elif cmd == "database_backups":
+            return _result_ok(engine.database_backups(**args))
+
+        elif cmd == "database_restore":
+            return _result_ok(engine.database_restore(**args))
+
         elif cmd == "logcat":
             return _result_ok(engine.logcat(**args))
 
@@ -434,6 +456,8 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
                 "location_set, orientation_set, orientation_get, airplane_set, airplane_toggle, "
                 "media_add, record_start, record_stop, clock_set, open_link, resolve, wait, wait_stable, "
                 "memory_update, goto, flow_run, flow_save, navigate, orient, list_devices, app, "
+                "database_list, database_schema, database_query, database_execute, "
+                "database_backup, database_backups, database_restore, "
                 "logcat, logcat_mark, suite_run, dev_show, dev_anim, dev_crashes, dev_profile, "
                 "a11y_scroll, a11y_action, flags_set, flags_apply, proxy_start, proxy_stop, "
                 "mock_map, mock_record, mock_replay, capture_status, capture_last, capture_export, "

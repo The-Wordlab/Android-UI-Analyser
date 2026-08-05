@@ -27,8 +27,9 @@ SKILL_DESCRIPTION = (
     "IDs + bounding boxes, then acts BY ID — tap/input/swipe/key — so you never guess pixel "
     'coordinates. Use whenever the task involves an Android device/emulator: "test the '
     'Android app", "what\'s on screen", "tap/type/swipe the X", "is <text> visible", "drive '
-    'the emulator", automating or debugging an Android UI flow, or checking a screen after a '
-    "change. Hierarchy-first (tens of ms); falls back to OCR/detection/grounding vision on "
+    'the emulator", automating or debugging an Android UI flow, checking a screen after a '
+    "change, or inspecting/seeding a debuggable app's SQLite database. Hierarchy-first "
+    "(tens of ms); falls back to OCR/detection/grounding vision on "
     "Compose/Flutter/WebView/canvas/game screens the accessibility tree can't see."
 )
 
@@ -106,6 +107,21 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "need an app restart to take effect (`aua app stop <pkg>` + `aua app launch <pkg>`). "
         "Don't know the app's deeplinks? `aua explore mine <repo> --app <pkg>` harvests them "
         "from the source once (then they ride inline + show in `aua about`).",
+    ),
+    (
+        "Inspect or seed app state through AUA, not hand-written adb",
+        "For a debuggable build, `aua db list <pkg>` discovers private SQLite files, "
+        '`aua db schema <pkg> <db>` describes them, and `aua db query <pkg> <db> "SELECT …"` '
+        "returns bounded JSON rows. Android images often have no `sqlite3`, so AUA stops the "
+        "app, snapshots the database plus WAL/SHM through `run-as`, queries with host SQLite, "
+        "and relaunches by default (`--no-restart` leaves it stopped). Data mutation is "
+        '`aua db execute <pkg> <db> "UPDATE …" --yes`: it creates a restore point, runs one '
+        "transaction, rejects schema/PRAGMA/ATTACH changes, checks foreign keys and integrity, "
+        "then replaces the database without stale sidecars. Use `db backups` / "
+        "`db restore … --yes` to roll back. Query/execute results can contain user data; "
+        "request only the columns and rows the task needs. For human inspection, the "
+        "single-device `aua dashboard` detail view has a database workspace backed by the "
+        "same service and typed mutation/restore confirmations.",
     ),
     (
         "Index an app you don't know yet",
@@ -389,6 +405,14 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "`--yes` / `--yes-wipe-flags`**; re-apply flags afterwards",
     ),
     (
+        "db",
+        "`list <pkg>`, `schema <pkg> <db> [--table NAME]`, "
+        '`query <pkg> <db> "SELECT …" [--params JSON --limit N]`, '
+        '`execute <pkg> <db> "UPDATE …" --yes`, `backup|backups|restore`. '
+        "All coherent reads stop/relaunch the app; execute backs up first and accepts data "
+        "mutations only; restore preserves the current state as a new safety backup",
+    ),
+    (
         "clipboard / paste / copy",
         "`clipboard set|get`, `paste`, `copy --rid/--text/--desc` (Maestro copyTextFrom / "
         "pasteText / setClipboard)",
@@ -427,8 +451,9 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "dashboard",
         "`dashboard [--serial …] [--grid] [--port 8765] [--no-open] [--poll-ms 500]` — "
         "localhost sneak-peek; auto **grid of live screens** when several emulators are "
-        "online (click a tile for journal/map); enables capture; does not stop the agent "
-        "(Ctrl-C closes the dashboard only)",
+        "online (click a tile for journal/map); the detail view browses debuggable app "
+        "databases, schema, bounded queries, restore points, and guarded writes; enables "
+        "capture; does not stop the agent (Ctrl-C closes the dashboard only)",
     ),
     (
         "dev",
@@ -526,6 +551,12 @@ AGENT_BEST_PRACTICES_PERCEPTION: list[tuple[str, str, str]] = [
         "`input-and-analyze` / `has` / `wait-and-analyze`)",
         "Pixels break on density/layout; ids and resource-ids do not. Discovery via screenshots "
         "is minutes; aua discovery is seconds.",
+    ),
+    (
+        "Hand-roll `adb exec-out run-as` + DB/WAL copies + host sqlite + push-back",
+        "Use `aua db list|schema|query|execute|backup|restore`",
+        "AUA targets the leased device/package, snapshots sidecars coherently, returns JSON, "
+        "and makes every confirmed mutation recoverable.",
     ),
     (
         "`analyze` after every `tap`/`input` (or always `--no-observe` then re-analyze)",
@@ -676,7 +707,9 @@ def render_markdown(*, brief: bool = False) -> str:
         "element IDs, not pixels**. It reads the accessibility/view hierarchy first (fast, "
         "exact) and falls back to image vision (detection + OCR, optional grounding VLM) on "
         "screens the hierarchy can't see. It remembers each app's layout so you start each "
-        "session already knowing the map."
+        "session already knowing the map. For debuggable builds, `aua db` also provides "
+        "structured private-SQLite inspection, guarded mutation, and rollback without "
+        "agent-authored adb pipelines."
     )
     p.append("")
     p.append("## Session protocol")
@@ -689,7 +722,8 @@ def render_markdown(*, brief: bool = False) -> str:
         p.append(
             "**Do:** act by id/`--rid`, use action `observation`, `wait --for` (never `sleep`), "
             "`about`/`goto`/`goto --from-here`/deeplinks/flows, leave OCR auto (map skips when "
-            "sure), `aua input-and-analyze` (built-in fast typing + readback). "
+            "sure), `aua input-and-analyze` (built-in fast typing + readback), use `aua db` "
+            "for private SQLite state. "
             "**Don't:** raw `adb`+screenshots+pixels, `analyze` after every tap, force "
             "`--with-ocr`/`--no-ocr`/vision on every screen, re-walk a goto after a mid-path hop, "
             "sleep between goto hops, `key back` to dismiss IME, hand-rolled clipboard paste. "

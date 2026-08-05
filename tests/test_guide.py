@@ -37,6 +37,8 @@ def test_markdown_covers_required_topics() -> None:
         "clipboard paste",
         "from-here",
         "hierarchy-only",
+        "aua db",
+        "restore point",
     ]:
         assert needle in low, needle
 
