@@ -402,6 +402,7 @@ class Engine:
         self._last_mem_fp: str | None = None
         self._last_known_screen: str | None = None
         self._last_action_kind: str | None = None
+        self._last_action_site: tuple[str, str] | None = None
         self._last_analyze_elements: list[Element] | None = None
         self._last_hierarchy_hash: str | None = None
         self._last_analyze_result: AnalyzeResult | None = None
@@ -1182,6 +1183,7 @@ class Engine:
                 known_screen=known_screen,
                 known_routes=hints.known_routes if hints else [],
                 suggested_gotos=hints.suggested_gotos if hints else [],
+                slow_controls=self._slow_controls_safe(known_screen),
                 suggested_deeplinks=hints.suggested_deeplinks if hints else [],
                 research_tasks=hints.research_tasks if hints else [],
                 map_hint=hints.map_hint if hints else None,
@@ -1460,6 +1462,7 @@ class Engine:
                 known_screen=known_screen,
                 known_routes=hints.known_routes if hints else [],
                 suggested_gotos=hints.suggested_gotos if hints else [],
+                slow_controls=self._slow_controls_safe(known_screen),
                 suggested_deeplinks=hints.suggested_deeplinks if hints else [],
                 research_tasks=hints.research_tasks if hints else [],
                 map_hint=hints.map_hint if hints else None,
@@ -1796,6 +1799,77 @@ class Engine:
         cached = self._read_cache()
         return cached.screen.package if cached else None
 
+    def _slow_controls_safe(self, screen: str | None) -> list[dict[str, Any]]:
+        """Slow controls on *screen*, for `meta` — told on arrival, not discovered on timeout.
+
+        This is the half the coarse profile could never provide: a per-kind average cannot say
+        *which* control on the screen in front of you costs 6s. An agent that knows before acting
+        can plan the wait (or pick `--until`) instead of reading a timeout as a broken product.
+        """
+        mem = self._memory
+        if not screen or mem is None:
+            return []
+        with contextlib.suppress(Exception):
+            package = self._package_of_last_analyze() or (
+                self.device.current_app().get("package") if self._device is not None else None
+            )
+            if package:
+                return mem.slow_controls(package, screen=screen)
+        return []
+
+    def _record_action_timing_safe(self, ms: float, *, outcome: str) -> None:
+        """Never let bookkeeping break an action — the same contract as the observation itself."""
+        site = getattr(self, "_last_action_site", None)
+        mem = self._memory
+        if not site or mem is None:
+            return
+        with contextlib.suppress(Exception):
+            package = self._package_of_last_analyze()
+            if package:
+                mem.record_action_timing(
+                    package, screen=site[0], control=site[1], ms=ms, outcome=outcome
+                )
+
+    def _action_site(self, element: Element | None) -> tuple[str, str] | None:
+        """``(screen, control)`` for cost bookkeeping, or None when either is unknown.
+
+        The control key prefers ``stable_key`` — the cross-frame fingerprint that exists exactly
+        because element ids churn between analyses — and falls back to the resource-id tail. A
+        node with neither is not keyed at all: a timing filed under a key that means something
+        different next run is worse than no timing, because it would be spent as a deadline.
+        """
+        if element is None:
+            return None
+        cached = self._read_cache()
+        screen = cached.meta.known_screen if cached and cached.meta else None
+        control = element.stable_key or _id_tail(element.resource_id)
+        if not (screen and control):
+            return None
+        return str(screen), str(control)
+
+    def _learned_action_budget(self, default_total_ms: int) -> int | None:
+        """The deadline this control has earned from history, or None to use the coarse profile.
+
+        Built from ``max_ms`` rather than the average: a deadline set from the mean is by
+        construction too short half the time, and the cost of being too short is a false
+        "nothing changed" — which this suite has already mistaken for a product defect. Padded
+        by 50% and floored at the caller's default so history can only ever *extend* the wait.
+        """
+        site = getattr(self, "_last_action_site", None)
+        mem = self._memory
+        if not site or mem is None or self._device is None:
+            return None
+        screen, control = site
+        with contextlib.suppress(Exception):
+            package = self._package_of_last_analyze()
+            if not package:
+                return None
+            timing = mem.action_timing(package, screen=screen, control=control)
+            if timing is None or timing.n < 1:
+                return None
+            return max(default_total_ms, int(timing.max_ms * 1.5))
+        return None
+
     def _step(
         self,
         kind: str,
@@ -1806,6 +1880,11 @@ class Engine:
     ) -> RouteStep:
         """The structured record of one action (selector + redacted label, never a value)."""
         self._last_action_kind = kind
+        # Where this action is happening, so its cost can be learned per (screen, control) and
+        # not merely per action kind. Captured here because `_step` runs *before* the action,
+        # while the cache still describes the screen we are acting from — afterwards it
+        # describes the destination, which is not where the click was spent.
+        self._last_action_site = self._action_site(element)
         label = redact_label(element, redact=self.config.memory.redact) if element else None
         return RouteStep(
             kind=kind,
@@ -3351,6 +3430,13 @@ class Engine:
                             self._last_action_kind,
                             total_max_ms=self.config.perf.settle_total_max_ms,
                         )
+                    # A control with its own history overrides the per-kind guess. This is the
+                    # only path that can exceed `settle_total_max_ms`: that ceiling exists to stop
+                    # a *blind* timer taxing every same-screen tap, and it is the wrong instrument
+                    # for a control we have actually measured at 18s.
+                    learned = self._learned_action_budget(total_ms)
+                    if learned is not None:
+                        total_ms = learned
                     ready = self._await_post_action_ready(
                         settle_ms=settle_ms, total_timeout_ms=total_ms
                     )
@@ -3367,6 +3453,14 @@ class Engine:
                         self._settle_profiles.observe(
                             self._last_action_kind,
                             min(float(ready["ms"]), self.config.perf.settle_learn_cap_ms),
+                        )
+                    # Persist the per-site cost regardless of whether the EMA accepted it: the
+                    # coarse profile refuses timeouts because they poison an app-wide average,
+                    # but "this control timed out" is precisely what a future run needs told.
+                    if ready is not None and ready.get("ms") is not None:
+                        self._record_action_timing_safe(
+                            float(ready["ms"]),
+                            outcome=("changed" if ready.get("changed") else "unchanged"),
                         )
                 obs = self.analyze(
                     source="hierarchy",

@@ -183,6 +183,30 @@ class KnowledgeItem(BaseModel):
     last_verified: str | None = None
 
 
+class ActionTiming(BaseModel):
+    """How long one control on one screen has historically taken to produce its next screen.
+
+    Kept per (screen, control) rather than per action kind, because that is the granularity the
+    cost actually varies at: on one screen a tap settles in 40ms and on another the same kind of
+    tap waits on a network round-trip. The coarse per-kind EMA has to average those together,
+    which makes it simultaneously too slow for the cheap screen and far too fast for the
+    expensive one — ``perf.py`` caps it at 1.6s while real screens here take 18-60s.
+
+    ``max_ms`` is kept beside the average deliberately: a deadline set from the mean is wrong
+    half the time by construction. ``n`` is what tells a reader whether to believe any of it.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+    n: int = 0
+    ema_ms: float = 0.0
+    max_ms: float = 0.0
+    last_ms: float = 0.0
+    last_seen: str | None = None
+    # What ended the wait the last time: a real change, or the deadline running out. A control
+    # whose history is all timeouts has no useful average — it has an unsolved problem.
+    last_outcome: str | None = None
+
+
 class ScreenRecord(BaseModel):
     model_config = ConfigDict(extra="ignore")
     name: str
@@ -203,6 +227,9 @@ class ScreenRecord(BaseModel):
     # a hierarchy-tier observation may still have run Apple Vision augmentation).
     hierarchy_only_ok: int = 0  # visits where hierarchy alone was enough (no kept OCR els)
     ocr_helped: int = 0  # visits where OCR contributed kept elements
+    # Per-control settle history for this screen, keyed by the control's stable key (or its
+    # resource-id tail when it has none). See :class:`ActionTiming`.
+    timings: dict[str, ActionTiming] = Field(default_factory=dict)
     key_elements: list[KeyElement] = Field(default_factory=list)
     dynamic: list[str] = Field(default_factory=list)  # shapes, e.g. "row list (dynamic)"
     notes: list[str] = Field(default_factory=list)
@@ -1747,6 +1774,104 @@ class AppMemoryStore:
             app, "deeplink", note or uri, name=uri, source="runtime" if probed else "user"
         )
         self.save(app)
+
+    # -- learned action cost (per screen, per control) ---------------------
+
+    def record_action_timing(
+        self,
+        package: str,
+        *,
+        screen: str,
+        control: str,
+        ms: float,
+        outcome: str | None = None,
+        context_id: str = DEFAULT_CONTEXT_ID,
+        half_life: float = 4.0,
+    ) -> None:
+        """Remember how long *control* on *screen* took to produce its next screen.
+
+        Scoped to ``context_id`` because the same control under a different flag set is a
+        different control for timing purposes — an experiment arm that adds a network call
+        changes the cost of the tap, and averaging the arms together describes neither.
+        """
+        if not self.cfg.enabled or ms < 0 or not (screen and control):
+            return
+        app = self.load(package)
+        if app is None:
+            return
+        rec = app.screens.get(screen)
+        if rec is None or rec.context_id != context_id:
+            return
+        prev = rec.timings.get(control)
+        now = _now_iso()
+        if prev is None:
+            rec.timings[control] = ActionTiming(
+                n=1, ema_ms=ms, max_ms=ms, last_ms=ms, last_seen=now, last_outcome=outcome
+            )
+        else:
+            alpha = 2.0 / (half_life + 1.0)
+            prev.ema_ms = alpha * ms + (1 - alpha) * prev.ema_ms
+            prev.max_ms = max(prev.max_ms, ms)
+            prev.last_ms = ms
+            prev.n += 1
+            prev.last_seen = now
+            prev.last_outcome = outcome
+        self.save(app)
+
+    def action_timing(
+        self,
+        package: str,
+        *,
+        screen: str,
+        control: str,
+        context_id: str = DEFAULT_CONTEXT_ID,
+    ) -> ActionTiming | None:
+        """What we know about this control's cost, or ``None`` when we have never timed it."""
+        if not self.cfg.enabled or not (screen and control):
+            return None
+        app = self.load(package)
+        if app is None:
+            return None
+        rec = app.screens.get(screen)
+        if rec is None or rec.context_id != context_id:
+            return None
+        return rec.timings.get(control)
+
+    def slow_controls(
+        self,
+        package: str,
+        *,
+        screen: str,
+        context_id: str = DEFAULT_CONTEXT_ID,
+        min_ms: float = 1000.0,
+        min_samples: int = 1,
+    ) -> list[dict[str, object]]:
+        """Controls on this screen known to be slow, worst first — for the agent, on arrival.
+
+        ``min_ms`` deliberately excludes the ordinary sub-second tap: a list of everything is
+        not a warning. ``n`` rides along so a reader can tell one observation from ten.
+        """
+        if not self.cfg.enabled or not screen:
+            return []
+        app = self.load(package)
+        if app is None:
+            return []
+        rec = app.screens.get(screen)
+        if rec is None or rec.context_id != context_id:
+            return []
+        rows = [
+            {
+                "control": key,
+                "avg_ms": round(t.ema_ms),
+                "max_ms": round(t.max_ms),
+                "n": t.n,
+                "last_outcome": t.last_outcome,
+            }
+            for key, t in rec.timings.items()
+            if t.n >= min_samples and max(t.ema_ms, t.max_ms) >= min_ms
+        ]
+        rows.sort(key=lambda r: r["max_ms"], reverse=True)  # type: ignore[arg-type,return-value]
+        return rows
 
     def remember_note(self, package: str, note: str) -> None:
         if not self.cfg.enabled or not note:

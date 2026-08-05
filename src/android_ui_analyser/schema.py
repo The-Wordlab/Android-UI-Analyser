@@ -220,6 +220,10 @@ class Meta(BaseModel):
     )
     research_tasks: list[str] = Field(default_factory=list)
     map_hint: str | None = None  # e.g. "12 screens mapped — run `aua map`"
+    # Controls on THIS screen that history says are slow, worst first:
+    # [{"control": "buttonContinue", "avg_ms": 4800, "max_ms": 6100, "n": 3, ...}].
+    # Told to the agent on arrival so a long wait is planned rather than discovered as a timeout.
+    slow_controls: list[dict[str, Any]] = Field(default_factory=list)
     capture_hint: str | None = None  # rolling buffer saw post-action change
     # The hierarchy handed us text it could not represent (U+FFFD). Silence here is worse
     # than slowness: an agent reads "Divide both sides by 2 to solve for <?>: <?>", cannot
