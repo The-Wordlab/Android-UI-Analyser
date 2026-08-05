@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 
 from mitmproxy import http
@@ -50,6 +51,11 @@ from mitmproxy import http
 _RULES_PATH = Path(os.environ.get("AUA_MOCK_RULES", ""))
 _RECORD_PATH = Path(os.environ.get("AUA_MOCK_RECORD", ""))
 _MODE = os.environ.get("AUA_MOCK_MODE", "map")  # map | record | replay
+# Always-on, append-only exchange log for `await net:` — deliberately separate from the
+# cassette record: waiting on a backend response must not require `record` mode, and the
+# cassette format must not change under replay. One JSONL line per completed response,
+# headers and body omitted so a chat stream does not write megabytes per turn.
+_FLOW_LOG_PATH = Path(os.environ.get("AUA_FLOW_LOG", ""))
 
 
 def _load_rules():
@@ -102,6 +108,25 @@ class AuaMock:
                 return
 
     def response(self, flow: http.HTTPFlow) -> None:
+        # mitmproxy calls this when the response is *complete*, so for a streamed chat
+        # surface it fires at stream end — which is the moment `await net:` waits for.
+        if str(_FLOW_LOG_PATH):
+            try:
+                line = json.dumps(
+                    {
+                        "ts": time.time(),
+                        "method": flow.request.method.upper(),
+                        "path": flow.request.path.split("?", 1)[0],
+                        "host": flow.request.host,
+                        "status": flow.response.status_code if flow.response else 0,
+                    }
+                )
+                _FLOW_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+                with _FLOW_LOG_PATH.open("a", encoding="utf-8") as fh:
+                    fh.write(line + "\\n")
+            except Exception:
+                pass  # observability must never break the proxied request
+
         mode = os.environ.get("AUA_MOCK_MODE", _MODE)
         if mode != "record" or not _RECORD_PATH:
             return
@@ -142,6 +167,70 @@ def rules_path(cache_dir: str | Path) -> Path:
 
 def record_path(cache_dir: str | Path) -> Path:
     return Path(cache_dir).expanduser() / "mock_record.json"
+
+
+def flow_log_path(cache_dir: str | Path) -> Path:
+    """Append-only JSONL of completed HTTP exchanges, for ``await net:``.
+
+    Separate from :func:`record_path` on purpose. That one is the cassette record: it is
+    written only in ``record`` mode, keeps whole bodies, and re-reads + rewrites the entire
+    file on every response — fine for capturing a fixture, useless to poll while a chat
+    surface streams. This one is always on, one small line per exchange, and append-only so
+    a reader can tail it without racing the writer.
+    """
+    return Path(cache_dir).expanduser() / "flow_log.jsonl"
+
+
+def read_flows_since(cache_dir: str | Path, since_ts: float) -> list[dict[str, Any]]:
+    """Completed exchanges logged after *since_ts* (epoch seconds).
+
+    Tolerates partial trailing lines: the proxy appends while we read.
+    """
+    path = flow_log_path(cache_dir)
+    if not path.is_file():
+        return []
+    out: list[dict[str, Any]] = []
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except Exception:
+                    continue  # a half-written final line
+                if isinstance(entry, dict) and float(entry.get("ts") or 0) > since_ts:
+                    out.append(entry)
+    except OSError:
+        return []
+    return out
+
+
+def flow_matches(entry: dict[str, Any], spec: str) -> bool:
+    """Does *entry* satisfy ``[METHOD ]PATH[=STATUS]``?
+
+    ``POST /v1/chat=200`` · ``/v1/chat`` · ``GET /feed``. Path match is a substring so a
+    caller does not have to reproduce a full templated route.
+    """
+    text = spec.strip()
+    status: int | None = None
+    if "=" in text:
+        text, _, raw = text.rpartition("=")
+        with contextlib.suppress(ValueError):
+            status = int(raw.strip())
+    text = text.strip()
+    method: str | None = None
+    parts = text.split(None, 1)
+    if len(parts) == 2 and parts[0].isalpha() and parts[0].upper() in {
+        "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS",
+    }:
+        method, text = parts[0].upper(), parts[1].strip()
+    if method and str(entry.get("method", "")).upper() != method:
+        return False
+    if status is not None and int(entry.get("status") or 0) != status:
+        return False
+    return text in str(entry.get("path", ""))
 
 
 def pid_path(cache_dir: str | Path) -> Path:
@@ -568,6 +657,7 @@ def start_mitm(
     env["AUA_MOCK_RULES"] = str(rules)
     env["AUA_MOCK_MODE"] = mode
     env["AUA_MOCK_RECORD"] = str(record_path(cache_dir))
+    env["AUA_FLOW_LOG"] = str(flow_log_path(cache_dir))
     log_fh = open(log, "ab")  # noqa: SIM115 — kept open for child stderr
     try:
         proc = subprocess.Popen(  # noqa: S603
