@@ -176,6 +176,18 @@ def _parse_step(item: Any, index: int) -> RouteStep:
         kw["label"] = v.pop("text", None) or v.pop("desc", None) or v.pop("label", None)
         if not (kw["resource_id"] or kw["label"]):
             raise _step_error(index, f"{key} needs an `id:` or `text:` selector")
+        if (nth := v.pop("index", None)) is not None:
+            # Coercion is refused rather than applied: silently reading 1.5 as "the second
+            # match" is the class of quiet guess `index:` was added to remove.
+            if isinstance(nth, bool) or not isinstance(nth, int):
+                if not (isinstance(nth, str) and nth.isdigit()):
+                    raise _step_error(
+                        index, f"{key} `index:` must be a whole number (0-based), got {nth!r}"
+                    )
+                nth = int(nth)
+            if nth < 0:
+                raise _step_error(index, f"{key} `index:` must not be negative, got {nth!r}")
+            kw["index"] = nth
     elif kind == "input":
         kw["resource_id"] = v.pop("id", None)
         kw["label"] = v.pop("label", None)
@@ -271,6 +283,8 @@ def _render_step(s: RouteStep) -> dict[str, Any] | str:
             body["id"] = s.resource_id
         if s.label:
             body["text"] = s.label
+        if s.index is not None:
+            body["index"] = s.index
         body.update(extras)
         if list(body) == ["text"]:
             return {key: s.label}

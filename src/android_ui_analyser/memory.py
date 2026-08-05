@@ -252,6 +252,7 @@ class RouteStep(BaseModel):
     activity: str | None = None  # launch-app: pin the entry Activity on multi-launcher builds
     timeout_ms: int | None = None  # wait-for / wait-stable / assert-visible override
     by: str | None = None  # match target by: text (default) | id (resource-id) | desc
+    index: int | None = None  # nth (0-based) of several matches, as the CLI's --index
     # Composite flow blocks (Maestro ``repeat`` / ``retry``).
     substeps: list[RouteStep] = Field(default_factory=list)
     repeat: int | None = None

@@ -285,12 +285,30 @@ def nearest_elements(
     return near or [el for _v, el in ranked[:limit]]
 
 
+def _pick(candidates: list[Element], index: int | None) -> Element | None:
+    """The nth candidate when the step asked for one, else the best/first.
+
+    Out of range returns None rather than falling back to the first match: a flow that
+    said "the second See all" and got the first would tap the wrong thing and carry on,
+    which is the failure mode `index:` exists to prevent. Diverging is the safe direction.
+    """
+    if not candidates:
+        return None
+    if index is None:
+        return candidates[0]
+    return candidates[index] if 0 <= index < len(candidates) else None
+
+
 def match_step(elements: list[Element], step: RouteStep) -> Element | None:
     """Resolve a step's target element: resource-id tail first, then label.
 
     Redacted labels never match — a step whose only identity was PII hands off rather
     than guessing. Label matching keeps the legacy tolerance (exact, then
     prefix/substring for truncation drift).
+
+    ``step.index`` disambiguates a selector that legitimately matches several elements,
+    matching the CLI's ``--index``. It applies within whichever tier produced the matches,
+    so the rid/exact/substring precedence is unchanged when no index is given.
     """
     rid = (step.resource_id or "").lower()
     if rid:
@@ -306,19 +324,20 @@ def match_step(elements: list[Element], step: RouteStep) -> Element | None:
                     (e.bounds[2] - e.bounds[0]) * (e.bounds[3] - e.bounds[1]),
                 )
             )
-            return matches[0]
+            return _pick(matches, step.index)
     label = (step.label or "").strip()
     if not label or label in REDACT_TOKENS:
         return None
-    for e in elements:  # exact text / content-desc match first
-        if (e.text or e.content_desc or "") == label:
-            return e
+    exact = [e for e in elements if (e.text or e.content_desc or "") == label]
+    if exact:
+        return _pick(exact, step.index)
     low = label.lower()
-    for e in elements:  # tolerate truncation / case drift on long labels
-        t = (e.text or e.content_desc or "").lower()
-        if t and (t.startswith(low) or low in t):
-            return e
-    return None
+    loose = [
+        e
+        for e in elements
+        if (t := (e.text or e.content_desc or "").lower()) and (t.startswith(low) or low in t)
+    ]
+    return _pick(loose, step.index)
 
 
 # Private alias kept for engine call sites that used ``_match_step``.
