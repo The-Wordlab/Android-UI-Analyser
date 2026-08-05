@@ -379,6 +379,12 @@ class ActionResult(BaseModel):
     # `await`: which of three things ended the wait — satisfied | screen-changed | timeout. A
     # bare `ok` cannot carry three states, and "is that a hang or a slow backend?" is exactly
     # the question a coordinator could not answer from the old output.
+    # What actually changed, rather than a claim that the action dispatched: activity before and
+    # after, node-count delta, focus movement, text added/removed. Deliberately carries no
+    # confidence score — a number invites trusting a figure over evidence, and "a command
+    # reporting success is not evidence of effect" is this project's first lesson. `changed` is
+    # an explicit boolean (None = no baseline to compare) so "nothing changed" is checkable.
+    change: dict[str, Any] | None = None
     await_outcome: str | None = None
     # Per-term results, reported satisfied or not: *which* term is missing is how a reader
     # tells a failed load from a slow one.

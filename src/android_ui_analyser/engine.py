@@ -114,6 +114,7 @@ _MAX_FLOW_DEPTH = 5  # bound on nested `flow:` sub-flow composition (cycle backs
 # sample may catch a half-attached tree; a slower one cannot (the render has finished by the
 # time it returns). Measured ~150ms headless vs 600-1200ms windowed on the same emulator.
 _FAST_DUMP_MS = 250.0
+_CHANGE_TEXT_CAP = 12  # text deltas echoed back per direction; a list screen would dump hundreds
 _FLAGS_VERIFY_DEADLINE_S = 2.0  # how long a flag write gets to reach the app's prefs file
 _FLAGS_ENTRY_TIMEOUT_S = 3.0  # how long a pinned entry Activity gets before the default one
 _FLAGS_FOREGROUND_TIMEOUT_S = 6.0  # how long the relaunched app gets to reach the foreground
@@ -388,6 +389,11 @@ class Engine:
         # ``_await_post_action_ready`` so observe does not return a mid-transition tree.
         self._pre_action_sig: tuple[float, ...] | None = None
         self._pre_action_tree_fp: tuple[str, ...] | None = None
+        # Pre-action screen shape for the change summary, and the last activity we managed to
+        # read. The activity is chained across observations rather than sampled before each
+        # action, so a sequence of actions gets its before/after comparison at no extra cost.
+        self._pre_action_state: dict[str, Any] | None = None
+        self._last_activity: str | None = None
         from .perf import GateCache, HierarchyPrefetch, SettleProfiles
 
         self._prefetch = HierarchyPrefetch()
@@ -3302,6 +3308,9 @@ class Engine:
         """
         if observe:
             with contextlib.suppress(Exception):  # observation is a bonus; never fail the action
+                # Read before the settle consumes the pre-action bookkeeping.
+                before_state = self._pre_action_state
+                self._pre_action_state = None
                 ready: dict[str, Any] | None = None
                 if settle:
                     settle_ms, total_ms = 45, 1100
@@ -3329,6 +3338,8 @@ class Engine:
                     with_image=self._effective_with_image(with_image),
                 )
                 result.observation = obs
+                with contextlib.suppress(Exception):
+                    result.change = self._change_summary(before_state, obs)
                 caveat = self._stale_observation_risk(settle, ready)
                 if caveat:
                     obs.meta.stale_risk = caveat
@@ -6106,11 +6117,136 @@ class Engine:
         # Cheap tree fingerprint from the last analyze (no extra dump) — used to
         # early-accept observe once the accessibility tree has moved and stabilised.
         self._pre_action_tree_fp = self._tree_fingerprint()
+        # Same cache read, richer shape: what the result will diff against to say what changed.
+        self._pre_action_state = self._pre_action_snapshot()
         yield
         self._invalidate_cache()
         # Speculative dump while the UI is settling / the agent thinks.
         if self.config.perf.prefetch or self.config.perf.predictive_prefetch:
             self._kick_hierarchy_prefetch()
+
+    def _pre_action_snapshot(self) -> dict[str, Any] | None:
+        """What the screen was, cheaply, so the next result can say what *changed*.
+
+        Observed need: an action reported that it dispatched, never what it did. The most reusable
+        technique produced all week was reading the resumed activity — it names what is in front of
+        the user, so after tapping something that should open a picker it says whether the picker
+        opened. That is a fact about the system rather than a reading of the app's description of
+        itself, and it is what settled a disputed critical failure.
+
+        Deliberately **not** a confidence score, which is what was originally asked for. A number
+        invites trusting a figure over evidence, and the founding lesson of this whole list is that
+        a command reporting success is not evidence of effect. What lanes needed was never "how
+        sure are you" but "what changed".
+
+        Nearly free: the shape comes from the analyze already in cache, so no device call. The
+        activity costs one call **only when it is not already known** — a plain hierarchy `analyze`
+        never learns it (only the vision path fetches app context), so the first action has to ask.
+        Every later action reuses the value the previous observation recorded, so a sequence pays
+        once rather than per action.
+        """
+        cached = self._read_cache()
+        if cached is None:
+            return None
+        labels: list[str] = []
+        focused: int | None = None
+        for e in cached.elements:
+            if e.focused and focused is None:
+                focused = e.id
+            label = (e.text or e.content_desc or "").strip()
+            if label:
+                labels.append(label[:60])
+        return {
+            "count": len(cached.elements),
+            "focused": focused,
+            "labels": labels,
+            "package": cached.screen.package,
+            "activity": self._last_activity or self._read_activity(),
+        }
+
+    def _change_summary(
+        self, before: dict[str, Any] | None, obs: AnalyzeResult
+    ) -> dict[str, Any]:
+        """Structured before/after deltas, with "nothing changed" stated rather than implied.
+
+        ``changed`` is an explicit boolean so a caller can branch on it without re-deriving the
+        answer from four other fields — and so "nothing changed" is machine-checkable, which is
+        the half that was missing. An unknown baseline is reported as ``None``, never as False:
+        "I could not compare" and "they are the same" are different claims.
+        """
+        after_labels = [
+            (e.text or e.content_desc or "").strip()[:60]
+            for e in obs.elements
+            if (e.text or e.content_desc or "").strip()
+        ]
+        after_focus = next((e.id for e in obs.elements if e.focused), None)
+        activity_before = (before or {}).get("activity") or self._last_activity
+        activity_after = self._read_activity()
+        if activity_after is not None:
+            self._last_activity = activity_after
+
+        out: dict[str, Any] = {
+            "activity_before": activity_before,
+            "activity_after": activity_after,
+            "activity_changed": (
+                None
+                if activity_before is None or activity_after is None
+                else activity_before != activity_after
+            ),
+            "node_count_after": len(obs.elements),
+        }
+        if before is None:
+            # No baseline: say so instead of implying stability from silence.
+            out.update(
+                {
+                    "changed": None if out["activity_changed"] is None else out["activity_changed"],
+                    "node_count_before": None,
+                    "node_count_delta": None,
+                    "focus_moved": None,
+                    "text_added": [],
+                    "text_removed": [],
+                    "detail": "no pre-action snapshot — deltas unavailable",
+                }
+            )
+            return out
+
+        added = [t for t in dict.fromkeys(after_labels) if t not in set(before["labels"])]
+        removed = [t for t in dict.fromkeys(before["labels"]) if t not in set(after_labels)]
+        focus_moved = before["focused"] != after_focus
+        out.update(
+            {
+                "node_count_before": before["count"],
+                "node_count_delta": len(obs.elements) - before["count"],
+                "focus_moved": focus_moved,
+                "text_added": added[:_CHANGE_TEXT_CAP],
+                "text_removed": removed[:_CHANGE_TEXT_CAP],
+            }
+        )
+        out["changed"] = bool(
+            out["activity_changed"] or added or removed or out["node_count_delta"] or focus_moved
+        )
+        if not out["changed"]:
+            out["detail"] = (
+                "nothing changed: same activity, same node count, no text added or removed, "
+                "focus unmoved"
+            )
+        return out
+
+    def _read_activity(self) -> str | None:
+        """``package/activity`` in front of the user, or None if it cannot be read.
+
+        One device call, only on the observe path — which already spends a settle and a full
+        hierarchy dump, so this is a small fraction of a cost the caller has already accepted.
+        Never sampled before the action: the baseline is chained from the previous observation, so
+        a sequence of actions gets its comparison for free.
+        """
+        with contextlib.suppress(Exception):
+            info = self.device.current_app() or {}
+            package = str(info.get("package") or "")
+            activity = str(info.get("activity") or "")
+            if package or activity:
+                return f"{package}/{activity}"
+        return None
 
     def _tree_fingerprint(self) -> tuple[str, ...] | None:
         """Stable-ish fingerprint of the last cached screen (rids + labels)."""
