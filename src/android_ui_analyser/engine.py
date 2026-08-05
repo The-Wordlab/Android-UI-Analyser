@@ -3215,6 +3215,14 @@ class Engine:
                     with_image=self._effective_with_image(with_image),
                 )
                 result.observation = obs
+                caveat = self._stale_observation_risk(settle, ready)
+                if caveat:
+                    obs.meta.stale_risk = caveat
+                    # Also on the action's own detail line: a runner that reads only the terse
+                    # form must not have to know the caveat exists to find it.
+                    result.detail = f"{result.detail} stale_risk".strip() if result.detail else (
+                        "stale_risk"
+                    )
                 if ready and ready.get("ms") is not None and ready.get("via") != "unchanged":
                     # Surface settle cost so agents/tests can see why a tap took >50 ms.
                     prev = result.detail
@@ -3244,6 +3252,57 @@ class Engine:
         if hint:
             result.capture_hint = hint
         return result
+
+    @staticmethod
+    def _stale_observation_risk(settle: bool, ready: dict[str, Any] | None) -> str | None:
+        """Why this post-action observation may describe the screen as it was *before* the action.
+
+        Observed: a `tap` succeeded and the device advanced, yet the returned observation reported
+        an empty `element_diff` with `unchanged=true` — measured against a snapshot taken before
+        the screen changed. A screenshot plus a fresh `analyze` showed the app had in fact moved
+        on.
+
+        The mechanism is the settle wait giving up early. `_await_post_action_ready` returns
+        `via=unchanged` after ~80ms of identical frames, and `via=hierarchy-same` on two matching
+        trees; the folded `analyze` then dumps a tree that still matches the previous one, so
+        `skip_unchanged_analyze` reuses the *previous* payload and stamps `unchanged=true`. The
+        device advances a few milliseconds later. Nothing was wrong with any individual step —
+        the claim is just older than it looks.
+
+        This is the dangerous direction. The other ways a tap can look inert risk an agent giving
+        up too early; this one risks it **repeating an action that already happened** — a second
+        submit, a second message, a second purchase attempt. So the engine cannot report
+        `unchanged` as a fact here: it genuinely cannot tell "no effect" from "not yet", and
+        saying which one it is would be a guess presented as evidence.
+
+        Deliberately conservative: only a *confirmed* transition (the wait saw the screen change
+        and then stop, without timing out) clears the caveat. A real in-screen no-op therefore
+        carries it too — correct, because the engine cannot distinguish that case either, and the
+        expensive mistake is the other direction.
+        """
+        if not settle:
+            # No wait was performed, so there is nothing to be stale relative to; the caller
+            # asked for a raw read.
+            return None
+        if ready is None:
+            return (
+                "post-action wait did not run, so `unchanged` / `element_diff` may describe the "
+                "pre-action screen. Re-analyze before concluding the action had no effect."
+            )
+        via = str(ready.get("via") or "?")
+        if ready.get("timeout"):
+            return (
+                f"post-action wait timed out (via={via}) — this observation may be mid-transition "
+                "or predate the action. Re-analyze before concluding anything from it."
+            )
+        if not ready.get("changed"):
+            return (
+                f"post-action wait saw no confirmed screen change (via={via}), so `unchanged` and "
+                "`element_diff` may be measured against a frame that predates the action. NOT "
+                "evidence the action had no effect — re-analyze, and never retry a mutating "
+                "action on `unchanged` alone."
+            )
+        return None
 
     @staticmethod
     def _await_foreground(device: Device, package: str, *, timeout_ms: int = 20_000) -> bool:

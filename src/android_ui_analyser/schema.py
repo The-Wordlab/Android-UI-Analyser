@@ -228,6 +228,12 @@ class Meta(BaseModel):
     element_diff: dict[str, Any] | None = None
     # Host-side incremental a11y: True when hierarchy XML matched the previous analyze.
     unchanged: bool = False
+    # Why `unchanged` / `element_diff` must NOT be read as evidence about an action's effect:
+    # set on a post-action observation whose settle wait never confirmed the screen had moved,
+    # so the frame it describes may predate the action. A *string* rather than a False flag
+    # because `compact` drops falsey values and `delta` allowlists keys — a boolean would
+    # vanish from output in exactly the cases that need it.
+    stale_risk: str | None = None
     # SHA1 of the raw hierarchy XML (or elements fingerprint for vision paths).
     fingerprint: str | None = None
     # How the result was produced (e.g. hierarchy, hierarchy-unchanged, vision).
@@ -271,6 +277,9 @@ class AnalyzeResult(BaseModel):
                         "element_diff",
                         "device_serial",
                         "known_screen",
+                        # Must survive the delta trim: `delta` fires precisely when
+                        # `unchanged` is True, which is the case whose caveat matters.
+                        "stale_risk",
                     }
                     and v not in (None, [], False)
                 }
