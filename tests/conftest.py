@@ -400,7 +400,11 @@ class FakeDevice(Device):
     ) -> Bounds | None:
         self.calls.append(("find_text", (text, str(match), ignore_case, by)))
         mode = MatchMode(match)
-        if by == "id":
+        # Resolve `by` through the shared vocabulary rather than comparing it here. This double
+        # used to test `by == "id"` itself, so it kept answering a *text* search for `by="rid"`
+        # long after the real device had learned the synonym — a double that disagrees with
+        # production is how a fix looks green without being one.
+        if self._fields_for(by) == ["resourceId"]:
             # tail-match against the resource index (keys may be a tail or full id)
             for key, bounds in self._resource_index.items():
                 tail = key.split("/")[-1]

@@ -15,9 +15,10 @@ and hits the resourceId branch - hence one surface working and the other not.
 the selector dict key, `_SELECTOR_FIELDS` - so reaching for `--by rid` is the natural mistake,
 and the two spellings must mean the same thing.
 
-Still open, deliberately left alone here: an *unrecognised* `by` still degrades to a text
-search rather than being refused. Rejecting it would be right, but it changes behaviour for
-every existing `has`/`wait` caller, so it wants its own change rather than riding along.
+The other half — an *unrecognised* `by` degrading to a text search instead of being refused —
+was deliberately left out of this change because it alters behaviour for every existing
+`has`/`wait` caller. It landed separately; see `test_an_unknown_by_token_is_refused.py`, which
+is also where the "no legitimate call regresses" enumeration lives.
 """
 
 from __future__ import annotations

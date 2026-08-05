@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .errors import DeviceError
+from .errors import DeviceError, UsageError
 from .providers.base import Bounds, ScreenImage
 from .schema import DeviceInfo, MatchMode
 
@@ -102,6 +102,41 @@ class Device(ABC):
     def press(self, key: str) -> None: ...
 
     # -- hierarchy selectors (T0/T1) --------------------------------------
+    # `rid` is the spelling of the resource-id everywhere else in the vocabulary — the
+    # `--rid` flag, the selector dict key, `_SELECTOR_FIELDS` — so `--by rid` is what a
+    # runner reaches for. It used to fall through to the text/desc default, meaning
+    # `wait --for containerLogin --by rid` searched the *label* for "containerLogin",
+    # found nothing and timed out on a screen where that container was plainly present.
+    _BY_FIELDS = {
+        "id": ["resourceId"],
+        "rid": ["resourceId"],
+        "desc": ["description"],
+        "text": ["text", "description"],
+    }
+
+    def _fields_for(self, by: str) -> list[str]:
+        """Fields to search for a ``by`` token — refusing one it does not know.
+
+        This used to `.get(..., ["text", "description"])`, so an unrecognised token quietly
+        became a label search. That is how `--by rid` (before it was a synonym) spent a full
+        15s timeout looking for the literal string "containerLogin" in the *text* of a screen
+        where that container was plainly present, and then reported the screen wrong.
+
+        A degrade is worse than a refusal here because of what the caller concludes. A refusal
+        says "you held it wrong" and costs one turn; a silent text search says "the element is
+        not on this screen", which is a claim about the *product* — and it arrives with a
+        screenshot that contradicts it, so it also costs the reader's trust in the tool. The
+        `tap` family already refused an unknown `--by` loudly (`cli.py:_selector`), so the two
+        surfaces disagreed about the same token, which is the divergence being closed.
+        """
+        fields = self._BY_FIELDS.get((by or "text").lower())
+        if fields is None:
+            raise UsageError(
+                f"unknown selector field 'by={by}'",
+                hint="Choose one of: " + ", ".join(sorted(self._BY_FIELDS)) + ".",
+            )
+        return fields
+
     @abstractmethod
     def find_text(
         self,
@@ -113,10 +148,12 @@ class Device(ABC):
     ) -> Bounds | None:
         """Cheap selector locate — return the box of the first match, or None.
 
-        ``by``: ``"text"`` searches text + content-desc (default); ``"id"`` matches the
-        resource-id (a bare tail like ``containerDetail`` matches the id's suffix) —
-        this can find containers that the parsed element list prunes; ``"desc"`` is
-        content-desc only.
+        ``by``: ``"text"`` searches text + content-desc (default); ``"id"`` (or ``"rid"``)
+        matches the resource-id (a bare tail like ``containerDetail`` matches the id's suffix)
+        — this can find containers that the parsed element list prunes; ``"desc"`` is
+        content-desc only. Resolve it through :meth:`_fields_for`, which is where the one
+        vocabulary lives: an implementation that maps ``by`` itself will drift from the real
+        device, and a test double that drifts makes a fix look green when it is not.
         """
 
     # -- optional metadata (best-effort; default unknown) -----------------
@@ -621,21 +658,6 @@ class Uiautomator2Device(Device):
         if match is MatchMode.contains:
             return {"resourceIdMatches": f".*{re.escape(text)}.*"}
         return {"resourceIdMatches": f".*:id/{re.escape(text)}$"}
-
-    # `rid` is the spelling of the resource-id everywhere else in the vocabulary — the
-    # `--rid` flag, the selector dict key, `_SELECTOR_FIELDS` — so `--by rid` is what a
-    # runner reaches for. It used to fall through to the text/desc default, meaning
-    # `wait --for containerLogin --by rid` searched the *label* for "containerLogin",
-    # found nothing and timed out on a screen where that container was plainly present.
-    _BY_FIELDS = {
-        "id": ["resourceId"],
-        "rid": ["resourceId"],
-        "desc": ["description"],
-        "text": ["text", "description"],
-    }
-
-    def _fields_for(self, by: str) -> list[str]:
-        return self._BY_FIELDS.get((by or "text").lower(), ["text", "description"])
 
     def find_text(
         self,
