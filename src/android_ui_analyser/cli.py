@@ -4702,6 +4702,14 @@ _GLOBAL_OPTS: dict[str, bool] = {  # name -> takes a value
     "--log-level": True,
     "--no-cache": False,
     "--with-image": False,
+    # These read as per-command options — `tap --rid x --until "text:Chats"` is how anyone
+    # writes it, and an agent that tried exactly that got a parse error, went to `tap --help`,
+    # then fell back to the `--no-observe` + `analyze` pair the flags exist to replace. A
+    # global that only parses in the unnatural position is a global nobody uses.
+    "--observe-fields": True,
+    "--until": True,
+    "--until-timeout": True,
+    "--until-poll": True,
 }
 
 
@@ -4733,6 +4741,28 @@ def _defines_option(argv: list[str], name: str) -> bool:
         return True
 
 
+def _first_subcommand(head: list[str]) -> int | None:
+    """Index of the subcommand token, skipping the *values* of value-taking globals.
+
+    A bare "first token that does not start with `-`" scan lands on the value instead: in
+    ``--serial emulator-5558 tap ...`` it picks ``emulator-5558`` at index 1, so every later
+    option looks like it sits after the subcommand and hoisting quietly stops. That is the
+    common shape — an agent passes ``--serial`` on every call — so `aua --serial X analyze
+    --format json` never got the fix that `aua analyze --format json` did.
+
+    Only globals are legal before the subcommand, so consuming their values here is safe.
+    """
+    i = 0
+    while i < len(head):
+        tok = head[i]
+        if not tok.startswith("-"):
+            return i
+        base, eq, _ = tok.partition("=")
+        # `--opt=value` carries its value inline; `--opt value` eats the next token.
+        i += 1 if eq or not _GLOBAL_OPTS.get(base, False) else 2
+    return None
+
+
 def hoist_global_options(argv: list[str]) -> list[str]:
     """Move top-level options that were written after the subcommand to the front.
 
@@ -4750,7 +4780,7 @@ def hoist_global_options(argv: list[str]) -> list[str]:
     head, tail = argv[:end], argv[end:]
 
     # Everything before the first subcommand token is already global.
-    first_cmd = next((i for i, tok in enumerate(head) if not tok.startswith("-")), None)
+    first_cmd = _first_subcommand(head)
     if first_cmd is None:
         return argv
 
