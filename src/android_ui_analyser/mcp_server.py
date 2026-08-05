@@ -250,13 +250,20 @@ def _tool_definitions() -> list[types.Tool]:
         ),
         types.Tool(
             name="scroll_to",
-            description="Scroll until the given text is visible; returns whether it was found.",
+            description="Scroll until the given text is visible; returns whether it was found. "
+            "It searches ONE way: `direction` up (default) looks further down the list, down "
+            "looks back up. A list that opens already scrolled past the target needs `down`.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "text": {"type": "string"},
                     "match": {"type": "string", "enum": match_enum, "default": "contains"},
                     "ignore_case": {"type": "boolean", "default": False},
+                    "direction": {
+                        "type": "string",
+                        "enum": ["up", "down", "left", "right"],
+                        "default": "up",
+                    },
                     "observe": _OBSERVE_PROP,
                     "with_image": _WITH_IMAGE_PROP,
                 },
@@ -1095,6 +1102,7 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 args["text"],
                 match=args.get("match", "contains"),
                 ignore_case=args.get("ignore_case", False),
+                direction=args.get("direction", "up"),
                 observe=args.get("observe", True),
                 with_image=img,
             )

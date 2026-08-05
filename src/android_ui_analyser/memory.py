@@ -253,6 +253,10 @@ class RouteStep(BaseModel):
     timeout_ms: int | None = None  # wait-for / wait-stable / assert-visible override
     by: str | None = None  # match target by: text (default) | id (resource-id) | desc
     index: int | None = None  # nth (0-based) of several matches, as the CLI's --index
+    # scroll-to: which way to swipe WHILE SEARCHING, as the CLI's --direction (default "up",
+    # i.e. look further down the list). A grid that opens already scrolled past its target
+    # needs "down" — searching the wrong way reads as a missing element, not a missed search.
+    direction: str | None = None
     # Composite flow blocks (Maestro ``repeat`` / ``retry``).
     substeps: list[RouteStep] = Field(default_factory=list)
     repeat: int | None = None

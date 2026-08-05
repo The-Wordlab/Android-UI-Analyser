@@ -90,6 +90,9 @@ _ARG_ALIAS = {
     "flags-apply": "path",
     "mock-replay": "name",
 }
+# Accepted by `scroll_to: {direction: ...}` — the same vocabulary `_swipe_path` takes, so the
+# flow surface and the CLI's `--direction` mean exactly one thing between them.
+_SCROLL_DIRECTIONS = frozenset({"up", "down", "left", "right"})
 _BARE_KINDS = frozenset(
     {
         "wait-stable",
@@ -234,6 +237,21 @@ def _parse_step(item: Any, index: int) -> RouteStep:
                 kw["by"] = "id"
         if not kw["arg"]:
             raise _step_error(index, f"{key} needs `{alias}:` (or `id:` for a resource-id)")
+        # `scroll_to` searches ONE way (default: swipe up, i.e. look further down the list), and
+        # the step could not say which. A tool grid that opens already scrolled past its target
+        # therefore had the search go away from it, and the flow failed live validation as though
+        # the card were absent — a search that went the wrong way looks exactly like a missing
+        # element, so it invites "the card is gone" instead of "I searched away from it". The
+        # workaround was an explicit `swipe: down` first, which only works by luck of distance.
+        if kind == "scroll-to" and (way := v.pop("direction", None)) is not None:
+            if str(way).lower() not in _SCROLL_DIRECTIONS:
+                raise _step_error(
+                    index,
+                    f"{key} `direction:` must be one of "
+                    f"{', '.join(sorted(_SCROLL_DIRECTIONS))}, got {way!r}",
+                    hint="`up` looks further down the list (the default); `down` looks back up.",
+                )
+            kw["direction"] = str(way).lower()
     kw["package"] = v.pop("package", None)
     timeout = v.pop("timeout_ms", None)
     if timeout is not None:
@@ -277,6 +295,10 @@ def _render_step(s: RouteStep) -> dict[str, Any] | str:
         extras["package"] = s.package
     if s.timeout_ms is not None:
         extras["timeout_ms"] = s.timeout_ms
+    if s.kind == "scroll-to" and s.direction:
+        # Must round-trip: `check_saveable` re-parses its own rendering, so a direction that
+        # rendered away would be silently dropped by the very check that proves a flow loads.
+        extras["direction"] = s.direction
     if s.kind in _ELEMENT_KINDS:
         body: dict[str, Any] = {}
         if s.resource_id:

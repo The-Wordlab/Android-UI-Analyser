@@ -1932,7 +1932,13 @@ class Engine:
             elif kind == "scroll-to":
                 if not s.arg:
                     return StepFailure("unsupported_action", i, s), res
-                if not self.scroll_to(s.arg, observe=False, by=s.by or "text").ok:
+                if not self.scroll_to(
+                    s.arg,
+                    observe=False,
+                    by=s.by or "text",
+                    # Default matches the CLI's `--direction up`: keep looking further down.
+                    direction=s.direction or "up",
+                ).ok:
                     return StepFailure("element_not_found", i, s), res
             elif kind == "launch-app":
                 pkg = s.arg or origin_package  # bare launch_app → the flow's own app
