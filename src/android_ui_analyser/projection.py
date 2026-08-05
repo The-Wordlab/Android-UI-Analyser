@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .errors import UsageError
@@ -164,6 +164,15 @@ class Projection:
 
     fields: tuple[str, ...] = ()
     nonempty: bool = False
+    # With ``nonempty``, also keep a node that carries no label but *can be acted on*. A
+    # design-system tile puts its click handler on an inner container and renders the title as a
+    # separate non-clickable node outside it, so that container has no text, no content-desc and
+    # no resource-id — and dropping it leaves a view showing the label with ``clickable: false``
+    # and no clickable node at all, which reads as "the control is absent or disabled". That
+    # exact structure produced a false FAIL_CRITICAL against the maths composer. Off for
+    # ``analyze --nonempty``, whose contract is "rows a human can read"; on for the folded
+    # post-action observation, whose contract is "rows you can act on next".
+    keep_actionable: bool = False
     no_system: bool = False
     no_ime: bool = False
     no_wrappers: bool = False
@@ -256,7 +265,8 @@ class Projection:
         cleaned = spec.strip()
         if not cleaned or cleaned.lower() == "all":
             return None
-        return cls.parse(fmt=fmt, fields=cleaned, nonempty=True, no_system=True)
+        parsed = cls.parse(fmt=fmt, fields=cleaned, nonempty=True, no_system=True)
+        return replace(parsed, keep_actionable=True)
 
     @staticmethod
     def _parse_fields(raw: str | None) -> tuple[str, ...]:
@@ -317,7 +327,9 @@ class Projection:
     def _keep(self, element: dict[str, Any], screen_height: int) -> bool:
         """Filters of different kinds AND together; repeats of one kind OR together."""
         checks = (
-            not self.nonempty or _has_label(element),
+            not self.nonempty
+            or _has_label(element)
+            or (self.keep_actionable and _is_actionable(element)),
             not self.no_system or not _is_system(element, screen_height),
             not self.no_ime or not _is_ime(element),
             not self.clickable_only or bool(element.get("clickable")),
@@ -411,6 +423,20 @@ def _comment_value(value: Any) -> str:
 
 def _has_label(element: dict[str, Any]) -> bool:
     return bool(element.get("text") or element.get("resource_id") or element.get("content_desc"))
+
+
+def _is_actionable(element: dict[str, Any]) -> bool:
+    """Can this node be acted on, whatever it is called?
+
+    Deliberately narrow: the interaction flags only. It is not "anything that might matter" — the
+    point is to keep a view small while never dropping a node the caller could tap next.
+    """
+    return bool(
+        element.get("clickable")
+        or element.get("checkable")
+        or element.get("long_clickable")
+        or element.get("scrollable")
+    )
 
 
 def _matches(value: Any, needles: Iterable[str]) -> bool:

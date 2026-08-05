@@ -126,7 +126,7 @@ class OutputCfg(BaseModel):
     # 5-scenario run: 37 taps produced 73 separate `analyze` calls and 37 `wait` calls, because
     # one unfilterable call was dearer than two targeted ones. The default path has to be the
     # cheap path, or agents will keep routing around it.
-    observation_fields: str = "id,text,rid,clickable"
+    observation_fields: str = "id,text,desc,rid,clickable,enabled,checked"
 
 
 class _ChainCfg(BaseModel):
