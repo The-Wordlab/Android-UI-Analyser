@@ -88,3 +88,64 @@ def test_unknown_option_is_left_for_click_to_report():
     """Not our job to guess; a real typo must still produce Click's error."""
     argv = ["analyze", "--totally-made-up"]
     assert hoist(argv) == argv
+
+
+# --------------------------------------------------------------------------- value skipping
+
+
+def test_a_preceding_global_value_is_not_mistaken_for_the_subcommand():
+    """`--serial emulator-5558 analyze --format json` must hoist just like the bare form.
+
+    The scan for "first token that is not an option" used to land on `emulator-5558` — the
+    *value* of `--serial`, at index 1 — so every later option looked like it already sat
+    before the subcommand and nothing moved. That is the shape agents always write, because
+    they pass `--serial` on every call, so the hoist quietly did nothing in exactly the case
+    it was built for.
+    """
+    assert hoist(["--serial", "emulator-5558", "analyze", "--format", "json"]) == [
+        "--format", "json", "--serial", "emulator-5558", "analyze",
+    ]
+
+
+def test_inline_global_value_still_finds_the_subcommand():
+    assert hoist(["--serial=emulator-5558", "analyze", "--format", "json"]) == [
+        "--format", "json", "--serial=emulator-5558", "analyze",
+    ]
+
+
+def test_valueless_global_before_the_subcommand():
+    assert hoist(["--no-cache", "tap", "9", "--format", "compact"]) == [
+        "--format", "compact", "--no-cache", "tap", "9",
+    ]
+
+
+# --------------------------------------------------------------------------- action globals
+
+
+def test_until_after_the_action_is_hoisted():
+    """`tap --rid x --until "text:Chats"` is how anyone writes it.
+
+    An agent wrote exactly that, got "No such option '--until'", detoured into `tap --help`,
+    and fell back to the `--no-observe` + `analyze` pair these flags exist to replace.
+    """
+    assert hoist(["tap", "--rid", "x", "--until", "text:Chats"]) == [
+        "--until", "text:Chats", "tap", "--rid", "x",
+    ]
+
+
+def test_until_with_serial_and_format_around_it():
+    assert hoist(
+        ["--serial", "emulator-5558", "tap", "--rid", "x", "--until", "text:Chats"]
+    ) == ["--until", "text:Chats", "--serial", "emulator-5558", "tap", "--rid", "x"]
+
+
+def test_until_timeout_and_poll_carry_their_values():
+    assert hoist(["tap", "9", "--until", "rid:card", "--until-timeout", "45000"]) == [
+        "--until", "rid:card", "--until-timeout", "45000", "tap", "9",
+    ]
+
+
+def test_observe_fields_after_the_action_is_hoisted():
+    assert hoist(["key", "back", "--observe-fields", "all"]) == [
+        "--observe-fields", "all", "key", "back",
+    ]
