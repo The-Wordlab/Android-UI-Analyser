@@ -32,7 +32,7 @@ description: >-
 13. **Ask for the columns you want — never post-process JSON.** **`aua --format tsv analyze` is the default way to look at a screen**: one element per line, tab-separated, `#`-commented summary on top, and status-bar/unlabelled noise already dropped (`--all` keeps everything). Narrow it in the same call instead of piping into a filter: `--fields id,text,rid,clickable` (`rid` = the short tail; `resource_id` = the full selector), `--where-text <substr>`, `--where-rid <substr>`, `--clickable`, `--region x1,y1,x2,y2` (header = `--region 0,0,1080,300 --clickable`), `--limit N`, `--nonempty`, `--no-system`, `--no-ime`, `--meta <csv>` / `--no-meta` (the routes and deeplink suggestions are worth reading once, not on every call). On View-based apps add `--no-wrappers` to drop the app's own id'd layout scaffolding (`app_bar`, `content_frame`) — inert, unlabelled boxes that wrap something; leaves and addressable containers stay. Filters of different kinds AND together, repeats of one kind OR together, and **ids are never renumbered** — the id in a filtered row is the id `aua tap` takes. The same flags work on `--format json|compact` when you want machine-readable output.
 14. **Read interaction state, don't screenshot it.** Every element carries `checkable`/`checked`/`selected`/`scrollable`/`long_clickable`/`password` alongside `clickable`/`enabled`/`focused`. So *is this switch on?* is `aua --format tsv analyze --where-rid settingsSwitch --fields id,checkable,checked` — not a screenshot you have to look at. `selected` tells you which tab is active; `scrollable` tells you which container actually scrolls. These are **tri-state**: `true`/`false` when the accessibility node reported it, **empty/null when genuinely unknown** (a vision-derived element has no a11y attributes), so off never masquerades as unknown.
 15. **Verify by resource-id, not just text.** `aua has --rid <id>` (or `aua has "<id>" --by id`) checks a resource-id (a bare tail like "containerDetail" works) — and it finds non-interactive **container** ids that `analyze` prunes from the element list, so it's the reliable way to assert you reached a screen (Maestro-style `assertVisible: id:`). Guard an action with the same selector you act with: `aua has --rid saveButton && aua tap --rid saveButton`. `wait --for <id> --by id` and `scroll-to <id> --by id` take `--by id` too. If a screen is WebView/Compose-backed and its result text isn't in the tree at all, read it with `analyze --source vision`.
-16. **Act, then read the screen the action gives back.** IDs are only valid until the screen changes. By default every state-changing action (tap/input/swipe/scroll-to/key) returns the next screen inline in `observation` (elements with fresh ids). This is the default agent contract: action + `observation` covers the normal readback path, so you should skip `analyze` unless you need another filtered view. `type → tap send` is two calls, not three, and `goto` returns the destination's `elements` too. Pass `--no-observe` to skip it on action-only sequences. Action `observation` waits for a pixel change + idle (animation-aware) before dumping the tree, and a screen whose content is still streaming in has to hold still for one confirming sample — so you get the *next* screen, not a mid-transition snapshot with the list body missing. Prefer `wait --for "<text>"` for known targets; reserve `wait --for-stable` for generation / loading / video.
+16. **Act, then read the screen the action gives back.** IDs are only valid until the screen changes. By default every state-changing action (tap/input/swipe/scroll-to/key) returns the next screen inline in `observation` (elements with fresh ids). This is the default agent contract: action + `observation` covers the normal readback path, so you should skip `analyze` unless you need another filtered view. Every action response now also includes `observation_present`, `known_screen`, `stable_elements`, `action_diff_summary`, and `note`, so callers can branch on that single payload. `type → tap send` is two calls, not three, and `goto` returns the destination's `elements` too. Pass `--no-observe` to skip it on action-only sequences. Action `observation` waits for a pixel change + idle (animation-aware) before dumping the tree, and a screen whose content is still streaming in has to hold still for one confirming sample — so you get the *next* screen, not a mid-transition snapshot with the list body missing. Prefer `wait --for "<text>"` for known targets; reserve `wait --for-stable` for generation / loading / video.
 17. **Wait on state, never sleep.** `aua wait --for "<text>"` waits for text to appear; `aua wait --for-stable` returns once the screen stops visually changing (grid pixel-hash; looping spinners/video are auto-masked so they don't block). Prefer goal waits over `--for-stable` after tabs/taps; never fixed sleeps.
 18. **Stop the daemon when done.** `aua daemon stop` releases the warm connection.
 
@@ -177,47 +177,24 @@ Measured on a real 6-scenario lane: 1348s wall clock, 239 aua calls, and only ~3
 
 ## Worked examples
 ```bash
-# No device attached? Boot headless so you don't bother the user:
-aua emulator start --headless       # or: --avd pixel7
-
-# Optional: warm daemon so every later call is ~tens of ms.
-aua daemon start --quiet            # `aua orient` prints the app playbook on demand
-
-# See the screen. When the app is mapped the response already carries
-# meta.known_screen + meta.known_routes + meta.suggested_gotos — act on those.
-aua --format tsv analyze
-
-# Just the header, just the tappable things (no JSON post-processing):
-aua --format tsv analyze --region 0,0,1080,300 --clickable --fields id,desc,rid
-
-# Is that switch on? Read the boolean instead of looking at a screenshot:
-aua --format tsv analyze --where-rid settingsSwitch --fields id,checkable,checked
-
-# Must you actually SEE something? Crop it — a full 1080x2400 PNG is expensive:
-aua screenshot --region 0,0,1080,300 --out /tmp/header.png   # then read that file
-
-# Jump straight to a remembered screen (drives + verifies each hop,
-# including cross-app auth legs):
-aua goto "image creator"
-aua goto "settings" --plan          # just print the route, take no action
-aua goto "settings" --from-here     # resume mid-edge after a manual step
-
-# Replay a whole journey (authored or recorded) in ONE call:
-aua flow run reset_account_google_login --param ACCOUNT="Engineering Team"
-aua flow save reach_checkout --last 8   # materialize what you just did
-
-# Act by id. Every action returns the post-action screen by default, so the
-# result already carries observation.elements with fresh ids — type → send is
-# two calls, not three:
-aua input 24 "a neon koala surfing a wave"   # result.observation has the send id
-aua tap 25                          # send-button id, taken from that observation
-aua wait --for-stable               # wait out image generation / loading
-
-# Reach an off-screen target; the scroll already returns what came into view:
-aua scroll-to "Translate"
-
-# Cheap branch with no JSON parsing (exit 0 present / 1 absent):
-aua has "Done" && echo present
+# Starter flow (6+ steps): open → tap → input → tap → wait → has → tap
+open "myapp://chat"                          # reads `action.observation` + ids
+tap 24                                      # id from the open response, then read observation
+input 25 "How much?"                        # read `observation.stable_elements` from tap
+tap 26                                      # send, then continue on the returned ids
+wait --for "How much?"                       # verify state transition before next action
+has --rid "resultBubble" --by id             # branch on current screen
+tap 31                                      # open details with another read-back id
+```
+# Optional: use stable references from the same response
+{
+  "action": "tap",
+  "observation_present": true,
+  "known_screen": "chat",
+  "stable_elements": [{"id": 25, "stable_key": "compose_input"}, {"id": 26, "stable_key": "send"}],
+  "action_diff_summary": {"added": 0, "removed": 0, "changed": 2, "prev_count": 17, "curr_count": 17},
+  "note": "No separate analyze needed; state is in observation."
+}
 ```
 
 ## Output schema (read these fields)
@@ -237,6 +214,23 @@ aua has "Done" && echo present
 ```
 `compact` drops null/default fields for the smallest token footprint — except `checked` on a `checkable` node, where *off* is the answer you asked for.
 Don't post-process this by hand. `--format tsv` plus `--fields`/`--where-*`/`--region`/`--limit` gives you exactly the rows and columns you want in the same call (see the flag table above); `--all` turns tsv's implicit noise filtering off.
+
+Action command responses always include a small contract wrapper so `analyze` is usually not needed:
+```json
+{"ok": true,
+  "action": "tap",
+  "observation_present": true,
+  "known_screen": "chat",
+  "stable_elements": [
+    {"id": 25, "stable_key": "compose_input"},
+    {"id": 26, "stable_key": "send"}
+  ],
+  "action_diff_summary": {"added": 0, "removed": 0, "changed": 2, "prev_count": 17, "curr_count": 17},
+  "note": "No separate analyze needed; state is in observation.",
+  "observation": { "screen": {...}, "elements": [...], "meta": {...} }
+}
+```
+If `observation_present` is false, the action did not request a post-action read (`--no-observe` or unsupported action), so run `analyze` explicitly.
 Need the actual pixels too? `--with-image [path]` on `analyze` AND on every action (tap/input/swipe/scroll-to/key/open) saves the raw screenshot to a timestamped file and returns its path in `meta.raw_image` (on actions: inside `observation.meta`) — Read that file when you must SEE the screen (visual fidelity, images, charts) instead of just addressing it. Over MCP the image comes back inline as an image content block. **Default off.** Do not pass `--with-image` on every step — hierarchy/TSV is faster and cheaper; images erase the token advantage of acting by id.
 
 ## Exit codes

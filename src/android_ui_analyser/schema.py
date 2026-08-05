@@ -364,6 +364,17 @@ class ActionResult(BaseModel):
     # The screen right after the action (when called with observe=True), so an agent gets
     # fresh element ids without a separate `analyze` round-trip (act + observe in one call).
     observation: AnalyzeResult | None = None
+    # Stable contract fields for downstream agents. `observation_present` is always
+    # returned so callers can branch without checking for key existence.
+    observation_present: bool = False
+    # Route context on the action response itself.
+    known_screen: str | None = None
+    # Stable identifiers for the returned ids (ID churn does happen, stable_key usually survives).
+    stable_elements: list[dict[str, Any]] = Field(default_factory=list)
+    # Compact diff summary from the folded observation (`meta.element_diff` transformed).
+    action_diff_summary: dict[str, Any] | None = None
+    # Inline hint when an action already returns usable screen state.
+    note: str | None = None
     # Rolling capture saw a post-action pixel change — pull `aua capture last`.
     capture_hint: str | None = None
     # Did the action's effect get *observed*, as opposed to merely attempted?

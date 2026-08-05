@@ -977,6 +977,34 @@ Prefer `goto` over manual tapping whenever your target is listed in `suggested_g
 daemon / native hot paths (unchanged hierarchy → tiny payload). All formats validate against
 the same pydantic schema where applicable.
 
+Action-command responses also carry a compact contract so `analyze` is usually not needed:
+
+```json
+{
+  "ok": true,
+  "action": "tap",
+  "observation_present": true,
+  "known_screen": "chat",
+  "stable_elements": [
+    { "id": 25, "stable_key": "compose_input" },
+    { "id": 26, "stable_key": "send" }
+  ],
+  "action_diff_summary": {
+    "added": 0,
+    "removed": 0,
+    "changed": 2,
+    "prev_count": 17,
+    "curr_count": 17
+  },
+  "note": "No separate analyze needed; state is in observation.",
+  "observation": { ... },
+  "capture_hint": null
+}
+```
+
+If `observation_present` is false, the action was run as `--no-observe`; run a normal
+`analyze` to refresh ids and state.
+
 ### Exit codes
 
 | Code | Meaning |

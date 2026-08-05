@@ -212,8 +212,10 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "(tap/input/swipe/scroll-to/key) returns the next screen inline in `observation` "
         "(elements with fresh ids). This is the default agent contract: action + `observation` "
         "covers the normal readback path, so you should skip `analyze` unless you need another "
-        "filtered view. `type → tap send` is two calls, not three, and `goto` returns the "
-        "destination's `elements` too. "
+        "filtered view. Every action response now also includes `observation_present`, "
+        "`known_screen`, `stable_elements`, `action_diff_summary`, and `note`, so callers can "
+        "branch on that single payload. `type → tap send` is two calls, not three, and `goto` "
+        "returns the destination's `elements` too. "
         "Pass `--no-observe` to skip it on action-only sequences. Action `observation` waits "
         "for a pixel change + idle (animation-aware) before dumping the tree, and a screen "
         "whose content is still streaming in has to hold still for one confirming sample — so "
@@ -801,47 +803,23 @@ def render_markdown(*, brief: bool = False) -> str:
     p.append("")
     p.append("## Worked examples")
     p.append("```bash")
-    p.append("# No device attached? Boot headless so you don't bother the user:")
-    p.append("aua emulator start --headless       # or: --avd pixel7")
-    p.append("")
-    p.append("# Optional: warm daemon so every later call is ~tens of ms.")
-    p.append("aua daemon start --quiet            # `aua orient` prints the app playbook on demand")
-    p.append("")
-    p.append("# See the screen. When the app is mapped the response already carries")
-    p.append("# meta.known_screen + meta.known_routes + meta.suggested_gotos — act on those.")
-    p.append("aua --format tsv analyze")
-    p.append("")
-    p.append("# Just the header, just the tappable things (no JSON post-processing):")
-    p.append("aua --format tsv analyze --region 0,0,1080,300 --clickable --fields id,desc,rid")
-    p.append("")
-    p.append("# Is that switch on? Read the boolean instead of looking at a screenshot:")
-    p.append("aua --format tsv analyze --where-rid settingsSwitch --fields id,checkable,checked")
-    p.append("")
-    p.append("# Must you actually SEE something? Crop it — a full 1080x2400 PNG is expensive:")
-    p.append("aua screenshot --region 0,0,1080,300 --out /tmp/header.png   # then read that file")
-    p.append("")
-    p.append("# Jump straight to a remembered screen (drives + verifies each hop,")
-    p.append("# including cross-app auth legs):")
-    p.append('aua goto "image creator"')
-    p.append('aua goto "settings" --plan          # just print the route, take no action')
-    p.append('aua goto "settings" --from-here     # resume mid-edge after a manual step')
-    p.append("")
-    p.append("# Replay a whole journey (authored or recorded) in ONE call:")
-    p.append('aua flow run reset_account_google_login --param ACCOUNT="Engineering Team"')
-    p.append("aua flow save reach_checkout --last 8   # materialize what you just did")
-    p.append("")
-    p.append("# Act by id. Every action returns the post-action screen by default, so the")
-    p.append("# result already carries observation.elements with fresh ids — type → send is")
-    p.append("# two calls, not three:")
-    p.append('aua input 24 "a neon koala surfing a wave"   # result.observation has the send id')
-    p.append("aua tap 25                          # send-button id, taken from that observation")
-    p.append("aua wait --for-stable               # wait out image generation / loading")
-    p.append("")
-    p.append("# Reach an off-screen target; the scroll already returns what came into view:")
-    p.append('aua scroll-to "Translate"')
-    p.append("")
-    p.append("# Cheap branch with no JSON parsing (exit 0 present / 1 absent):")
-    p.append('aua has "Done" && echo present')
+    p.append("# Starter flow (6+ steps): open → tap → input → tap → wait → has → tap")
+    p.append('open "myapp://chat"                          # reads `action.observation` + ids')
+    p.append('tap 24                                      # id from the open response, then read observation')
+    p.append('input 25 "How much?"                        # read `observation.stable_elements` from tap')
+    p.append("tap 26                                      # send, then continue on the returned ids")
+    p.append("wait --for \"How much?\"                       # verify state transition before next action")
+    p.append('has --rid "resultBubble" --by id             # branch on current screen')
+    p.append("tap 31                                      # open details with another read-back id")
+    p.append("```\n# Optional: use stable references from the same response")
+    p.append("{")
+    p.append('  "action": "tap",')
+    p.append('  "observation_present": true,')
+    p.append('  "known_screen": "chat",')
+    p.append('  "stable_elements": [{"id": 25, "stable_key": "compose_input"}, {"id": 26, "stable_key": "send"}],')
+    p.append('  "action_diff_summary": {"added": 0, "removed": 0, "changed": 2, "prev_count": 17, "curr_count": 17},')
+    p.append('  "note": "No separate analyze needed; state is in observation."')
+    p.append("}")
     p.append("```")
 
     p.append("")
@@ -872,6 +850,26 @@ def render_markdown(*, brief: bool = False) -> str:
         "Don't post-process this by hand. `--format tsv` plus `--fields`/`--where-*`/`--region`/"
         "`--limit` gives you exactly the rows and columns you want in the same call (see the "
         "flag table above); `--all` turns tsv's implicit noise filtering off."
+    )
+    p.append("")
+    p.append("Action command responses always include a small contract wrapper so `analyze` is usually not needed:")
+    p.append("```json")
+    p.append('{"ok": true,')
+    p.append('  "action": "tap",')
+    p.append('  "observation_present": true,')
+    p.append('  "known_screen": "chat",')
+    p.append('  "stable_elements": [')
+    p.append('    {"id": 25, "stable_key": "compose_input"},')
+    p.append('    {"id": 26, "stable_key": "send"}')
+    p.append("  ],")
+    p.append('  "action_diff_summary": {"added": 0, "removed": 0, "changed": 2, "prev_count": 17, "curr_count": 17},')
+    p.append('  "note": "No separate analyze needed; state is in observation.",')
+    p.append('  "observation": { "screen": {...}, "elements": [...], "meta": {...} }')
+    p.append("}")
+    p.append("```")
+    p.append(
+        "If `observation_present` is false, the action did not request a post-action read "
+        "(`--no-observe` or unsupported action), so run `analyze` explicitly."
     )
     p.append(
         "Need the actual pixels too? `--with-image [path]` on `analyze` AND on every "

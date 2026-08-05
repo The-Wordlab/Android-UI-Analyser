@@ -374,6 +374,47 @@ def _echo_json(data: Any, fmt: OutputFormat) -> None:
     typer.echo(json.dumps(data, indent=indent, separators=sep, ensure_ascii=False))
 
 
+def _warn_if_redundant_analyze(engine: Engine, args: dict[str, Any] | None = None) -> None:
+    """Soft lint: `analyze` immediately after an observed action usually re-reads the same state."""
+    if args is not None and args.get("cmd") != "analyze":
+        return
+    cfg = engine.config
+    serial = None
+    with contextlib.suppress(Exception):
+        serial = engine.device.serial
+    try:
+        from . import journal as journal_mod
+
+        events = journal_mod.read_since(cfg.cache.dir, serial, limit=4)
+    except Exception:  # pragma: no cover - best effort
+        return
+    if len(events) < 2:
+        return
+    latest, previous = events[-1], events[-2]
+    if latest.get("cmd") != "analyze" or not previous.get("ok"):
+        return
+    prev = previous.get("result")
+    if not isinstance(prev, dict):
+        return
+    if not prev.get("observation"):
+        return
+    action = prev.get("action")
+    if not isinstance(action, str):
+        return
+    # If the user already asked for an intentionally different view (query/source), do not warn.
+    latest_args = (latest.get("args") or {})
+    if latest_args.get("source") == "vision" or latest_args.get("query"):
+        return
+    if latest_args.get("with_ocr") is not None or latest_args.get("fields"):
+        return
+    logger.warning(
+        "redundant analyze right after %s: that action already returned `observation` (id "
+        "space is already in the action response). Prefer using the previous `observation` and "
+        "running analyze only when you need a different view.",
+        action,
+    )
+
+
 def _analyze_payload(result: Any) -> dict[str, Any] | None:
     """The full (untrimmed) dict form of an analyze result, whatever produced it.
 
@@ -806,6 +847,16 @@ def analyze(
             cheap=cheap,
             deep=deep,
             no_cache=nc,
+        )
+        _warn_if_redundant_analyze(
+            engine,
+            {
+                "cmd": "analyze",
+                "source": source,
+                "query": query,
+                "with_ocr": with_ocr,
+                "fields": fields,
+            },
         )
         _emit_analyze(result, fmt, view)
 

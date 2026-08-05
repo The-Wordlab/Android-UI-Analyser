@@ -3289,6 +3289,38 @@ class Engine:
 
     # ----------------------------------------------------------------- actions
 
+    @staticmethod
+    def _compact_action_diff(element_diff: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Keep inline diffs token-cheap and machine-readable."""
+        if not isinstance(element_diff, dict):
+            return None
+        added = element_diff.get("added", [])
+        removed = element_diff.get("removed", [])
+        changed = element_diff.get("changed", [])
+        out: dict[str, Any] = {
+            "added": len(added) if isinstance(added, list) else added,
+            "removed": len(removed) if isinstance(removed, list) else removed,
+            "changed": len(changed) if isinstance(changed, list) else changed,
+        }
+        if "prev_count" in element_diff:
+            out["prev_count"] = element_diff["prev_count"]
+        if "curr_count" in element_diff:
+            out["curr_count"] = element_diff["curr_count"]
+        if element_diff.get("unchanged") is not None:
+            out["unchanged"] = bool(element_diff["unchanged"])
+        return out
+
+    @staticmethod
+    def _stable_elements(elements: list[Element]) -> list[dict[str, Any]]:
+        """A compact stable-key map for the ids in the folded observation."""
+        out: list[dict[str, Any]] = []
+        for e in elements:
+            if e.stable_key is not None:
+                out.append({"id": e.id, "stable_key": e.stable_key})
+            else:
+                out.append({"id": e.id})
+        return out
+
     def _observe(
         self,
         result: ActionResult,
@@ -3369,10 +3401,16 @@ class Engine:
                         )
                         if known:
                             obs.meta.known_screen = known
+                result.observation_present = True
+                result.known_screen = obs.meta.known_screen
+                result.stable_elements = self._stable_elements(obs.elements)
+                result.action_diff_summary = self._compact_action_diff(obs.meta.element_diff)
+                result.note = "No separate analyze needed; state is in observation."
         else:
             self._pre_action_sig = None
             if self.config.perf.prefetch:
                 self._kick_hierarchy_prefetch()
+            result.observation_present = False
         hint = self._capture_hint()
         if hint:
             result.capture_hint = hint
