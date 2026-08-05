@@ -3174,6 +3174,8 @@ def _build_doctor_report(engine: Engine) -> dict[str, Any]:
     except Exception as exc:  # pragma: no cover - defensive
         checks["emulator"] = {"ok": False, "detail": str(exc)}
 
+    checks["skill"] = _installed_skill_check()
+
     try:
         providers = engine.provider_status()
     except Exception as exc:  # pragma: no cover - defensive
@@ -3181,6 +3183,49 @@ def _build_doctor_report(engine: Engine) -> dict[str, Any]:
         checks["providers_error"] = str(exc)
 
     return {"checks": checks, "providers": providers}
+
+
+# Where `install.sh` puts the user-level skill. Checked rather than rewritten: doctor
+# reports, it does not mutate the user's Claude Code config.
+_USER_SKILL = Path.home() / ".claude" / "skills" / "android-ui-analyser" / "SKILL.md"
+
+
+def _installed_skill_check() -> dict[str, Any]:
+    """Is the *installed* SKILL.md still what ``guide.py`` renders?
+
+    The pre-commit hook keeps the two in-repo copies in sync, but nothing syncs the copy
+    agents actually load — ``~/.claude/skills/…`` only changes when someone re-runs
+    ``install.sh``. Observed: a guide change was committed, both repo copies updated, and
+    live agents kept reading a day-old skill for hours. Nothing anywhere reported it.
+
+    The failure is silent by construction, which is why it belongs in ``doctor``: an agent
+    following stale instructions does not error, it just uses flags that no longer exist and
+    misses ones that do.
+    """
+    try:
+        from . import guide as guide_mod
+
+        expected = guide_mod.render_skill()
+    except Exception as exc:  # pragma: no cover - defensive
+        return {"ok": False, "detail": f"could not render the guide: {exc}"}
+
+    if not _USER_SKILL.is_file():
+        return {
+            "ok": True,  # not every install wants the user-level skill; absence is not breakage
+            "detail": f"no user-level skill at {_USER_SKILL} (plugin/project copies still apply)",
+        }
+    try:
+        installed = _USER_SKILL.read_text(encoding="utf-8")
+    except OSError as exc:
+        return {"ok": False, "detail": f"unreadable: {exc}"}
+
+    if installed == expected:
+        return {"ok": True, "detail": f"{_USER_SKILL} matches guide.py"}
+    return {
+        "ok": False,
+        "detail": f"{_USER_SKILL} is stale — agents are reading older instructions than this build",
+        "hint": f"aua guide --emit-skill {_USER_SKILL}",
+    }
 
 
 def _render_doctor_pretty(report: dict[str, Any]) -> str:
@@ -3212,6 +3257,12 @@ def _render_doctor_pretty(report: dict[str, Any]) -> str:
                 f"avds={len(avds)}  running={len(running)}"
             )
         lines.append(f"[{mark(emu.get('ok', False))}] emulator      {detail}")
+
+    skill = checks.get("skill", {})
+    if skill:
+        lines.append(f"[{mark(skill.get('ok', False))}] skill         {skill.get('detail', '')}")
+        if skill.get("hint"):
+            lines.append(f"               hint: {skill['hint']}")
 
     lines.append("")
     lines.append("Providers:")

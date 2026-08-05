@@ -14,8 +14,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from conftest import make_config
 from android_ui_analyser.memory import AppMemoryStore
+from conftest import make_config
 
 
 def _store(tmp_path: Path) -> AppMemoryStore:

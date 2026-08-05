@@ -178,7 +178,7 @@ On the first command against a device, `uiautomator2` automatically pushes a sma
 
 ```bash
 adb devices     # device appears as "device" (not "unauthorized" or "offline")
-aua doctor      # checks: adb on PATH · uiautomator2 importable · devices reachable · provider readiness
+aua doctor      # checks: adb on PATH · uiautomator2 importable · devices reachable · provider readiness · installed skill is current
 aua devices     # aua's own device listing (serial, model, Android version)
 ```
 
@@ -275,7 +275,30 @@ aua ask "Describe this screen from top to bottom and say where each control is"
 The **analyze → act → analyze** loop is the core workflow:
 1. `aua analyze` returns elements with IDs.
 2. The agent picks an ID and acts: `aua tap <id>` / `aua input <id> "text"`.
-3. No manual re-analyze needed — by default each action returns the next screen inline (`observation`, with fresh IDs), folding step 1 into step 2. Use `--no-observe` to skip it on action-only sequences, or a plain `analyze` (after `aua wait --for-stable`) when the screen is still animating.
+3. No manual re-analyze needed — by default each action returns the next screen inline (`observation`, with fresh IDs), folding step 1 into step 2.
+
+The observation is **compact by default** (`id,text,rid,clickable`, app nodes only), so it is
+also the cheapest way to read the new screen — widen it with `--observe-fields all` or any
+field list. You should not need `--no-observe` followed by `analyze`; that pair costs two
+round trips for one screen.
+
+When the next screen is slow, say what you are waiting for and the action waits on evidence
+instead of a fixed settle window:
+
+```bash
+aua tap <id> --until "rid:introCard" --until-timeout 45000
+aua tap <id> --until "text:Chats,!text:Loading"      # terms are ANDed; ! means absent
+aua tap <id> --until "net:POST /v1/chat,text:x ="    # backend replied AND the screen shows it
+```
+
+The response then carries `await_outcome` — `satisfied` / `screen-changed` / `timeout` — plus
+per-term results, so a slow backend is distinguishable from a hang. Term prefixes are `text:`,
+`rid:`, `desc:`, `net:` (a completed HTTP exchange, needs `aua proxy start`) and `log:`
+(logcat since the wait began, no proxy needed).
+
+> **Never re-tap on `nothing changed` / `stale_risk`.** The settle can only wait ~1.1s, so a
+> slower screen reports "unchanged" for an action that landed. It cannot tell "no effect" from
+> "not yet" — re-tapping means a second submit. Re-read, or pass `--until`.
 
 ---
 
@@ -1033,6 +1056,7 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 | `aua has "<text>"` | Exit 0 if text is on screen, 1 if not — cheap branch check |
 | `aua expect …` | Assert visibility / state (exit 8 on failure) |
 | `aua wait --for "<text>"` | Poll until text appears (`--idle` / `--for-stable` / `--changed`) |
+| `aua await '<predicate>'` | Wait on ANDed terms — `text:` `rid:` `desc:` `net:` `log:`, `!` = absent. Reports `await_outcome`: satisfied / screen-changed / timeout |
 | `aua fanout …` | Run a command across multiple `--serials` |
 | `aua tap <id>` / `aua click <id>` | Tap an element by ID (also `--rid`/`--text`/`--desc`) |
 | `aua double-tap <id>` | Double-tap an element |
