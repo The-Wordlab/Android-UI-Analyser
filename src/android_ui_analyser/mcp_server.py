@@ -547,18 +547,39 @@ def _tool_definitions() -> list[types.Tool]:
         ),
         types.Tool(
             name="expect",
-            description="Assert something about the screen (exists/absent/text/state). "
-            "ok=false means the assertion failed.",
+            description="Assert something about exactly one selected element. Provide one of "
+            "text, rid, or desc; text_is/text_contains are assertions about that element, not "
+            "selectors. ok=false means the assertion failed.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "rid": {"type": "string"},
-                    "text": {"type": "string"},
-                    "desc": {"type": "string"},
+                    "rid": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Select one element by resource-id.",
+                    },
+                    "text": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Select one element by its current visible text.",
+                    },
+                    "desc": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Select one element by content-desc.",
+                    },
                     "exists": {"type": "boolean", "default": False},
                     "absent": {"type": "boolean", "default": False},
-                    "text_is": {"type": "string"},
-                    "text_contains": {"type": "string"},
+                    "text_is": {
+                        "type": "string",
+                        "description": "Assert the selected element's text equals this value. "
+                        "This does not select an element; also provide text, rid, or desc.",
+                    },
+                    "text_contains": {
+                        "type": "string",
+                        "description": "Assert the selected element's text contains this value. "
+                        "This does not select an element; also provide text, rid, or desc.",
+                    },
                     "checked": {"type": "boolean"},
                     "enabled": {"type": "boolean"},
                     "selected": {"type": "boolean"},
@@ -569,6 +590,11 @@ def _tool_definitions() -> list[types.Tool]:
                     "poll_ms": {"type": "integer", "default": 250},
                     "observe": {"type": "boolean", "default": False},
                 },
+                "oneOf": [
+                    {"required": ["rid"]},
+                    {"required": ["text"]},
+                    {"required": ["desc"]},
+                ],
                 "additionalProperties": False,
             },
         ),
@@ -1093,11 +1119,10 @@ def _tool_definitions() -> list[types.Tool]:
 def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
     """Call the engine method for ``name`` and return a JSON-serialisable payload."""
     internal_name = _ANALYZED_TOOL_BASES.get(name)
-    observe_fields: str | None = None
     if internal_name is not None:
         name = internal_name
         args = {**args, "observe": True}
-        observe_fields = args.pop("observe_fields", None)
+        args.pop("observe_fields", None)
     elif name in _ANALYZED_TOOL_NAMES:
         raise UsageError(
             f"MCP tool '{name}' was renamed to '{_ANALYZED_TOOL_NAMES[name]}'",
@@ -1322,6 +1347,17 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
             )
         )
     if name == "expect":
+        selectors = [
+            key
+            for key in ("rid", "text", "desc")
+            if isinstance(args.get(key), str) and args[key].strip()
+        ]
+        if len(selectors) != 1:
+            raise UsageError(
+                "expect_and_analyze requires exactly one selector: text, rid, or desc. "
+                "text_is and text_contains assert on the selected element; they do not select it.",
+                hint='For example: {"text":"Continue","text_is":"Continue","exists":true}.',
+            )
         return _dump(
             engine.expect(
                 rid=args.get("rid"),

@@ -5614,8 +5614,9 @@ class Engine:
         selector = {"rid": rid, "text": text, "desc": desc}
         if len([v for v in selector.values() if v]) != 1:
             raise UsageError(
-                "expect needs exactly one of --rid / --text / --desc",
-                hint="e.g. `aua expect --rid notificationsButton --exists`",
+                "expect-and-analyze needs exactly one of --rid / --text / --desc; "
+                "--text-is and --text-contains assert on the selected element",
+                hint="e.g. `aua expect-and-analyze --rid notificationsButton --exists`",
             )
         if absent and exists:
             raise UsageError("--exists and --absent are mutually exclusive")

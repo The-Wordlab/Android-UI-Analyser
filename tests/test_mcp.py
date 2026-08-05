@@ -17,7 +17,8 @@ from mcp.shared.memory import create_connected_server_and_client_session
 
 import android_ui_analyser.engine as engine_mod
 from android_ui_analyser.engine import Engine
-from android_ui_analyser.mcp_server import build_server
+from android_ui_analyser.errors import UsageError
+from android_ui_analyser.mcp_server import _dispatch, build_server
 from android_ui_analyser.schema import AnalyzeResult
 from conftest import FakeDevice, make_config
 
@@ -170,6 +171,46 @@ def test_mcp_observed_actions_are_named_and_force_analysis() -> None:
     assert "observe" not in schema["properties"], "the renamed tool cannot contradict its name"
     assert old["error"]["code"] == "usage"
     assert "tap_and_analyze" in old["error"]["message"]
+
+
+def test_mcp_expect_requires_one_selector_before_text_assertions() -> None:
+    """Luna supplied only text_is; the schema must make that shape invalid up front."""
+    eng = _engine()
+    server = build_server(eng)
+
+    async def run() -> tuple[dict, bool, str, dict]:  # type: ignore[type-arg]
+        async with create_connected_server_and_client_session(server) as client:
+            listed = await client.list_tools()
+            tool = next(t for t in listed.tools if t.name == "expect_and_analyze")
+            malformed = await client.call_tool(
+                "expect_and_analyze", {"text_is": "Continue", "exists": True}
+            )
+            valid = await client.call_tool(
+                "expect_and_analyze",
+                {"text": "Continue", "text_is": "Continue", "exists": True},
+            )
+            return (
+                tool.inputSchema,
+                bool(malformed.isError),
+                _first_text(malformed),
+                json.loads(_first_text(valid)),
+            )
+
+    schema, malformed_is_error, malformed_text, valid = anyio.run(run)
+
+    assert schema["oneOf"] == [
+        {"required": ["rid"]},
+        {"required": ["text"]},
+        {"required": ["desc"]},
+    ]
+    assert "does not select" in schema["properties"]["text_is"]["description"]
+    assert malformed_is_error is True
+    assert "Input validation error" in malformed_text
+    assert valid["ok"] is True
+
+    # Keep a structured AUA error too, for MCP clients that do not enforce inputSchema.
+    with pytest.raises(UsageError, match="exactly one selector"):
+        _dispatch(eng, "expect_and_analyze", {"text_is": "Continue", "exists": True})
 
 
 def test_mcp_map_audit_and_reconcile_plan_roundtrip() -> None:

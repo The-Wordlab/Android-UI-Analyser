@@ -241,6 +241,21 @@ def test_usage_error_missing_argument_exit_2() -> None:
     assert result.exit_code == 2
 
 
+def test_expect_text_assertion_requires_a_selector_on_cli(patched_device: FakeDevice) -> None:
+    help_result = runner.invoke(app, ["expect-and-analyze", "--help"])
+    assert help_result.exit_code == 0
+    normalized_help = " ".join(help_result.stdout.split())
+    assert "Provide exactly one of" in normalized_help
+    assert "they do not select it" in normalized_help
+
+    result = runner.invoke(app, ["expect-and-analyze", "--text-is", "Continue"])
+
+    assert result.exit_code == 2
+    error = json.loads(result.stderr)
+    assert "exactly one of --rid / --text / --desc" in error["error"]["message"]
+    assert "expect-and-analyze --rid" in error["error"]["hint"]
+
+
 # --------------------------------------------------------------------------- actions
 
 

@@ -1834,14 +1834,26 @@ def scroll_to(
 @app.command(hidden=True)
 def expect(
     ctx: typer.Context,
-    rid: str | None = typer.Option(None, "--rid", help="Assert about this resource-id."),
-    text: str | None = typer.Option(None, "--text", help="Assert about this label."),
-    desc: str | None = typer.Option(None, "--desc", help="Assert about this content-desc."),
+    rid: str | None = typer.Option(
+        None, "--rid", help="Select exactly one element by resource-id."
+    ),
+    text: str | None = typer.Option(
+        None, "--text", help="Select exactly one element by its current visible text."
+    ),
+    desc: str | None = typer.Option(
+        None, "--desc", help="Select exactly one element by content-desc."
+    ),
     exists: bool = typer.Option(False, "--exists", help="It must be on screen (the default)."),
     absent: bool = typer.Option(False, "--absent", help="It must NOT be on screen."),
-    text_is: str | None = typer.Option(None, "--text-is", help="Its label must equal this."),
+    text_is: str | None = typer.Option(
+        None,
+        "--text-is",
+        help="Requires a selector; assert its label equals this.",
+    ),
     text_contains: str | None = typer.Option(
-        None, "--text-contains", help="Its label must contain this."
+        None,
+        "--text-contains",
+        help="Requires a selector; assert its label contains this.",
     ),
     checked: bool | None = typer.Option(
         None, "--checked/--unchecked", help="Toggle/checkbox state."
@@ -1856,12 +1868,17 @@ def expect(
         0, "--timeout", "--timeout-ms", help="Poll until it holds, up to this many ms."
     ),
 ) -> None:
-    """Assert one thing about the screen. Exit 0 = pass, 8 = the assertion failed.
+    """Assert one thing about exactly one selected element.
 
-    `aua expect --rid notificationsButton --exists` ·
-    `aua expect --text "Loading" --absent --timeout 5000` ·
-    `aua expect --rid itemDetailLikeCount --text-is "7"` ·
-    `aua expect --rid settingsPushToggleSwitch --checked`
+    Provide exactly one of ``--text``, ``--rid``, or ``--desc``. ``--text-is`` and
+    ``--text-contains`` check the selected element; they do not select it.
+
+    Exit 0 = pass, 8 = the assertion failed.
+
+    `aua expect-and-analyze --rid notificationsButton --exists` ·
+    `aua expect-and-analyze --text "Loading" --absent --timeout 5000` ·
+    `aua expect-and-analyze --rid itemDetailLikeCount --text-is "7"` ·
+    `aua expect-and-analyze --rid settingsPushToggleSwitch --checked`
 
     One acceptance criterion per call, so a criteria list becomes a script instead of a pile
     of eyeballed screenshots. Exit 8 is a *test* failure and stays distinct from 3 (device)
