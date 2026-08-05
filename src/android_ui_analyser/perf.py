@@ -111,6 +111,7 @@ class SettleProfiles:
         *,
         default_settle_ms: int = 45,
         default_total_ms: int = 1100,
+        total_max_ms: int = 1600,
     ) -> tuple[int, int]:
         """Return ``(settle_ms, total_timeout_ms)`` tuned from history.
 
@@ -121,7 +122,7 @@ class SettleProfiles:
             ema = self._ema_ms.get(kind)
         if ema is None:
             return default_settle_ms, default_total_ms
-        total = int(max(400, min(1600, ema * 1.8 + 100)))
+        total = int(max(400, min(total_max_ms, ema * 1.8 + 100)))
         return default_settle_ms, total
 
 

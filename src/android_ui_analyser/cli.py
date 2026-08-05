@@ -115,6 +115,10 @@ class GlobalOpts:
     log_level: str = "warn"
     no_cache: bool = False
     with_image: bool = False
+    observe_fields: str | None = None
+    until: str | None = None
+    until_timeout: int = 30000
+    until_poll: int = 500
     _cfg: Config | None = field(default=None, repr=False)
 
     def cli_overrides(self) -> dict[str, Any]:
@@ -178,6 +182,15 @@ def _run(ctx: typer.Context, fn: Callable[[Engine, OutputFormat], T]) -> T:
     try:
         cfg_fmt = opts.fmt()
         engine = opts.engine()
+        global _OBSERVATION_VIEW, _UNTIL, _ENGINE
+        spec = opts.observe_fields
+        if spec is None:
+            spec = getattr(engine.config.output, "observation_fields", None)
+        _OBSERVATION_VIEW = Projection.for_observation(spec, fmt=cfg_fmt)
+        _ENGINE = engine
+        _UNTIL = (
+            (opts.until, opts.until_timeout, opts.until_poll) if opts.until else None
+        )
         return fn(engine, cfg_fmt)
     except AuaError as err:
         emit_error(err)
@@ -356,10 +369,120 @@ def _rehydrate(data: dict[str, Any]) -> Any:
         return data
 
 
+# Session view for a folded post-action ``observation``, resolved once per invocation by
+# ``_run`` from --observe-fields / config.output.observation_fields. Module-level because
+# ``_emit`` has 80-odd call sites: threading a parameter through all of them to carry a
+# session-wide default would be churn, not clarity.
+_OBSERVATION_VIEW: Projection | None = None
+# Global --until, and the engine to run it on. Same reasoning as _OBSERVATION_VIEW: these are
+# session-wide and every action command would otherwise need four more parameters.
+_UNTIL: tuple[str, int, int] | None = None
+_ENGINE: Any = None
+
+
+def _project_observation(result: Any, fmt: OutputFormat) -> dict[str, Any] | None:
+    """The result as a dict with its ``observation`` trimmed, or None to render normally.
+
+    Round-trips the model's own ``render`` so the envelope stays byte-identical to the
+    unprojected path — only the nested observation is rewritten.
+    """
+    import json
+
+    view = _OBSERVATION_VIEW
+    if view is None or not hasattr(result, "render"):
+        return None
+    if getattr(result, "observation", None) is None:
+        return None
+    try:
+        data = json.loads(result.render(fmt))
+    except Exception:  # pragma: no cover - defensive; fall back to the plain render
+        return None
+    payload = data.get("observation") if isinstance(data, dict) else None
+    if not isinstance(payload, dict) or not isinstance(payload.get("elements"), list):
+        return None
+    projected = view.apply(payload, fmt=fmt)
+    data["observation"] = projected
+    # ``stable_elements`` is derived from the same tree, so an unprojected copy re-adds every
+    # system-bar node the view just dropped — the status bar alone accounted for a third of it.
+    kept = {e.get("id") for e in projected.get("elements", []) if isinstance(e, dict)}
+    stable = data.get("stable_elements")
+    if kept and isinstance(stable, list):
+        data["stable_elements"] = [
+            s for s in stable if isinstance(s, dict) and s.get("id") in kept
+        ]
+    return data
+
+
+def _await_until(result: Any) -> Any:
+    """Honour a global ``--until``: wait for the predicate, then adopt *that* screen.
+
+    The post-action settle can only ever wait ~1.1s (``_await_post_action_ready``), stretched
+    to at most 1.6s by ``SettleProfiles``. Screens in a real app routinely take 18-60s, so the
+    folded observation reported "nothing changed" on a tap that had in fact landed — 38 times
+    across a 5-scenario run. An agent cannot tell "no effect" from "not yet" from that, so it
+    stopped trusting the observation and hand-rolled ``wait`` + ``analyze`` after every tap.
+
+    A caller-supplied predicate is what resolves the ambiguity, so the budget comes from the
+    predicate rather than the settle default, and ``await_outcome`` says which of three things
+    ended the wait: ``satisfied`` / ``screen-changed`` / ``timeout``.
+    """
+    if _UNTIL is None or _ENGINE is None:
+        return result
+    # `observation_present` is the action contract's marker — set on both `_observe` branches
+    # and absent everywhere else, so it distinguishes an action response from `devices`/`doctor`.
+    if getattr(result, "observation_present", None) is None:
+        return result
+    if not getattr(result, "ok", False):
+        return result  # a failed action produced no transition worth waiting on
+    predicate, timeout_ms, poll_ms = _UNTIL
+    try:
+        awaited = _route(
+            _ENGINE,
+            "await_predicate",
+            predicate=predicate,
+            timeout_ms=timeout_ms,
+            poll_ms=poll_ms,
+            observe=True,
+        )
+    except AuaError:
+        raise
+    except Exception:  # pragma: no cover - the action already happened; never lose its result
+        return result
+    if isinstance(awaited, dict):
+        awaited = _rehydrate(awaited)
+    for attr in (
+        "await_outcome",
+        "await_terms",
+        "elapsed_ms",
+        "observation",
+        "observation_present",
+        "known_screen",
+        "stable_elements",
+        "action_diff_summary",
+    ):
+        value = getattr(awaited, attr, None)
+        if value is not None:
+            with contextlib.suppress(Exception):
+                setattr(result, attr, value)
+    # The action's own settle-derived caveat described a screen we have since re-read.
+    if getattr(result, "await_outcome", None) == "satisfied":
+        detail = getattr(result, "detail", None)
+        if isinstance(detail, str) and "stale_risk" in detail:
+            cleaned = detail.replace("stale_risk", "").strip()
+            with contextlib.suppress(Exception):
+                result.detail = cleaned or None
+    return result
+
+
 def _emit(result: Any, fmt: OutputFormat) -> None:
     """Render a pydantic result (``.render``) or a plain dict (daemon path) to stdout."""
     if isinstance(result, dict):
         result = _rehydrate(result)
+    result = _await_until(result)
+    projected = _project_observation(result, fmt)
+    if projected is not None:
+        _echo_json(projected, fmt)
+        return
     if hasattr(result, "render"):
         typer.echo(result.render(fmt))
         return
@@ -671,6 +794,26 @@ def main(
         help="Session default: save raw screenshots on analyze/actions "
         "(override per-command with --with-image PATH or omit).",
     ),
+    observe_fields: str | None = typer.Option(
+        None,
+        "--observe-fields",
+        metavar="NAMES|all",
+        help="Columns kept in an action's post-action observation ('all' = full dump). "
+        "Defaults to a compact view so you never need --no-observe.",
+    ),
+    until: str | None = typer.Option(
+        None,
+        "--until",
+        metavar="PREDICATE",
+        help="After the action, wait until this holds before observing "
+        "(`rid:introCard`, `text:Chats`, `!text:Loading`). Sets await_outcome.",
+    ),
+    until_timeout: int = typer.Option(
+        30000, "--until-timeout", metavar="MS", help="Give up on --until after this long."
+    ),
+    until_poll: int = typer.Option(
+        500, "--until-poll", metavar="MS", help="How often --until re-checks."
+    ),
     version: bool = typer.Option(
         False,
         "--version",
@@ -711,6 +854,10 @@ def main(
         log_level=log_level,
         no_cache=no_cache,
         with_image=with_image,
+        observe_fields=observe_fields,
+        until=until,
+        until_timeout=until_timeout,
+        until_poll=until_poll,
     )
 
 
