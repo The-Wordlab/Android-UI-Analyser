@@ -364,13 +364,18 @@ class ActionResult(BaseModel):
     # The screen right after the action (when called with observe=True), so an agent gets
     # fresh element ids without a separate `analyze` round-trip (act + observe in one call).
     observation: AnalyzeResult | None = None
-    # Stable contract fields for downstream agents. `observation_present` is always
-    # returned so callers can branch without checking for key existence.
-    observation_present: bool = False
+    # Stable contract fields for downstream agents. `observation_present` is always returned on
+    # an *action* response, so callers can branch without checking for key existence. Both are
+    # None by default rather than False/[] because `render()` only strips None: a plain default
+    # would emit these on commands that perform no action at all, and "observation_present:
+    # false" on a `screenshot` claims the effect of an action was not observed when there was no
+    # action to observe. `_observe` sets `observation_present` on both of its branches, which is
+    # what makes the field reliably present exactly where the contract promises it.
+    observation_present: bool | None = None
     # Route context on the action response itself.
     known_screen: str | None = None
     # Stable identifiers for the returned ids (ID churn does happen, stable_key usually survives).
-    stable_elements: list[dict[str, Any]] = Field(default_factory=list)
+    stable_elements: list[dict[str, Any]] | None = None
     # Compact diff summary from the folded observation (`meta.element_diff` transformed).
     action_diff_summary: dict[str, Any] | None = None
     # Inline hint when an action already returns usable screen state.

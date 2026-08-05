@@ -177,17 +177,52 @@ Measured on a real 6-scenario lane: 1348s wall clock, 239 aua calls, and only ~3
 
 ## Worked examples
 ```bash
-# Starter flow (6+ steps): open → tap → input → tap → wait → has → tap
-open "myapp://chat"                          # reads `action.observation` + ids
-tap 24                                      # id from the open response, then read observation
-input 25 "How much?"                        # read `observation.stable_elements` from tap
-tap 26                                      # send, then continue on the returned ids
-wait --for "How much?"                       # verify state transition before next action
-has --rid "resultBubble" --by id             # branch on current screen
-tap 31                                      # open details with another read-back id
+# No device attached? Boot headless so you don't bother the user:
+aua emulator start --headless       # or: --avd pixel7
+
+# Optional: warm daemon so every later call is ~tens of ms.
+aua daemon start --quiet            # `aua orient` prints the app playbook on demand
+
+# See the screen. When the app is mapped the response already carries
+# meta.known_screen + meta.known_routes + meta.suggested_gotos — act on those.
+aua --format tsv analyze
+
+# Just the header, just the tappable things (no JSON post-processing):
+aua --format tsv analyze --region 0,0,1080,300 --clickable --fields id,desc,rid
+
+# Is that switch on? Read the boolean instead of looking at a screenshot:
+aua --format tsv analyze --where-rid settingsSwitch --fields id,checkable,checked
+
+# Must you actually SEE something? Crop it — a full 1080x2400 PNG is expensive:
+aua screenshot --region 0,0,1080,300 --out /tmp/header.png   # then read that file
+
+# Jump straight to a remembered screen (drives + verifies each hop,
+# including cross-app auth legs):
+aua goto "image creator"
+aua goto "settings" --plan          # just print the route, take no action
+aua goto "settings" --from-here     # resume mid-edge after a manual step
+
+# Replay a whole journey (authored or recorded) in ONE call:
+aua flow run reset_account_google_login --param ACCOUNT="Engineering Team"
+aua flow save reach_checkout --last 8   # materialize what you just did
+
+# Starter journey: open → tap → input → tap → wait → has → tap. Every action
+# returns the post-action screen, so each id below comes from the previous call:
+aua open "myapp://chat"                   # response carries observation + fresh ids
+aua tap 24                                # id from the open response
+aua input 25 "How much?"                  # id from the tap response
+aua tap 26                                # send-button id from that same response
+aua wait --for "How much?"                 # confirm the transition before acting again
+aua has --rid resultBubble && echo present  # cheap branch, exit 0 present / 1 absent
+aua tap 31                                # continue on another read-back id
 ```
-# Optional: use stable references from the same response
+
+An action response carries its own state, so a follow-up `analyze` is usually
+unnecessary — reach for one when you need a *different* view (another region, OCR,
+or a filtered projection), or when content was still streaming in on the first read.
+```json
 {
+  "ok": true,
   "action": "tap",
   "observation_present": true,
   "known_screen": "chat",
