@@ -57,6 +57,16 @@ class PerfCfg(BaseModel):
     auto_daemon: bool = True  # CLI auto-starts the warm daemon when enabled but down
     settle_profiles: bool = True  # learn per-action settle budgets from history
     gate_cache: bool = True  # memoize gate.decide for identical tree fingerprints
+    # Ceiling on the learned post-action deadline, and on a single learning sample.
+    #
+    # Both were hard-coded (1600ms / 500ms). They are a deliberate trade, not a bug: the
+    # deadline is only *spent* when an action produces no detectable change, so raising it
+    # taxes every same-screen tap to help slow ones. Left at the measured-safe defaults and
+    # exposed instead, because the right answer for a genuinely slow screen is `--until
+    # <predicate>`, which waits on evidence rather than on a blind timer. Raise these only for
+    # an app whose transitions are uniformly slow.
+    settle_total_max_ms: int = 1600
+    settle_learn_cap_ms: float = 500.0
 
 
 class GateCfg(BaseModel):
@@ -108,6 +118,15 @@ class OutputCfg(BaseModel):
     annotate: bool = False
     # Session default for analyze/actions — per-call --with-image overrides when set.
     with_image: bool | str = False
+    # Columns kept in a folded post-action ``observation``; ``"all"`` restores the full dump.
+    #
+    # The observation used to be all-or-nothing: the whole screen, or `--no-observe`. Actions
+    # carry no `--fields`/`--where-*`, so the only way to get a *cheap* read of the new screen
+    # was to disable the observation and run a filtered `analyze` instead. Measured on a
+    # 5-scenario run: 37 taps produced 73 separate `analyze` calls and 37 `wait` calls, because
+    # one unfilterable call was dearer than two targeted ones. The default path has to be the
+    # cheap path, or agents will keep routing around it.
+    observation_fields: str = "id,text,rid,clickable"
 
 
 class _ChainCfg(BaseModel):

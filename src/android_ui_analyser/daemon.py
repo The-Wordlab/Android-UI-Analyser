@@ -83,6 +83,20 @@ def _idle_tick(engine: Engine, activity: _Activity) -> bool:
 # --------------------------------------------------------------------------- helpers
 
 
+def effective_serial(config: Config, serial: str | None = None) -> str | None:
+    """The serial this daemon is *for*: explicit arg, ``config.device.serial``, or ``AUA_SERIAL``.
+
+    Single source of truth on purpose. ``socket_path`` used to resolve the fallback chain
+    inline while ``start`` gated its ``--serial`` argv on the bare parameter, so
+    ``start(config)`` with ``config.device.serial`` set spawned a **serial-less daemon on a
+    serial-named socket**. It looked healthy — right socket, `daemon-start` ok — then failed
+    every routed call with "multiple devices attached", because the child resolved its device
+    with ``connect(None)``. Callers then stopped/restarted the daemon and gave up, losing the
+    warm-state amortization the daemon exists to provide.
+    """
+    return serial or getattr(config.device, "serial", None) or os.environ.get("AUA_SERIAL")
+
+
 def socket_path(config: Config, serial: str | None = None) -> str:
     """Return the expanded unix-socket path from *config*.
 
@@ -94,7 +108,7 @@ def socket_path(config: Config, serial: str | None = None) -> str:
     if env:
         return os.path.expanduser(env)
     base = os.path.expanduser(config.daemon.socket)
-    ser = serial or getattr(config.device, "serial", None) or os.environ.get("AUA_SERIAL")
+    ser = effective_serial(config, serial)
     if not ser:
         return base
     safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in ser)
@@ -846,6 +860,10 @@ def start(config: Config, *, serial: str | None = None) -> dict[str, Any]:
 
     Returns a dict with keys ``running``, ``pid``, and ``socket``.
     """
+    # Resolve once, use for BOTH the socket name and the child's argv. Gating the argv on
+    # the bare parameter while the socket fell back to config/env is what produced a
+    # serial-less daemon answering on a serial-named socket.
+    serial = effective_serial(config, serial)
     sock = socket_path(config, serial=serial)
 
     # Adopt on the socket we are about to bind, not on the config-derived one: with an

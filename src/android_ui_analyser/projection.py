@@ -241,6 +241,23 @@ class Projection:
             _explicit=explicit,
         )
 
+    @classmethod
+    def for_observation(
+        cls, spec: str | None, *, fmt: OutputFormat | str = OutputFormat.json
+    ) -> Projection | None:
+        """The view applied to a folded post-action ``observation``; ``None`` means "don't touch".
+
+        ``spec`` of ``"all"`` (or empty) returns ``None`` so the full dump is emitted verbatim.
+        Anything else is a field list, filtered to the app's own labelled nodes — the point is
+        that the *default* observation is cheap enough that no caller needs ``--no-observe``.
+        """
+        if spec is None:
+            return None
+        cleaned = spec.strip()
+        if not cleaned or cleaned.lower() == "all":
+            return None
+        return cls.parse(fmt=fmt, fields=cleaned, nonempty=True, no_system=True)
+
     @staticmethod
     def _parse_fields(raw: str | None) -> tuple[str, ...]:
         if not raw:

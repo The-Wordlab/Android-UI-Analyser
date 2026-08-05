@@ -220,7 +220,19 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "for a pixel change + idle (animation-aware) before dumping the tree, and a screen "
         "whose content is still streaming in has to hold still for one confirming sample — so "
         "you get the *next* screen, not a mid-transition snapshot with the list body missing. "
-        "Prefer "
+        "The observation is **compact by default** (`id,text,rid,clickable`, app nodes only); "
+        "widen it with `--observe-fields all` or any field list. You therefore never need the "
+        "`--no-observe` + `analyze` pair to get a cheap read — that pair costs two round trips "
+        "for one screen. "
+        "**That settle can only wait ~1.1s (max 1.6s).** A slower screen makes the action "
+        "report `nothing changed` for a tap that did land, and `stale_risk` appears in "
+        "`detail`. That is *not* evidence the tap missed: it cannot tell \"no effect\" from "
+        "\"not yet\", so **never re-tap on it** — a second tap means a second submit. When you "
+        "know what should come next, say so and the wait becomes evidence-based with your "
+        "budget instead of the settle timer: `--until \"rid:introCard\"`, `--until "
+        "\"text:Chats\"`, `--until \"!text:Loading\"` (with `--until-timeout MS`). The response "
+        "then carries `await_outcome`: `satisfied` / `screen-changed` / `timeout`, and "
+        "`await_terms` says which term is missing. Prefer "
         "`wait --for \"<text>\"` for known targets; reserve `wait --for-stable` for "
         "generation / loading / video.",
     ),
@@ -481,9 +493,18 @@ AGENT_BEST_PRACTICES_PERCEPTION: list[tuple[str, str, str]] = [
     ),
     (
         "`analyze` after every `tap`/`input` (or always `--no-observe` then re-analyze)",
-        "Let the action return `observation` (default); only re-analyze when you need a fresh "
-        "filtered view",
-        "Post-action observation already has fresh ids. Extra analyzes double round trips.",
+        "Let the action return `observation` (default, already compact); narrow it with "
+        "`--observe-fields`, and add `--until \"<predicate>\"` when the next screen is slow",
+        "Post-action observation already has fresh ids. Extra analyzes double round trips. "
+        "Measured on a 5-scenario run: 37 taps became 73 `analyze` + 37 `wait` calls this way, "
+        "roughly 60% of wall-clock spent on avoidable round trips.",
+    ),
+    (
+        "Re-tap when an action reports `nothing changed` / `stale_risk`",
+        "Re-read (or pass `--until`), never re-tap",
+        "The settle gives up after ~1.1s, so a slow screen reports `unchanged` for a tap that "
+        "landed. Re-tapping means a second submit / second purchase — the one failure this "
+        "contract exists to prevent.",
     ),
     (
         "Force `--source vision` / `--with-ocr` / `--no-ocr` on every screen",

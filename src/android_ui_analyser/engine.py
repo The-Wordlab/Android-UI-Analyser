@@ -3347,7 +3347,10 @@ class Engine:
                 if settle:
                     settle_ms, total_ms = 45, 1100
                     if self.config.perf.settle_profiles and self._last_action_kind:
-                        settle_ms, total_ms = self._settle_profiles.budget(self._last_action_kind)
+                        settle_ms, total_ms = self._settle_profiles.budget(
+                            self._last_action_kind,
+                            total_max_ms=self.config.perf.settle_total_max_ms,
+                        )
                     ready = self._await_post_action_ready(
                         settle_ms=settle_ms, total_timeout_ms=total_ms
                     )
@@ -3362,7 +3365,8 @@ class Engine:
                         and ready.get("ms") is not None
                     ):
                         self._settle_profiles.observe(
-                            self._last_action_kind, min(float(ready["ms"]), 500.0)
+                            self._last_action_kind,
+                            min(float(ready["ms"]), self.config.perf.settle_learn_cap_ms),
                         )
                 obs = self.analyze(
                     source="hierarchy",
