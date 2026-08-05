@@ -257,6 +257,22 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "one. Still not network idle: this app never is.",
     ),
     (
+        "One agent, one emulator — leases are automatic",
+        "With several agents running at once, every one of them otherwise resolves to \"the "
+        "only/first device\" and they drive each other's screens; nothing errors, the results "
+        "are just wrong. So each command **claims a lease** on the device it uses and keeps "
+        "you on the same one (element ids, app state and the learned map are all per-device). "
+        "You need do nothing. Identify yourself with `--owner <agent>` or `$AUA_OWNER` if you "
+        "want readable output; otherwise it is derived and stable for your process. "
+        "Ask for what the device must support with `--needs root,play,proxy` and you get a "
+        "capable one or a refusal — never a device that silently cannot do it. "
+        "**Exit 9 (`device_leased`) means another agent holds it — that is routable, not "
+        "fatal:** drop `--serial` and one will be picked, or take a different emulator; the "
+        "hint lists which are free. `aua lease list` shows who holds what, `aua lease "
+        "release` hands one back early. Leases expire on their own, so a crashed agent blocks "
+        "nobody and there is nothing to clean up.",
+    ),
+    (
         "Stop the daemon when done",
         "`aua daemon stop` releases the warm connection.",
     ),

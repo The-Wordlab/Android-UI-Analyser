@@ -143,6 +143,98 @@ def test_derived_identity_skips_shells(monkeypatch):
     assert not any(ident.startswith(f"{sh}-") for sh in ("zsh", "bash", "sh"))
 
 
+# --------------------------------------------------------------------------- selection
+
+import pytest  # noqa: E402
+
+from android_ui_analyser.errors import DeviceLeasedError  # noqa: E402
+
+CANDIDATES = [
+    ("emulator-5554", {"root": True, "play": True, "proxy": True}),
+    ("emulator-5556", {"root": False, "play": True, "proxy": False}),
+    ("emulator-5558", {"root": False, "play": True, "proxy": False}),
+]
+
+
+def _choose(tmp_path, owner, explicit=None, needs=None):
+    return L.choose_device(
+        tmp_path, owner=owner, explicit=explicit, candidates=CANDIDATES, needs=needs
+    )
+
+
+def test_two_agents_get_different_devices(tmp_path):
+    """The whole point: Claude on search and Cursor on delete must not share a screen."""
+    a, _ = _choose(tmp_path, "claude")
+    b, _ = _choose(tmp_path, "cursor")
+    assert a != b
+
+
+def test_an_agent_stays_on_its_device(tmp_path):
+    """Element ids, app state and the learned screen map are all per-device."""
+    first, why1 = _choose(tmp_path, "claude")
+    second, why2 = _choose(tmp_path, "claude")
+    assert (first, why1) == (second, "assigned") or why1 == "assigned"
+    assert second == first
+    assert why2 == "sticky"
+
+
+def test_explicit_serial_on_a_held_device_is_refused_not_redirected(tmp_path):
+    """Silently moving a test pinned to a device's state would invalidate it invisibly."""
+    held, _ = _choose(tmp_path, "claude")
+    with pytest.raises(DeviceLeasedError) as err:
+        _choose(tmp_path, "cursor", explicit=held)
+    assert "claude" in err.value.message
+    assert err.value.hint and "free now" in err.value.hint
+    assert int(err.value.exit_code) == 9
+
+
+def test_leased_exit_code_is_distinct_from_device_error(tmp_path):
+    """A runner must tell "busy, try another" from "nothing is reachable"."""
+    from android_ui_analyser.errors import DeviceError, ExitCode
+
+    assert int(ExitCode.LEASED) == 9
+    assert int(DeviceError.exit_code) != int(DeviceLeasedError.exit_code)
+
+
+def test_needs_routes_to_a_capable_device(tmp_path):
+    serial, _ = _choose(tmp_path, "claude", needs=["proxy"])
+    assert serial == "emulator-5554", "only 5554 is rootable, so only it can proxy HTTPS"
+
+
+def test_explicit_device_that_cannot_meet_needs_is_refused(tmp_path):
+    with pytest.raises(DeviceLeasedError) as err:
+        _choose(tmp_path, "claude", explicit="emulator-5556", needs=["root"])
+    assert "root" in err.value.message
+
+
+def test_unknown_capability_is_unmet_not_ignored(tmp_path):
+    """Silently satisfying `--needs jellybean` hands back a device that cannot do it."""
+    assert L.unmet_needs({"root": True}, ["jellybean"]) == ["jellybean"]
+    with pytest.raises(DeviceLeasedError):
+        _choose(tmp_path, "claude", needs=["jellybean"])
+
+
+def test_exhaustion_names_who_holds_what(tmp_path):
+    """"No free device" is useless without saying which agent to go ask."""
+    for owner in ("a", "b", "c"):
+        _choose(tmp_path, owner)
+    with pytest.raises(DeviceLeasedError) as err:
+        _choose(tmp_path, "d")
+    for owner in ("a", "b", "c"):
+        assert owner in err.value.message
+
+
+def test_an_expired_holder_frees_the_device_for_selection(tmp_path):
+    """Anti-deadlock, at the selection layer: a crashed agent must not starve the pool."""
+    for owner in ("a", "b", "c"):
+        L.choose_device(
+            tmp_path, owner=owner, explicit=None, candidates=CANDIDATES, needs=None, ttl_s=1
+        )
+    time.sleep(1.1)
+    serial, why = _choose(tmp_path, "late")
+    assert why == "assigned" and serial in dict(CANDIDATES)
+
+
 def test_lease_file_is_readable_json(tmp_path):
     """Operators debug this by eye; it must not be an opaque blob."""
     L.acquire(tmp_path, "emulator-5554", owner="claude")

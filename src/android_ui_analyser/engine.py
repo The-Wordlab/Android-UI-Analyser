@@ -406,6 +406,12 @@ class Engine:
         # action, so a sequence of actions gets its before/after comparison at no extra cost.
         self._pre_action_state: dict[str, Any] | None = None
         self._last_activity: str | None = None
+        # Lease context: which agent this engine speaks for, what it needs, and what it got.
+        # Set by the CLI/MCP layer before the device is first touched.
+        self._lease_owner: str | None = None
+        self._lease_needs: list[str] | None = None
+        self._lease_serial: str | None = None
+        self._lease_owner_resolved: str | None = None
         from .perf import GateCache, HierarchyPrefetch, SettleProfiles
 
         self._prefetch = HierarchyPrefetch()
@@ -435,8 +441,70 @@ class Engine:
     def device(self) -> Device:
         """Lazily connect; doctor/devices/config work without ever touching this."""
         if self._device is None:
-            self._device = connect(self.config.device.serial)
+            self._device = connect(self._lease_device())
         return self._device
+
+    def _lease_device(self) -> str | None:
+        """The serial this engine may use, claiming a lease on it.
+
+        Without this, ``connect(None)`` takes "the only/first device" and two agents working
+        in parallel silently drive the same emulator — each mutating the screen the other is
+        reading. Nothing errors; the results are just wrong.
+
+        Returns the configured serial untouched when leasing is off, so a single-agent setup
+        and every existing script behave exactly as before.
+        """
+        cfg = self.config
+        explicit = cfg.device.serial
+        if not getattr(cfg.lease, "enabled", True):
+            return explicit
+
+        from . import leases
+
+        try:
+            infos = [d for d in list_devices() if d.state == "device"]
+        except Exception:
+            return explicit  # cannot enumerate; let connect() produce the real error
+        if not infos:
+            return explicit
+
+        needs = list(self._lease_needs or [])
+        # Capabilities cost adb round-trips, so only probe when someone actually asked.
+        candidates = [
+            (
+                d.serial,
+                leases.probe_capabilities(cfg.cache.dir, d.serial) if needs else {},
+            )
+            for d in infos
+            if d.serial
+        ]
+        owner = leases.resolve_owner(self._lease_owner)
+        serial, _why = leases.choose_device(
+            cfg.cache.dir,
+            owner=owner,
+            explicit=explicit,
+            candidates=candidates,
+            needs=needs,
+            ttl_s=int(getattr(cfg.lease, "ttl_s", leases.DEFAULT_TTL_S)),
+        )
+        self._lease_serial = serial
+        self._lease_owner_resolved = owner
+        return serial
+
+    def renew_lease(self) -> None:
+        """Heartbeat the current lease — called from inside long waits.
+
+        A single ``--until`` can block 90-120s. Without a heartbeat mid-wait, a shorter TTL
+        would expire while the holder is still actively driving the device.
+        """
+        serial = getattr(self, "_lease_serial", None)
+        owner = getattr(self, "_lease_owner_resolved", None)
+        if not serial or not owner:
+            return
+        from . import leases
+
+        with contextlib.suppress(Exception):
+            leases.renew(self.config.cache.dir, serial, owner=owner)
 
     def list_devices(self) -> list[DeviceInfo]:
         return list_devices()

@@ -256,3 +256,138 @@ def held_by(cache_dir: str | Path, owner: str) -> list[str]:
 
 def idle_seconds(entry: dict[str, Any]) -> float:
     return max(0.0, _now() - float(entry.get("last_activity") or 0))
+
+
+# --------------------------------------------------------------------------- capabilities
+
+# Capabilities are probed from the *device*, not from an AVD's config.ini: that works for
+# physical devices too, needs no serial→AVD mapping, and reports what is actually true rather
+# than what was configured. Probing costs a few adb round-trips, so it is cached — and only
+# runs at all when a caller passes --needs.
+_CAPS_TTL_S = 3600
+
+
+def _adb_shell(serial: str, command: str) -> str:
+    try:
+        out = subprocess.run(  # noqa: S603
+            ["adb", "-s", serial, "shell", command],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        return (out.stdout or "").strip()
+    except Exception:
+        return ""
+
+
+def probe_capabilities(cache_dir: str | Path, serial: str) -> dict[str, Any]:
+    """What *serial* can do: ``root``, ``play``, ``proxy``.
+
+    ``proxy`` means "an HTTPS-intercepting proxy can work here", which requires installing a
+    CA into the system trust store — so it tracks rootability rather than being independent.
+    """
+    path = Path(cache_dir).expanduser() / "caps" / f"{serial.replace(':', '_')}.json"
+    with contextlib.suppress(Exception):
+        cached = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(cached, dict) and (_now() - float(cached.get("probed") or 0)) < _CAPS_TTL_S:
+            return cached
+
+    tags = _adb_shell(serial, "getprop ro.build.tags")
+    debuggable = _adb_shell(serial, "getprop ro.debuggable")
+    vending = _adb_shell(serial, "pm list packages com.android.vending")
+    rootable = ("test-keys" in tags) or debuggable.strip() == "1"
+    caps: dict[str, Any] = {
+        "serial": serial,
+        "root": rootable,
+        "play": "com.android.vending" in vending,
+        "proxy": rootable,  # system-CA install is the gate
+        "probed": _now(),
+    }
+    with contextlib.suppress(Exception):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(caps, indent=2) + "\n", encoding="utf-8")
+    return caps
+
+
+# --------------------------------------------------------------------------- selection
+
+
+def unmet_needs(capabilities: dict[str, Any] | None, needs: list[str] | None) -> list[str]:
+    """Which of *needs* this device cannot satisfy.
+
+    Unknown capability names are reported as unmet rather than ignored: silently satisfying
+    ``--needs jellybean`` would hand back a device that does not do what was asked, and the
+    caller would only find out several steps later.
+    """
+    if not needs:
+        return []
+    caps = capabilities or {}
+    return [n for n in needs if not bool(caps.get(n))]
+
+
+def choose_device(
+    cache_dir: str | Path,
+    *,
+    owner: str,
+    explicit: str | None,
+    candidates: list[tuple[str, dict[str, Any]]],
+    needs: list[str] | None = None,
+    ttl_s: int = DEFAULT_TTL_S,
+) -> tuple[str, str]:
+    """Pick and claim a device. Returns ``(serial, why)``; raises when nothing is available.
+
+    ``candidates`` is ``[(serial, capabilities)]`` for *online* devices, in preference order.
+
+    Explicit intent is never silently redirected — asking for a specific emulator and being
+    moved to another one would quietly invalidate a test pinned to that device's state. So an
+    explicit ``--serial`` that is held fails loudly, while an unspecified one is free to route.
+    """
+    from .errors import DeviceLeasedError
+
+    known = dict(candidates)
+
+    def _free_report() -> str:
+        free = [s for s, caps in candidates if holder(cache_dir, s) in (None, owner)
+                and not unmet_needs(caps, needs)]
+        return ", ".join(free) if free else "none"
+
+    if explicit:
+        current = read_lease(cache_dir, explicit)
+        if current is not None and current.get("owner") != owner:
+            raise DeviceLeasedError(
+                f"{explicit} is leased by {current.get('owner')} "
+                f"(active {idle_seconds(current):.0f}s ago)",
+                hint=f"free now: {_free_report()} — omit --serial to auto-pick",
+            )
+        missing = unmet_needs(known.get(explicit), needs)
+        if missing:
+            raise DeviceLeasedError(
+                f"{explicit} does not satisfy: {', '.join(missing)}",
+                hint=f"free and matching: {_free_report()}",
+            )
+        acquire(cache_dir, explicit, owner=owner, ttl_s=ttl_s, needs=needs)
+        return explicit, "explicit"
+
+    # Sticky: keep an agent on the device it already knows, so its element ids, app state and
+    # learned screen map stay valid across calls.
+    for serial in held_by(cache_dir, owner):
+        if serial in known and not unmet_needs(known[serial], needs):
+            renew(cache_dir, serial, owner=owner)
+            return serial, "sticky"
+
+    for serial, caps in candidates:
+        if unmet_needs(caps, needs):
+            continue
+        if read_lease(cache_dir, serial) is not None:
+            continue
+        if acquire(cache_dir, serial, owner=owner, ttl_s=ttl_s, needs=needs):
+            return serial, "assigned"
+
+    busy = [
+        f"{e['serial']} ({e['owner']}, active {idle_seconds(e):.0f}s ago)"
+        for e in list_leases(cache_dir)
+        if e.get("serial") in known
+    ]
+    detail = "; ".join(busy) if busy else "no attached device matches"
+    raise DeviceLeasedError(
+        f"no free device{' matching ' + ','.join(needs) if needs else ''}: {detail}",
+        hint="wait, start another emulator (`aua emulator start`), or widen --needs",
+    )

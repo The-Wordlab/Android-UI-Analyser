@@ -41,6 +41,11 @@ class ExitCode(IntEnum):
     NOT_FOUND = 6
     AMBIGUOUS = 7
     ASSERTION = 8
+    # Distinct from DEVICE on purpose: "another agent is driving this one" is a *routable*
+    # condition — the caller should pick a different emulator and carry on — whereas a plain
+    # device error means nothing is reachable. A runner that cannot tell them apart either
+    # aborts a run that could have proceeded, or retries forever against a busy device.
+    LEASED = 9
 
 
 class AuaError(Exception):
@@ -75,6 +80,17 @@ class UsageError(AuaError):
 class DeviceError(AuaError):
     exit_code = ExitCode.DEVICE
     code = "device"
+
+
+class DeviceLeasedError(AuaError):
+    """The requested device is held by another agent, or nothing free matches ``--needs``.
+
+    Separate from :class:`DeviceError` so a caller can branch: this one says *try a different
+    emulator*, and the hint names which are free.
+    """
+
+    exit_code = ExitCode.LEASED
+    code = "device_leased"
 
 
 class ConfigError(AuaError):

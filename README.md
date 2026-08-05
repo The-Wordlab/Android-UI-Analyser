@@ -300,6 +300,28 @@ per-term results, so a slow backend is distinguishable from a hang. Term prefixe
 > slower screen reports "unchanged" for an action that landed. It cannot tell "no effect" from
 > "not yet" — re-tapping means a second submit. Re-read, or pass `--until`.
 
+### Several agents at once
+
+With more than one agent running, every one of them resolves to "the only/first device" and
+they end up driving each other's screens — nothing errors, the results are just wrong. So each
+command **claims a lease** on the device it uses, and keeps that agent on the same one
+(element IDs, app state and the learned screen map are all per-device):
+
+```bash
+export AUA_OWNER=claude-search       # optional; otherwise derived and stable per process
+aua tap 5                            # claims a free emulator, then sticks to it
+aua --needs root,proxy lease acquire # reserve one that can do HTTPS interception
+aua lease list                       # who holds what, and how long they have been idle
+```
+
+Asking for a device someone else holds fails with **exit 9 (`device_leased`)**, naming the
+holder and the free alternatives — that is routable, not fatal: drop `--serial` and one gets
+picked for you. `--needs` gets you a capable device or a refusal, never one that silently
+cannot do the job.
+
+Leases expire on their own, so a crashed agent blocks nobody and there is nothing to clean up.
+`--no-lease` opts out entirely for single-agent scripts.
+
 ---
 
 ## Use it from Claude Code (the `aua` skill)
@@ -1057,6 +1079,7 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 | `aua expect …` | Assert visibility / state (exit 8 on failure) |
 | `aua wait --for "<text>"` | Poll until text appears (`--idle` / `--for-stable` / `--changed`) |
 | `aua await '<predicate>'` | Wait on ANDed terms — `text:` `rid:` `desc:` `net:` `log:`, `!` = absent. Reports `await_outcome`: satisfied / screen-changed / timeout |
+| `aua lease list\|acquire\|release` | Who is driving which emulator (claimed automatically; `--needs root,play,proxy`) |
 | `aua fanout …` | Run a command across multiple `--serials` |
 | `aua tap <id>` / `aua click <id>` | Tap an element by ID (also `--rid`/`--text`/`--desc`) |
 | `aua double-tap <id>` | Double-tap an element |

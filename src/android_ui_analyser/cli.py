@@ -36,6 +36,7 @@ from .errors import (
     AuaError,
     ConfigError,
     DeviceError,
+    DeviceLeasedError,
     ExitCode,
     ExpectationFailed,
     SelectorAmbiguousError,
@@ -119,6 +120,9 @@ class GlobalOpts:
     until: str | None = None
     until_timeout: int = 30000
     until_poll: int = 500
+    owner: str | None = None
+    needs: str | None = None
+    no_lease: bool = False
     _cfg: Config | None = field(default=None, repr=False)
 
     def cli_overrides(self) -> dict[str, Any]:
@@ -133,6 +137,8 @@ class GlobalOpts:
             if self.with_image:
                 out["with_image"] = True
             overrides["output"] = out
+        if self.no_lease:
+            overrides["lease"] = {"enabled": False}
         if self.log_level is not None:
             overrides["log_level"] = self.log_level
         if self.timeout is not None:
@@ -155,7 +161,19 @@ class GlobalOpts:
         return self.load().output.format
 
     def engine(self) -> Engine:
-        return Engine(self.load())
+        eng = Engine(self.load())
+        # Hand the lease context over before anything touches the device: the claim happens
+        # on first access to `Engine.device`, and needs to know who is asking.
+        eng._lease_owner = self.owner
+        eng._lease_needs = _split_needs(self.needs)
+        return eng
+
+
+def _split_needs(raw: str | None) -> list[str]:
+    """``"root, play"`` → ``["root", "play"]``. Empty when unset, so nothing gets probed."""
+    if not raw:
+        return []
+    return [p.strip().lower() for p in str(raw).replace(" ", ",").split(",") if p.strip()]
 
 
 def _opts(ctx: typer.Context) -> GlobalOpts:
@@ -814,6 +832,22 @@ def main(
     until_poll: int = typer.Option(
         500, "--until-poll", metavar="MS", help="How often --until re-checks."
     ),
+    owner: str | None = typer.Option(
+        None,
+        "--owner",
+        metavar="AGENT",
+        help="Agent identity for the device lease (else $AUA_OWNER, else derived).",
+    ),
+    needs: str | None = typer.Option(
+        None,
+        "--needs",
+        metavar="root,play,proxy",
+        help="Capabilities the device must have; refuses rather than handing back a device "
+        "that cannot do them.",
+    ),
+    no_lease: bool = typer.Option(
+        False, "--no-lease", help="Skip device leasing entirely (single-agent / scripts)."
+    ),
     version: bool = typer.Option(
         False,
         "--version",
@@ -858,6 +892,9 @@ def main(
         until=until,
         until_timeout=until_timeout,
         until_poll=until_poll,
+        owner=owner,
+        needs=needs,
+        no_lease=no_lease,
     )
 
 
@@ -3089,6 +3126,94 @@ def config_path(ctx: typer.Context) -> None:
 
 
 # --------------------------------------------------------------------------- doctor
+
+
+@app.command(name="lease")
+def lease_cmd(
+    ctx: typer.Context,
+    action: str = typer.Argument("list", metavar="ACTION", help="list|acquire|renew|release"),
+    serial_arg: str | None = typer.Argument(None, metavar="[SERIAL]", help="Device to act on."),
+) -> None:
+    """Who is driving which emulator — and claim one for this agent.
+
+    Parallel agents otherwise all land on "the only/first device" and silently drive each
+    other's screens. A lease is claimed automatically by any command, so this is for
+    reserving one up front (with `--needs`), inspecting who holds what, or handing one back
+    early.
+
+        aua lease list
+        aua lease acquire --needs root,proxy
+        aua lease release emulator-5554
+
+    Leases expire on their own: a crashed agent blocks nobody, and there is nothing to clean
+    up. `--owner` (or `$AUA_OWNER`) names the agent; otherwise it is derived and stable for
+    the life of the calling process.
+    """
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        from . import leases as lease_mod
+
+        cache = engine.config.cache.dir
+        owner = lease_mod.resolve_owner(_opts(ctx).owner)
+        verb = (action or "list").strip().lower()
+
+        if verb == "list":
+            live = {e["serial"]: e for e in lease_mod.list_leases(cache)}
+            rows = []
+            for d in engine.list_devices():
+                held = live.get(d.serial)
+                rows.append(
+                    {
+                        "serial": d.serial,
+                        "model": d.model,
+                        "owner": held.get("owner") if held else None,
+                        "idle_s": round(lease_mod.idle_seconds(held), 1) if held else None,
+                        "app": held.get("app") if held else None,
+                        "needs": held.get("needs") if held else None,
+                        "mine": bool(held and held.get("owner") == owner),
+                    }
+                )
+            _echo_json({"owner": owner, "devices": rows}, fmt)
+            return
+
+        if verb == "acquire":
+            # Claiming *is* device resolution, so just resolve — same code path every command
+            # takes, which keeps `acquire` from drifting from the implicit claim.
+            serial = engine._lease_device()
+            _echo_json(
+                {"ok": True, "action": "lease-acquire", "serial": serial, "owner": owner}, fmt
+            )
+            return
+
+        target = serial_arg or engine.config.device.serial
+        if not target:
+            raise UsageError(
+                f"`lease {verb}` needs a serial",
+                hint="e.g. `aua lease release emulator-5554`, or pass --serial.",
+            )
+        if verb == "renew":
+            ok = lease_mod.renew(cache, target, owner=owner)
+            _echo_json({"ok": ok, "action": "lease-renew", "serial": target, "owner": owner}, fmt)
+            if not ok:
+                raise DeviceLeasedError(
+                    f"{target} is not leased by {owner}",
+                    hint="`aua lease list` shows the holder.",
+                )
+            return
+        if verb == "release":
+            ok = lease_mod.release(cache, target, owner=owner)
+            _echo_json({"ok": ok, "action": "lease-release", "serial": target}, fmt)
+            if not ok:
+                raise DeviceLeasedError(
+                    f"{target} is held by another agent",
+                    hint="An agent may only release its own lease.",
+                )
+            return
+        raise UsageError(
+            f"unknown lease action {verb!r}", hint="Use list, acquire, renew or release."
+        )
+
+    _run(ctx, go)
 
 
 @app.command()

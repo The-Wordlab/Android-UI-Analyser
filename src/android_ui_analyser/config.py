@@ -69,6 +69,17 @@ class PerfCfg(BaseModel):
     settle_learn_cap_ms: float = 500.0
 
 
+class LeaseCfg(BaseModel):
+    """Per-device leases, so parallel agents stop landing on the same emulator."""
+
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = True
+    # 900s deliberately: `--until` waits legitimately block 90-120s, and a TTL shorter than a
+    # single blocking call would hand the device to another agent while the holder is still
+    # driving it — strictly worse than no lease. Every command renews.
+    ttl_s: int = 900
+
+
 class GateCfg(BaseModel):
     model_config = ConfigDict(extra="forbid")
     min_elements: int = 3
@@ -365,6 +376,7 @@ class Config(BaseModel):
     capture: CaptureCfg = Field(default_factory=CaptureCfg)
     memory: MemoryCfg = Field(default_factory=MemoryCfg)
     perf: PerfCfg = Field(default_factory=PerfCfg)
+    lease: LeaseCfg = Field(default_factory=LeaseCfg)
     flags: FlagsCfg = Field(default_factory=FlagsCfg)
     profiles: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
