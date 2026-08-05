@@ -193,12 +193,15 @@ def _run(ctx: typer.Context, fn: Callable[[Engine, OutputFormat], T]) -> T:
 
 # --------------------------------------------------------------------------- selectors
 
-_BY_KINDS = {"id": "rid", "text": "text", "desc": "desc"}
+# `rid` is accepted alongside `id`: it is how the resource-id is spelled by the `--rid`
+# flag and the selector dict, so a runner reaches for `--by rid` and must not be refused
+# on one surface while `wait --by rid` quietly text-searched on another.
+_BY_KINDS = {"id": "rid", "rid": "rid", "text": "text", "desc": "desc"}
 
 # Shared selector options — the same six flags on every action, so `--rid` means one thing
 # everywhere. Typer copies an OptionInfo per command, so one instance is safe to reuse.
 _SEL_BY = typer.Option(
-    None, "--by", help="Read the positional as: id (resource-id) | text | desc."
+    None, "--by", help="Read the positional as: id/rid (resource-id) | text | desc."
 )
 _SEL_RID = typer.Option(None, "--rid", help="Target this resource-id (bare tail accepted).")
 _SEL_TEXT = typer.Option(None, "--text", help="Target this label (exact first, then substring).")
@@ -272,7 +275,7 @@ def _selector(
     if by is not None:
         kind = _BY_KINDS.get(by.lower())
         if kind is None:
-            raise UsageError(f"unknown --by '{by}'", hint="Choose one of: id, text, desc.")
+            raise UsageError(f"unknown --by '{by}'", hint="Choose one of: id (or rid), text, desc.")
         if not ident:
             raise UsageError(
                 f"--by {by} needs the value as the positional argument",
@@ -1710,7 +1713,7 @@ def wait(
         "--observe",
         help="Also return the (settled) screen with fresh ids — act on it without a re-analyze.",
     ),
-    by: str = typer.Option("text", "--by", help="--for match by: text (default) | id | desc."),
+    by: str = typer.Option("text", "--by", help="--for match by: text (default) | id/rid (resource-id) | desc."),
     absent: bool = typer.Option(
         False, "--absent", help="With --for: wait until it DISAPPEARS (loading spinners, dialogs)."
     ),

@@ -622,8 +622,20 @@ class Uiautomator2Device(Device):
             return {"resourceIdMatches": f".*{re.escape(text)}.*"}
         return {"resourceIdMatches": f".*:id/{re.escape(text)}$"}
 
+    # `rid` is the spelling of the resource-id everywhere else in the vocabulary — the
+    # `--rid` flag, the selector dict key, `_SELECTOR_FIELDS` — so `--by rid` is what a
+    # runner reaches for. It used to fall through to the text/desc default, meaning
+    # `wait --for containerLogin --by rid` searched the *label* for "containerLogin",
+    # found nothing and timed out on a screen where that container was plainly present.
+    _BY_FIELDS = {
+        "id": ["resourceId"],
+        "rid": ["resourceId"],
+        "desc": ["description"],
+        "text": ["text", "description"],
+    }
+
     def _fields_for(self, by: str) -> list[str]:
-        return {"id": ["resourceId"], "desc": ["description"]}.get(by, ["text", "description"])
+        return self._BY_FIELDS.get((by or "text").lower(), ["text", "description"])
 
     def find_text(
         self,
