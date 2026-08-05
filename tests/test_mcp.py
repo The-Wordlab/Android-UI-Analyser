@@ -61,22 +61,24 @@ def test_mcp_lists_core_tools() -> None:
 
     names = anyio.run(run)
     assert "analyze_screen" in names
-    assert "tap" in names
+    assert "tap_and_analyze" in names
+    assert "tap" not in names
     assert "has" in names
     # Full 1:1 surface (PRD §11) + Maestro/device parity tools.
     assert {
         "analyze_screen",
-        "tap",
-        "input",
-        "swipe",
-        "key",
-        "wait",
+        "tap_and_analyze",
+        "input_and_analyze",
+        "swipe_and_analyze",
+        "key_and_analyze",
+        "wait_and_analyze",
+        "wait_changed_and_analyze",
         "has",
         "screenshot",
         "inspect",
-        "long_press",
-        "scroll_to",
-        "wait_stable",
+        "long_press_and_analyze",
+        "scroll_to_and_analyze",
+        "wait_stable_and_analyze",
         "goto",
         "flow_run",
         "navigate",
@@ -85,17 +87,17 @@ def test_mcp_lists_core_tools() -> None:
         "emulator_status",
         "emulator_start",
         "emulator_stop",
-        "double_tap",
-        "clear",
-        "scroll",
-        "expect",
-        "hide_keyboard",
-        "open_link",
+        "double_tap_and_analyze",
+        "clear_and_analyze",
+        "scroll_and_analyze",
+        "expect_and_analyze",
+        "hide_keyboard_and_analyze",
+        "open_link_and_analyze",
         "clipboard_set",
         "clipboard_get",
-        "paste",
+        "paste_and_analyze",
         "copy_text",
-        "erase",
+        "erase_and_analyze",
         "location_set",
         "orientation_set",
         "orientation_get",
@@ -106,6 +108,9 @@ def test_mcp_lists_core_tools() -> None:
         "record_stop",
         "clock_set",
         "app",
+        "app_launch_and_analyze",
+        "a11y_scroll_and_analyze",
+        "flags_apply_and_analyze",
         "resolve",
         "configure",
         "map_audit",
@@ -137,6 +142,34 @@ def test_mcp_analyze_screen_returns_schema_valid_json() -> None:
     parsed = AnalyzeResult.model_validate(data)
     assert parsed.screen.source.value == "hierarchy"
     assert len(parsed.elements) == 3
+
+
+def test_mcp_observed_actions_are_named_and_force_analysis() -> None:
+    eng = _engine()
+    server = build_server(eng)
+
+    async def run() -> tuple[dict, dict, dict]:  # type: ignore[type-arg]
+        async with create_connected_server_and_client_session(server) as client:
+            listed = await client.list_tools()
+            tap_tool = next(t for t in listed.tools if t.name == "tap_and_analyze")
+            before = await client.call_tool("analyze_screen", {"source": "hierarchy"})
+            button = next(
+                e for e in json.loads(_first_text(before))["elements"] if e["text"] == "Continue"
+            )
+            tapped = await client.call_tool("tap_and_analyze", {"id": button["id"]})
+            old = await client.call_tool("tap", {"id": button["id"]})
+            return (
+                json.loads(_first_text(tapped)),
+                json.loads(_first_text(old)),
+                tap_tool.inputSchema,
+            )
+
+    tapped, old, schema = anyio.run(run)
+    assert tapped["observation_present"] is True
+    assert tapped["observation"]["elements"]
+    assert "observe" not in schema["properties"], "the renamed tool cannot contradict its name"
+    assert old["error"]["code"] == "usage"
+    assert "tap_and_analyze" in old["error"]["message"]
 
 
 def test_mcp_map_audit_and_reconcile_plan_roundtrip() -> None:
@@ -192,7 +225,7 @@ def test_mcp_long_press_drives_device() -> None:
     async def run() -> dict:
         async with create_connected_server_and_client_session(server) as client:
             await client.call_tool("analyze_screen", {"source": "hierarchy"})
-            result = await client.call_tool("long_press", {"id": 1})
+            result = await client.call_tool("long_press_and_analyze", {"id": 1})
             assert not result.isError, result
             return json.loads(_first_text(result))
 
@@ -206,7 +239,9 @@ def test_mcp_wait_stable_settles_on_static_screen() -> None:
 
     async def run() -> dict:
         async with create_connected_server_and_client_session(server) as client:
-            result = await client.call_tool("wait_stable", {"settle": 100, "interval": 10})
+            result = await client.call_tool(
+                "wait_stable_and_analyze", {"settle": 100, "interval": 10}
+            )
             assert not result.isError, result
             return json.loads(_first_text(result))
 
@@ -287,12 +322,13 @@ def test_mcp_hide_keyboard_drives_device() -> None:
 
     async def run() -> dict:
         async with create_connected_server_and_client_session(server) as client:
-            result = await client.call_tool("hide_keyboard", {"observe": False})
+            result = await client.call_tool("hide_keyboard_and_analyze", {})
             assert not result.isError, result
             return json.loads(_first_text(result))
 
     data = anyio.run(run)
     assert data["ok"] is True and data["action"] == "hide-keyboard"
+    assert data["observation_present"] is True
     assert ("hide_keyboard", ()) in eng.device.calls  # type: ignore[attr-defined]
 
 

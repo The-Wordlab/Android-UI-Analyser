@@ -265,7 +265,13 @@ class Projection:
         cleaned = spec.strip()
         if not cleaned or cleaned.lower() == "all":
             return None
-        parsed = cls.parse(fmt=fmt, fields=cleaned, nonempty=True, no_system=True)
+        parsed = cls.parse(
+            fmt=fmt,
+            fields=cleaned,
+            nonempty=True,
+            no_system=True,
+            no_ime=True,
+        )
         return replace(parsed, keep_actionable=True)
 
     @staticmethod

@@ -165,7 +165,8 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
     (
         "Drive by element ID",
         "`aua --format compact analyze` → a list of elements each with an integer `id` + bounds. "
-        'Act on the id: `aua tap <id>`, `aua input <id> "text"`, `aua swipe up`, `aua key back`. '
+        'Act on the id: `aua tap-and-analyze <id>`, `aua input-and-analyze <id> "text"`, '
+        '`aua swipe-and-analyze up`, `aua key-and-analyze back`. '
         'Use `aua has "<text>"` (exit 0/1) to branch cheaply without parsing JSON.',
     ),
     (
@@ -182,7 +183,7 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "`content_frame`) — inert, unlabelled boxes that wrap something; leaves and "
         "addressable containers stay. Filters of different "
         "kinds AND together, repeats of one kind OR together, and **ids are never renumbered** — "
-        "the id in a filtered row is the id `aua tap` takes. The same flags work on "
+        "the id in a filtered row is the id `aua tap-and-analyze` takes. The same flags work on "
         "`--format json|compact` when you want machine-readable output.",
     ),
     (
@@ -201,7 +202,7 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         'like "containerDetail" works) — and it finds non-interactive **container** ids that '
         "`analyze` prunes from the element list, so it's the reliable way to assert you "
         "reached a screen (Maestro-style `assertVisible: id:`). Guard an action with the same "
-        "selector you act with: `aua has --rid saveButton && aua tap --rid saveButton`. "
+        "selector you act with: `aua has --rid saveButton && aua tap-and-analyze --rid saveButton`. "
         "`wait --for <id> --by id` and "
         "`scroll-to <id> --by id` take `--by id` too. If a screen is WebView/Compose-backed "
         "and its result text isn't in the tree at all, read it with `analyze --source vision`.",
@@ -216,6 +217,11 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "`known_screen`, `stable_elements`, `action_diff_summary`, and `note`, so callers can "
         "branch on that single payload. `type → tap send` is two calls, not three, and `goto` "
         "returns the destination's `elements` too. "
+        "The MCP surface makes that contract visible in the method name: "
+        "`tap_and_analyze`, `input_and_analyze`, `scroll_and_analyze`, and the corresponding "
+        "names for every observed action. The ambiguous short MCP names are not exposed. On "
+        "the CLI, prefer the matching `tap-and-analyze` / `input-and-analyze` names; these "
+        "explicit forms force the observation even if `--no-observe` is supplied. "
         "Pass `--no-observe` to skip it on action-only sequences. Action `observation` waits "
         "for a pixel change + idle (animation-aware) before dumping the tree, and a screen "
         "whose content is still streaming in has to hold still for one confirming sample — so "
@@ -487,10 +493,10 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "`--allow-destructive`, `--save-flow <name>` — needs `planner.enabled`",
     ),
     (
-        "actions (tap/double-tap/input/swipe/scroll/scroll-to/key/hide-keyboard/…)",
-        "return the post-action screen inline by default (`observation`, fresh ids); "
-        "`--no-observe` to skip it. Prefer `hide-keyboard` over `key back` when the IME is "
-        "covering the tree",
+        "observed actions (`*_and_analyze` MCP / `*-and-analyze` CLI)",
+        "return the post-action screen inline (`observation`, fresh ids), and the explicit "
+        "names cannot disable that readback. Prefer `hide-keyboard-and-analyze` over "
+        "`key-and-analyze back` when the IME is covering the tree",
     ),
     (
         "logcat",
@@ -516,13 +522,14 @@ KEY_FLAGS: list[tuple[str, str]] = [
 AGENT_BEST_PRACTICES_PERCEPTION: list[tuple[str, str, str]] = [
     (
         "Drive with raw `adb` + screenshots + pixel taps",
-        "Drive with `aua` (`analyze` / `--rid` / `tap` / `input` / `has` / `wait`)",
+        "Drive with `aua` (`analyze` / `--rid` / `tap-and-analyze` / "
+        "`input-and-analyze` / `has` / `wait-and-analyze`)",
         "Pixels break on density/layout; ids and resource-ids do not. Discovery via screenshots "
         "is minutes; aua discovery is seconds.",
     ),
     (
         "`analyze` after every `tap`/`input` (or always `--no-observe` then re-analyze)",
-        "Let the action return `observation` (default, already compact); narrow it with "
+        "Use the explicit `*-and-analyze` action and consume its compact `observation`; narrow it with "
         "`--observe-fields`, and add `--until \"<predicate>\"` when the next screen is slow",
         "Post-action observation already has fresh ids. Extra analyzes double round trips. "
         "Measured on a 5-scenario run: 37 taps became 73 `analyze` + 37 `wait` calls this way, "
@@ -549,9 +556,9 @@ AGENT_BEST_PRACTICES_PERCEPTION: list[tuple[str, str, str]] = [
     ),
     (
         "Hand-roll `clipboard set` + `paste` (or IME keys) for typing speed",
-        'Just `aua input <id|--rid …> "…"` — prefers one-shot `set_text`, then clipboard paste '
+        'Just `aua input-and-analyze <id|--rid …> "…"` — prefers one-shot `set_text`, then clipboard paste '
         "(clipboard restored), then IME keys",
-        "`input` owns the fast path; agents should not reinvent it.",
+        "`input-and-analyze` owns the fast path and readback; agents should not reinvent it.",
     ),
     (
         "Use `key back` to dismiss the keyboard",
@@ -593,7 +600,7 @@ AGENT_BEST_PRACTICES_MEMORY: list[tuple[str, str, str]] = [
 AGENT_BEST_PRACTICES_SPEED: list[tuple[str, str, str]] = [
     (
         "`tap --rid x --no-observe` then `analyze`",
-        "`tap --rid x`",
+        "`tap-and-analyze --rid x`",
         "A tap RETURNS the resulting screen by default. The two-call habit doubled a lane's "
         "round trips: 66 taps followed by 52 analyzes.",
     ),
@@ -682,7 +689,7 @@ def render_markdown(*, brief: bool = False) -> str:
         p.append(
             "**Do:** act by id/`--rid`, use action `observation`, `wait --for` (never `sleep`), "
             "`about`/`goto`/`goto --from-here`/deeplinks/flows, leave OCR auto (map skips when "
-            "sure), `aua input` (built-in fast typing). "
+            "sure), `aua input-and-analyze` (built-in fast typing + readback). "
             "**Don't:** raw `adb`+screenshots+pixels, `analyze` after every tap, force "
             "`--with-ocr`/`--no-ocr`/vision on every screen, re-walk a goto after a mid-path hop, "
             "sleep between goto hops, `key back` to dismiss IME, hand-rolled clipboard paste. "
@@ -718,9 +725,9 @@ def render_markdown(*, brief: bool = False) -> str:
     p.append("aua --format tsv analyze         # READ the screen: one element per line, no noise")
     p.append("aua --format compact analyze     # same screen as JSON, when you need it machine-readable")
     p.append('aua ask "describe this screen top-to-bottom"  # screenshot + element graph via VLM')
-    p.append("aua tap 4                        # act by id (alias: click)")
+    p.append("aua tap-and-analyze 4            # act by id and receive the resulting screen")
     p.append(
-        'aua input 2 "hello@example.com"  # focus id 2 and type (--submit fires the IME action)'
+        'aua input-and-analyze 2 "hello@example.com"  # type and receive the resulting screen'
     )
     p.append(
         "aua --format tsv analyze         # only if you need a narrower/fresher filtered view"
@@ -884,13 +891,13 @@ def render_markdown(*, brief: bool = False) -> str:
     p.append("")
     p.append("# Starter journey: open → tap → input → tap → wait → has → tap. Every action")
     p.append("# returns the post-action screen, so each id below comes from the previous call:")
-    p.append('aua open "myapp://chat"                   # response carries observation + fresh ids')
-    p.append("aua tap 24                                # id from the open response")
-    p.append('aua input 25 "How much?"                  # id from the tap response')
-    p.append("aua tap 26                                # send-button id from that same response")
-    p.append('aua wait --for "How much?"                 # confirm the transition before acting again')
+    p.append('aua open-and-analyze "myapp://chat"       # response carries observation + fresh ids')
+    p.append("aua tap-and-analyze 24                    # id from the open response")
+    p.append('aua input-and-analyze 25 "How much?"      # id from the tap response')
+    p.append("aua tap-and-analyze 26                    # send-button id from that same response")
+    p.append('aua wait-and-analyze --for "How much?"     # confirm and receive the settled screen')
     p.append("aua has --rid resultBubble && echo present  # cheap branch, exit 0 present / 1 absent")
-    p.append("aua tap 31                                # continue on another read-back id")
+    p.append("aua tap-and-analyze 31                    # continue on another read-back id")
     p.append("```")
     p.append("")
     p.append("An action response carries its own state, so a follow-up `analyze` is usually")

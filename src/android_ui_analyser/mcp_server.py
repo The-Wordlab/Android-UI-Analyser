@@ -21,7 +21,7 @@ from mcp.server.lowlevel import Server
 
 from .config import load_config
 from .engine import Engine
-from .errors import AuaError
+from .errors import AuaError, UsageError
 
 SERVER_NAME = "android-ui-analyser"
 
@@ -67,6 +67,52 @@ _SELECTOR_PROPS: dict[str, Any] = {
     "first": {"type": "boolean", "default": False, "description": "Take the first match."},
 }
 
+# These are the public agent-facing names. The shorter verbs used to advertise an optional
+# ``observe`` switch even though their default response already analyzed the resulting screen.
+# Models repeatedly ignored that response and called ``analyze_screen`` anyway. Make the
+# behavior impossible to miss at tool-selection time, and keep the terse names internal only.
+_ANALYZED_TOOL_NAMES: dict[str, str] = {
+    "tap": "tap_and_analyze",
+    "input": "input_and_analyze",
+    "swipe": "swipe_and_analyze",
+    "key": "key_and_analyze",
+    "wait": "wait_and_analyze",
+    "wait_changed": "wait_changed_and_analyze",
+    "long_press": "long_press_and_analyze",
+    "scroll_to": "scroll_to_and_analyze",
+    "wait_stable": "wait_stable_and_analyze",
+    "double_tap": "double_tap_and_analyze",
+    "clear": "clear_and_analyze",
+    "scroll": "scroll_and_analyze",
+    "expect": "expect_and_analyze",
+    "hide_keyboard": "hide_keyboard_and_analyze",
+    "open_link": "open_link_and_analyze",
+    "paste": "paste_and_analyze",
+    "erase": "erase_and_analyze",
+    "a11y_scroll": "a11y_scroll_and_analyze",
+    "flags_apply": "flags_apply_and_analyze",
+}
+_ANALYZED_TOOL_BASES = {public: base for base, public in _ANALYZED_TOOL_NAMES.items()}
+
+
+def _as_analyzed_tool(tool: types.Tool) -> types.Tool:
+    """Rename an observed tool and remove the now-contradictory ``observe`` input."""
+    public_name = _ANALYZED_TOOL_NAMES.get(tool.name)
+    if public_name is None:
+        return tool
+    schema = dict(tool.inputSchema)
+    properties = dict(schema.get("properties") or {})
+    properties.pop("observe", None)
+    schema["properties"] = properties
+    return types.Tool(
+        name=public_name,
+        description=(
+            f"{tool.description or 'Perform the action.'} Returns the analyzed resulting screen "
+            "in `observation`; use its fresh ids directly and do not call analyze_screen next."
+        ),
+        inputSchema=schema,
+    )
+
 
 # --------------------------------------------------------------------------- tool specs
 
@@ -75,7 +121,7 @@ def _tool_definitions() -> list[types.Tool]:
     """The MCP tool catalogue (input schemas only; output is JSON text content)."""
     match_enum = ["exact", "contains", "regex"]
     source_enum = ["auto", "hierarchy", "vision"]
-    return [
+    tools = [
         types.Tool(
             name="analyze_screen",
             description="Analyze the current screen and return Set-of-Marks JSON "
@@ -193,6 +239,7 @@ def _tool_definitions() -> list[types.Tool]:
                     "for_": {"type": "string"},
                     "idle": {"type": "boolean", "default": False},
                     "timeout": {"type": "integer", "default": 5000},
+                    "observe": _OBSERVE_PROP,
                 },
                 "additionalProperties": False,
             },
@@ -281,6 +328,7 @@ def _tool_definitions() -> list[types.Tool]:
                     "interval": {"type": "integer", "default": 200},
                     "settle": {"type": "integer", "default": 600},
                     "timeout": {"type": "integer", "default": 30000},
+                    "observe": _OBSERVE_PROP,
                 },
                 "additionalProperties": False,
             },
@@ -794,6 +842,7 @@ def _tool_definitions() -> list[types.Tool]:
                     "package": {"type": "string"},
                     "restart": {"type": "boolean", "default": True},
                     "verify": {"type": "boolean", "default": True},
+                    "observe": _OBSERVE_PROP,
                 },
                 "required": ["path"],
                 "additionalProperties": False,
@@ -956,7 +1005,7 @@ def _tool_definitions() -> list[types.Tool]:
         types.Tool(
             name="app",
             description="Inspect or control the foreground app "
-            "(foreground|launch|stop|kill|clear|grant|current).",
+            "(foreground|stop|kill|clear|grant|current). Use app_launch_and_analyze to launch.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -966,6 +1015,27 @@ def _tool_definitions() -> list[types.Tool]:
                     "clear_state": {"type": "boolean", "default": False},
                 },
                 "required": ["action"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="app_launch_and_analyze",
+            description="Launch an app and return the analyzed resulting screen in `observation`; "
+            "use its fresh ids directly and do not call analyze_screen next.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "package": {"type": "string"},
+                    "activity": {"type": "string"},
+                    "clear_state": {"type": "boolean", "default": False},
+                    "confirmed": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Required when clear_state=true because it wipes app data.",
+                    },
+                    "with_image": _WITH_IMAGE_PROP,
+                },
+                "required": ["package"],
                 "additionalProperties": False,
             },
         ),
@@ -1000,6 +1070,7 @@ def _tool_definitions() -> list[types.Tool]:
             },
         ),
     ]
+    return [_as_analyzed_tool(tool) for tool in tools]
 
 
 # --------------------------------------------------------------------------- dispatch
@@ -1007,6 +1078,16 @@ def _tool_definitions() -> list[types.Tool]:
 
 def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
     """Call the engine method for ``name`` and return a JSON-serialisable payload."""
+    internal_name = _ANALYZED_TOOL_BASES.get(name)
+    if internal_name is not None:
+        name = internal_name
+        args = {**args, "observe": True}
+    elif name in _ANALYZED_TOOL_NAMES:
+        raise UsageError(
+            f"MCP tool '{name}' was renamed to '{_ANALYZED_TOOL_NAMES[name]}'",
+            hint="The renamed tool already returns the analyzed resulting screen; use its "
+            "`observation` and do not call `analyze_screen` afterward.",
+        )
     img = _with_image(engine, args)
 
     if name == "analyze_screen":
@@ -1073,6 +1154,7 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 for_=args.get("for_"),
                 idle=args.get("idle", False),
                 timeout_ms=args.get("timeout", 5000),
+                observe=args.get("observe", True),
             )
         )
     if name == "wait_changed":
@@ -1080,7 +1162,7 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
             engine.wait_changed(
                 timeout_ms=int(args.get("timeout_ms", 15000)),
                 interval_ms=args.get("interval_ms"),
-                observe=args.get("observe", False),
+                observe=args.get("observe", True),
             )
         )
     if name == "screenshot":
@@ -1113,6 +1195,7 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 interval_ms=int(args.get("interval", 200)),
                 settle_ms=int(args.get("settle", 600)),
                 timeout_ms=int(args.get("timeout", 30000)),
+                observe=args.get("observe", True),
             )
         )
     if name == "goto":
@@ -1354,7 +1437,7 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
             engine.flags_apply(
                 args["path"],
                 package=args.get("package"),
-                observe=True,
+                observe=args.get("observe", True),
                 restart=args.get("restart", True),
                 verify=args.get("verify", True),
             )
@@ -1467,12 +1550,30 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
     if name == "mock_replay":
         return _dump(engine.mock_replay(args["name"]))
     if name == "app":
+        if str(args["action"]).lower() == "launch":
+            raise UsageError(
+                "MCP app launch is named 'app_launch_and_analyze'",
+                hint="That tool returns the launched screen in `observation`; use its fresh ids "
+                "without calling `analyze_screen` afterward.",
+            )
         return _dump(
             engine.app(
                 args["action"],
                 package=args.get("package"),
                 activity=args.get("activity"),
                 clear_state=args.get("clear_state", False),
+            )
+        )
+    if name == "app_launch_and_analyze":
+        return _dump(
+            engine.app(
+                "launch",
+                package=args["package"],
+                activity=args.get("activity"),
+                clear_state=args.get("clear_state", False),
+                confirmed=args.get("confirmed", False),
+                observe=True,
+                with_image=img,
             )
         )
     if name == "resolve":

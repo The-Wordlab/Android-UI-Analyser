@@ -27,16 +27,18 @@ def _tapped(**kw) -> ActionResult:
     return ActionResult(**base)
 
 
-def _awaited(outcome: str) -> ActionResult:
-    return ActionResult(
-        ok=outcome == "satisfied",
-        action="await",
-        await_outcome=outcome,
-        await_terms=[{"term": "rid:introCard", "present": outcome == "satisfied"}],
-        elapsed_ms=2381,
-        observation_present=True,
-        known_screen="home",
-    )
+def _awaited(outcome: str, **kw) -> ActionResult:  # type: ignore[no-untyped-def]
+    base = {
+        "ok": outcome == "satisfied",
+        "action": "await",
+        "await_outcome": outcome,
+        "await_terms": [{"term": "rid:introCard", "present": outcome == "satisfied"}],
+        "elapsed_ms": 2381,
+        "observation_present": True,
+        "known_screen": "home",
+    }
+    base.update(kw)
+    return ActionResult(**base)
 
 
 def _run(monkeypatch, result, until, awaited=None):
@@ -69,9 +71,38 @@ def test_until_adopts_the_awaited_outcome_and_budget(monkeypatch) -> None:
 
 def test_satisfied_clears_the_settle_derived_stale_caveat(monkeypatch) -> None:
     """``stale_risk`` describes a screen we have since re-read on evidence."""
-    out, _ = _run(monkeypatch, _tapped(), ("rid:introCard", 30000, 500), _awaited("satisfied"))
+    out, _ = _run(
+        monkeypatch,
+        _tapped(stale_risk="the early read may be stale"),
+        ("rid:introCard", 30000, 500),
+        _awaited("satisfied"),
+    )
     assert out.detail is not None
     assert "stale_risk" not in out.detail
+    assert out.stale_risk is None
+
+
+def test_until_adopts_guidance_from_the_awaited_screen(monkeypatch) -> None:
+    """Top-level guidance must describe the observation adopted after ``--until``."""
+    out, _ = _run(
+        monkeypatch,
+        _tapped(
+            known_screen="search",
+            next_actions=[{"id": 3, "label": "Old search field"}],
+            routes=["old route"],
+        ),
+        ("rid:introCard", 30000, 500),
+        _awaited(
+            "satisfied",
+            known_screen="home",
+            next_actions=[{"id": 8, "label": "Continue"}],
+            routes=["tap Continue -> details"],
+        ),
+    )
+
+    assert out.known_screen == "home"
+    assert out.next_actions == [{"id": 8, "label": "Continue"}]
+    assert out.routes == ["tap Continue -> details"]
 
 
 def test_timeout_keeps_the_caveat_and_reports_which_term_failed(monkeypatch) -> None:

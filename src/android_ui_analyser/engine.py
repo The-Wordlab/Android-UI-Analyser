@@ -5849,7 +5849,26 @@ class Engine:
                 verified=fully_verified,
             )
             payload["context_id"] = self._memory.load_session(self.device.serial).active_context_id
-        self._observe(ActionResult(ok=True, action="flags-set"), observe, with_image)
+        observed = self._observe(
+            ActionResult(ok=True, action="flags-set"), observe, with_image
+        ).model_dump(mode="json", exclude_none=True)
+        # Keep the verification payload's own ok/detail, but expose the same folded-screen
+        # contract as every other observed action. Previously this analysis was performed and
+        # then discarded, so callers paid for it and still had to call ``analyze`` themselves.
+        for key in (
+            "observation",
+            "observation_present",
+            "known_screen",
+            "stable_elements",
+            "action_diff_summary",
+            "next_actions",
+            "routes",
+            "note",
+            "stale_risk",
+            "settle",
+        ):
+            if key in observed:
+                payload[key] = observed[key]
         return payload
 
     def _foreground_activity(self, package: str) -> str | None:

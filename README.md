@@ -802,13 +802,17 @@ screencap per tile (grid).
 
 `aua mcp` runs an MCP server over stdio, exposing the same tools as the CLI. It is a thin adapter over the engine — no separate perception logic.
 
-Tools include (non-exhaustive): `analyze_screen`, `tap`, `double_tap`, `long_press`, `input`,
-`clear`, `swipe`, `scroll`, `scroll_to`, `key`, `wait`, `wait_stable`, `wait_changed`, `has`,
+Tools include (non-exhaustive): `analyze_screen`, `tap_and_analyze`,
+`double_tap_and_analyze`, `long_press_and_analyze`, `input_and_analyze`,
+`clear_and_analyze`, `swipe_and_analyze`, `scroll_and_analyze`,
+`scroll_to_and_analyze`, `key_and_analyze`, `wait_and_analyze`,
+`wait_stable_and_analyze`, `wait_changed_and_analyze`, `has`,
 `expect`, `screenshot`, `inspect`, `goto`, `flow_run`, `navigate`, `list_devices`,
 `emulator_list` / `emulator_status` / `emulator_start` / `emulator_stop` (stop before exit —
-MCP also auto-stops emulators it started when the server process ends), `open_link`,
+MCP also auto-stops emulators it started when the server process ends), `open_link_and_analyze`,
 `app`, `resolve`, clipboard/paste/copy/erase, location/orientation/airplane/media/record/clock,
-`capture_*`, `dev_profile`, `a11y_scroll`, `flags_apply`, map/`reconcile_*`/`knowledge_*`,
+`capture_*`, `dev_profile`, `a11y_scroll_and_analyze`, `flags_apply_and_analyze`,
+map/`reconcile_*`/`knowledge_*`,
 `proxy_start` / `proxy_stop` / `mock_replay`, `configure`.
 
 Example MCP client config (Claude Desktop / `claude_desktop_config.json`):

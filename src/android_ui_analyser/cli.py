@@ -92,6 +92,20 @@ class AnnotateCommand(TyperCommand):
                 param.nargs = 1
 
 
+class AnalyzeCommand(AnnotateCommand):
+    """An explicit action-and-read command whose post-action analysis cannot be disabled."""
+
+    def invoke(self, ctx: click.Context) -> Any:
+        # The explicit name is a contract, not a default. Keep the existing callback signatures
+        # for one implementation path, but do not let a contradictory legacy flag turn
+        # ``tap-and-analyze`` back into the ambiguous action-only response it exists to prevent.
+        if "observe" in ctx.params:
+            ctx.params["observe"] = True
+        if "no_observe" in ctx.params:
+            ctx.params["no_observe"] = False
+        return super().invoke(ctx)
+
+
 def _annotate_arg(value: str | None) -> bool | str | None:
     """Translate the raw ``--annotate`` value into the engine's ``annotate`` arg."""
     if value is None:
@@ -424,9 +438,19 @@ def _project_observation(result: Any, fmt: OutputFormat) -> dict[str, Any] | Non
     # system-bar node the view just dropped — the status bar alone accounted for a third of it.
     kept = {e.get("id") for e in projected.get("elements", []) if isinstance(e, dict)}
     stable = data.get("stable_elements")
-    if kept and isinstance(stable, list):
+    if isinstance(stable, list):
         data["stable_elements"] = [
             s for s in stable if isinstance(s, dict) and s.get("id") in kept
+        ]
+    # ``next_actions`` names ids from that same tree. Leaving it unprojected tells the caller to
+    # tap controls that are absent from the response it was given — exactly the kind of mismatch
+    # that makes an agent distrust the folded observation and call ``analyze`` again.
+    next_actions = data.get("next_actions")
+    if isinstance(next_actions, list):
+        data["next_actions"] = [
+            action
+            for action in next_actions
+            if isinstance(action, dict) and action.get("id") in kept
         ]
     return data
 
@@ -477,13 +501,18 @@ def _await_until(result: Any) -> Any:
         "known_screen",
         "stable_elements",
         "action_diff_summary",
+        "next_actions",
+        "routes",
+        "note",
     ):
-        value = getattr(awaited, attr, None)
-        if value is not None:
-            with contextlib.suppress(Exception):
-                setattr(result, attr, value)
+        # These all describe the adopted screen. Assign even ``None`` so guidance from the
+        # action's early readback cannot survive when the evidence-based re-read has none.
+        with contextlib.suppress(Exception):
+            setattr(result, attr, getattr(awaited, attr, None))
     # The action's own settle-derived caveat described a screen we have since re-read.
     if getattr(result, "await_outcome", None) == "satisfied":
+        with contextlib.suppress(Exception):
+            result.stale_risk = None
         detail = getattr(result, "detail", None)
         if isinstance(detail, str) and "stale_risk" in detail:
             cleaned = detail.replace("stale_risk", "").strip()
@@ -1170,7 +1199,8 @@ def has(
 # --------------------------------------------------------------------------- actions
 
 
-@app.command(cls=AnnotateCommand)
+@app.command(name="tap-and-analyze", cls=AnalyzeCommand)
+@app.command(cls=AnnotateCommand, hidden=True)
 def tap(
     ctx: typer.Context,
     ident: str | None = typer.Argument(
@@ -1255,7 +1285,8 @@ def tap(
     _run(ctx, go)
 
 
-@app.command(name="await")
+@app.command(name="await-and-analyze", cls=AnalyzeCommand)
+@app.command(name="await", hidden=True)
 def await_cmd(
     ctx: typer.Context,
     predicate: str = typer.Argument(
@@ -1360,7 +1391,8 @@ def target_cmd(
     _run(ctx, go)
 
 
-@app.command(name="click", cls=AnnotateCommand)
+@app.command(name="click-and-analyze", cls=AnalyzeCommand)
+@app.command(name="click", cls=AnnotateCommand, hidden=True)
 def click_cmd(
     ctx: typer.Context,
     ident: str | None = typer.Argument(
@@ -1404,7 +1436,8 @@ def click_cmd(
     _run(ctx, go)
 
 
-@app.command(name="long-press", cls=AnnotateCommand)
+@app.command(name="long-press-and-analyze", cls=AnalyzeCommand)
+@app.command(name="long-press", cls=AnnotateCommand, hidden=True)
 def long_press(
     ctx: typer.Context,
     ident: str | None = typer.Argument(
@@ -1450,7 +1483,8 @@ def long_press(
     _run(ctx, go)
 
 
-@app.command(name="double-tap", cls=AnnotateCommand)
+@app.command(name="double-tap-and-analyze", cls=AnalyzeCommand)
+@app.command(name="double-tap", cls=AnnotateCommand, hidden=True)
 def double_tap(
     ctx: typer.Context,
     ident: str | None = typer.Argument(
@@ -1494,7 +1528,8 @@ def double_tap(
     _run(ctx, go)
 
 
-@app.command(name="input", cls=AnnotateCommand)
+@app.command(name="input-and-analyze", cls=AnalyzeCommand)
+@app.command(name="input", cls=AnnotateCommand, hidden=True)
 def input_cmd(
     ctx: typer.Context,
     first_arg: str | None = typer.Argument(
@@ -1565,7 +1600,8 @@ def input_cmd(
     _run(ctx, go)
 
 
-@app.command(cls=AnnotateCommand)
+@app.command(name="clear-and-analyze", cls=AnalyzeCommand)
+@app.command(cls=AnnotateCommand, hidden=True)
 def clear(
     ctx: typer.Context,
     ident: str | None = typer.Argument(
@@ -1609,7 +1645,8 @@ def clear(
     _run(ctx, go)
 
 
-@app.command(cls=AnnotateCommand)
+@app.command(name="swipe-and-analyze", cls=AnalyzeCommand)
+@app.command(cls=AnnotateCommand, hidden=True)
 def swipe(
     ctx: typer.Context,
     direction_arg: str | None = typer.Argument(
@@ -1676,7 +1713,8 @@ def swipe(
     _run(ctx, go)
 
 
-@app.command(cls=AnnotateCommand)
+@app.command(name="scroll-and-analyze", cls=AnalyzeCommand)
+@app.command(cls=AnnotateCommand, hidden=True)
 def scroll(
     ctx: typer.Context,
     direction_arg: str | None = typer.Argument(
@@ -1741,7 +1779,8 @@ def scroll(
     _run(ctx, go)
 
 
-@app.command(name="scroll-to", cls=AnnotateCommand)
+@app.command(name="scroll-to-and-analyze", cls=AnalyzeCommand)
+@app.command(name="scroll-to", cls=AnnotateCommand, hidden=True)
 def scroll_to(
     ctx: typer.Context,
     text: str | None = typer.Argument(
@@ -1810,7 +1849,8 @@ def scroll_to(
     _run(ctx, go)
 
 
-@app.command()
+@app.command(name="expect-and-analyze", cls=AnalyzeCommand)
+@app.command(hidden=True)
 def expect(
     ctx: typer.Context,
     rid: str | None = typer.Option(None, "--rid", help="Assert about this resource-id."),
@@ -1873,7 +1913,8 @@ def expect(
     _run(ctx, go)
 
 
-@app.command(cls=AnnotateCommand)
+@app.command(name="key-and-analyze", cls=AnalyzeCommand)
+@app.command(cls=AnnotateCommand, hidden=True)
 def key(
     ctx: typer.Context,
     name: str = typer.Argument(..., help="back|home|enter|recents|KEYCODE_*."),
@@ -1907,7 +1948,8 @@ def key(
     _run(ctx, go)
 
 
-@app.command(name="hide-keyboard", cls=AnnotateCommand)
+@app.command(name="hide-keyboard-and-analyze", cls=AnalyzeCommand)
+@app.command(name="hide-keyboard", cls=AnnotateCommand, hidden=True)
 def hide_keyboard(
     ctx: typer.Context,
     observe: bool = typer.Option(
@@ -1939,7 +1981,8 @@ def hide_keyboard(
     _run(ctx, go)
 
 
-@app.command(cls=AnnotateCommand)
+@app.command(name="open-and-analyze", cls=AnalyzeCommand)
+@app.command(cls=AnnotateCommand, hidden=True)
 def open(  # noqa: A001 - matches the user-facing verb `aua open`
     ctx: typer.Context,
     uri: str = typer.Argument(..., help="Deeplink URI, e.g. 'myapp://set-flags?flag=value'."),
@@ -2017,7 +2060,8 @@ def resolve(
     _run(ctx, go)
 
 
-@app.command()
+@app.command(name="wait-and-analyze", cls=AnalyzeCommand)
+@app.command(hidden=True)
 def wait(
     ctx: typer.Context,
     for_: str | None = typer.Option(None, "--for", help="Text/resource-id to wait for."),
@@ -2611,7 +2655,7 @@ def app_cmd(
     action: str = typer.Argument(
         ...,
         metavar="ACTION",
-        help="foreground|launch|stop|kill|clear|grant|current.",
+        help="foreground|launch-and-analyze|launch|stop|kill|clear|grant|current.",
     ),
     package: str | None = typer.Argument(
         None, metavar="[PKG]", help="Package for launch/stop/kill/clear/grant."
@@ -2654,6 +2698,9 @@ def app_cmd(
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
         a = action.lower()
+        explicit_analyze = a in ("launch-and-analyze", "launch_and_analyze")
+        if explicit_analyze:
+            a = "launch"
         wiping = a in ("clear", "clear-state", "clear_state") or (
             a == "launch" and clear_state
         )
@@ -2666,12 +2713,12 @@ def app_cmd(
             )
         _emit(
             engine.app(
-                action,
+                a,
                 package=package,
                 activity=activity,
                 clear_state=clear_state,
                 confirmed=yes,
-                observe=observe,
+                observe=True if explicit_analyze else observe,
             ),
             fmt,
         )
@@ -2699,7 +2746,8 @@ def clipboard_get(ctx: typer.Context) -> None:
     _run(ctx, go)
 
 
-@app.command(cls=AnnotateCommand)
+@app.command(name="paste-and-analyze", cls=AnalyzeCommand)
+@app.command(cls=AnnotateCommand, hidden=True)
 def paste(
     ctx: typer.Context,
     observe: bool = typer.Option(True, "--observe/--no-observe"),
@@ -2738,7 +2786,8 @@ def copy(
     _run(ctx, go)
 
 
-@app.command(cls=AnnotateCommand)
+@app.command(name="erase-and-analyze", cls=AnalyzeCommand)
+@app.command(cls=AnnotateCommand, hidden=True)
 def erase(
     ctx: typer.Context,
     ident: str | None = typer.Argument(None, metavar="[ID]"),
@@ -4473,7 +4522,8 @@ a11y_app = typer.Typer(
 app.add_typer(a11y_app, name="a11y")
 
 
-@a11y_app.command("scroll")
+@a11y_app.command("scroll-and-analyze", cls=AnalyzeCommand)
+@a11y_app.command("scroll", hidden=True)
 def a11y_scroll_cmd(
     ctx: typer.Context,
     ident: str | None = typer.Argument(None, help="Element id from the last analyze."),
@@ -4509,7 +4559,8 @@ def a11y_scroll_cmd(
     _run(ctx, go)
 
 
-@a11y_app.command("action")
+@a11y_app.command("action-and-analyze", cls=AnalyzeCommand)
+@a11y_app.command("action", hidden=True)
 def a11y_action_cmd(
     ctx: typer.Context,
     ident: str | None = typer.Argument(None, help="Element id from the last analyze."),
@@ -4589,7 +4640,8 @@ def _exit_unless_flags_ok(result: dict[str, Any]) -> None:
     )
 
 
-@flags_app.command("set")
+@flags_app.command("set-and-analyze", cls=AnalyzeCommand)
+@flags_app.command("set", hidden=True)
 def flags_set_cmd(
     ctx: typer.Context,
     package: str = typer.Argument(..., help="App package id."),
@@ -4624,7 +4676,8 @@ def flags_set_cmd(
     _run(ctx, go)
 
 
-@flags_app.command("apply")
+@flags_app.command("apply-and-analyze", cls=AnalyzeCommand)
+@flags_app.command("apply", hidden=True)
 def flags_apply_cmd(
     ctx: typer.Context,
     path: str = typer.Argument(..., help="YAML file: optional app: + flags: mapping."),

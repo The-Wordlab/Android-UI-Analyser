@@ -68,6 +68,20 @@ def test_help_exits_zero() -> None:
     assert result.exit_code == 0
     assert "Usage" in result.stdout
     assert "analyze" in result.stdout
+    assert "tap-and-analyze" in result.stdout
+
+
+def test_explicit_action_name_cannot_disable_its_analysis(patched_device: FakeDevice) -> None:
+    result = runner.invoke(
+        app,
+        ["--no-cache", "tap-and-analyze", "--rid", "continue_btn", "--no-observe"],
+    )
+
+    assert result.exit_code == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["action"] == "tap"
+    assert data["observation_present"] is True
+    assert data["observation"]["elements"]
 
 
 def test_version_prints_and_exits_zero() -> None:

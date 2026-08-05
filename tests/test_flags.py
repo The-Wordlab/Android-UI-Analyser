@@ -250,6 +250,22 @@ def test_flags_set_is_ok_when_every_key_lands(tmp_path: Path) -> None:
     assert result["ignored"] == []
 
 
+def test_flags_set_returns_the_analysis_it_performed(tmp_path: Path) -> None:
+    device = device_with(
+        {"hub": "a"},
+        hierarchy_xml=(
+            '<hierarchy rotation="0"><node class="android.widget.TextView" '
+            'text="Apps" bounds="[0,0][400,100]"/></hierarchy>'
+        ),
+    )
+    engine = make_flags_engine(tmp_path, device)
+
+    result = engine.flags_set(PKG, ["hub=a"], observe=True)
+
+    assert result["observation_present"] is True
+    assert result["observation"]["elements"][0]["text"] == "Apps"
+
+
 def test_flags_set_treats_a_different_stored_value_as_not_applied(tmp_path: Path) -> None:
     device = device_with({"hub": "control"})
     engine = make_flags_engine(tmp_path, device)

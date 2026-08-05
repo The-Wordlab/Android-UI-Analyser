@@ -59,6 +59,16 @@ def _observation() -> AnalyzeResult:
                 clickable=True,
                 window="app",
             ),
+            Element(
+                id=3,
+                type="Button",
+                bounds=[0, 2200, 1080, 2400],
+                center=[540, 2300],
+                text="Search",
+                resource_id="com.google.android.inputmethod.latin:id/key_search",
+                clickable=True,
+                window="ime",
+            ),
         ],
         meta=Meta(duration_ms=12, tier_used="hierarchy", path="hierarchy"),
     )
@@ -76,6 +86,12 @@ def _action_result() -> ActionResult:
             {"id": 0, "stable_key": "rid:status_bar"},
             {"id": 1, "stable_key": "rid:clock"},
             {"id": 2, "stable_key": "rid:buttonContinue"},
+            {"id": 3, "stable_key": "rid:key_search"},
+        ],
+        next_actions=[
+            {"id": 0, "label": "Status bar"},
+            {"id": 2, "label": "Continue"},
+            {"id": 3, "label": "Keyboard search"},
         ],
     )
 
@@ -112,6 +128,13 @@ def test_stable_elements_follow_the_same_view(monkeypatch) -> None:
     assert [s["id"] for s in data["stable_elements"]] == [2]
 
 
+def test_next_actions_follow_the_same_view(monkeypatch) -> None:
+    """Guidance cannot reference system/IME ids absent from the projected observation."""
+    view = Projection.for_observation("id,text,rid,clickable")
+    data = _emitted(monkeypatch, view)
+    assert data["next_actions"] == [{"id": 2, "label": "Continue"}]
+
+
 def test_observe_fields_all_is_an_exact_opt_out(monkeypatch) -> None:
     """``all`` must be byte-identical to the unprojected render, not merely similar."""
     assert Projection.for_observation("all") is None
@@ -120,8 +143,8 @@ def test_observe_fields_all_is_an_exact_opt_out(monkeypatch) -> None:
     assert Projection.for_observation(None) is None
 
     data = _emitted(monkeypatch, None)
-    assert [e["id"] for e in data["observation"]["elements"]] == [0, 1, 2]
-    assert [s["id"] for s in data["stable_elements"]] == [0, 1, 2]
+    assert [e["id"] for e in data["observation"]["elements"]] == [0, 1, 2, 3]
+    assert [s["id"] for s in data["stable_elements"]] == [0, 1, 2, 3]
 
 
 def test_compact_view_is_materially_smaller(monkeypatch) -> None:
