@@ -113,15 +113,23 @@ def test_a_settle_timeout_is_also_flagged(tmp_path: Path, monkeypatch) -> None:
     assert risk and "timed out" in risk
 
 
-def test_the_action_detail_mentions_the_risk(tmp_path: Path) -> None:
-    """A runner reading only the terse line must not have to know the caveat exists to find it."""
+def test_the_risk_is_visible_at_the_top_level_without_corrupting_detail(tmp_path: Path) -> None:
+    """A runner reading only the terse form must find the caveat — in its own field.
+
+    This first appended the marker to ``detail``, which was wrong: ``detail`` carries a semantic
+    value for several actions (``app launch`` puts the launched package/activity there), so
+    appending to it corrupts the thing a caller parses. Caught when ``app launch`` started folding
+    in an observation and its detail came back as ``"com.example.app stale_risk"``.
+    """
     dev = FakeDevice(hierarchy_xml=SCREEN, package=PKG, serial="emu-detail")
     eng = _engine(tmp_path, dev)
     send = next(e.id for e in eng.analyze(source="hierarchy").elements if e.text == "Send")
 
     out = eng.tap(send, observe=True)
 
-    assert "stale_risk" in (out.detail or "")
+    assert out.stale_risk, "the caveat must be reachable without opening `observation.meta`"
+    assert "not evidence" in out.stale_risk.lower(), "and must carry the reason, not a bare flag"
+    assert "stale_risk" not in (out.detail or ""), "detail must not be polluted with the marker"
 
 
 def test_the_caveat_survives_the_compact_and_delta_trims(tmp_path: Path) -> None:

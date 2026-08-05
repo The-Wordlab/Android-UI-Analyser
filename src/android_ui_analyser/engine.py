@@ -3375,20 +3375,27 @@ class Engine:
                 caveat = self._stale_observation_risk(settle, ready)
                 if caveat:
                     obs.meta.stale_risk = caveat
-                    # Also on the action's own detail line: a runner that reads only the terse
-                    # form must not have to know the caveat exists to find it.
-                    result.detail = f"{result.detail} stale_risk".strip() if result.detail else (
-                        "stale_risk"
-                    )
+                    # Also at the top level of the action result, because a runner reading only the
+                    # terse form must not have to know the caveat exists to find it. It gets its
+                    # own field rather than being appended to `detail`: `detail` carries a
+                    # *semantic value* for several actions — `app launch` puts the launched
+                    # package/activity there — and appending a marker to it corrupts the thing a
+                    # caller parses. The caveat text, not a bare flag, so the reason travels too.
+                    result.stale_risk = caveat
                 if ready and ready.get("ms") is not None and ready.get("via") != "unchanged":
-                    # Surface settle cost so agents/tests can see why a tap took >50 ms.
-                    prev = result.detail
-                    tag = f"settle={ready['ms']}ms"
+                    # Surface settle cost so agents/tests can see why a tap took >50 ms — in its own
+                    # field. This used to be appended to `detail` as a "settle=295ms via=pixels"
+                    # tag, which corrupts the semantic value `detail` carries for some actions:
+                    # `app launch` puts the launched package/activity there, so an observed launch
+                    # answered `detail: "<pkg>/<activity> settle=295ms via=pixels"` and a caller
+                    # parsing it got the timing glued onto the component name. Structured here, so
+                    # it can be read as a number rather than scraped out of prose.
+                    settle: dict[str, Any] = {"ms": ready["ms"]}
                     if ready.get("via"):
-                        tag += f" via={ready['via']}"
+                        settle["via"] = ready["via"]
                     if ready.get("masked"):
-                        tag += f" anim={ready['masked']}"
-                    result.detail = f"{prev} {tag}".strip() if prev else tag
+                        settle["anim"] = ready["masked"]
+                    result.settle = settle
                 mem = self._memory
                 if mem is not None and self._device is not None:
                     with contextlib.suppress(Exception):
@@ -5854,6 +5861,8 @@ class Engine:
         activity: str | None = None,
         clear_state: bool = False,
         confirmed: bool = False,
+        observe: bool = True,
+        with_image: bool | str | None = None,
     ) -> ActionResult:
         device = self.device
         a = action.lower()
@@ -5900,7 +5909,15 @@ class Engine:
                         else "Check the package name, and that the device is unlocked."
                     ),
                 )
-            return ActionResult(ok=True, action="app-launch", detail=detail)
+            # `launch` is the first action of nearly every journey, and it used to answer with a
+            # bare ok/detail: no fresh ids, and no statement of what the launch actually produced.
+            # Callers then spent a separate `analyze` to learn where they had landed, and had
+            # nothing structured to show for the step. `_await_foreground` above already proves the
+            # package reached the foreground, so this adds the *screen* to that proof — the same
+            # act-and-observe contract every other action honours.
+            return self._observe(
+                ActionResult(ok=True, action="app-launch", detail=detail), observe, with_image
+            )
         if a in ("kill", "force-stop"):
             if not package:
                 raise UsageError("app kill needs a package name")

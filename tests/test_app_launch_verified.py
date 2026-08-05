@@ -10,6 +10,8 @@ caller looking for a UI bug that did not exist.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 
 from android_ui_analyser.engine import Engine
@@ -70,11 +72,9 @@ def test_the_launch_is_still_attempted_before_verifying() -> None:
     assert ("launch_app", (PKG, ".Main")) in dev.calls, "verification must not replace the action"
 
 
-def test_arrival_polling_stops_as_soon_as_the_app_is_there() -> None:
-    """A healthy launch must not pay the failure budget."""
-    dev = LaunchDevice(arrives=True)
+def _counting_current_app(dev: LaunchDevice) -> Callable[[], int]:
+    """Count reads of the foreground app, so a polling loop is visible as a call count."""
     seen = 0
-
     original = dev.current_app
 
     def counting() -> dict[str, str]:
@@ -83,5 +83,28 @@ def test_arrival_polling_stops_as_soon_as_the_app_is_there() -> None:
         return original()
 
     dev.current_app = counting  # type: ignore[method-assign]
-    _engine(dev).app("launch", package=PKG)
-    assert seen == 1
+    return lambda: seen
+
+
+def test_arrival_polling_stops_as_soon_as_the_app_is_there() -> None:
+    """A healthy launch must not pay the failure budget.
+
+    Counted with ``observe=False`` so the number means only "how many times did arrival polling
+    ask". A launch now also folds in the screen it landed on, and that observation legitimately
+    reads the foreground once more — conflating the two would make this assert a total that says
+    nothing about whether polling looped.
+    """
+    dev = LaunchDevice(arrives=True)
+    count = _counting_current_app(dev)
+    _engine(dev).app("launch", package=PKG, observe=False)
+    assert count() == 1
+
+
+def test_observing_the_landing_screen_does_not_reintroduce_polling() -> None:
+    """The observation may cost a read; it must not cost a retry loop."""
+    dev = LaunchDevice(arrives=True)
+    count = _counting_current_app(dev)
+    _engine(dev).app("launch", package=PKG, observe=True)
+    # One arrival check plus the observation's own read. A polling regression shows up here as a
+    # number that grows with the failure budget rather than staying a small constant.
+    assert count() <= 2, f"a healthy observed launch read the foreground {count()} times"

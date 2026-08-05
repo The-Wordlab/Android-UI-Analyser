@@ -2449,6 +2449,11 @@ def app_cmd(
         help="Required for `clear` / `launch --clear`: confirms wiping app data "
         "(feature-flag overrides, login session, local config, …).",
     ),
+    observe: bool = typer.Option(
+        True,
+        "--observe/--no-observe",
+        help="launch: also return the screen the app opened on (skips a follow-up analyze).",
+    ),
 ) -> None:
     """Inspect or control the foreground app.
 
@@ -2482,6 +2487,7 @@ def app_cmd(
                 activity=activity,
                 clear_state=clear_state,
                 confirmed=yes,
+                observe=observe,
             ),
             fmt,
         )
