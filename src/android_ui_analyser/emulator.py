@@ -1207,6 +1207,85 @@ def _aua_started_records(cache_dir: str | Path) -> list[dict[str, Any]]:
     return out
 
 
+STOP_LOG_NAME = "stops.log"
+
+
+def _stop_origin(requested_by: str | None) -> dict[str, Any]:
+    """Identify the process asking for a stop.
+
+    ``owner`` here is the *requester's* own ``$AUA_OWNER``, which is not the same thing as the
+    owner a stop is scoped to: the accident this exists to detect is a coordinator stopping a
+    worker's device, where those two differ.
+    """
+    return {
+        "requested_by": requested_by or "cli",
+        "requester_owner": resolve_owner(None),
+        "pid": os.getpid(),
+        "ppid": os.getppid(),
+        # The command line settles "which path asked" when the branch name is not enough --
+        # e.g. a `--mine` in a shell that had a stale $AUA_OWNER exported.
+        "argv": [str(a) for a in sys.argv[:16]],
+    }
+
+
+def _log_stop(
+    cache_dir: str | Path,
+    *,
+    origin: dict[str, Any],
+    requested_via: str,
+    request: dict[str, Any],
+    matched: list[dict[str, Any]],
+    stopped: list[str],
+) -> None:
+    """Append an attributable record of one stop, and say it out loud on stderr.
+
+    A device died under a live worker mid-scenario and the cause could never be settled. The
+    emulator's own log showed AUA's *graceful* shutdown sequence beginning at that exact second,
+    so the stop had certainly been requested — but no log anywhere recorded the requester's
+    owner, its pid, or which code path asked (explicit serial, owner match, or the idle
+    watchdog). Coordinator error could therefore not be ruled out, and an unattributable stop is
+    what makes a shared pool untrustworthy: on the same night a coordinator legitimately stopped
+    two instances, and there was no way to prove those calls had not also taken this one.
+
+    The record lands beside ``{instance}.log`` — the file that investigation already read — and
+    is best-effort: a stop must never fail because its audit line could not be written.
+    """
+    entry = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "epoch": time.time(),
+        "action": "emulator-stop",
+        "requested_via": requested_via,
+        "origin": origin,
+        "request": request,
+        "matched": matched,
+        "stopped": stopped,
+    }
+    logger.warning(
+        "emulator stop via=%s stopped=%s by pid=%s owner=%s request=%s",
+        requested_via,
+        stopped or "nothing",
+        origin.get("pid"),
+        origin.get("requester_owner"),
+        {k: v for k, v in request.items() if v},
+    )
+    with contextlib.suppress(OSError):
+        directory = _pid_dir(cache_dir)
+        directory.mkdir(parents=True, exist_ok=True)
+        with (directory / STOP_LOG_NAME).open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+
+
+def _instance_identity(meta: dict[str, Any]) -> dict[str, Any]:
+    """The subset of a pid record that names *which* instance a scoped stop matched."""
+    return {
+        "instance": meta.get("instance") or Path(str(meta.get("_path") or "")).stem or None,
+        "serial": meta.get("serial"),
+        "avd": meta.get("avd"),
+        "owner": meta.get("owner"),
+        "pid": meta.get("pid"),
+    }
+
+
 def stop(
     *,
     serial: str | None = None,
@@ -1215,15 +1294,28 @@ def stop(
     mine: bool = False,
     owner: str | None = None,
     cache_dir: str | Path,
+    requested_by: str | None = None,
 ) -> dict[str, Any]:
     """Stop a running emulator (``adb emu kill``), scoped by serial/AVD/owner/mine.
 
     An untargeted call is refused rather than treated as "all". ``--all`` kills every
     emulator; ``--mine`` kills AVDs recorded under aua's cache (optionally filtered by
     ``owner`` / ``$AUA_OWNER`` so parallel agents only tear down their own).
+
+    Every stop is attributed: ``requested_by`` names the code path (``cli`` by default,
+    ``idle-watchdog`` from the watchdog), and the returned ``origin`` / ``requested_via`` are
+    also appended to ``<cache>/emulator/stops.log``. See :func:`_log_stop`.
     """
     targets = running_emulators()
     owner_tag = resolve_owner(owner)
+    origin = _stop_origin(requested_by)
+    request = {
+        "serial": serial,
+        "avd": avd,
+        "owner": owner_tag,
+        "mine": bool(mine),
+        "all": bool(all_devices),
+    }
     if not serial and avd is None and not all_devices and not mine and not owner_tag:
         raise UsageError(
             "emulator stop needs a target: --serial, --avd, --owner, --mine, or --all",
@@ -1237,23 +1329,42 @@ def stop(
 
     # --owner alone (or with --mine): stop matching aua records.
     if (mine or owner_tag) and not serial and avd is None and not all_devices:
-        records = _aua_started_records(cache_dir)
+        all_records = _aua_started_records(cache_dir)
         if owner_tag:
-            records = [m for m in records if m.get("owner") == owner_tag]
+            records = [m for m in all_records if m.get("owner") == owner_tag]
             detail = f"stopped emulators owned by {owner_tag!r}"
         else:
+            records = all_records
             detail = "stopped emulators recorded as started by aua"
+        # An owner-scoped stop must say exactly which instances it matched, so a caller can see
+        # it hit one device and not several — the question nobody could answer after a worker
+        # lost its emulator mid-scenario.
+        matched = [_instance_identity(m) for m in records]
+        considered = [_instance_identity(m) for m in all_records]
         if not records:
-            return {
+            payload = {
                 "ok": True,
                 "action": "emulator-stop",
                 "stopped": [],
                 "owner": owner_tag,
+                "matched": [],
+                "considered": considered,
+                "requested_via": "owner-scope",
+                "origin": origin,
                 "detail": (
                     "no aua-started emulator records"
                     + (f" for owner {owner_tag!r}" if owner_tag else " in cache")
                 ),
             }
+            _log_stop(
+                cache_dir,
+                origin=origin,
+                requested_via="owner-scope",
+                request=request,
+                matched=[],
+                stopped=[],
+            )
+            return payload
         stopped_mine: list[str] = []
         for meta in records:
             ser = meta.get("serial")
@@ -1269,11 +1380,23 @@ def stop(
             path = Path(str(meta.get("_path") or ""))
             if path.is_file():
                 path.unlink(missing_ok=True)
+        _log_stop(
+            cache_dir,
+            origin=origin,
+            requested_via="owner-scope",
+            request=request,
+            matched=matched,
+            stopped=stopped_mine,
+        )
         return {
             "ok": True,
             "action": "emulator-stop",
             "stopped": stopped_mine,
             "owner": owner_tag,
+            "matched": matched,
+            "considered": considered,
+            "requested_via": "owner-scope",
+            "origin": origin,
             "detail": detail,
         }
 
@@ -1282,14 +1405,14 @@ def stop(
 
     if avd is not None:
         # Match legacy `{avd}.json` and parallel `{avd}.p{port}.json` records.
-        matched = [
+        avd_records = [
             m
             for m in _aua_started_records(cache_dir)
             if m.get("avd") == avd or Path(str(m.get("_path") or "")).stem == avd
         ]
-        if matched:
+        if avd_records:
             stopped_avd: list[str] = []
-            for meta in matched:
+            for meta in avd_records:
                 ser = meta.get("serial")
                 if isinstance(ser, str) and ser:
                     with contextlib.suppress(Exception):
@@ -1303,10 +1426,22 @@ def stop(
                 path = Path(str(meta.get("_path") or ""))
                 if path.is_file():
                     path.unlink(missing_ok=True)
+            avd_matched = [_instance_identity(m) for m in avd_records]
+            _log_stop(
+                cache_dir,
+                origin=origin,
+                requested_via="avd-records",
+                request=request,
+                matched=avd_matched,
+                stopped=stopped_avd,
+            )
             return {
                 "ok": True,
                 "action": "emulator-stop",
                 "stopped": stopped_avd,
+                "matched": avd_matched,
+                "requested_via": "avd-records",
+                "origin": origin,
                 "detail": f"stopped aua instances of avd {avd}",
             }
         # Fall through: maybe a live emulator whose serial we don't have recorded.
@@ -1335,10 +1470,21 @@ def stop(
                     stopped_pids.append(pid)
             _kill_watchdog(meta)
             path.unlink(missing_ok=True)
+        _log_stop(
+            cache_dir,
+            origin=origin,
+            requested_via="registry-cleanup",
+            request=request,
+            matched=[],
+            stopped=[],
+        )
         return {
             "ok": True,
             "action": "emulator-stop",
             "stopped": [],
+            "matched": [],
+            "requested_via": "registry-cleanup",
+            "origin": origin,
             "detail": "no running emulator-* devices; cleared aua pid records if any",
             "signalled_pids": stopped_pids,
         }
@@ -1369,4 +1515,21 @@ def stop(
             _kill_watchdog(meta)
             path.unlink(missing_ok=True)
 
-    return {"ok": True, "action": "emulator-stop", "stopped": stopped}
+    requested_via = "serial" if serial else ("all" if all_devices else "running-list")
+    live_matched = [{"instance": None, "serial": t["serial"]} for t in targets]
+    _log_stop(
+        cache_dir,
+        origin=origin,
+        requested_via=requested_via,
+        request=request,
+        matched=live_matched,
+        stopped=stopped,
+    )
+    return {
+        "ok": True,
+        "action": "emulator-stop",
+        "stopped": stopped,
+        "matched": live_matched,
+        "requested_via": requested_via,
+        "origin": origin,
+    }
