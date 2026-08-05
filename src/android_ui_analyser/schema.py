@@ -391,6 +391,15 @@ class ActionResult(BaseModel):
     # What the post-action wait cost: {"ms": int, "via": str, "anim": ...}. Answers "why did that
     # tap take 300 ms" as data rather than as a tag glued onto `detail`.
     settle: dict[str, Any] | None = None
+    # What can be done from the screen this action landed on — the point being that an agent should
+    # not have to scan `observation.elements` to pick its next id. Each entry carries the control's
+    # own learned cost when we have one, so "tap 26 next, and it historically takes 4.8s" is a
+    # single read: [{"id": 26, "label": "Send", "rid": "sendButton", "avg_ms": 4800, "n": 3}].
+    # Capped, because a list of everything is a dump, not guidance.
+    next_actions: list[dict[str, Any]] | None = None
+    # Navigation shortcuts out of here that memory already knows — merged `known_routes` and
+    # `suggested_gotos`, hoisted so they are visible without opening `observation.meta`.
+    routes: list[str] | None = None
     # Rolling capture saw a post-action pixel change — pull `aua capture last`.
     capture_hint: str | None = None
     # Did the action's effect get *observed*, as opposed to merely attempted?

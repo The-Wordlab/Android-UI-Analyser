@@ -1811,6 +1811,62 @@ class Engine:
         cached = self._read_cache()
         return cached.screen.package if cached else None
 
+    def _next_actions(
+        self, obs: AnalyzeResult, *, limit: int = 12
+    ) -> list[dict[str, Any]] | None:
+        """What can be done from here, decision-ready, with each control's learned cost attached.
+
+        This exists to remove a *reasoning* step, not a call: the post-action screen already came
+        back inline, but an agent still had to scan `observation.elements` to find which of 50
+        nodes it could act on — and scanning was expensive enough that agents preferred
+        `--no-observe` plus a filtered `analyze`, which is two calls to avoid one read.
+
+        Ordered by how likely a caller wants it (labelled controls first, then the rest) and
+        capped: a list of every tappable node is a dump, and a dump is what `analyze` is for.
+        Cost rides on the entry it belongs to, so "tap 26 next, and it takes ~4.8s" is one read
+        rather than a cross-reference against `slow_controls`.
+        """
+        rows: list[dict[str, Any]] = []
+        timings = self._screen_timings_safe(obs.meta.known_screen if obs.meta else None)
+        for e in obs.elements:
+            if not (e.clickable or e.checkable or e.long_clickable or e.scrollable):
+                continue
+            label = (e.text or e.content_desc or "").strip()
+            rid = _id_tail(e.resource_id)
+            row: dict[str, Any] = {"id": e.id}
+            if label:
+                row["label"] = label[:60]
+            if rid:
+                row["rid"] = rid
+            if e.checkable is not None:
+                row["checked"] = e.checked
+            known = timings.get(e.stable_key or rid or "")
+            if known is not None:
+                row["avg_ms"] = round(known.ema_ms)
+                row["max_ms"] = round(known.max_ms)
+                row["n"] = known.n
+            rows.append(row)
+        if not rows:
+            return None
+        # Labelled first: an unlabelled container is kept (it may be the only thing that acts —
+        # see `keep_actionable`) but it is not what a caller reaches for first.
+        rows.sort(key=lambda r: (0 if r.get("label") or r.get("rid") else 1))
+        return rows[:limit]
+
+    def _screen_timings_safe(self, screen: str | None) -> dict[str, Any]:
+        """The timing map for *screen*, keyed by control — empty when unknown."""
+        mem = self._memory
+        if not screen or mem is None:
+            return {}
+        with contextlib.suppress(Exception):
+            package = self._package_of_last_analyze()
+            if package:
+                app = mem.load(package)
+                rec = app.screens.get(screen) if app else None
+                if rec is not None:
+                    return dict(rec.timings)
+        return {}
+
     def _slow_controls_safe(self, screen: str | None) -> list[dict[str, Any]]:
         """Slow controls on *screen*, for `meta` — told on arrival, not discovered on timeout.
 
@@ -3519,6 +3575,9 @@ class Engine:
                         if known:
                             obs.meta.known_screen = known
                 result.observation_present = True
+                result.next_actions = self._next_actions(obs)
+                nav = list(obs.meta.known_routes or []) + list(obs.meta.suggested_gotos or [])
+                result.routes = nav or None
                 result.known_screen = obs.meta.known_screen
                 result.stable_elements = self._stable_elements(obs.elements)
                 result.action_diff_summary = self._compact_action_diff(obs.meta.element_diff)
