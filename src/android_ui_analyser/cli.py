@@ -2232,6 +2232,22 @@ def emulator_stop_cmd(
 
     opts = _opts(ctx)
     cfg = opts.load()
+    # A *global* `--serial` — written before the subcommand, the position every other command
+    # wants it in — used to be dropped on the floor here. `emulator stop` declares its own
+    # `--serial`, so `hoist_global_options` rightly leaves the subcommand's flag alone, and this
+    # function only ever read the local one. `aua --serial X emulator stop --owner Y` then fell
+    # into the owner branch, reported `ok:true` with an empty `stopped` list, and left qemu
+    # running. Honour the global flag here too; a teardown that silently does nothing is how
+    # orphaned instances (and one coordinator killing a live worker) happened.
+    if serial and opts.serial and serial != opts.serial:
+        err = UsageError(
+            f"conflicting serials: global --serial {opts.serial} vs "
+            f"`emulator stop --serial` {serial}",
+            hint="Pass one target. Both positions work; naming two different devices cannot.",
+        )
+        emit_error(err)
+        raise typer.Exit(int(err.exit_code))
+    serial = serial or opts.serial
     try:
         _emulator_emit(
             emulator_mod.stop(
