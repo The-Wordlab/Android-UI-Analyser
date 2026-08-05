@@ -3536,6 +3536,64 @@ class Engine:
                 out.append({"id": e.id})
         return out
 
+    def _analyze_post_action(self, with_image: bool | str | None) -> AnalyzeResult:
+        """Read the post-action screen, escalating thin trees exactly as ``analyze`` would."""
+        obs = self.analyze(
+            source="hierarchy",
+            record=False,
+            with_image=self._effective_with_image(with_image),
+        )
+        # Hierarchy first because it is tens of milliseconds and answers for most screens.
+        # But pinning the folded observation to hierarchy made every Compose/canvas/WebView
+        # caller pay for a second explicit analyze. Escalate once through the normal gate.
+        if self.config.perception.observe_escalates_to_vision:
+            with contextlib.suppress(Exception):
+                decision = self._gate_decide(
+                    obs.elements,
+                    package=obs.screen.package,
+                    activity=obs.screen.activity,
+                )
+                if decision.use_vision:
+                    richer = self.analyze(
+                        source="auto",
+                        record=False,
+                        with_image=self._effective_with_image(with_image),
+                    )
+                    # Keep the hierarchy answer unless escalation actually found more.
+                    if len(richer.elements) > len(obs.elements):
+                        obs = richer
+        return obs
+
+    @staticmethod
+    def _change_has_semantic_effect(change: dict[str, Any] | None) -> bool:
+        """Whether the readback names an effect beyond node/layout churn."""
+        if not change:
+            return False
+        return bool(
+            change.get("activity_changed") is True
+            or change.get("focus_moved") is True
+            or change.get("text_added")
+            or change.get("text_removed")
+        )
+
+    @staticmethod
+    def _tap_settle_needs_confirmation(
+        action_kind: str | None, ready: dict[str, Any] | None
+    ) -> bool:
+        """Whether an early tap settle needs a longer quiet window before analysis.
+
+        The live traces defeated content heuristics in three different ways: an old screen plus
+        one pager node, OCR destination text over the old hierarchy, and a mixed hierarchy with
+        both old and new screens. Therefore no single early frame certifies arrival. Confirm every
+        tap-like fast hierarchy/pixel settle; slower double-sampled hierarchy settles keep their
+        existing path.
+        """
+        if action_kind not in {"tap", "tap-point", "double-tap", "long-press"}:
+            return False
+        if not ready or ready.get("timeout") or not ready.get("changed"):
+            return False
+        return ready.get("via") in {"hierarchy-fast", "pixels"}
+
     def _observe(
         self,
         result: ActionResult,
@@ -3559,6 +3617,7 @@ class Engine:
                 before_state = self._pre_action_state
                 self._pre_action_state = None
                 ready: dict[str, Any] | None = None
+                confirmed_stable = False
                 if settle:
                     settle_ms, total_ms = 45, 1100
                     if self.config.perf.settle_profiles and self._last_action_kind:
@@ -3598,44 +3657,37 @@ class Engine:
                             float(ready["ms"]),
                             outcome=("changed" if ready.get("changed") else "unchanged"),
                         )
-                obs = self.analyze(
-                    source="hierarchy",
-                    record=False,
-                    with_image=self._effective_with_image(with_image),
-                )
-                # Hierarchy first because it is tens of milliseconds and answers for most screens.
-                # But pinning it here meant the fold could never do what a bare `analyze` does by
-                # default: self-route to vision when the tree cannot describe the screen. On a
-                # Compose/canvas/WebView surface — every mini app in this suite — a tap therefore
-                # returned an observation with nothing usable in it and the caller was *forced*
-                # into a second `analyze --source auto`. That is the round trip act-and-observe
-                # exists to remove, and it was guaranteed to happen precisely where perception is
-                # hardest. Escalate once, using the same gate a normal `analyze` consults, so the
-                # cost is paid only on screens that would otherwise have cost a whole extra call.
-                if self.config.perception.observe_escalates_to_vision:
-                    with contextlib.suppress(Exception):
-                        decision = self._gate_decide(
-                            obs.elements,
-                            package=obs.screen.package,
-                            activity=obs.screen.activity,
+                if self._tap_settle_needs_confirmation(self._last_action_kind, ready):
+                    confirm_t0 = time.monotonic()
+                    try:
+                        # A 350ms quiet window outlives a ripple and a single Compose pager
+                        # frame, while the 1.4s ceiling keeps a looping surface bounded.
+                        self.wait_stable(
+                            interval_ms=80,
+                            settle_ms=350,
+                            timeout_ms=1400,
+                            observe=False,
                         )
-                        # Attribute access, not getattr-with-default: `GateDecision.use_vision` is
-                        # the contract, and if it is ever renamed this must break loudly rather
-                        # than silently deciding "no escalation needed" forever.
-                        if decision.use_vision:
-                            richer = self.analyze(
-                                source="auto",
-                                record=False,
-                                with_image=self._effective_with_image(with_image),
-                            )
-                            # Only take it if it actually saw more — an escalation that returns
-                            # the same thin tree is cost without information, and swapping it in
-                            # would hide the fact that this screen is still unreadable.
-                            if len(richer.elements) > len(obs.elements):
-                                obs = richer
-                result.observation = obs
+                        confirmed_stable = True
+                    except Exception:  # noqa: BLE001 — observation remains best-effort
+                        if ready is not None:
+                            ready["confirmation_timeout"] = True
+                    if ready is not None:
+                        ready["confirmation_ms"] = int(
+                            (time.monotonic() - confirm_t0) * 1000
+                        )
+
+                # Analyze only after the confirmation. Besides being safer, this avoids paying
+                # for and returning an OCR-enriched read of a frame we already distrust.
+                obs = self._analyze_post_action(with_image)
+                change: dict[str, Any] | None = None
                 with contextlib.suppress(Exception):
-                    result.change = self._change_summary(before_state, obs)
+                    change = self._change_summary(before_state, obs)
+                if ready is not None and confirmed_stable:
+                    ready["semantic_confirmation"] = self._change_has_semantic_effect(change)
+
+                result.observation = obs
+                result.change = change
                 caveat = self._stale_observation_risk(settle, ready)
                 if caveat:
                     obs.meta.stale_risk = caveat
@@ -3659,6 +3711,10 @@ class Engine:
                         settle["via"] = ready["via"]
                     if ready.get("masked"):
                         settle["anim"] = ready["masked"]
+                    if ready.get("confirmation_ms") is not None:
+                        settle["confirmation_ms"] = ready["confirmation_ms"]
+                    if ready.get("semantic_confirmation") is not None:
+                        settle["semantic_confirmation"] = ready["semantic_confirmation"]
                     result.settle = settle
                 mem = self._memory
                 if mem is not None and self._device is not None:
@@ -3727,6 +3783,18 @@ class Engine:
                 "pre-action screen. Re-analyze before concluding the action had no effect."
             )
         via = str(ready.get("via") or "?")
+        if ready.get("confirmation_timeout"):
+            return (
+                "post-action read looked transitional and its extended stability confirmation "
+                "timed out. The later observation is safer but may still be in flight — wait or "
+                "re-analyze; never repeat a mutating action from this readback alone."
+            )
+        if ready.get("semantic_confirmation") is False:
+            return (
+                "post-action screen stabilized, but AUA observed no semantic destination beyond "
+                "layout/node movement. The action may have a visual-only effect — do not repeat a "
+                "mutating action from this readback alone."
+            )
         if ready.get("timeout"):
             return (
                 f"post-action wait timed out (via={via}) — this observation may be mid-transition "
