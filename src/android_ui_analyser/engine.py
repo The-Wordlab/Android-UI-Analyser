@@ -121,7 +121,19 @@ _FLAGS_FOREGROUND_TIMEOUT_S = 6.0  # how long the relaunched app gets to reach t
 
 _PACKAGE_RE = re.compile(r'package="([^"]+)"')
 
-_AWAIT_PREFIXES = {"text": "text", "rid": "rid", "id": "rid", "desc": "desc"}
+_AWAIT_PREFIXES = {
+    "text": "text",
+    "rid": "rid",
+    "id": "rid",
+    "desc": "desc",
+    # Off-screen evidence. A UI predicate answers "is it drawn yet"; these answer "did the
+    # work actually happen", which is a different question and sometimes the only answerable
+    # one — a streamed LaTeX answer reaches the hierarchy as U+FFFD, so no `text:` term can
+    # confirm it arrived. Terms are ANDed, so `net:POST /v1/chat,text:x =` reads as "the
+    # backend replied *and* the screen shows it".
+    "net": "net",
+    "log": "log",
+}
 
 
 class _AwaitTerm(NamedTuple):
@@ -4866,13 +4878,68 @@ class Engine:
                 return ("", "")
             return (str(info.get("package") or ""), str(info.get("activity") or ""))
 
+        # Baseline for the off-screen terms, taken before the first evaluation so a `net:` /
+        # `log:` term only ever matches evidence produced *after* the wait began. Without it
+        # the previous turn's response would satisfy this turn's wait instantly.
+        wall_baseline = time.time()
+
+        def _log_baseline_ms() -> int:
+            """Baseline as a **device**-clock epoch — `logcat(since_ms=…)` demands one.
+
+            The host clock is not interchangeable: an emulator can sit seconds off, and a
+            baseline in the wrong frame either drops the very lines we are waiting for or
+            admits the previous turn's. The measured skew is cached, so this costs no adb
+            round-trip on the poll path.
+            """
+            try:
+                from . import logcat as logcat_mod
+
+                clock = logcat_mod.resolve_clock(device, self.config.cache.dir)
+                return int(clock.to_device(int(wall_baseline * 1000)))
+            except Exception:
+                return int(wall_baseline * 1000)
+
+        log_baseline_ms = _log_baseline_ms() if any(t.by == "log" for t in terms) else 0
+
+        def _net_present(spec: str) -> bool:
+            try:
+                from . import proxy_mock
+
+                flows = proxy_mock.read_flows_since(self.config.cache.dir, wall_baseline)
+            except Exception:  # proxy not running / extra not installed
+                return False
+            return any(proxy_mock.flow_matches(f, spec) for f in flows)
+
+        def _log_present(spec: str) -> bool:
+            try:
+                lines = device.logcat(dump=True, since_ms=log_baseline_ms) or ""
+            except TypeError:  # device implementations that take no since filter
+                try:
+                    lines = device.logcat(dump=True) or ""
+                except Exception:
+                    return False
+            except Exception:
+                return False
+            if not isinstance(lines, str):
+                lines = "\n".join(str(x) for x in lines)
+            haystack = lines.lower() if ignore_case else lines
+            needle = spec.lower() if ignore_case else spec
+            return needle in haystack
+
         def evaluate() -> list[dict[str, Any]]:
             out: list[dict[str, Any]] = []
             for term in terms:
-                hit = device.find_text(
-                    term.value, match=mode, ignore_case=ignore_case, by=term.by
-                )
-                present = hit is not None
+                if term.by == "net":
+                    present = _net_present(term.value)
+                elif term.by == "log":
+                    present = _log_present(term.value)
+                else:
+                    present = (
+                        device.find_text(
+                            term.value, match=mode, ignore_case=ignore_case, by=term.by
+                        )
+                        is not None
+                    )
                 out.append(
                     {
                         "term": term.text,

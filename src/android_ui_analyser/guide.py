@@ -244,6 +244,19 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "never fixed sleeps.",
     ),
     (
+        "Wait on the backend when the screen cannot tell you",
+        "`await` / `--until` terms are not limited to what is drawn. `net:<[METHOD ]PATH[=STATUS]>` "
+        "waits for a completed HTTP exchange (`net:POST /v1/chat`, `net:/v1/chat=200`) — "
+        "mitmproxy's response hook fires at *stream completion*, so it is the honest signal for a "
+        "streamed chat turn; it needs `aua proxy start` running. `log:<substring>` matches logcat "
+        "since the wait began and needs no proxy, but is only as good as what the app logs. "
+        "Terms are ANDed, so `--until \"net:POST /v1/chat,text:x =\"` reads as *the backend "
+        "replied and the screen shows it* — which matters because a streamed LaTeX answer reaches "
+        "the hierarchy as U+FFFD, so no `text:` term alone can confirm it arrived. Both take a "
+        "baseline when the wait starts, so the previous turn's response can never satisfy this "
+        "one. Still not network idle: this app never is.",
+    ),
+    (
         "Stop the daemon when done",
         "`aua daemon stop` releases the warm connection.",
     ),
