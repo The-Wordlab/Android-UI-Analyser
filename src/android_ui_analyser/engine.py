@@ -1850,6 +1850,7 @@ class Engine:
         executed: list[dict[str, Any]] | None = None,
         flow_depth: int = 0,
         hierarchy_ocr: bool = True,
+        flow_dir: Path | None = None,
     ) -> tuple[StepFailure | None, AnalyzeResult]:
         """Execute *steps* with selector matching, settle waits, and re-perception.
 
@@ -1859,6 +1860,11 @@ class Engine:
         screen surfaces as the next step's ``element_not_found`` — terminal verification
         (``known_screen`` / asserts) is the caller's job. Returns
         ``(failure | None, last analyze result)``.
+
+        ``flow_dir`` is the directory of the flow file these steps came from, and is what makes
+        a nested ``flow:`` reference resolvable by path — "next to me" has no meaning without
+        it. It is passed down each nesting level, so a sub-flow's own references are relative
+        to the sub-flow.
         """
         if res is None:
             res = self._analyze_route_step(
@@ -2026,6 +2032,8 @@ class Engine:
                         executed=executed,
                         flow_depth=flow_depth,
                         hierarchy_ocr=hierarchy_ocr,
+                        # substeps came from the same file, so "next to me" is unchanged
+                        flow_dir=flow_dir,
                     )
                     if subfail is not None:
                         return subfail, res
@@ -2045,6 +2053,8 @@ class Engine:
                         executed=executed,
                         flow_depth=flow_depth,
                         hierarchy_ocr=hierarchy_ocr,
+                        # substeps came from the same file, so "next to me" is unchanged
+                        flow_dir=flow_dir,
                     )
                     if subfail is None:
                         break
@@ -2063,14 +2073,20 @@ class Engine:
                 # Run a saved flow inline (Maestro's runFlow) — reuse shared recipes.
                 if not allow_goto_steps or not s.arg or flow_depth >= _MAX_FLOW_DEPTH:
                     return StepFailure("unsupported_action", i, s), res
-                from .flows import FlowStore, resolve_params
+                from .flows import anchor_paths, resolve_params
 
                 try:
-                    sub = FlowStore(self.config.memory).load(s.arg)
+                    sub, sub_dir = self._resolve_nested_flow(s.arg, flow_dir)
                 except UsageError:
                     return StepFailure("route_unknown", i, s), res
+                sub_steps = resolve_params(sub, {})
+                if sub_dir is not None:
+                    # A path inside the SUB-flow belongs to the sub-flow. Anchoring only the
+                    # top-level flow's steps left a nested `flags_apply: flags/guest.yaml`
+                    # resolving against the daemon's cwd — the same defect one level down.
+                    sub_steps = anchor_paths(sub_steps, sub_dir)
                 subfail, res = self._run_steps(
-                    resolve_params(sub, {}),
+                    sub_steps,
                     origin_package=sub.app or origin_package,
                     allow_destructive=allow_destructive,
                     allow_goto_steps=True,
@@ -2079,6 +2095,7 @@ class Engine:
                     executed=executed,
                     flow_depth=flow_depth + 1,
                     hierarchy_ocr=hierarchy_ocr,
+                    flow_dir=sub_dir,
                 )
                 if subfail is not None:
                     return StepFailure(subfail.code, i, s), res  # surface sub-failure here
@@ -2098,6 +2115,44 @@ class Engine:
                     steps, i + 1, origin_package, hierarchy_ocr=hierarchy_ocr
                 )
         return None, res
+
+    def _resolve_nested_flow(self, ref: str, flow_dir: Path | None) -> tuple[Any, Path | None]:
+        """Load a nested ``flow:`` reference — by path when it looks like one — as (flow, dir).
+
+        Nested flows resolved by *name* from AUA's own memory directory only, so a promoted
+        flow that referenced a sibling broke for anyone whose memory directory did not happen
+        to contain a flow of that name. Factoring shared preconditions into ``flows/common/``
+        was therefore impossible: nine shared routes had to be inlined into ~35 derived flows,
+        so a fix to one does not propagate.
+
+        A path-looking reference that resolves nowhere is **refused**, not retried as a name.
+        Falling back would look up a sanitised spelling of the path in the memory directory
+        (``common/auth.yaml`` → ``common_auth.yaml``), where a chance match would silently run
+        a different journey. Failing to find the file the author named is recoverable; running
+        somebody else's flow instead is not. The searched candidates are logged, because the
+        executor's ``StepFailure`` carries a code and a step but no message.
+        """
+        from .flows import FlowStore, looks_like_path, nested_flow_candidates, parse_flow_yaml
+
+        store = FlowStore(self.config.memory)
+        if not looks_like_path(ref):
+            return store.load(ref), store.flows_dir()
+        candidates = nested_flow_candidates(ref, flow_dir, store.flows_dir())
+        for cand in candidates:
+            if cand.is_file():
+                return (
+                    parse_flow_yaml(cand.read_text(encoding="utf-8"), name=cand.stem),
+                    cand.resolve().parent,
+                )
+        logger.warning(
+            "nested flow %r not found; looked in: %s",
+            ref,
+            ", ".join(str(c) for c in candidates) or "(nowhere — no referring directory)",
+        )
+        raise UsageError(
+            f"no flow file for nested reference {ref!r}",
+            hint="Tried: " + ", ".join(str(c) for c in candidates),
+        )
 
     def _settle_for_next_step(self, nxt: RouteStep | None) -> bool:
         """Synchronize on the next step's known selector instead of a full pixel settle.
@@ -2655,6 +2710,7 @@ class Engine:
                 scroll_fallback=True,
                 res=res_in,
                 executed=ex,
+                flow_dir=base_dir,
             )
             for e in ex:
                 e["index"] += slice_start  # absolute flow indices

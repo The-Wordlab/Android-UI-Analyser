@@ -386,8 +386,74 @@ def resolve_params(flow: Flow, given: dict[str, str]) -> list[RouteStep]:
 
 
 # Step kinds whose `arg` is a host filesystem path rather than a name or a label.
-# `mock-replay`, `flow` and `dev-profile` take *names*, so they must not be touched.
+# `mock-replay` and `dev-profile` take *names*, so they must not be touched. A nested `flow:`
+# takes either — see :func:`looks_like_path` — and is resolved at execution time rather than
+# here, because the candidate list includes directories `anchor_paths` cannot know about.
 _PATH_KINDS = frozenset({"flags-apply"})
+
+
+def looks_like_path(ref: str) -> bool:
+    """Is this nested-``flow:`` reference a path rather than a name?
+
+    Nested flows resolved by name from AUA's own memory directory only, so promoting shared
+    preconditions into `flows/common/` and referencing them from `flows/derived/*` was
+    impossible: a promoted flow that referenced a sibling broke for anyone whose memory
+    directory did not happen to contain a flow of that name. Nine shared routes therefore had
+    to be *inlined* into ~35 derived flows, so the same steps exist in many copies and a fix to
+    one does not propagate. `grep` keeps them in step, which is a convention, not a guarantee.
+
+    The test has to be conservative in one specific direction: a name that is mistaken for a
+    path merely fails to resolve and says so, while a *path* mistaken for a name is looked up
+    in the memory directory under a sanitised spelling — where it could match some unrelated
+    flow and silently run the wrong journey. So this asks for positive evidence of a path
+    (a separator, a YAML suffix, a `~`, or an explicit `./`), and a bare word stays a name.
+    """
+    text = str(ref or "").strip()
+    if not text:
+        return False
+    if text.startswith("~") or Path(text).is_absolute():
+        return True
+    if "/" in text or "\\" in text:
+        return True
+    return text.lower().endswith((".yaml", ".yml"))
+
+
+def nested_flow_candidates(
+    ref: str, referring_dir: Path | None, memory_flows_dir: Path | None
+) -> list[Path]:
+    """Where a path-looking nested ``flow:`` reference may live, in precedence order.
+
+    ``flows/derived/x.yaml`` saying ``flow: common/auth.yaml`` means "next to me" first — that
+    is the reading that makes a flow directory portable, which is the whole point of keeping
+    flows in a repository. A reference relative to the *collection* root is the second reading,
+    so the nearest enclosing directory named ``flows`` is tried next (that is how
+    ``derived/a.yaml`` reaches ``common/auth.yaml`` without spelling `../`). The memory
+    directory comes last, so nothing that resolves inside the repository can be shadowed by
+    whatever happens to be installed on one machine.
+    """
+    text = str(ref).strip()
+    path = Path(text).expanduser()
+    if path.is_absolute():
+        return [path]
+    out: list[Path] = []
+    if referring_dir is not None:
+        base = Path(referring_dir).expanduser().resolve()
+        out.append(base / path)
+        # Walk up to the nearest `flows` collection root, including `base` itself.
+        for parent in [base, *base.parents]:
+            if parent.name == "flows":
+                out.append(parent / path)
+                break
+    if memory_flows_dir is not None:
+        out.append(Path(memory_flows_dir).expanduser() / path)
+    # Preserve order, drop repeats (a flow directly inside `flows/` yields the same candidate).
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for cand in out:
+        if cand not in seen:
+            seen.add(cand)
+            unique.append(cand)
+    return unique
 
 
 def anchor_paths(steps: list[RouteStep], base_dir: Path) -> list[RouteStep]:
