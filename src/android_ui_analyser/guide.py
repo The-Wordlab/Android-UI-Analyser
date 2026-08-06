@@ -79,12 +79,15 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
     (
         "Start from the app playbook",
         "`aua about` prints what the tool already learned about THIS app — a one-line "
-        "description, login **recipes** (e.g. how to log in as a test/full user), useful "
+        "description, the pinned **launch** Activity (on multi-launcher / Dev Tools builds), "
+        "login **recipes** (e.g. how to log in as a test/full user), useful "
         "**deeplinks**, and **notes** (quirks, e.g. a dialog to dismiss after login, or that "
         "the 'Apps' tab is really Tools). Read it first and follow it — it saves you the "
         "discovery the last run already did. As you learn things, teach it back with "
-        '`aua remember --about "…" | --note "…" | --recipe NAME --note "…" | --deeplink URI --note "…"` '
-        "so the next run starts even more informed.",
+        '`aua remember --about "…" | --note "…" | --recipe NAME --note "…" | --deeplink URI '
+        '--note "…" | --launch-activity ACTIVITY` '
+        "so the next run starts even more informed. A successful "
+        "`aua app launch <pkg> --activity …` also pins that entry for later bare launches.",
     ),
     (
         "Use what memory already knows",
@@ -385,8 +388,9 @@ KEY_FLAGS: list[tuple[str, str]] = [
     (
         "app",
         "`launch <pkg> [--activity .Entry] [--clear --yes]`, `stop|kill|clear|grant`. "
-        "`clear` / `launch --clear` wipe ALL app data (typically flags + login) — **requires "
-        "`--yes` / `--yes-wipe-flags`**; re-apply flags afterwards",
+        "`--activity` pins multi-launcher builds and teaches the map; later bare launches "
+        "reuse it. `clear` / `launch --clear` wipe ALL app data (typically flags + login) — "
+        "**requires `--yes` / `--yes-wipe-flags`**; re-apply flags afterwards",
     ),
     (
         "clipboard / paste / copy",
@@ -453,8 +457,11 @@ KEY_FLAGS: list[tuple[str, str]] = [
     ),
     (
         "proxy / mock",
-        "`proxy start|stop`, `mock map METHOD PATH [--status N --body '{…}']`, "
-        "`mock record start|stop NAME`, `mock replay NAME` (optional `[proxy]` extra)",
+        "`proxy start|stop`, `proxy flows` (what it saw), `proxy flow <n> [--to-rule]` "
+        "(one exchange → a ready rule), `mock map METHOD PATH [--status N --body '{…}']` "
+        "(stub), `mock rewrite METHOD PATH --host H --set a.b=v --once` (edit the *real* "
+        "response), `mock list|clear`, `mock record start|stop NAME`, `mock replay NAME`, "
+        "`device reset` (undo a wrecked device). Optional `[proxy]` extra",
     ),
     (
         "map",
@@ -475,7 +482,11 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "/ `dev_profile` / `a11y_scroll` / `flags_apply` / `proxy_start`/`stop` / `mock_replay` "
         "(a `flow:` step runs a saved flow inline — reuse a shared `login` recipe).",
     ),
-    ("open / about / remember", "`open <uri>` deeplink; `about` app playbook; `remember …` teach it"),
+    (
+        "open / about / remember",
+        "`open <uri>` deeplink; `about` app playbook; `remember …` teach it "
+        "(`--launch-activity` pins cold-start on multi-launcher builds)",
+    ),
     (
         "knowledge / reconcile",
         "`knowledge list|show|add|stale`; `reconcile plan|submit|status|apply|rollback` "
@@ -828,10 +839,57 @@ def render_markdown(*, brief: bool = False) -> str:
         "aua emulator recommend-proxy         # package + why (no download)\n"
         "aua emulator ensure-proxy --start    # download google_apis image + boot aua_proxy\n"
         "aua --serial <serial> proxy start\n"
+        "aua --serial <serial> proxy start --companion  # auto-build/install VPN helper\n"
         "aua emulator stop --mine             # cleanup when done\n"
         "```\n"
         "Analyze/tap/wait work identically; hierarchy + screenshots do not need a visible "
         "window. Never wipe or stop an emulator the user already had open unless they asked."
+    )
+
+    p.append("")
+    p.append("## Network: watch one request, then change it")
+    p.append(
+        "The proxy is for **one endpoint at a time**, the way you would use Charles: watch "
+        "real traffic, pick the exchange you care about, edit that one and let everything "
+        "else through untouched. Start it **whenever you need it** — including three "
+        "screens into a flow. The app under test keeps running and keeps its state; its "
+        "next requests go through the proxy. (`--relaunch` restarts it if you want a clean "
+        "process.)\n"
+        "```bash\n"
+        "aua proxy start                       # mid-flow is fine — the app keeps running\n"
+        "# … drive the app to the thing you want …\n"
+        "aua proxy flows --host api.example.com    # numbered list of what it saw\n"
+        "aua proxy flow 12 --to-rule           # headers + bodies, and the rule that edits it\n"
+        "aua mock rewrite GET /v1/me --host api.example.com --set 'plan=premium' --once\n"
+        "# … repeat the action; the *next* matching response is patched, then the rule "
+        "expires …\n"
+        "aua proxy stop                        # always\n"
+        "```\n"
+        "`mock rewrite` edits the **real** upstream response (`--set a.b=v` JSON patch, "
+        "`--delete`, `--replace old=new`, `--status`, `--header`); `mock map` **stubs** one "
+        "outright and never hits the network. Both need a `--host` unless the path is "
+        "specific — a bare `/` or `*` would swallow the whole app. `--once`/`--times N` are "
+        "how you affect a single call rather than every call for the rest of the session. "
+        "`mock list` shows what is armed, `mock clear` disarms it.\n"
+        "**This needs a rootable emulator.** Android's own network validation probe "
+        "(`connectivitycheck.gstatic.com/generate_204`) goes *through* the proxy, and the "
+        "global proxy exclusion list does not exempt it. So mitm has to be able to serve "
+        "HTTPS, which means its CA must be a **system** trust anchor, which means "
+        "`adb root` — available on `google_apis` / `-userdebug` images, refused by Play "
+        "Store (`-user`) ones. On a Play Store AVD the probe fails TLS, Android marks the "
+        "network unvalidated, and *every* app renders its offline state. Get a usable one "
+        "with `aua emulator ensure-proxy --start`. Physical devices are generally not "
+        "rootable either.\n"
+        "`proxy start` **refuses** on a device where it could not install the CA rather "
+        "than arming a proxy that would break every HTTPS request and look exactly like a "
+        "broken app. `--allow-untrusted` overrides it, but expect the offline `!` — it is "
+        "only for plain-HTTP traffic or an app that trusts user CAs.\n"
+        "**Why the device used to stay broken afterwards.** A device proxy is "
+        "`settings put global http_proxy`, which persists in the settings database, but the "
+        "mitmdump behind it — reached over `adb reverse` — does not survive the run. An "
+        "abandoned proxy is now detected and cleared automatically, both when another agent "
+        "inherits the emulator and mid-session if mitmdump dies under you. "
+        "`aua device reset` does it on demand and reports what it changed."
     )
 
     p.append("")

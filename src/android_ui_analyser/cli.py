@@ -629,11 +629,16 @@ def _daemon_error(err: dict[str, Any]) -> AuaError:
     code = err.get("code", "error")
     message = err.get("message", "daemon error")
     hint = err.get("hint")
+    if code == "selector_not_found":
+        return SelectorNotFoundError(
+            message,
+            hint=hint,
+            observation=err.get("observation"),
+        )
     mapping: dict[str, type[AuaError]] = {
         "usage": UsageError,
         "device": DeviceError,
         "config": ConfigError,
-        "selector_not_found": SelectorNotFoundError,
         "selector_ambiguous": SelectorAmbiguousError,
         "expectation_failed": ExpectationFailed,
     }
@@ -2684,8 +2689,9 @@ def app_cmd(
     """Inspect or control the foreground app.
 
     Some dev builds have several launcher activities (a Dev Tools menu next to the real
-    entry), so a bare `launch` opens the wrong one nondeterministically — pass
-    ``--activity`` to pin it.
+    entry), so a bare platform resolve opens the wrong one nondeterministically. Prefer
+    ``--activity`` once (it teaches the map), or ``aua remember --launch-activity`` — later
+    bare ``launch`` calls reuse the pin automatically.
 
     ``clear`` / ``launch --clear`` run ``pm clear`` — a **full wipe** of app data. Many apps
     keep feature-flag overrides and the login session in app data, so a wipe resets your test
@@ -2907,6 +2913,36 @@ def media_add_cmd(
 ) -> None:
     def go(engine: Engine, fmt: OutputFormat) -> None:
         _emit(engine.media_add(path, remote_dir=remote_dir), fmt)
+
+    _run(ctx, go)
+
+
+device_app = typer.Typer(
+    help="Whole-device state: put an emulator back to a known-good baseline.",
+    no_args_is_help=True,
+)
+app.add_typer(device_app, name="device")
+
+
+@device_app.command("reset")
+def device_reset_cmd(
+    ctx: typer.Context,
+    reverses: bool = typer.Option(
+        False,
+        "--reverses",
+        help="Also drop every adb reverse mapping (not just the proxy's).",
+    ),
+) -> None:
+    """Clear a leftover HTTP proxy, turn airplane mode off, re-enable Wi-Fi/data.
+
+    Run this at the start of a session on a shared emulator. Serials are recycled, so a
+    device you inherit may still be proxied to a mitmdump that died with the last agent —
+    every app then reports itself offline and Wi-Fi shows the unvalidated "!", with nothing
+    on the device to explain why. Idempotent and safe on a healthy device.
+    """
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.device_reset(reverses=reverses), fmt)
 
     _run(ctx, go)
 
@@ -3180,6 +3216,17 @@ def lease_cmd(
     ctx: typer.Context,
     action: str = typer.Argument("list", metavar="ACTION", help="list|acquire|renew|release"),
     serial_arg: str | None = typer.Argument(None, metavar="[SERIAL]", help="Device to act on."),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Take an explicitly named device from its current lease holder.",
+    ),
+    ttl: int | None = typer.Option(
+        None,
+        "--ttl",
+        min=1,
+        help="Override this lease's idle expiry in seconds for the current session.",
+    ),
 ) -> None:
     """Who is driving which emulator — and claim one for this agent.
 
@@ -3190,11 +3237,13 @@ def lease_cmd(
 
         aua lease list
         aua lease acquire --needs root,proxy
+        aua lease renew emulator-5554 --ttl 600
+        aua lease acquire emulator-5554 --force
         aua lease release emulator-5554
 
-    Leases expire on their own: a crashed agent blocks nobody, and there is nothing to clean
-    up. `--owner` (or `$AUA_OWNER`) names the agent; otherwise it is derived and stable for
-    the life of the calling process.
+    Derived agent leases expire as soon as their owning process exits. Explicit owner names
+    fall back to the configured TTL. `--force` requires a specific serial and is intended for
+    an operator-approved takeover after confirming the previous session is gone.
     """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
@@ -3224,11 +3273,52 @@ def lease_cmd(
             return
 
         if verb == "acquire":
+            target = serial_arg or engine.config.device.serial
+            if force:
+                if not target:
+                    raise UsageError(
+                        "`lease acquire --force` needs a serial",
+                        hint="e.g. `aua lease acquire emulator-5554 --force`",
+                    )
+                online = {device.serial for device in engine.list_devices()}
+                if target not in online:
+                    raise DeviceError(f"device {target} is not online")
+                previous = lease_mod.read_lease(cache, target)
+                ok = lease_mod.acquire(
+                    cache,
+                    target,
+                    owner=owner,
+                    ttl_s=ttl or int(engine.config.lease.ttl_s),
+                    needs=_split_needs(_opts(ctx).needs),
+                    force=True,
+                )
+                _echo_json(
+                    {
+                        "ok": ok,
+                        "action": "lease-force-acquire",
+                        "serial": target,
+                        "owner": owner,
+                        "previous_owner": previous.get("owner") if previous else None,
+                    },
+                    fmt,
+                )
+                return
+            if serial_arg:
+                engine.config.device.serial = serial_arg
             # Claiming *is* device resolution, so just resolve — same code path every command
             # takes, which keeps `acquire` from drifting from the implicit claim.
             serial = engine._lease_device()
+            if ttl is not None and serial is not None:
+                lease_mod.renew(cache, serial, owner=owner, ttl_s=ttl)
             _echo_json(
-                {"ok": True, "action": "lease-acquire", "serial": serial, "owner": owner}, fmt
+                {
+                    "ok": True,
+                    "action": "lease-acquire",
+                    "serial": serial,
+                    "owner": owner,
+                    "ttl_s": ttl or int(engine.config.lease.ttl_s),
+                },
+                fmt,
             )
             return
 
@@ -3239,8 +3329,17 @@ def lease_cmd(
                 hint="e.g. `aua lease release emulator-5554`, or pass --serial.",
             )
         if verb == "renew":
-            ok = lease_mod.renew(cache, target, owner=owner)
-            _echo_json({"ok": ok, "action": "lease-renew", "serial": target, "owner": owner}, fmt)
+            ok = lease_mod.renew(cache, target, owner=owner, ttl_s=ttl)
+            _echo_json(
+                {
+                    "ok": ok,
+                    "action": "lease-renew",
+                    "serial": target,
+                    "owner": owner,
+                    "ttl_s": ttl,
+                },
+                fmt,
+            )
             if not ok:
                 raise DeviceLeasedError(
                     f"{target} is not leased by {owner}",
@@ -3346,6 +3445,7 @@ def _build_doctor_report(engine: Engine) -> dict[str, Any]:
     except Exception as exc:  # pragma: no cover - defensive
         checks["emulator"] = {"ok": False, "detail": str(exc)}
 
+    checks["network"] = _device_network_check(engine)
     checks["skill"] = _installed_skill_check()
 
     try:
@@ -3355,6 +3455,49 @@ def _build_doctor_report(engine: Engine) -> dict[str, Any]:
         checks["providers_error"] = str(exc)
 
     return {"checks": checks, "providers": providers}
+
+
+def _device_network_check(engine: Engine) -> dict[str, Any]:
+    """Is the attached device proxied to something that can actually answer?
+
+    The single most confusing device state there is: a stale `http_proxy` makes every app
+    report itself offline and puts the "!" on Wi-Fi, while `adb devices`, the hierarchy and
+    every screenshot look completely healthy. Worth one `settings get` in doctor so the
+    answer is on screen before anyone starts bisecting the app.
+    """
+    from . import proxy_mock as pm
+
+    try:
+        device = engine.device
+        proxy = device.get_http_proxy()
+    except AuaError as exc:
+        return {"ok": True, "detail": f"no device to check ({exc.message})"}
+    except Exception as exc:  # pragma: no cover - defensive
+        return {"ok": True, "detail": f"no device to check ({exc})"}
+
+    airplane = device.get_airplane_mode()
+    if not proxy:
+        detail = "no http_proxy set" + (" · AIRPLANE MODE ON" if airplane else "")
+        return {"ok": not airplane, "detail": detail} | (
+            {"hint": f"`aua device reset --serial {device.serial}` turns it back off."}
+            if airplane
+            else {}
+        )
+
+    boot_id = None
+    with contextlib.suppress(Exception):
+        boot_id = device.instance_token()
+    reason = pm.orphan_reason(pm.read_state(device.serial), boot_id=boot_id)
+    if reason is None:
+        return {"ok": True, "detail": f"http_proxy {proxy} (live)"}
+    return {
+        "ok": False,
+        "detail": f"http_proxy {proxy} is ORPHANED — {reason}",
+        "hint": (
+            "Apps on this device have no internet and Wi-Fi shows the unvalidated '!'. "
+            f"Fix: `aua device reset --serial {device.serial}`."
+        ),
+    }
 
 
 # Where `install.sh` puts the user-level skill. Checked rather than rewritten: doctor
@@ -3607,6 +3750,11 @@ def remember(
     note: str | None = typer.Option(None, "--note", help="A quirk/fact to remember."),
     recipe: str | None = typer.Option(None, "--recipe", help="Recipe NAME (needs --note)."),
     deeplink: str | None = typer.Option(None, "--deeplink", help="A useful deeplink URI (needs/uses --note)."),
+    launch_activity: str | None = typer.Option(
+        None,
+        "--launch-activity",
+        help="Pin the cold-start Activity (multi-launcher / Dev Tools builds).",
+    ),
     app_pkg: str | None = typer.Option(None, "--app", help="Package (default: current)."),
 ) -> None:
     """Teach the app playbook: a description, a quirk note, a login/etc. recipe, or a deeplink.
@@ -3614,6 +3762,9 @@ def remember(
     The agent should record what it learns so the NEXT run starts informed, e.g.
     `aua remember --recipe login_full --note "tap 'Login with test user'"` or
     `aua remember --deeplink "myapp://set-flags?flag=value" --note "set flags, then restart"`.
+    On builds with a Dev Tools launcher next to the product one, pin the entry once with
+    `aua remember --launch-activity co.thewordlab.luzia.ui.activity.launch.LaunchActivity`
+    (or pass `--activity` on `app launch` — a successful pin teaches the map the same way).
     """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
@@ -3634,13 +3785,17 @@ def remember(
         if deeplink:
             store.remember_deeplink(pkg, deeplink, note=note)
             did.append("deeplink")
+        if launch_activity:
+            store.remember_launch_entry(pkg, launch_activity, source="user")
+            did.append("launch")
         if note and not recipe and not deeplink:
             store.remember_note(pkg, note)
             did.append("note")
         if not did:
             raise UsageError(
                 "remember needs something to store",
-                hint="pass --about / --note / --recipe NAME --note / --deeplink URI",
+                hint="pass --about / --note / --recipe NAME --note / --deeplink URI / "
+                "--launch-activity ACTIVITY",
             )
         typer.echo(json.dumps({"ok": True, "action": "remember", "package": pkg, "saved": did}))
 
@@ -3672,6 +3827,14 @@ def about(
                 "deeplinks": [{"uri": d.uri, "note": d.note} for d in app_map.deeplinks],
                 "notes": list(app_map.notes),
             }
+            if app_map.launch is not None:
+                play["launch"] = {
+                    "activity": app_map.launch.activity,
+                    "source": app_map.launch.source,
+                    "alternatives": list(app_map.launch.alternatives),
+                }
+            elif len(app_map.launcher_activities) > 1:
+                play["launch_ambiguous"] = list(app_map.launcher_activities)
             typer.echo(json.dumps(play, indent=None if fmt is OutputFormat.compact else 2))
         else:
             from .memory import _playbook_lines
@@ -4724,11 +4887,56 @@ def proxy_start_cmd(
         "--install-ca/--no-install-ca",
         help="Install mitm CA as a system trust anchor (needs rootable emulator).",
     ),
+    keep_rules: bool = typer.Option(
+        False,
+        "--keep-rules",
+        help="Keep any mock rules already in the cache (default: start from a clean slate).",
+    ),
+    exclude: str | None = typer.Option(
+        None,
+        "--exclude",
+        help="Extra comma-separated hosts to bypass the proxy (connectivity checks always do).",
+    ),
+    allow_untrusted: bool = typer.Option(
+        False,
+        "--allow-untrusted",
+        help="Proxy even when the system CA could not be installed (HTTPS apps will fail).",
+    ),
+    relaunch: bool = typer.Option(
+        False,
+        "--relaunch/--no-relaunch",
+        help="Also restart the foreground app (default: leave it running and keep its state).",
+    ),
+    companion: bool = typer.Option(
+        False,
+        "--companion/--no-companion",
+        help="Install and start AUA's VPN companion instead of changing Android's global proxy.",
+    ),
 ) -> None:
-    """Start mitmdump, adb-reverse, set device HTTP proxy, and (by default) install the CA."""
+    """Start mitmdump, adb-reverse, set device HTTP proxy, and (by default) install the CA.
+
+    Safe to run mid-flow: the app under test is left running and keeps its state, and its
+    next requests go through the proxy. Pass `--relaunch` if you want it restarted anyway.
+
+    Refuses on a device where the CA cannot become a system trust anchor (a Google Play
+    AVD), because arming the proxy there breaks every HTTPS request the app makes and the
+    app then reports itself offline. `--allow-untrusted` overrides.
+    """
+    hosts = [h.strip() for h in (exclude or "").split(",") if h.strip()]
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(engine.proxy_start(port=port or None, install_ca=install_ca), fmt)
+        _emit(
+            engine.proxy_start(
+                port=port or None,
+                install_ca=install_ca,
+                keep_rules=keep_rules,
+                exclude=hosts,
+                allow_untrusted=allow_untrusted,
+                relaunch=relaunch,
+                companion=companion,
+            ),
+            fmt,
+        )
 
     _run(ctx, go)
 
@@ -4739,6 +4947,41 @@ def proxy_stop_cmd(ctx: typer.Context) -> None:
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
         _emit(engine.proxy_stop(), fmt)
+
+    _run(ctx, go)
+
+
+@proxy_app.command("flows")
+def proxy_flows_cmd(
+    ctx: typer.Context,
+    limit: int = typer.Option(30, "--limit", help="Show at most N most recent exchanges."),
+    host: str | None = typer.Option(None, "--host", help="Filter by host (glob allowed)."),
+    path: str | None = typer.Option(None, "--path", help="Filter by path substring."),
+    status: int | None = typer.Option(None, "--status", help="Filter by response status."),
+) -> None:
+    """List the HTTP exchanges the proxy has seen — find the one you want to change."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.proxy_flows(limit=limit, host=host, path=path, status=status), fmt)
+
+    _run(ctx, go)
+
+
+@proxy_app.command("flow")
+def proxy_flow_cmd(
+    ctx: typer.Context,
+    n: int = typer.Argument(..., help="Flow number from `aua proxy flows`."),
+    to_rule: bool = typer.Option(
+        False, "--to-rule", help="Also print the `mock rewrite` command that would edit it."
+    ),
+    full: bool = typer.Option(
+        False, "--full", help="Print whole bodies instead of a clipped preview."
+    ),
+) -> None:
+    """Show one exchange — headers and bodies, request and response."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.proxy_flow(n, to_rule=to_rule, full=full), fmt)
 
     _run(ctx, go)
 
@@ -4762,18 +5005,139 @@ mock_app = typer.Typer(
 app.add_typer(mock_app, name="mock")
 
 
+def _parse_assignments(pairs: list[str] | None) -> dict[str, Any]:
+    """``a.b.0.c=<json|text>`` pairs into a mapping, keeping JSON literals typed.
+
+    So ``--set limitReached=true`` writes the boolean the app is checking, while
+    ``--set title=true`` on a string field still needs ``--set 'title="true"'``.
+    """
+    import json as _json
+
+    out: dict[str, Any] = {}
+    for raw in pairs or []:
+        key, sep, value = raw.partition("=")
+        if not sep or not key.strip():
+            raise UsageError(
+                f"expected PATH=VALUE, got {raw!r}",
+                hint="e.g. --set 'data.items.0.title=Hola' or --set 'limitReached=true'",
+            )
+        try:
+            out[key.strip()] = _json.loads(value)
+        except _json.JSONDecodeError:
+            out[key.strip()] = value
+    return out
+
+
 @mock_app.command("map")
 def mock_map_cmd(
     ctx: typer.Context,
     method: str = typer.Argument(..., help="HTTP method (GET|POST|…)."),
-    path: str = typer.Argument(..., help="Path to match (prefix or exact)."),
+    path: str = typer.Argument(..., help="Path to match (exact, /segment prefix, or glob)."),
     status: int = typer.Option(200, "--status", help="Response status."),
     body: str | None = typer.Option(None, "--body", help="JSON or raw body string."),
+    host: str | None = typer.Option(None, "--host", help="Only this host (glob allowed)."),
+    times: int = typer.Option(0, "--times", help="Apply at most N times (0 = unlimited)."),
+    once: bool = typer.Option(False, "--once", help="Shorthand for --times 1."),
 ) -> None:
-    """Add a live mock rule (reloaded by the mitmproxy addon)."""
+    """Stub a response — the request never reaches the server."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(engine.mock_map(method, path, status=status, body=body), fmt)
+        _emit(
+            engine.mock_map(
+                method,
+                path,
+                status=status,
+                body=body,
+                host=host,
+                times=1 if once else times,
+            ),
+            fmt,
+        )
+
+    _run(ctx, go)
+
+
+@mock_app.command("rewrite")
+def mock_rewrite_cmd(
+    ctx: typer.Context,
+    method: str = typer.Argument(..., help="HTTP method (GET|POST|… or * for any)."),
+    path: str = typer.Argument(..., help="Path to match (exact, /segment prefix, or glob)."),
+    host: str | None = typer.Option(None, "--host", help="Only this host (glob allowed)."),
+    query: str | None = typer.Option(None, "--query", help="Only when the query contains this."),
+    status: int | None = typer.Option(None, "--status", help="Override the response status."),
+    set_: list[str] = typer.Option(
+        [], "--set", help="Patch one JSON field: 'data.items.0.title=Hola'. Repeatable."
+    ),
+    delete: list[str] = typer.Option(
+        [], "--delete", help="Remove a JSON field by path. Repeatable."
+    ),
+    replace: list[str] = typer.Option(
+        [], "--replace", help="Literal 'OLD=NEW' substitution in the body. Repeatable."
+    ),
+    header: list[str] = typer.Option([], "--header", help="'Name: value' to set. Repeatable."),
+    body: str | None = typer.Option(None, "--body", help="Replace the whole body."),
+    times: int = typer.Option(0, "--times", help="Apply at most N times (0 = unlimited)."),
+    once: bool = typer.Option(False, "--once", help="Shorthand for --times 1."),
+) -> None:
+    """Let the request reach the server, then patch the real response.
+
+    The Charles "edit this one response" move. Unlike `mock map` you do not have to
+    reproduce the whole payload, so the rule stays valid as the backend evolves:
+
+        aua mock rewrite GET /api/v4.0/hub --host api.example.com \\
+          --set 'data.items.0.data.title=Renamed' --once
+        aua mock rewrite POST /v1/chat --status 429 --once   # force the paywall
+    """
+    headers: dict[str, str] = {}
+    for raw in header:
+        name, sep, value = raw.partition(":")
+        if not sep:
+            raise UsageError(f"expected 'Name: value', got {raw!r}")
+        headers[name.strip()] = value.strip()
+    pairs: list[tuple[str, str]] = []
+    for raw in replace:
+        old, sep, new = raw.partition("=")
+        if not sep:
+            raise UsageError(f"expected 'OLD=NEW', got {raw!r}")
+        pairs.append((old, new))
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(
+            engine.mock_rewrite(
+                method,
+                path,
+                host=host,
+                query=query,
+                status=status,
+                headers=headers or None,
+                body=body,
+                set_json=_parse_assignments(set_) or None,
+                delete_json=list(delete) or None,
+                replace=pairs or None,
+                times=1 if once else times,
+            ),
+            fmt,
+        )
+
+    _run(ctx, go)
+
+
+@mock_app.command("list")
+def mock_list_cmd(ctx: typer.Context) -> None:
+    """Show the rules currently armed, and whether recording is on."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.mock_list(), fmt)
+
+    _run(ctx, go)
+
+
+@mock_app.command("clear")
+def mock_clear_cmd(ctx: typer.Context) -> None:
+    """Drop every armed rule (traffic goes back to plain passthrough)."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.mock_clear(), fmt)
 
     _run(ctx, go)
 

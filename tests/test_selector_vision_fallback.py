@@ -45,8 +45,11 @@ class _FakeEngine:
         self._tree = tree
         self._seen = seen
         self.vision_calls = 0
+        self.forced_ocr_calls = 0
 
-    def analyze(self, *, source="auto", record=True, **_kw):
+    def analyze(self, *, source="auto", record=True, with_ocr=None, **_kw):
+        if source == "auto" and with_ocr is True:
+            self.forced_ocr_calls += 1
         if source == "vision":
             self.vision_calls += 1
             if self._seen is None:
@@ -98,9 +101,13 @@ def test_resource_id_does_not_fall_back():
     """Pixels cannot supply a resource-id; guessing one would be a wrong answer."""
     engine = _bind(_FakeEngine(tree=_result(_el(1, "Continue")), seen=None))
 
-    with pytest.raises(SelectorNotFoundError):
+    with pytest.raises(SelectorNotFoundError) as exc:
         engine.resolve_selector(rid="continueButton")
     assert engine.vision_calls == 0
+    assert engine.forced_ocr_calls == 1
+    payload = exc.value.to_dict()["error"]
+    assert payload["observation_present"] is True
+    assert payload["observation"]["elements"][0]["text"] == "Continue"
 
 
 def test_desc_does_not_fall_back():
@@ -130,6 +137,7 @@ def test_miss_names_what_is_visible():
 def test_fallback_can_be_switched_off():
     engine = _bind(_FakeEngine(tree=_result(_el(1, "", rid="webView")), seen=None))
 
-    with pytest.raises(SelectorNotFoundError):
+    with pytest.raises(SelectorNotFoundError) as exc:
         engine.resolve_selector(text="Continue", vision_fallback=False)
     assert engine.vision_calls == 0
+    assert exc.value.to_dict()["error"]["observation_present"] is True

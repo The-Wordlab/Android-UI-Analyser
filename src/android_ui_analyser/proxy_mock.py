@@ -38,9 +38,21 @@ _MITM_CA_PEM = _MITM_CONFDIR / "mitmproxy-ca-cert.pem"
 _MITM_CA_FULL = _MITM_CONFDIR / "mitmproxy-ca.pem"
 
 ADDON_SCRIPT = '''\
-"""aua mitmproxy addon — reload rules from RULES_PATH env."""
+"""aua mitmproxy addon.
+
+Everything the agent can change is hot-reloaded from the rules file on each exchange, so
+flipping record on or arming a rewrite never requires bouncing mitmdump — a restart would
+leave the device pointed at a dead port for as long as it took to come back up.
+
+Two ways to touch an exchange:
+  stub    — answer from the rule, the request never reaches the server.
+  rewrite — let the real request through, then patch the real response.
+Everything unmatched is relayed untouched, which is the whole point: one request is under
+test, the rest of the app has to keep working.
+"""
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import time
@@ -50,40 +62,178 @@ from mitmproxy import http
 
 _RULES_PATH = Path(os.environ.get("AUA_MOCK_RULES", ""))
 _RECORD_PATH = Path(os.environ.get("AUA_MOCK_RECORD", ""))
-_MODE = os.environ.get("AUA_MOCK_MODE", "map")  # map | record | replay
+_ENV_MODE = os.environ.get("AUA_MOCK_MODE", "map")
 # Always-on, append-only exchange log for `await net:` — deliberately separate from the
 # cassette record: waiting on a backend response must not require `record` mode, and the
 # cassette format must not change under replay. One JSONL line per completed response,
 # headers and body omitted so a chat stream does not write megabytes per turn.
 _FLOW_LOG_PATH = Path(os.environ.get("AUA_FLOW_LOG", ""))
+# The bodies behind those lines, for `aua proxy flow <n>`: capped per entry and rotated as
+# a whole, because this is a debugging buffer and must never be able to fill a disk.
+_BODY_LOG_PATH = Path(os.environ.get("AUA_FLOW_BODIES", ""))
+
+_MAX_BODY = 64 * 1024
+_MAX_BODY_LOG = 16 * 1024 * 1024
+# Allow-list rather than a binary block-list: anything not known to be text decodes into
+# mojibake that is useless to read and expensive to carry. protobuf/gRPC in particular are
+# very common on Android and would otherwise sail through a block-list.
+_TEXT_TYPES = (
+    "text/",
+    "application/json",
+    "application/xml",
+    "application/javascript",
+    "application/x-www-form-urlencoded",
+    "application/graphql",
+    "+json",
+    "+xml",
+)
+
+# Rule id -> applications so far. Kept in the process rather than written back to the rules
+# file: the file is re-read on every exchange and the CLI appends to it, so a counter
+# living there would be lost the next time a rule was added.
+_APPLIED = {}
+_SEQ = [0]
 
 
-def _load_rules():
+def _doc():
+    """The rules file, tolerating the legacy bare-list form."""
+    empty = {"mode": _ENV_MODE, "capture_bodies": True, "rules": []}
     if not _RULES_PATH.is_file():
-        return []
+        return empty
     try:
         data = json.loads(_RULES_PATH.read_text(encoding="utf-8"))
     except Exception:
-        return []
-    return data if isinstance(data, list) else data.get("entries") or []
+        return empty
+    if isinstance(data, list):
+        return {"mode": _ENV_MODE, "capture_bodies": True, "rules": data}
+    if not isinstance(data, dict):
+        return empty
+    return {
+        "mode": data.get("mode") or _ENV_MODE,
+        "capture_bodies": bool(data.get("capture_bodies", True)),
+        "rules": data.get("rules") or data.get("entries") or [],
+    }
 
 
-def _match(flow: http.HTTPFlow, rule: dict) -> bool:
-    req = rule.get("request") or {}
-    method = (req.get("method") or "*").upper()
-    path = req.get("path") or "*"
-    if method not in ("*", flow.request.method.upper()):
+def _match_path(pattern, url_path):
+    """Exact, path-segment prefix, or glob — never a bare substring.
+
+    Substring matching is how a rule for `/` silently stubs the entire internet, and how a
+    rule meant for one endpoint swallows every path that happens to contain it.
+    """
+    if not pattern or pattern == "*":
+        return True
+    if "*" in pattern or "?" in pattern:
+        return fnmatch.fnmatch(url_path, pattern)
+    if url_path == pattern:
+        return True
+    return url_path.startswith(pattern.rstrip("/") + "/")
+
+
+def _matches(flow, rule):
+    spec = rule.get("match") or rule.get("request") or {}
+    method = str(spec.get("method") or "*").upper()
+    if method != "*" and method != flow.request.method.upper():
         return False
-    url_path = flow.request.path.split("?", 1)[0]
-    if path != "*" and path not in url_path and url_path != path:
-        # prefix or exact
-        if not (path.endswith("*") and url_path.startswith(path[:-1])):
-            if url_path != path and not url_path.startswith(path.rstrip("/") + "/"):
+    host = spec.get("host")
+    if host and not fnmatch.fnmatch((flow.request.host or "").lower(), str(host).lower()):
+        return False
+    if not _match_path(spec.get("path"), flow.request.path.split("?", 1)[0]):
+        return False
+    query = spec.get("query")
+    if query and str(query) not in flow.request.path:
+        return False
+    needle = spec.get("body")
+    if needle:
+        try:
+            if str(needle) not in (flow.request.get_text(strict=False) or ""):
                 return False
+        except Exception:
+            return False
     return True
 
 
-def _apply(flow: http.HTTPFlow, rule: dict) -> None:
+def _pick(flow, action):
+    """First matching rule of *action* whose --times budget is not yet spent."""
+    for rule in _doc()["rules"]:
+        if (rule.get("action") or "stub") != action:
+            continue
+        if not _matches(flow, rule):
+            continue
+        times = int(rule.get("times") or 0)
+        if times > 0 and _APPLIED.get(str(rule.get("id") or ""), 0) >= times:
+            continue
+        return rule
+    return None
+
+
+def _consume(rule):
+    key = str(rule.get("id") or "")
+    _APPLIED[key] = _APPLIED.get(key, 0) + 1
+
+
+def _path_parts(path):
+    text = str(path)
+    if text.startswith("$."):
+        text = text[2:]
+    elif text.startswith("$"):
+        text = text[1:]
+    return [p for p in text.split(".") if p != ""]
+
+
+def _descend(node, parts):
+    for part in parts:
+        if isinstance(node, list):
+            try:
+                node = node[int(part)]
+            except (ValueError, IndexError):
+                return None
+        elif isinstance(node, dict):
+            if part not in node:
+                return None
+            node = node[part]
+        else:
+            return None
+    return node
+
+
+def _assign(doc, parts, value):
+    if not parts:
+        return False
+    node = _descend(doc, parts[:-1]) if len(parts) > 1 else doc
+    leaf = parts[-1]
+    if isinstance(node, list):
+        try:
+            node[int(leaf)] = value
+        except (ValueError, IndexError):
+            return False
+        return True
+    if isinstance(node, dict):
+        node[leaf] = value
+        return True
+    return False
+
+
+def _unset(doc, parts):
+    if not parts:
+        return False
+    node = _descend(doc, parts[:-1]) if len(parts) > 1 else doc
+    leaf = parts[-1]
+    if isinstance(node, list):
+        try:
+            del node[int(leaf)]
+        except (ValueError, IndexError):
+            return False
+        return True
+    if isinstance(node, dict):
+        return node.pop(leaf, _SENTINEL) is not _SENTINEL
+    return False
+
+
+_SENTINEL = object()
+
+
+def _stub(flow, rule):
     resp = rule.get("response") or {}
     status = int(resp.get("status") or 200)
     body = resp.get("body")
@@ -97,60 +247,150 @@ def _apply(flow: http.HTTPFlow, rule: dict) -> None:
     flow.response = http.Response.make(status, body, headers)
 
 
+def _rewrite(flow, rule):
+    """Patch the response the server actually sent."""
+    spec = rule.get("rewrite") or {}
+    resp = flow.response
+    if resp is None:
+        return
+    status = spec.get("status")
+    if status is not None:
+        resp.status_code = int(status)
+    for key, value in (spec.get("headers") or {}).items():
+        resp.headers[str(key)] = str(value)
+    body = spec.get("body")
+    if body is not None:
+        resp.text = body if isinstance(body, str) else json.dumps(body)
+
+    sets = spec.get("set_json") or {}
+    unsets = spec.get("delete_json") or []
+    if sets or unsets:
+        try:
+            parsed = json.loads(resp.get_text(strict=False) or "")
+        except Exception:
+            parsed = None
+        if parsed is not None:
+            for path, value in sets.items():
+                _assign(parsed, _path_parts(path), value)
+            for path in unsets:
+                _unset(parsed, _path_parts(path))
+            resp.text = json.dumps(parsed)
+
+    for pair in spec.get("replace") or []:
+        try:
+            old, new = pair[0], pair[1]
+        except (IndexError, TypeError, KeyError):
+            continue
+        current = resp.get_text(strict=False)
+        if current is not None:
+            resp.text = current.replace(str(old), str(new))
+
+
+def _append(path, payload):
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload) + "\\n")
+    except Exception:
+        pass  # observability must never break the proxied request
+
+
+def _snippet(message):
+    if message is None:
+        return None
+    ctype = str(message.headers.get("content-type", "")).lower()
+    body = message.raw_content or b""
+    if ctype and not any(t in ctype for t in _TEXT_TYPES):
+        return "<%s omitted, %d bytes>" % (ctype.split(";")[0].strip() or "binary", len(body))
+    try:
+        text = message.get_text(strict=False)
+    except Exception:
+        return None
+    if text is None:
+        return None
+    return text[:_MAX_BODY]
+
+
 class AuaMock:
     def request(self, flow: http.HTTPFlow) -> None:
-        mode = os.environ.get("AUA_MOCK_MODE", _MODE)
-        if mode == "record":
-            return
-        for rule in _load_rules():
-            if _match(flow, rule):
-                _apply(flow, rule)
-                return
+        rule = _pick(flow, "stub")
+        if rule is not None:
+            _consume(rule)
+            flow.metadata["aua_rule"] = rule.get("id")
+            flow.metadata["aua_action"] = "stub"
+            _stub(flow, rule)
 
     def response(self, flow: http.HTTPFlow) -> None:
         # mitmproxy calls this when the response is *complete*, so for a streamed chat
         # surface it fires at stream end — which is the moment `await net:` waits for.
+        doc = _doc()
+        if flow.metadata.get("aua_action") != "stub":
+            rule = _pick(flow, "rewrite")
+            if rule is not None:
+                _consume(rule)
+                flow.metadata["aua_rule"] = rule.get("id")
+                flow.metadata["aua_action"] = "rewrite"
+                try:
+                    _rewrite(flow, rule)
+                except Exception:
+                    pass  # a bad rule must not take the app's network down with it
+
+        _SEQ[0] += 1
+        seq = _SEQ[0]
+        status = flow.response.status_code if flow.response else 0
+        summary = {
+            "n": seq,
+            "ts": time.time(),
+            "method": flow.request.method.upper(),
+            "path": flow.request.path.split("?", 1)[0],
+            "host": flow.request.host,
+            "status": status,
+            "action": flow.metadata.get("aua_action"),
+            # Which rule fired. The per-rule `times` budget is spent in this process and is
+            # deliberately not written back to the rules file (the addon re-reads that file
+            # on every exchange and the CLI appends to it, so a counter there would be lost
+            # the next time a rule was added). Logging it here is what lets `mock list` tell
+            # an armed rule from one that has already been used up.
+            "rule": flow.metadata.get("aua_rule"),
+        }
         if str(_FLOW_LOG_PATH):
+            _append(_FLOW_LOG_PATH, summary)
+
+        if doc["capture_bodies"] and str(_BODY_LOG_PATH):
             try:
-                line = json.dumps(
-                    {
-                        "ts": time.time(),
+                if _BODY_LOG_PATH.is_file() and _BODY_LOG_PATH.stat().st_size > _MAX_BODY_LOG:
+                    _BODY_LOG_PATH.unlink()
+            except Exception:
+                pass
+            _append(
+                _BODY_LOG_PATH,
+                dict(
+                    summary,
+                    query=flow.request.path.split("?", 1)[1] if "?" in flow.request.path else "",
+                    request_headers=dict(flow.request.headers),
+                    request_body=_snippet(flow.request),
+                    response_headers=dict(flow.response.headers) if flow.response else {},
+                    response_body=_snippet(flow.response),
+                ),
+            )
+
+        # Cassette capture is orthogonal to rules now: recording a flow you are also
+        # rewriting is a normal thing to want, and the old early-return made it impossible.
+        if doc["mode"] == "record" and str(_RECORD_PATH):
+            _append(
+                _RECORD_PATH,
+                {
+                    "request": {
                         "method": flow.request.method.upper(),
                         "path": flow.request.path.split("?", 1)[0],
                         "host": flow.request.host,
-                        "status": flow.response.status_code if flow.response else 0,
-                    }
-                )
-                _FLOW_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-                with _FLOW_LOG_PATH.open("a", encoding="utf-8") as fh:
-                    fh.write(line + "\\n")
-            except Exception:
-                pass  # observability must never break the proxied request
-
-        mode = os.environ.get("AUA_MOCK_MODE", _MODE)
-        if mode != "record" or not _RECORD_PATH:
-            return
-        entry = {
-            "request": {
-                "method": flow.request.method.upper(),
-                "path": flow.request.path.split("?", 1)[0],
-            },
-            "response": {
-                "status": flow.response.status_code if flow.response else 0,
-                "body": (flow.response.text if flow.response else "")[:200_000],
-            },
-        }
-        entries = []
-        if _RECORD_PATH.is_file():
-            try:
-                entries = json.loads(_RECORD_PATH.read_text(encoding="utf-8"))
-            except Exception:
-                entries = []
-        if not isinstance(entries, list):
-            entries = []
-        entries.append(entry)
-        _RECORD_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _RECORD_PATH.write_text(json.dumps(entries, indent=2), encoding="utf-8")
+                    },
+                    "response": {
+                        "status": status,
+                        "body": (_snippet(flow.response) or "")[:200_000],
+                    },
+                },
+            )
 
 
 addons = [AuaMock()]
@@ -166,7 +406,47 @@ def rules_path(cache_dir: str | Path) -> Path:
 
 
 def record_path(cache_dir: str | Path) -> Path:
-    return Path(cache_dir).expanduser() / "mock_record.json"
+    """In-progress cassette capture — append-only.
+
+    Was a JSON array the addon re-read and rewrote on every single response, which is
+    O(n²) writes and turns a chat surface into a stall.
+    """
+    return Path(cache_dir).expanduser() / "mock_record.jsonl"
+
+
+def load_record(cache_dir: str | Path) -> list[dict[str, Any]]:
+    """Entries captured so far, skipping any half-written trailing line."""
+    return _read_jsonl(record_path(cache_dir))
+
+
+def flow_bodies_path(cache_dir: str | Path) -> Path:
+    """Full request/response detail for ``aua proxy flow <n>`` (bounded, rotated)."""
+    return Path(cache_dir).expanduser() / "flow_bodies.jsonl"
+
+
+def read_flow_bodies(cache_dir: str | Path) -> list[dict[str, Any]]:
+    return _read_jsonl(flow_bodies_path(cache_dir))
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    out: list[dict[str, Any]] = []
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue  # the writer is mid-append
+                if isinstance(entry, dict):
+                    out.append(entry)
+    except OSError:
+        return []
+    return out
 
 
 def flow_log_path(cache_dir: str | Path) -> Path:
@@ -231,6 +511,108 @@ def flow_matches(entry: dict[str, Any], spec: str) -> bool:
     if status is not None and int(entry.get("status") or 0) != status:
         return False
     return text in str(entry.get("path", ""))
+
+
+# --------------------------------------------------------------------------- ownership
+#
+# The device's `http_proxy` is a *persistent* global setting pointing at a *non-persistent*
+# host process, reached through an `adb reverse` tunnel that dies with the adb transport.
+# When either half goes away the device is left proxied to a dead loopback port: every app
+# reports "Offline" and NetworkMonitor flags the network unvalidated (the Wi-Fi "!"). So a
+# device-global setting needs device-global bookkeeping — who owns the proxy, on which port,
+# under which boot — recorded where *any* process can find it.
+
+
+def proxy_state_dir() -> Path:
+    """Serial-keyed proxy ownership records, deliberately NOT under ``AUA_CACHE__DIR``.
+
+    Parallel agents are told to keep separate caches so their mock rules cannot leak into
+    one another, which also means the port agent A wrote into its own cache is invisible to
+    agent B — and B is the one that inherits the emulator. Mirrors the emulator's
+    port-reservation directory: process-wide facts live at a fixed path.
+    """
+    d = Path.home() / ".cache/android-ui-analyser/proxy"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def state_path(serial: str) -> Path:
+    return proxy_state_dir() / f"{str(serial).replace(':', '_')}.json"
+
+
+def write_state(serial: str, state: dict[str, Any]) -> None:
+    path = state_path(serial)
+    payload = {"serial": serial, "written": time.time(), **state}
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def read_state(serial: str) -> dict[str, Any] | None:
+    path = state_path(serial)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def clear_state(serial: str) -> None:
+    with contextlib.suppress(OSError):
+        state_path(serial).unlink()
+
+
+def pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # alive, just not ours to signal
+    except OSError:
+        return False
+    return True
+
+
+def port_listening(port: int, *, timeout: float = 0.25) -> bool:
+    """Is something accepting connections on ``127.0.0.1:port`` right now?"""
+    if port <= 0:
+        return False
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.settimeout(timeout)
+        return sock.connect_ex(("127.0.0.1", int(port))) == 0
+    except OSError:
+        return False
+    finally:
+        with contextlib.suppress(OSError):
+            sock.close()
+
+
+def orphan_reason(state: dict[str, Any] | None, *, boot_id: str | None) -> str | None:
+    """Why the proxy recorded for a device is dead, or ``None`` when it is still healthy.
+
+    Deliberately conservative: a proxy another agent is actively using must survive this
+    check, so every reason here is positive evidence of death rather than of foreignness.
+    """
+    if state is None:
+        return "no aua owns it (no ownership record for this device)"
+    recorded_boot = state.get("boot_id")
+    if boot_id and recorded_boot and str(recorded_boot) != str(boot_id):
+        return "the device rebooted since the proxy was set"
+    pid = int(state.get("pid") or 0)
+    if pid and not pid_alive(pid):
+        return f"its mitmdump (pid {pid}) is gone"
+    port = int(state.get("port") or 0)
+    if port and not port_listening(port):
+        return f"nothing is listening on host port {port}"
+    if not pid and not port:
+        return "its ownership record names neither a process nor a port"
+    return None
 
 
 def pid_path(cache_dir: str | Path) -> Path:
@@ -305,21 +687,162 @@ def clear_listen_port(cache_dir: str | Path) -> None:
         port_path(cache_dir).unlink()
 
 
-def write_rules(path: Path, entries: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(entries, indent=2), encoding="utf-8")
+# Android validates a network by fetching these; if that fetch goes through a proxy the
+# app under test is also breaking, the whole network is marked unvalidated and every app
+# shows an offline state for a reason that has nothing to do with the app. Sending the
+# probes direct keeps the "!" off the Wi-Fi icon while the proxy is live.
+CONNECTIVITY_CHECK_HOSTS = (
+    "connectivitycheck.gstatic.com",
+    "connectivitycheck.android.com",
+    "clients3.google.com",
+    "clients1.google.com",
+    "www.google.com",
+    "play.googleapis.com",
+    "android.clients.google.com",
+)
 
 
-def load_rules(path: Path) -> list[dict[str, Any]]:
+def load_doc(path: Path) -> dict[str, Any]:
+    """The rules file as ``{mode, capture_bodies, rules}``, whatever shape it is on disk.
+
+    ``mode`` lives in the file rather than in mitmdump's environment so record can be
+    flipped without restarting the proxy — a restart drops the device's only route to the
+    network for as long as it takes to rebind.
+    """
+    doc: dict[str, Any] = {"mode": "map", "capture_bodies": True, "rules": []}
     if not path.is_file():
-        return []
+        return doc
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return []
+        return doc
     if isinstance(data, list):
-        return data
-    return list(data.get("entries") or [])
+        doc["rules"] = data
+        return doc
+    if isinstance(data, dict):
+        doc["mode"] = str(data.get("mode") or "map")
+        doc["capture_bodies"] = bool(data.get("capture_bodies", True))
+        doc["rules"] = list(data.get("rules") or data.get("entries") or [])
+    return doc
+
+
+def save_doc(path: Path, doc: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+    os.replace(tmp, path)  # the addon re-reads this file constantly; never show it partial
+
+
+def write_rules(path: Path, entries: list[dict[str, Any]]) -> None:
+    """Replace the rule list, preserving mode/capture settings already in the file."""
+    doc = load_doc(path)
+    doc["rules"] = entries
+    save_doc(path, doc)
+
+
+def set_mode(path: Path, mode: str) -> None:
+    doc = load_doc(path)
+    doc["mode"] = mode
+    save_doc(path, doc)
+
+
+def rewrite_rule(
+    *,
+    host: str | None = None,
+    method: str = "*",
+    path: str = "*",
+    query: str | None = None,
+    request_body: str | None = None,
+    status: int | None = None,
+    headers: dict[str, str] | None = None,
+    body: Any = None,
+    set_json: dict[str, Any] | None = None,
+    delete_json: list[str] | None = None,
+    replace: list[tuple[str, str]] | None = None,
+    times: int = 0,
+) -> dict[str, Any]:
+    """A rule that lets the request reach the server, then patches the real response."""
+    match: dict[str, Any] = {"method": method.upper(), "path": path}
+    if host:
+        match["host"] = host
+    if query:
+        match["query"] = query
+    if request_body:
+        match["body"] = request_body
+    spec: dict[str, Any] = {}
+    if status is not None:
+        spec["status"] = int(status)
+    if headers:
+        spec["headers"] = headers
+    if body is not None:
+        spec["body"] = body
+    if set_json:
+        spec["set_json"] = set_json
+    if delete_json:
+        spec["delete_json"] = delete_json
+    if replace:
+        spec["replace"] = [list(pair) for pair in replace]
+    if not spec:
+        raise UsageError(
+            "a rewrite rule must change something",
+            hint="Pass at least one of --status / --set / --delete / --replace / "
+            "--header / --body.",
+        )
+    return {
+        "id": f"r{int(time.time() * 1000) % 10_000_000}-{random.randrange(1000):03d}",
+        "action": "rewrite",
+        "match": match,
+        "rewrite": spec,
+        "times": int(times),
+    }
+
+
+def guard_rule_scope(rule: dict[str, Any]) -> None:
+    """Refuse a rule broad enough to take the whole device offline.
+
+    An unhosted `/` (or `*`) matches every request on every host, including Android's own
+    connectivity probes, so arming one looks identical to the device losing its network.
+    """
+    match = rule.get("match") or rule.get("request") or {}
+    path = str(match.get("path") or "*").strip()
+    if match.get("host"):
+        return
+    if path in ("", "*", "/", "/*", "**"):
+        raise UsageError(
+            f"rule path {path!r} with no --host matches every request on every host",
+            hint="Scope it: add `--host api.example.com`, or give a real path like "
+            "`/v1/chat`.",
+        )
+
+
+def reset_session_files(cache_dir: str | Path) -> list[str]:
+    """Drop every leftover rule/record artefact; return the names actually removed.
+
+    A cache dir outlives the run that filled it, so without this the next ``proxy start``
+    silently re-arms the previous scenario's stubs — which is indistinguishable, from the
+    agent's side, from the app misbehaving.
+    """
+    cache = Path(cache_dir).expanduser()
+    removed: list[str] = []
+    for name in (
+        "mock_rules.json",
+        "mock_record.jsonl",
+        "mock_record.json",  # pre-JSONL capture file
+        "mock_mode.txt",
+        "mock_record_name.txt",
+        "flow_log.jsonl",
+        "flow_bodies.jsonl",
+    ):
+        path = cache / name
+        if path.exists():
+            with contextlib.suppress(OSError):
+                path.unlink()
+                removed.append(name)
+    return removed
+
+
+def load_rules(path: Path) -> list[dict[str, Any]]:
+    return load_doc(path)["rules"]
 
 
 def load_cassette(path: Path) -> list[dict[str, Any]]:
@@ -351,7 +874,10 @@ def map_rule(
     status: int = 200,
     body: Any = None,
     headers: dict[str, str] | None = None,
+    host: str | None = None,
+    times: int = 0,
 ) -> dict[str, Any]:
+    """A rule that answers from the rule itself — the request never reaches the server."""
     resp: dict[str, Any] = {"status": status}
     if body is not None:
         if isinstance(body, str):
@@ -363,7 +889,20 @@ def map_rule(
             resp["body"] = body
     if headers:
         resp["headers"] = headers
-    return {"request": {"method": method.upper(), "path": path}, "response": resp}
+    request: dict[str, Any] = {"method": method.upper(), "path": path}
+    if host:
+        request["host"] = host
+    rule: dict[str, Any] = {
+        "id": f"r{int(time.time() * 1000) % 10_000_000}-{random.randrange(1000):03d}",
+        "action": "stub",
+        # Kept under `request` (not `match`) so cassettes written by any earlier version
+        # still load, and so a hand-edited cassette reads the way its author expects.
+        "request": request,
+        "response": resp,
+    }
+    if times:
+        rule["times"] = int(times)
+    return rule
 
 
 def ensure_addon(cache: Path) -> Path:
@@ -652,12 +1191,14 @@ def start_mitm(
     rules = rules_path(cache_dir)
     if not rules.is_file():
         write_rules(rules, [])
+    set_mode(rules, mode)
     log = Path(cache_dir).expanduser() / "mitmdump.log"
     env = os.environ.copy()
     env["AUA_MOCK_RULES"] = str(rules)
     env["AUA_MOCK_MODE"] = mode
     env["AUA_MOCK_RECORD"] = str(record_path(cache_dir))
     env["AUA_FLOW_LOG"] = str(flow_log_path(cache_dir))
+    env["AUA_FLOW_BODIES"] = str(flow_bodies_path(cache_dir))
     log_fh = open(log, "ab")  # noqa: SIM115 — kept open for child stderr
     try:
         proc = subprocess.Popen(  # noqa: S603
@@ -716,26 +1257,44 @@ def stop_mitm(cache_dir: Path) -> bool:
 
 
 __all__ = [
+    "CONNECTIVITY_CHECK_HOSTS",
     "android_cert_hash",
     "cassette_dir",
     "clear_listen_port",
+    "clear_state",
     "ensure_addon",
     "ensure_mitm_ca",
+    "flow_bodies_path",
+    "guard_rule_scope",
     "install_system_ca",
     "load_cassette",
+    "load_doc",
     "load_listen_port",
+    "load_record",
     "load_rules",
     "map_rule",
     "mitmdump_bin",
+    "orphan_reason",
     "pick_listen_port",
+    "pid_alive",
     "pid_path",
+    "port_listening",
     "port_path",
+    "proxy_state_dir",
+    "read_flow_bodies",
+    "read_state",
     "record_path",
+    "reset_session_files",
+    "rewrite_rule",
     "rules_path",
     "save_cassette",
+    "save_doc",
     "save_listen_port",
+    "set_mode",
     "start_mitm",
+    "state_path",
     "stop_mitm",
     "tls_failures_in_log",
     "write_rules",
+    "write_state",
 ]

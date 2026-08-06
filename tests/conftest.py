@@ -134,6 +134,8 @@ class FakeDevice(Device):
         self.clock_skew_ms = clock_skew_ms
         self.utc_offset = utc_offset
         self._clock_ms: int | None = None
+        # MAIN+LAUNCHER Activities returned by ``launcher_activities`` (empty = unknown).
+        self._launcher_activities: list[str] = []
 
     # capture
     def window_size(self) -> tuple[int, int]:
@@ -186,6 +188,10 @@ class FakeDevice(Device):
         self._pkg = package
         if activity is not None:
             self._act = activity
+
+    def launcher_activities(self, package: str) -> list[str]:
+        self.calls.append(("launcher_activities", (package,)))
+        return list(self._launcher_activities)
 
     def stop_app(self, package: str) -> None:
         self.calls.append(("stop_app", (package,)))
@@ -372,7 +378,7 @@ class FakeDevice(Device):
     def a11y_action(self, x: int, y: int, action: str) -> None:
         self.calls.append(("a11y_action", (x, y, action)))
 
-    def set_http_proxy(self, host_port: str | None) -> None:
+    def set_http_proxy(self, host_port: str | None, *, exclusion_list=None) -> None:
         self.calls.append(("set_http_proxy", (host_port,)))
         if not hasattr(self, "_settings"):
             self.shell("settings get global http_proxy")  # ensure dict
@@ -380,12 +386,38 @@ class FakeDevice(Device):
             self._settings[("global", "http_proxy")] = host_port
         else:
             self._settings[("global", "http_proxy")] = ":0"
+        key = ("global", "global_http_proxy_exclusion_list")
+        if exclusion_list:
+            self._settings[key] = ",".join(exclusion_list)
+        else:
+            self._settings.pop(key, None)
+
+    def get_http_proxy(self) -> str | None:
+        raw = str(self.shell("settings get global http_proxy")).strip()
+        return None if raw.lower() in ("", "null", ":0", "0") else raw
+
+    def get_proxy_exclusion_list(self) -> list[str]:
+        raw = str(self.shell("settings get global global_http_proxy_exclusion_list")).strip()
+        if raw.lower() in ("", "null"):
+            return []
+        return [h.strip() for h in raw.split(",") if h.strip()]
+
+    def set_wifi_enabled(self, enabled: bool) -> None:
+        self.calls.append(("set_wifi_enabled", (enabled,)))
+
+    def set_mobile_data_enabled(self, enabled: bool) -> None:
+        self.calls.append(("set_mobile_data_enabled", (enabled,)))
 
     def adb_reverse(self, device_port: int, host_port: int) -> None:
         self.calls.append(("adb_reverse", (device_port, host_port)))
+        self._reverses = sorted({*getattr(self, "_reverses", set()), device_port})
 
     def adb_reverse_remove(self, device_port: int) -> None:
         self.calls.append(("adb_reverse_remove", (device_port,)))
+        self._reverses = [p for p in getattr(self, "_reverses", []) if p != device_port]
+
+    def adb_reverse_list(self) -> list[int]:
+        return list(getattr(self, "_reverses", []))
 
     def open_link(self, uri: str, *, package: str | None = None) -> None:
         self.calls.append(("open_link", (uri,) if package is None else (uri, package)))

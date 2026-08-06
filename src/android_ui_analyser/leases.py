@@ -8,10 +8,8 @@ quietly wrong.
 The design keeps two properties that matter more than features:
 
 **No deadlock is possible.** Expiry is computed when a lease is *read*, not by a reaper
-process. A stale lease is simply not a lease. There is no state a crashed agent can leave
-behind that blocks anyone, and no cleanup step anyone can forget — which is exactly the
-failure a "watchdog that frees stuck locks" design invites, because the watchdog becomes one
-more thing that can die holding the world.
+process. A lease owned by a derived agent process expires as soon as that process is gone;
+other owners fall back to the TTL. There is no cleanup process that can itself fail.
 
 **Identity has to be stable across an agent's calls, or stickiness inverts into churn.**
 Measured: a session id is *not* stable — consecutive tool calls from one agent reported sids
@@ -30,11 +28,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-# Long enough that a single blocking call cannot outlive it: `--until` waits legitimately run
-# 90-120s on a slow backend, and a lease that expires mid-wait would let another agent seize a
-# device that is actively in use — strictly worse than no lease at all. Every command renews,
-# so the TTL only ever measures the gap *since an agent stopped working*.
-DEFAULT_TTL_S = 900
+# Long waits renew from inside their polling loop. This fallback covers owners that cannot be
+# bound to a live process without making an abandoned device unavailable for an excessive time.
+DEFAULT_TTL_S = 120
 
 _SHELLS = {"sh", "bash", "zsh", "dash", "fish", "ksh", "csh", "tcsh", "login", "-zsh", "-bash"}
 
@@ -124,9 +120,29 @@ def _now() -> float:
 
 
 def _expired(entry: dict[str, Any], *, now: float | None = None) -> bool:
+    owner_pid = entry.get("owner_pid")
+    owner_started = entry.get("owner_started")
+    if isinstance(owner_pid, int) and owner_pid > 1:
+        try:
+            os.kill(owner_pid, 0)
+        except (OSError, ProcessLookupError):
+            return True
+        if owner_started and _proc_started(owner_pid) != owner_started:
+            return True
     now = _now() if now is None else now
     ttl = float(entry.get("ttl_s") or DEFAULT_TTL_S)
     return (now - float(entry.get("last_activity") or 0)) > ttl
+
+
+def _owner_process(owner: str) -> tuple[int, str] | None:
+    parts = owner.rsplit("-", 2)
+    if len(parts) != 3 or not parts[1].isdigit() or not parts[2]:
+        return None
+    pid = int(parts[1])
+    started = parts[2]
+    if _proc_started(pid) != started:
+        return None
+    return pid, started
 
 
 def read_lease(cache_dir: str | Path, serial: str) -> dict[str, Any] | None:
@@ -160,6 +176,7 @@ def acquire(
     ttl_s: int = DEFAULT_TTL_S,
     needs: list[str] | None = None,
     app: str | None = None,
+    force: bool = False,
 ) -> bool:
     """Claim *serial* for *owner*. True when held afterwards (including a sticky re-claim)."""
     path = _lease_path(cache_dir, serial)
@@ -174,6 +191,14 @@ def acquire(
         "needs": list(needs or []),
         "app": app,
     }
+    owner_process = _owner_process(owner)
+    if owner_process is not None:
+        entry["owner_pid"], entry["owner_started"] = owner_process
+
+    if force:
+        _write(path, entry)
+        confirmed = read_lease(cache_dir, serial)
+        return bool(confirmed and confirmed.get("owner") == owner)
 
     # Fast path: nobody has ever held it.
     try:
@@ -199,7 +224,7 @@ def acquire(
         return bool(confirmed and confirmed.get("owner") == owner)
     if current.get("owner") == owner:
         current["last_activity"] = _now()
-        current["ttl_s"] = int(ttl_s)
+        current["ttl_s"] = max(int(current.get("ttl_s") or 0), int(ttl_s))
         if app:
             current["app"] = app
         if needs:
@@ -209,12 +234,21 @@ def acquire(
     return False
 
 
-def renew(cache_dir: str | Path, serial: str, *, owner: str, app: str | None = None) -> bool:
+def renew(
+    cache_dir: str | Path,
+    serial: str,
+    *,
+    owner: str,
+    app: str | None = None,
+    ttl_s: int | None = None,
+) -> bool:
     """Heartbeat. Called on every command, and from inside long waits."""
     current = read_lease(cache_dir, serial)
     if current is None or current.get("owner") != owner:
         return False
     current["last_activity"] = _now()
+    if ttl_s is not None:
+        current["ttl_s"] = int(ttl_s)
     if app:
         current["app"] = app
     _write(_lease_path(cache_dir, serial), current)
@@ -323,6 +357,12 @@ def unmet_needs(capabilities: dict[str, Any] | None, needs: list[str] | None) ->
     return [n for n in needs if not bool(caps.get(n))]
 
 
+# `why` values meaning this owner did *not* hold the device a moment ago — the emulator was
+# just inherited, quite possibly from an agent that never got to clean up after itself. The
+# only moment worth paying adb round-trips to check the device's baseline state.
+FRESH_CLAIMS = frozenset({"assigned", "explicit-new"})
+
+
 def choose_device(
     cache_dir: str | Path,
     *,
@@ -364,7 +404,7 @@ def choose_device(
                 hint=f"free and matching: {_free_report()}",
             )
         acquire(cache_dir, explicit, owner=owner, ttl_s=ttl_s, needs=needs)
-        return explicit, "explicit"
+        return explicit, ("explicit-new" if current is None else "explicit")
 
     # Sticky: keep an agent on the device it already knows, so its element ids, app state and
     # learned screen map stay valid across calls.

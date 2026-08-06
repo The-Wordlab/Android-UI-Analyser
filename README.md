@@ -753,23 +753,66 @@ Everything else (and any unknown flags) exec's the full Python CLI. Host-side sp
 
 ---
 
-## Proxy / mock (HTTPS record & replay)
+## Proxy / mock (watch one request, then change it)
 
 Optional extra: `pip`/`uv` install with `[proxy]` (pulls `mitmproxy`). Apps whose Network
 Security Config trusts **system CAs only** need a rootable emulator and a system CA install
-(see [Emulator](#option-a--emulator-avd)):
+(see [Emulator](#option-a--emulator-avd)).
+
+The everyday use is the Charles one — watch real traffic, pick one exchange, change only
+that one, and let the rest of the app's network through untouched.
+
+You can arm it **at any point**, including partway through a flow: the app under test is
+left running and keeps its state, and its next requests go through the proxy. So you don't
+have to restart the app and redo the steps that got you to the interesting screen. Pass
+`--relaunch` if you do want a fresh process.
 
 ```bash
 aua emulator ensure-proxy --start
-aua --serial <serial> proxy start          # random high port + system CA by default
-aua mock record start login_flow
-# … drive the app …
-aua mock record stop login_flow            # cassette under memory.dir/cassettes/
-aua mock map GET /v1/foo --status 200 --body '{"ok":true}'
-aua mock replay login_flow
+# … drive the app to the screen you care about, then …
+aua --serial <serial> proxy start           # random high port + system CA; app keeps running
+aua proxy flows --host api.example.com      # numbered list of what the proxy saw
+aua proxy flow 12 --to-rule                 # headers + bodies, and the rule that edits it
+aua mock rewrite GET /v1/me --host api.example.com --set 'plan=premium' --once
+# … repeat the action: the next matching response is patched, then the rule expires …
 aua proxy stop
 aua emulator stop --mine
 ```
+
+| Command | What it does |
+| --- | --- |
+| `mock rewrite` | Edits the **real** upstream response — `--set a.b=v` (JSON patch), `--delete`, `--replace old=new`, `--status`, `--header` |
+| `mock map` | **Stubs** the endpoint outright; the request never reaches the network |
+| `mock list` / `mock clear` | Show what is armed / disarm everything |
+| `mock record` / `mock replay` | Whole-session cassettes, under `memory.dir/cassettes/` |
+| `device reset` | Put a wrecked device back: clears proxy, exclusion list, reverses, airplane mode |
+
+Both rule kinds need a `--host` unless the path is specific — a bare `/` or `*` would
+swallow the whole app. `--once` / `--times N` is how you affect a single call instead of
+every call for the rest of the session.
+
+### This needs a rootable emulator
+
+Not optional, and not only for the app's sake. Android's own network validation probe
+(`connectivitycheck.gstatic.com/generate_204`) is sent **through** the proxy, and
+`global_http_proxy_exclusion_list` does not exempt it — measured, not assumed. So mitmproxy
+has to be able to serve HTTPS, which means its CA must be a **system** trust anchor, which
+means `adb root`:
+
+| Image | `adb root` | Result |
+| --- | --- | --- |
+| `google_apis` / `-userdebug` (e.g. `aua emulator ensure-proxy`) | yes | Works. Device stays validated, HTTPS is intercepted |
+| Google Play / `-user` | refused | `proxy start` refuses; with `--allow-untrusted` the network goes unvalidated and every app shows offline |
+| Physical device (not rooted) | refused | Same as above |
+
+`proxy start` **refuses** where it could not install the CA, rather than arming a proxy that
+would fail every HTTPS handshake and look exactly like a broken app. `--allow-untrusted`
+overrides, but expect the offline `!` — it is for plain HTTP, or an app that trusts user CAs.
+
+**On the device staying broken afterwards.** A device proxy is `settings put global
+http_proxy`, which persists in the settings database; the mitmdump behind it, reached over
+`adb reverse`, does not survive the run. `aua` now clears an abandoned proxy automatically:
+both when a new agent inherits the emulator and mid-session if mitmdump dies underneath it.
 
 Empty cassettes almost always mean TLS rejected the forged cert (Play Store AVD / no system
 CA) — not “no traffic”.
@@ -1108,7 +1151,9 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 | `aua emulator list\|status\|start\|stop` | Boot/stop AVDs (`--headless`, `--parallel`, `--gpu`, `--mine`/`--owner`) |
 | `aua emulator recommend-proxy\|ensure-proxy` | Suggest/create a small rootable Google APIs AVD |
 | `aua flags set\|apply` | Feature-flag writes with verify/restart |
-| `aua proxy start\|stop` / `aua mock …` | HTTPS mitm record/map/replay (`[proxy]` extra) |
+| `aua proxy start\|stop` / `aua proxy flows\|flow <n>` | HTTPS mitm: arm the proxy, then inspect what it saw (`[proxy]` extra) |
+| `aua mock rewrite\|map\|list\|clear\|record\|replay` | Edit one real response, stub one, or record/replay a session |
+| `aua device reset` | Undo a wrecked device: proxy, exclusion list, reverses, airplane mode |
 | `aua capture …` | Session capture / export / explain |
 | `aua dashboard` | Live browser sneak-peek (`--grid` for multi-agent tiles; works with headless) |
 | `aua logcat` / `aua suite` | Device-clock log windows / scripted suites |

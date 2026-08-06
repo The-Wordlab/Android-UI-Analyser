@@ -10,10 +10,13 @@ cleanly. The CLI, MCP server, and daemon are all thin adapters over this class.
 from __future__ import annotations
 
 import contextlib
+import fnmatch
 import hashlib
 import json
 import logging
+import os
 import re
+import signal
 import threading
 import time
 from collections import Counter
@@ -378,6 +381,66 @@ def _detect_lossy_text(elements: list[Any]) -> tuple[bool, str | None]:
     )
 
 
+def _port_of_proxy(setting: str | None) -> int | None:
+    """Port out of a ``host:port`` proxy setting, or ``None`` when it has no usable one."""
+    if not setting:
+        return None
+    _, _, tail = str(setting).rpartition(":")
+    try:
+        port = int(tail)
+    except ValueError:
+        return None
+    return port if 0 < port < 65536 else None
+
+
+# The `device` property is read many times per command, so the orphan sweep is throttled
+# to something that still reacts within one agent turn.
+_HEAL_INTERVAL_S = 1.0
+
+_FLOW_BODY_PREVIEW = 2000
+
+
+def _clip_body(body: Any) -> tuple[Any, bool]:
+    """Bound one captured body, because the caller is usually an LLM's context window."""
+    if not isinstance(body, str) or len(body) <= _FLOW_BODY_PREVIEW:
+        return body, False
+    return body[:_FLOW_BODY_PREVIEW] + f"… [+{len(body) - _FLOW_BODY_PREVIEW} chars]", True
+
+
+def _json_paths(value: Any, prefix: str = "", out: list[str] | None = None) -> list[str]:
+    """Dotted paths to the scalars in a decoded body — the things `--set` can target."""
+    paths = [] if out is None else out
+    if len(paths) >= 20:
+        return paths
+    if isinstance(value, dict):
+        for key, sub in value.items():
+            _json_paths(sub, f"{prefix}.{key}" if prefix else str(key), paths)
+    elif isinstance(value, list):
+        for i, sub in enumerate(value[:3]):
+            _json_paths(sub, f"{prefix}[{i}]", paths)
+    elif prefix:
+        paths.append(prefix)
+    return paths
+
+
+def _rewrite_command(flow: dict[str, Any]) -> str:
+    """The `mock rewrite` line that would edit this exchange, pre-filled where we can."""
+    method = str(flow.get("method") or "GET")
+    path = str(flow.get("path") or "/")
+    host = str(flow.get("host") or "")
+    target = "<json.path>=<value>"
+    body = flow.get("response_body")
+    if isinstance(body, str):
+        try:
+            paths = _json_paths(json.loads(body))
+        except Exception:
+            paths = []
+        if paths:
+            target = f"{paths[0]}=<value>"
+    host_flag = f" --host {host}" if host else ""
+    return f"aua mock rewrite {method} {path}{host_flag} --set '{target}' --once"
+
+
 class Engine:
     def __init__(
         self,
@@ -426,6 +489,11 @@ class Engine:
         self._last_analyze_result: AnalyzeResult | None = None
         self._mem_lock = threading.Lock()
         self._mem_thread: threading.Thread | None = None
+        # Last orphaned-proxy sweep, monotonic. See _heal_device_network.
+        self._healed_at = -_HEAL_INTERVAL_S
+        self._sweep_paused = False
+        # Did this engine take the device off a previous holder? Set by _lease_device.
+        self._lease_fresh = False
 
     def _effective_with_image(self, with_image: bool | str | None) -> bool | str | None:
         """Per-call ``with_image`` overrides the session default; ``False`` forces off."""
@@ -442,7 +510,122 @@ class Engine:
         """Lazily connect; doctor/devices/config work without ever touching this."""
         if self._device is None:
             self._device = connect(self._lease_device())
+            self._heal_device_network(self._device, first_connect=True)
+        else:
+            self._heal_device_network(self._device)
         return self._device
+
+    def _heal_device_network(self, device: Device, *, first_connect: bool = False) -> None:
+        """Clear a global HTTP proxy whose owner is gone, before anything else runs.
+
+        ``settings put global http_proxy`` persists in the device's settings database, but
+        the thing it points at — a mitmdump on this host, reached over ``adb reverse`` —
+        does not survive the agent's process tree or an adb transport drop. An interrupted
+        run therefore hands the next agent an emulator where every app reports itself
+        offline and Wi-Fi carries the unvalidated "!", for a reason nothing visible on the
+        device explains. Serials are recycled from a small pool, so "the next agent" is the
+        normal case rather than the unlucky one.
+
+        Only a proxy with positive evidence of death is cleared — a live one another agent
+        is driving must survive untouched.
+
+        This runs on every device access rather than once per engine, because the daemon
+        serves a whole session from a single engine: a proxy that dies mid-session would
+        otherwise never be noticed by the process best placed to clean it up. It can afford
+        to, because the evidence it needs is host-side — a file stat, ``kill(pid, 0)`` and a
+        loopback connect. The device is only interrogated once that evidence says something
+        is actually broken.
+        """
+        if self._sweep_paused:
+            return
+        now = time.monotonic()
+        if now - self._healed_at < _HEAL_INTERVAL_S and not first_connect:
+            return
+        self._healed_at = now
+        from . import proxy_mock as pm
+
+        state = pm.read_state(device.serial)
+        if state is None:
+            # Nothing recorded against this serial. The only remaining way to inherit a
+            # stale proxy is to take an emulator off an agent that never wrote one, which
+            # is worth exactly one probe at connect time.
+            if first_connect and getattr(self, "_lease_fresh", False):
+                self._clear_orphan_proxy(device, state=None, reason="its owner is gone")
+            return
+
+        reason = pm.orphan_reason(state, boot_id=None)
+        if reason is None and first_connect:
+            # Host-side everything looks alive, so the last way to be orphaned is a device
+            # reboot — which wiped the adb reverse but kept the setting. Only the device
+            # can answer that, so it costs a round trip and happens once per engine.
+            with contextlib.suppress(Exception):
+                reason = pm.orphan_reason(state, boot_id=device.instance_token())
+        if reason is None:
+            return  # someone's live proxy — not ours to reclaim
+        self._clear_orphan_proxy(device, state=state, reason=reason)
+
+    @contextlib.contextmanager
+    def _rearranging_proxy(self) -> Iterator[None]:
+        """Hold the orphan sweep off while we are the ones moving the proxy.
+
+        Between arming the device and recording who owns it there is a moment where the
+        ownership record on disk still describes the *previous* run — and the sweep would
+        read that as evidence that the proxy we just set is dead.
+        """
+        self._sweep_paused = True
+        try:
+            yield
+        finally:
+            self._sweep_paused = False
+            self._healed_at = time.monotonic()
+
+    def _clear_orphan_proxy(
+        self, device: Device, *, state: dict[str, Any] | None, reason: str
+    ) -> None:
+        """Drop a proxy setting we have decided is dead, if the device still carries one."""
+        from . import proxy_mock as pm
+
+        try:
+            current = device.get_http_proxy()
+        except Exception:  # pragma: no cover - a device too sick to answer needs no repair
+            return
+        if not current:
+            pm.clear_state(device.serial)
+            return
+        logger.warning(
+            "%s was left proxied to %s but %s — clearing it so the device has internet again "
+            "(the previous run did not reach `aua proxy stop`)",
+            device.serial,
+            current,
+            reason,
+        )
+        self._clear_device_proxy(device, port_hint=_port_of_proxy(current), state=state)
+
+    def _clear_device_proxy(
+        self,
+        device: Device,
+        *,
+        port_hint: int | None = None,
+        state: dict[str, Any] | None = None,
+    ) -> list[int]:
+        """Unset the device proxy and drop the reverse tunnels behind it.
+
+        The port is taken from the proxy setting itself rather than from a cache file: the
+        record lives in the cache dir of whichever worker started the proxy, and the worker
+        cleaning up is usually a different one. Returns the reverse ports removed.
+        """
+        from . import proxy_mock as pm
+
+        device.set_http_proxy(None)
+        ports = {p for p in (port_hint, int((state or {}).get("port") or 0)) if p}
+        removed: list[int] = []
+        with contextlib.suppress(Exception):
+            live = set(device.adb_reverse_list())
+            for port in sorted(ports & live):
+                device.adb_reverse_remove(port)
+                removed.append(port)
+        pm.clear_state(device.serial)
+        return removed
 
     def _lease_device(self) -> str | None:
         """The serial this engine may use, claiming a lease on it.
@@ -456,6 +639,7 @@ class Engine:
         """
         cfg = self.config
         explicit = cfg.device.serial
+        self._lease_fresh = False
         if not getattr(cfg.lease, "enabled", True):
             return explicit
 
@@ -479,7 +663,7 @@ class Engine:
             if d.serial
         ]
         owner = leases.resolve_owner(self._lease_owner)
-        serial, _why = leases.choose_device(
+        serial, why = leases.choose_device(
             cfg.cache.dir,
             owner=owner,
             explicit=explicit,
@@ -489,6 +673,7 @@ class Engine:
         )
         self._lease_serial = serial
         self._lease_owner_resolved = owner
+        self._lease_fresh = why in leases.FRESH_CLAIMS
         return serial
 
     def renew_lease(self) -> None:
@@ -3278,7 +3463,14 @@ class Engine:
         app = mem.load(pkg)
         if app is None:
             return out
-        has_playbook = bool(app.description or app.deeplinks or app.recipes or app.notes)
+        has_playbook = bool(
+            app.description
+            or app.deeplinks
+            or app.recipes
+            or app.notes
+            or app.launch
+            or len(app.launcher_activities) > 1
+        )
         if not app.screens and not has_playbook:
             return out
         hints = mem.navigation_hints(
@@ -3298,6 +3490,14 @@ class Engine:
         )
         if app.description:
             out["description"] = app.description
+        if app.launch is not None:
+            out["launch"] = {
+                "activity": app.launch.activity,
+                "source": app.launch.source,
+                "alternatives": list(app.launch.alternatives),
+            }
+        elif len(app.launcher_activities) > 1:
+            out["launch_ambiguous"] = list(app.launcher_activities)
         if app.recipes:
             out["recipes"] = {r.name: r.note for r in app.recipes}
         if app.deeplinks:
@@ -4107,6 +4307,16 @@ class Engine:
         if not matches:
             needle = rid or text or desc or ""
             near = nearest_elements(elements, needle)
+            observation = result
+            try:
+                observation = self.analyze(
+                    source="auto",
+                    with_ocr=True,
+                    no_cache=True,
+                    record=False,
+                )
+            except AuaError as exc:
+                logger.debug("OCR-enriched selector miss observation unavailable: %s", exc)
             raise SelectorNotFoundError(
                 f"no element matches {label} "
                 f"({len(app_elements(elements))} app elements on screen)",
@@ -4115,6 +4325,7 @@ class Engine:
                     if near
                     else "Run `aua analyze` to see what is on screen."
                 ),
+                observation=observation,
             )
         if len(matches) > 1:
             if index is not None:
@@ -5960,6 +6171,51 @@ class Engine:
                 return False
             time.sleep(0.3)
 
+    def _learned_launch_activity(self, package: str) -> str | None:
+        """Pinned cold-start Activity from the app map, if any."""
+        mem = self._memory
+        if mem is None:
+            return None
+        with contextlib.suppress(Exception):
+            return mem.launch_activity(package)
+        return None
+
+    def _teach_launch_entry(
+        self, package: str, *, explicit: str | None
+    ) -> str | None:
+        """Record / refresh the cold-start pin after a successful launch.
+
+        Returns an agent-facing note when the package has multiple MAIN/LAUNCHER
+        Activities and nothing is pinned yet — otherwise ``None``.
+        """
+        mem = self._memory
+        if mem is None:
+            return None
+        try:
+            if explicit:
+                alts: list[str] = []
+                with contextlib.suppress(Exception):
+                    alts = self.device.launcher_activities(package)
+                mem.remember_launch_entry(
+                    package, explicit, source="explicit", alternatives=alts or None
+                )
+                return None
+            if mem.launch_activity(package):
+                return None  # already pinned — skip the adb query on the hot path
+            activities = self.device.launcher_activities(package)
+            entry = mem.record_launcher_activities(package, activities)
+            if entry is not None or len(activities) <= 1:
+                return None
+            listed = ", ".join(activities)
+            return (
+                f"multi-launcher package ({listed}); pin the product entry with "
+                f"`aua remember --launch-activity <Activity> --app {package}` or "
+                f"`aua app launch {package} --activity <Activity>` — bare launch is a coin flip"
+            )
+        except Exception as exc:  # pragma: no cover - playbook is a bonus
+            logger.debug("launch-entry teach failed for %s: %s", package, exc)
+            return None
+
     def _restart_app(self, package: str, activity: str | None) -> Restart:
         """Force-stop + relaunch, and confirm the app came back.
 
@@ -5980,6 +6236,20 @@ class Engine:
                     logger.debug(
                         "%s/%s did not come up; using the default entry", package, activity
                     )
+            # Prefer the learned cold-start pin over an unpinned platform resolve — that
+            # resolve is a coin flip on multi-launcher builds (product entry + Dev Tools).
+            if not pinned:
+                learned = self._learned_launch_activity(package)
+                if learned:
+                    with contextlib.suppress(Exception):
+                        device.launch_app(package, activity=learned)
+                    pinned = self._wait_foreground(package, _FLAGS_ENTRY_TIMEOUT_S)
+                    if not pinned:
+                        logger.debug(
+                            "%s/%s (learned) did not come up; using platform default",
+                            package,
+                            learned,
+                        )
             if not pinned:
                 with contextlib.suppress(Exception):
                     device.launch_app(package)
@@ -6049,72 +6319,283 @@ class Engine:
         *,
         port: int | None = None,
         install_ca: bool = True,
+        keep_rules: bool = False,
+        exclude: list[str] | None = None,
+        allow_untrusted: bool = False,
+        relaunch: bool = False,
+        companion: bool = False,
     ) -> dict[str, Any]:
         from . import proxy_mock as pm
 
         cache = Path(self.config.cache.dir).expanduser()
         # Touch the device first so a dead serial does not leave a stray mitmdump.
         device = self.device
+        pkg = None
+        with contextlib.suppress(Exception):
+            pkg = (device.current_app() or {}).get("package")
+
+        # A cache dir outlives the run that filled it, so an unrelated scenario's stubs are
+        # still armed here unless the caller explicitly asked to keep them. Silently
+        # re-applying them looks exactly like the app misbehaving.
+        cleared = [] if keep_rules else pm.reset_session_files(cache)
+
         ca_info: dict[str, Any] | None = None
         if install_ca:
             try:
                 ca_info = pm.install_system_ca(device.serial)
             except (DeviceError, UsageError) as exc:
-                # Still start the proxy — but surface why HTTPS will likely fail.
                 ca_info = {"ok": False, "error": str(exc), "hint": getattr(exc, "hint", None)}
                 logger.warning("system CA install failed: %s", exc)
+                # Arming the proxy anyway is what produced the original complaint: every
+                # HTTPS request in the app fails its handshake, the app renders its offline
+                # state, and the agent is left debugging an app that is fine. Refuse, and
+                # leave the device exactly as it was.
+                if not allow_untrusted and not companion:
+                    raise DeviceError(
+                        f"not starting the proxy on {device.serial}: the mitm CA could not "
+                        "be installed as a system trust anchor, so every HTTPS request the "
+                        "app makes would fail and it would show itself as offline",
+                        hint=(
+                            "Use a rootable Google APIs AVD: `aua emulator ensure-proxy "
+                            "--start`, then `aua proxy start --serial <that serial>`. "
+                            "To proxy anyway (plain HTTP only, or an app that trusts user "
+                            "CAs), pass `--allow-untrusted`. Cause: " + str(exc)
+                        ),
+                    ) from exc
         # ``port<=0`` / omitted → random free high port (never hardcodes 8080).
         preferred = port if port and port > 0 else None
         pid, listen = pm.start_mitm(cache_dir=cache, port=preferred, mode="map")
-        try:
-            device.adb_reverse(listen, listen)
-            device.set_http_proxy(f"127.0.0.1:{listen}")
-        except Exception:
+        # Android's own network validation must not depend on the proxy: if the probe to
+        # connectivitycheck.gstatic.com breaks, the whole network is marked unvalidated and
+        # every app renders an offline state that has nothing to do with the app.
+        bypass = [*pm.CONNECTIVITY_CHECK_HOSTS, *(exclude or [])]
+        with self._rearranging_proxy():
+            try:
+                device.adb_reverse(listen, listen)
+                companion_info = None
+                if companion:
+                    from . import companion as companion_app
+
+                    companion_info = companion_app.start(
+                        device.serial,
+                        cache,
+                        listen,
+                        target_package=pkg,
+                        ca_pem=pm.ensure_mitm_ca() if install_ca else None,
+                    )
+                else:
+                    device.set_http_proxy(f"127.0.0.1:{listen}", exclusion_list=bypass)
+            except Exception:
+                # Never leave the device pointed at a proxy we are about to kill.
+                with contextlib.suppress(Exception):
+                    device.set_http_proxy(None)
+                with contextlib.suppress(Exception):
+                    device.adb_reverse_remove(listen)
+                with contextlib.suppress(Exception):
+                    pm.stop_mitm(cache)
+                raise
+            # What the device kept, not what we asked for: the exclusion list is the thing
+            # standing between a proxied emulator and an "unvalidated network" badge, so
+            # reporting an intention here would hide the failure that matters most.
             with contextlib.suppress(Exception):
-                pm.stop_mitm(cache)
-            raise
-        # Relaunching the foreground app makes it inherit Zygote CA mounts.
-        pkg = None
-        with contextlib.suppress(Exception):
-            pkg = (device.current_app() or {}).get("package")
-        if pkg and ca_info and ca_info.get("ok"):
+                bypass = device.get_proxy_exclusion_list() or bypass
+            boot_id: str | None = None
+            with contextlib.suppress(Exception):
+                boot_id = device.instance_token()
+            # Recorded where every worker can see it, so whoever inherits this emulator can
+            # tell a live proxy from an abandoned one without sharing our cache dir.
+            pm.write_state(
+                device.serial,
+                {
+                    "port": listen,
+                    "pid": pid,
+                    "owner": os.environ.get("AUA_OWNER") or f"pid-{os.getpid()}",
+                    "boot_id": boot_id,
+                    "cache_dir": str(cache),
+                    "proxy": f"127.0.0.1:{listen}",
+                    "transport": "companion" if companion else "global-proxy",
+                    "exclusion_list": bypass,
+                    "started": time.time(),
+                },
+            )
+        # Deliberately *not* the default. Arming the proxy is something you usually want to
+        # do partway through a session — three screens into a flow, on the request you were
+        # actually curious about — and restarting the app throws that state away. It is also
+        # unnecessary: an already-running process picks the new proxy up for its next
+        # connection, and `install_system_ca` nsenters the CA mount into live app PIDs
+        # rather than relying on them re-inheriting it from the Zygote.
+        relaunched: str | None = None
+        if pkg and relaunch:
             with contextlib.suppress(Exception):
                 device.stop_app(pkg)
                 device.launch_app(pkg)
+                relaunched = pkg
         out: dict[str, Any] = {
             "ok": True,
             "action": "proxy-start",
             "pid": pid,
             "port": listen,
             "ca": ca_info,
+            "bypass": bypass,
+            "transport": "companion" if companion else "global-proxy",
             "hint": (
-                f"Device http_proxy is 127.0.0.1:{listen} (via adb reverse). "
-                + (
-                    "System CA installed — force-stop/relaunch done for foreground app."
-                    if ca_info and ca_info.get("ok")
-                    else "CA install failed or skipped: HTTPS apps that only trust system "
-                    "CAs will produce EMPTY cassettes until the mitm CA is a "
-                    "system trust anchor. Fix: `aua emulator ensure-proxy` → start "
-                    "`aua_proxy` → `aua proxy start` on that serial."
+                (
+                    "AUA Companion was installed and opened. Approve any certificate/VPN "
+                    "system prompts; traffic then reaches the proxy through adb reverse. "
+                    if companion
+                    else f"Device http_proxy is 127.0.0.1:{listen} (via adb reverse). "
                 )
+                + (
+                    "System CA installed. `aua proxy flows` lists what it sees; "
+                    "`aua mock rewrite … --once` edits one response."
+                    if ca_info and ca_info.get("ok")
+                    else "Running WITHOUT a system CA (--allow-untrusted): HTTPS to apps "
+                    "that trust system CAs only will fail its handshake and the app will "
+                    "look offline. Plain HTTP still works."
+                )
+                + " Always finish with `aua proxy stop` — a proxy left set with nothing "
+                "behind it takes the device's network down."
             ),
         }
-        if pkg:
-            out["relaunched"] = pkg
+        if cleared:
+            out["cleared_stale"] = cleared
+        if companion and companion_info:
+            out["companion"] = companion_info
+        if relaunched:
+            out["relaunched"] = relaunched
+        elif pkg:
+            out["kept_running"] = pkg
+            out["relaunch_note"] = (
+                f"{pkg} was left running and keeps its state — its next requests go through "
+                "the proxy. If it built an HTTP client at startup that snapshots the trust "
+                "store, or holds pooled connections you need to break, `--relaunch` "
+                "restarts it."
+            )
         return out
 
     def proxy_stop(self) -> dict[str, Any]:
+        """Take the device off the proxy, then stop mitmdump — and verify the first part.
+
+        Ordered that way on purpose: killing mitmdump first would leave a window in which
+        the device is proxied to a dead port. The clear is *not* suppressed, because a
+        silent failure here is what strands an emulator with no internet.
+        """
         from . import proxy_mock as pm
 
         cache = Path(self.config.cache.dir).expanduser()
-        p = self._proxy_port()
+        device = self.device
+        state = pm.read_state(device.serial)
+        companion_stopped = False
+        if state and state.get("transport") == "companion":
+            from . import companion as companion_app
+
+            companion_stopped = companion_app.stop(device.serial)
+        current = None
         with contextlib.suppress(Exception):
-            self.device.set_http_proxy(None)
-        if p is not None:
-            with contextlib.suppress(Exception):
-                self.device.adb_reverse_remove(p)
+            current = device.get_http_proxy()
+        port = _port_of_proxy(current) or self._proxy_port()
+        removed = self._clear_device_proxy(device, port_hint=port, state=state)
         stopped = pm.stop_mitm(cache)
-        return {"ok": True, "action": "proxy-stop", "stopped": stopped, "port": p}
+        # A foreign cache dir owns the pid file, so fall back to the shared record.
+        if not stopped and state and pm.pid_alive(int(state.get("pid") or 0)):
+            with contextlib.suppress(Exception):
+                os.kill(int(state["pid"]), signal.SIGTERM)
+                stopped = True
+        return {
+            "ok": True,
+            "action": "proxy-stop",
+            "stopped": stopped,
+            "port": port,
+            "reverses_removed": removed,
+            "http_proxy": device.get_http_proxy(),
+            "companion_stopped": companion_stopped,
+        }
+
+    def device_reset(self, *, reverses: bool = False) -> dict[str, Any]:
+        """Put the device's network back to a known-good state.
+
+        The teardown an agent is supposed to run but frequently cannot: a crash, a
+        cancelled run or a plain timeout all skip `proxy stop`, and the emulator goes back
+        into the pool proxied to a port nothing answers. Everything here is idempotent, so
+        it is safe to run at the top of any session.
+        """
+        from . import proxy_mock as pm
+
+        device = self.device
+        was_proxy = device.get_http_proxy()
+        was_excluded = device.get_proxy_exclusion_list()
+        was_airplane = device.get_airplane_mode()
+        was_reverses = device.adb_reverse_list()
+        before = {
+            "http_proxy": was_proxy,
+            "exclusion_list": was_excluded,
+            "airplane": was_airplane,
+            "reverses": was_reverses,
+        }
+        changed: list[str] = []
+
+        if was_proxy:
+            self._clear_device_proxy(
+                device,
+                port_hint=_port_of_proxy(was_proxy),
+                state=pm.read_state(device.serial),
+            )
+            changed.append(f"cleared http_proxy ({was_proxy})")
+        else:
+            pm.clear_state(device.serial)
+        if was_excluded:
+            changed.append("cleared proxy exclusion list")
+        if was_airplane:
+            device.set_airplane_mode(False)
+            changed.append("airplane mode off")
+        # Unconditional: `svc` is idempotent and a radio disabled by a previous run reads
+        # as perfectly normal, so there is nothing to detect a drift against.
+        with contextlib.suppress(Exception):
+            device.set_wifi_enabled(True)
+        with contextlib.suppress(Exception):
+            device.set_mobile_data_enabled(True)
+        left_alone: list[str] = []
+        if was_reverses:
+            if reverses:
+                for port in was_reverses:
+                    device.adb_reverse_remove(port)
+                changed.append(f"removed {len(was_reverses)} adb reverse mapping(s)")
+            else:
+                # Not ours to assume: `adb reverse` is also how Metro (tcp:8081), Appium and
+                # friends reach the host, and a mapping whose listener is merely not running
+                # yet looks identical to abandoned debris.
+                left_alone.append(
+                    f"kept {len(was_reverses)} adb reverse mapping(s) "
+                    f"({', '.join(str(p) for p in was_reverses)}) — `--reverses` removes them"
+                )
+
+        cleared = pm.reset_session_files(Path(self.config.cache.dir).expanduser())
+        if cleared:
+            changed.append(f"dropped stale mock state ({', '.join(cleared)})")
+
+        after = {
+            "http_proxy": device.get_http_proxy(),
+            "exclusion_list": device.get_proxy_exclusion_list(),
+            "airplane": device.get_airplane_mode(),
+            "reverses": device.adb_reverse_list(),
+        }
+        if not changed:
+            changed = [
+                "no network state needed resetting"
+                if left_alone
+                else "nothing to reset — the device's network was already clean"
+            ]
+        out = {
+            "ok": after["http_proxy"] is None and not after["airplane"],
+            "action": "device-reset",
+            "serial": device.serial,
+            "changed": changed,
+            "before": before,
+            "after": after,
+        }
+        if left_alone:
+            out["left_alone"] = left_alone
+        return out
 
     def mock_map(
         self,
@@ -6123,43 +6604,118 @@ class Engine:
         *,
         status: int = 200,
         body: str | None = None,
+        host: str | None = None,
+        times: int = 0,
     ) -> dict[str, Any]:
+        """Answer a request from the rule — it never reaches the server."""
         from . import proxy_mock as pm
 
         cache = Path(self.config.cache.dir).expanduser()
         rules_file = pm.rules_path(cache)
         rules = pm.load_rules(rules_file)
-        rule = pm.map_rule(method, path, status=status, body=body)
+        rule = pm.map_rule(method, path, status=status, body=body, host=host, times=times)
+        pm.guard_rule_scope(rule)
         rules.append(rule)
         pm.write_rules(rules_file, rules)
         return {"ok": True, "action": "mock-map", "rule": rule, "count": len(rules)}
+
+    def mock_rewrite(
+        self,
+        method: str,
+        path: str,
+        *,
+        host: str | None = None,
+        query: str | None = None,
+        status: int | None = None,
+        headers: dict[str, str] | None = None,
+        body: str | None = None,
+        set_json: dict[str, Any] | None = None,
+        delete_json: list[str] | None = None,
+        replace: list[tuple[str, str]] | None = None,
+        times: int = 0,
+    ) -> dict[str, Any]:
+        """Let a request reach the server, then patch the response it actually returned.
+
+        The difference from :meth:`mock_map` is the whole point of it: a stub has to
+        reproduce the entire payload, so it goes stale the moment the backend changes and
+        it cannot express "the real thing, but with this one field different".
+        """
+        from . import proxy_mock as pm
+
+        cache = Path(self.config.cache.dir).expanduser()
+        rules_file = pm.rules_path(cache)
+        rules = pm.load_rules(rules_file)
+        rule = pm.rewrite_rule(
+            host=host,
+            method=method,
+            path=path,
+            query=query,
+            status=status,
+            headers=headers,
+            body=body,
+            set_json=set_json,
+            delete_json=delete_json,
+            replace=replace,
+            times=times,
+        )
+        pm.guard_rule_scope(rule)
+        rules.append(rule)
+        pm.write_rules(rules_file, rules)
+        return {"ok": True, "action": "mock-rewrite", "rule": rule, "count": len(rules)}
+
+    def mock_clear(self) -> dict[str, Any]:
+        from . import proxy_mock as pm
+
+        rules_file = pm.rules_path(Path(self.config.cache.dir).expanduser())
+        dropped = len(pm.load_rules(rules_file))
+        pm.write_rules(rules_file, [])
+        return {"ok": True, "action": "mock-clear", "dropped": dropped}
+
+    def mock_list(self) -> dict[str, Any]:
+        from . import proxy_mock as pm
+
+        cache = Path(self.config.cache.dir).expanduser()
+        doc = pm.load_doc(pm.rules_path(cache))
+        # A `--once` rule stays in the file after it fires — the budget is spent inside
+        # mitmdump. Listing it as simply "armed" is how you end up waiting for a rewrite
+        # that already happened, so count what the flow log says actually fired.
+        used = Counter(
+            str(row.get("rule")) for row in pm.read_flows_since(cache, 0) if row.get("rule")
+        )
+        rules = []
+        for rule in doc.get("rules", []):
+            entry = dict(rule)
+            budget = entry.get("times")
+            spent = used.get(str(entry.get("id")), 0)
+            entry["applied"] = spent
+            if budget:
+                entry["remaining"] = max(0, int(budget) - spent)
+                entry["spent"] = entry["remaining"] == 0
+            rules.append(entry)
+        out = {**doc, "rules": rules}
+        return {"ok": True, "action": "mock-list", **out}
 
     def mock_record(self, action: str, name: str | None = None) -> dict[str, Any]:
         from . import proxy_mock as pm
 
         cache = Path(self.config.cache.dir).expanduser()
+        rules_file = pm.rules_path(cache)
         a = (action or "").lower()
+        # Mode lives in the rules file, which the addon re-reads per exchange, so flipping
+        # it no longer restarts mitmdump. The old restart dropped the device's only route
+        # to the network — and re-set `http_proxy` inside a suppressed block, so a failure
+        # left the emulator offline with nothing reported.
         if a == "start":
             if not name:
                 raise UsageError("mock record start needs a NAME")
-            pm.record_path(cache).write_text("[]", encoding="utf-8")
-            # Restart mitm in record mode if running; otherwise just arm the sidecar.
-            env_mode = cache / "mock_mode.txt"
-            env_mode.write_text("record", encoding="utf-8")
+            pm.record_path(cache).write_text("", encoding="utf-8")
             (cache / "mock_record_name.txt").write_text(name, encoding="utf-8")
-            # Live addon reads AUA_MOCK_MODE from process env — restart to flip mode.
-            # Keep the same listen port when one is already bound so adb reverse stays valid.
-            prev = pm.load_listen_port(cache)
-            pm.stop_mitm(cache)
-            _pid, listen = pm.start_mitm(cache_dir=cache, port=prev, mode="record")
-            with contextlib.suppress(Exception):
-                self.device.adb_reverse(listen, listen)
-                self.device.set_http_proxy(f"127.0.0.1:{listen}")
+            pm.set_mode(rules_file, "record")
             return {
                 "ok": True,
                 "action": "mock-record-start",
                 "name": name,
-                "port": listen,
+                "port": pm.load_listen_port(cache),
             }
         if a == "stop":
             name_path = cache / "mock_record_name.txt"
@@ -6168,33 +6724,17 @@ class Engine:
             )
             if not rec_name:
                 raise UsageError("mock record stop needs the cassette NAME")
-            entries: list[dict[str, Any]] = []
-            rec = pm.record_path(cache)
-            if rec.is_file():
-                try:
-                    import json as _json
-
-                    data = _json.loads(rec.read_text(encoding="utf-8"))
-                    if isinstance(data, list):
-                        entries = data
-                except Exception:
-                    entries = []
+            entries = pm.load_record(cache)
             dest = pm.cassette_dir(self.config.memory.dir) / f"{rec_name}.yaml"
             pm.save_cassette(dest, rec_name, entries)
-            # Flip back to map mode on the same port.
-            prev = pm.load_listen_port(cache)
-            pm.stop_mitm(cache)
-            _pid, listen = pm.start_mitm(cache_dir=cache, port=prev, mode="map")
-            with contextlib.suppress(Exception):
-                self.device.adb_reverse(listen, listen)
-                self.device.set_http_proxy(f"127.0.0.1:{listen}")
+            pm.set_mode(rules_file, "map")
             out: dict[str, Any] = {
                 "ok": True,
                 "action": "mock-record-stop",
                 "name": rec_name,
                 "path": str(dest),
                 "entries": len(entries),
-                "port": listen,
+                "port": pm.load_listen_port(cache),
             }
             if not entries:
                 tls = pm.tls_failures_in_log(cache)
@@ -6213,6 +6753,77 @@ class Engine:
             f"unknown mock record action {action!r}",
             hint="Use `aua mock record start NAME` or `aua mock record stop`.",
         )
+
+    def proxy_flows(
+        self,
+        *,
+        limit: int = 30,
+        host: str | None = None,
+        path: str | None = None,
+        status: int | None = None,
+    ) -> dict[str, Any]:
+        """Recent exchanges — the session list you scroll in Charles before picking one."""
+        from . import proxy_mock as pm
+
+        cache = Path(self.config.cache.dir).expanduser()
+        rows = pm.read_flow_bodies(cache) or pm.read_flows_since(cache, 0)
+        if host:
+            rows = [r for r in rows if fnmatch.fnmatch(str(r.get("host", "")).lower(), host.lower())]
+        if path:
+            rows = [r for r in rows if path in str(r.get("path", ""))]
+        if status is not None:
+            rows = [r for r in rows if int(r.get("status") or 0) == status]
+        tail = rows[-max(1, limit) :]
+        return {
+            "ok": True,
+            "action": "proxy-flows",
+            "count": len(tail),
+            "total": len(rows),
+            "flows": [
+                {
+                    "n": r.get("n"),
+                    "method": r.get("method"),
+                    "status": r.get("status"),
+                    "host": r.get("host"),
+                    "path": r.get("path"),
+                    "action": r.get("action"),
+                }
+                for r in tail
+            ],
+            "hint": "Inspect one with `aua proxy flow <n>`; turn it into a rule with "
+            "`aua proxy flow <n> --to-rule`.",
+        }
+
+    def proxy_flow(self, n: int, *, to_rule: bool = False, full: bool = False) -> dict[str, Any]:
+        """One exchange — and optionally the rewrite rule that would edit it."""
+        from . import proxy_mock as pm
+
+        cache = Path(self.config.cache.dir).expanduser()
+        rows = pm.read_flow_bodies(cache)
+        match = next((r for r in rows if int(r.get("n") or 0) == int(n)), None)
+        if match is None:
+            raise UsageError(
+                f"no captured flow #{n}",
+                hint=(
+                    "`aua proxy flows` lists what was captured. Bodies are only recorded "
+                    "while the proxy is running with capture on."
+                ),
+            )
+        flow = dict(match)
+        truncated: list[str] = []
+        if not full:
+            for key in ("request_body", "response_body"):
+                clipped, was_cut = _clip_body(flow.get(key))
+                flow[key] = clipped
+                if was_cut:
+                    truncated.append(key)
+        out: dict[str, Any] = {"ok": True, "action": "proxy-flow", "flow": flow}
+        if truncated:
+            out["truncated"] = truncated
+            out["hint"] = "Bodies clipped for readability — `--full` prints them whole."
+        if to_rule:
+            out["command"] = _rewrite_command(match)
+        return out
 
     def mock_replay(self, name: str) -> dict[str, Any]:
         from . import proxy_mock as pm
@@ -6287,13 +6898,15 @@ class Engine:
                     "launch --clear wipes app data (flags + session) — pass --yes",
                     hint="`aua app launch <pkg> --clear --yes`",
                 )
+            # --activity pins for this call; otherwise reuse the learned cold-start pin.
+            # Bare platform resolve is a coin flip when the APK declares multiple MAIN/LAUNCHER
+            # Activities (product entry + Dev Tools menu).
+            explicit_activity = activity
+            entry = explicit_activity or self._learned_launch_activity(package)
             with self._acting():
                 if clear_state:
                     device.clear_app(package)
-                # --activity pins the entry Activity — some builds have multiple launcher
-                # activities (e.g. a Dev Tools menu) and default resolution is
-                # nondeterministic.
-                device.launch_app(package, activity=activity)
+                device.launch_app(package, activity=entry)
             if self._memory is not None:
                 if clear_state:
                     self._memory.clear_context(device.serial, package)
@@ -6303,7 +6916,7 @@ class Engine:
                         package,
                         app_version=self._version_for(device, package),
                     )
-            detail = f"{package}/{activity}" if activity else package
+            detail = f"{package}/{entry}" if entry else package
             if clear_state:
                 detail = f"{detail} (cleared)"
             if not self._await_foreground(device, package):
@@ -6314,20 +6927,27 @@ class Engine:
                     f"launched {detail} but {package} never reached the foreground",
                     hint=(
                         "That Activity may not be exported (`am start` denies it) — retry "
-                        "without --activity."
-                        if activity
+                        "without --activity, or pin a different entry with "
+                        "`aua remember --launch-activity`."
+                        if entry
                         else "Check the package name, and that the device is unlocked."
                     ),
                 )
+            launch_note = self._teach_launch_entry(package, explicit=explicit_activity)
             # `launch` is the first action of nearly every journey, and it used to answer with a
             # bare ok/detail: no fresh ids, and no statement of what the launch actually produced.
             # Callers then spent a separate `analyze` to learn where they had landed, and had
             # nothing structured to show for the step. `_await_foreground` above already proves the
             # package reached the foreground, so this adds the *screen* to that proof — the same
             # act-and-observe contract every other action honours.
-            return self._observe(
+            result = self._observe(
                 ActionResult(ok=True, action="app-launch", detail=detail), observe, with_image
             )
+            # `_observe` overwrites `note` with the generic act-and-observe hint; put the
+            # multi-launcher warning after so the agent actually sees it.
+            if launch_note:
+                result.note = launch_note
+            return result
         if a in ("kill", "force-stop"):
             if not package:
                 raise UsageError("app kill needs a package name")

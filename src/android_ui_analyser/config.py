@@ -74,10 +74,9 @@ class LeaseCfg(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     enabled: bool = True
-    # 900s deliberately: `--until` waits legitimately block 90-120s, and a TTL shorter than a
-    # single blocking call would hand the device to another agent while the holder is still
-    # driving it — strictly worse than no lease. Every command renews.
-    ttl_s: int = 900
+    # Long waits renew from inside their polling loop; this is the fallback for owners that
+    # cannot be bound to a live process.
+    ttl_s: int = 120
 
 
 class GateCfg(BaseModel):

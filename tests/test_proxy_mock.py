@@ -81,20 +81,43 @@ def test_proxy_start_uses_random_port(tmp_path: Path, monkeypatch: pytest.Monkey
     out = engine.proxy_start(install_ca=True)
     assert out["port"] != 8080
     assert pm.load_listen_port(cache) == out["port"]
-    # Record must reuse the same port, not fall back to 8080.
-    seen: list[int | None] = []
 
-    def fake_start2(*, cache_dir: Path, port: int | None = None, mode: str = "map") -> tuple[int, int]:
-        seen.append(port)
-        listen = port or 54321
+
+def test_mock_record_flips_mode_without_bouncing_mitm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Restarting mitmdump to change mode left the device proxied to a dead port.
+
+    The device keeps `http_proxy` while the proxy rebinds, so every app in the middle of
+    that window fails its requests — and the old code re-applied the setting afterwards
+    inside a suppressed block, so a failure to restore it was reported as success.
+    """
+    device = FakeDevice()
+    cache = tmp_path / "cache"
+    engine = Engine(make_config(cache={"dir": str(cache)}), device=device)
+
+    def fake_start(*, cache_dir: Path, port: int | None = None, mode: str = "map") -> tuple[int, int]:
+        listen = pm.pick_listen_port(preferred=port)
         pm.save_listen_port(cache_dir, listen)
-        return 99, listen
+        (cache_dir / "mitmproxy.pid").write_text("12345", encoding="utf-8")
+        return 12345, listen
 
-    monkeypatch.setattr(pm, "start_mitm", fake_start2)
-    monkeypatch.setattr(pm, "stop_mitm", lambda _c: True)
+    restarts: list[str] = []
+    monkeypatch.setattr(pm, "start_mitm", fake_start)
+    monkeypatch.setattr(pm, "install_system_ca", lambda *_a, **_k: {"ok": True})
+    started = engine.proxy_start(install_ca=False)
+
+    monkeypatch.setattr(pm, "start_mitm", lambda **kw: restarts.append("start") or (1, 1))
+    monkeypatch.setattr(pm, "stop_mitm", lambda _c: restarts.append("stop") or True)
+
     rec = engine.mock_record("start", "hub")
-    assert seen == [out["port"]]
-    assert rec["port"] == out["port"]
+    assert restarts == [], "record must not bounce the proxy"
+    assert rec["port"] == started["port"]
+    assert pm.load_doc(pm.rules_path(cache))["mode"] == "record"
+
+    engine.mock_record("stop", "hub")
+    assert restarts == []
+    assert pm.load_doc(pm.rules_path(cache))["mode"] == "map"
 
 
 def test_tls_failures_in_log(tmp_path: Path) -> None:

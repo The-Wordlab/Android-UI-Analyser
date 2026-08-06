@@ -97,22 +97,11 @@ def test_flow_log_is_separate_from_the_cassette_record(tmp_path):
 # --------------------------------------------------------------------------- the addon
 
 
-def test_addon_logs_every_exchange_regardless_of_mode():
-    """The flow log is always-on; only the cassette record is gated on `record` mode."""
-    src = proxy_mock.ADDON_SCRIPT
-    body = src.split("def response(", 1)[1]
-    flow_write = body.index("_FLOW_LOG_PATH")
-    mode_gate = body.index('mode != "record"')
-    assert flow_write < mode_gate, "the flow log must be written before the record-mode gate"
-
-
 def test_addon_flow_entry_carries_a_timestamp():
     """Without `ts` there is no baseline, and every wait matches stale traffic."""
     assert '"ts": time.time()' in proxy_mock.ADDON_SCRIPT
 
 
-def test_addon_does_not_log_bodies():
-    """A streamed chat turn would otherwise write megabytes per response."""
-    response_block = proxy_mock.ADDON_SCRIPT.split("if str(_FLOW_LOG_PATH):", 1)[1]
-    first_write = response_block.split("mode = os.environ", 1)[0]
-    assert "body" not in first_write
+# The addon's actual logging behaviour — always-on flow log, bodies kept out of it, and
+# record mode gating only the cassette — is exercised against a live addon in
+# tests/test_proxy_addon.py rather than asserted against this source text.

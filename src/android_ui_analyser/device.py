@@ -17,6 +17,7 @@ import signal
 import subprocess
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -212,6 +213,10 @@ class Device(ABC):
         """Packages that claim *uri* (best-effort; empty when unknown)."""
         return []
 
+    def launcher_activities(self, package: str) -> list[str]:
+        """Fully-qualified MAIN+LAUNCHER Activities declared by *package* (best-effort)."""
+        return []
+
     def double_click(self, x: int, y: int) -> None:
         """Double-tap at pixel coordinates (default: two quick clicks)."""
         self.click(x, y)
@@ -310,9 +315,27 @@ class Device(ABC):
         """Perform an accessibility action on the node at *(x, y)*."""
         raise DeviceError("a11y action requires a real device")
 
-    def set_http_proxy(self, host_port: str | None) -> None:
+    def set_http_proxy(
+        self, host_port: str | None, *, exclusion_list: Sequence[str] | None = None
+    ) -> None:
         """Set or clear the global HTTP proxy (``host:port`` or ``None`` to clear)."""
         raise DeviceError("http proxy requires a real device")
+
+    def get_http_proxy(self) -> str | None:
+        """The device's global HTTP proxy, or ``None`` when unset/cleared/unreadable."""
+        return None
+
+    def get_proxy_exclusion_list(self) -> list[str]:
+        """Hosts configured to bypass the global proxy."""
+        return []
+
+    def set_wifi_enabled(self, enabled: bool) -> None:
+        """Turn the Wi-Fi radio on/off (``svc wifi``)."""
+        raise DeviceError("wifi control requires a real device")
+
+    def set_mobile_data_enabled(self, enabled: bool) -> None:
+        """Turn mobile data on/off (``svc data``)."""
+        raise DeviceError("mobile data control requires a real device")
 
     def adb_reverse(self, device_port: int, host_port: int) -> None:
         """``adb reverse tcp:device_port tcp:host_port``."""
@@ -321,6 +344,10 @@ class Device(ABC):
     def adb_reverse_remove(self, device_port: int) -> None:
         """Remove a reverse port mapping (no-op if absent)."""
         return None
+
+    def adb_reverse_list(self) -> list[int]:
+        """Device-side ports currently reverse-forwarded to this host."""
+        return []
 
     def logcat(self, *, since_ms: int | None = None, dump: bool = True) -> str:
         """Dump (or clear) logcat. ``dump=False`` clears the buffer and returns ``""``.
@@ -792,7 +819,9 @@ class Uiautomator2Device(Device):
 
     def get_airplane_mode(self) -> bool | None:
         try:
-            raw = str(self._d.shell("settings get global airplane_mode_on")).strip()
+            # `self.shell`, not `self._d.shell`: the latter returns a ShellResponse whose
+            # str() is a repr, so this silently answered "unknown" for every device.
+            raw = str(self.shell("settings get global airplane_mode_on")).strip()
             if raw in ("0", "1"):
                 return raw == "1"
         except Exception:  # pragma: no cover
@@ -1172,14 +1201,90 @@ class Uiautomator2Device(Device):
                 return obj
         return None
 
-    def set_http_proxy(self, host_port: str | None) -> None:
+    def set_http_proxy(
+        self, host_port: str | None, *, exclusion_list: Sequence[str] | None = None
+    ) -> None:
+        """Point the device at a proxy, or clear it — and verify the device agrees.
+
+        Never suppresses a failure. Half-applying this setting is the worst outcome
+        available: the device keeps a proxy it cannot reach, every app reports itself
+        offline, and the caller has been told the teardown succeeded.
+        """
         if host_port:
             self.shell(f"settings put global http_proxy {host_port}")
+            # Strictly after the proxy: writing a *new* http_proxy value makes Android
+            # rebuild the network's ProxyInfo and the exclusion list goes with it, so
+            # exclusions written first are silently erased. (Re-writing the *same* value is
+            # a no-op that leaves them alone, which is what makes this so easy to verify
+            # wrongly by hand.)
+            self._set_proxy_exclusion_list(exclusion_list or ())
         else:
-            # `:0` clears the proxy on modern Android; delete is a fallback.
+            # `:0` clears the proxy on modern Android; delete is a fallback for images
+            # whose ConnectivityService ignores the sentinel.
             self.shell("settings put global http_proxy :0")
             with contextlib.suppress(Exception):
                 self.shell("settings delete global http_proxy")
+            self._set_proxy_exclusion_list(())
+        actual = self.get_http_proxy()
+        expected = host_port or None
+        if actual != expected:
+            raise DeviceError(
+                f"device {self.serial} still reports http_proxy={actual!r} "
+                f"after setting it to {expected!r}",
+                hint=(
+                    "Something is rewriting the setting (an MDM profile, another agent, or a "
+                    "read-only settings DB). Run `aua device reset --serial "
+                    f"{self.serial}` and check `adb -s {self.serial} shell settings get "
+                    "global http_proxy`."
+                ),
+            )
+        # Not fatal — a proxy without its bypass list still proxies, it just costs the
+        # device its "validated network" badge. Worth saying out loud rather than letting
+        # the caller report a bypass that never took.
+        wanted = [h for h in (exclusion_list or []) if h]
+        if wanted and self.get_proxy_exclusion_list() != wanted:
+            self._set_proxy_exclusion_list(wanted)
+            if self.get_proxy_exclusion_list() != wanted:
+                logger.warning(
+                    "%s did not keep the proxy exclusion list; Android's connectivity "
+                    "probes will go through the proxy and the network may show as "
+                    "unvalidated",
+                    self.serial,
+                )
+
+    def get_http_proxy(self) -> str | None:
+        """The configured global proxy, normalising every "unset" spelling to ``None``."""
+        try:
+            raw = str(self.shell("settings get global http_proxy")).strip()
+        except Exception:  # pragma: no cover - best effort
+            return None
+        # Android reports an unset proxy as `null`, an empty line, or the `:0` sentinel.
+        if raw.lower() in ("", "null", ":0", "0"):
+            return None
+        return raw
+
+    def _set_proxy_exclusion_list(self, hosts: Sequence[str]) -> None:
+        key = "global_http_proxy_exclusion_list"
+        if hosts:
+            self.shell(f"settings put global {key} {','.join(hosts)}")
+        else:
+            with contextlib.suppress(Exception):
+                self.shell(f"settings delete global {key}")
+
+    def get_proxy_exclusion_list(self) -> list[str]:
+        try:
+            raw = str(self.shell("settings get global global_http_proxy_exclusion_list")).strip()
+        except Exception:  # pragma: no cover - best effort
+            return []
+        if raw.lower() in ("", "null"):
+            return []
+        return [h.strip() for h in raw.split(",") if h.strip()]
+
+    def set_wifi_enabled(self, enabled: bool) -> None:
+        self.shell(f"svc wifi {'enable' if enabled else 'disable'}")
+
+    def set_mobile_data_enabled(self, enabled: bool) -> None:
+        self.shell(f"svc data {'enable' if enabled else 'disable'}")
 
     def adb_reverse(self, device_port: int, host_port: int) -> None:
         try:
@@ -1210,6 +1315,30 @@ class Uiautomator2Device(Device):
                 capture_output=True,
                 timeout=15,
             )
+
+    def adb_reverse_list(self) -> list[int]:
+        """Device-side ports currently reverse-forwarded to this host.
+
+        Teardown cannot depend on remembering the port: the record lives in the cache dir
+        of whichever worker started the proxy, and the worker that has to clean up is
+        usually a different one. Asking adb is authoritative and needs no bookkeeping.
+        """
+        try:
+            proc = subprocess.run(  # noqa: S603
+                ["adb", "-s", self.serial, "reverse", "--list"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except (subprocess.SubprocessError, FileNotFoundError):
+            return []
+        ports: list[int] = []
+        for line in (proc.stdout or "").splitlines():
+            match = re.search(r"\btcp:(\d+)\b", line)
+            if match:
+                ports.append(int(match.group(1)))
+        return ports
 
     def _logcat_dump(self, args: list[str]) -> str:
         proc = subprocess.run(  # noqa: S603
@@ -1289,6 +1418,39 @@ class Uiautomator2Device(Device):
             if "/" in line and not line.startswith("priority"):
                 pkgs.append(line.split("/", 1)[0])
         return pkgs
+
+    def launcher_activities(self, package: str) -> list[str]:
+        """MAIN+LAUNCHER Activities for *package*, fully-qualified.
+
+        Used to detect multi-launcher builds (product entry + Dev Tools) so memory can
+        pin a deterministic cold-start Activity instead of letting the platform coin-flip.
+        """
+        try:
+            out = self.shell(
+                "cmd package query-activities --brief "
+                "-a android.intent.action.MAIN "
+                "-c android.intent.category.LAUNCHER"
+            )
+        except Exception:
+            return []
+        found: list[str] = []
+        seen: set[str] = set()
+        # --brief prints `pkg/cls` (cls may be `.Foo` when it shares the package prefix).
+        for line in str(out).splitlines():
+            line = line.strip()
+            if "/" not in line or line.startswith("priority"):
+                continue
+            pkg, cls = line.split("/", 1)
+            if pkg != package:
+                continue
+            if cls.startswith("."):
+                fq = f"{pkg}{cls}"
+            else:
+                fq = cls
+            if fq and fq not in seen:
+                seen.add(fq)
+                found.append(fq)
+        return found
 
 
 # --------------------------------------------------------------------------- factory

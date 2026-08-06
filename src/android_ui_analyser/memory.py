@@ -326,6 +326,24 @@ class Recipe(BaseModel):
     note: str
 
 
+class LaunchEntry(BaseModel):
+    """How to cold-start this app — the MAIN/LAUNCHER Activity to pin.
+
+    Dev builds often declare more than one launcher (product entry + Dev Tools). Without
+    a pin, ``am start`` / ``app_start`` resolves that nondeterministically. Once set,
+    every bare ``aua app launch <pkg>`` (and flag/proxy restart fallback) uses this
+    Activity instead of flipping a coin.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+    activity: str
+    # user = `aua remember --launch-activity`; explicit = successful `app launch --activity`;
+    # resolved = only one MAIN/LAUNCHER was declared so we auto-pinned it.
+    source: Literal["user", "explicit", "resolved"] = "user"
+    alternatives: list[str] = Field(default_factory=list)  # other MAIN/LAUNCHER components
+    last_seen: str | None = None
+
+
 class AppMap(BaseModel):
     model_config = ConfigDict(extra="ignore")
     schema_version: int = MEMORY_SCHEMA_VERSION
@@ -338,6 +356,9 @@ class AppMap(BaseModel):
     deeplinks: list[Deeplink] = Field(default_factory=list)  # shortcuts (set flags, jump)
     recipes: list[Recipe] = Field(default_factory=list)  # login_full, etc.
     notes: list[str] = Field(default_factory=list)  # quirks worth remembering
+    launch: LaunchEntry | None = None  # pinned cold-start Activity (multi-launcher builds)
+    # Last-seen MAIN/LAUNCHER set when no pin exists yet (surfaces ambiguity in the playbook).
+    launcher_activities: list[str] = Field(default_factory=list)
     contexts: dict[str, ContextRecord] = Field(default_factory=dict)
     knowledge: list[KnowledgeItem] = Field(default_factory=list)
     research_tasks: list[dict[str, object]] = Field(default_factory=list)
@@ -951,6 +972,21 @@ def _resource_name(elements: list[Element], height: int | None = None) -> str | 
 
 def _now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _normalize_activity(package: str, activity: str) -> str:
+    """Expand ``pkg/.Foo`` / ``.Foo`` into a fully-qualified class name."""
+    act = (activity or "").strip()
+    if not act:
+        return ""
+    if "/" in act:
+        pkg, cls = act.split("/", 1)
+        if cls.startswith("."):
+            return f"{pkg}{cls}"
+        return cls
+    if act.startswith("."):
+        return f"{package}{act}"
+    return act
 
 
 def _safe(name: str) -> str:
@@ -1882,6 +1918,105 @@ class AppMemoryStore:
             self._upsert_knowledge_in_map(app, "note", note, source="user")
             self.save(app)
 
+    def remember_launch_entry(
+        self,
+        package: str,
+        activity: str,
+        *,
+        source: Literal["user", "explicit", "resolved"] = "user",
+        alternatives: Sequence[str] | None = None,
+    ) -> LaunchEntry | None:
+        """Pin the cold-start Activity for *package*.
+
+        A ``user`` pin is never overwritten by ``explicit`` / ``resolved`` — once someone
+        (or the agent via ``remember --launch-activity``) teaches the right entry, autodetection
+        must not flip it back to a coin-toss candidate.
+        """
+        if not self.cfg.enabled or not activity:
+            return None
+        app = self.load(package) or AppMap(package=package)
+        existing = app.launch
+        if existing is not None and existing.source == "user" and source != "user":
+            # Still refresh the alternatives list when we learn more about the package.
+            if alternatives is not None:
+                alts = [a for a in alternatives if a and a != existing.activity]
+                if alts and alts != existing.alternatives:
+                    existing.alternatives = list(alts)
+                    existing.last_seen = _now_iso()
+                    self.save(app)
+            return existing
+        pinned = _normalize_activity(package, activity)
+        alts = [
+            _normalize_activity(package, a)
+            for a in (alternatives or [])
+            if a and _normalize_activity(package, a) != pinned
+        ]
+        # Preserve prior alternatives when the caller didn't re-query.
+        if not alts and existing is not None:
+            alts = [a for a in existing.alternatives if a != pinned]
+        app.launch = LaunchEntry(
+            activity=pinned,
+            source=source,
+            alternatives=alts,
+            last_seen=_now_iso(),
+        )
+        # Ambiguity list is obsolete once we have a pin.
+        if app.launcher_activities:
+            app.launcher_activities = []
+        self.save(app)
+        return app.launch
+
+    def record_launcher_activities(
+        self, package: str, activities: Sequence[str]
+    ) -> LaunchEntry | None:
+        """Remember the package's MAIN/LAUNCHER set; auto-pin when unambiguous.
+
+        Returns the (possibly new) :class:`LaunchEntry` when a pin exists after this call,
+        else ``None`` — caller should surface ambiguity when ``None`` and ``len > 1``.
+        """
+        if not self.cfg.enabled:
+            return None
+        normalized = []
+        seen: set[str] = set()
+        for raw in activities:
+            act = _normalize_activity(package, raw)
+            if not act or act in seen:
+                continue
+            seen.add(act)
+            normalized.append(act)
+        app = self.load(package) or AppMap(package=package)
+        if app.launch is not None:
+            # Keep alternatives fresh under an existing pin.
+            app.launch.alternatives = [a for a in normalized if a != app.launch.activity]
+            app.launch.last_seen = _now_iso()
+            app.launcher_activities = []
+            self.save(app)
+            return app.launch
+        if len(normalized) == 1:
+            app.launch = LaunchEntry(
+                activity=normalized[0],
+                source="resolved",
+                alternatives=[],
+                last_seen=_now_iso(),
+            )
+            app.launcher_activities = []
+            self.save(app)
+            return app.launch
+        # 0 or many — store the set so the playbook can shout about it.
+        if normalized != app.launcher_activities:
+            app.launcher_activities = normalized
+            self.save(app)
+        return None
+
+    def launch_activity(self, package: str) -> str | None:
+        """Pinned cold-start Activity for *package*, or ``None`` if unset."""
+        if not self.cfg.enabled:
+            return None
+        app = self.load(package)
+        if app is None or app.launch is None:
+            return None
+        return app.launch.activity
+
     def remember_recipe(self, package: str, name: str, note: str) -> None:
         if not self.cfg.enabled or not (name and note):
             return
@@ -2546,11 +2681,36 @@ def _header(app: AppMap, context_id: str | None = None) -> list[str]:
 def _playbook_lines(app: AppMap) -> list[str]:
     """The app-level knowledge block (description, deeplinks, recipes, notes) — the
     durable facts the tool learned and should surface to the agent up front."""
-    if not (app.description or app.deeplinks or app.recipes or app.notes or app.knowledge):
+    has_launch = app.launch is not None or len(app.launcher_activities) > 1
+    if not (
+        app.description
+        or app.deeplinks
+        or app.recipes
+        or app.notes
+        or app.knowledge
+        or has_launch
+    ):
         return []
     lines = ["## Playbook"]
     if app.description:
         lines.append(app.description)
+    if app.launch is not None:
+        alts = (
+            f" (also declares: {', '.join(f'`{a}`' for a in app.launch.alternatives)})"
+            if app.launch.alternatives
+            else ""
+        )
+        lines.append(
+            f"- launch: `{app.launch.activity}`"
+            f" — pinned ({app.launch.source}); bare `aua app launch` uses this{alts}"
+        )
+    elif len(app.launcher_activities) > 1:
+        listed = ", ".join(f"`{a}`" for a in app.launcher_activities)
+        lines.append(
+            f"- launch AMBIGUOUS: {listed} — pin with "
+            "`aua remember --launch-activity <Activity>` or "
+            "`aua app launch <pkg> --activity <Activity>` before trusting cold starts"
+        )
     for r in app.recipes:
         lines.append(f"- recipe `{r.name}`: {r.note}")
     for d in app.deeplinks:

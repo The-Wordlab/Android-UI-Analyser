@@ -19,6 +19,7 @@ The two properties worth pinning are not features:
 from __future__ import annotations
 
 import json
+import os
 import time
 
 from android_ui_analyser import leases as L
@@ -73,15 +74,35 @@ def test_renew_keeps_a_long_running_wait_alive(tmp_path):
 
 
 def test_default_ttl_outlives_the_longest_blocking_call():
-    """A TTL shorter than an `--until` wait is worse than no lease: it hands the device away
-    while the holder is still driving it."""
-    assert L.DEFAULT_TTL_S >= 300
+    assert L.DEFAULT_TTL_S == 120
+
+
+def test_agent_can_extend_its_lease_without_next_command_shrinking_it(tmp_path):
+    assert L.acquire(tmp_path, "emulator-5554", owner="claude") is True
+    assert L.renew(tmp_path, "emulator-5554", owner="claude", ttl_s=600) is True
+    assert L.acquire(tmp_path, "emulator-5554", owner="claude") is True
+    entry = L.read_lease(tmp_path, "emulator-5554")
+    assert entry["ttl_s"] == 600
 
 
 def test_release_frees_the_device_for_others(tmp_path):
     L.acquire(tmp_path, "emulator-5554", owner="claude")
     assert L.release(tmp_path, "emulator-5554", owner="claude") is True
     assert L.acquire(tmp_path, "emulator-5554", owner="cursor") is True
+
+
+def test_force_acquire_replaces_a_live_holder(tmp_path):
+    assert L.acquire(tmp_path, "emulator-5554", owner="claude") is True
+    assert L.acquire(tmp_path, "emulator-5554", owner="cursor", force=True) is True
+    assert L.holder(tmp_path, "emulator-5554") == "cursor"
+
+
+def test_lease_expires_immediately_when_derived_owner_process_is_gone(tmp_path, monkeypatch):
+    owner = f"codex-{os.getpid()}-session-start"
+    monkeypatch.setattr(L, "_proc_started", lambda pid: "session-start")
+    assert L.acquire(tmp_path, "emulator-5554", owner=owner) is True
+    monkeypatch.setattr(L.os, "kill", lambda pid, signal: (_ for _ in ()).throw(ProcessLookupError()))
+    assert L.read_lease(tmp_path, "emulator-5554") is None
 
 
 def test_lease_records_what_it_is_for(tmp_path):

@@ -401,7 +401,11 @@ def test_cli_flow_run_dry_run(tmp_path: Path, monkeypatch) -> None:
     assert out.exit_code == 0, out.stderr
     data = json.loads(out.stdout)
     assert data["dry_run"] and data["steps"][0]["step"] == "tap 'Apps'"
-    assert dev.calls == []
+    # A dry run must not act on the device. The single permitted call is the read-only
+    # orphaned-proxy probe every fresh device claim makes (Engine._heal_device_network),
+    # which only runs at all when this process has just taken the device off someone else.
+    probe = ("shell", ("settings get global http_proxy",))
+    assert [c for c in dev.calls if c != probe] == []
 
 
 def test_cli_flow_run_param_parsing_error() -> None:

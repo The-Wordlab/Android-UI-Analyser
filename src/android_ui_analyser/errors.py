@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 import sys
 from enum import IntEnum
-from typing import IO
+from typing import IO, Any
 
 
 class ExitCode(IntEnum):
@@ -144,6 +144,30 @@ class SelectorNotFoundError(AuaError):
 
     exit_code = ExitCode.NOT_FOUND
     code = "selector_not_found"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        hint: str | None = None,
+        observation: Any | None = None,
+    ) -> None:
+        super().__init__(message, hint=hint)
+        self.observation = observation
+
+    def to_dict(self) -> dict[str, object]:
+        payload = super().to_dict()
+        if self.observation is None:
+            return payload
+        if hasattr(self.observation, "as_dict"):
+            observation = self.observation.as_dict("compact")
+        else:
+            observation = self.observation
+        error = payload["error"]
+        if isinstance(error, dict):
+            error["observation_present"] = True
+            error["observation"] = observation
+        return payload
 
 
 class SelectorAmbiguousError(AuaError):
