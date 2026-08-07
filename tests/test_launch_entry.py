@@ -13,10 +13,10 @@ from android_ui_analyser.engine import Engine
 from android_ui_analyser.memory import AppMemoryStore, _playbook_lines
 from conftest import FakeDevice, make_config
 
-PKG = "co.thewordlab.luzia.dev"
+PKG = "com.example.app.dev"
 PRODUCT = f"{PKG}.ui.activity.launch.LaunchActivity"
-# Real Luzia uses a different package prefix for the activity class; keep the test
-# self-contained with FQNs under PKG so normalization is visible.
+# A real build often prefixes the Activity class differently from the applicationId; keep
+# the test self-contained with FQNs under PKG so normalization is visible.
 DEVTOOLS = f"{PKG}.devtools.DevToolsActivity"
 PRODUCT_SHORT = ".ui.activity.launch.LaunchActivity"
 

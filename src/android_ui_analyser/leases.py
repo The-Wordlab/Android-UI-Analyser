@@ -23,6 +23,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -134,18 +135,30 @@ def _expired(entry: dict[str, Any], *, now: float | None = None) -> bool:
     return (now - float(entry.get("last_activity") or 0)) > ttl
 
 
+# ``{name}-{pid}-{started}``, where *both* outer fields can themselves contain "-": a
+# process name like `claude-code`, and a start token that is only hyphen-free for the
+# real `ps` format. Anchoring on the digits-only pid — greedily, so the *last* candidate
+# wins — parses every shape a plain `rsplit("-", 2)` got wrong.
+_OWNER_RE = re.compile(r"^(?P<name>.+)-(?P<pid>\d+)-(?P<started>.+)$")
+
+
 def _owner_process(owner: str) -> tuple[int, str] | None:
-    parts = owner.rsplit("-", 2)
-    if len(parts) != 3 or not parts[1].isdigit() or not parts[2]:
+    match = _OWNER_RE.match(owner)
+    if match is None:
         return None
-    pid = int(parts[1])
-    started = parts[2]
+    pid = int(match.group("pid"))
+    started = match.group("started")
     if _proc_started(pid) != started:
         return None
     return pid, started
 
 
-def read_lease(cache_dir: str | Path, serial: str) -> dict[str, Any] | None:
+def read_lease(
+    cache_dir: str | Path,
+    serial: str,
+    *,
+    boot_id: str | None = None,
+) -> dict[str, Any] | None:
     """The live lease on *serial*, or None when free/expired.
 
     Expiry is evaluated here rather than swept elsewhere — that is what makes a crashed
@@ -157,6 +170,9 @@ def read_lease(cache_dir: str | Path, serial: str) -> dict[str, Any] | None:
     except (OSError, json.JSONDecodeError):
         return None
     if not isinstance(entry, dict) or _expired(entry):
+        return None
+    recorded_boot = entry.get("boot_id")
+    if boot_id and recorded_boot and str(recorded_boot) != str(boot_id):
         return None
     return entry
 
@@ -176,6 +192,7 @@ def acquire(
     ttl_s: int = DEFAULT_TTL_S,
     needs: list[str] | None = None,
     app: str | None = None,
+    boot_id: str | None = None,
     force: bool = False,
 ) -> bool:
     """Claim *serial* for *owner*. True when held afterwards (including a sticky re-claim)."""
@@ -190,6 +207,7 @@ def acquire(
         "pid": os.getpid(),
         "needs": list(needs or []),
         "app": app,
+        "boot_id": boot_id,
     }
     owner_process = _owner_process(owner)
     if owner_process is not None:
@@ -197,7 +215,7 @@ def acquire(
 
     if force:
         _write(path, entry)
-        confirmed = read_lease(cache_dir, serial)
+        confirmed = read_lease(cache_dir, serial, boot_id=boot_id)
         return bool(confirmed and confirmed.get("owner") == owner)
 
     # Fast path: nobody has ever held it.
@@ -214,13 +232,13 @@ def acquire(
             os.close(fd)
         return True
 
-    current = read_lease(cache_dir, serial)
+    current = read_lease(cache_dir, serial, boot_id=boot_id)
     if current is None:
         # Free or expired — take it over, then re-read to settle a race with another
         # taker. Optimistic on purpose: the loser simply moves to another device.
         entry["acquired"] = _now()
         _write(path, entry)
-        confirmed = read_lease(cache_dir, serial)
+        confirmed = read_lease(cache_dir, serial, boot_id=boot_id)
         return bool(confirmed and confirmed.get("owner") == owner)
     if current.get("owner") == owner:
         current["last_activity"] = _now()
@@ -229,6 +247,8 @@ def acquire(
             current["app"] = app
         if needs:
             current["needs"] = list(needs)
+        if boot_id:
+            current["boot_id"] = boot_id
         _write(path, current)
         return True
     return False
@@ -241,9 +261,10 @@ def renew(
     owner: str,
     app: str | None = None,
     ttl_s: int | None = None,
+    boot_id: str | None = None,
 ) -> bool:
     """Heartbeat. Called on every command, and from inside long waits."""
-    current = read_lease(cache_dir, serial)
+    current = read_lease(cache_dir, serial, boot_id=boot_id)
     if current is None or current.get("owner") != owner:
         return False
     current["last_activity"] = _now()
@@ -251,6 +272,8 @@ def renew(
         current["ttl_s"] = int(ttl_s)
     if app:
         current["app"] = app
+    if boot_id:
+        current["boot_id"] = boot_id
     _write(_lease_path(cache_dir, serial), current)
     return True
 
@@ -265,7 +288,11 @@ def release(cache_dir: str | Path, serial: str, *, owner: str | None = None) -> 
     return True
 
 
-def list_leases(cache_dir: str | Path) -> list[dict[str, Any]]:
+def list_leases(
+    cache_dir: str | Path,
+    *,
+    boot_ids: dict[str, str | None] | None = None,
+) -> list[dict[str, Any]]:
     """Live leases only — expired entries are reported as free, never as holders."""
     out: list[dict[str, Any]] = []
     for path in sorted(lease_dir(cache_dir).glob("*.json")):
@@ -273,8 +300,14 @@ def list_leases(cache_dir: str | Path) -> list[dict[str, Any]]:
             entry = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if isinstance(entry, dict) and not _expired(entry):
-            out.append(entry)
+        if not isinstance(entry, dict) or _expired(entry):
+            continue
+        serial = str(entry.get("serial") or "")
+        boot_id = (boot_ids or {}).get(serial)
+        recorded_boot = entry.get("boot_id")
+        if boot_id and recorded_boot and str(recorded_boot) != str(boot_id):
+            continue
+        out.append(entry)
     return out
 
 
@@ -310,6 +343,14 @@ def _adb_shell(serial: str, command: str) -> str:
         return (out.stdout or "").strip()
     except Exception:
         return ""
+
+
+def device_instance_token(serial: str) -> str | None:
+    """Kernel boot UUID for the device currently attached at *serial*."""
+    token = _adb_shell(serial, "cat /proc/sys/kernel/random/boot_id")
+    if 30 <= len(token) <= 40 and token.count("-") == 4:
+        return token
+    return None
 
 
 def probe_capabilities(cache_dir: str | Path, serial: str) -> dict[str, Any]:
@@ -383,14 +424,22 @@ def choose_device(
     from .errors import DeviceLeasedError
 
     known = dict(candidates)
+    boot_ids = {
+        serial: str(caps["_boot_id"])
+        for serial, caps in candidates
+        if caps.get("_boot_id")
+    }
+
+    def _current(serial: str) -> dict[str, Any] | None:
+        return read_lease(cache_dir, serial, boot_id=boot_ids.get(serial))
 
     def _free_report() -> str:
-        free = [s for s, caps in candidates if holder(cache_dir, s) in (None, owner)
+        free = [s for s, caps in candidates if (_current(s) or {}).get("owner") in (None, owner)
                 and not unmet_needs(caps, needs)]
         return ", ".join(free) if free else "none"
 
     if explicit:
-        current = read_lease(cache_dir, explicit)
+        current = _current(explicit)
         if current is not None and current.get("owner") != owner:
             raise DeviceLeasedError(
                 f"{explicit} is leased by {current.get('owner')} "
@@ -403,27 +452,42 @@ def choose_device(
                 f"{explicit} does not satisfy: {', '.join(missing)}",
                 hint=f"free and matching: {_free_report()}",
             )
-        acquire(cache_dir, explicit, owner=owner, ttl_s=ttl_s, needs=needs)
+        acquire(
+            cache_dir,
+            explicit,
+            owner=owner,
+            ttl_s=ttl_s,
+            needs=needs,
+            boot_id=boot_ids.get(explicit),
+        )
         return explicit, ("explicit-new" if current is None else "explicit")
 
     # Sticky: keep an agent on the device it already knows, so its element ids, app state and
     # learned screen map stay valid across calls.
-    for serial in held_by(cache_dir, owner):
+    live = list_leases(cache_dir, boot_ids=boot_ids)
+    for serial in [str(e["serial"]) for e in live if e.get("owner") == owner]:
         if serial in known and not unmet_needs(known[serial], needs):
-            renew(cache_dir, serial, owner=owner)
+            renew(cache_dir, serial, owner=owner, boot_id=boot_ids.get(serial))
             return serial, "sticky"
 
     for serial, caps in candidates:
         if unmet_needs(caps, needs):
             continue
-        if read_lease(cache_dir, serial) is not None:
+        if _current(serial) is not None:
             continue
-        if acquire(cache_dir, serial, owner=owner, ttl_s=ttl_s, needs=needs):
+        if acquire(
+            cache_dir,
+            serial,
+            owner=owner,
+            ttl_s=ttl_s,
+            needs=needs,
+            boot_id=boot_ids.get(serial),
+        ):
             return serial, "assigned"
 
     busy = [
         f"{e['serial']} ({e['owner']}, active {idle_seconds(e):.0f}s ago)"
-        for e in list_leases(cache_dir)
+        for e in list_leases(cache_dir, boot_ids=boot_ids)
         if e.get("serial") in known
     ]
     detail = "; ".join(busy) if busy else "no attached device matches"

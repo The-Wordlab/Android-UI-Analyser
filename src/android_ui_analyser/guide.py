@@ -50,15 +50,15 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "`aua emulator start --avd aua_proxy --headless`. "
         "**Parallel agents on one host:** each boots with "
         "`aua emulator start --headless --parallel` (unique `-port` + `-read-only` + owner "
-        "tag); pin every later command with the returned `serial` "
-        "(`aua --serial …` / `AUA_SERIAL`); tear down only yours with "
-        "`aua emulator stop --serial <yours>` or `AUA_OWNER=… aua emulator stop --mine`.",
+        "tag); automatic leases keep every later bare `aua` command on that device. Do not "
+        "copy its serial into every command. Use `--serial` only as an explicit debugging "
+        "override; tear down yours with `AUA_OWNER=… aua emulator stop --mine`.",
     ),
     (
         "ALWAYS stop headless emulators YOU started",
         "**Hard requirement before you end the session** (not optional, not 'if convenient'): "
-        "`aua emulator stop --serial <yours>` (safest with parallel agents) or "
-        "`AUA_OWNER=… aua emulator stop --mine` / `--avd <name>`. Orphaned headless AVDs burn "
+        "`AUA_OWNER=… aua emulator stop --mine`. Use `--serial` / `--avd` only for explicit "
+        "operator overrides. Orphaned headless AVDs burn "
         "CPU and battery. Do this even if the test failed. "
         "Safety nets (do not rely on them alone): idle watchdog auto-stops after "
         "`--idle-stop` seconds of no aua activity (default 900); MCP `emulator_start` "
@@ -167,16 +167,15 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
     ),
     (
         "Drive by element ID",
-        "`aua --format compact analyze` → a list of elements each with an integer `id` + bounds. "
+        "`aua analyze` returns JSON by default, with elements carrying integer `id` values. "
         'Act on the id: `aua tap-and-analyze <id>`, `aua input-and-analyze <id> "text"`, '
         '`aua swipe-and-analyze up`, `aua key-and-analyze back`. '
         'Use `aua has "<text>"` (exit 0/1) to branch cheaply without parsing JSON.',
     ),
     (
         "Ask for the columns you want — never post-process JSON",
-        "**`aua --format tsv analyze` is the default way to look at a screen**: one element "
-        "per line, tab-separated, `#`-commented summary on top, and status-bar/unlabelled "
-        "noise already dropped (`--all` keeps everything). Narrow it in the same call instead "
+        "**JSON is the default agent contract**, so use plain `aua analyze` and action commands. "
+        "Narrow responses in the same call instead "
         "of piping into a filter: `--fields id,text,rid,clickable` (`rid` = the short tail; "
         "`resource_id` = the full selector), `--where-text <substr>`, `--where-rid <substr>`, "
         "`--clickable`, `--region x1,y1,x2,y2` (header = `--region 0,0,1080,300 --clickable`), "
@@ -186,8 +185,9 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "`content_frame`) — inert, unlabelled boxes that wrap something; leaves and "
         "addressable containers stay. Filters of different "
         "kinds AND together, repeats of one kind OR together, and **ids are never renumbered** — "
-        "the id in a filtered row is the id `aua tap-and-analyze` takes. The same flags work on "
-        "`--format json|compact` when you want machine-readable output.",
+        "the id in a filtered row is the id `aua tap-and-analyze` takes. Use `--format compact` "
+        "for smaller JSON, `tsv` for human table inspection, `delta` for unchanged-screen "
+        "polling, or `msgpack` for binary transport; never repeat `--format json`.",
     ),
     (
         "Read interaction state, don't screenshot it",
@@ -311,8 +311,9 @@ KEY_FLAGS: list[tuple[str, str]] = [
     (
         "global, BEFORE the subcommand",
         "`--format json|pretty|compact|tsv|delta|msgpack` (`tsv`/`delta`/`msgpack` = analyze; "
-        "`delta` omits elements when unchanged; `msgpack` is AUA1 binary/base64), "
-        "`--serial`, `--config`, `--profile`, `--timeout`, `--log-level`, `--no-cache`, "
+        "default `json`; `delta` omits elements when unchanged; `msgpack` is AUA1 "
+        "binary/base64), `--serial` (explicit device override; automatic leases are the "
+        "default), `--config`, `--profile`, `--timeout`, `--log-level`, `--no-cache`, "
         "`--with-image` (session default: attach raw screenshots on analyze/actions — "
         "prefer off; use only when you must SEE pixels)",
     ),
@@ -456,12 +457,18 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "experiment/treatment/variant/flag values and switches map context automatically.",
     ),
     (
-        "proxy / mock",
-        "`proxy start|stop`, `proxy flows` (what it saw), `proxy flow <n> [--to-rule]` "
-        "(one exchange → a ready rule), `mock map METHOD PATH [--status N --body '{…}']` "
-        "(stub), `mock rewrite METHOD PATH --host H --set a.b=v --once` (edit the *real* "
-        "response), `mock list|clear`, `mock record start|stop NAME`, `mock replay NAME`, "
-        "`device reset` (undo a wrecked device). Optional `[proxy]` extra",
+        "proxy",
+        "`proxy start`, `proxy status` (owner/process/transport/TLS health), "
+        "`proxy flows` (completed calls), `proxy flow <n> [--to-rule]` (headers/bodies and a "
+        "ready edit), `proxy map METHOD PATH [--status N --body '{…}']` (stub), "
+        "`proxy rewrite METHOD PATH --host H --set a.b=v --once` (edit the *real* response), "
+        "`proxy list|clear`, `proxy record start NAME|stop`, `proxy replay NAME`, `proxy stop`. "
+        "**HTTPS needs a rootable Google APIs AVD** (`aua emulator ensure-proxy --start`), not "
+        "Google Play: the CA must land in the *system* store, because apps targeting API 24+ "
+        "ignore user-installed CAs unless their own network security config opts in, and "
+        "writing that store needs root. No VPN/companion app can work around this — pinned "
+        "apps defeat even a system CA. Legacy `mock …` aliases remain. "
+        "`device reset` undoes a wrecked device. Optional `[proxy]` extra",
     ),
     (
         "map",
@@ -839,9 +846,11 @@ def render_markdown(*, brief: bool = False) -> str:
         "aua emulator recommend-proxy         # package + why (no download)\n"
         "aua emulator ensure-proxy --start    # download google_apis image + boot aua_proxy\n"
         "aua --serial <serial> proxy start\n"
-        "aua --serial <serial> proxy start --companion  # auto-build/install VPN helper\n"
         "aua emulator stop --mine             # cleanup when done\n"
         "```\n"
+        "There is **no non-root path**: apps targeting API 24+ trust only the *system* CA "
+        "store unless their own network security config opts in, and writing that store "
+        "needs root. A VPN helper app cannot change what the target app trusts.\n"
         "Analyze/tap/wait work identically; hierarchy + screenshots do not need a visible "
         "window. Never wipe or stop an emulator the user already had open unless they asked."
     )

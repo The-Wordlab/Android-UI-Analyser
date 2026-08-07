@@ -278,8 +278,29 @@ def test_app_launch_activity_threads_to_device() -> None:
     eng = _engine(dev)
     eng.app("launch", package="com.x", activity=".LaunchActivity")
     assert ("launch_app", ("com.x", ".LaunchActivity")) in dev.calls
-    eng.app("launch", package="com.x")  # bare launch keeps the old 1-tuple shape
+
+
+def test_bare_launch_without_a_pin_keeps_the_platform_default() -> None:
+    """No pin learned yet → bare launch stays a 1-tuple and lets Android resolve."""
+    dev = FakeDevice(hierarchy_xml=_XML, package="com.x")
+    eng = _engine(dev)
+    eng.app("launch", package="com.x")
     assert ("launch_app", ("com.x",)) in dev.calls
+
+
+def test_bare_launch_reuses_the_pin_an_explicit_launch_taught() -> None:
+    """The point of the pin: after one `--activity`, bare launch stops coin-flipping.
+
+    Multi-launcher dev builds declare a product MAIN/LAUNCHER next to a Dev Tools one, so
+    an unpinned resolve picks either. The learned entry is normalised to an FQN first.
+    """
+    dev = FakeDevice(hierarchy_xml=_XML, package="com.x")
+    eng = _engine(dev)
+    eng.app("launch", package="com.x", activity=".LaunchActivity")
+    dev.calls.clear()
+    eng.app("launch", package="com.x")
+    assert ("launch_app", ("com.x", "com.x.LaunchActivity")) in dev.calls
+    assert ("launch_app", ("com.x",)) not in dev.calls
 
 
 def test_cli_wait_absent_and_app_activity(monkeypatch: pytest.MonkeyPatch) -> None:

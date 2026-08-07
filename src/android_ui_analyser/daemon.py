@@ -154,6 +154,10 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
     args: dict[str, Any] = request.get("args") or {}
 
     try:
+        lease_owner = request.get("lease_owner")
+        if lease_owner:
+            engine.bind_lease_owner(str(lease_owner))
+
         if cmd == "ping":
             return _result_ok({"pong": True, "version": _aua_version()})
 
@@ -654,7 +658,13 @@ class DaemonClient:
     def __exit__(self, *_: Any) -> None:
         pass  # Each call() opens and closes its own connection for simplicity.
 
-    def call(self, cmd: str, **args: Any) -> dict[str, Any]:
+    def call(
+        self,
+        cmd: str,
+        *,
+        _lease_owner: str | None = None,
+        **args: Any,
+    ) -> dict[str, Any]:
         """Send one request and return the parsed response dict.
 
         Does NOT raise on ok=False — caller decides what to do.
@@ -663,6 +673,8 @@ class DaemonClient:
         """
         journal = args.pop("journal", True)
         request: dict[str, Any] = {"cmd": cmd, "args": args}
+        if _lease_owner:
+            request["lease_owner"] = _lease_owner
         if journal is False:
             request["journal"] = False
         payload = json.dumps(request, ensure_ascii=False).encode() + b"\n"

@@ -29,3 +29,6 @@ runs/
 
 # Built AOT thin client
 native/aua-fast/aua-fast
+
+# macOS Finder metadata — never belongs in a repo
+.DS_Store

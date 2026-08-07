@@ -1214,6 +1214,7 @@ def start_mitm(
             env=env,
             stdout=log_fh,
             stderr=log_fh,
+            start_new_session=True,
         )
     finally:
         log_fh.close()

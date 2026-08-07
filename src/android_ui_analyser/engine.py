@@ -32,6 +32,7 @@ from .device import Device, connect, list_devices
 from .errors import (
     AuaError,
     DeviceError,
+    DeviceLeasedError,
     ElementNotFoundError,
     ProviderError,
     SelectorAmbiguousError,
@@ -654,14 +655,15 @@ class Engine:
 
         needs = list(self._lease_needs or [])
         # Capabilities cost adb round-trips, so only probe when someone actually asked.
-        candidates = [
-            (
-                d.serial,
-                leases.probe_capabilities(cfg.cache.dir, d.serial) if needs else {},
+        candidates: list[tuple[str, dict[str, Any]]] = []
+        for info in infos:
+            if not info.serial:
+                continue
+            capabilities = dict(
+                leases.probe_capabilities(cfg.cache.dir, info.serial) if needs else {}
             )
-            for d in infos
-            if d.serial
-        ]
+            capabilities["_boot_id"] = leases.device_instance_token(info.serial)
+            candidates.append((info.serial, capabilities))
         owner = leases.resolve_owner(self._lease_owner)
         serial, why = leases.choose_device(
             cfg.cache.dir,
@@ -676,6 +678,33 @@ class Engine:
         self._lease_fresh = why in leases.FRESH_CLAIMS
         return serial
 
+    def bind_lease_owner(self, owner: str | None) -> None:
+        """Bind a daemon request to its client owner and revalidate the live device lease."""
+        from . import leases
+
+        resolved = leases.resolve_owner(owner)
+        self._lease_owner = resolved
+        serial = self._lease_serial
+        if not serial:
+            return
+
+        boot_id = self._device.instance_token() if self._device is not None else None
+        previous = leases.read_lease(self.config.cache.dir, serial, boot_id=boot_id)
+        if not leases.acquire(
+            self.config.cache.dir,
+            serial,
+            owner=resolved,
+            ttl_s=int(getattr(self.config.lease, "ttl_s", leases.DEFAULT_TTL_S)),
+            boot_id=boot_id,
+        ):
+            holder_name = previous.get("owner") if previous else "another agent"
+            raise DeviceLeasedError(
+                f"{serial} is leased by {holder_name}",
+                hint="`aua lease list` shows the holder.",
+            )
+        self._lease_owner_resolved = resolved
+        self._lease_fresh = previous is None
+
     def renew_lease(self) -> None:
         """Heartbeat the current lease — called from inside long waits.
 
@@ -689,7 +718,13 @@ class Engine:
         from . import leases
 
         with contextlib.suppress(Exception):
-            leases.renew(self.config.cache.dir, serial, owner=owner)
+            boot_id = self._device.instance_token() if self._device is not None else None
+            leases.renew(
+                self.config.cache.dir,
+                serial,
+                owner=owner,
+                boot_id=boot_id,
+            )
 
     def list_devices(self) -> list[DeviceInfo]:
         return list_devices()
@@ -6323,7 +6358,6 @@ class Engine:
         exclude: list[str] | None = None,
         allow_untrusted: bool = False,
         relaunch: bool = False,
-        companion: bool = False,
     ) -> dict[str, Any]:
         from . import proxy_mock as pm
 
@@ -6350,16 +6384,22 @@ class Engine:
                 # HTTPS request in the app fails its handshake, the app renders its offline
                 # state, and the agent is left debugging an app that is fine. Refuse, and
                 # leave the device exactly as it was.
-                if not allow_untrusted and not companion:
+                if not allow_untrusted:
                     raise DeviceError(
                         f"not starting the proxy on {device.serial}: the mitm CA could not "
                         "be installed as a system trust anchor, so every HTTPS request the "
                         "app makes would fail and it would show itself as offline",
                         hint=(
-                            "Use a rootable Google APIs AVD: `aua emulator ensure-proxy "
-                            "--start`, then `aua proxy start --serial <that serial>`. "
-                            "To proxy anyway (plain HTTP only, or an app that trusts user "
-                            "CAs), pass `--allow-untrusted`. Cause: " + str(exc)
+                            "HTTPS interception needs the CA in the *system* store, and "
+                            "writing that store needs root. Apps targeting API 24+ ignore "
+                            "user-installed CAs unless their own network security config "
+                            "opts in, so on a non-rooted device there is no way to "
+                            "intercept an unmodified app — a VPN helper cannot change "
+                            "this. Use a rootable Google APIs AVD (not Google Play): "
+                            "`aua emulator ensure-proxy --start`, then "
+                            "`aua proxy start --serial <that serial>`. To proxy anyway "
+                            "(plain HTTP only, or an app that trusts user CAs), pass "
+                            "`--allow-untrusted`. Cause: " + str(exc)
                         ),
                     ) from exc
         # ``port<=0`` / omitted → random free high port (never hardcodes 8080).
@@ -6372,19 +6412,7 @@ class Engine:
         with self._rearranging_proxy():
             try:
                 device.adb_reverse(listen, listen)
-                companion_info = None
-                if companion:
-                    from . import companion as companion_app
-
-                    companion_info = companion_app.start(
-                        device.serial,
-                        cache,
-                        listen,
-                        target_package=pkg,
-                        ca_pem=pm.ensure_mitm_ca() if install_ca else None,
-                    )
-                else:
-                    device.set_http_proxy(f"127.0.0.1:{listen}", exclusion_list=bypass)
+                device.set_http_proxy(f"127.0.0.1:{listen}", exclusion_list=bypass)
             except Exception:
                 # Never leave the device pointed at a proxy we are about to kill.
                 with contextlib.suppress(Exception):
@@ -6413,7 +6441,7 @@ class Engine:
                     "boot_id": boot_id,
                     "cache_dir": str(cache),
                     "proxy": f"127.0.0.1:{listen}",
-                    "transport": "companion" if companion else "global-proxy",
+                    "transport": "global-proxy",
                     "exclusion_list": bypass,
                     "started": time.time(),
                 },
@@ -6437,14 +6465,9 @@ class Engine:
             "port": listen,
             "ca": ca_info,
             "bypass": bypass,
-            "transport": "companion" if companion else "global-proxy",
+            "transport": "global-proxy",
             "hint": (
-                (
-                    "AUA Companion was installed and opened. Approve any certificate/VPN "
-                    "system prompts; traffic then reaches the proxy through adb reverse. "
-                    if companion
-                    else f"Device http_proxy is 127.0.0.1:{listen} (via adb reverse). "
-                )
+                f"Device http_proxy is 127.0.0.1:{listen} (via adb reverse). "
                 + (
                     "System CA installed. `aua proxy flows` lists what it sees; "
                     "`aua mock rewrite … --once` edits one response."
@@ -6459,8 +6482,6 @@ class Engine:
         }
         if cleared:
             out["cleared_stale"] = cleared
-        if companion and companion_info:
-            out["companion"] = companion_info
         if relaunched:
             out["relaunched"] = relaunched
         elif pkg:
@@ -6470,6 +6491,70 @@ class Engine:
                 "the proxy. If it built an HTTP client at startup that snapshots the trust "
                 "store, or holds pooled connections you need to break, `--relaunch` "
                 "restarts it."
+            )
+        return out
+
+    def proxy_status(self) -> dict[str, Any]:
+        """Report whether the host proxy, device transport, capture, and rules are usable."""
+        from . import proxy_mock as pm
+
+        device = self.device
+        state = pm.read_state(device.serial)
+        cache = Path(
+            str((state or {}).get("cache_dir") or self.config.cache.dir)
+        ).expanduser()
+        pid = int((state or {}).get("pid") or 0)
+        port = int((state or {}).get("port") or 0)
+        process_alive = pm.pid_alive(pid)
+        listener_ready = pm.port_listening(port)
+        current_proxy = None
+        with contextlib.suppress(Exception):
+            current_proxy = device.get_http_proxy()
+        doc = pm.load_doc(pm.rules_path(cache))
+        flows = pm.read_flows_since(cache, 0)
+        tls_errors = pm.tls_failures_in_log(cache)
+        transport = (state or {}).get("transport")
+        transport_ready = bool(current_proxy)
+        running = bool(state and process_alive and listener_ready and transport_ready)
+        out: dict[str, Any] = {
+            "ok": True,
+            "action": "proxy-status",
+            "running": running,
+            "serial": device.serial,
+            "transport": transport,
+            "owner": (state or {}).get("owner"),
+            "pid": pid or None,
+            "process_alive": process_alive,
+            "port": port or None,
+            "listener_ready": listener_ready,
+            "http_proxy": current_proxy,
+            "transport_ready": transport_ready,
+            "flow_count": len(flows),
+            "last_flow": flows[-1] if flows else None,
+            "mode": doc.get("mode", "map"),
+            "rule_count": len(doc.get("rules") or []),
+            "tls_errors": tls_errors,
+        }
+        if not state:
+            out["hint"] = "No active AUA proxy owns this device. Start one with `aua proxy start`."
+        elif not running:
+            out["hint"] = (
+                "The proxy session is incomplete or stale. Run `aua proxy stop`, then start "
+                "it again on a rootable Google APIs AVD (`aua emulator ensure-proxy --start`)."
+            )
+        elif tls_errors:
+            out["hint"] = (
+                "The transport is running, but TLS interception failed: the app does not "
+                "trust the AUA CA. Apps targeting API 24+ trust only the *system* store "
+                "unless their own network security config opts in, and writing that store "
+                "needs root — so this needs a rootable Google APIs AVD "
+                "(`aua emulator ensure-proxy --start`). Certificate pinning defeats even "
+                "that."
+            )
+        else:
+            out["hint"] = (
+                "Monitor with `aua proxy flows`; inspect with `aua proxy flow <n>`; manipulate "
+                "with `aua proxy rewrite|map`; tear down with `aua proxy stop`."
             )
         return out
 
@@ -6485,11 +6570,6 @@ class Engine:
         cache = Path(self.config.cache.dir).expanduser()
         device = self.device
         state = pm.read_state(device.serial)
-        companion_stopped = False
-        if state and state.get("transport") == "companion":
-            from . import companion as companion_app
-
-            companion_stopped = companion_app.stop(device.serial)
         current = None
         with contextlib.suppress(Exception):
             current = device.get_http_proxy()
@@ -6508,7 +6588,6 @@ class Engine:
             "port": port,
             "reverses_removed": removed,
             "http_proxy": device.get_http_proxy(),
-            "companion_stopped": companion_stopped,
         }
 
     def device_reset(self, *, reverses: bool = False) -> dict[str, Any]:

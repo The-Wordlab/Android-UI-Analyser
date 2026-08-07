@@ -175,10 +175,12 @@ class GlobalOpts:
         return self.load().output.format
 
     def engine(self) -> Engine:
+        from .leases import resolve_owner
+
         eng = Engine(self.load())
         # Hand the lease context over before anything touches the device: the claim happens
         # on first access to `Engine.device`, and needs to know who is asking.
-        eng._lease_owner = self.owner
+        eng._lease_owner = resolve_owner(self.owner)
         eng._lease_needs = _split_needs(self.needs)
         return eng
 
@@ -739,7 +741,7 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
             if ver is not False and not skew:
                 client = daemon_mod.DaemonClient(daemon_mod.socket_path(cfg))
                 cmd = _DAEMON_CMD.get(method, method)
-                resp = client.call(cmd, **kwargs)
+                resp = client.call(cmd, _lease_owner=engine._lease_owner, **kwargs)
                 if resp.get("ok"):
                     return resp.get("result")
                 raise _daemon_error(resp.get("error", {}))
@@ -809,11 +811,15 @@ app = typer.Typer(
 def main(
     ctx: typer.Context,
     serial: str | None = typer.Option(
-        None, "--serial", help="Target device serial (default: only/first)."
+        None,
+        "--serial",
+        help="Explicit device override (default: automatically leased device).",
     ),
     config: str | None = typer.Option(None, "--config", help="Explicit config file path."),
     format: str | None = typer.Option(
-        None, "--format", help="Output format: json|pretty|compact|tsv|delta|msgpack (tsv/delta/msgpack: analyze)."
+        None,
+        "--format",
+        help="Output override: json|pretty|compact|tsv|delta|msgpack (default: json).",
     ),
     profile: str | None = typer.Option(None, "--profile", help="Named config profile to overlay."),
     timeout: int | None = typer.Option(None, "--timeout", help="Per-operation timeout in ms."),
@@ -3254,9 +3260,17 @@ def lease_cmd(
         verb = (action or "list").strip().lower()
 
         if verb == "list":
-            live = {e["serial"]: e for e in lease_mod.list_leases(cache)}
+            devices = engine.list_devices()
+            boot_ids = {
+                device.serial: lease_mod.device_instance_token(device.serial)
+                for device in devices
+            }
+            live = {
+                e["serial"]: e
+                for e in lease_mod.list_leases(cache, boot_ids=boot_ids)
+            }
             rows = []
-            for d in engine.list_devices():
+            for d in devices:
                 held = live.get(d.serial)
                 rows.append(
                     {
@@ -3290,6 +3304,7 @@ def lease_cmd(
                     owner=owner,
                     ttl_s=ttl or int(engine.config.lease.ttl_s),
                     needs=_split_needs(_opts(ctx).needs),
+                    boot_id=lease_mod.device_instance_token(target),
                     force=True,
                 )
                 _echo_json(
@@ -3763,7 +3778,7 @@ def remember(
     `aua remember --recipe login_full --note "tap 'Login with test user'"` or
     `aua remember --deeplink "myapp://set-flags?flag=value" --note "set flags, then restart"`.
     On builds with a Dev Tools launcher next to the product one, pin the entry once with
-    `aua remember --launch-activity co.thewordlab.luzia.ui.activity.launch.LaunchActivity`
+    `aua remember --launch-activity com.example.app.ui.launch.LaunchActivity`
     (or pass `--activity` on `app launch` — a successful pin teaches the map the same way).
     """
 
@@ -4868,7 +4883,7 @@ def flags_apply_cmd(
 
 
 proxy_app = typer.Typer(
-    help="Headless mitmproxy — device http_proxy + adb reverse (optional proxy extra).",
+    help="Observe and manipulate app HTTP traffic through AUA's managed mitmproxy.",
     no_args_is_help=True,
 )
 app.add_typer(proxy_app, name="proxy")
@@ -4907,20 +4922,18 @@ def proxy_start_cmd(
         "--relaunch/--no-relaunch",
         help="Also restart the foreground app (default: leave it running and keep its state).",
     ),
-    companion: bool = typer.Option(
-        False,
-        "--companion/--no-companion",
-        help="Install and start AUA's VPN companion instead of changing Android's global proxy.",
-    ),
 ) -> None:
     """Start mitmdump, adb-reverse, set device HTTP proxy, and (by default) install the CA.
 
     Safe to run mid-flow: the app under test is left running and keeps its state, and its
     next requests go through the proxy. Pass `--relaunch` if you want it restarted anyway.
 
-    Refuses on a device where the CA cannot become a system trust anchor (a Google Play
-    AVD), because arming the proxy there breaks every HTTPS request the app makes and the
-    app then reports itself offline. `--allow-untrusted` overrides.
+    Needs a rootable device: HTTPS interception requires the CA in the *system* store, and
+    apps targeting API 24+ ignore user-installed CAs unless their own network security
+    config opts in. Use a Google APIs AVD (`aua emulator ensure-proxy --start`), not Google
+    Play. Refuses where the CA cannot become a system trust anchor, because arming the
+    proxy there breaks every HTTPS request and the app reports itself offline.
+    `--allow-untrusted` overrides.
     """
     hosts = [h.strip() for h in (exclude or "").split(",") if h.strip()]
 
@@ -4933,7 +4946,6 @@ def proxy_start_cmd(
                 exclude=hosts,
                 allow_untrusted=allow_untrusted,
                 relaunch=relaunch,
-                companion=companion,
             ),
             fmt,
         )
@@ -4947,6 +4959,16 @@ def proxy_stop_cmd(ctx: typer.Context) -> None:
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
         _emit(engine.proxy_stop(), fmt)
+
+    _run(ctx, go)
+
+
+@proxy_app.command("status")
+def proxy_status_cmd(ctx: typer.Context) -> None:
+    """Show proxy ownership, transport health, capture count, rules, and TLS failures."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.proxy_status(), fmt)
 
     _run(ctx, go)
 
@@ -4972,7 +4994,7 @@ def proxy_flow_cmd(
     ctx: typer.Context,
     n: int = typer.Argument(..., help="Flow number from `aua proxy flows`."),
     to_rule: bool = typer.Option(
-        False, "--to-rule", help="Also print the `mock rewrite` command that would edit it."
+        False, "--to-rule", help="Also print the `proxy rewrite` command that would edit it."
     ),
     full: bool = typer.Option(
         False, "--full", help="Print whole bodies instead of a clipped preview."
@@ -5028,6 +5050,7 @@ def _parse_assignments(pairs: list[str] | None) -> dict[str, Any]:
     return out
 
 
+@proxy_app.command("map")
 @mock_app.command("map")
 def mock_map_cmd(
     ctx: typer.Context,
@@ -5057,6 +5080,7 @@ def mock_map_cmd(
     _run(ctx, go)
 
 
+@proxy_app.command("rewrite")
 @mock_app.command("rewrite")
 def mock_rewrite_cmd(
     ctx: typer.Context,
@@ -5084,9 +5108,9 @@ def mock_rewrite_cmd(
     The Charles "edit this one response" move. Unlike `mock map` you do not have to
     reproduce the whole payload, so the rule stays valid as the backend evolves:
 
-        aua mock rewrite GET /api/v4.0/hub --host api.example.com \\
+        aua proxy rewrite GET /api/v4.0/hub --host api.example.com \\
           --set 'data.items.0.data.title=Renamed' --once
-        aua mock rewrite POST /v1/chat --status 429 --once   # force the paywall
+        aua proxy rewrite POST /v1/chat --status 429 --once   # force the paywall
     """
     headers: dict[str, str] = {}
     for raw in header:
@@ -5122,6 +5146,7 @@ def mock_rewrite_cmd(
     _run(ctx, go)
 
 
+@proxy_app.command("list")
 @mock_app.command("list")
 def mock_list_cmd(ctx: typer.Context) -> None:
     """Show the rules currently armed, and whether recording is on."""
@@ -5132,6 +5157,7 @@ def mock_list_cmd(ctx: typer.Context) -> None:
     _run(ctx, go)
 
 
+@proxy_app.command("clear")
 @mock_app.command("clear")
 def mock_clear_cmd(ctx: typer.Context) -> None:
     """Drop every armed rule (traffic goes back to plain passthrough)."""
@@ -5142,6 +5168,7 @@ def mock_clear_cmd(ctx: typer.Context) -> None:
     _run(ctx, go)
 
 
+@proxy_app.command("record")
 @mock_app.command("record")
 def mock_record_cmd(
     ctx: typer.Context,
@@ -5156,6 +5183,7 @@ def mock_record_cmd(
     _run(ctx, go)
 
 
+@proxy_app.command("replay")
 @mock_app.command("replay")
 def mock_replay_cmd(
     ctx: typer.Context,

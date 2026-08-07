@@ -1443,10 +1443,7 @@ class Uiautomator2Device(Device):
             pkg, cls = line.split("/", 1)
             if pkg != package:
                 continue
-            if cls.startswith("."):
-                fq = f"{pkg}{cls}"
-            else:
-                fq = cls
+            fq = f"{pkg}{cls}" if cls.startswith(".") else cls
             if fq and fq not in seen:
                 seen.add(fq)
                 found.append(fq)
