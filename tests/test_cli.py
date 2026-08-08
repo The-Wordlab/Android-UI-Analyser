@@ -237,7 +237,7 @@ def test_usage_error_bad_format_exit_2() -> None:
 
 def test_usage_error_missing_argument_exit_2() -> None:
     # `tap` requires an element id; Typer/Click reports a usage error (exit 2).
-    result = runner.invoke(app, ["tap"])
+    result = runner.invoke(app, ["tap-and-analyze"])
     assert result.exit_code == 2
 
 
@@ -248,7 +248,7 @@ def test_tap_records_click_and_emits_action(patched_device: FakeDevice) -> None:
     # Seed the analyze cache so the element id resolves.
     seed = runner.invoke(app, ["analyze", "--source", "hierarchy"])
     assert seed.exit_code == 0, seed.stderr
-    result = runner.invoke(app, ["tap", "1"])
+    result = runner.invoke(app, ["tap-and-analyze", "1"])
     assert result.exit_code == 0, result.stderr
     data = json.loads(result.stdout)
     assert data["ok"] is True
@@ -259,13 +259,13 @@ def test_tap_records_click_and_emits_action(patched_device: FakeDevice) -> None:
 
 def test_click_is_alias_of_tap(patched_device: FakeDevice) -> None:
     runner.invoke(app, ["analyze", "--source", "hierarchy"])
-    result = runner.invoke(app, ["click", "1"])
+    result = runner.invoke(app, ["click-and-analyze", "1"])
     assert result.exit_code == 0, result.stderr
     assert json.loads(result.stdout)["action"] == "tap"
 
 
 def test_key_press(patched_device: FakeDevice) -> None:
-    result = runner.invoke(app, ["key", "back"])
+    result = runner.invoke(app, ["key-and-analyze", "back"])
     assert result.exit_code == 0, result.stderr
     data = json.loads(result.stdout)
     assert data["action"] == "key"

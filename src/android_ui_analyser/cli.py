@@ -1181,7 +1181,6 @@ def has(
 
 
 @app.command(name="tap-and-analyze", cls=AnalyzeCommand)
-@app.command(cls=AnnotateCommand, hidden=True)
 def tap(
     ctx: typer.Context,
     ident: str | None = typer.Argument(
@@ -1267,7 +1266,6 @@ def tap(
 
 
 @app.command(name="await-and-analyze", cls=AnalyzeCommand)
-@app.command(name="await", hidden=True)
 def await_cmd(
     ctx: typer.Context,
     predicate: str = typer.Argument(
@@ -1373,7 +1371,6 @@ def target_cmd(
 
 
 @app.command(name="click-and-analyze", cls=AnalyzeCommand)
-@app.command(name="click", cls=AnnotateCommand, hidden=True)
 def click_cmd(
     ctx: typer.Context,
     ident: str | None = typer.Argument(
@@ -1418,7 +1415,6 @@ def click_cmd(
 
 
 @app.command(name="long-press-and-analyze", cls=AnalyzeCommand)
-@app.command(name="long-press", cls=AnnotateCommand, hidden=True)
 def long_press(
     ctx: typer.Context,
     ident: str | None = typer.Argument(
@@ -1465,7 +1461,6 @@ def long_press(
 
 
 @app.command(name="double-tap-and-analyze", cls=AnalyzeCommand)
-@app.command(name="double-tap", cls=AnnotateCommand, hidden=True)
 def double_tap(
     ctx: typer.Context,
     ident: str | None = typer.Argument(
@@ -1510,7 +1505,6 @@ def double_tap(
 
 
 @app.command(name="input-and-analyze", cls=AnalyzeCommand)
-@app.command(name="input", cls=AnnotateCommand, hidden=True)
 def input_cmd(
     ctx: typer.Context,
     first_arg: str | None = typer.Argument(
@@ -1582,7 +1576,6 @@ def input_cmd(
 
 
 @app.command(name="clear-and-analyze", cls=AnalyzeCommand)
-@app.command(cls=AnnotateCommand, hidden=True)
 def clear(
     ctx: typer.Context,
     ident: str | None = typer.Argument(
@@ -1627,7 +1620,6 @@ def clear(
 
 
 @app.command(name="swipe-and-analyze", cls=AnalyzeCommand)
-@app.command(cls=AnnotateCommand, hidden=True)
 def swipe(
     ctx: typer.Context,
     direction_arg: str | None = typer.Argument(
@@ -1695,7 +1687,6 @@ def swipe(
 
 
 @app.command(name="scroll-and-analyze", cls=AnalyzeCommand)
-@app.command(cls=AnnotateCommand, hidden=True)
 def scroll(
     ctx: typer.Context,
     direction_arg: str | None = typer.Argument(
@@ -1761,7 +1752,6 @@ def scroll(
 
 
 @app.command(name="scroll-to-and-analyze", cls=AnalyzeCommand)
-@app.command(name="scroll-to", cls=AnnotateCommand, hidden=True)
 def scroll_to(
     ctx: typer.Context,
     text: str | None = typer.Argument(
@@ -1831,7 +1821,6 @@ def scroll_to(
 
 
 @app.command(name="expect-and-analyze", cls=AnalyzeCommand)
-@app.command(hidden=True)
 def expect(
     ctx: typer.Context,
     rid: str | None = typer.Option(None, "--rid", help="Assert about this resource-id."),
@@ -1895,7 +1884,6 @@ def expect(
 
 
 @app.command(name="key-and-analyze", cls=AnalyzeCommand)
-@app.command(cls=AnnotateCommand, hidden=True)
 def key(
     ctx: typer.Context,
     name: str = typer.Argument(..., help="back|home|enter|recents|KEYCODE_*."),
@@ -1930,7 +1918,6 @@ def key(
 
 
 @app.command(name="hide-keyboard-and-analyze", cls=AnalyzeCommand)
-@app.command(name="hide-keyboard", cls=AnnotateCommand, hidden=True)
 def hide_keyboard(
     ctx: typer.Context,
     observe: bool = typer.Option(
@@ -1963,7 +1950,6 @@ def hide_keyboard(
 
 
 @app.command(name="open-and-analyze", cls=AnalyzeCommand)
-@app.command(cls=AnnotateCommand, hidden=True)
 def open(  # noqa: A001 - matches the user-facing verb `aua open`
     ctx: typer.Context,
     uri: str = typer.Argument(..., help="Deeplink URI, e.g. 'myapp://set-flags?flag=value'."),
@@ -2042,7 +2028,6 @@ def resolve(
 
 
 @app.command(name="wait-and-analyze", cls=AnalyzeCommand)
-@app.command(hidden=True)
 def wait(
     ctx: typer.Context,
     for_: str | None = typer.Option(None, "--for", help="Text/resource-id to wait for."),
@@ -2976,7 +2961,6 @@ def clipboard_get(ctx: typer.Context) -> None:
 
 
 @app.command(name="paste-and-analyze", cls=AnalyzeCommand)
-@app.command(cls=AnnotateCommand, hidden=True)
 def paste(
     ctx: typer.Context,
     observe: bool = typer.Option(True, "--observe/--no-observe"),
@@ -3016,7 +3000,6 @@ def copy(
 
 
 @app.command(name="erase-and-analyze", cls=AnalyzeCommand)
-@app.command(cls=AnnotateCommand, hidden=True)
 def erase(
     ctx: typer.Context,
     ident: str | None = typer.Argument(None, metavar="[ID]"),
@@ -5261,6 +5244,63 @@ def hoist_global_options(argv: list[str]) -> list[str]:
             kept.append(tok)
         i += 1
     return hoisted + kept + tail
+
+
+# --------------------------------------------------------------- removed short aliases
+
+#: Action verbs that used to also exist under their bare name. Each bare alias performed the
+#: action but returned a *weaker* response than its ``-and-analyze`` twin, so a caller reaching
+#: for the obvious short name silently got less, then spent a second round-trip on ``analyze``
+#: to recover what the first call could have returned.
+#:
+#: Measured on one downstream suite (2026-08-08, 2322 invocations): ``tap-and-analyze`` was used
+#: **zero** times while bare ``tap`` followed by a separate ``analyze`` happened 255 times - 36%
+#: of every tap. Of 665 bare-``tap`` results, 509 carried no observation at all.
+#:
+#: They were hidden from ``--help`` in 100a392 and that did not work, because **a hidden alias
+#: still answers**. Nothing ever corrects the caller, so the habit survives in agent memory, in
+#: downstream docs, and in prompts. Removing them costs one failed call and fixes the caller for
+#: the rest of the session - which is the whole point of failing loudly instead of quietly
+#: returning less. The equivalent short names were already removed from the MCP surface.
+_REMOVED_ACTION_ALIASES = (
+    "tap", "click", "long-press", "double-tap", "input", "clear", "swipe", "scroll",
+    "scroll-to", "expect", "key", "hide-keyboard", "open", "wait", "paste", "erase", "await",
+)
+
+
+class RemovedCommand(AuaError):
+    """A short action alias that no longer exists, answered with its replacement."""
+
+    exit_code = ExitCode.USAGE
+    code = "removed_command"
+
+
+def _register_removed_alias(old: str) -> None:
+    """Register ``old`` as a command that fails, naming the replacement."""
+    replacement = f"{old}-and-analyze"
+
+    def _removed(ctx: typer.Context) -> None:
+        err = RemovedCommand(
+            f"`aua {old}` was removed. Use `aua {replacement}` instead.",
+            hint=(
+                f"`{replacement}` performs the same action and returns the resulting screen "
+                f"in the same response, so a follow-up `analyze` is not needed. Every option "
+                f"you passed to `{old}` is accepted unchanged."
+            ),
+        )
+        emit_error(err)
+        raise typer.Exit(int(err.exit_code))
+
+    _removed.__name__ = "removed_" + old.replace("-", "_")
+    app.command(
+        name=old,
+        hidden=True,
+        context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+    )(_removed)
+
+
+for _removed_alias in _REMOVED_ACTION_ALIASES:
+    _register_removed_alias(_removed_alias)
 
 
 def run() -> None:

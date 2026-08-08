@@ -389,7 +389,7 @@ def test_cli_tap_observe(monkeypatch) -> None:
     monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
     a = runner.invoke(app, ["--format", "compact", "analyze", "--source", "hierarchy"])
     tid = next(e["id"] for e in json.loads(a.stdout)["elements"] if e.get("text") == "Apps")
-    r = runner.invoke(app, ["--format", "compact", "tap", str(tid), "--observe"])
+    r = runner.invoke(app, ["--format", "compact", "tap-and-analyze", str(tid)])
     assert r.exit_code == 0, r.stderr
     assert "observation" in json.loads(r.stdout)
 

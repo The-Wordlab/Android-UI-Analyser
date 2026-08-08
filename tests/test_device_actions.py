@@ -69,11 +69,11 @@ def test_cli_app_clear_and_hide_keyboard(monkeypatch) -> None:
     r2 = runner.invoke(app, ["app", "grant", "com.x"])
     assert r2.exit_code == 0, r2.stderr
 
-    r3 = runner.invoke(app, ["hide-keyboard", "--no-observe"])
+    r3 = runner.invoke(app, ["hide-keyboard-and-analyze", "--no-observe"])
     assert r3.exit_code == 0, r3.stderr
     assert ("hide_keyboard", ()) in dev.calls
 
-    r4 = runner.invoke(app, ["double-tap", "--rid", "continue_btn", "--no-observe"])
+    r4 = runner.invoke(app, ["double-tap-and-analyze", "--rid", "continue_btn", "--no-observe"])
     assert r4.exit_code == 0, r4.stderr
     assert any(c == "double_click" for c, _ in dev.calls)
 

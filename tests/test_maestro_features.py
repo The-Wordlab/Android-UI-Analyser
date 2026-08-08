@@ -82,7 +82,7 @@ def test_cli_maestro_commands(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert runner.invoke(app, ["clipboard", "set", "hi"]).exit_code == 0
     assert runner.invoke(app, ["clipboard", "get"]).exit_code == 0
-    assert runner.invoke(app, ["paste", "--no-observe"]).exit_code == 0
+    assert runner.invoke(app, ["paste-and-analyze", "--no-observe"]).exit_code == 0
     assert runner.invoke(app, ["copy", "--text", "Continue"]).exit_code == 0
     assert runner.invoke(app, ["location", "set", "37.42,-122.08"]).exit_code == 0
     assert runner.invoke(app, ["orientation", "set", "portrait"]).exit_code == 0

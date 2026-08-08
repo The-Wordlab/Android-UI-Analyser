@@ -95,7 +95,7 @@ def test_cli_wait_for_stable_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
     res = runner.invoke(
         app,
-        ["wait", "--for-stable", "--interval", "1", "--settle", "2", "--timeout", "3000"],
+        ["wait-and-analyze", "--for-stable", "--interval", "1", "--settle", "2", "--timeout", "3000"],
     )
     assert res.exit_code == 0, res.stderr
     assert "wait-stable" in res.stdout
@@ -106,7 +106,7 @@ def test_cli_wait_for_stable_timeout_exit_3(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
     res = runner.invoke(
         app,
-        ["wait", "--for-stable", "--interval", "1", "--settle", "50", "--timeout", "25"],
+        ["wait-and-analyze", "--for-stable", "--interval", "1", "--settle", "50", "--timeout", "25"],
     )
     assert res.exit_code == 3
     import json
@@ -153,7 +153,7 @@ def test_cli_wait_accepts_timeout_ms_alias(monkeypatch: pytest.MonkeyPatch) -> N
     dev = FakeDevice(hierarchy_xml=_XML, text_index={"Continue": (0, 0, 100, 60)})
     monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
     # --timeout-ms is accepted as an alias for --timeout (both are ms).
-    r = runner.invoke(app, ["wait", "--for", "Continue", "--timeout-ms", "1500"])
+    r = runner.invoke(app, ["wait-and-analyze", "--for", "Continue", "--timeout-ms", "1500"])
     assert r.exit_code == 0, r.stderr
 
 
@@ -285,7 +285,7 @@ def test_app_launch_activity_threads_to_device() -> None:
 def test_cli_wait_absent_and_app_activity(monkeypatch: pytest.MonkeyPatch) -> None:
     dev = FakeDevice(hierarchy_xml=_XML, package="com.x")
     monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
-    r = runner.invoke(app, ["wait", "--for", "Loading", "--absent", "--timeout", "200"])
+    r = runner.invoke(app, ["wait-and-analyze", "--for", "Loading", "--absent", "--timeout", "200"])
     assert r.exit_code == 0, r.stderr  # already absent → ok
     r2 = runner.invoke(app, ["app", "launch", "com.x", "--activity", ".LaunchActivity"])
     assert r2.exit_code == 0, r2.stderr

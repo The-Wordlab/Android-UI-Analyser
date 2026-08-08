@@ -336,7 +336,7 @@ def test_cli_map_lists_screens_routes_and_find(tmp_path, monkeypatch) -> None:
     a1 = runner.invoke(app, ["--format", "compact", "analyze", "--source", "hierarchy"])
     assert a1.exit_code == 0, a1.stderr
     apps_id = next(e["id"] for e in json.loads(a1.stdout)["elements"] if e.get("text") == "Apps")
-    assert runner.invoke(app, ["tap", str(apps_id)]).exit_code == 0
+    assert runner.invoke(app, ["tap-and-analyze", str(apps_id)]).exit_code == 0
     dev._xml = APPS
     assert runner.invoke(app, ["analyze", "--source", "hierarchy"]).exit_code == 0
     dev._xml = HOME

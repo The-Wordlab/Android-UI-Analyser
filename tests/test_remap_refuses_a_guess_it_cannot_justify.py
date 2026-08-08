@@ -1,8 +1,8 @@
 """``remap_ids`` must refuse to re-point an id when it cannot tell which candidate is right.
 
-Found in the field on 2026-08-07 (Luzia QA, `mini-apps-cook-assistant`): a numeric element id taken
-from one ``analyze`` and used in a later ``tap-and-analyze`` resolved to the **system nav bar's Home
-button**, twice, silently backgrounding the app. ``ok: true`` both times.
+Found in the field on 2026-08-07 by a downstream UI suite: a numeric element id taken from one
+``analyze`` and used in a later ``tap-and-analyze`` resolved to the **system nav bar's Home
+button**, twice, silently backgrounding the app under test. ``ok: true`` both times.
 
 The mechanism is here rather than in `Engine._resolve`, which already refuses an unknown id cleanly.
 A numeric target is first run through ``remap_ids``, which re-points the old id at whatever it

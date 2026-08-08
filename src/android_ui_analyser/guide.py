@@ -75,7 +75,7 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "analyze|tap|has|…` — a tiny C client that speaks the daemon socket (falls back to "
         "`aua` if the daemon is down). See `docs/NATIVE_ROADMAP.md`. Unchanged screens short-"
         "circuit via `meta.via=hierarchy-unchanged` / `--format delta`; wait on any tree change "
-        "with `aua wait --changed` (or MCP `wait_changed`); multi-device with `aua fanout`.",
+        "with `aua wait-and-analyze --changed` (or MCP `wait_changed`); multi-device with `aua fanout`.",
     ),
     (
         "Start from the app playbook",
@@ -99,7 +99,7 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
     ),
     (
         "Take shortcuts with deeplinks",
-        "`aua open \"<uri>\"` fires a deeplink — jump straight to a screen or trigger an app "
+        "`aua open-and-analyze \"<uri>\"` fires a deeplink — jump straight to a screen or trigger an app "
         "action (e.g. set a feature flag) instead of tapping through the UI. Far faster than "
         "navigating. When an app has known deeplinks, every `analyze` offers the best ones "
         "inline in `meta.suggested_deeplinks` (e.g. `open myapp://home`) — so to reach the "
@@ -260,7 +260,7 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
     ),
     (
         "Wait on state, never sleep",
-        '`aua wait --for "<text>"` waits for text to appear; `aua wait --for-stable` returns once '
+        '`aua wait-and-analyze --for "<text>"` waits for text to appear; `aua wait-and-analyze --for-stable` returns once '
         "the screen stops visually changing (grid pixel-hash; looping spinners/video are "
         "auto-masked so they don't block). Prefer goal waits over `--for-stable` after tabs/taps; "
         "never fixed sleeps.",
@@ -317,7 +317,7 @@ EXIT_CODES: list[tuple[str, str]] = [
     ("5", "config error"),
     ("6", "selector matched nothing (`--rid`/`--text`/`--desc`)"),
     ("7", "selector matched several candidates (disambiguate with `--index`/`--first`)"),
-    ("8", "`aua expect` / `aua suite run` assertion failed"),
+    ("8", "`aua expect-and-analyze` / `aua suite run` assertion failed"),
 ]
 
 KEY_FLAGS: list[tuple[str, str]] = [
@@ -593,7 +593,7 @@ AGENT_BEST_PRACTICES_PERCEPTION: list[tuple[str, str, str]] = [
     ),
     (
         "Use `key back` to dismiss the keyboard",
-        "`aua hide-keyboard`",
+        "`aua hide-keyboard-and-analyze`",
         "`key back` often navigates away from the screen instead of only closing the IME.",
     ),
 ]
@@ -607,7 +607,7 @@ AGENT_BEST_PRACTICES_MEMORY: list[tuple[str, str, str]] = [
     ),
     (
         "Tap through 5 screens to reach a known destination",
-        '`aua open "<deeplink>"` or `aua goto "<goal>"` / a saved `aua flow run`',
+        '`aua open-and-analyze "<deeplink>"` or `aua goto "<goal>"` / a saved `aua flow run`',
         "One call beats a hand-rolled path. Flows collapse whole journeys.",
     ),
     (
@@ -769,7 +769,7 @@ def render_markdown(*, brief: bool = False) -> str:
     p.append("```")
     p.append(
         'Cheap presence check to branch on: `aua has "Sign in"` (exit 0 found / 1 not). '
-        '`aua wait --for "Welcome"` polls until present; `aua wait --for-stable` returns once '
+        '`aua wait-and-analyze --for "Welcome"` polls until present; `aua wait-and-analyze --for-stable` returns once '
         "the screen settles (no OCR/hierarchy — just screenshots)."
     )
 

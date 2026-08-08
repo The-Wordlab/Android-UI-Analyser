@@ -210,10 +210,10 @@ def test_limit_caps_the_rows(device: FakeDevice) -> None:
 
 
 def test_ids_stay_addressable_after_filtering(device: FakeDevice) -> None:
-    """A view must not renumber: the id a filtered row shows is the id `tap` takes."""
+    """A view must not renumber: the id a filtered row shows is the id `tap-and-analyze` takes."""
     rows = _rows(_run("--format", "tsv", "analyze", "--where-rid", "settingsSwitch"))
     element_id = rows[1][0]
-    _run("tap", element_id, "--no-observe")
+    _run("tap-and-analyze", element_id)
     assert ("click", (927, 650)) in device.calls
 
 

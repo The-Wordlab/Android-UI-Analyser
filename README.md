@@ -1,6 +1,6 @@
 # android-ui-analyser (`aua`)
 
-`aua` is a fast, configurable CLI that gives an AI agent structured "what's on screen and where" for Android UI testing. It reads the accessibility/view hierarchy first — returning every element with a stable integer ID, type, text, and bounding box in tens of milliseconds — and falls back to image-based detection and OCR (and optionally a grounding VLM) only on screens the hierarchy cannot see (Compose without semantics, Flutter, WebViews, canvas, games). The agent acts on **integer IDs, not pixels**: `aua tap 4` and `aua input 2 "hello"` compute coordinates internally, eliminating coordinate hallucination and shrinking the token footprint to a compact JSON list.
+`aua` is a fast, configurable CLI that gives an AI agent structured "what's on screen and where" for Android UI testing. It reads the accessibility/view hierarchy first — returning every element with a stable integer ID, type, text, and bounding box in tens of milliseconds — and falls back to image-based detection and OCR (and optionally a grounding VLM) only on screens the hierarchy cannot see (Compose without semantics, Flutter, WebViews, canvas, games). The agent acts on **integer IDs, not pixels**: `aua tap-and-analyze 4` and `aua input-and-analyze 2 "hello"` compute coordinates internally, eliminating coordinate hallucination and shrinking the token footprint to a compact JSON list.
 
 > **Using Claude Code?** Install `aua` as a plugin in two lines — `/plugin marketplace add The-Wordlab/Android-UI-Analyser` then `/plugin install android-ui-analyser@the-wordlab` (plus a one-time CLI install). The skill then auto-activates on Android tasks in every project. Full details: [Use it from Claude Code](#use-it-from-claude-code-the-aua-skill).
 
@@ -247,13 +247,13 @@ aua --format tsv analyze --where-rid settingsSwitch --fields id,checkable,checke
 aua has "Sign in"
 
 # Wait on state (don't sleep) — including any hierarchy change
-aua wait --for "Sign in"
-aua wait --changed                  # any tree fingerprint change
+aua wait-and-analyze --for "Sign in"
+aua wait-and-analyze --changed                  # any tree fingerprint change
 
 # Act on elements by ID from the last analyze
-aua tap 4
-aua input 2 "hello@example.com"
-aua swipe up
+aua tap-and-analyze 4
+aua input-and-analyze 2 "hello@example.com"
+aua swipe-and-analyze up
 
 # Multi-emulator: same command on several serials
 # aua fanout --serials emulator-5554,emulator-5556 analyze
@@ -274,7 +274,7 @@ aua ask "Describe this screen from top to bottom and say where each control is"
 
 The **analyze → act → analyze** loop is the core workflow:
 1. `aua analyze` returns elements with IDs.
-2. The agent picks an ID and acts: `aua tap <id>` / `aua input <id> "text"`.
+2. The agent picks an ID and acts: `aua tap-and-analyze <id>` / `aua input-and-analyze <id> "text"`.
 3. No manual re-analyze needed — by default each action returns the next screen inline (`observation`, with fresh IDs), folding step 1 into step 2.
 
 The observation is **compact by default** (`id,text,rid,clickable`, app nodes only), so it is
@@ -286,9 +286,9 @@ When the next screen is slow, say what you are waiting for and the action waits 
 instead of a fixed settle window:
 
 ```bash
-aua tap <id> --until "rid:introCard" --until-timeout 45000
-aua tap <id> --until "text:Chats,!text:Loading"      # terms are ANDed; ! means absent
-aua tap <id> --until "net:POST /v1/chat,text:x ="    # backend replied AND the screen shows it
+aua tap-and-analyze <id> --until "rid:introCard" --until-timeout 45000
+aua tap-and-analyze <id> --until "text:Chats,!text:Loading"      # terms are ANDed; ! means absent
+aua tap-and-analyze <id> --until "net:POST /v1/chat,text:x ="    # backend replied AND the screen shows it
 ```
 
 The response then carries `await_outcome` — `satisfied` / `screen-changed` / `timeout` — plus
@@ -309,7 +309,7 @@ command **claims a lease** on the device it uses, and keeps that agent on the sa
 
 ```bash
 export AUA_OWNER=claude-search       # optional; otherwise derived and stable per process
-aua tap 5                            # claims a free emulator, then sticks to it
+aua tap-and-analyze 5                            # claims a free emulator, then sticks to it
 aua --needs root,proxy lease acquire # reserve one that can do HTTPS interception
 aua lease list                       # who holds what, and how long they have been idle
 ```
@@ -930,7 +930,7 @@ aua --format compact analyze --fields id,rid --nonempty   # same views, JSON out
   they do have a resource-id, which is exactly what makes them addressable.
 - Filters of different kinds AND together; repeating one kind ORs together
   (`--region A --region B` = either box).
-- **IDs are never renumbered.** The id in a filtered row is the id `aua tap` takes.
+- **IDs are never renumbered.** The id in a filtered row is the id `aua tap-and-analyze` takes.
 - `--meta <csv>` / `--no-meta` control the metadata (the route/deeplink suggestions are
   worth reading once per session, not on every call).
 
@@ -955,11 +955,11 @@ so *off* never masquerades as *unknown*.
 ### Acting on elements
 
 ```bash
-aua tap <id>              # tap / click an element (returns the next screen by default)
-aua input <id> "text"     # focus element and type; add --submit to send IME action
-aua tap <id> --no-observe # act WITHOUT returning the new screen (skip the folded analyze)
-aua swipe up              # swipe direction (up|down|left|right)
-aua swipe --from <id>     # scroll a specific container
+aua tap-and-analyze <id>              # tap / click an element (returns the next screen by default)
+aua input-and-analyze <id> "text"     # focus element and type; add --submit to send IME action
+aua tap-and-analyze <id> --no-observe # act WITHOUT returning the new screen (skip the folded analyze)
+aua swipe-and-analyze up              # swipe direction (up|down|left|right)
+aua swipe-and-analyze --from <id>     # scroll a specific container
 ```
 
 By default every action returns the post-action screen inline (`observation`, with fresh
@@ -1024,7 +1024,7 @@ Prefer `goto` over manual tapping whenever your target is listed in `suggested_g
 ### Typical loop
 
 1. `aua --format compact analyze` → read element IDs from JSON output.
-2. `aua tap <id>` or `aua input <id> "text"`.
+2. `aua tap-and-analyze <id>` or `aua input-and-analyze <id> "text"`.
 3. `aua has "<expected text>"` to confirm the transition.
 4. `aua --format compact analyze` again for the new screen.
 ```
@@ -1127,21 +1127,21 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 | `aua analyze` | Capture the screen → element list with IDs (the core command) |
 | `aua resolve <id\|key>` | Remap a prior id / `stable_key` onto the current screen |
 | `aua has "<text>"` | Exit 0 if text is on screen, 1 if not — cheap branch check |
-| `aua expect …` | Assert visibility / state (exit 8 on failure) |
-| `aua wait --for "<text>"` | Poll until text appears (`--idle` / `--for-stable` / `--changed`) |
-| `aua await '<predicate>'` | Wait on ANDed terms — `text:` `rid:` `desc:` `net:` `log:`, `!` = absent. Reports `await_outcome`: satisfied / screen-changed / timeout |
+| `aua expect-and-analyze …` | Assert visibility / state (exit 8 on failure) |
+| `aua wait-and-analyze --for "<text>"` | Poll until text appears (`--idle` / `--for-stable` / `--changed`) |
+| `aua await-and-analyze '<predicate>'` | Wait on ANDed terms — `text:` `rid:` `desc:` `net:` `log:`, `!` = absent. Reports `await_outcome`: satisfied / screen-changed / timeout |
 | `aua lease list\|acquire\|release` | Who is driving which emulator (claimed automatically; `--needs root,play,proxy`) |
 | `aua fanout …` | Run a command across multiple `--serials` |
-| `aua tap <id>` / `aua click <id>` | Tap an element by ID (also `--rid`/`--text`/`--desc`) |
-| `aua double-tap <id>` | Double-tap an element |
-| `aua long-press <id>` | Long-press an element by ID |
-| `aua input <id> "text"` | Focus an element and type (`--submit` fires the IME action) |
-| `aua clear <id>` / `aua erase` | Clear a field / backspace N chars |
-| `aua hide-keyboard` | Dismiss the IME without navigating away |
-| `aua swipe <up\|down\|left\|right>` | Swipe / scroll (`--from <id>` to scroll a container) |
-| `aua scroll` / `aua scroll-to "<text>"` | Directional scroll / scroll until text is found |
-| `aua key <back\|home\|enter\|…>` | Press a hardware/navigation key |
-| `aua open <uri> [--app pkg]` | Open a deeplink (pin package to skip "Open with…") |
+| `aua tap-and-analyze <id>` / `aua click-and-analyze <id>` | Tap an element by ID (also `--rid`/`--text`/`--desc`) |
+| `aua double-tap-and-analyze <id>` | Double-tap an element |
+| `aua long-press-and-analyze <id>` | Long-press an element by ID |
+| `aua input-and-analyze <id> "text"` | Focus an element and type (`--submit` fires the IME action) |
+| `aua clear-and-analyze <id>` / `aua erase-and-analyze` | Clear a field / backspace N chars |
+| `aua hide-keyboard-and-analyze` | Dismiss the IME without navigating away |
+| `aua swipe-and-analyze <up\|down\|left\|right>` | Swipe / scroll (`--from <id>` to scroll a container) |
+| `aua scroll-and-analyze` / `aua scroll-to-and-analyze "<text>"` | Directional scroll / scroll until text is found |
+| `aua key-and-analyze <back\|home\|enter\|…>` | Press a hardware/navigation key |
+| `aua open-and-analyze <uri> [--app pkg]` | Open a deeplink (pin package to skip "Open with…") |
 | `aua clipboard set\|get` / `paste` / `copy` | Clipboard helpers |
 | `aua location set LAT,LON` | Mock GPS |
 | `aua orientation set\|get` | Screen orientation |
@@ -1191,7 +1191,7 @@ All action commands (`tap`, `long-press`, `input`, `clear`, `swipe`, `scroll-to`
 | First command is slow / times out | `uiautomator2` is pushing its helper agent on first connect — retry once it settles, then use `aua daemon start` to keep the connection warm. |
 | `uiautomator2 is not installed` | Reinstall the package — `uiautomator2` is a base dependency, not an extra. |
 | `analyze` returns few/no elements | The hierarchy is empty (Compose/Flutter/WebView/canvas). Force vision: `aua --format compact analyze --source vision --annotate`. |
-| Typing does nothing / is slow on Android 14+ | `aua input` prefers accessibility `set_text`, then clipboard paste (restores clipboard), then IME keys. Focus the field first. |
+| Typing does nothing / is slow on Android 14+ | `aua input-and-analyze` prefers accessibility `set_text`, then clipboard paste (restores clipboard), then IME keys. Focus the field first. |
 | Headless emulator pegs CPU / fans | Old default was SwiftShader (CPU). Current Mac/Windows headless uses `-gpu host`. Stop orphans with `aua emulator stop --mine`. Headless also auto-stops after `--idle-stop` (default 900s) with no aua activity. |
 | `proxy` / empty HTTPS cassettes | Need `[proxy]` extra + **rootable** Google APIs AVD (`aua emulator ensure-proxy`). Play Store images refuse `adb root` → system CA install fails → TLS handshake fails. |
 | `sdkmanager` / `ensure-proxy` fails | Prefer `$ANDROID_HOME/cmdline-tools/latest/bin` over outdated Homebrew cmdline-tools. |
