@@ -66,3 +66,17 @@ def test_the_error_survives_arbitrary_arguments() -> None:
         result = runner.invoke(app, argv)
         assert result.exit_code == 2, argv
         assert json.loads(result.stderr)["error"]["code"] == "removed_command", argv
+
+
+@pytest.mark.parametrize("old", _REMOVED_ACTION_ALIASES)
+def test_removed_alias_has_no_plausible_help_page(old: str) -> None:
+    """`--help` on a dead command must NOT render an empty page and exit 0.
+
+    Regression for the 2026-08-08 probe, where three of four lanes independently reported that
+    `aua tap --help` printed `Usage: aua tap [OPTIONS]` with an empty options box and exited 0 --
+    so the careful caller who checks help *before* guessing was told the command exists and takes
+    nothing, while the caller who just guessed got the correct error. Help must agree with runtime.
+    """
+    result = runner.invoke(app, [old, "--help"])
+    assert result.exit_code == 2, f"`aua {old} --help` rendered a help page instead of refusing"
+    assert json.loads(result.stderr)["error"]["code"] == "removed_command"

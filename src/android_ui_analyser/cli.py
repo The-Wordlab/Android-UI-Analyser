@@ -5275,33 +5275,47 @@ class RemovedCommand(AuaError):
     code = "removed_command"
 
 
-def _register_removed_alias(old: str) -> None:
+def _register_removed_alias(
+    old: str,
+    *,
+    target: typer.Typer | None = None,
+    replacement: str | None = None,
+    prefix: str = "",
+) -> None:
     """Register ``old`` as a command that fails, naming the replacement."""
-    replacement = f"{old}-and-analyze"
+    target = app if target is None else target
+    replacement = replacement or f"{old}-and-analyze"
+    spoken = f"{prefix}{old}"
 
     def _removed(ctx: typer.Context) -> None:
         err = RemovedCommand(
-            f"`aua {old}` was removed. Use `aua {replacement}` instead.",
+            f"`aua {spoken}` was removed. Use `aua {replacement}` instead.",
             hint=(
                 f"`{replacement}` performs the same action and returns the resulting screen "
                 f"in the same response, so a follow-up `analyze` is not needed. Every option "
-                f"you passed to `{old}` is accepted unchanged."
+                f"you passed to `{spoken}` is accepted unchanged."
             ),
         )
         emit_error(err)
         raise typer.Exit(int(err.exit_code))
 
     _removed.__name__ = "removed_" + old.replace("-", "_")
-    app.command(
+    # `add_help_option=False` is the point of this call, not a detail. With Click's built-in
+    # `--help`, a removed command renders a plausible, empty options page and exits 0 — so the
+    # careful caller who checks help BEFORE guessing is told the command exists and takes nothing,
+    # while the caller who just guesses gets the correct error. Three of four lanes in the
+    # 2026-08-08 probe hit exactly that. Turning help off routes `--help` into the callback below,
+    # which names the replacement and exits 2 like every other invocation.
+    target.command(
         name=old,
         hidden=True,
+        add_help_option=False,
         context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
     )(_removed)
 
 
 for _removed_alias in _REMOVED_ACTION_ALIASES:
     _register_removed_alias(_removed_alias)
-
 
 def run() -> None:
     """Console-script entry point: tolerate misplaced global options, then dispatch."""
