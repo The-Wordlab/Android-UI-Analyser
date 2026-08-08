@@ -5972,16 +5972,30 @@ class Engine:
             device.stop_app(package)
             pinned = False
             if activity:
-                with contextlib.suppress(Exception):
+                # Only wait for something that was actually asked to start. `launch_app`
+                # RAISES when `am start` refuses (a non-exported Activity is the usual case,
+                # and the default pinned entry is simply whatever was in the foreground) —
+                # waiting the entry timeout after a refusal is waiting for a process that was
+                # never launched. That cost `_FLAGS_ENTRY_TIMEOUT_S` on every `flags set`
+                # against an app whose entry Activity is not exported, before the fallback
+                # had even started.
+                launched = True
+                try:
                     device.launch_app(package, activity=activity)
-                pinned = self._wait_foreground(package, _FLAGS_ENTRY_TIMEOUT_S)
-                if not pinned:
-                    logger.debug(
-                        "%s/%s did not come up; using the default entry", package, activity
-                    )
+                except Exception as exc:  # noqa: BLE001 — any refusal means "did not start"
+                    launched = False
+                    logger.debug("%s/%s refused (%s); using the default entry", package, activity, exc)
+                if launched:
+                    pinned = self._wait_foreground(package, _FLAGS_ENTRY_TIMEOUT_S)
+                    if not pinned:
+                        logger.debug(
+                            "%s/%s did not come up; using the default entry", package, activity
+                        )
             if not pinned:
-                with contextlib.suppress(Exception):
+                try:
                     device.launch_app(package)
+                except Exception as exc:  # noqa: BLE001 — same reasoning as above
+                    return Restart(False, None, f"{package} could not be relaunched: {exc}")
                 if not self._wait_foreground(package):
                     return Restart(False, None, f"{package} did not come back after the restart")
             with contextlib.suppress(Exception):
