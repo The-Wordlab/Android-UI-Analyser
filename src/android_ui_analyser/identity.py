@@ -99,8 +99,21 @@ def remap_ids(
         if len(cands) == 1:
             mapping[prev.id] = cands[0].id
         elif len(cands) > 1:
-            # Disambiguate by IoU with previous bounds.
-            best, best_iou = None, -1.0
+            # Disambiguate by IoU with previous bounds — but only when there is actually some
+            # overlap to reason from. This used to seed best_iou at -1.0 and accept the winner
+            # unconditionally, so a candidate overlapping the original by *nothing* still won, and
+            # which one won came down to list order. On 2026-08-07 that re-pointed a live element id
+            # onto the system nav bar's Home button twice, silently backgrounding the app under a
+            # scenario that then had to explain a "crash" that never happened.
+            #
+            # Two of the three key kinds make that easy to hit: rid: carries no position at all and
+            # cd:/tx: carry only a coarse quadrant, so same-key candidates can sit anywhere on
+            # screen. (geo: hashes exact bounds, so its candidates always overlap perfectly.)
+            #
+            # With several same-key candidates and no overlap anywhere, there is simply no evidence
+            # for choosing one. Decline, and let the caller raise ElementNotFoundError: recovery is
+            # one `analyze` away, whereas a silent mis-tap costs the whole journey.
+            best, best_iou = None, 0.0
             for cand in cands:
                 iou = _iou(prev.bounds, cand.bounds)
                 if iou > best_iou:
