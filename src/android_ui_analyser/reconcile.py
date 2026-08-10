@@ -441,9 +441,18 @@ class ReconciliationStore:
             self._apply_operation(candidate, operation, report)
         for knowledge in report.knowledge:
             self._apply_knowledge(candidate, knowledge, report)
+        # A correction has to leave the map no worse than it found it — not find it perfect.
+        # Validating the candidate absolutely meant one stale row vetoed every unrelated
+        # correction, and since corrections are the only way to repair the map, the repair
+        # mechanism was locked shut by the damage it exists to repair. Measured 2026-08-10: one
+        # dangling route in 623 blocked all 210 open research tasks, and a rename of an
+        # unrelated screen was refused with that route's id as the reason.
         errors = validate_map(candidate)
-        if errors:
-            raise ValueError("correction rejected: " + "; ".join(errors))
+        inherited = set(validate_map(current))
+        introduced = [e for e in errors if e not in inherited]
+        if introduced:
+            raise ValueError("correction rejected: " + "; ".join(introduced))
+        carried = [e for e in errors if e in inherited]
 
         now = _now_iso()
         event_id = _stable_id("correction", package, report.task_id, now)
@@ -472,7 +481,10 @@ class ReconciliationStore:
             applied_at=now,
             report=report,
             operations=report.operations,
-            validation=["stable ids unique", "all route endpoints exist"],
+            # What was actually checked, not a fixed claim: this correction introduced no new
+            # violation. Anything the map already had is carried here so it stays visible —
+            # silently inheriting damage is how one dangling route survived 623 routes.
+            validation=["introduced no new violation", *(f"pre-existing: {e}" for e in carried)],
             before_snapshot=str(before),
             after_snapshot=str(after),
             rollback_id=event_id,
