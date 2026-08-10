@@ -639,6 +639,7 @@ def _journal_dispatch(
         duration_ms=duration_ms,
         result=response.get("result") if ok else None,
         error=response.get("error") if not ok else None,
+        owner=request.get("owner") or getattr(engine, "_lease_owner_resolved", None),
     )
 
 

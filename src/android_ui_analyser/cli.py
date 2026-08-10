@@ -605,6 +605,35 @@ def _echo_json(data: Any, fmt: OutputFormat) -> None:
     typer.echo(json.dumps(data, indent=indent, separators=sep, ensure_ascii=False))
 
 
+def _same_caller(engine: Engine, previous: dict[str, Any]) -> bool:
+    """Was *previous* run by whoever is running now, and recently enough to be "right after"?
+
+    The journal is per-device, and running several agents against one host is a supported
+    setup, so every one of them appends here. Measured 2026-08-10: an agent's very first
+    `analyze` was told it was a "redundant analyze right after wait" — the `wait` belonged to
+    a different process, minutes earlier. It reported the warning as misleading and guessed
+    at "prior/shared AUA session state". A lint that accuses you of someone else's command
+    teaches you to ignore it.
+
+    The owner is the real discriminator; the age check covers entries written before the
+    journal carried one, where a gap this large cannot be the "immediately after" the message
+    claims. `pid` is no help — daemon-routed commands all carry the daemon's.
+    """
+    owner = getattr(engine, "_lease_owner_resolved", None)
+    prev_owner = previous.get("owner")
+    if owner and prev_owner:
+        return bool(owner == prev_owner)
+    prev_ms = previous.get("ts_ms")
+    if not isinstance(prev_ms, (int, float)):
+        return True
+    return (time.time() * 1000.0 - float(prev_ms)) <= _SAME_TURN_MS
+
+
+# One agent turn: the model reads the last response, decides, and issues the next command.
+# Wide enough for a slow model to still be linted, far short of a gap between sessions.
+_SAME_TURN_MS = 120_000
+
+
 def _warn_if_redundant_analyze(engine: Engine, args: dict[str, Any] | None = None) -> None:
     """Soft lint: `analyze` immediately after an observed action usually re-reads the same state."""
     if args is not None and args.get("cmd") != "analyze":
@@ -623,6 +652,8 @@ def _warn_if_redundant_analyze(engine: Engine, args: dict[str, Any] | None = Non
         return
     latest, previous = events[-1], events[-2]
     if latest.get("cmd") != "analyze" or not previous.get("ok"):
+        return
+    if not _same_caller(engine, previous):
         return
     prev = previous.get("result")
     if not isinstance(prev, dict):
@@ -684,6 +715,8 @@ def _warn_if_wait_could_have_been_until(engine: Engine, waited_for: str | None) 
         return
     previous = events[-1]
     if not previous.get("ok"):
+        return
+    if not _same_caller(engine, previous):
         return
     # A global `--until` is journaled as its own `await_predicate` entry, so the newest entry
     # after `tap-and-analyze --until X` is the await, not the tap. `await_outcome` never reaches
@@ -921,6 +954,7 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
                 ok=True,
                 duration_ms=(time.monotonic() - t0) * 1000.0,
                 result=result,
+                owner=getattr(engine, "_lease_owner_resolved", None),
             )
         return result
     except AuaError as err:
@@ -934,6 +968,7 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
                 ok=False,
                 duration_ms=(time.monotonic() - t0) * 1000.0,
                 error=err.to_dict().get("error"),
+                owner=getattr(engine, "_lease_owner_resolved", None),
             )
         raise
 

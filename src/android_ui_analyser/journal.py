@@ -157,8 +157,15 @@ def record(
     result: Any = None,
     error: dict[str, Any] | None = None,
     extra: dict[str, Any] | None = None,
+    owner: str | None = None,
 ) -> None:
-    """Append one journal event (best-effort; never raises into the caller)."""
+    """Append one journal event (best-effort; never raises into the caller).
+
+    ``owner`` is the lease holder that ran the command. The journal is per-device and every
+    agent driving that device appends to it, so without a name a reader cannot tell its own
+    last command from someone else's — and `pid` cannot stand in, because everything routed
+    through the warm daemon carries the daemon's pid.
+    """
     try:
         path = journal_path(cache_dir, serial)
         event: dict[str, Any] = {
@@ -171,6 +178,8 @@ def record(
             "serial": serial,
             "pid": os.getpid(),
         }
+        if owner:
+            event["owner"] = owner
         if duration_ms is not None:
             event["duration_ms"] = round(float(duration_ms), 1)
         if error:
