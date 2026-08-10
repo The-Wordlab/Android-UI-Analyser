@@ -219,6 +219,9 @@ class Meta(BaseModel):
         default_factory=list
     )
     research_tasks: list[str] = Field(default_factory=list)
+    # Saved journeys for THIS app, as ``name(PARAM, …)``. A flow replays a whole sequence in one
+    # call, so it belongs next to the routes rather than in a manual nobody opens.
+    flows: list[str] = Field(default_factory=list)
     # One question about THIS screen, answerable on the caller's next command via `--answers`.
     # Scoped to where the caller is standing, because that is the only question they can answer
     # from what is in front of them.

@@ -1719,6 +1719,38 @@ class AppMemoryStore:
         self.save(app)
         return edge
 
+    def record_route_outcome(
+        self, package: str, route_id: str, *, ok: bool, reached: str | None
+    ) -> None:
+        """Write back what replaying an edge actually did.
+
+        A miss demotes rather than rejects, for the same reason a single sighting does not
+        promote: one replay can fail on timing, a permission dialog, or an app that was simply
+        somewhere else. `provisional` takes it out of pathfinding until it proves itself again,
+        which is recoverable; `rejected` is a verdict this has not earned from one attempt.
+        The reason carries where it really went, so the next reader can see the conflict.
+        """
+        if not self.cfg.enabled:
+            return
+        app = self.load(package)
+        if app is None:
+            return
+        edge = next((e for e in app.routes if e.id == route_id), None)
+        if edge is None:
+            return
+        if ok:
+            edge.rejection_reason = None
+            edge.verification_count += 1
+            if edge.status != "verified":
+                edge.status = "verified"
+        elif edge.status == "verified":
+            edge.status = "provisional"
+            edge.rejection_reason = f"replay landed on {reached or 'an unrecognised screen'}"
+        else:
+            edge.rejection_reason = f"replay landed on {reached or 'an unrecognised screen'}"
+        edge.last_seen = _now_iso()
+        self.save(app)
+
     def refresh_research_tasks(
         self, package: str, *, context_id: str | None = None
     ) -> list[dict[str, object]]:

@@ -1054,6 +1054,9 @@ def render_markdown(*, brief: bool = False) -> str:
         '                "known_screen", "known_routes", "suggested_gotos", "research_tasks",'
     )
     p.append(
+        '                "flows": ["name(PARAM)"],          // aua flow run name --param PARAM=v'
+    )
+    p.append(
         '                "ask": {"id","about","q","how"},   // answer with --answers id="<name>"'
     )
     p.append('                "map_hint",')
@@ -1187,6 +1190,7 @@ def render_json() -> dict[str, object]:
                 "suggested_gotos",
                 "suggested_deeplinks",
                 "research_tasks",
+                "flows",
                 "ask",
                 "map_hint",
                 "annotated_image",

@@ -421,6 +421,7 @@ class Engine:
         self._last_activity: str | None = None
         # Lease context: which agent this engine speaks for, what it needs, and what it got.
         # Set by the CLI/MCP layer before the device is first touched.
+        self._flows_cache: dict[str, list[str]] = {}
         self._lease_owner: str | None = None
         self._lease_needs: list[str] | None = None
         self._lease_serial: str | None = None
@@ -503,6 +504,35 @@ class Engine:
         self._lease_serial = serial
         self._lease_owner_resolved = owner
         return serial
+
+    def _flows_for(self, package: str | None) -> list[str]:
+        """Saved journeys for *package*, as ``name(PARAM, …)``.
+
+        A flow replays a whole sequence — launch, taps, waits, cross-app auth — in one call,
+        and one had been sitting saved and parameterised for this project with no agent ever
+        running it. `flow` appeared 19 times in the long guide and zero times in anything an
+        agent actually reads: not the orientation block, not the analyze header. That is the
+        same omission that kept `goto` unused across five runs.
+
+        Cached per package: flows are files on disk that do not change mid-session, and this
+        is on the analyze path.
+        """
+        if not package:
+            return []
+        cached = self._flows_cache.get(package)
+        if cached is not None:
+            return cached
+        names: list[str] = []
+        with contextlib.suppress(Exception):
+            from .flows import FlowStore
+
+            for flow in FlowStore(self.config.memory).list():
+                if flow.get("app") not in (None, package):
+                    continue
+                params = ", ".join(flow.get("params") or [])
+                names.append(f"{flow['name']}({params})" if params else str(flow["name"]))
+        self._flows_cache[package] = names
+        return names
 
     def renew_lease(self) -> None:
         """Heartbeat the current lease — called from inside long waits.
@@ -1279,6 +1309,7 @@ class Engine:
                 slow_controls=self._slow_controls_safe(known_screen),
                 suggested_deeplinks=hints.suggested_deeplinks if hints else [],
                 research_tasks=hints.research_tasks if hints else [],
+                flows=self._flows_for(package),
                 ask=hints.ask if hints else None,
                 map_hint=hints.map_hint if hints else None,
                 capture_hint=self._capture_hint(),
@@ -1559,6 +1590,7 @@ class Engine:
                 slow_controls=self._slow_controls_safe(known_screen),
                 suggested_deeplinks=hints.suggested_deeplinks if hints else [],
                 research_tasks=hints.research_tasks if hints else [],
+                flows=self._flows_for(package),
                 ask=hints.ask if hints else None,
                 map_hint=hints.map_hint if hints else None,
                 capture_hint=self._capture_hint(),
@@ -2879,6 +2911,15 @@ class Engine:
                     "ok": reached == edge.to_screen,
                 }
             )
+            # Replaying an edge IS the check on it, and the device is the ground truth. This
+            # outcome was computed and then thrown away on every hop of every `goto` ever run,
+            # so a route that had stopped working stayed `verified` forever and no amount of
+            # driving could clean the map. Measured 2026-08-10: 118 of 636 rows contradicted
+            # another row on the same origin+action+context. Nothing here needs an agent.
+            with contextlib.suppress(Exception):
+                mem.record_route_outcome(
+                    package, edge.id, ok=reached == edge.to_screen, reached=reached
+                )
             if reached != edge.to_screen:
                 if assist:
                     recovered, res = self._goto_assist_recover(

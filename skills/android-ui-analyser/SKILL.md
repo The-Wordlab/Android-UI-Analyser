@@ -252,6 +252,7 @@ or a filtered projection), or when content was still streaming in on the first r
                   "source": "hierarchy|detection|ocr|grounding", "confidence" } ],
   "meta":     { "duration_ms", "tier_used", "path", "providers_used",
                 "known_screen", "known_routes", "suggested_gotos", "research_tasks",
+                "flows": ["name(PARAM)"],          // aua flow run name --param PARAM=v
                 "ask": {"id","about","q","how"},   // answer with --answers id="<name>"
                 "map_hint",
                 "annotated_image", "raw_image", "device_serial" } }

@@ -454,7 +454,7 @@ class Projection:
             # whole task by tapping. What the call cost is metadata about the call; a route you
             # can replay and a question you can answer are things to DO, and suppressing those
             # to save two lines is what made the map invisible in the first place.
-            return _route_comment(meta) + _ask_comment(meta)
+            return _route_comment(meta) + _flows_comment(meta) + _ask_comment(meta)
         screen = payload.get("screen") or {}
         head = [f"screen={meta.get('known_screen') or '-'}"]
         if screen.get("package"):
@@ -472,8 +472,25 @@ class Projection:
                 summary.append(f"{key}={meta[key]}")
         lines.append("# " + " ".join(summary))
         lines += _route_comment(meta)
+        lines += _flows_comment(meta)
         lines += _ask_comment(meta)
         return lines
+
+
+def _flows_comment(meta: dict[str, Any]) -> list[str]:
+    """Saved journeys for this app — one call instead of a dozen.
+
+    A parameterised flow had been sitting saved for this project and no agent had ever run one.
+    `flow` appeared 19 times in the long guide and zero times in the analyze header or the
+    orientation block, which is everything an agent actually reads.
+    """
+    flows = [str(f) for f in (meta.get("flows") or [])]
+    if not flows:
+        return []
+    return [
+        "# flows: " + " | ".join(flows[:3]) + "  (aua flow run <name> --param K=V — replays a "
+        "whole saved journey: launch, taps, waits, even cross-app sign-in)"
+    ]
 
 
 def _ask_comment(meta: dict[str, Any]) -> list[str]:
