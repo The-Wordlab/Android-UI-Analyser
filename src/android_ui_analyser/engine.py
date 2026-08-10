@@ -6797,8 +6797,13 @@ class Engine:
         the half that was missing. An unknown baseline is reported as ``None``, never as False:
         "I could not compare" and "they are the same" are different claims.
         """
+        # Not shortened. These become `change.text_added` / `text_removed`, which is the field a
+        # caller reads to decide whether the action did what it was for — so a cut here lands in
+        # the verdict itself. Saving a few dozen characters there is a false economy: the reader
+        # cannot tell a clipped line from a complete one, and the way out is another `analyze`,
+        # which costs a round trip and kilobytes to recover the tens of bytes that were withheld.
         after_labels = [
-            (e.text or e.content_desc or "").strip()[:60]
+            (e.text or e.content_desc or "").strip()
             for e in obs.elements
             if (e.text or e.content_desc or "").strip()
         ]
