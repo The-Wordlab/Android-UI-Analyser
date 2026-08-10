@@ -5454,6 +5454,37 @@ def _first_subcommand(head: list[str]) -> int | None:
     return None
 
 
+def alias_fields_on_actions(argv: list[str]) -> list[str]:
+    """`--fields` on an action means the global `--observe-fields`; accept it as that.
+
+    `analyze --fields id,text` is how every caller learns to project element columns, so it is
+    what they then type on `tap-and-analyze`. That is not a different concept — both name the
+    columns of the element rows being returned — so a second spelling is fragmentation, not
+    precision, and Click answered it with "No such option '--fields'. (Did you mean one of:
+    '--first', '--rid'?)". Measured 2026-08-10: an agent took that at face value and piped the
+    whole JSON response through `jq` for the rest of the run.
+
+    This is an alias, unlike the guessed command names, because the two spellings do the same
+    thing to the same data. `--text` on `input` was refused precisely because it did not.
+
+    Only rewritten when the target command has no `--fields` of its own, so `analyze` keeps hers.
+    """
+    if not any(a == "--fields" or a.startswith("--fields=") for a in argv):
+        return argv
+    start = _first_subcommand(argv)
+    if start is None or _defines_option(argv[start:], "--fields"):
+        return argv
+    out: list[str] = []
+    for arg in argv:
+        if arg == "--fields":
+            out.append("--observe-fields")
+        elif arg.startswith("--fields="):
+            out.append("--observe-fields=" + arg.split("=", 1)[1])
+        else:
+            out.append(arg)
+    return out
+
+
 def hoist_global_options(argv: list[str]) -> list[str]:
     """Move top-level options that were written after the subcommand to the front.
 
@@ -5571,7 +5602,7 @@ for _removed_alias in _REMOVED_ACTION_ALIASES:
 
 def run() -> None:
     """Console-script entry point: tolerate misplaced global options, then dispatch."""
-    sys.argv[1:] = hoist_global_options(sys.argv[1:])
+    sys.argv[1:] = hoist_global_options(alias_fields_on_actions(sys.argv[1:]))
     app()
 
 

@@ -103,6 +103,41 @@ def test_a_lone_positional_is_told_it_was_eaten_as_the_target() -> None:
     assert "--rid" in hint and "zzzqqqxyz" in hint, f"the fix must be copy-pasteable: {hint!r}"
 
 
+def test_fields_on_an_action_becomes_observe_fields() -> None:
+    """Learned on `analyze`, typed on `tap-and-analyze`; it is the same projection."""
+    from android_ui_analyser.cli import alias_fields_on_actions
+
+    assert alias_fields_on_actions(["tap-and-analyze", "--rid", "x", "--fields", "id,text"]) == [
+        "tap-and-analyze",
+        "--rid",
+        "x",
+        "--observe-fields",
+        "id,text",
+    ]
+    assert alias_fields_on_actions(["tap-and-analyze", "--fields=id,text"]) == [
+        "tap-and-analyze",
+        "--observe-fields=id,text",
+    ]
+
+
+def test_analyze_keeps_its_own_fields() -> None:
+    from android_ui_analyser.cli import alias_fields_on_actions
+
+    argv = ["analyze", "--fields", "id,text"]
+    assert alias_fields_on_actions(argv) == argv, "the command that defines it must win"
+
+
+def test_leading_globals_do_not_hide_the_subcommand() -> None:
+    """`_first_subcommand` exists because a bare scan lands on a global's value, not the command."""
+    from android_ui_analyser.cli import alias_fields_on_actions
+
+    argv = ["--serial", "emulator-5554", "analyze", "--fields", "id,text"]
+    assert alias_fields_on_actions(argv) == argv, "analyze is still the target here"
+
+    hoisted = alias_fields_on_actions(["--format", "tsv", "tap-and-analyze", "--fields", "id"])
+    assert "--observe-fields" in hoisted
+
+
 def _action_payload() -> dict:
     return {
         "ok": True,
