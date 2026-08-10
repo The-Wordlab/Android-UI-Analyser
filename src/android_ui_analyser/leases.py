@@ -404,7 +404,22 @@ def choose_device(
         if e.get("serial") in known
     ]
     detail = "; ".join(busy) if busy else "no attached device matches"
+    # The sibling branch above learned this the hard way; this one kept the old advice and
+    # stranded the same caller three more times in one session. "wait" is not actionable
+    # without saying how long, and the command that actually frees a device — `lease release`,
+    # which takes the holder's `--owner` — went unmentioned, so it stayed invisible.
+    holders = sorted({str(e.get("owner")) for e in list_leases(cache_dir) if e.get("serial") in known})
+    recover = (
+        f" A stale holder's lease is yours to hand back: "
+        f"`aua --owner {holders[0]} lease release <serial>`."
+        if holders
+        else ""
+    )
     raise DeviceLeasedError(
         f"no free device{' matching ' + ','.join(needs) if needs else ''}: {detail}",
-        hint="wait, start another emulator (`aua emulator start`), or widen --needs",
+        hint=(
+            f"`aua lease list` shows idle_s; a lease expires after {ttl_s}s idle."
+            f"{recover} Otherwise start your own: `aua emulator start --headless --parallel`"
+            f"{', or widen --needs' if needs else ''}."
+        ),
     )

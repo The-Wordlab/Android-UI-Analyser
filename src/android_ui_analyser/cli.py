@@ -2433,6 +2433,27 @@ def wait(
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
         _warn_if_wait_could_have_been_until(engine, for_)
+        global _UNTIL
+        if not (for_ or idle or for_stable or after_change or changed) and _UNTIL:
+            # `--until` is the global "then wait for this" that every action takes, and on a
+            # wait command it IS the wait — the same concept in a richer predicate language
+            # (`!text:`, `rid:`, comma-separated terms) than `--for`. Refusing it with "wait
+            # needs --for <text> or --idle" reads as "--until is not a thing here", which is
+            # false: it parsed, and it names exactly what the caller is waiting for.
+            predicate, timeout_ms, poll_ms = _UNTIL
+            _UNTIL = None  # this IS the wait; the post-action pass must not repeat it
+            _emit(
+                _route(
+                    engine,
+                    "await_predicate",
+                    predicate=predicate,
+                    timeout_ms=timeout_ms,
+                    poll_ms=poll_ms,
+                    observe=observe,
+                ),
+                fmt,
+            )
+            return
         if after_change:
             # First wait for something to happen, then for it to finish happening. Either half
             # alone is a trap: --changed returns mid-stream, --for-stable returns before the
