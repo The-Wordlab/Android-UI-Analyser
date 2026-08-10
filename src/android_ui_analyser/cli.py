@@ -16,6 +16,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -5464,9 +5465,12 @@ def mcp(ctx: typer.Context) -> None:
 
 # ------------------------------------------------------------------- entry point
 
-# Options declared on the top-level callback rather than on a command. Written out
-# rather than introspected because the value has to be known before Click parses.
-_GLOBAL_OPTS: dict[str, bool] = {  # name -> takes a value
+# Options declared on the top-level callback rather than on a command. Only the ones Click
+# cannot be asked about are written out; the rest are read off the callback itself, because a
+# hand-kept copy drifts. It drifted: `--owner`, `--needs` and `--page` were all absent, and a
+# missing value-taking global makes `_first_subcommand` land on the option's *value*, so
+# `aua --owner X analyze --fields id,text` rewrote `--fields` for a command that has one.
+_STATIC_GLOBAL_OPTS: dict[str, bool] = {  # name -> takes a value
     "--serial": True,
     "--config": True,
     "--format": True,
@@ -5484,6 +5488,22 @@ _GLOBAL_OPTS: dict[str, bool] = {  # name -> takes a value
     "--until-timeout": True,
     "--until-poll": True,
 }
+
+
+@lru_cache(maxsize=1)
+def _global_opts() -> dict[str, bool]:
+    try:
+        import typer.main
+
+        found = dict(_STATIC_GLOBAL_OPTS)
+        for param in typer.main.get_command(app).params:
+            takes_value = not getattr(param, "is_flag", False)
+            for name in [*getattr(param, "opts", []), *getattr(param, "secondary_opts", [])]:
+                if name.startswith("--"):
+                    found[name] = takes_value
+        return found
+    except Exception:  # introspection must never break the CLI
+        return dict(_STATIC_GLOBAL_OPTS)
 
 
 def _defines_option(argv: list[str], name: str) -> bool:
@@ -5532,7 +5552,7 @@ def _first_subcommand(head: list[str]) -> int | None:
             return i
         base, eq, _ = tok.partition("=")
         # `--opt=value` carries its value inline; `--opt value` eats the next token.
-        i += 1 if eq or not _GLOBAL_OPTS.get(base, False) else 2
+        i += 1 if eq or not _global_opts().get(base, False) else 2
     return None
 
 
@@ -5594,8 +5614,9 @@ def hoist_global_options(argv: list[str]) -> list[str]:
     while i < len(head):
         tok = head[i]
         base, eq, inline = tok.partition("=")
-        if i > first_cmd and base in _GLOBAL_OPTS and not _defines_option(head[first_cmd:], base):
-            takes_value = _GLOBAL_OPTS[base]
+        globals_ = _global_opts()
+        if i > first_cmd and base in globals_ and not _defines_option(head[first_cmd:], base):
+            takes_value = globals_[base]
             if eq:
                 hoisted.append(tok)
             elif takes_value and i + 1 < len(head) and not head[i + 1].startswith("-"):
