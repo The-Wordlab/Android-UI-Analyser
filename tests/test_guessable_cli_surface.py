@@ -93,6 +93,16 @@ def test_input_text_is_answered_not_just_rejected() -> None:
     assert "`aua input-and-analyze --rid" in combined, f"stale example: {combined!r}"
 
 
+def test_a_lone_positional_is_told_it_was_eaten_as_the_target() -> None:
+    """"input needs the text to type" reads as false to a caller who passed text."""
+    code, err = _invoke("input-and-analyze", "zzzqqqxyz")
+    assert code != 0
+    assert "zzzqqqxyz" in err.get("message", ""), f"echo their argument back: {err!r}"
+    assert "element" in err.get("message", ""), f"name what it was read as: {err!r}"
+    hint = err.get("hint", "")
+    assert "--rid" in hint and "zzzqqqxyz" in hint, f"the fix must be copy-pasteable: {hint!r}"
+
+
 def _action_payload() -> dict:
     return {
         "ok": True,

@@ -1761,10 +1761,20 @@ def input_cmd(
                 "with --rid/--desc, pass only the text to type",
                 hint='e.g. `aua input-and-analyze --rid promptField "hello"`',
             )
+        if typed is None and first_arg is not None:
+            # The caller DID pass text; it was consumed as the target. "needs the text to type"
+            # reads as false from their side, so name what actually happened to their argument.
+            raise UsageError(
+                f'"{first_arg}" was read as the element to type INTO, not the text to type — '
+                "without --rid/--desc the first positional addresses the field",
+                hint=f'`aua input-and-analyze --rid <resourceId> "{first_arg}"` addresses the '
+                f'field by resource-id, or `aua input-and-analyze <id> "{first_arg}"` gives both.',
+            )
         if typed is None:
             raise UsageError(
-                "input needs the text to type",
-                hint='e.g. `aua input-and-analyze 9 "hello"` or `aua input-and-analyze --rid promptField "hello"`',
+                "input-and-analyze needs the text to type",
+                hint='e.g. `aua input-and-analyze 9 "hello"` or '
+                '`aua input-and-analyze --rid promptField "hello"`',
             )
         _emit(
             _route(
