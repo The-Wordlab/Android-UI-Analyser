@@ -141,6 +141,27 @@ def _serialize(obj: Any) -> Any:
     return obj
 
 
+def _adopt_client_owner(engine: Engine, owner: str | None) -> None:
+    """Lease as the caller, not as this daemon.
+
+    `resolve_owner` walks up to the first non-shell ancestor, so it answers a different name
+    inside the detached daemon than in the CLI process that spawned it. The daemon then claimed
+    the device under its own name, or — with the CLI holding the lease first — was refused by
+    it. Measured 2026-08-10: the caller's own lease locked the caller out. `--owner` and
+    `$AUA_OWNER` did not help, because neither ever crossed the socket; the agent that hit it
+    read `leases.py`, `cli.py`, `engine.py` and `config.py` looking for why, and finished by
+    setting `AUA_DAEMON__ENABLED=false` — turning the warm path off to get its work done.
+
+    The lease belongs to whoever typed the command, so that is who the request now names.
+    """
+    if not owner or owner == getattr(engine, "_lease_owner_resolved", None):
+        return
+    engine._lease_owner = owner
+    engine._lease_serial = None
+    engine._lease_owner_resolved = None
+    engine._lease_device()  # raises DeviceLeasedError when this owner may not have it
+
+
 def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
     """Map a request dict to an Engine call and return a response dict.
 
@@ -155,6 +176,7 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
     args: dict[str, Any] = request.get("args") or {}
 
     try:
+        _adopt_client_owner(engine, request.get("owner"))
         if cmd == "ping":
             return _result_ok({"pong": True, "version": _aua_version()})
 
@@ -680,9 +702,12 @@ class DaemonClient:
             resp = client.call("analyze", source="auto")
     """
 
-    def __init__(self, sock_path: str, *, timeout: float = 5.0) -> None:
+    def __init__(self, sock_path: str, *, timeout: float = 5.0, owner: str | None = None) -> None:
         self._sock_path = sock_path
         self._timeout = timeout
+        # Resolved in THIS process; the daemon would resolve a different name. See
+        # `_adopt_client_owner`.
+        self._owner = owner
 
     def __enter__(self) -> DaemonClient:
         return self
@@ -701,6 +726,8 @@ class DaemonClient:
         request: dict[str, Any] = {"cmd": cmd, "args": args}
         if journal is False:
             request["journal"] = False
+        if self._owner:
+            request["owner"] = self._owner
         payload = json.dumps(request, ensure_ascii=False).encode() + b"\n"
 
         # Long-poll commands need a client timeout above their own deadline.

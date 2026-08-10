@@ -886,7 +886,12 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
                     daemon_mod._aua_version(),
                 )
             if ver is not False and not skew:
-                client = daemon_mod.DaemonClient(daemon_mod.socket_path(cfg))
+                from . import leases as _leases
+
+                client = daemon_mod.DaemonClient(
+                    daemon_mod.socket_path(cfg),
+                    owner=_leases.resolve_owner(getattr(engine, "_lease_owner", None)),
+                )
                 cmd = _DAEMON_CMD.get(method, method)
                 resp = client.call(cmd, **kwargs)
                 if resp.get("ok"):

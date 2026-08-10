@@ -352,10 +352,27 @@ def choose_device(
     if explicit:
         current = read_lease(cache_dir, explicit)
         if current is not None and current.get("owner") != owner:
+            free = _free_report()
+            # "omit --serial to auto-pick" is a dead end when nothing is free: dropping the
+            # flag lands on the no-free-device branch below. Measured 2026-08-10 — an agent
+            # followed it, got refused again, and spent the rest of its run reading aua's
+            # source for a way through. So when there is nowhere to route, say what works.
+            hint = (
+                f"free now: {free} — omit --serial to auto-pick"
+                if free != "none"
+                else (
+                    f"nothing else is free. The lease expires after "
+                    f"{int(current.get('ttl_s') or ttl_s)}s idle "
+                    f"(`aua lease list` shows idle_s), or start your own device with "
+                    f"`aua emulator start --headless --parallel` and pass its serial. "
+                    f"You are `{owner}`; pass `--owner {current.get('owner')}` only if that "
+                    f"holder is you under another name."
+                )
+            )
             raise DeviceLeasedError(
                 f"{explicit} is leased by {current.get('owner')} "
                 f"(active {idle_seconds(current):.0f}s ago)",
-                hint=f"free now: {_free_report()} — omit --serial to auto-pick",
+                hint=hint,
             )
         missing = unmet_needs(known.get(explicit), needs)
         if missing:
