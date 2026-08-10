@@ -2,8 +2,8 @@
 
 Run 6 of the fresh-agent series (2026-08-10) did this:
 
-    tap-and-analyze --rid bottomBarAppsHub --until 'text:Search'     # 2042ms, satisfied
-    wait-and-analyze --after-change --until '!text:Loading'          # 25256ms
+    tap-and-analyze --rid <navTab> --until 'text:Search'     # 2042ms, satisfied
+    wait-and-analyze --after-change --until '!text:Loading'  # 25256ms
 
 The second call cost 25.3s — more than a third of the whole run — and bought nothing: the search
 field it went on to use was already on the screen the first call returned. For comparison, the

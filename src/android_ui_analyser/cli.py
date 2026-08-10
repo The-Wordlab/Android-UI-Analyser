@@ -134,6 +134,10 @@ class GlobalOpts:
     until: str | None = None
     until_timeout: int = 30000
     until_poll: int = 500
+    #: Which of the wait-tuning flags the caller actually typed. A bound default is
+    #: indistinguishable from an explicit value, and the difference decides whether a timeout
+    #: with no `--until` was a mistake or just the default riding along.
+    explicit_wait_flags: frozenset[str] = frozenset()
     owner: str | None = None
     needs: str | None = None
     no_lease: bool = False
@@ -220,6 +224,19 @@ def _run(ctx: typer.Context, fn: Callable[[Engine, OutputFormat], T]) -> T:
             spec = getattr(engine.config.output, "observation_fields", None)
         _OBSERVATION_VIEW = Projection.for_observation(spec, fmt=cfg_fmt)
         _ENGINE = engine
+        if not opts.until:
+            # `--until-timeout` only bounds a `--until`, so on its own it does nothing at all.
+            # A fresh agent passed `--until-timeout 3000` believing it had a "safety bound",
+            # got no wait and no `await_outcome`, and then spent four extra commands proving
+            # by hand what a predicate would have asserted for it.
+            dangling = sorted(opts.explicit_wait_flags)
+            if dangling:
+                raise UsageError(
+                    f"{' and '.join(dangling)} only bounds `--until`, and no --until was given",
+                    hint="Name what you are waiting for — `--until 'rid:<target>'` or "
+                    "`--until 'text:<label>'` — and the timeout applies to it. Without a "
+                    "predicate nothing is waited for and `await_outcome` is not reported.",
+                )
         _UNTIL = (
             (opts.until, opts.until_timeout, opts.until_poll) if opts.until else None
         )
@@ -1122,6 +1139,11 @@ def main(
         until=until,
         until_timeout=until_timeout,
         until_poll=until_poll,
+        explicit_wait_flags=frozenset(
+            flag
+            for name, flag in (("until_timeout", "--until-timeout"), ("until_poll", "--until-poll"))
+            if getattr(ctx.get_parameter_source(name), "name", None) == "COMMANDLINE"
+        ),
         owner=owner,
         needs=needs,
         no_lease=no_lease,
