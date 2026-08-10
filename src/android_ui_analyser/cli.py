@@ -593,6 +593,55 @@ def _warn_if_redundant_analyze(engine: Engine, args: dict[str, Any] | None = Non
     )
 
 
+def _warn_if_wait_could_have_been_until(engine: Engine, waited_for: str | None) -> None:
+    """Soft lint: a settle-wait straight after an action is a `--until` the caller did not know.
+
+    Measured on a fresh agent (2026-08-10): it typed, then ran `wait-and-analyze --after-change`
+    to let the results land — 1851ms + 3762ms across two calls, where folding the same wait into
+    `input-and-analyze --until 'text:No apps found'` took 2015ms in one. `--after-change` cannot
+    do better: with no predicate it has to observe the screen go quiet, while `--until` returns
+    the moment the thing arrives.
+
+    It reached for `--after-change` because nothing had told it `--until` exists — the
+    redundant-analyze lint only fires on `analyze`, and `wait-and-analyze --help` documents
+    `--for`/`--for-stable`/`--changed` but not the global flag that replaces them here.
+    """
+    cfg = engine.config
+    serial = None
+    with contextlib.suppress(Exception):
+        serial = engine.device.serial
+    try:
+        from . import journal as journal_mod
+
+        events = journal_mod.read_since(cfg.cache.dir, serial, limit=4)
+    except Exception:  # pragma: no cover - best effort
+        return
+    # Unlike the redundant-analyze lint, this runs BEFORE its own command is journaled, so the
+    # action being followed is the newest entry, not the one behind it.
+    if not events:
+        return
+    previous = events[-1]
+    if not previous.get("ok"):
+        return
+    prev = previous.get("result")
+    if not isinstance(prev, dict) or not prev.get("observation"):
+        return
+    action = prev.get("action")
+    if not isinstance(action, str):
+        return
+    predicate = f"text:{waited_for}" if waited_for else "text:<label>"
+    logger.warning(
+        "this wait follows `%s`, which already observed the screen. If you know what you are "
+        "waiting for, pass it to the action instead: `%s ... --until '%s'` waits and returns the "
+        "settled screen in ONE call, and reports `await_outcome` so you can tell arrived from "
+        "timed-out. A predicate-less settle wait has to watch the screen go quiet, so it is "
+        "slower than waiting for the thing itself.",
+        action,
+        f"{action}-and-analyze" if not action.endswith("-and-analyze") else action,
+        predicate,
+    )
+
+
 def _analyze_payload(result: Any) -> dict[str, Any] | None:
     """The full (untrimmed) dict form of an analyze result, whatever produced it.
 
@@ -814,6 +863,51 @@ _GUIDE_POINTER = (
     "Code skill from the same source."
 )
 
+#: Lines per page of `--help` / `guide`. Sized so one page survives a tool-output limit whole.
+HELP_PAGE_LINES = 55
+
+
+def _page_arg(argv: list[str] | None = None) -> int:
+    """``--page N`` / ``--page=N`` read straight from argv.
+
+    Click's ``--help`` is eager: it renders and exits during parsing, before a normally-declared
+    option would bind. Reading argv is what makes ``aua --help --page 2`` work at all.
+    """
+    args = sys.argv[1:] if argv is None else argv
+    for i, arg in enumerate(args):
+        if arg == "--page" and i + 1 < len(args):
+            raw = args[i + 1]
+        elif arg.startswith("--page="):
+            raw = arg.split("=", 1)[1]
+        else:
+            continue
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            return 1
+    return 1
+
+
+def paginate(text: str, page: int, *, per_page: int = HELP_PAGE_LINES, more: str = "") -> str:
+    """One page of *text*, ending with the command that returns the next one.
+
+    Long help reaches an agent through a tool that truncates, and a silent cut is
+    indistinguishable from "that is all there is". Measured: a fresh agent read `aua --help`
+    (172 lines), had it cut, concluded typing was undocumented, and only learned the syntax by
+    failing a call. Splitting the text is not the fix on its own — the footer is, because it is
+    the only thing that tells the reader something was withheld.
+    """
+    lines = text.splitlines()
+    total = max(1, -(-len(lines) // per_page))
+    page = min(max(1, page), total)
+    if total == 1:
+        return text
+    chunk = lines[(page - 1) * per_page : page * per_page]
+    footer = f"— page {page} of {total} —"
+    footer += f"  next: {more.format(page=page + 1)}" if page < total and more else "  (end)"
+    return "\n".join([*chunk, "", footer])
+
+
 class UnknownCommand(AuaError):
     """A name that is not a command, answered with the one that was meant plus how to drive."""
 
@@ -849,6 +943,28 @@ class GuidingGroup(TyperGroup):
     `dump` or `elements`. An agent that guessed has not read the guide, so the failure is the only
     place it will read anything — it carries the orientation block rather than a usage page.
     """
+
+    def format_help(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        # Typer renders help through rich straight to stdout rather than into `formatter`, so the
+        # only way to page it is to catch what it wrote.
+        import contextlib
+        import io
+
+        from .guide import ORIENTATION
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            super().format_help(ctx, formatter)
+        rendered = buffer.getvalue() or formatter.getvalue()
+        # Paging alone would make page 1 fifty-five lines of global options and not one command.
+        # Whatever a truncating reader gets, it must be the loop.
+        head = [
+            "The loop — everything else is a variation on these:",
+            *(f"  {cmd}  # {why}" for cmd, why in ORIENTATION),
+            "",
+        ]
+        body = "\n".join([*head, rendered.rstrip("\n")])
+        click.echo(paginate(body, _page_arg(), more="aua --help --page {page}"))
 
     def resolve_command(
         self, ctx: click.Context, args: list[str]
@@ -889,6 +1005,11 @@ def main(
         None, "--format", help="Output format: json|pretty|compact|tsv|delta|msgpack (tsv/delta/msgpack: analyze)."
     ),
     profile: str | None = typer.Option(None, "--profile", help="Named config profile to overlay."),
+    # Declared so Click accepts it; the value is read from argv in `_page_arg`, because `--help`
+    # is eager and renders before a normal option would ever bind.
+    page: int = typer.Option(
+        1, "--page", hidden=True, help="Which page of `--help` / `guide` output to print."
+    ),
     timeout: int | None = typer.Option(None, "--timeout", help="Per-operation timeout in ms."),
     log_level: str = typer.Option(
         "warn", "--log-level", help="error|warn|info|debug (logs → stderr)."
@@ -2157,6 +2278,12 @@ def wait(
 ) -> None:
     """Wait for text to appear (or with ``--absent`` disappear), for idle, or for settle.
 
+    FIRST: if you are waiting on your own last action, you do not need this command. Pass the
+    global ``--until`` to the action — `aua tap-and-analyze --rid send --until 'text:Sent'` —
+    and it waits and returns the settled screen in one call, reporting ``await_outcome`` so
+    "arrived" is distinguishable from "timed out". Reach for ``wait-and-analyze`` when there is
+    no action to attach to, or when you need ``--for-stable``/``--after-change`` semantics.
+
     ``--for-stable`` polls cheap screenshots (a perceptual-hash "settled" check — no OCR,
     no hierarchy parse; works on opaque screens) and returns once the screen stops changing
     for ``--settle`` ms. ``--changed`` waits for any hierarchy-tree change (host-polled
@@ -2172,6 +2299,7 @@ def wait(
     """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
+        _warn_if_wait_could_have_been_until(engine, for_)
         if after_change:
             # First wait for something to happen, then for it to finish happening. Either half
             # alone is a trap: --changed returns mid-stream, --for-stable returns before the
