@@ -693,6 +693,13 @@ def _handle_connection(
 # --------------------------------------------------------------------------- client
 
 
+# Commands that can block for a long time without being told a deadline; one that IS told a
+# deadline gets its socket budget from that number, whatever the command is called.
+_LONG_POLL_COMMANDS = frozenset(
+    {"wait", "wait_stable", "wait_changed", "await_predicate", "goto", "flow_run", "navigate"}
+)
+
+
 class DaemonClient:
     """Minimal client for the daemon unix socket.
 
@@ -731,14 +738,18 @@ class DaemonClient:
             request["owner"] = self._owner
         payload = json.dumps(request, ensure_ascii=False).encode() + b"\n"
 
-        # Long-poll commands need a client timeout above their own deadline.
+        # A request that carries its own deadline needs a socket timeout above it. Naming the
+        # long-poll commands instead was a list that drifted: `await_predicate` — every global
+        # `--until` — was absent, so any predicate slower than the 5s default timed out at the
+        # socket, `_route` swallowed it as "daemon unavailable" and ran the whole wait AGAIN
+        # in-process. Measured 2026-08-10: one wrong `--until` cost 31.0s in the daemon plus
+        # 31.7s in the CLI — 62s of a 99s run, silently doubled.
         timeout = self._timeout
-        if cmd in {"wait", "wait_stable", "wait_changed", "goto", "flow_run", "navigate"}:
-            ms = args.get("timeout_ms")
-            if isinstance(ms, (int, float)) and ms > 0:
-                timeout = max(timeout, ms / 1000.0 + 5.0)
-            else:
-                timeout = max(timeout, 60.0)
+        ms = args.get("timeout_ms")
+        if isinstance(ms, (int, float)) and ms > 0:
+            timeout = max(timeout, ms / 1000.0 + 5.0)
+        elif cmd in _LONG_POLL_COMMANDS:
+            timeout = max(timeout, 60.0)
 
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(timeout)
