@@ -220,6 +220,19 @@ def _parse_point(arg: str | None) -> tuple[int, int] | None:
     return (x, y) if x >= 0 and y >= 0 else None
 
 
+def _label(text: str) -> str:
+    """A one-line label for a summary row — normalised, not shortened.
+
+    These used to be cut at 60 characters, which bought nothing: the same string is already in
+    `elements[].text` at full length in the same response, and on the densest screen measured
+    (2026-08-10) every label together came to 149 characters inside a 9,915-character payload,
+    with none reaching the limit. What it did cost was legibility — a heading past the limit came
+    back as a sentence that simply stops, so two agent runs read it as complete and spent an extra
+    `analyze` recovering text they had already been sent.
+    """
+    return text.replace("\n", " ").strip()
+
+
 def _action_mark(verb: str, el: Element) -> str:
     """Compact capture timeline label — verb + best human/id token."""
     label = el.text or el.content_desc or _id_tail(el.resource_id) or el.id
@@ -1903,7 +1916,7 @@ class Engine:
             rid = _id_tail(e.resource_id)
             row: dict[str, Any] = {"id": e.id}
             if label:
-                row["label"] = label[:60]
+                row["label"] = _label(label)
             if rid:
                 row["rid"] = rid
             if e.checkable is not None:
@@ -6765,7 +6778,7 @@ class Engine:
                 focused = e.id
             label = (e.text or e.content_desc or "").strip()
             if label:
-                labels.append(label[:60])
+                labels.append(_label(label))
         return {
             "count": len(cached.elements),
             "focused": focused,
