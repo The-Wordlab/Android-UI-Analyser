@@ -323,7 +323,9 @@ EXIT_CODES: list[tuple[str, str]] = [
 KEY_FLAGS: list[tuple[str, str]] = [
     (
         "global, BEFORE the subcommand",
-        "`--format json|pretty|compact|tsv|delta|msgpack` (`tsv`/`delta`/`msgpack` = analyze; "
+        "`--format json|pretty|compact|tsv|delta|msgpack` (`delta`/`msgpack` = analyze; `tsv` "
+        "also renders an action: its envelope becomes `#key=value` lines — `# change.text_added=…` "
+        "is usually the whole verdict — followed by the observation's rows; "
         "`delta` omits elements when unchanged; `msgpack` is AUA1 binary/base64), "
         "`--serial`, `--config`, `--profile`, `--timeout`, `--log-level`, `--no-cache`, "
         "`--with-image` (session default: attach raw screenshots on analyze/actions — "

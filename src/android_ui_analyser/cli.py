@@ -53,7 +53,7 @@ from .memory import (
     find_result,
     render_map,
 )
-from .projection import Projection, trim_observation_payload
+from .projection import Projection, render_action_tsv, trim_observation_payload
 from .reconcile import ReconciliationStore, ResearchReport, audit_map
 from .schema import ActionResult, AnalyzeResult, OutputFormat
 
@@ -436,6 +436,24 @@ def _project_observation(result: Any, fmt: OutputFormat) -> dict[str, Any] | Non
     return data
 
 
+def _action_dict(result: Any) -> dict[str, Any] | None:
+    """An action envelope as a plain dict when it carries an observation with elements."""
+    import json
+
+    if not hasattr(result, "render") or getattr(result, "observation", None) is None:
+        return None
+    try:
+        data = json.loads(result.render(OutputFormat.json))
+    except Exception:  # pragma: no cover - defensive; fall back to the plain render
+        return None
+    if not isinstance(data, dict):
+        return None
+    payload = data.get("observation")
+    if not isinstance(payload, dict) or not isinstance(payload.get("elements"), list):
+        return None
+    return data
+
+
 def _await_until(result: Any) -> Any:
     """Honour a global ``--until``: wait for the predicate, then adopt *that* screen.
 
@@ -508,6 +526,11 @@ def _emit(result: Any, fmt: OutputFormat) -> None:
         result = _rehydrate(result)
     result = _await_until(result)
     projected = _project_observation(result, fmt)
+    if fmt is OutputFormat.tsv:
+        payload = projected if projected is not None else _action_dict(result)
+        if payload is not None:
+            typer.echo(render_action_tsv(payload, _OBSERVATION_VIEW))
+            return
     if projected is not None:
         _echo_json(projected, fmt)
         return
@@ -561,7 +584,11 @@ def _warn_if_redundant_analyze(engine: Engine, args: dict[str, Any] | None = Non
     logger.warning(
         "redundant analyze right after %s: that action already returned `observation` (id "
         "space is already in the action response). Prefer using the previous `observation` and "
-        "running analyze only when you need a different view.",
+        "running analyze only when you need a different view. If you are re-reading because the "
+        "screen had not settled yet, do not sleep-then-analyze: re-run the action with "
+        "`--until 'text:<label>'` (or `--until '!text:Loading'`), which waits and returns the "
+        "settled screen in the same call; for network-driven content use "
+        "`aua wait --after-change --observe`.",
         action,
     )
 
@@ -927,6 +954,9 @@ def ask(
 
 
 @app.command(cls=AnnotateCommand)
+# `screen` is what an agent that has not read the guide reaches for first; without it click's
+# nearest-name hint points at `screenshot`, which returns a PNG instead of the element list.
+@app.command(name="screen", cls=AnnotateCommand, hidden=True)
 def analyze(
     ctx: typer.Context,
     source: str = typer.Option(
@@ -1522,6 +1552,9 @@ def input_cmd(
     desc: str | None = _SEL_DESC,
     index: int | None = _SEL_INDEX,
     first: bool = _SEL_FIRST,
+    # Accepted only to answer it properly: `--text` is a selector on every other command, so
+    # click's nearest-name hint here was "--index", which sends people further from the fix.
+    text_opt: str | None = typer.Option(None, "--text", hidden=True),
     submit: bool = typer.Option(False, "--submit", help="Send the IME action after typing."),
     observe: bool = typer.Option(
         True,
@@ -1548,6 +1581,12 @@ def input_cmd(
     """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
+        if text_opt is not None:
+            raise UsageError(
+                "input takes the text to type positionally, not with --text",
+                hint=f'e.g. `aua input --rid <resourceId> "{text_opt}"`; on other commands '
+                "--text selects an element by its label, so input cannot reuse it",
+            )
         selector = _selector(
             ident=first_arg, by=by, rid=rid, desc=desc, index=index, first=first
         )
