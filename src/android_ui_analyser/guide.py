@@ -325,10 +325,19 @@ EXIT_CODES: list[tuple[str, str]] = [
 #: have given — an agent that never read the manual reads this instead, once, and then knows.
 ORIENTATION: tuple[tuple[str, str], ...] = (
     ("aua --format tsv analyze --fields id,text,rid,clickable", "READ the screen as rows"),
-    ("aua tap-and-analyze --rid <resourceId>", "ACT, and receive the resulting screen"),
-    ('aua input-and-analyze --rid <resourceId> "text"', "TYPE — the text is positional"),
-    ("<any action> --until 'text:<label>'", "WAIT for the next screen; never sleep"),
+    (
+        "aua tap-and-analyze --rid <resourceId> --until 'text:<label>'",
+        "ACT, wait, and get the settled screen — one call",
+    ),
+    (
+        "aua input-and-analyze --rid <resourceId> \"text\" --until '!text:Loading'",
+        "TYPE — text is positional, and --until belongs HERE, not on a later analyze",
+    ),
     ('aua has "Sign in"', "cheap presence check (exit 0 found / 1 not)"),
+    (
+        "aua app restart-and-analyze <pkg> --activity <activity>",
+        "back to a known screen — no adb, no sleep",
+    ),
     ("aua guide", "the full manual"),
 )
 
