@@ -2784,32 +2784,57 @@ def _find_targets(
     app: AppMap, query: str, context_id: str | None = None
 ) -> list[str]:
     """Screens matching *query* by name, key-element label, anchor, dynamic shape, or a
-    route action that leads to them (so ``--find "image"`` finds the image screen)."""
+    route action that leads to them (so ``--find "image"`` finds the image screen).
+
+    Every term has to appear somewhere in the screen, but they do not have to appear together.
+    Matching the query as one literal substring meant only a caller who already knew the
+    phrasing could find anything: `--find "search"` and `--find "apps"` each answered, while
+    `--find "apps search"` — a goal, which is how anyone actually asks — answered "no matching
+    screen in memory" about a map that held the route. Measured 2026-08-10: an agent shown that
+    hint on a map of 135 screens and 613 routes navigated the whole task by tapping.
+    """
     q = query.lower().strip()
+    terms = [t for t in re.split(r"\W+", q) if t]
 
-    def matches(name: str) -> bool:
+    def haystacks(name: str) -> tuple[str, str, str]:
+        """What it is called, what is on it, and how you get there — in that order of weight.
+
+        A term found in the route is the weakest evidence: every route string names the screens
+        it passes through, so `--find "apps search"` otherwise ranks a chat screen reached via
+        an Apps tab above the search screen itself.
+        """
         rec = app.screens[name]
-        if q in name.lower():
-            return True
-        if any(ke.label and q in ke.label.lower() for ke in rec.key_elements):
-            return True
-        if any(q in a.lower() for a in rec.anchors):
-            return True
-        return any(q in d.lower() for d in rec.dynamic)
-
-    targets = [
-        name
-        for name, rec in app.screens.items()
-        if (
-            context_id is None
-            or rec.context_id in (context_id, LEGACY_CONTEXT_ID)
+        on_screen = [
+            *(ke.label or "" for ke in rec.key_elements),
+            *rec.anchors,
+            *rec.dynamic,
+        ]
+        via = [e.action for e in _routes_for_context(app, context_id) if e.to_screen == name]
+        return (
+            name.lower(),
+            " ".join([name, *on_screen]).lower(),
+            " ".join([name, *on_screen, *via]).lower(),
         )
-        and matches(name)
-    ]
-    for e in _routes_for_context(app, context_id):
-        if q in e.action.lower() and e.to_screen not in targets:
-            targets.append(e.to_screen)
-    return targets
+
+    def rank(name: str) -> int | None:
+        """Lower is better; None does not match at all."""
+        in_name, on_screen, anywhere = haystacks(name)
+        for score, hay in enumerate((in_name, on_screen, anywhere)):
+            if q and q in hay:
+                return score * 2
+            if terms and all(t in hay for t in terms):
+                return score * 2 + 1
+        return None
+
+    scored: list[tuple[int, str]] = []
+    for name, rec in app.screens.items():
+        if context_id is not None and rec.context_id not in (context_id, LEGACY_CONTEXT_ID):
+            continue
+        score = rank(name)
+        if score is not None:
+            scored.append((score, name))
+    scored.sort(key=lambda pair: pair[0])
+    return [name for _score, name in scored]
 
 
 def find_result(
