@@ -593,6 +593,11 @@ def _warn_if_redundant_analyze(engine: Engine, args: dict[str, Any] | None = Non
     )
 
 
+#: Journal `cmd` values that mean "the previous call was itself a wait". A global `--until`
+#: records `await_predicate`; `wait-and-analyze` records its own internals.
+_WAIT_COMMANDS = frozenset({"await_predicate", "wait_stable", "wait_changed", "wait_idle"})
+
+
 def _warn_if_wait_could_have_been_until(engine: Engine, waited_for: str | None) -> None:
     """Soft lint: a settle-wait straight after an action is a `--until` the caller did not know.
 
@@ -617,11 +622,26 @@ def _warn_if_wait_could_have_been_until(engine: Engine, waited_for: str | None) 
     except Exception:  # pragma: no cover - best effort
         return
     # Unlike the redundant-analyze lint, this runs BEFORE its own command is journaled, so the
-    # action being followed is the newest entry, not the one behind it.
+    # call being followed is the newest entry, not the one behind it.
     if not events:
         return
     previous = events[-1]
     if not previous.get("ok"):
+        return
+    # A global `--until` is journaled as its own `await_predicate` entry, so the newest entry
+    # after `tap-and-analyze --until X` is the await, not the tap. `await_outcome` never reaches
+    # the journal at all — it is attached to the emitted result — so the *entry kind* is the only
+    # usable signal that the caller already waited.
+    if previous.get("cmd") in _WAIT_COMMANDS:
+        logger.warning(
+            "the call before this already waited%s — you were handed the settled screen. Act on "
+            "that observation instead of re-reading it. When you do need to wait, name the "
+            "element you are about to act on (`--until 'rid:<target>'`), which returns as soon as "
+            "that element exists; a screen-wide predicate like `!text:Loading` waits for "
+            "EVERYTHING on the page — measured 25.3s on a streaming feed against 2.3s for the "
+            "element that was already there.",
+            " with `--until`" if previous.get("cmd") == "await_predicate" else "",
+        )
         return
     prev = previous.get("result")
     if not isinstance(prev, dict) or not prev.get("observation"):
@@ -629,13 +649,14 @@ def _warn_if_wait_could_have_been_until(engine: Engine, waited_for: str | None) 
     action = prev.get("action")
     if not isinstance(action, str):
         return
-    predicate = f"text:{waited_for}" if waited_for else "text:<label>"
+    predicate = f"text:{waited_for}" if waited_for else "rid:<the element you will act on next>"
     logger.warning(
         "this wait follows `%s`, which already observed the screen. If you know what you are "
         "waiting for, pass it to the action instead: `%s ... --until '%s'` waits and returns the "
         "settled screen in ONE call, and reports `await_outcome` so you can tell arrived from "
-        "timed-out. A predicate-less settle wait has to watch the screen go quiet, so it is "
-        "slower than waiting for the thing itself.",
+        "timed-out. Name the element you are about to act on rather than the whole screen: a "
+        "predicate-less settle wait, or a screen-wide one like `!text:Loading`, waits for every "
+        "last thing on the page.",
         action,
         f"{action}-and-analyze" if not action.endswith("-and-analyze") else action,
         predicate,
