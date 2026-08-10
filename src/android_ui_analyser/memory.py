@@ -722,6 +722,40 @@ _GENERIC_TITLES = frozenset(
         "crear",
         "nouveau",
         "nuovo",
+        # A screen is never named after the control that leaves it. `title_of` reads the
+        # topmost text in the upper fifth of the display, and on a bottom sheet that band is
+        # the dismiss chrome, not the heading — so a sign-up sheet reading "Create your
+        # account" was recorded as the screen `cancel`. Measured 2026-08-10: an agent called
+        # that "a misleading map name" and fell back to reading the raw text itself.
+        "cancel",
+        "close",
+        "dismiss",
+        "back",
+        "done",
+        "skip",
+        "next",
+        "ok",
+        "x",
+        "cancelar",
+        "cerrar",
+        "atras",
+        "listo",
+        "hecho",
+        "omitir",
+        "siguiente",
+        "voltar",
+        "fechar",
+        "pular",
+        "annuler",
+        "fermer",
+        "retour",
+        "termine",
+        "passer",
+        "annulla",
+        "chiudi",
+        "indietro",
+        "fatto",
+        "avanti",
     }
 )
 
