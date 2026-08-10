@@ -164,3 +164,20 @@ def test_a_missing_wait_result_is_treated_as_unverified() -> None:
     """Absence of evidence is not evidence — an unavailable wait must not read as confirmation."""
     risk = Engine._stale_observation_risk(True, None)
     assert risk and "did not run" in risk
+
+
+def test_a_known_semantically_changed_destination_outweighs_a_quiet_window_timeout() -> None:
+    """A looping destination can be trustworthy even when its pixels never become fully idle."""
+    ready = {
+        **CONFIRMED_CHANGE,
+        "confirmation_timeout": True,
+        "semantic_confirmation": True,
+    }
+
+    assert Engine._stale_observation_risk(
+        True, ready, destination_confirmed=True
+    ) is None
+    assert Engine._stale_observation_risk(True, ready), (
+        "semantic movement alone is not identity evidence; without a recognised destination "
+        "the conservative caveat must remain"
+    )

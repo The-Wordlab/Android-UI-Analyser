@@ -18,6 +18,7 @@ from android_ui_analyser.cli import app
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.memory import (
     AppMemoryStore,
+    RouteStep,
     find_result,
     matches_any,
     render_map,
@@ -285,7 +286,35 @@ def test_engine_builds_map_and_sets_known_screen(tmp_path: Path) -> None:
     text = render_map(am, detail="default")
     assert "home" in text and "apps" in text and "Apps" in text
     fr = find_result(am, "image")
-    assert fr["results"] and fr["results"][0]["route"]  # route to the image tool
+    assert fr["results"] and fr["results"][0]["route"] == []
+
+
+def test_find_does_not_present_a_provisional_route_as_runnable(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    home = store.record_screen(package=P, elements=_elements(HOME), name_hint="home")
+    apps = store.record_screen(package=P, elements=_elements(APPS), name_hint="catalog")
+    store.record_route(
+        P,
+        home.name,
+        apps.name,
+        steps=[RouteStep(kind="tap", label="Catalog", resource_id="nav_catalog")],
+        verified=False,
+    )
+
+    result = find_result(store.load(P), "catalog")
+
+    assert result["results"][0]["route"] == []
+    rendered = render_map(store.load(P), find="catalog")
+    assert "route: (no verified route)" in rendered
+
+    store.record_route(
+        P,
+        home.name,
+        apps.name,
+        steps=[RouteStep(kind="tap", label="Catalog", resource_id="nav_catalog")],
+        verified=True,
+    )
+    assert find_result(store.load(P), "catalog")["results"][0]["route"]
 
 
 def test_engine_input_action_does_not_store_typed_value(tmp_path: Path) -> None:
@@ -353,11 +382,26 @@ def test_cli_map_lists_screens_routes_and_find(tmp_path, monkeypatch) -> None:
     f = runner.invoke(app, ["map", "--app", P, "--find", "image", "--json"])
     assert f.exit_code == 0, f.stderr
     fr = json.loads(f.stdout)
-    assert fr["results"] and fr["results"][0]["route"]
+    assert fr["results"] and fr["results"][0]["route"] == []
 
     # text tree (default) also names screens + routes
     t = runner.invoke(app, ["map", "--app", P])
     assert t.exit_code == 0 and "home" in t.stdout and "apps" in t.stdout
+
+    # Agents can ask for counts without receiving every question/task. The existing JSON
+    # contract remains the full evidence unless --summary is explicit.
+    summary = runner.invoke(app, ["map", "--app", P, "--audit", "--summary", "--json"])
+    assert summary.exit_code == 0, summary.stderr
+    health = json.loads(summary.stdout)
+    assert set(health["issues"]["by_severity"]) == {"error", "warning", "info"}
+    assert "by_type" in health["issues"]
+    assert {"total", "open", "by_status"} <= set(health["research_tasks"])
+
+    full_audit = runner.invoke(app, ["map", "--app", P, "--audit", "--json"])
+    assert full_audit.exit_code == 0, full_audit.stderr
+    evidence = json.loads(full_audit.stdout)
+    assert isinstance(evidence["issues"], list), "full JSON must stay backward-compatible"
+    assert isinstance(evidence["research_tasks"], list)
 
 
 # --------------------------------------------------------------- package hygiene

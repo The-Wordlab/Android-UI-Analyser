@@ -157,6 +157,63 @@ def test_cli_wait_accepts_timeout_ms_alias(monkeypatch: pytest.MonkeyPatch) -> N
     assert r.exit_code == 0, r.stderr
 
 
+def test_wait_after_change_restarts_when_result_arrives_after_quiet_loading_shell() -> None:
+    """A first stable frame is provisional until the bounded confirmation stays quiet."""
+
+    class ScriptedHierarchy(FakeDevice):
+        def __init__(self) -> None:
+            super().__init__(screenshots=[FRAME_A] * 80)
+            self.frames = [
+                '<hierarchy><node text="Initial"/></hierarchy>',
+                '<hierarchy><node text="Working"/></hierarchy>',
+                '<hierarchy><node text="Working"/></hierarchy>',
+                '<hierarchy><node text="Working"/></hierarchy>',
+                '<hierarchy><node text="Result"/></hierarchy>',
+            ]
+
+        def dump_hierarchy(self, compressed: bool = False) -> str:
+            self.hierarchy_calls += 1
+            return self.frames[min(self.hierarchy_calls - 1, len(self.frames) - 1)]
+
+    dev = ScriptedHierarchy()
+    eng = _engine(dev)
+
+    out = eng.wait_after_change(
+        interval_ms=1,
+        settle_ms=2,
+        confirmation_ms=35,
+        timeout_ms=2000,
+    )
+
+    assert out.ok and out.action == "wait-after-change"
+    assert "1 late change(s) restabilized" in (out.detail or "")
+
+
+def test_cli_after_change_uses_the_confirmed_engine_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dev = FakeDevice(hierarchy_xml=_XML, screenshots=[FRAME_A] * 80)
+    eng = _engine(dev)
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def fake_route(_engine, method: str, **kwargs):
+        calls.append((method, kwargs))
+        return engine_mod.ActionResult(ok=True, action="wait-after-change")
+
+    from android_ui_analyser import cli
+
+    monkeypatch.setattr(cli, "_route", fake_route)
+    monkeypatch.setattr(cli.GlobalOpts, "engine", lambda self: eng)
+    res = runner.invoke(
+        app,
+        ["wait-and-analyze", "--after-change", "--timeout", "9000", "--observe"],
+    )
+
+    assert res.exit_code == 0, res.stderr
+    assert [method for method, _ in calls] == ["wait_after_change"]
+    assert calls[0][1]["timeout_ms"] == 9000
+
+
 # --------------------------------------------------------------- grid-based settle (animation masking)
 
 

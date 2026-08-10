@@ -288,13 +288,15 @@ instead of a fixed settle window:
 ```bash
 aua tap-and-analyze <id> --until "rid:introCard" --until-timeout 45000
 aua tap-and-analyze <id> --until "text:Chats,!text:Loading"      # terms are ANDed; ! means absent
+aua tap-and-analyze <id> --until 'text:Hello\, explorer'         # \, is a literal comma in one value
 aua tap-and-analyze <id> --until "net:POST /v1/chat,text:x ="    # backend replied AND the screen shows it
 ```
 
 The response then carries `await_outcome` — `satisfied` / `screen-changed` / `timeout` — plus
 per-term results, so a slow backend is distinguishable from a hang. Term prefixes are `text:`,
 `rid:`, `desc:`, `net:` (a completed HTTP exchange, needs `aua proxy start`) and `log:`
-(logcat since the wait began, no proxy needed).
+(logcat since the wait began, no proxy needed). AUA keeps hierarchy polling cheap, then uses
+available OCR before accepting `!text:` as visually absent or declaring a positive `text:` timeout.
 
 > **Never re-tap on `nothing changed` / `stale_risk`.** The settle can only wait ~1.1s, so a
 > slower screen reports "unchanged" for an action that landed. It cannot tell "no effect" from
@@ -418,12 +420,17 @@ Because of that, `analyze` hands navigation affordances back to you **inline**, 
 
 ```bash
 aua goto "image creator"      # replay the remembered steps: selector-matched, verified per hop
-aua goto "settings" --plan    # print the annotated route (steps/replayable/destructive), don't act
-aua goto "onboarding"         # cross-app auth legs (Google sign-in via Chrome) replay too
+aua goto "settings" --plan    # print every step and risk; do not act
+aua goto "onboarding"         # safe UI steps run; cross-app/deeplink effects return a refusal preview
+aua goto "onboarding" --allow-unsafe  # only after reviewing that preview
 aua goto "login" --allow-destructive   # required when a step matches memory.destructive_labels
 ```
 
-`goto` resolves the goal (fuzzy) against the map, walks the shortest **verified** route from the current screen, and replays each edge's recorded steps — matching by resource-id first, then label — re-checking `known_screen` after every hop. Known in-app hops are hierarchy-only for speed; OCR runs only when a remembered selector is absent or hierarchy-only arrival verification fails. Transit/foreign screens keep automatic OCR. A newly auto-observed edge is provisional until the same transition is observed again (a passive observation landing on an already-known screen verifies it immediately); selectorless edges are retained for audit but rejected from navigation. Auth excursions through `memory.transit_packages` (Google sign-in in Chrome/GMS, permission dialogs) are recorded as **one edge on the origin app** and replay end-to-end; a step whose identity was redacted (e.g. an account row containing an email) hands off for one manual tap — then just re-run `goto`: it resumes mid-route, even mid-auth. Destructive steps (delete / sign out / pay / …) are refused without `--allow-destructive`. On divergence it stops and hands back the failing step, the remaining steps, the current screen, and its elements (exit `1`); it exits `0` on arrival, returning the destination's `elements` (fresh ids). It runs through the warm daemon too.
+`goto` resolves the goal (fuzzy) against the map, walks the shortest **verified** route from the current screen, and replays each edge's recorded steps — matching by resource-id first, then label — re-checking `known_screen` after every hop. Known in-app hops are hierarchy-only for speed; OCR runs only when a remembered selector is absent or hierarchy-only arrival verification fails. Transit/foreign screens keep automatic OCR. A newly auto-observed edge is provisional until the same transition is observed again; a cross-package transit journey supplies independent corroboration. Selectorless and conflicting edges are retained for audit but rejected from navigation.
+
+An observed route proves that its actions preceded a destination; it does not prove those actions were navigation-only. `goto` therefore preflights the **whole** route before its first step. Ordinary semantic taps, scrolls, waits, and Back remain automatic. Deeplinks, external-package actions, settings/data/environment mutation, app lifecycle changes, and other actions with unproven side effects return `code: unsafe_route` plus the annotated `route`, `risks`, and `required_opt_in`; no route step has run. Re-run with `--allow-unsafe` only after reviewing that preview. Destructive labels (delete / sign out / pay / …) separately require `--allow-destructive`; a route containing both classes requires both flags. Prefer an explicitly authored flow for setup or mutation journeys.
+
+Auth excursions through `memory.transit_packages` (Google sign-in in Chrome/GMS, permission dialogs) are recorded as **one edge on the origin app**, but their cross-package steps require that deliberate unsafe-route opt-in. A step whose identity was redacted (e.g. an account row containing an email) hands off for one manual tap — then re-run `goto --from-here` to resume mid-route, even mid-auth. On divergence it reports work already performed and replans from the actual recognized screen when another verified route exists, without replaying the failed edge. Reaching the target earlier than an obsolete intermediate is success. It exits `0` on arrival, returning the destination's `elements` (fresh ids). It runs through the warm daemon too.
 
 ### Replay whole journeys in one call (flows)
 
@@ -462,7 +469,7 @@ steps:
 
 ```bash
 aua map                       # learned screens + routes for the current app
-aua map --find "image"        # just the route to a target
+aua map --find "image"        # verified route only; provisional evidence is not replay advice
 aua map --context flags-catalog_experiment-…  # one verified feature-flag context
 aua map --all-contexts        # compare variants across contexts
 aua map --audit               # ambiguities + questions for a research agent
@@ -720,8 +727,8 @@ aua daemon stop           # stop the daemon
 aua orient                # the orientation blob on demand, any time
 ```
 
-`daemon start` prints what the tool already knows about the foreground app — description,
-screens, routes, mined deeplinks, login recipes, quirks. That is genuinely useful the first
+`daemon start` prints a bounded current projection of what the tool already knows about the foreground app — description,
+screens, routes, selected deeplinks, login recipes, quirks, plus counts and an `aua about` pointer when more exists. Stale, wrong-version, and superseded facts retain their evidence but are filtered from `about`/`orient`. That is genuinely useful the first
 time in a session and pure noise on every restart afterwards, so `--quiet` suppresses it and
 `aua orient` prints it whenever you actually want it.
 

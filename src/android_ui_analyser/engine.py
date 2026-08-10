@@ -34,6 +34,7 @@ from .errors import (
     SelectorAmbiguousError,
     SelectorNotFoundError,
     StabilityTimeout,
+    StaleElementIdError,
     UsageError,
 )
 from .memory import (
@@ -48,8 +49,10 @@ from .memory import (
     context_view,
     is_destructive_step,
     matches_any,
+    playbook_view,
     redact_label,
     resolve_goal,
+    route_step_risks,
     screen_skips_ocr,
     step_display,
 )
@@ -146,6 +149,44 @@ class _AwaitTerm(NamedTuple):
     negated: bool
 
 
+def _split_await_terms(predicate: str) -> list[str]:
+    r"""Split comma-separated terms while allowing a literal comma as ``\,``.
+
+    Shell quotes protect spaces from the shell; they cannot tell this grammar whether a comma
+    belongs to a label or separates two terms because the quote characters are already gone by
+    the time Python receives the argument.  A small explicit escape keeps the grammar usable:
+    ``--until 'text:Hello\, friend,!text:Loading'``.  Only comma and backslash are special, so
+    values such as Windows-looking paths or regular apostrophes are not accidentally rewritten.
+    """
+    chunks: list[str] = []
+    current: list[str] = []
+    escaped = False
+    for char in predicate:
+        if escaped:
+            if char in {",", "\\"}:
+                current.append(char)
+            else:
+                # Preserve an escape that does not belong to this tiny grammar.  In particular,
+                # regex-like text remains byte-for-byte what the caller supplied.
+                current.extend(("\\", char))
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+        elif char == ",":
+            chunks.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    if escaped:
+        raise UsageError(
+            "await predicate ends with an incomplete escape",
+            hint="Use `\\,` for a literal comma and `\\\\` for a literal backslash.",
+        )
+    chunks.append("".join(current))
+    return chunks
+
+
 def _parse_await_terms(predicate: str) -> list[_AwaitTerm]:
     """``"rid:resultCard,!text:Generating"`` → two terms, ANDed.
 
@@ -160,10 +201,10 @@ def _parse_await_terms(predicate: str) -> list[_AwaitTerm]:
         raise UsageError(
             "await needs a predicate",
             hint="e.g. `aua await-and-analyze 'rid:resultCard,!text:Generating'` — comma-separated terms, "
-            "all of which must hold; `!` means must be absent.",
+            "all of which must hold; `!` means must be absent; `\\,` is a literal comma.",
         )
     terms: list[_AwaitTerm] = []
-    for chunk in raw.split(","):
+    for chunk in _split_await_terms(raw):
         piece = chunk.strip()
         if not piece:
             continue
@@ -173,13 +214,17 @@ def _parse_await_terms(predicate: str) -> list[_AwaitTerm]:
         if not sep or not value.strip():
             raise UsageError(
                 f"await term {piece!r} needs a <field>:<value> form",
-                hint="fields: " + ", ".join(sorted(_AWAIT_PREFIXES)) + " (prefix with ! for absent)",
+                hint="fields: "
+                + ", ".join(sorted(_AWAIT_PREFIXES))
+                + " (prefix with ! for absent)",
             )
         by = _AWAIT_PREFIXES.get(prefix.strip().lower())
         if by is None:
             raise UsageError(
                 f"await term {piece!r} names an unknown field {prefix.strip()!r}",
-                hint="fields: " + ", ".join(sorted(_AWAIT_PREFIXES)) + " (prefix with ! for absent)",
+                hint="fields: "
+                + ", ".join(sorted(_AWAIT_PREFIXES))
+                + " (prefix with ! for absent)",
             )
         terms.append(_AwaitTerm(text=piece, by=by, value=value.strip(), negated=negated))
     if not terms:
@@ -256,9 +301,7 @@ def _region_from_point(cx: int, cy: int, width: int, height: int) -> str:
     return names[gy][gx]
 
 
-def _package_from_xml(
-    xml: str, ignore: Sequence[str] = ("com.android.systemui",)
-) -> str | None:
+def _package_from_xml(xml: str, ignore: Sequence[str] = ("com.android.systemui",)) -> str | None:
     """Cheap foreground-package guess from a hierarchy dump (avoids an app_current RPC).
 
     Picks the most common ``package=`` among nodes, excluding *ignore* globs — system
@@ -332,7 +375,7 @@ def _goto_handoff(
             if (e.text or e.content_desc)
         ][:20],
         "hint": hint
-        or "route diverged — finish the failed step, then `aua goto \"…\" --from-here` "
+        or 'route diverged — finish the failed step, then `aua goto "…" --from-here` '
         "(or continue with `aua analyze` + `aua tap-and-analyze`)",
     }
     if failed_step is not None:
@@ -361,9 +404,25 @@ def detail_tokens(outcome: str, **fields: Any) -> str:
 # device as a no-op-or-crash, so it is rejected up front rather than looking like it worked.
 _KEY_NAMES = frozenset(
     {
-        "home", "back", "left", "right", "up", "down", "center", "menu", "search",
-        "enter", "delete", "del", "recent", "recents", "volume_up", "volume_down",
-        "volume_mute", "camera", "power",
+        "home",
+        "back",
+        "left",
+        "right",
+        "up",
+        "down",
+        "center",
+        "menu",
+        "search",
+        "enter",
+        "delete",
+        "del",
+        "recent",
+        "recents",
+        "volume_up",
+        "volume_down",
+        "volume_mute",
+        "camera",
+        "power",
     }
 )
 
@@ -899,9 +958,7 @@ class Engine:
 
         t0 = time.perf_counter()
         device, width, height = self._context()
-        observation = self._capture_hierarchy_with_ocr(
-            device, width, height, with_ocr=None
-        )
+        observation = self._capture_hierarchy_with_ocr(device, width, height, with_ocr=None)
         elements = observation.elements + observation.ocr_elements
         package = observation.package
         app = device.current_app()
@@ -1134,9 +1191,7 @@ class Engine:
         use_vision = force_vision
         xml_dump: str | None = None
         if not force_vision and not force_hierarchy:
-            decision = self._gate_decide(
-                hierarchy_elements, package=package, activity=activity
-            )
+            decision = self._gate_decide(hierarchy_elements, package=package, activity=activity)
             if decision.use_vision and routing.allows(Tier.vision, ceiling):
                 # Prefer WebView DOM/a11y enrichment over OCR when the tree looks hollow.
                 wv_cfg = self.config.perception.webview
@@ -1149,7 +1204,9 @@ class Engine:
                     if webview_mod.should_try_webview(hierarchy_elements, xml_dump):
                         shell = None
                         if wv_cfg.cdp:
-                            shell = lambda cmd: str(device.shell(cmd) if hasattr(device, "shell") else "")  # noqa: E731
+                            shell = lambda cmd: str(  # noqa: E731
+                                device.shell(cmd) if hasattr(device, "shell") else ""
+                            )
                         enriched = webview_mod.enrich(
                             xml_dump,
                             screen_size=(w, h),
@@ -1276,20 +1333,14 @@ class Engine:
         _repaired, _repair_provider = (
             self._repair_lossy_text(device, elements)
             if not use_vision
-            and not (
-                hierarchy_observation is not None and hierarchy_observation.ocr_provider
-            )
+            and not (hierarchy_observation is not None and hierarchy_observation.ocr_provider)
             else (0, None)
         )
         if _repair_provider and _repair_provider not in providers_used:
             # Provenance matters: text that came from OCR is not text the app exposed.
             providers_used.append(_repair_provider)
         _lossy, _lossy_hint = _detect_lossy_text(elements)
-        if (
-            _lossy
-            and hierarchy_observation is not None
-            and hierarchy_observation.ocr_provider
-        ):
+        if _lossy and hierarchy_observation is not None and hierarchy_observation.ocr_provider:
             _lossy_hint = (
                 "The hierarchy contains unrepresentable text; raw Apple Vision OCR elements "
                 "are included alongside it with source=ocr. Compare both observations."
@@ -1426,9 +1477,7 @@ class Engine:
         # --- T3: vision, if allowed and useful ---
         want_vision = force_vision
         if not force_vision and routing.allows(Tier.vision, ceiling):
-            decision = self._gate_decide(
-                hierarchy_elements, package=package, activity=activity
-            )
+            decision = self._gate_decide(hierarchy_elements, package=package, activity=activity)
             kind = routing.classify_query(query)
             want_vision = decision.use_vision or kind is routing.QueryKind.visual or pin_grounding
 
@@ -1706,9 +1755,7 @@ class Engine:
             # earliest readers here are handed a live `device` by their caller.
             if self._device is not None:
                 with contextlib.suppress(Exception):
-                    self._mem.claim_session(
-                        self._device.serial, self._device.instance_token()
-                    )
+                    self._mem.claim_session(self._device.serial, self._device.instance_token())
         return self._mem
 
     def _version_for(self, device: Device, package: str) -> str | None:
@@ -1720,9 +1767,7 @@ class Engine:
                 self._version_cache[package] = None
         return self._version_cache[package]
 
-    def _sync_runtime_flag_context(
-        self, device: Device, package: str, mem: AppMemoryStore
-    ) -> bool:
+    def _sync_runtime_flag_context(self, device: Device, package: str, mem: AppMemoryStore) -> bool:
         """Discover already-active feature flags before assigning a screen context."""
         cfg = self.config.flags
         configured = package in cfg.prefs_files or package in cfg.context_keys
@@ -1802,11 +1847,7 @@ class Engine:
             from .perf import elements_fingerprint
 
             fp = elements_fingerprint(elements)
-            if (
-                perf.skip_unchanged_memory
-                and not context_changed
-                and fp == self._last_mem_fp
-            ):
+            if perf.skip_unchanged_memory and not context_changed and fp == self._last_mem_fp:
                 mcfg = self.config.memory
                 hints = (
                     mem.navigation_hints(
@@ -1927,9 +1968,7 @@ class Engine:
         cached = self._read_cache()
         return cached.screen.package if cached else None
 
-    def _next_actions(
-        self, obs: AnalyzeResult, *, limit: int = 12
-    ) -> list[dict[str, Any]] | None:
+    def _next_actions(self, obs: AnalyzeResult, *, limit: int = 12) -> list[dict[str, Any]] | None:
         """What can be done from here, decision-ready, with each control's learned cost attached.
 
         This exists to remove a *reasoning* step, not a call: the post-action screen already came
@@ -1966,7 +2005,7 @@ class Engine:
             return None
         # Labelled first: an unlabelled container is kept (it may be the only thing that acts —
         # see `keep_actionable`) but it is not what a caller reaches for first.
-        rows.sort(key=lambda r: (0 if r.get("label") or r.get("rid") else 1))
+        rows.sort(key=lambda r: 0 if r.get("label") or r.get("rid") else 1)
         return rows[:limit]
 
     def _screen_timings_safe(self, screen: str | None) -> dict[str, Any]:
@@ -2143,9 +2182,7 @@ class Engine:
 
     # ----------------------------------------------------------------- step executor
 
-    def _source_for(
-        self, steps: list[RouteStep], index: int, origin_package: str | None
-    ) -> str:
+    def _source_for(self, steps: list[RouteStep], index: int, origin_package: str | None) -> str:
         """Analyze source between steps: ``auto`` when the NEXT step runs in a foreign
         (transit) package — its screen may be vision-tier — else the fast hierarchy path."""
         nxt = steps[index] if index < len(steps) else None
@@ -2184,6 +2221,7 @@ class Engine:
         flow_depth: int = 0,
         hierarchy_ocr: bool = True,
         flow_dir: Path | None = None,
+        allow_unsafe_route_effects: bool = True,
     ) -> tuple[StepFailure | None, AnalyzeResult]:
         """Execute *steps* with selector matching, settle waits, and re-perception.
 
@@ -2200,13 +2238,22 @@ class Engine:
         to the sub-flow.
         """
         if res is None:
-            res = self._analyze_route_step(
-                steps, 0, origin_package, hierarchy_ocr=hierarchy_ocr
-            )
+            res = self._analyze_route_step(steps, 0, origin_package, hierarchy_ocr=hierarchy_ocr)
         lexicon = self.config.memory.destructive_labels
         for i, s in enumerate(steps):
             if is_destructive_step(s, lexicon) and not allow_destructive:
                 return StepFailure("destructive_step", i, s), res
+            non_destructive_risks = [
+                risk
+                for risk in route_step_risks(
+                    s,
+                    origin_package=origin_package,
+                    destructive_labels=lexicon,
+                )
+                if risk["code"] != "destructive"
+            ]
+            if non_destructive_risks and not allow_unsafe_route_effects:
+                return StepFailure("unsafe_route_step", i, s), res
             kind = s.kind
             reanalyze = True  # most kinds change state → settle + re-perceive
             settle = True
@@ -2242,9 +2289,7 @@ class Engine:
                     # A step that typed nothing must diverge, not pass quietly: a flow whose
                     # input never landed goes on to assert against a screen it never reached,
                     # and reports the app's fault instead of its own.
-                    if not self.input_text(
-                        el.id, s.text or "", submit=s.submit, observe=False
-                    ).ok:
+                    if not self.input_text(el.id, s.text or "", submit=s.submit, observe=False).ok:
                         return StepFailure("input_not_applied", i, s), res
             elif kind == "tap-point":
                 point = _parse_point(s.arg)
@@ -2367,6 +2412,7 @@ class Engine:
                         hierarchy_ocr=hierarchy_ocr,
                         # substeps came from the same file, so "next to me" is unchanged
                         flow_dir=flow_dir,
+                        allow_unsafe_route_effects=allow_unsafe_route_effects,
                     )
                     if subfail is not None:
                         return subfail, res
@@ -2388,6 +2434,7 @@ class Engine:
                         hierarchy_ocr=hierarchy_ocr,
                         # substeps came from the same file, so "next to me" is unchanged
                         flow_dir=flow_dir,
+                        allow_unsafe_route_effects=allow_unsafe_route_effects,
                     )
                     if subfail is None:
                         break
@@ -2398,7 +2445,13 @@ class Engine:
             elif kind == "goto":
                 if not allow_goto_steps or not s.arg:
                     return StepFailure("unsupported_action", i, s), res
-                out = self.goto(s.arg, allow_destructive=allow_destructive)
+                out = self.goto(
+                    s.arg,
+                    allow_destructive=allow_destructive,
+                    # A goto nested in an explicitly authored flow is already deliberate
+                    # execution; keep flow semantics while standalone learned goto stays safe.
+                    allow_unsafe=True,
+                )
                 if not out.get("ok"):
                     return StepFailure(str(out.get("code") or "route_unknown"), i, s), res
                 settle = False  # goto verified arrival; just refresh our view
@@ -2429,6 +2482,7 @@ class Engine:
                     flow_depth=flow_depth + 1,
                     hierarchy_ocr=hierarchy_ocr,
                     flow_dir=sub_dir,
+                    allow_unsafe_route_effects=allow_unsafe_route_effects,
                 )
                 if subfail is not None:
                     return StepFailure(subfail.code, i, s), res  # surface sub-failure here
@@ -2497,9 +2551,7 @@ class Engine:
             return False
         timeout_ms = min(int(nxt.timeout_ms or 3000), 4000)
         if nxt.kind in ("wait-for", "assert-visible") and nxt.arg:
-            return self.has(
-                nxt.arg, timeout_ms=timeout_ms, by=nxt.by or "text"
-            ).found
+            return self.has(nxt.arg, timeout_ms=timeout_ms, by=nxt.by or "text").found
         if nxt.kind in ("tap", "long-press", "input", "clear", "a11y-scroll"):
             if nxt.resource_id:
                 return self.has(nxt.resource_id, timeout_ms=timeout_ms, by="id").found
@@ -2543,9 +2595,7 @@ class Engine:
                 continue
             resume = matches[-1]
             remaining = len(steps) - resume
-            if best is None or remaining < best[2] or (
-                remaining == best[2] and resume > best[1]
-            ):
+            if best is None or remaining < best[2] or (remaining == best[2] and resume > best[1]):
                 best = (edge, resume, remaining)
         if best is None:
             return None
@@ -2553,9 +2603,7 @@ class Engine:
 
     # ----------------------------------------------------------------- planner (§7.3)
 
-    def _planner_view(
-        self, res: AnalyzeResult
-    ) -> tuple[list[dict[str, Any]], ScreenImage | None]:
+    def _planner_view(self, res: AnalyzeResult) -> tuple[list[dict[str, Any]], ScreenImage | None]:
         """Token-light element list for the planner (+ a screenshot only if weakly labelled)."""
         elements = [
             {
@@ -2614,11 +2662,7 @@ class Engine:
                 return True, res
             if action == "give-up":
                 return False, res
-            el = (
-                res.element_by_id(decision.target_id)
-                if decision.target_id is not None
-                else None
-            )
+            el = res.element_by_id(decision.target_id) if decision.target_id is not None else None
             if action in ("tap", "input") and el is None:
                 return False, res  # invalid/off-screen id → hand off rather than guess
             if el is not None:  # destructive guard applies to the planner too
@@ -2675,8 +2719,10 @@ class Engine:
         plan: bool = False,
         max_steps: int = 8,
         allow_destructive: bool = False,
+        allow_unsafe: bool = False,
         assist: bool = False,
         from_here: bool = False,
+        _attempted_route_ids: set[str] | None = None,
     ) -> dict[str, Any]:
         """Drive to a remembered screen via the app map (PRD §6b).
 
@@ -2685,7 +2731,10 @@ class Engine:
         On any mismatch it stops and hands back the remaining route/steps + the current
         screen, so the caller can continue manually. ``plan=True`` returns the annotated
         route without acting. Destructive steps (config ``memory.destructive_labels``)
-        are refused unless *allow_destructive*.
+        are refused unless *allow_destructive*. Deeplinks, cross-package actions, settings/data
+        mutation, app lifecycle changes, environment changes, and other actions not provably
+        limited to navigation are refused unless *allow_unsafe*. A refusal includes the full
+        route/risk preview and occurs before the first state-changing step.
 
         ``from_here=True`` (``--from-here``): you already opened part of the journey —
         scan the first edge for the last step that still matches the *current* screen and
@@ -2752,9 +2801,7 @@ class Engine:
                 "code": "route_unknown",
                 "goal": goal,
                 "package": package,
-                "known_screens": list(
-                    context_view(app, sess.active_context_id).screens
-                ),
+                "known_screens": list(context_view(app, sess.active_context_id).screens),
                 "hint": "no known screen matches; explore with `aua analyze`",
             }
         mem.set_last_goal(serial, goal)  # remember intent for ranking even if we divert
@@ -2770,20 +2817,58 @@ class Engine:
                 "hops": [],
             }
         path = _shortest_path(
-            app, target, start=current, context_id=sess.active_context_id
+            app,
+            target,
+            start=current,
+            context_id=sess.active_context_id,
+            exclude_route_ids=_attempted_route_ids,
         )
         resume_from = 0
         from_here_preset = False
         if not path and from_here and not transit_resume:
             # Recognition may already name a mid-journey screen while a multi-step edge
             # toward the goal still has remaining selectors on screen.
-            mid = self._mid_edge_path(
-                app, target, res.elements, context_id=sess.active_context_id
-            )
+            mid = self._mid_edge_path(app, target, res.elements, context_id=sess.active_context_id)
             if mid is not None:
                 path, resume_from = mid
                 from_here_preset = True
-        route = [{"from": e.from_screen, "action": e.action, "to": e.to_screen} for e in path]
+        lexicon = self.config.memory.destructive_labels
+
+        def edge_preview(edge: RouteEdge) -> dict[str, Any]:
+            steps = edge.steps or _parse_legacy_steps(edge.action)
+            risk_rows: list[dict[str, Any]] = []
+            for step_index, step in enumerate(steps or []):
+                for risk in route_step_risks(
+                    step,
+                    origin_package=package,
+                    destructive_labels=lexicon,
+                    path=f"steps[{step_index}]",
+                ):
+                    risk_rows.append(
+                        {
+                            "step_index": step_index,
+                            "step": step_display(step),
+                            **risk,
+                        }
+                    )
+            return {
+                "from": edge.from_screen,
+                "action": edge.action,
+                "to": edge.to_screen,
+                "steps": [step_display(step) for step in (steps or [])],
+                "replayable": steps is not None,
+                "legacy": not edge.steps,
+                "risk": "requires_opt_in" if risk_rows else "safe_navigation",
+                "risks": risk_rows,
+                # Kept for compatibility with callers that consumed the original plan field.
+                "destructive": [
+                    step.label
+                    for step in (steps or [])
+                    if is_destructive_step(step, lexicon)
+                ],
+            }
+
+        route = [edge_preview(edge) for edge in path]
         if not path:
             return {
                 "ok": False,
@@ -2793,38 +2878,80 @@ class Engine:
                 "package": package,
                 "current_screen": current,
                 "hint": (
-                    "no known route from here — try `aua goto \"…\" --from-here` if you "
+                    'no known route from here — try `aua goto "…" --from-here` if you '
                     "already opened part of a remembered edge, or explore with `aua analyze`"
                     if not from_here
                     else "no known route / mid-edge match from here — explore with `aua analyze`"
                 ),
             }
-        lexicon = self.config.memory.destructive_labels
         if plan:
-            annotated = []
-            for e in path:
-                steps = e.steps or _parse_legacy_steps(e.action)
-                annotated.append(
-                    {
-                        "from": e.from_screen,
-                        "action": e.action,
-                        "to": e.to_screen,
-                        "steps": [step_display(s) for s in (steps or [])],
-                        "replayable": steps is not None,
-                        "legacy": not e.steps,
-                        "destructive": [
-                            s.label for s in (steps or []) if is_destructive_step(s, lexicon)
-                        ],
-                    }
-                )
             return {
                 "ok": True,
                 "goal": goal,
                 "target": target,
                 "plan": True,
                 "package": package,
-                "route": annotated,
+                "route": route,
                 "note": "not executed (--plan)",
+            }
+
+        # Preflight the WHOLE learned route before even trying to resume within it. An observed
+        # edge proves that its actions preceded the destination; it does not prove that a
+        # deeplink, cross-package action, or configuration step was navigation-only. Doing this
+        # before transit/from-here selector matching also guarantees a blind caller sees the
+        # side-effect reason rather than an unrelated element-miss from inside a risky route.
+        blocked: list[dict[str, Any]] = []
+        for edge_index, edge in enumerate(path):
+            edge_steps = edge.steps or _parse_legacy_steps(edge.action) or []
+            start = resume_from if edge_index == 0 and from_here_preset else 0
+            for step_index, step in enumerate(edge_steps[start:], start=start):
+                for risk in route_step_risks(
+                    step,
+                    origin_package=package,
+                    destructive_labels=lexicon,
+                    path=f"route[{edge_index}].steps[{step_index}]",
+                ):
+                    code = risk["code"]
+                    if code == "destructive" and allow_destructive:
+                        continue
+                    if code != "destructive" and allow_unsafe:
+                        continue
+                    blocked.append(
+                        {
+                            "edge_index": edge_index,
+                            "step_index": step_index,
+                            "step": step_display(step),
+                            **risk,
+                        }
+                    )
+        if blocked:
+            codes = {str(item["code"]) for item in blocked}
+            required: list[str] = []
+            if codes - {"destructive"}:
+                required.append("--allow-unsafe")
+            if "destructive" in codes:
+                required.append("--allow-destructive")
+            first = blocked[0]
+            first_edge = path[int(first["edge_index"])]
+            blocked_first_steps = first_edge.steps or _parse_legacy_steps(first_edge.action) or []
+            first_step = blocked_first_steps[int(first["step_index"])]
+            return {
+                "ok": False,
+                "code": "destructive_step" if codes == {"destructive"} else "unsafe_route",
+                "goal": goal,
+                "target": target,
+                "package": package,
+                "current_screen": current,
+                "route": route,
+                "risks": blocked,
+                "required_opt_in": required,
+                "step": {"display": step_display(first_step), **first_step.model_dump()},
+                "hint": (
+                    "No route step was executed. Review `route[].risks`, then re-run with "
+                    + " and ".join(required)
+                    + " only if every disclosed side effect is intended. For setup or mutation, "
+                    "prefer an explicitly authored `flow run` journey."
+                ),
             }
         if not from_here_preset:
             resume_from = 0
@@ -2847,9 +2974,7 @@ class Engine:
                     )
                 if transit_resume:
                     res = self.analyze(source="auto")  # transit screens may be vision-tier
-                matches = [
-                    j for j, s in enumerate(first_steps) if _match_step(res.elements, s)
-                ]
+                matches = [j for j, s in enumerate(first_steps) if _match_step(res.elements, s)]
                 if not matches:
                     if transit_resume:
                         return _goto_handoff(
@@ -2872,7 +2997,57 @@ class Engine:
                     # --from-here: last match skips already-passed prefix taps when several
                     # remembered selectors are still on screen (e.g. Apps + Settings).
                     resume_from = matches[0] if transit_resume else matches[-1]
+
         hops: list[dict[str, Any]] = []
+        attempted_route_ids = set(_attempted_route_ids or ())
+
+        def arrived_result(*, early: bool = False) -> dict[str, Any]:
+            out: dict[str, Any] = {
+                "ok": True,
+                "goal": goal,
+                "target": target,
+                "arrived": True,
+                "package": package,
+                "final_screen": res.meta.known_screen,
+                "hops": hops,
+                "route": route,
+                "elements": [e.compact() for e in res.elements],
+            }
+            if early:
+                out["early_arrival"] = True
+            return out
+
+        def replan_from(
+            reached: str | None, *, attempted_route: list[dict[str, Any]]
+        ) -> dict[str, Any] | None:
+            """Continue from a recognized divergence without replaying an attempted edge."""
+            remaining_budget = max_steps - len(hops)
+            if not reached or remaining_budget <= 0:
+                return None
+            latest = mem.load(package)
+            latest_sess = mem.load_session(serial)
+            if latest is None or not _shortest_path(
+                latest,
+                target,
+                start=reached,
+                context_id=latest_sess.active_context_id,
+                exclude_route_ids=attempted_route_ids,
+            ):
+                return None
+            follow = self.goto(
+                target,
+                max_steps=remaining_budget,
+                allow_destructive=allow_destructive,
+                allow_unsafe=allow_unsafe,
+                assist=assist,
+                _attempted_route_ids=attempted_route_ids,
+            )
+            follow["goal"] = goal
+            follow["replanned_from"] = reached
+            follow["hops"] = [*hops, *follow.get("hops", [])]
+            follow["route"] = [*attempted_route, *follow.get("route", [])]
+            return follow
+
         for i, edge in enumerate(path):
             if i >= max_steps:
                 return _goto_handoff(goal, target, "max_steps", hops, route[i:], res)
@@ -2889,14 +3064,50 @@ class Engine:
                     "(or author a flow), then goto can replay it",
                 )
             steps = all_steps[resume_from:] if i == 0 else all_steps
+            if edge.id:
+                attempted_route_ids.add(edge.id)
+            edge_executed: list[dict[str, Any]] = []
             fail, res = self._run_steps(
                 steps,
                 origin_package=package,
                 allow_destructive=allow_destructive,
+                allow_unsafe_route_effects=allow_unsafe,
                 res=res,
+                executed=edge_executed,
                 hierarchy_ocr=False,
             )
             if fail is not None:
+                reached = res.meta.known_screen
+                if edge_executed:
+                    hops.append(
+                        {
+                            "action": edge.action,
+                            "expected": edge.to_screen,
+                            "known_screen": reached,
+                            "ok": reached == target,
+                            "partial": True,
+                            "executed_steps": edge_executed,
+                            "failed_step": step_display(fail.step),
+                        }
+                    )
+                # A policy refusal or a manual handoff mid-transit did not test the edge.
+                # Demote only when a mutation produced a different recognized screen inside
+                # the origin app; that is actual contradictory route evidence.
+                if (
+                    edge_executed
+                    and edge.id
+                    and reached
+                    and reached != edge.from_screen
+                    and res.screen.package == package
+                ):
+                    with contextlib.suppress(Exception):
+                        mem.record_route_outcome(package, edge.id, ok=False, reached=reached)
+                if reached == target:
+                    return arrived_result(early=True)
+                if edge_executed:
+                    replanned = replan_from(reached, attempted_route=route[: i + 1])
+                    if replanned is not None:
+                        return replanned
                 if assist:
                     recovered, res = self._goto_assist_recover(
                         target, res, allow_destructive=allow_destructive
@@ -2927,7 +3138,8 @@ class Engine:
                     "action": edge.action,
                     "expected": edge.to_screen,
                     "known_screen": reached,
-                    "ok": reached == edge.to_screen,
+                    "ok": reached in {edge.to_screen, target},
+                    **({"executed_steps": edge_executed} if len(edge_executed) > 1 else {}),
                 }
             )
             # Replaying an edge IS the check on it, and the device is the ground truth. This
@@ -2935,11 +3147,17 @@ class Engine:
             # so a route that had stopped working stayed `verified` forever and no amount of
             # driving could clean the map. Measured 2026-08-10: 118 of 636 rows contradicted
             # another row on the same origin+action+context. Nothing here needs an agent.
-            with contextlib.suppress(Exception):
-                mem.record_route_outcome(
-                    package, edge.id, ok=reached == edge.to_screen, reached=reached
-                )
+            if edge.id:
+                with contextlib.suppress(Exception):
+                    mem.record_route_outcome(
+                        package, edge.id, ok=reached == edge.to_screen, reached=reached
+                    )
+            if reached == target:
+                return arrived_result(early=reached != edge.to_screen)
             if reached != edge.to_screen:
+                replanned = replan_from(reached, attempted_route=route[: i + 1])
+                if replanned is not None:
+                    return replanned
                 if assist:
                     recovered, res = self._goto_assist_recover(
                         target, res, allow_destructive=allow_destructive
@@ -3024,9 +3242,7 @@ class Engine:
             # A path *inside* a flow belongs to the flow, not to the caller's cwd.
             steps = anchor_paths(steps, base_dir)
         if not 0 <= from_step < len(steps):
-            raise UsageError(
-                f"--from-step {from_step} out of range (flow has {len(steps)} steps)"
-            )
+            raise UsageError(f"--from-step {from_step} out of range (flow has {len(steps)} steps)")
         steps_slice = steps[from_step:]
         lexicon = self.config.memory.destructive_labels
         if dry_run:
@@ -3048,7 +3264,9 @@ class Engine:
             }
         executed: list[dict[str, Any]] = []
 
-        def _exec(slice_start: int, res_in: AnalyzeResult | None) -> tuple[Any, AnalyzeResult, int | None]:
+        def _exec(
+            slice_start: int, res_in: AnalyzeResult | None
+        ) -> tuple[Any, AnalyzeResult, int | None]:
             ex: list[dict[str, Any]] = []
             f, r = self._run_steps(
                 steps[slice_start:],
@@ -3149,13 +3367,13 @@ class Engine:
     def explore_plan(self, *, package: str | None = None, max_tasks: int = 12) -> dict[str, Any]:
         """A prioritized exploration worklist for the calling agent (the offline-agent mode).
 
-        Reads the app's map + playbook and returns concrete next actions — probe mined
-        deeplinks (shortcuts) to learn where they land, and expand dead-end screens. The
-        agent runs these with normal `aua` commands; auto-record persists the results, so
-        re-running the plan shows what's left. This is how the agent "explores and hands
-        the result back" for aua to memorize.
+        Reads the app's map + playbook and returns concrete next actions. Existing map debt is
+        more valuable than speculative shortcuts: unresolved research comes first, then dead-end
+        screens, then unprobed deeplinks. Every task declares whether it can leave the app or
+        mutate state so an agent never turns "explore" into accidental authorization.
         """
         from .explore import _is_templated as _is_templated_uri
+        from .reconcile import ReconciliationStore
 
         mem = self._memory
         pkg = package or self.current_package()
@@ -3179,44 +3397,134 @@ class Engine:
             "routes": len(app.routes),
             "deeplinks": len(app.deeplinks),
         }
-        # 1) Unprobed, concrete deeplinks — the highest-value: each opens a screen in one hop.
-        for d in app.deeplinks:
-            if d.probed or _is_templated_uri(d.uri):
-                continue
+
+        def add_task(
+            *,
+            kind: str,
+            do: str,
+            why: str,
+            risk: str,
+            external: bool = False,
+            destructive: bool = False,
+        ) -> None:
             tasks.append(
                 {
-                    "kind": "probe_deeplink",
-                    "do": f'aua open-and-analyze "{d.uri}" && aua analyze',
-                    "why": "unprobed deeplink shortcut — record where it lands",
+                    "kind": kind,
+                    "do": do,
+                    "why": why,
+                    "risk": risk,
+                    "external": external,
+                    "destructive": destructive,
+                    "requires_explicit_authorization": destructive,
                 }
             )
-        # 2) Templated deeplinks — need a value; tell the agent to fill it.
-        for d in app.deeplinks:
-            if d.probed or not _is_templated_uri(d.uri):
-                continue
-            tasks.append(
-                {
-                    "kind": "probe_template",
-                    "do": f'fill the placeholder in "{d.uri}", then `aua open-and-analyze` it',
-                    "why": "templated deeplink — a shortcut once you supply the id",
-                }
+
+        # 1) Current structural questions. `plan` also refreshes stale task materialization, so
+        # this worklist cannot ignore hundreds of audit findings merely because deeplinks exist.
+        latest = mem.latest_session(pkg)
+        active_context = latest.active_context_id if latest else DEFAULT_CONTEXT_ID
+        research = ReconciliationStore(mem).plan(pkg, context_id=active_context)
+        issue_rank = {
+            "orphan_route": 0,
+            "route_conflict": 1,
+            "unreplayable_route": 2,
+            "stale_screen": 3,
+            "duplicate_screen": 4,
+            "poor_name": 5,
+            "provisional_route": 6,
+            "unverified_context": 7,
+            "legacy_context": 8,
+        }
+        open_research = sorted(
+            (task for task in research if task.status == "open"),
+            key=lambda task: (issue_rank.get(task.issue_type, 99), task.id),
+        )
+        for task in open_research:
+            affected = ", ".join(task.affected_ids[:3]) or "map"
+            add_task(
+                kind="resolve_map_issue",
+                do=(
+                    f'aua reconcile plan --app "{pkg}"; investigate task {task.id} '
+                    "with source or a fresh runtime observation, then submit evidence"
+                ),
+                why=f"{task.issue_type} affects {affected}",
+                risk="read_only_research",
             )
-        # 3) Dead-end screens (no outgoing routes) — likely under-explored.
-        outgoing = {e.from_screen for e in app.routes}
+
+        # 2) Dead ends before shortcuts. The instruction is explicitly non-destructive: a screen
+        # with an unknown Delete/Pay/Send control is not permission to press it.
+        outgoing = {edge.from_screen for edge in app.routes if edge.status == "verified"}
         for name in app.screens:
             if name not in outgoing:
-                tasks.append(
-                    {
-                        "kind": "expand_screen",
-                        "do": f'aua goto "{name}"; aua analyze; tap each new clickable',
-                        "why": "screen has no recorded routes out — map what it leads to",
-                    }
+                add_task(
+                    kind="expand_screen",
+                    do=(
+                        f'aua goto "{name}"; aua analyze; inspect unvisited controls one at a '
+                        "time, skipping destructive or external actions unless authorized"
+                    ),
+                    why="screen has no verified routes out — map safe navigation from it",
+                    risk="interactive_navigation",
                 )
+
+        # 3) Deeplinks are speculative external intents, not the first exploration strategy.
+        # Flag obviously destructive URI vocabulary and refuse to turn it into a ready-to-run
+        # command. Other links remain runnable, but their metadata tells an orchestrator that the
+        # action crosses the normal UI boundary and arrival must be verified.
+        destructive_words = {
+            "delete",
+            "remove",
+            "logout",
+            "signout",
+            "purchase",
+            "subscribe",
+            "payment",
+            "erase",
+        }
+        destructive_words.update(
+            word.casefold().replace(" ", "")
+            for word in self.config.memory.destructive_labels
+        )
+        for d in app.deeplinks:
+            if d.probed:
+                continue
+            normalized_uri = d.uri.casefold().replace("-", "").replace("_", "")
+            destructive = any(word and word in normalized_uri for word in destructive_words)
+            templated = _is_templated_uri(d.uri)
+            if destructive:
+                do = (
+                    f'inspect the source/handler for "{d.uri}"; do not open it without explicit '
+                    "authorization for the destructive effect"
+                )
+                risk = "destructive_external_intent"
+            elif templated:
+                do = (
+                    f'fill the placeholder in "{d.uri}" with a non-sensitive fixture, then '
+                    "`aua open-and-analyze` it and verify arrival"
+                )
+                risk = "templated_external_intent"
+            else:
+                do = f'aua open-and-analyze "{d.uri}"'
+                risk = "external_intent"
+            add_task(
+                kind="probe_template" if templated else "probe_deeplink",
+                do=do,
+                why=(
+                    "unprobed deeplink — delivered intent is not proof of arrival"
+                    if not templated
+                    else "templated deeplink needs a safe fixture and verified destination"
+                ),
+                risk=risk,
+                external=True,
+                destructive=destructive,
+            )
+
         out["tasks"] = tasks[: max(0, max_tasks)]
         out["remaining"] = len(tasks)
+        out["remaining_by_kind"] = dict(Counter(task["kind"] for task in tasks))
         out["hint"] = (
-            "run these (results auto-record), then re-run `aua explore plan` — it shrinks "
-            "as coverage grows. Save durable facts with `aua remember`."
+            "resolve map debt and safe dead ends before speculative intents; results auto-record. "
+            "Re-run `aua explore plan` as the map improves, and never treat a listed task as "
+            "authorization for destructive or external side effects."
         )
         return out
 
@@ -3353,7 +3661,16 @@ class Engine:
         app = mem.load(pkg)
         if app is None:
             return out
-        has_playbook = bool(app.description or app.deeplinks or app.recipes or app.notes)
+        session = mem.load_session(self.device.serial)
+        playbook = playbook_view(
+            app,
+            context_id=session.active_context_id,
+            max_deeplinks=8,
+            max_notes=10,
+        )
+        has_playbook = any(
+            playbook[key] for key in ("description", "deeplinks", "recipes", "notes")
+        )
         if not app.screens and not has_playbook:
             return out
         hints = mem.navigation_hints(
@@ -3371,16 +3688,27 @@ class Engine:
             suggested_gotos=hints.suggested_gotos,
             research_tasks=hints.research_tasks,
         )
-        if app.description:
-            out["description"] = app.description
-        if app.recipes:
-            out["recipes"] = {r.name: r.note for r in app.recipes}
-        if app.deeplinks:
+        if playbook["description"]:
+            out["description"] = playbook["description"]
+        if playbook["recipes"]:
+            out["recipes"] = {r.name: r.note for r in playbook["recipes"]}
+        if playbook["deeplinks"]:
             out["deeplinks"] = [
-                {"uri": d.uri, "note": d.note} for d in app.deeplinks
+                {"uri": link.uri, "note": link.note} for link in playbook["deeplinks"]
             ]
-        if app.notes:
-            out["notes"] = list(app.notes)
+        if playbook["notes"]:
+            out["notes"] = playbook["notes"]
+        counts = playbook["counts"]
+        if counts["deeplinks"] > len(playbook["deeplinks"]) or counts["notes"] > len(
+            playbook["notes"]
+        ):
+            out["playbook_more"] = {
+                "deeplinks": counts["deeplinks"] - len(playbook["deeplinks"]),
+                "notes": counts["notes"] - len(playbook["notes"]),
+                "hint": "Run `aua about` for the complete current playbook.",
+            }
+        if counts["stale_or_scoped_out"]:
+            out["playbook_filtered"] = counts["stale_or_scoped_out"]
         return out
 
     # ----------------------------------------------------------------- wait --for-stable
@@ -3611,11 +3939,16 @@ class Engine:
                 out.append({"id": e.id})
         return out
 
-    def _analyze_post_action(self, with_image: bool | str | None) -> AnalyzeResult:
+    def _analyze_post_action(
+        self,
+        with_image: bool | str | None,
+        *,
+        record_screen: bool = False,
+    ) -> AnalyzeResult:
         """Read the post-action screen, escalating thin trees exactly as ``analyze`` would."""
         obs = self.analyze(
             source="hierarchy",
-            record=False,
+            record=record_screen,
             with_image=self._effective_with_image(with_image),
         )
         # Hierarchy first because it is tens of milliseconds and answers for most screens.
@@ -3631,7 +3964,7 @@ class Engine:
                 if decision.use_vision:
                     richer = self.analyze(
                         source="auto",
-                        record=False,
+                        record=record_screen,
                         with_image=self._effective_with_image(with_image),
                     )
                     # Keep the hierarchy answer unless escalation actually found more.
@@ -3676,6 +4009,7 @@ class Engine:
         with_image: bool | str | None = None,
         *,
         settle: bool = True,
+        record_screen: bool = False,
     ) -> ActionResult:
         """Attach the post-action screen so callers skip a separate ``analyze`` round-trip.
 
@@ -3748,22 +4082,49 @@ class Engine:
                         if ready is not None:
                             ready["confirmation_timeout"] = True
                     if ready is not None:
-                        ready["confirmation_ms"] = int(
-                            (time.monotonic() - confirm_t0) * 1000
-                        )
+                        ready["confirmation_ms"] = int((time.monotonic() - confirm_t0) * 1000)
 
                 # Analyze only after the confirmation. Besides being safer, this avoids paying
                 # for and returning an OCR-enriched read of a frame we already distrust.
-                obs = self._analyze_post_action(with_image)
+                obs = self._analyze_post_action(with_image, record_screen=record_screen)
                 change: dict[str, Any] | None = None
                 with contextlib.suppress(Exception):
                     change = self._change_summary(before_state, obs)
-                if ready is not None and confirmed_stable:
+                if ready is not None and (
+                    confirmed_stable or ready.get("confirmation_timeout")
+                ):
                     ready["semantic_confirmation"] = self._change_has_semantic_effect(change)
+
+                # Post-action analyzes deliberately do not write memory because their frame may
+                # still be transitional. Recognition against the existing map is safe, though,
+                # and is strong destination evidence. Do it before evaluating stale risk so a
+                # looping animation cannot make a correctly recognised, semantically different
+                # destination look unsafe merely because its extended quiet-window timed out.
+                mem = self._memory
+                if mem is not None and self._device is not None:
+                    with contextlib.suppress(Exception):
+                        known = mem.observe_screen_passive(
+                            self._device.serial,
+                            package=obs.screen.package,
+                            elements=obs.elements,
+                            activity=obs.screen.activity,
+                            screen_height=obs.screen.height,
+                        )
+                        if known:
+                            obs.meta.known_screen = known
+
+                before_known = (before_state or {}).get("known_screen")
+                destination_confirmed = bool(
+                    obs.meta.known_screen and obs.meta.known_screen != before_known
+                )
 
                 result.observation = obs
                 result.change = change
-                caveat = self._stale_observation_risk(settle, ready)
+                caveat = self._stale_observation_risk(
+                    settle,
+                    ready,
+                    destination_confirmed=destination_confirmed,
+                )
                 if caveat:
                     obs.meta.stale_risk = caveat
                     # Also at the top level of the action result, because a runner reading only the
@@ -3791,18 +4152,6 @@ class Engine:
                     if ready.get("semantic_confirmation") is not None:
                         settle["semantic_confirmation"] = ready["semantic_confirmation"]
                     result.settle = settle
-                mem = self._memory
-                if mem is not None and self._device is not None:
-                    with contextlib.suppress(Exception):
-                        known = mem.observe_screen_passive(
-                            self._device.serial,
-                            package=obs.screen.package,
-                            elements=obs.elements,
-                            activity=obs.screen.activity,
-                            screen_height=obs.screen.height,
-                        )
-                        if known:
-                            obs.meta.known_screen = known
                 result.observation_present = True
                 result.next_actions = self._next_actions(obs)
                 nav = list(obs.meta.known_routes or []) + list(obs.meta.suggested_gotos or [])
@@ -3822,7 +4171,12 @@ class Engine:
         return result
 
     @staticmethod
-    def _stale_observation_risk(settle: bool, ready: dict[str, Any] | None) -> str | None:
+    def _stale_observation_risk(
+        settle: bool,
+        ready: dict[str, Any] | None,
+        *,
+        destination_confirmed: bool = False,
+    ) -> str | None:
         """Why this post-action observation may describe the screen as it was *before* the action.
 
         Observed: a `tap` succeeded and the device advanced, yet the returned observation reported
@@ -3858,6 +4212,16 @@ class Engine:
                 "pre-action screen. Re-analyze before concluding the action had no effect."
             )
         via = str(ready.get("via") or "?")
+        if (
+            ready.get("confirmation_timeout")
+            and destination_confirmed
+            and ready.get("semantic_confirmation") is True
+        ):
+            # The stability wait answers whether every pixel stopped moving. Recognition plus a
+            # semantic before/after delta answers the question agents actually need: whether the
+            # action reached a different known destination. Persistent animation must not turn
+            # that stronger evidence into a false stale warning.
+            return None
         if ready.get("confirmation_timeout"):
             return (
                 "post-action read looked transitional and its extended stability confirmation "
@@ -4087,9 +4451,7 @@ class Engine:
         from .identity import find_by_stable_key, remap_ids, stable_key
 
         cached = self._read_cache()
-        current = (
-            self.analyze(source="auto", record=False) if fresh or cached is None else cached
-        )
+        current = self.analyze(source="auto", record=False) if fresh or cached is None else cached
 
         from_id: int | None = None
         key: str | None = None
@@ -4120,9 +4482,7 @@ class Engine:
         hits = find_by_stable_key(current.elements, key)
         if len(hits) == 1:
             el = hits[0]
-            return ResolveResult(
-                ok=True, from_id=from_id, to_id=el.id, stable_key=key, element=el
-            )
+            return ResolveResult(ok=True, from_id=from_id, to_id=el.id, stable_key=key, element=el)
         if not hits:
             raise ElementNotFoundError(
                 f"no element with stable_key {key!r} on the current screen",
@@ -4236,7 +4596,9 @@ class Engine:
                 )
         return matches[0]
 
-    def _match_by_vision(self, elements: list[Element], text: str) -> tuple[list[Element], list[Element]]:
+    def _match_by_vision(
+        self, elements: list[Element], text: str
+    ) -> tuple[list[Element], list[Element]]:
         """Look again with vision when the hierarchy has no element carrying ``text``.
 
         Web content publishes almost nothing to the accessibility tree, so `--text Continue`
@@ -4283,18 +4645,86 @@ class Engine:
     def _target(
         self, element_id: int | None, selector: dict[str, Any] | None, *, verb: str = "tap"
     ) -> Element:
-        """The element an action addresses: an id from the last analyze, or a selector."""
+        """The element an action addresses: a freshly-bound prior id, or a selector.
+
+        Integer ids are reading-order ordinals, not identities.  A network update can renumber a
+        dynamic list between ``analyze`` and ``long-press`` without any AUA command in between;
+        resolving the integer straight out of the old cache then acts on a different row.  Before
+        every numeric action, re-read and remap the cached element by stable identity.  When the
+        evidence no longer names the same labelled control, refuse before touching the device.
+        """
         if selector:
             # A verb that needs something tappable may break a tie on clickability.
-            return self.resolve_selector(
-                **selector, prefer_clickable=verb in ("tap", "long-press")
-            )
+            return self.resolve_selector(**selector, prefer_clickable=verb in ("tap", "long-press"))
         if element_id is None:
             raise UsageError(
                 f"{verb} needs an element id or a selector",
                 hint=f"`aua {verb} 9`, `aua {verb} --rid someId`, or `aua {verb} --text 'Label'`",
             )
-        return self._resolve(element_id)
+        return self._resolve_action_id(element_id, verb=verb)
+
+    @staticmethod
+    def _binding_label(element: Element) -> tuple[str, str]:
+        """Normalised semantic label used to detect a resource-id that changed owners."""
+
+        def normalise(value: str | None) -> str:
+            return re.sub(r"\s+", " ", (value or "").strip()).casefold()
+
+        return normalise(element.text), normalise(element.content_desc)
+
+    def _resolve_action_id(self, element_id: int, *, verb: str) -> Element:
+        """Remap a frame-local id onto a fresh hierarchy, or raise ``stale_element_id``.
+
+        Resource ids are normally the strongest binding, but reusable row layouts give every
+        item the same rid.  The label check is therefore intentional even after ``remap_ids``:
+        if cached id 8 said "Draft Orion" and the same row now says "Suggested reply", touching
+        the overlapping node would silently perform the requested action on the wrong content.
+        """
+        from .identity import remap_ids, stable_key
+
+        cached = self._read_cache()
+        if cached is None:
+            raise ElementNotFoundError(
+                "no cached analyze result", hint="Run `aua analyze` first to assign element ids."
+            )
+        previous = cached.element_by_id(element_id)
+        if previous is None:
+            valid = ", ".join(str(e.id) for e in cached.elements[:20]) or "(none)"
+            raise ElementNotFoundError(
+                f"element id {element_id} is not in the last analyze (valid: {valid})",
+                hint="Re-run `aua analyze`; ids change when the screen changes.",
+            )
+
+        # Freshness validation compares hierarchy bindings. Running optional OCR here adds an
+        # unrelated provider call to every numeric action and defeats goto's hierarchy-first
+        # policy; `_run_steps` already performs one explicit OCR retry on a selector miss.
+        current = self.analyze(source="hierarchy", with_ocr=False, record=False)
+        mapped = remap_ids(cached.elements, current.elements).get(element_id)
+        candidate = current.element_by_id(mapped) if mapped is not None else None
+        previous_key = previous.stable_key or stable_key(previous)
+        labels_match = candidate is not None and self._binding_label(
+            previous
+        ) == self._binding_label(candidate)
+        if candidate is None or not labels_match:
+            selector_hint = "a stable --rid/--text/--desc selector"
+            if previous.resource_id:
+                selector_hint = f"--rid {(previous.resource_id or '').rsplit('/', 1)[-1]}"
+            elif previous.content_desc:
+                selector_hint = f"--desc {previous.content_desc!r}"
+            elif previous.text:
+                selector_hint = f"--text {previous.text!r}"
+            current_label = None
+            if candidate is not None:
+                current_label = candidate.text or candidate.content_desc
+            detail = f"; it now resolves to {current_label!r}" if current_label else ""
+            raise StaleElementIdError(
+                f"element id {element_id} is stale for {verb}: binding {previous_key!r} changed{detail}",
+                hint=(
+                    f"No action was sent. Use {selector_hint}, or re-run `aua analyze` and use "
+                    "an id from that fresh observation."
+                ),
+            )
+        return candidate
 
     def target_report(
         self,
@@ -4355,7 +4785,7 @@ class Engine:
             ),
         }
 
-    def _acting_target(self, el: Element) -> tuple[Element, dict[str, Any]]:
+    def _acting_target(self, el: Element, *, verb: str = "tap") -> tuple[Element, dict[str, Any]]:
         """The node that will receive the interaction, plus the report of that choice.
 
         Retargets **only when the named node carries no interaction at all**, which is the
@@ -4376,6 +4806,15 @@ class Engine:
         if all(other.id != el.id for other in pool):
             pool.append(el)
         found = acting_node(pool, el)
+        if verb == "long-press" and found.relation == "sibling-subtree":
+            raise UsageError(
+                "long-press will not retarget a label into a sibling control subtree",
+                hint=(
+                    "No gesture was sent. Inspect the acting candidates with `aua target`, then "
+                    "long-press the actual control by --rid or a fresh numeric id."
+                ),
+                code="unsafe_action_target",
+            )
         report = acting_report(found)
         return (found.element if found.redirected else el), report
 
@@ -4499,7 +4938,7 @@ class Engine:
         with_image: bool | str | None = None,
     ) -> ActionResult:
         named = self._target(element_id, selector, verb="long-press")
-        el, acting = self._acting_target(named)
+        el, acting = self._acting_target(named, verb="long-press")
         cx, cy = self._aim(el)
         step = self._step("long-press", el)
         with self._acting(_action_mark("long-press", el)):
@@ -4703,9 +5142,7 @@ class Engine:
             self.device.click(cx, cy)
             self.device.clear_text()
         self._record_action_safe(step)
-        return self._observe(
-            ActionResult(ok=True, action="clear", id=el.id), observe, with_image
-        )
+        return self._observe(ActionResult(ok=True, action="clear", id=el.id), observe, with_image)
 
     # ------------------------------------------------------------- scroll internals
 
@@ -4831,7 +5268,9 @@ class Engine:
                 with_image,
             )
         if direction is None:
-            raise UsageError("swipe needs a direction or --coords", hint="e.g. `aua swipe-and-analyze up`")
+            raise UsageError(
+                "swipe needs a direction or --coords", hint="e.g. `aua swipe-and-analyze up`"
+            )
         d = direction.lower()
         box, real = self._scroll_box(from_id=from_id, selector=selector)
         x1, y1, x2, y2 = self._swipe_path(box, d, percent)
@@ -5026,15 +5465,15 @@ class Engine:
         if not known:
             raise UsageError(
                 f"unknown key '{name}'",
-                hint="Valid: " + ", ".join(sorted(_KEY_NAMES)) + ", KEYCODE_*, or a keycode number.",
+                hint="Valid: "
+                + ", ".join(sorted(_KEY_NAMES))
+                + ", KEYCODE_*, or a keycode number.",
             )
         step = self._step("key", arg=name)
         with self._acting(f"key:{name}"):
             self.device.press(name)
         self._record_action_safe(step)
-        return self._observe(
-            ActionResult(ok=True, action="key", detail=name), observe, with_image
-        )
+        return self._observe(ActionResult(ok=True, action="key", detail=name), observe, with_image)
 
     def hide_keyboard(
         self, *, observe: bool = True, with_image: bool | str | None = None
@@ -5272,6 +5711,7 @@ class Engine:
         match: str = "contains",
         ignore_case: bool = False,
         observe: bool = False,
+        adopt_action: bool = False,
     ) -> ActionResult:
         """Wait until *predicate* holds, and say **which** of three things ended the wait.
 
@@ -5384,23 +5824,136 @@ class Engine:
                 )
             return out
 
+        ui_terms = [term for term in terms if term.by in {"text", "desc"}]
+
+        def evaluate_rich() -> list[dict[str, Any]] | None:
+            """Verify UI text against hierarchy plus OCR before making a final claim.
+
+            The device selector only sees accessibility text. That is cheap enough to poll, but
+            it made ``!text:Loading`` succeed immediately on a visible canvas label and made a
+            positive result time out even though OCR could read it. Rich verification is bounded:
+            once before accepting a negated UI term and once at the deadline for a positive miss.
+            """
+            if not ui_terms:
+                return None
+            try:
+                observed = self.analyze(source="hierarchy", with_ocr=True, record=False)
+            except Exception:  # noqa: BLE001 - unavailable OCR preserves hierarchy semantics
+                return None
+            base_present = {str(result["term"]): bool(result["present"]) for result in results}
+
+            def matches(value: str, needle: str) -> bool:
+                candidate = value.casefold() if ignore_case else value
+                wanted = needle.casefold() if ignore_case else needle
+                if mode is MatchMode.exact:
+                    return candidate == wanted
+                if mode is MatchMode.regex:
+                    flags = re.IGNORECASE if ignore_case else 0
+                    return re.search(needle, value, flags) is not None
+                return wanted in candidate
+
+            rich: list[dict[str, Any]] = []
+            for term in terms:
+                if term.by not in {"text", "desc"}:
+                    present = base_present.get(term.text, False)
+                else:
+                    values: list[str] = []
+                    for element in observed.elements:
+                        if term.by == "text":
+                            values.extend(
+                                value
+                                for value in (element.text, element.content_desc)
+                                if value
+                            )
+                        elif element.content_desc:
+                            values.append(element.content_desc)
+                    # Rich analysis is an enrichment, never a replacement: a provider may return
+                    # only OCR boxes while the cheap selector already proved a hierarchy term.
+                    present = base_present.get(term.text, False) or any(
+                        matches(value, term.value) for value in values
+                    )
+                rich.append(
+                    {
+                        "term": term.text,
+                        "present": present,
+                        "satisfied": (not present) if term.negated else present,
+                    }
+                )
+            return rich
+
         started_at = time.monotonic()
         origin = snapshot()
         deadline = started_at + max(0.0, timeout_ms / 1000.0)
+        next_negative_rich_at = started_at
+        negative_ui_terms = any(term.negated for term in ui_terms)
         checks = 0
         results = evaluate()
         while True:
             checks += 1
             if all(t["satisfied"] for t in results):
-                return self._await_result("satisfied", results, started_at, checks, origin, origin,
-                                          observe)
+                if not negative_ui_terms:
+                    return self._await_result(
+                        "satisfied",
+                        results,
+                        started_at,
+                        checks,
+                        origin,
+                        origin,
+                        observe,
+                        adopt_action,
+                    )
+                # A negated accessibility miss is not proof of visual absence. Verify with OCR,
+                # but at most every two seconds while a canvas/loading label remains visible.
+                if time.monotonic() >= next_negative_rich_at:
+                    rich = evaluate_rich()
+                    next_negative_rich_at = time.monotonic() + max(2.0, poll_ms / 250.0)
+                    if rich is None or all(term["satisfied"] for term in rich):
+                        return self._await_result(
+                            "satisfied",
+                            rich or results,
+                            started_at,
+                            checks,
+                            origin,
+                            origin,
+                            observe,
+                            adopt_action,
+                        )
+                    results = rich
             now = snapshot()
             if now != origin and any(now):
-                return self._await_result("screen-changed", results, started_at, checks, origin,
-                                          now, observe)
+                return self._await_result(
+                    "screen-changed",
+                    results,
+                    started_at,
+                    checks,
+                    origin,
+                    now,
+                    observe,
+                    adopt_action,
+                )
             if time.monotonic() >= deadline:
-                return self._await_result("timeout", results, started_at, checks, origin, now,
-                                          observe)
+                rich = evaluate_rich()
+                if rich is not None and all(term["satisfied"] for term in rich):
+                    return self._await_result(
+                        "satisfied",
+                        rich,
+                        started_at,
+                        checks,
+                        origin,
+                        origin,
+                        observe,
+                        adopt_action,
+                    )
+                return self._await_result(
+                    "timeout",
+                    results,
+                    started_at,
+                    checks,
+                    origin,
+                    now,
+                    observe,
+                    adopt_action,
+                )
             time.sleep(max(0.01, poll_ms / 1000.0))
             results = evaluate()
 
@@ -5413,6 +5966,7 @@ class Engine:
         origin: tuple[str, str],
         now: tuple[str, str],
         observe: bool,
+        adopt_action: bool = False,
     ) -> ActionResult:
         elapsed = int((time.monotonic() - started_at) * 1000)
         unmet = [t["term"] for t in terms if not t["satisfied"]]
@@ -5431,7 +5985,18 @@ class Engine:
             await_terms=terms,
             elapsed_ms=elapsed,
         )
-        return self._observe(result, observe, settle=False)
+        # A standalone await is read-only. A global action ``--until`` is different: its final
+        # evidence replaces the action's early loading-shell readback, so it must run the normal
+        # recording path and consume the still-pending action into this destination. The CLI
+        # opts into this explicitly; MCP/standalone waits retain their passive behaviour.
+        return self._observe(
+            result,
+            observe,
+            settle=False,
+            # A timeout is explicitly not final evidence; recording it would merely replace an
+            # early loading shell with a later loading shell and consume the action anyway.
+            record_screen=adopt_action and outcome != "timeout",
+        )
 
     def wait(
         self,
@@ -5448,7 +6013,9 @@ class Engine:
         device = self.device
         if idle:
             device.wait_idle(timeout_ms)
-            return self._observe(ActionResult(ok=True, action="wait", detail="idle"), observe, settle=False)
+            return self._observe(
+                ActionResult(ok=True, action="wait", detail="idle"), observe, settle=False
+            )
         if not for_:
             raise UsageError("wait needs --for <text> or --idle")
         mode = MatchMode(match)
@@ -5481,7 +6048,9 @@ class Engine:
             detail = self._wait_timeout_message(
                 for_, mode=mode, by=by, ignore_case=ignore_case, absent=False
             )
-            return self._observe(ActionResult(ok=False, action="wait", detail=detail), observe, settle=False)
+            return self._observe(
+                ActionResult(ok=False, action="wait", detail=detail), observe, settle=False
+            )
         result = ActionResult(
             ok=True,
             action="wait",
@@ -5515,7 +6084,9 @@ class Engine:
         Host-polled stand-in for AccessibilityEvent push (phase 2). Prefer this over
         busy ``analyze`` loops when waiting for *any* UI change.
         """
-        interval = interval_ms if interval_ms is not None else int(self.config.daemon.watch_interval_ms)
+        interval = (
+            interval_ms if interval_ms is not None else int(self.config.daemon.watch_interval_ms)
+        )
         baseline = self.hierarchy_fingerprint()
         deadline = time.monotonic() + timeout_ms / 1000.0
         samples = 0
@@ -5539,6 +6110,85 @@ class Engine:
             f"hierarchy did not change within {timeout_ms} ms ({samples} samples)",
             hint="Increase --timeout, or the screen is idle. Use `aua wait-and-analyze --for` for a label.",
         )
+
+    def wait_after_change(
+        self,
+        *,
+        timeout_ms: int = 60_000,
+        interval_ms: int = 120,
+        settle_ms: int = 1_200,
+        confirmation_ms: int = 1_800,
+        observe: bool = False,
+    ) -> ActionResult:
+        """Wait for a change, visual settle, and a bounded late-change confirmation.
+
+        A loading shell can become visually quiet while its request is still running. Plainly
+        composing :meth:`wait_changed` with :meth:`wait_stable` therefore accepts the first quiet
+        spinner frame as the result. This contract adds a second, bounded phase: after visual
+        settle, the hierarchy must stay unchanged for ``confirmation_ms``. If later content lands
+        during that window, stability is measured again from the new frame.
+
+        The confirmation uses the hierarchy rather than full-frame pixels so a looping spinner or
+        video remains maskable by :meth:`wait_stable`. Opaque/canvas results should still use an
+        explicit predicate, which is the only generic proof that particular content arrived.
+        ``timeout_ms`` bounds the complete change + settle + confirmation sequence.
+        """
+        started = time.monotonic()
+        deadline = started + max(0.0, timeout_ms / 1000.0)
+
+        def remaining_ms() -> int:
+            return max(1, int((deadline - time.monotonic()) * 1000))
+
+        self.wait_changed(
+            timeout_ms=remaining_ms(),
+            interval_ms=interval_ms,
+            observe=False,
+        )
+        late_changes = 0
+        while True:
+            if time.monotonic() >= deadline:
+                raise StabilityTimeout(
+                    f"screen did not finish changing within {timeout_ms} ms",
+                    hint="Increase --timeout, or wait for a specific result with `--until`.",
+                )
+            self.wait_stable(
+                interval_ms=interval_ms,
+                settle_ms=max(1, settle_ms),
+                timeout_ms=remaining_ms(),
+                observe=False,
+            )
+
+            baseline = self.hierarchy_fingerprint()
+            confirm_deadline = min(
+                deadline,
+                time.monotonic() + max(0, confirmation_ms) / 1000.0,
+            )
+            changed_again = False
+            while time.monotonic() < confirm_deadline:
+                time.sleep(max(0.01, interval_ms / 1000.0))
+                current = self.hierarchy_fingerprint()
+                if baseline and current and current != baseline:
+                    changed_again = True
+                    late_changes += 1
+                    break
+                if baseline is None and current:
+                    baseline = current
+            if changed_again:
+                continue
+            if confirm_deadline >= deadline and confirmation_ms > 0:
+                raise StabilityTimeout(
+                    f"screen did not remain confirmed within {timeout_ms} ms",
+                    hint="Increase --timeout, or wait for a specific result with `--until`.",
+                )
+            elapsed = int((time.monotonic() - started) * 1000)
+            detail = f"changed and confirmed settled after {elapsed}ms"
+            if late_changes:
+                detail += f" ({late_changes} late change(s) restabilized)"
+            return self._observe(
+                ActionResult(ok=True, action="wait-after-change", detail=detail),
+                observe,
+                settle=False,
+            )
 
     def _wait_timeout_message(
         self,
@@ -5607,9 +6257,7 @@ class Engine:
         if node is not None:
             holder = node
             if node.get("checkable") != "true":
-                holder = next(
-                    (n for n in node.iter("node") if n.get("checkable") == "true"), node
-                )
+                holder = next((n for n in node.iter("node") if n.get("checkable") == "true"), node)
             state.update(
                 checkable=holder.get("checkable") == "true",
                 checked=holder.get("checked") == "true",
@@ -5646,7 +6294,12 @@ class Engine:
         return failures
 
     def _expect_once(
-        self, selector: dict[str, Any], predicates: dict[str, Any], *, index: int | None, first: bool
+        self,
+        selector: dict[str, Any],
+        predicates: dict[str, Any],
+        *,
+        index: int | None,
+        first: bool,
     ) -> tuple[bool, str]:
         """One evaluation pass: ``(ok, detail)``. One hierarchy dump, no screenshots."""
         from . import hierarchy
@@ -6093,7 +6746,9 @@ class Engine:
                     device.launch_app(package, activity=activity)
                 except Exception as exc:  # noqa: BLE001 — any refusal means "did not start"
                     launched = False
-                    logger.debug("%s/%s refused (%s); using the default entry", package, activity, exc)
+                    logger.debug(
+                        "%s/%s refused (%s); using the default entry", package, activity, exc
+                    )
                 if launched:
                     pinned = self._wait_foreground(package, _FLAGS_ENTRY_TIMEOUT_S)
                     if not pinned:
@@ -6871,11 +7526,12 @@ class Engine:
             "labels": labels,
             "package": cached.screen.package,
             "activity": self._last_activity or self._read_activity(),
+            "known_screen": (
+                cached.meta.known_screen if cached.meta is not None else self._last_known_screen
+            ),
         }
 
-    def _change_summary(
-        self, before: dict[str, Any] | None, obs: AnalyzeResult
-    ) -> dict[str, Any]:
+    def _change_summary(self, before: dict[str, Any] | None, obs: AnalyzeResult) -> dict[str, Any]:
         """Structured before/after deltas, with "nothing changed" stated rather than implied.
 
         ``changed`` is an explicit boolean so a caller can branch on it without re-deriving the
@@ -6983,10 +7639,7 @@ class Engine:
             return None
         if not buf.hint_ready():
             return None
-        return (
-            "recent pixel change after last action — "
-            "`aua capture last --since last-action`"
-        )
+        return "recent pixel change after last action — `aua capture last --since last-action`"
 
     def capture_start(self) -> dict[str, Any]:
         """Start the rolling capture buffer (daemon-warm sessions)."""
@@ -7033,7 +7686,12 @@ class Engine:
             return {"ok": True, "action": "capture-stop", "running": False}
         buf.stop()
         self._capture = None
-        return {"ok": True, "action": "capture-stop", "running": False, "session_id": buf.session_id}
+        return {
+            "ok": True,
+            "action": "capture-stop",
+            "running": False,
+            "session_id": buf.session_id,
+        }
 
     def capture_on(self) -> dict[str, Any]:
         if self._capture is None:
@@ -7127,9 +7785,11 @@ class Engine:
         for el in cached.elements:
             if not el.resource_id:
                 continue
-            if el.resource_id == want or el.resource_id.endswith("/" + want) or _id_tail(
-                el.resource_id
-            ) == want:
+            if (
+                el.resource_id == want
+                or el.resource_id.endswith("/" + want)
+                or _id_tail(el.resource_id) == want
+            ):
                 w = cached.screen.width or 0
                 h = cached.screen.height or 0
                 if w <= 0 or h <= 0:
@@ -7158,9 +7818,7 @@ class Engine:
         if since and since.lower().strip() in ("last-action", "last_action", "action"):
             since_ms = self._capture.last_action_ms()
         try:
-            return self._capture.export(
-                path, seconds=seconds, since_ms=since_ms, fmt=fmt, fps=fps
-            )
+            return self._capture.export(path, seconds=seconds, since_ms=since_ms, fmt=fmt, fps=fps)
         except (ValueError, ImportError) as exc:
             raise UsageError(str(exc)) from exc
 
@@ -7189,9 +7847,7 @@ class Engine:
         """Best-effort narration via the planner chain (opt-in)."""
         try:
             if not self.factory.is_enabled("planner"):
-                return (
-                    "(llm skipped: planner disabled — enable planner in config or use local narration)"
-                )
+                return "(llm skipped: planner disabled — enable planner in config or use local narration)"
             names = self.factory.chain_names("planner")
             objective = (
                 "Summarize this Android UI transition for a QA agent in 2-4 sentences.\n"

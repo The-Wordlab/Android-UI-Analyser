@@ -17,7 +17,7 @@ Errors::
 Supported commands
 ------------------
 ping, analyze, ask_screen, has, inspect, screenshot, tap, long_press, input, clear,
-swipe, scroll_to, key, open_link, wait, wait_stable, memory_update, goto,
+swipe, scroll_to, key, open_link, wait, wait_stable, wait_after_change, memory_update, goto,
 flow_run, flow_save, navigate, orient, list_devices, app, logcat,
 logcat_mark, suite_run, database_list, database_schema, database_query,
 database_execute, database_backup, database_backups, database_restore
@@ -342,6 +342,10 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
             result = engine.wait_changed(**args)
             return _result_ok(result.model_dump(mode="json"))
 
+        elif cmd == "wait_after_change":
+            result = engine.wait_after_change(**args)
+            return _result_ok(result.model_dump(mode="json"))
+
         elif cmd == "hierarchy_fingerprint":
             return _result_ok({"fingerprint": engine.hierarchy_fingerprint()})
 
@@ -489,6 +493,7 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
                 "hide_keyboard, paste, copy_text, erase, clipboard_set, clipboard_get, "
                 "location_set, orientation_set, orientation_get, airplane_set, airplane_toggle, "
                 "media_add, record_start, record_stop, clock_set, open_link, resolve, wait, wait_stable, "
+                "wait_changed, wait_after_change, "
                 "memory_update, goto, flow_run, flow_save, navigate, orient, list_devices, app, "
                 "database_list, database_schema, database_query, database_execute, "
                 "database_backup, database_backups, database_restore, "
@@ -696,7 +701,16 @@ def _handle_connection(
 # Commands that can block for a long time without being told a deadline; one that IS told a
 # deadline gets its socket budget from that number, whatever the command is called.
 _LONG_POLL_COMMANDS = frozenset(
-    {"wait", "wait_stable", "wait_changed", "await_predicate", "goto", "flow_run", "navigate"}
+    {
+        "wait",
+        "wait_stable",
+        "wait_changed",
+        "wait_after_change",
+        "await_predicate",
+        "goto",
+        "flow_run",
+        "navigate",
+    }
 )
 
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Literal
 
@@ -64,6 +64,39 @@ class MapAudit(BaseModel):
     @property
     def ok(self) -> bool:
         return not any(issue.severity == "error" for issue in self.issues)
+
+
+def summarize_audit(
+    audit: MapAudit,
+    *,
+    research_tasks: list[ResearchTask] | None = None,
+) -> dict[str, Any]:
+    """Token-cheap map-health counts for agents; the canonical audit remains unchanged."""
+    severity = Counter(issue.severity for issue in audit.issues)
+    issue_types = Counter(issue.type for issue in audit.issues)
+    tasks = research_tasks or []
+    task_status = Counter(task.status for task in tasks)
+    return {
+        "package": audit.package,
+        "app_version": audit.app_version,
+        "context_id": audit.context_id,
+        "generated_at": audit.generated_at,
+        "ok": audit.ok,
+        "issues": {
+            "total": len(audit.issues),
+            "by_severity": {
+                "error": severity["error"],
+                "warning": severity["warning"],
+                "info": severity["info"],
+            },
+            "by_type": dict(sorted(issue_types.items(), key=lambda item: (-item[1], item[0]))),
+        },
+        "research_tasks": {
+            "total": len(tasks),
+            "open": task_status.get("open", 0),
+            "by_status": dict(sorted(task_status.items())),
+        },
+    }
 
 
 class ResearchTask(BaseModel):

@@ -357,9 +357,10 @@ def _tool_definitions() -> list[types.Tool]:
         types.Tool(
             name="goto",
             description="Drive to a remembered screen via the learned app map: replays "
-            "the recorded steps of each route edge (including cross-app auth legs) and "
-            "verifies each hop; hands back remaining steps on divergence. plan=true "
-            "previews without acting. assist=true lets the opt-in planner recover a "
+            "the recorded steps of each route edge and verifies each hop. Risky deeplink, "
+            "external, settings/data/lifecycle, and non-navigation effects are previewed and "
+            "refused before execution unless allow_unsafe=true. plan=true previews without "
+            "acting. assist=true lets the opt-in planner recover a "
             "divergence (needs planner.enabled). from_here=true resumes mid-edge when "
             "you already navigated part of the way.",
             inputSchema={
@@ -372,6 +373,11 @@ def _tool_definitions() -> list[types.Tool]:
                     "plan": {"type": "boolean", "default": False},
                     "max_steps": {"type": "integer", "default": 8},
                     "allow_destructive": {"type": "boolean", "default": False},
+                    "allow_unsafe": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Permit disclosed non-navigation route effects after reviewing the preview.",
+                    },
                     "assist": {"type": "boolean", "default": False},
                     "from_here": {
                         "type": "boolean",
@@ -1349,6 +1355,7 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
             plan=args.get("plan", False),
             max_steps=int(args.get("max_steps", 8)),
             allow_destructive=args.get("allow_destructive", False),
+            allow_unsafe=args.get("allow_unsafe", False),
             assist=args.get("assist", False),
             from_here=args.get("from_here", False),
         )

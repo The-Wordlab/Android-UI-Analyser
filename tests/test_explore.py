@@ -140,6 +140,9 @@ def test_explore_plan_lists_unprobed_deeplinks(tmp_path: Path) -> None:
     assert "probe_deeplink" in kinds and "myapp://pet" in dos
     assert "probe_template" in kinds  # templated one flagged separately
     assert "myapp://home" not in dos  # probed → not re-suggested
+    link = next(task for task in out["tasks"] if task["kind"] == "probe_deeplink")
+    assert link["external"] is True and link["destructive"] is False
+    assert link["risk"] == "external_intent"
 
 
 def test_explore_plan_flags_dead_end_screens(tmp_path: Path) -> None:
@@ -150,6 +153,31 @@ def test_explore_plan_flags_dead_end_screens(tmp_path: Path) -> None:
     store.record_screen(package=P, elements=_elements(HOME), name_hint="home")  # no routes out
     out = eng.explore_plan(package=P)
     assert any(t["kind"] == "expand_screen" and "home" in t["do"] for t in out["tasks"])
+
+
+def test_explore_plan_prioritizes_map_debt_and_dead_ends_before_risky_intents(
+    tmp_path: Path,
+) -> None:
+    from test_memory import HOME, _elements
+
+    eng, cfg = _eng(tmp_path)
+    store = AppMemoryStore(cfg.memory)
+    screen = store.record_screen(package=P, elements=_elements(HOME), name_hint="screen")
+    app_map = store.load(P)
+    app_map.screens[screen.name].stale = True
+    store.save(app_map)
+    store.remember_deeplink(P, "myapp://account/delete")
+
+    out = eng.explore_plan(package=P, max_tasks=20)
+    kinds = [task["kind"] for task in out["tasks"]]
+    first_deeplink = kinds.index("probe_deeplink")
+
+    assert kinds[0] == "resolve_map_issue"
+    assert kinds.index("expand_screen") < first_deeplink
+    risky = out["tasks"][first_deeplink]
+    assert risky["risk"] == "destructive_external_intent"
+    assert risky["requires_explicit_authorization"] is True
+    assert "do not open" in risky["do"]
 
 
 def test_open_link_marks_deeplink_probed(tmp_path: Path) -> None:

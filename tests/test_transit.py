@@ -148,7 +148,12 @@ def test_goto_replays_the_auth_leg_end_to_end(tmp_path: Path) -> None:
         [LOGIN, CHROME_PICKER, CHROME_CONSENT, ONBOARDING], package=P, serial="emu-replay"
     )
     eng = _engine(tmp_path, dev)
-    out = eng.goto("onboarding")
+    refused = eng.goto("onboarding")
+    assert refused["code"] == "unsafe_route"
+    assert refused["required_opt_in"] == ["--allow-unsafe"]
+    assert not any(call[0] == "click" for call in dev.calls)
+
+    out = eng.goto("onboarding", allow_unsafe=True)
     assert out["ok"] is True and out["arrived"] is True, out
     assert sum(1 for c in dev.calls if c[0] == "click") == 3  # the whole boring leg
     assert out["final_screen"] == "onboarding"
@@ -172,7 +177,7 @@ def test_goto_hands_off_on_redacted_transit_step(tmp_path: Path) -> None:
         [LOGIN, CHROME_PICKER, CHROME_CONSENT, ONBOARDING], package=P, serial="emu-redact"
     )
     eng = _engine(tmp_path, dev)
-    out = eng.goto("onboarding")
+    out = eng.goto("onboarding", allow_unsafe=True)
     assert out["ok"] is False and out["code"] == "element_not_found"
     assert out["step"]["label"] == "<redacted>"  # the identity-bearing tap is manual
     assert out["expected_package"] == CHROME
@@ -199,14 +204,15 @@ def test_goto_resumes_mid_transit_after_manual_step(tmp_path: Path) -> None:
         [LOGIN, CHROME_PICKER, CHROME_CONSENT, ONBOARDING], package=P, serial="emu-resume"
     )
     eng = _engine(tmp_path, dev)
-    first = eng.goto("onboarding")
+    first = eng.goto("onboarding", allow_unsafe=True)
     assert first["ok"] is False  # stops at the redacted account row (on CHROME_PICKER)
 
     res = eng.analyze(source="hierarchy")  # the agent's one manual step
     row = next(e.id for e in res.elements if e.text == "Engineering Team")
     eng.tap(row, observe=False)  # → CHROME_CONSENT
 
-    resumed = eng.goto("onboarding")  # foreground=chrome, journey=origin app → resume
+    # Foreground=chrome, journey=origin app → resume.
+    resumed = eng.goto("onboarding", allow_unsafe=True)
     assert resumed["ok"] is True and resumed["arrived"] is True, resumed
     # resume matched 'Continue' on the consent screen and only tapped that
     clicks_total = sum(1 for c in dev.calls if c[0] == "click")
@@ -230,7 +236,7 @@ def test_goto_resume_hands_off_when_nothing_matches(tmp_path: Path) -> None:
     store.save_session("emu-stuck", sess)
     dev = TransitScriptedDevice([CHROME_PICKER], package=CHROME, serial="emu-stuck")
     eng = _engine(tmp_path, dev)
-    out = eng.goto("onboarding")
+    out = eng.goto("onboarding", allow_unsafe=True)
     assert out["ok"] is False and out["code"] == "element_not_found"
     assert "manually" in out["hint"] and out["remaining_steps"]
     assert not any(c[0] == "click" for c in dev.calls)

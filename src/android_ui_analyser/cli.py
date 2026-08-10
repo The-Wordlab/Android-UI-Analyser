@@ -32,7 +32,7 @@ from .config import (
     load_config,
     user_config_path,
 )
-from .engine import Engine, _parse_point
+from .engine import Engine, _parse_await_terms, _parse_point
 from .errors import (
     AuaError,
     ConfigError,
@@ -55,7 +55,7 @@ from .memory import (
     render_map,
 )
 from .projection import Projection, render_action_tsv, trim_observation_payload
-from .reconcile import ReconciliationStore, ResearchReport, audit_map
+from .reconcile import ReconciliationStore, ResearchReport, audit_map, summarize_audit
 from .schema import ActionResult, AnalyzeResult, OutputFormat
 
 logger = logging.getLogger("android_ui_analyser")
@@ -220,6 +220,12 @@ def _run(ctx: typer.Context, fn: Callable[[Engine, OutputFormat], T]) -> T:
     opts = _opts(ctx)
     try:
         cfg_fmt = opts.fmt()
+        # A global --until is logically part of the action, so validate it before constructing
+        # the engine or applying any side effect.  Previously the parser lived only inside
+        # `await_predicate`, which runs after the tap/input: a typo could therefore mutate the
+        # device and then fail as a usage error.  A usage error must mean zero device actions.
+        if opts.until:
+            _parse_await_terms(opts.until)
         engine = opts.engine()
         global _OBSERVATION_VIEW, _UNTIL, _ENGINE
         spec = opts.observe_fields
@@ -240,9 +246,7 @@ def _run(ctx: typer.Context, fn: Callable[[Engine, OutputFormat], T]) -> T:
                     "`--until 'text:<label>'` — and the timeout applies to it. Without a "
                     "predicate nothing is waited for and `await_outcome` is not reported.",
                 )
-        _UNTIL = (
-            (opts.until, opts.until_timeout, opts.until_poll) if opts.until else None
-        )
+        _UNTIL = (opts.until, opts.until_timeout, opts.until_poll) if opts.until else None
         _apply_answers(engine, opts.answers)
         return fn(engine, cfg_fmt)
     except AuaError as err:
@@ -418,9 +422,7 @@ def _element_id(ident: str | None, selector: dict[str, Any] | None) -> int | Non
         ) from exc
 
 
-def _require_target(
-    verb: str, ident: str | None, selector: dict[str, Any] | None
-) -> int | None:
+def _require_target(verb: str, ident: str | None, selector: dict[str, Any] | None) -> int | None:
     """Element id or selector — raise usage (exit 2) before any device connect."""
     element_id = _element_id(ident, selector)
     if element_id is None and selector is None:
@@ -510,9 +512,12 @@ def _action_dict(result: Any) -> dict[str, Any] | None:
 
 def _predicate_needle(predicate: str) -> str:
     """The literal a caller was hoping to see, stripped of `!`, `text:`/`rid:` and commas."""
-    first = predicate.split(",")[0].strip().lstrip("!")
-    _, _, value = first.partition(":")
-    return (value or first).strip().strip("'\"")
+    try:
+        return _parse_await_terms(predicate)[0].value
+    except (AuaError, IndexError):  # preflight normally makes this unreachable
+        first = predicate.split(",")[0].strip().lstrip("!")
+        _, _, value = first.partition(":")
+        return (value or first).strip().strip("'\"")
 
 
 def _await_timeout_note(predicate: str, timeout_ms: int, result: Any) -> str:
@@ -574,6 +579,7 @@ def _await_until(result: Any) -> Any:
             timeout_ms=timeout_ms,
             poll_ms=poll_ms,
             observe=True,
+            adopt_action=True,
         )
     except AuaError:
         raise
@@ -590,6 +596,7 @@ def _await_until(result: Any) -> Any:
         "known_screen",
         "stable_elements",
         "action_diff_summary",
+        "change",
         "next_actions",
         "routes",
         "note",
@@ -700,7 +707,7 @@ def _warn_if_redundant_analyze(engine: Engine, args: dict[str, Any] | None = Non
     if not isinstance(action, str):
         return
     # If the user already asked for an intentionally different view (query/source), do not warn.
-    latest_args = (latest.get("args") or {})
+    latest_args = latest.get("args") or {}
     if latest_args.get("source") == "vision" or latest_args.get("query"):
         return
     if latest_args.get("with_ocr") is not None or latest_args.get("fields"):
@@ -1008,6 +1015,7 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
             )
         raise
 
+
 # --------------------------------------------------------------------------- app
 
 
@@ -1184,7 +1192,9 @@ def main(
     ),
     config: str | None = typer.Option(None, "--config", help="Explicit config file path."),
     format: str | None = typer.Option(
-        None, "--format", help="Output format: json|pretty|compact|tsv|delta|msgpack (tsv/delta/msgpack: analyze)."
+        None,
+        "--format",
+        help="Output format: json|pretty|compact|tsv|delta|msgpack (tsv/delta/msgpack: analyze).",
     ),
     profile: str | None = typer.Option(None, "--profile", help="Named config profile to overlay."),
     # Declared so Click accepts it; the value is read from argv in `_page_arg`, because `--help`
@@ -1215,7 +1225,8 @@ def main(
         "--until",
         metavar="PREDICATE",
         help="After the action, wait until this holds before observing "
-        "(`rid:introCard`, `text:Chats`, `!text:Loading`). Sets await_outcome.",
+        "(`rid:introCard`, `text:Chats`, `!text:Loading`). Terms use commas; escape a "
+        "literal comma as `\\,`. Sets await_outcome.",
     ),
     answers: list[str] | None = typer.Option(
         None,
@@ -1346,7 +1357,6 @@ def analyze(
         help="Also save the raw screenshot; bare flag uses a timestamped default path.",
         show_default=False,
     ),
-
     deep: bool = typer.Option(False, "--deep", help="Raise the escalation ceiling for this call."),
     cheap: bool = typer.Option(
         False, "--cheap", help="Lower the escalation ceiling for this call."
@@ -1550,6 +1560,7 @@ def has(
     Takes the same one-shot selectors as the action commands, so a check reads like the act
     it guards: `aua has --rid buttonSettings` then `aua tap-and-analyze --rid buttonSettings`.
     """
+
     def go(engine: Engine, fmt: OutputFormat) -> None:
         target, target_by = _has_target(text, by=by, rid=rid, text_sel=text_sel, desc=desc)
         result = _route(
@@ -1945,9 +1956,7 @@ def input_cmd(
                 hint=f'e.g. `aua input-and-analyze --rid <resourceId> "{text_opt}"`; on other '
                 "commands --text selects an element by its label, so input cannot reuse it",
             )
-        selector = _selector(
-            ident=first_arg, by=by, rid=rid, desc=desc, index=index, first=first
-        )
+        selector = _selector(ident=first_arg, by=by, rid=rid, desc=desc, index=index, first=first)
         # --rid/--desc address the field, so the lone positional is the text to type;
         # --by consumes the first positional as the selector value.
         typed = first_arg if (selector is not None and by is None) else second_arg
@@ -2111,7 +2120,9 @@ def scroll(
     pages: int = typer.Option(1, "--pages", help="Scroll this many screenfuls."),
     to_end: bool = typer.Option(False, "--to-end", help="Scroll until nothing moves any more."),
     to_start: bool = typer.Option(False, "--to-start", help="Scroll back to the top/start."),
-    from_id: int | None = typer.Option(None, "--from", help="Scroll the container at this element."),
+    from_id: int | None = typer.Option(
+        None, "--from", help="Scroll the container at this element."
+    ),
     in_rid: str | None = typer.Option(
         None, "--in-rid", help="Scroll the container at this resource-id."
     ),
@@ -2459,7 +2470,9 @@ def wait(
         help="Wait for the screen to CHANGE and then settle. Use for network-driven content "
         "(AI replies, image generation): plain --for-stable can return before anything starts.",
     ),
-    interval: int = typer.Option(120, "--interval", help="--for-stable/--changed: poll interval ms."),
+    interval: int = typer.Option(
+        120, "--interval", help="--for-stable/--changed: poll interval ms."
+    ),
     settle: int = typer.Option(
         200, "--settle", help="--for-stable: ms of no (non-animated) change to settle."
     ),
@@ -2476,7 +2489,9 @@ def wait(
         "--observe",
         help="Also return the (settled) screen with fresh ids — act on it without a re-analyze.",
     ),
-    by: str = typer.Option("text", "--by", help="--for match by: text (default) | id/rid (resource-id) | desc."),
+    by: str = typer.Option(
+        "text", "--by", help="--for match by: text (default) | id/rid (resource-id) | desc."
+    ),
     absent: bool = typer.Option(
         False, "--absent", help="With --for: wait until it DISAPPEARS (loading spinners, dialogs)."
     ),
@@ -2527,18 +2542,15 @@ def wait(
             )
             return
         if after_change:
-            # First wait for something to happen, then for it to finish happening. Either half
-            # alone is a trap: --changed returns mid-stream, --for-stable returns before the
-            # stream starts.
-            eff_change = timeout if timeout is not None else 30000
-            _route(engine, "wait_changed", timeout_ms=eff_change, interval_ms=interval, observe=False)
+            # One bounded engine contract owns all three phases: first change, visual settle,
+            # then a quiet confirmation window that catches a result arriving after a stable
+            # loading shell. Keeping it in the engine also makes daemon and in-process calls
+            # behave identically.
             _emit(
                 _route(
                     engine,
-                    "wait_stable",
+                    "wait_after_change",
                     interval_ms=interval,
-                    # A 200ms settle is fine for an animation but far too eager for streamed
-                    # text; require a real pause unless the caller asked for something else.
                     settle_ms=settle if settle != 200 else 1200,
                     timeout_ms=timeout if timeout is not None else 60000,
                     observe=observe,
@@ -2612,6 +2624,12 @@ def goto(
         "--allow-destructive",
         help="Replay steps whose label matches memory.destructive_labels (delete/sign out/…).",
     ),
+    allow_unsafe: bool = typer.Option(
+        False,
+        "--allow-unsafe",
+        help="After reviewing the risk preview, permit deeplinks, external packages, "
+        "settings/data/environment mutation, lifecycle changes, and other non-navigation steps.",
+    ),
     assist: bool = typer.Option(
         False,
         "--assist",
@@ -2629,8 +2647,10 @@ def goto(
     Resolves the goal against the learned map, then replays each edge's recorded steps
     along the shortest route from the current screen, confirming ``known_screen`` after
     every hop. Stops and returns the remaining route/steps + current screen if anything
-    diverges. ``--plan`` prints the annotated route only; destructive steps are refused
-    without ``--allow-destructive``. ``--assist`` lets a fast model recover a divergence.
+    diverges. ``--plan`` prints every step and its risk without acting. Destructive steps are
+    refused without ``--allow-destructive``; deeplinks, external/settings/data/lifecycle and
+    other non-navigation effects are refused without ``--allow-unsafe``. A refusal happens
+    before the first route action. ``--assist`` lets a fast model recover a divergence.
     ``--from-here`` resumes mid-edge when you already navigated part of the way yourself.
     """
 
@@ -2642,6 +2662,7 @@ def goto(
             plan=plan,
             max_steps=max_steps,
             allow_destructive=allow_destructive,
+            allow_unsafe=allow_unsafe,
             assist=assist,
             from_here=from_here,
         )
@@ -2655,7 +2676,9 @@ def goto(
 @app.command()
 def navigate(
     ctx: typer.Context,
-    goal: str = typer.Argument(..., help="Natural-language destination, e.g. 'open the image generator'."),
+    goal: str = typer.Argument(
+        ..., help="Natural-language destination, e.g. 'open the image generator'."
+    ),
     until: str | None = typer.Option(
         None, "--until", help="Stop when this text appears (a deterministic arrival check)."
     ),
@@ -2813,9 +2836,7 @@ def emulator_list_cmd(ctx: typer.Context) -> None:
 @emulator_app.command("recommend-proxy")
 def emulator_recommend_proxy_cmd(
     ctx: typer.Context,
-    name: str = typer.Option(
-        "aua_proxy", "--name", help="Suggested AVD name for ensure-proxy."
-    ),
+    name: str = typer.Option("aua_proxy", "--name", help="Suggested AVD name for ensure-proxy."),
     api: int = typer.Option(
         30,
         "--api",
@@ -2839,25 +2860,19 @@ def emulator_recommend_proxy_cmd(
 @emulator_app.command("ensure-proxy")
 def emulator_ensure_proxy_cmd(
     ctx: typer.Context,
-    name: str = typer.Option(
-        "aua_proxy", "--name", help="AVD name to create or reuse."
-    ),
+    name: str = typer.Option("aua_proxy", "--name", help="AVD name to create or reuse."),
     api: int = typer.Option(
         30,
         "--api",
         help="API level (google_apis, not Play Store). Lower = smaller/faster.",
     ),
-    force: bool = typer.Option(
-        False, "--force", help="Recreate even if the AVD already exists."
-    ),
+    force: bool = typer.Option(False, "--force", help="Recreate even if the AVD already exists."),
     start_after: bool = typer.Option(
         False,
         "--start/--no-start",
         help="Boot the AVD headless after create/reuse.",
     ),
-    wait: int = typer.Option(
-        180, "--wait", help="Seconds to wait for adb when --start is set."
-    ),
+    wait: int = typer.Option(180, "--wait", help="Seconds to wait for adb when --start is set."),
 ) -> None:
     """Install a small google_apis system image (if needed) and create a rootable AVD.
 
@@ -3133,9 +3148,7 @@ def app_cmd(
                 fmt,
             )
             return
-        wiping = a in ("clear", "clear-state", "clear_state") or (
-            a == "launch" and clear_state
-        )
+        wiping = a in ("clear", "clear-state", "clear_state") or (a == "launch" and clear_state)
         if wiping and not yes:
             raise UsageError(
                 f"app {action}{' --clear' if a == 'launch' else ''} wipes ALL app data "
@@ -3411,7 +3424,9 @@ app.add_typer(clipboard_app, name="clipboard")
 
 
 @clipboard_app.command("set")
-def clipboard_set(ctx: typer.Context, text: str = typer.Argument(..., help="Text to copy.")) -> None:
+def clipboard_set(
+    ctx: typer.Context, text: str = typer.Argument(..., help="Text to copy.")
+) -> None:
     def go(engine: Engine, fmt: OutputFormat) -> None:
         _emit(engine.clipboard_set(text), fmt)
 
@@ -3430,7 +3445,9 @@ def clipboard_get(ctx: typer.Context) -> None:
 def paste(
     ctx: typer.Context,
     observe: bool = typer.Option(True, "--observe/--no-observe"),
-    with_image: str | None = typer.Option(None, "--with-image", metavar="[PATH]", show_default=False),
+    with_image: str | None = typer.Option(
+        None, "--with-image", metavar="[PATH]", show_default=False
+    ),
 ) -> None:
     """Paste the clipboard into the focused field (Maestro pasteText)."""
 
@@ -3479,7 +3496,9 @@ def erase(
         None, "--chars", help="Delete this many characters; omit to clear the whole field."
     ),
     observe: bool = typer.Option(True, "--observe/--no-observe"),
-    with_image: str | None = typer.Option(None, "--with-image", metavar="[PATH]", show_default=False),
+    with_image: str | None = typer.Option(
+        None, "--with-image", metavar="[PATH]", show_default=False
+    ),
 ) -> None:
     """Erase text in a field (Maestro eraseText)."""
 
@@ -3513,9 +3532,7 @@ def location_set(
     def go(engine: Engine, fmt: OutputFormat) -> None:
         parts = [p.strip() for p in coords.split(",") if p.strip()]
         if len(parts) != 2:
-            raise UsageError(
-                "location needs LAT,LON", hint="e.g. `aua location set 37.42,-122.08`"
-            )
+            raise UsageError("location needs LAT,LON", hint="e.g. `aua location set 37.42,-122.08`")
         lat, lon = float(parts[0]), float(parts[1])
         _emit(engine.location_set(lat, lon), fmt)
 
@@ -3681,7 +3698,9 @@ def dashboard(
         "--grid",
         help="Force multi-device grid (live screens). Auto-on when several emulators are online.",
     ),
-    port: int = typer.Option(8765, "--port", help="Preferred localhost port (tries nearby if busy)."),
+    port: int = typer.Option(
+        8765, "--port", help="Preferred localhost port (tries nearby if busy)."
+    ),
     open_browser: bool = typer.Option(
         True, "--open/--no-open", help="Open the page in your default browser."
     ),
@@ -3771,9 +3790,7 @@ def daemon(
         elif a == "reap":
             out = daemon_mod.reap(cfg)
         else:
-            raise UsageError(
-                f"unknown daemon action '{action}'", hint="start|stop|status|reap"
-            )
+            raise UsageError(f"unknown daemon action '{action}'", hint="start|stop|status|reap")
         indent = 2 if fmt is OutputFormat.pretty else None
         sep = None if indent else (",", ":")
         typer.echo(json.dumps(out, indent=indent, separators=sep, ensure_ascii=False, default=str))
@@ -4105,8 +4122,7 @@ def _render_doctor_pretty(report: dict[str, Any]) -> str:
             avds = detail.get("avds") or []
             running = detail.get("running") or []
             detail = (
-                f"bin={detail.get('binary') or 'missing'}  "
-                f"avds={len(avds)}  running={len(running)}"
+                f"bin={detail.get('binary') or 'missing'}  avds={len(avds)}  running={len(running)}"
             )
         lines.append(f"[{mark(emu.get('ok', False))}] emulator      {detail}")
 
@@ -4181,6 +4197,11 @@ def map_cmd(
     audit: bool = typer.Option(
         False, "--audit", help="Find ambiguous names/routes and research questions."
     ),
+    audit_summary: bool = typer.Option(
+        False,
+        "--summary",
+        help="With --audit, emit token-cheap issue/research counts instead of every issue.",
+    ),
     context: str | None = typer.Option(
         None, "--context", help="Show/audit one feature-flag context."
     ),
@@ -4209,15 +4230,47 @@ def map_cmd(
                 hint="Use `aua map --all-contexts --json` to list recorded contexts.",
             )
         compact = fmt is OutputFormat.compact
+        if audit_summary and not audit:
+            raise UsageError("--summary requires --audit", hint="Run `aua map --audit --summary`.")
         if audit:
             result = audit_map(app_map, context_id=None if all_contexts else selected_context)
             audit_payload = result.model_dump(mode="json")
             tasks = ReconciliationStore(store).plan(
                 pkg, context_id=None if all_contexts else selected_context
             )
-            audit_payload["research_tasks"] = [
-                task.model_dump(mode="json") for task in tasks
-            ]
+            audit_payload["research_tasks"] = [task.model_dump(mode="json") for task in tasks]
+            if audit_summary:
+                summary = summarize_audit(result, research_tasks=tasks)
+                if as_json or compact or fmt is OutputFormat.json:
+                    typer.echo(
+                        json.dumps(
+                            summary,
+                            indent=None if compact else 2,
+                            separators=(",", ":") if compact else None,
+                            ensure_ascii=False,
+                        )
+                    )
+                else:
+                    counts = summary["issues"]
+                    severities = counts["by_severity"]
+                    typer.echo(f"# Map audit summary: {pkg} [{selected_context}]")
+                    typer.echo(
+                        f"Issues: {counts['total']} "
+                        f"(error {severities['error']}, warning {severities['warning']}, "
+                        f"info {severities['info']})"
+                    )
+                    typer.echo("Types:")
+                    if counts["by_type"]:
+                        for kind, count in counts["by_type"].items():
+                            typer.echo(f"- {kind}: {count}")
+                    else:
+                        typer.echo("- none")
+                    research = summary["research_tasks"]
+                    typer.echo(
+                        f"Research tasks: {research['open']} open / {research['total']} total"
+                    )
+                    typer.echo("Full evidence: `aua map --audit --json`.")
+                return
             if as_json or compact or fmt is OutputFormat.json:
                 typer.echo(
                     json.dumps(
@@ -4286,7 +4339,9 @@ def remember(
     about: str | None = typer.Option(None, "--about", help="One-line description of the app."),
     note: str | None = typer.Option(None, "--note", help="A quirk/fact to remember."),
     recipe: str | None = typer.Option(None, "--recipe", help="Recipe NAME (needs --note)."),
-    deeplink: str | None = typer.Option(None, "--deeplink", help="A useful deeplink URI (needs/uses --note)."),
+    deeplink: str | None = typer.Option(
+        None, "--deeplink", help="A useful deeplink URI (needs/uses --note)."
+    ),
     app_pkg: str | None = typer.Option(None, "--app", help="Package (default: current)."),
 ) -> None:
     """Teach the app playbook: a description, a quirk note, a login/etc. recipe, or a deeplink.
@@ -4308,7 +4363,9 @@ def remember(
             did.append("description")
         if recipe:
             if not note:
-                raise UsageError("--recipe needs --note", hint='e.g. --recipe login_full --note "tap X"')
+                raise UsageError(
+                    "--recipe needs --note", hint='e.g. --recipe login_full --note "tap X"'
+                )
             store.remember_recipe(pkg, recipe, note)
             did.append(f"recipe:{recipe}")
         if deeplink:
@@ -4344,19 +4401,31 @@ def about(
         if app_map is None:
             typer.echo(f"nothing recorded for {pkg} yet")
             return
+        selected_context = _active_map_context(
+            engine,
+            opts,
+            store,
+            pkg,
+            explicit_package=app_pkg is not None,
+        )
+        from .memory import _playbook_lines, playbook_view
+
+        current = playbook_view(app_map, context_id=selected_context)
         if fmt in (OutputFormat.json, OutputFormat.compact):
             play = {
                 "package": pkg,
-                "description": app_map.description,
-                "recipes": {r.name: r.note for r in app_map.recipes},
-                "deeplinks": [{"uri": d.uri, "note": d.note} for d in app_map.deeplinks],
-                "notes": list(app_map.notes),
+                "context_id": selected_context,
+                "description": current["description"],
+                "recipes": {r.name: r.note for r in current["recipes"]},
+                "deeplinks": [
+                    {"uri": link.uri, "note": link.note} for link in current["deeplinks"]
+                ],
+                "notes": current["notes"],
+                "counts": current["counts"],
             }
             typer.echo(json.dumps(play, indent=None if fmt is OutputFormat.compact else 2))
         else:
-            from .memory import _playbook_lines
-
-            lines = _playbook_lines(app_map)
+            lines = _playbook_lines(app_map, context_id=selected_context)
             typer.echo("\n".join(lines) if lines else f"no playbook for {pkg} yet")
 
     _run(ctx, go)
@@ -4759,10 +4828,11 @@ def explore_plan_cmd(
     app_pkg: str | None = typer.Option(None, "--app", help="Package (default: current)."),
     max_tasks: int = typer.Option(12, "--max-tasks", help="Cap on returned tasks."),
 ) -> None:
-    """Get a prioritized exploration worklist for THIS app (probe deeplinks, expand screens).
+    """Get a risk-classified worklist: map debt, safe dead ends, then deeplinks.
 
     Run the tasks with normal `aua` commands — results auto-record into the map/playbook,
-    so re-running the plan shows what's left. The way to have an agent index an app.
+    so re-running the plan shows what's left. Listed tasks are not authorization for any
+    destructive or external effect.
     """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
@@ -4881,7 +4951,9 @@ def flow_show_cmd(
         from .flows import FlowStore
 
         store = FlowStore(_opts(ctx).load().memory)
-        typer.echo(store.path(name).read_text(encoding="utf-8") if store.path(name).is_file() else "")
+        typer.echo(
+            store.path(name).read_text(encoding="utf-8") if store.path(name).is_file() else ""
+        )
         if not store.path(name).is_file():
             raise UsageError(f"no flow named '{name}'", hint="see `aua flow list`")
 
@@ -4930,7 +5002,9 @@ def logcat_cmd(
     ),
     tag: str | None = typer.Option(None, "--tag", help="Exact log tag filter."),
     as_json: bool = typer.Option(False, "--json", help="Emit structured JSON."),
-    lines: int | None = typer.Option(None, "--lines", "-n", help="Keep only the last N matching lines."),
+    lines: int | None = typer.Option(
+        None, "--lines", "-n", help="Keep only the last N matching lines."
+    ),
 ) -> None:
     """Dump recent logcat (default since last-action mark, else last 30s)."""
     if ctx.invoked_subcommand is not None:
@@ -5067,9 +5141,7 @@ def capture_explain_cmd(
     ctx: typer.Context,
     seconds: float | None = typer.Option(None, "--seconds"),
     since: str | None = typer.Option(None, "--since", help="last-action"),
-    llm: bool = typer.Option(
-        False, "--llm", help="Also ask the opt-in planner LLM to narrate."
-    ),
+    llm: bool = typer.Option(False, "--llm", help="Also ask the opt-in planner LLM to narrate."),
 ) -> None:
     """Narrate the recent capture window (local diff summary; optional --llm)."""
 
@@ -5221,9 +5293,7 @@ def a11y_scroll_cmd(
         if forward and backward:
             raise UsageError("pass only one of --forward / --backward")
         direction = "backward" if backward else "forward"
-        sel = _selector(
-            ident=ident, by=by, rid=rid, text=text, desc=desc, index=index, first=first
-        )
+        sel = _selector(ident=ident, by=by, rid=rid, text=text, desc=desc, index=index, first=first)
         _emit(
             engine.a11y_scroll(
                 _element_id(ident, sel),
@@ -5241,10 +5311,15 @@ def a11y_scroll_cmd(
 @a11y_app.command("action", hidden=True)
 def a11y_action_cmd(
     ctx: typer.Context,
-    ident: str | None = typer.Argument(None, help="Element id from the last analyze."),
-    action: str = typer.Argument(
+    ident_or_action: str = typer.Argument(
         ...,
-        help="CLICK|LONG_CLICK|SCROLL_FORWARD|SCROLL_BACKWARD|EXPAND|COLLAPSE|DISMISS",
+        metavar="ID_OR_ACTION",
+        help="Element id followed by action, or just ACTION when a --rid/--text/--desc selector is used.",
+    ),
+    action: str | None = typer.Argument(
+        None,
+        metavar="[ACTION]",
+        help="CLICK|LONG_CLICK|SCROLL_FORWARD|SCROLL_BACKWARD|EXPAND|COLLAPSE|DISMISS.",
     ),
     by: str | None = _SEL_BY,
     rid: str | None = _SEL_RID,
@@ -5257,14 +5332,26 @@ def a11y_action_cmd(
     """Perform a named accessibility action on an element."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        sel = _selector(
-            ident=ident, by=by, rid=rid, text=text, desc=desc, index=index, first=first
-        )
+        ident: str | None = ident_or_action
+        action_name = action
+        selector_given = any(value is not None for value in (by, rid, text, desc))
+        if action_name is None:
+            if not selector_given:
+                raise UsageError(
+                    "a11y action needs both an element id and an action, or a selector plus an action",
+                    hint=(
+                        "Use `aua a11y action-and-analyze 7 CLICK`, or "
+                        "`aua a11y action-and-analyze --rid expandButton CLICK`."
+                    ),
+                )
+            action_name = ident_or_action
+            ident = None
+        sel = _selector(ident=ident, by=by, rid=rid, text=text, desc=desc, index=index, first=first)
         _emit(
             engine.a11y_action(
                 _element_id(ident, sel),
                 selector=sel,
-                action=action,
+                action=action_name,
                 observe=not no_observe,
             ),
             fmt,
@@ -5780,8 +5867,23 @@ def hoist_global_options(argv: list[str]) -> list[str]:
 #: the rest of the session - which is the whole point of failing loudly instead of quietly
 #: returning less. The equivalent short names were already removed from the MCP surface.
 _REMOVED_ACTION_ALIASES = (
-    "tap", "click", "long-press", "double-tap", "input", "clear", "swipe", "scroll",
-    "scroll-to", "expect", "key", "hide-keyboard", "open", "wait", "paste", "erase", "await",
+    "tap",
+    "click",
+    "long-press",
+    "double-tap",
+    "input",
+    "clear",
+    "swipe",
+    "scroll",
+    "scroll-to",
+    "expect",
+    "key",
+    "hide-keyboard",
+    "open",
+    "wait",
+    "paste",
+    "erase",
+    "await",
 )
 
 
@@ -5833,7 +5935,6 @@ def _register_removed_alias(
 
 for _removed_alias in _REMOVED_ACTION_ALIASES:
     _register_removed_alias(_removed_alias)
-
 
 
 def run() -> None:

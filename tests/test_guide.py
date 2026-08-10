@@ -92,6 +92,22 @@ def test_brief_is_shorter_but_keeps_the_protocol() -> None:
     brief = guide.render_brief()
     assert "Session protocol" in brief
     assert len(brief) < len(full)
+    assert len(brief.split()) < 1_200, "brief must be a decision loop, not the full manual"
+    assert len(brief) < len(full) * 0.45
+
+
+def test_brief_prefers_stable_selectors_and_current_playbook_facts() -> None:
+    brief = guide.render_brief()
+    for claim in [
+        "stable_key",
+        "prefer `--rid",
+        "numeric id after its frame changed",
+        "knowledge stale",
+        "near-duplicate",
+        "map --audit --summary",
+        "text:Hello\\, friend",
+    ]:
+        assert claim in brief
 
 
 def test_json_is_structured() -> None:

@@ -481,6 +481,27 @@ def test_playbook_notes_recipes_description(tmp_path) -> None:
     assert len(app.recipes) == 1 and app.recipes[0].note == "tap testUserLogin"
 
 
+def test_playbook_projection_hides_stale_facts_and_deduplicates_replacements(tmp_path) -> None:
+    from android_ui_analyser.memory import playbook_view
+
+    store = _store(tmp_path)
+    store.remember_recipe(P, "open_library", "tap the old shelf")
+    store.remember_recipe(P, "open_library", "tap the catalog tab")
+    store.remember_note(P, "The archive is on the old toolbar")
+    app_map = store.load(P)
+    stale = next(item for item in app_map.knowledge if item.text == "The archive is on the old toolbar")
+    stale.status = "stale"
+    store.save(app_map)
+
+    view = playbook_view(store.load(P))
+
+    assert [(recipe.name, recipe.note) for recipe in view["recipes"]] == [
+        ("open_library", "tap the catalog tab")
+    ]
+    assert view["notes"] == []
+    assert view["counts"]["stale_or_scoped_out"] == 1
+
+
 def test_flow_open_link_and_bare_stop_app(tmp_path) -> None:
     # The real set-feature-flags recipe: open a deeplink, restart the app.
     text = """
@@ -559,6 +580,32 @@ def test_orient_surfaces_playbook(tmp_path) -> None:
     assert out["description"] == "Example App"
     assert out["recipes"]["login_full"] == "tap testUserLogin"
     assert out["deeplinks"][0]["uri"] == "myapp://set-flags?x=a"
+
+
+def test_orient_caps_large_playbooks_and_points_to_about(tmp_path) -> None:
+    from android_ui_analyser.engine import Engine
+    from android_ui_analyser.providers.registry import ProviderFactory
+    from conftest import FakeDevice
+
+    cfg = make_config(memory={"dir": str(tmp_path / "home")}, daemon={"enabled": False})
+    store = AppMemoryStore(cfg.memory)
+    store.set_description(P, "Fictional catalog")
+    for index in range(15):
+        store.remember_note(P, f"Catalog note {index}")
+        store.remember_deeplink(P, f"fiction://catalog/{index}")
+    eng = Engine(
+        cfg,
+        device=FakeDevice(hierarchy_xml=HOME, package=P),
+        factory=ProviderFactory(cfg),
+    )
+
+    out = eng.orient()
+
+    assert len(out["notes"]) == 10
+    assert len(out["deeplinks"]) == 8
+    assert out["playbook_more"]["notes"] == 5
+    assert out["playbook_more"]["deeplinks"] == 7
+    assert "aua about" in out["playbook_more"]["hint"]
 
 
 def test_cli_remember_and_about(tmp_path, monkeypatch) -> None:

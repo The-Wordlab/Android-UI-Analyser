@@ -34,7 +34,8 @@ from collections.abc import Sequence
 from datetime import datetime
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
+from urllib.parse import parse_qsl, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -57,9 +58,51 @@ _PENDING_CAP = 12
 _PENDING_TTL_S = 600
 _RECENT_CAP = 40  # rolling action journal (feeds `aua flow save --last N`)
 
+# A same-package edge with this many destination-producing actions is almost certainly a
+# recognition failure that kept the cursor on one sparse screen while the user crossed several
+# real screens. Long cross-package sign-in journeys are exempt (their package markers prove the
+# steps are an intentional transit route). Agents can still author longer flows explicitly.
+_MAX_SAME_PACKAGE_DESTINATION_STEPS = 4
+
 # Jaccard overlap (after a small activity bonus) at/above which a screen is recognised as
 # a known one rather than treated as new. Below the drift band it is a fresh screen.
 _RECOGNIZE_MIN = 0.34
+
+# Shared chrome/renderers describe *how* a screen is drawn, not *which* screen it is. They may
+# remain in stored signatures for drift diagnostics, but recognition must have at least one
+# app-authored, discriminative anchor in common. Without this guard, two sparse surfaces that
+# only shared a back button and a framework root scored 0.8 and collapsed into one screen.
+_GENERIC_IDENTITY_RESOURCE_IDS = frozenset(
+    {
+        "action_bar_root",
+        "actionbar_root",
+        "button_back",
+        "button_nav_back",
+        "buttonnavback",
+        "latex_view",
+        "latexview",
+        "nav_back",
+        "navigate_up",
+        "screen_title",
+        "screentitle",
+        "surface_title",
+        "surfacetitle",
+        "title",
+        "title_view",
+        "titleview",
+        "header",
+        "toolbar_back",
+    }
+)
+_GENERIC_IDENTITY_LABELS = frozenset(
+    {
+        "back",
+        "close",
+        "dismiss",
+        "navigate up",
+        "up",
+    }
+)
 
 # A screen matching the session's last goto/find target is floated to the top of
 # suggestions regardless of frequency (a large additive boost, not a hard pin).
@@ -457,6 +500,166 @@ def is_destructive_step(step: RouteStep, lexicon: Sequence[str]) -> bool:
     return any(re.search(rf"\b{re.escape(w.lower())}\b", low) for w in lexicon)
 
 
+_SAFE_GOTO_STEP_KINDS = frozenset(
+    {
+        "tap",
+        "swipe",
+        "scroll",
+        "scroll-to",
+        "wait-for",
+        "wait-stable",
+        "assert-visible",
+        "assert-not-visible",
+        "hide-keyboard",
+        "a11y-scroll",
+    }
+)
+_SETTINGS_STEP_KINDS = frozenset({"flags-apply", "dev-profile"})
+_DATA_STEP_KINDS = frozenset({"input", "clear", "paste"})
+_ENVIRONMENT_STEP_KINDS = frozenset({"proxy-start", "proxy-stop", "mock-replay"})
+_LIFECYCLE_STEP_KINDS = frozenset({"launch-app", "stop-app"})
+_EXTERNAL_URI_SCHEMES = frozenset(
+    {"http", "https", "intent", "market", "mailto", "tel", "sms", "geo", "file", "content"}
+)
+_SETTINGS_URI_TOKENS = frozenset(
+    {
+        "flag",
+        "flags",
+        "feature",
+        "features",
+        "experiment",
+        "experiments",
+        "config",
+        "configuration",
+        "setting",
+        "settings",
+        "preference",
+        "preferences",
+        "prefs",
+    }
+)
+
+
+def _deeplink_changes_settings(uri: str) -> bool:
+    """Whether a URI advertises configuration mutation in its structured components."""
+    try:
+        parsed = urlsplit(uri)
+        fields = [parsed.netloc, parsed.path, parsed.fragment]
+        fields.extend(key for key, _value in parse_qsl(parsed.query, keep_blank_values=True))
+    except ValueError:
+        fields = [uri]
+    tokens = {
+        token
+        for field in fields
+        for token in re.split(r"[^a-z0-9]+", field.casefold())
+        if token
+    }
+    return bool(tokens & _SETTINGS_URI_TOKENS)
+
+
+def route_step_risks(
+    step: RouteStep,
+    *,
+    origin_package: str | None,
+    destructive_labels: Sequence[str],
+    path: str = "",
+) -> list[dict[str, str]]:
+    """Classify side effects that an auto-learned ``goto`` must not replay silently.
+
+    A route edge proves that an action preceded a recognized screen; it does not prove the
+    action was *only* navigation.  In particular, Android reports a configuration deeplink and
+    a screen deeplink through the same ``open-link`` primitive.  This classifier is deliberately
+    independent of any private app vocabulary and conservative where the route cannot prove
+    intent.  Authored flows remain the explicit surface for setup/mutation journeys.
+    """
+    risks: list[dict[str, str]] = []
+
+    def add(code: str, reason: str, *, where: str = path) -> None:
+        item = {"code": code, "reason": reason}
+        if where:
+            item["path"] = where
+        if item not in risks:
+            risks.append(item)
+
+    kind = step.kind.strip().lower()
+    if step.package and origin_package and step.package != origin_package:
+        add(
+            "external_package",
+            "step targets a package outside the app whose map is being replayed",
+        )
+    if is_destructive_step(step, destructive_labels):
+        add("destructive", "label matches the configured destructive-action vocabulary")
+
+    if kind in _SAFE_GOTO_STEP_KINDS:
+        return risks
+    if kind == "key":
+        if (step.arg or "").strip().casefold() != "back":
+            add("system_navigation", "only the Back key is a navigation-only goto step")
+        return risks
+    if kind == "open-link":
+        uri = (step.arg or "").strip()
+        try:
+            scheme = urlsplit(uri).scheme.casefold() if uri else ""
+        except ValueError:
+            scheme = ""
+        if uri and _deeplink_changes_settings(uri):
+            add(
+                "settings_mutation",
+                "deeplink contains configuration/feature-setting parameters",
+            )
+        elif scheme in _EXTERNAL_URI_SCHEMES:
+            add("external_navigation", "link can hand control to another app or system handler")
+        else:
+            add(
+                "deeplink_effect",
+                "a custom deeplink may navigate or mutate app state; the recorded edge "
+                "cannot distinguish them",
+            )
+        return risks
+    if kind in _SETTINGS_STEP_KINDS:
+        add("settings_mutation", f"{kind} changes app configuration")
+        return risks
+    if kind in _DATA_STEP_KINDS:
+        add("data_mutation", f"{kind} changes user-visible field or clipboard state")
+        return risks
+    if kind in _ENVIRONMENT_STEP_KINDS:
+        add("environment_mutation", f"{kind} changes the test/device environment")
+        return risks
+    if kind in _LIFECYCLE_STEP_KINDS:
+        add("app_lifecycle", f"{kind} starts or stops an application process")
+        return risks
+    if kind == "tap-point":
+        add("unbound_coordinate", "coordinate action has no stable semantic navigation target")
+        return risks
+    if kind == "long-press":
+        # Long-press commonly opens a context menu, but it can also immediately mutate content;
+        # unlike a normal tap, Android exposes that stronger gesture explicitly.
+        add("content_interaction", "long-press is not provably navigation-only")
+        return risks
+    if kind in {"repeat", "retry"}:
+        if not step.substeps:
+            add("unknown_action", f"{kind} has no inspectable substeps")
+            return risks
+        for index, substep in enumerate(step.substeps):
+            nested_path = f"{path}.substeps[{index}]" if path else f"substeps[{index}]"
+            risks.extend(
+                item
+                for item in route_step_risks(
+                    substep,
+                    origin_package=origin_package,
+                    destructive_labels=destructive_labels,
+                    path=nested_path,
+                )
+                if item not in risks
+            )
+        return risks
+    if kind in {"goto", "flow"}:
+        add("nested_execution", f"{kind} delegates to another learned or authored journey")
+        return risks
+    add("unknown_action", f"{kind or 'empty'} is not a navigation-only goto step")
+    return risks
+
+
 # --------------------------------------------------------------------------- redaction
 
 
@@ -626,6 +829,16 @@ def anchor_similarity(a: set[str], b: set[str]) -> float:
     if not union:
         return 0.0
     return sum(weight(item) for item in a & b) / sum(weight(item) for item in union)
+
+
+def _is_discriminative_anchor(anchor: str) -> bool:
+    """Whether an identity anchor says more than shared navigation/rendering chrome."""
+    kind, _, value = anchor.partition(":")
+    if kind == "id":
+        return _resource_slug(value) not in _GENERIC_IDENTITY_RESOURCE_IDS
+    if kind in {"cd", "tx"}:
+        return value.strip().lower() not in _GENERIC_IDENTITY_LABELS
+    return True
 
 
 def key_elements(
@@ -1426,11 +1639,27 @@ class AppMemoryStore:
             for name, rec in candidates:
                 state_compatible = rec.state == state or (rec.state is None and state is None)
                 surface_compatible = not rec.surface or not surface or rec.surface == surface
-                if rec.signature == sig and state_compatible and surface_compatible:
+                recorded_anchors = set(rec.anchors)
+                shared_identity = {
+                    anchor
+                    for anchor in anchors & recorded_anchors
+                    if _is_discriminative_anchor(anchor)
+                }
+                # An identical hash made only from framework roots/back buttons is not screen
+                # identity. Require a shared app-authored title, description, state selector,
+                # or resource id even on the exact-signature fast path.
+                if (
+                    rec.signature == sig
+                    and state_compatible
+                    and surface_compatible
+                    and shared_identity
+                ):
                     return name, 1.0
                 if not state_compatible:
                     continue
-                sim = anchor_similarity(anchors, set(rec.anchors))
+                if not shared_identity:
+                    continue
+                sim = anchor_similarity(anchors, recorded_anchors)
                 if rec.activity and activity:
                     sim += 0.05 if rec.activity == activity else -0.10
                 if not surface_compatible:
@@ -1728,7 +1957,13 @@ class AppMemoryStore:
             return None
         # Explicit/manual edges without structured steps pre-date automatic observation
         # and remain trusted. Auto-recorded edges always pass an explicit verification bit.
-        is_verified = True if verified is None else verified
+        # ``verified is None`` is an explicitly authored/legacy edge. Automatic observation
+        # always passes a bool and must be corroborated by a second consistent recording; a
+        # destination merely being a known screen is not independent evidence that recognition
+        # named it correctly.
+        explicitly_trusted = verified is None
+        is_verified = explicitly_trusted or bool(verified)
+        independently_corroborated = bool(verified) and any(step.package for step in steps)
         rejection_reason = _route_rejection_reason(steps) if steps else None
         now = _now_iso()
         route_context = app.contexts.get(context_id)
@@ -1744,15 +1979,22 @@ class AppMemoryStore:
                 if steps and not e.steps:
                     e.steps = steps  # re-walking a legacy edge upgrades it in place
                 if rejection_reason is None:
-                    e.rejection_reason = None
-                    if is_verified or (e.status == "provisional" and e.count >= 2):
+                    has_conflict = _has_route_conflict(app, e)
+                    if (
+                        explicitly_trusted
+                        or independently_corroborated
+                        or (is_verified and e.count >= 2)
+                    ) and not has_conflict:
                         e.status = "verified"
                         e.verification_count += 1
-                    elif e.status == "rejected":
+                        e.rejection_reason = None
+                    elif e.status == "rejected" and not has_conflict:
                         e.status = "provisional"
+                        e.rejection_reason = None
                 else:
                     e.status = "rejected"
                     e.rejection_reason = rejection_reason
+                _demote_contradicting_edges(app, e)
                 self.save(app)
                 return e
         edge = RouteEdge(
@@ -1763,25 +2005,23 @@ class AppMemoryStore:
             context_id=context_id,
             guards=dict(route_context.flags) if route_context else {},
             steps=steps,
-            # First sighting still counts as verified, deliberately: `provisional` does not
-            # mean "less sure" here, it means INVISIBLE — `_adjacency` excludes it, so demoting
-            # every new edge stops `goto` finding any route until each one has been walked
-            # twice, and a map you have to walk twice before it helps is not a map. The real
-            # defect was never the single sighting; it was that nothing ever compared two
-            # recordings of the same deterministic action. `_demote_contradicting_edges` does.
             status=(
                 "rejected"
                 if rejection_reason
                 else "verified"
-                if is_verified
+                if explicitly_trusted or independently_corroborated
                 else "provisional"
             ),
-            verification_count=1 if is_verified and not rejection_reason else 0,
+            verification_count=(
+                1
+                if (explicitly_trusted or independently_corroborated) and not rejection_reason
+                else 0
+            ),
             rejection_reason=rejection_reason,
             last_seen=now,
         )
-        _demote_contradicting_edges(app, edge)
         app.routes.append(edge)
+        _demote_contradicting_edges(app, edge)
         self.save(app)
         return edge
 
@@ -1805,10 +2045,13 @@ class AppMemoryStore:
         if edge is None:
             return
         if ok:
-            edge.rejection_reason = None
-            edge.verification_count += 1
-            if edge.status != "verified":
+            if not _has_route_conflict(app, edge):
+                edge.rejection_reason = None
+                edge.verification_count += 1
                 edge.status = "verified"
+            else:
+                edge.status = "provisional"
+                edge.rejection_reason = "conflicting destination for the same origin and action"
         elif edge.status == "verified":
             edge.status = "provisional"
             edge.rejection_reason = f"replay landed on {reached or 'an unrecognised screen'}"
@@ -2096,6 +2339,14 @@ class AppMemoryStore:
         sess = self.load_session(serial)
         sess.recent.append(step)
         sess.recent = sess.recent[-_RECENT_CAP:]
+        # A persistent top-level navigation control expresses a fresh destination. If sparse
+        # recognition failed to advance the cursor after an earlier action, carrying the whole
+        # exploratory history into this tap creates a compound route that no agent intended.
+        # Keep the journal, but let the newest top-level intent supersede unresolved pending.
+        if sess.pending and _is_top_level_navigation_step(step):
+            sess.pending = []
+            sess.pending_since = None
+            sess.pending_overflow = False
         if not sess.pending:
             sess.pending_since = _now_iso()
         if len(sess.pending) >= _PENDING_CAP:
@@ -2138,6 +2389,10 @@ class AppMemoryStore:
         if matches_any(package, self.cfg.ignore_packages):
             return None  # keyboards / system chrome never get a map of their own
         sess = self.load_session(serial)
+        # Post-action loading shells are not destinations. Preserve the cursor and pending
+        # action so the settled observation records one direct edge to the final screen.
+        if sess.package == package and sess.pending and _infer_state(elements) == "loading":
+            return None
         in_transit = (
             sess.package is not None
             and package != sess.package
@@ -2287,6 +2542,8 @@ class AppMemoryStore:
         sess = self.load_session(serial)
         if sess.package != package:
             return None  # foreign/transit observation — leave the journey state alone
+        if sess.pending and _infer_state(elements) == "loading":
+            return None  # awaited/final observation must consume the route, not this shell
         app = self.load(package)
         if app is None or not app.screens:
             return None
@@ -2377,6 +2634,7 @@ class AppMemoryStore:
             [
                 f"{e.action} → {e.to_screen}"
                 for e in sorted(adj.get(current or "", []), key=lambda x: x.to_screen)
+                if e.to_screen in app.screens and not app.screens[e.to_screen].stale
             ]
             if include_navigation
             else []
@@ -2384,14 +2642,28 @@ class AppMemoryStore:
         # Rank destinations by usage; prefer ones reachable from here so `goto` will work,
         # else fall back to the app's top screens (reachable from a root).
         reachable = _reachable(app, current, sess.active_context_id)
-        visible = {
+        exact_context = {
             name
             for name, rec in app.screens.items()
-            if rec.context_id in (sess.active_context_id, LEGACY_CONTEXT_ID)
+            if rec.context_id == sess.active_context_id and not rec.stale
         }
-        pool = [n for n in visible if n != current and (not reachable or n in reachable)]
-        if not pool:
-            pool = [n for n in visible if n != current]
+        legacy_fallback = {
+            name
+            for name, rec in app.screens.items()
+            if rec.context_id == LEGACY_CONTEXT_ID and not rec.stale
+        }
+        visible = exact_context or legacy_fallback
+        if current is None:
+            reachable = {
+                name
+                for name in visible
+                if _shortest_path(app, name, context_id=sess.active_context_id)
+            }
+        # Suggestions are advertised as ready-to-run commands. Never suggest a stale screen or
+        # an unreachable fallback merely because it ranks highly; `goto` would reject it and the
+        # agent would learn that map hints are guesses. Legacy screens are fallback-only when the
+        # active context has no healthy screens of its own.
+        pool = [n for n in visible if n != current and n in reachable]
         ranked = sorted(
             pool,
             key=lambda n: _rank_score(
@@ -2461,24 +2733,37 @@ def _suggest_deeplinks(app: AppMap, cap: int) -> list[str]:
 def _demote_contradicting_edges(app: AppMap, edge: RouteEdge) -> None:
     """Two destinations for one deterministic action cannot both be verified.
 
-    A deeplink resolves to one place: same URI, same origin, same flag context, same screen. So
-    a second, different destination means at least one of the two is wrong, and neither has
-    earned trust. Measured 2026-08-10: one URI had been recorded arriving at six different
-    screens and another at four, every row `verified`, because each was written down the first
-    time it was seen and nothing ever compared them. Demoting rather than deleting keeps the
-    evidence — the existing `route_conflict` research task is what resolves which is real.
+    The same stable selector on the same origin in the same context is deterministic. A second,
+    different destination means at least one recognition was wrong, and neither edge has earned
+    trust. Demoting rather than deleting keeps the evidence — the existing ``route_conflict``
+    research task is what resolves which destination is real.
     """
-    if "open-link" not in edge.action:
+    conflicts = [
+        other
+        for other in app.routes
+        if other.from_screen == edge.from_screen
+        and other.action == edge.action
+        and other.context_id == edge.context_id
+        and other.to_screen != edge.to_screen
+    ]
+    if not conflicts:
         return
-    for other in app.routes:
-        if (
-            other.from_screen == edge.from_screen
-            and other.action == edge.action
-            and other.context_id == edge.context_id
-            and other.to_screen != edge.to_screen
-            and other.status == "verified"
-        ):
-            other.status = "provisional"
+    reason = "conflicting destination for the same origin and action"
+    edge.status = "provisional"
+    edge.rejection_reason = reason
+    for other in conflicts:
+        other.status = "provisional"
+        other.rejection_reason = reason
+
+
+def _has_route_conflict(app: AppMap, edge: RouteEdge) -> bool:
+    return any(
+        other.from_screen == edge.from_screen
+        and other.action == edge.action
+        and other.context_id == edge.context_id
+        and other.to_screen != edge.to_screen
+        for other in app.routes
+    )
 
 
 def _resolve_screen_name(app: AppMap, name: str | None) -> str | None:
@@ -2571,6 +2856,11 @@ def _route_rejection_reason(steps: list[RouteStep]) -> str | None:
     ]
     if not destination_steps:
         return "no destination-producing action"
+    if (
+        len(destination_steps) > _MAX_SAME_PACKAGE_DESTINATION_STEPS
+        and not any(step.package for step in steps)
+    ):
+        return "too many destination actions accumulated without a recognized screen"
     for step in destination_steps:
         if step.kind in {"tap", "long-press"}:
             if step.resource_id or (step.label and step.label not in REDACT_TOKENS):
@@ -2578,6 +2868,17 @@ def _route_rejection_reason(steps: list[RouteStep]) -> str | None:
         elif step.arg:
             return None
     return "destination action has no durable selector"
+
+
+def _is_top_level_navigation_step(step: RouteStep) -> bool:
+    """Conservative resource-id heuristic for persistent app navigation controls."""
+    if step.kind != "tap" or not step.resource_id:
+        return False
+    resource = _resource_slug(step.resource_id)
+    return (
+        resource.startswith(("bottom_bar_", "bottom_nav_", "navigation_bar_", "tab_"))
+        or resource.endswith("_tab")
+    )
 
 
 def _pending_fresh(since: str | None, *, now: datetime | None = None) -> bool:
@@ -2672,9 +2973,17 @@ def _adjacency(
     include_provisional: bool = False,
 ) -> dict[str, list[RouteEdge]]:
     adj: dict[str, list[RouteEdge]] = {}
-    for e in _routes_for_context(
+    routes = _routes_for_context(
         app, context_id, include_provisional=include_provisional
-    ):
+    )
+    destinations: dict[tuple[str, str, str], set[str]] = {}
+    for edge in routes:
+        key = (edge.from_screen, edge.action, edge.context_id)
+        destinations.setdefault(key, set()).add(edge.to_screen)
+    conflicted = {key for key, targets in destinations.items() if len(targets) > 1}
+    for e in routes:
+        if (e.from_screen, e.action, e.context_id) in conflicted:
+            continue
         adj.setdefault(e.from_screen, []).append(e)
     return adj
 
@@ -2778,35 +3087,129 @@ def _header(app: AppMap, context_id: str | None = None) -> list[str]:
     return lines
 
 
-def _playbook_lines(app: AppMap) -> list[str]:
-    """The app-level knowledge block (description, deeplinks, recipes, notes) — the
-    durable facts the tool learned and should surface to the agent up front."""
-    if not (app.description or app.deeplinks or app.recipes or app.notes or app.knowledge):
+def playbook_view(
+    app: AppMap,
+    *,
+    context_id: str | None = None,
+    max_deeplinks: int | None = None,
+    max_notes: int | None = None,
+) -> dict[str, Any]:
+    """Current, deduplicated playbook facts for an agent-facing response.
+
+    The legacy lists remain the storage-compatible projection, while ``knowledge`` carries
+    provenance, status, version and context. Rendering the lists directly made a superseded
+    recipe appear beside its replacement and made ``knowledge stale`` ineffective: the stale
+    sentence was still echoed from ``app.notes``. This view merges both stores by semantic key,
+    lets the newest accepted scoped fact win, and suppresses stale/out-of-scope exact copies
+    without deleting their evidence.
+    """
+
+    def normal(value: str | None) -> str:
+        return re.sub(r"\s+", " ", (value or "").strip()).casefold()
+
+    def exact_key(kind: str, name: str | None, text: str) -> tuple[str, str, str]:
+        return kind, normal(name), normal(text)
+
+    def in_scope(item: KnowledgeItem) -> bool:
+        scope = item.scope
+        if scope.app_version and app.app_version and scope.app_version != app.app_version:
+            return False
+        return context_id is None or scope.context_id in (None, context_id, LEGACY_CONTEXT_ID)
+
+    ordered = sorted(
+        app.knowledge,
+        key=lambda item: (item.last_verified or item.created_at, item.created_at, item.id),
+    )
+    suppressed = {
+        exact_key(item.kind, item.name, item.text)
+        for item in ordered
+        if item.status != "accepted" or not in_scope(item)
+    }
+    active = [item for item in ordered if item.status == "accepted" and in_scope(item)]
+
+    description = (
+        app.description
+        if app.description
+        and exact_key("description", None, app.description) not in suppressed
+        else None
+    )
+    recipes: dict[str, Recipe] = {
+        normal(recipe.name): recipe
+        for recipe in app.recipes
+        if exact_key("recipe", recipe.name, recipe.note) not in suppressed
+    }
+    deeplinks: dict[str, Deeplink] = {
+        normal(link.uri): link
+        for link in app.deeplinks
+        if exact_key("deeplink", link.uri, link.note or link.uri) not in suppressed
+    }
+    notes: dict[str, str] = {
+        normal(note): note
+        for note in app.notes
+        if exact_key("note", None, note) not in suppressed
+    }
+
+    for item in active:
+        if item.kind == "description":
+            description = item.text
+        elif item.kind == "recipe" and item.name:
+            recipes[normal(item.name)] = Recipe(name=item.name, note=item.text)
+        elif item.kind == "deeplink" and item.name:
+            prior = deeplinks.get(normal(item.name))
+            deeplinks[normal(item.name)] = Deeplink(
+                uri=item.name,
+                note=None if item.text == item.name else item.text,
+                count=prior.count if prior else 1,
+                probed=prior.probed if prior else False,
+                landed=prior.landed if prior else None,
+                last_seen=prior.last_seen if prior else item.last_verified,
+            )
+        elif item.kind in {"note", "claim"}:
+            notes[normal(item.text)] = item.text
+
+    links = sorted(
+        deeplinks.values(),
+        key=lambda link: (
+            not link.probed,
+            "$" in link.uri or "{" in link.uri,
+            -link.count,
+            link.uri,
+        ),
+    )
+    note_values = list(notes.values())
+    total_links, total_notes = len(links), len(note_values)
+    if max_deeplinks is not None:
+        links = links[: max(0, max_deeplinks)]
+    if max_notes is not None:
+        note_values = note_values[: max(0, max_notes)]
+    return {
+        "description": description,
+        "recipes": list(recipes.values()),
+        "deeplinks": links,
+        "notes": note_values,
+        "counts": {
+            "recipes": len(recipes),
+            "deeplinks": total_links,
+            "notes": total_notes,
+            "stale_or_scoped_out": len(suppressed),
+        },
+    }
+
+
+def _playbook_lines(app: AppMap, *, context_id: str | None = None) -> list[str]:
+    """The current app playbook, deduplicated through :func:`playbook_view`."""
+    view = playbook_view(app, context_id=context_id)
+    if not any(view[key] for key in ("description", "deeplinks", "recipes", "notes")):
         return []
     lines = ["## Playbook"]
-    if app.description:
-        lines.append(app.description)
-    for r in app.recipes:
+    if view["description"]:
+        lines.append(str(view["description"]))
+    for r in view["recipes"]:
         lines.append(f"- recipe `{r.name}`: {r.note}")
-    for d in app.deeplinks:
+    for d in view["deeplinks"]:
         lines.append(f"- deeplink `{d.uri}`" + (f" — {d.note}" if d.note else ""))
-    for note in app.notes:
+    for note in view["notes"]:
         lines.append(f"- note: {note}")
-    legacy_text = {
-        app.description or "",
-        *app.notes,
-        *(recipe.note for recipe in app.recipes),
-        *(deeplink.note or deeplink.uri for deeplink in app.deeplinks),
-    }
-    for item in app.knowledge:
-        if item.status != "accepted" or item.text in legacy_text:
-            continue
-        scope = f" [{item.scope.context_id}]" if item.scope.context_id else ""
-        provenance = f" ({item.source}"
-        if item.agent:
-            provenance += f": {item.agent}"
-        provenance += ")"
-        lines.append(f"- {item.kind}{scope}: {item.text}{provenance}")
     return lines
 
 
@@ -2847,7 +3250,7 @@ def render_map(
             if detail != "brief" and context.evidence:
                 lines.append(f"    - evidence: {' | '.join(context.evidence)}")
         lines.append("")
-    if playbook := _playbook_lines(app):
+    if playbook := _playbook_lines(app, context_id=selected_context):
         lines.extend([*playbook, ""])
     if not app.screens:
         lines.append("_(no screens recorded yet — run `aua analyze` while navigating)_")
@@ -2934,6 +3337,7 @@ def _shortest_path(
     context_id: str | None = None,
     *,
     include_provisional: bool = False,
+    exclude_route_ids: set[str] | None = None,
 ) -> list[RouteEdge]:
     """Shortest route to *target*; ``[]`` if already there / no path.
 
@@ -2941,6 +3345,7 @@ def _shortest_path(
     current position); otherwise search from roots, then any screen (the original behaviour).
     """
     adj = _adjacency(app, context_id, include_provisional=include_provisional)
+    excluded = exclude_route_ids or set()
     if start is not None:
         if start == target or start not in app.screens:
             return []
@@ -2963,7 +3368,10 @@ def _shortest_path(
             node, path = queue.popleft()
             # Among parallel edges to the same screen, prefer a replayable (steps-bearing)
             # one, then the most-travelled — BFS shortest-path is unaffected.
-            edges = sorted(adj.get(node, []), key=lambda e: (not e.steps, -e.count, e.action))
+            edges = sorted(
+                (edge for edge in adj.get(node, []) if edge.id not in excluded),
+                key=lambda e: (not e.steps, -e.count, e.action),
+            )
             for e in edges:
                 if e.to_screen in visited:
                     continue
@@ -3027,15 +3435,15 @@ def _find_targets(
                 return score * 2 + 1
         return None
 
-    scored: list[tuple[int, str]] = []
+    scored: list[tuple[bool, bool, int, str]] = []
     for name, rec in app.screens.items():
         if context_id is not None and rec.context_id not in (context_id, LEGACY_CONTEXT_ID):
             continue
         score = rank(name)
         if score is not None:
-            scored.append((score, name))
-    scored.sort(key=lambda pair: pair[0])
-    return [name for _score, name in scored]
+            scored.append((rec.stale, rec.context_id == LEGACY_CONTEXT_ID, score, name))
+    scored.sort()
+    return [name for _stale, _legacy, _score, name in scored]
 
 
 def find_result(
@@ -3043,9 +3451,10 @@ def find_result(
 ) -> dict[str, object]:
     """Structured ``--find --json`` payload: matching screens + the route to each."""
     results = []
-    for t in _find_targets(app, query, context_id):
+    targets = _find_targets(app, query, context_id)
+    for t in targets[:8]:
         rec = app.screens.get(t)
-        path = _shortest_path(app, t, context_id=context_id, include_provisional=True)
+        path = [] if rec and rec.stale else _shortest_path(app, t, context_id=context_id)
         results.append(
             {
                 "screen": t,
@@ -3057,7 +3466,13 @@ def find_result(
                 "key_elements": [ke.model_dump() for ke in rec.key_elements] if rec else [],
             }
         )
-    return {"query": query, "package": app.package, "results": results}
+    return {
+        "query": query,
+        "package": app.package,
+        "results": results,
+        "total_matches": len(targets),
+        "truncated": max(0, len(targets) - len(results)),
+    }
 
 
 def resolve_goal(
@@ -3084,7 +3499,7 @@ def resolve_goal(
         return exact[0]
     now = now or datetime.now().astimezone()
 
-    def key(name: str) -> tuple[bool, bool, float, int]:
+    def key(name: str) -> tuple[bool, bool, bool, bool, float, int]:
         path = _shortest_path(app, name, start=start, context_id=context_id)
         reachable = (
             bool(path)
@@ -3095,7 +3510,15 @@ def resolve_goal(
             app.screens[name], now=now, half_life_days=half_life_days, last_goal=last_goal
         )
         # A screen *named* for the goal beats one that merely contains a matching element.
-        return (g in name.lower(), reachable, score, -(len(path) or 99))
+        rec = app.screens[name]
+        return (
+            not rec.stale,
+            rec.context_id != LEGACY_CONTEXT_ID,
+            g in name.lower(),
+            reachable,
+            score,
+            -(len(path) or 99),
+        )
 
     return sorted(targets, key=key, reverse=True)[0]
 
@@ -3109,14 +3532,29 @@ def _render_find(
         lines.append("")
         lines.append("_(no matching screen in memory — navigate there once so it is recorded)_")
         return "\n".join(lines) + "\n"
-    for t in targets:
+    for t in targets[:8]:
         rec = app.screens.get(t)
         lines.append("")
         lines.append(f"## {t}" + (f"  (tier: {rec.tier})" if rec else ""))
-        path = _shortest_path(app, t, context_id=context_id, include_provisional=True)
-        lines.append("route: " + (_format_path(path) if path else "(start here)"))
+        path = [] if rec and rec.stale else _shortest_path(app, t, context_id=context_id)
+        roots = _roots(app, context_id)
+        has_untrusted_incoming = any(
+            edge.to_screen == t
+            for edge in _routes_for_context(app, context_id, include_provisional=True)
+        )
+        if rec and rec.stale:
+            route_text = "(stale screen; re-observe before routing)"
+        elif path:
+            route_text = _format_path(path)
+        elif t in roots and not has_untrusted_incoming:
+            route_text = "(start here)"
+        else:
+            route_text = "(no verified route)"
+        lines.append("route: " + route_text)
         if rec:
             lines.extend(f"  - {s}" for s in _summarize_keys(rec))
+    if len(targets) > 8:
+        lines.extend(("", f"_({len(targets) - 8} lower-ranked matches omitted)_"))
     return "\n".join(lines).rstrip() + "\n"
 
 

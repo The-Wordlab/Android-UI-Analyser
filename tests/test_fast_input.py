@@ -5,7 +5,10 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
+
 from android_ui_analyser.device import Uiautomator2Device
+from android_ui_analyser.errors import DeviceError
 
 
 def _bare_device(u2: Any) -> Uiautomator2Device:
@@ -37,6 +40,8 @@ def test_send_text_prefers_set_text() -> None:
 def test_send_text_clipboard_paste_when_set_text_fails() -> None:
     focused = MagicMock()
     focused.set_text.side_effect = RuntimeError("no a11y SET_TEXT")
+    field = {"text": "old field content"}
+    focused.get_text.side_effect = lambda: field["text"]
     u2 = MagicMock(return_value=focused)
     u2.clipboard = "previous-value"
     shells: list[str] = []
@@ -44,11 +49,20 @@ def test_send_text_clipboard_paste_when_set_text_fails() -> None:
 
     def shell(cmd: str) -> str:
         shells.append(cmd)
+        if cmd == "input keyevent 279":
+            field["text"] = u2.clipboard
         return ""
 
     u2.shell = shell
 
     dev = _bare_device(u2)
+    clip_reads: list[str] = []
+
+    def get_clipboard() -> str:
+        clip_reads.append(u2.clipboard)
+        return str(u2.clipboard)
+
+    dev.get_clipboard = get_clipboard  # type: ignore[method-assign]
 
     def _call(name: str, *args: Any, **kwargs: Any) -> Any:
         if name == "set_clipboard":
@@ -56,6 +70,7 @@ def test_send_text_clipboard_paste_when_set_text_fails() -> None:
             u2.clipboard = args[0]
             return None
         if name == "clear_text":
+            field["text"] = ""
             return None
         if name == "send_keys":
             raise AssertionError("send_keys must not run when paste works")
@@ -69,17 +84,30 @@ def test_send_text_clipboard_paste_when_set_text_fails() -> None:
 
     assert "input keyevent 279" in shells
     assert "fast paste me" in clip_writes
-    # Restored after paste
-    assert clip_writes[-1] == "previous-value"
-    assert u2.clipboard == "previous-value"
+    # The value that predated this lease is never restored into a paste overlay.  The transient
+    # clipboard is emptied after the verified field update.
+    assert "previous-value" not in clip_writes
+    assert clip_reads == ["fast paste me"], "the pre-lease clipboard must never be read"
+    assert clip_writes[-1] == ""
+    assert u2.clipboard == ""
+    assert field["text"] == "fast paste me"
 
 
 def test_send_text_append_skips_set_text_uses_paste() -> None:
     focused = MagicMock()
+    field = {"text": "hello"}
+    focused.get_text.side_effect = lambda: field["text"]
     u2 = MagicMock(return_value=focused)
     u2.clipboard = ""
     shells: list[str] = []
-    u2.shell = lambda cmd: shells.append(cmd) or ""
+
+    def shell(cmd: str) -> str:
+        shells.append(cmd)
+        if cmd == "input keyevent 279":
+            field["text"] += u2.clipboard
+        return ""
+
+    u2.shell = shell
 
     dev = _bare_device(u2)
 
@@ -94,6 +122,8 @@ def test_send_text_append_skips_set_text_uses_paste() -> None:
 
     focused.set_text.assert_not_called()
     assert "input keyevent 279" in shells
+    assert field["text"] == "hello more"
+    assert u2.clipboard == ""
 
 
 def test_send_text_falls_back_to_send_keys_when_paste_fails() -> None:
@@ -106,7 +136,7 @@ def test_send_text_falls_back_to_send_keys_when_paste_fails() -> None:
         raise RuntimeError("paste keyevent failed")
 
     u2.shell = shell
-    keys: list[tuple[Any, ...]] = []
+    keys: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
 
     dev = _bare_device(u2)
 
@@ -116,7 +146,7 @@ def test_send_text_falls_back_to_send_keys_when_paste_fails() -> None:
         if name == "clear_text":
             return None
         if name == "send_keys":
-            keys.append(args)
+            keys.append((args, kwargs))
             return None
         raise AssertionError(name)
 
@@ -125,4 +155,37 @@ def test_send_text_falls_back_to_send_keys_when_paste_fails() -> None:
     focused.set_text.side_effect = RuntimeError("no set_text")
 
     dev.send_text("slow path", clear=True)
-    assert keys == [("slow path",)]
+    assert keys == [(("slow path",), {"clear": True})]
+
+
+def test_a_dispatched_but_unverified_paste_fails_closed_and_clears_clipboard() -> None:
+    focused = MagicMock()
+    focused.set_text.side_effect = RuntimeError("no set_text")
+    field = {"text": ""}
+    focused.get_text.side_effect = lambda: field["text"]
+    u2 = MagicMock(return_value=focused)
+    u2.clipboard = "unrelated"
+    u2.shell = lambda _cmd: ""  # accepts KEYCODE_PASTE, but the field never changes
+    calls: list[str] = []
+
+    dev = _bare_device(u2)
+
+    def _call(name: str, *args: Any, **kwargs: Any) -> Any:
+        calls.append(name)
+        if name == "clear_text":
+            field["text"] = ""
+            return None
+        if name == "set_clipboard":
+            u2.clipboard = args[0]
+            return None
+        if name == "send_keys":
+            raise AssertionError("must not risk duplicating a paste that may have landed")
+        raise AssertionError(name)
+
+    dev._call = _call  # type: ignore[method-assign]
+
+    with pytest.raises(DeviceError):
+        dev.send_text("transient phrase", clear=True)
+
+    assert "send_keys" not in calls
+    assert u2.clipboard == ""

@@ -142,6 +142,23 @@ def test_resolve_goal_fuzzy_and_miss(tmp_path: Path) -> None:
     assert resolve_goal(app_map, "nonexistent-zzz") is None
 
 
+def test_resolve_goal_prefers_a_current_screen_over_a_stale_better_rank(tmp_path: Path) -> None:
+    app_map = _build_three(tmp_path).load(P)
+    assert app_map is not None
+    app_map.screens["images"].stale = True
+    current = app_map.screens["images"].model_copy(
+        update={
+            "name": "image_gallery",
+            "id": "screen_image_gallery",
+            "stale": False,
+            "visit_count": 1,
+        }
+    )
+    app_map.screens["image_gallery"] = current
+
+    assert resolve_goal(app_map, "image") == "image_gallery"
+
+
 # --------------------------------------------------------------- navigation_hints
 
 
@@ -159,6 +176,28 @@ def test_navigation_hints_empty_for_unmapped(tmp_path: Path) -> None:
     store = _store(tmp_path)  # nothing recorded
     hints = store.navigation_hints("emu-x", P)
     assert hints.known_routes == [] and hints.suggested_gotos == [] and hints.map_hint is None
+
+
+def test_navigation_hints_never_advertise_stale_or_unreachable_gotos(tmp_path: Path) -> None:
+    store = _build_three(tmp_path)
+    app_map = store.load(P)
+    assert app_map is not None
+    app_map.screens["images"].stale = True
+    # A healthy screen with no verified path is known, but not a ready-to-run goto.
+    orphan = app_map.screens["images"].model_copy(
+        update={"name": "orphan", "id": "screen_orphan", "stale": False}
+    )
+    app_map.screens["orphan"] = orphan
+    store.save(app_map)
+    session = store.load_session("safe-hints")
+    session.current_screen = "apps"
+    store.save_session("safe-hints", session)
+
+    hints = store.navigation_hints("safe-hints", P)
+
+    assert "goto images" not in hints.suggested_gotos
+    assert "goto orphan" not in hints.suggested_gotos
+    assert not any("images" in route for route in hints.known_routes)
 
 
 def test_session_back_compat_without_last_goal() -> None:

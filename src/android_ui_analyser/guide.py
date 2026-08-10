@@ -97,7 +97,10 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "an app quirk, or no inline route/flow answers the goal; it is a playbook, not a "
         "mandatory first round trip. As you learn things, teach it back with "
         '`aua remember --about "…" | --note "…" | --recipe NAME --note "…" | --deeplink URI --note "…"` '
-        "so the next run starts even more informed.",
+        "so the next run starts even more informed. Check for an equivalent fact first rather "
+        "than appending a near-duplicate; scope version/flag/locale/account-dependent claims, and "
+        "when a new build contradicts one preserve its evidence with "
+        "`aua knowledge stale <id>` before adding the replacement.",
     ),
     (
         "Use what memory already knows",
@@ -105,7 +108,8 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "usually don't need to call it: every `analyze` already returns `meta.known_screen` plus "
         "inline `meta.known_routes` / `meta.suggested_gotos` / `meta.map_hint`; unresolved "
         "map questions arrive in `meta.research_tasks`. Act on those "
-        'instead of re-exploring. `aua map --find "<goal>"` gives just the route to a target. '
+        'instead of re-exploring. `aua map --find "<goal>"` gives only a verified route to a '
+        "target; provisional evidence is shown as no verified route, never as runnable steps. "
         "Feature-flag sets are separate contexts; use `--all-contexts` to compare variants and "
         "`--audit` to persist ambiguous names/routes as concrete research tasks.",
     ),
@@ -140,10 +144,12 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
     ),
     (
         "Index an app you don't know yet",
-        "`aua explore plan` returns a prioritized worklist — mined deeplinks to probe, "
-        "dead-end screens to expand. Run the tasks with normal `aua` commands; the results "
-        "auto-record into the map + playbook, and re-running the plan shows what's left. "
-        "This is how you (the agent) index an app for aua to remember.",
+        "`aua explore plan` returns a risk-classified worklist — unresolved map questions first, "
+        "then safe dead-end screens, then speculative deeplinks. External/destructive probes are "
+        "labelled and a listed task never grants authorization for their side effects. Run safe "
+        "tasks with normal `aua` commands; results auto-record into the map + playbook, and "
+        "re-running the plan shows what's left. Use `aua map --audit --summary` for token-cheap "
+        "health counts and full `--json` only when you need the evidence.",
     ),
     (
         "Feed research back and correct the map",
@@ -166,14 +172,20 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
     (
         "Jump to a known screen in one call",
         '`aua goto "<goal>"` replays the remembered steps of each route edge — by resource-id '
-        "first, then label — verifying every hop, including cross-app auth legs (Google sign-in "
-        "through Chrome/GMS is folded into one edge). For a destination, prefer it over a raw "
+        "first, then label — verifying every hop. Cross-app auth legs are folded into one edge, "
+        "but require explicit side-effect approval before replay. For a destination, prefer it "
+        "over a raw "
         "deeplink whenever `suggested_gotos` lists the target: `goto` verifies each hop and "
-        "arrival instead of merely delivering an intent. Known in-app hops skip OCR and retry it only when hierarchy cannot match "
+        "arrival instead of merely delivering an intent. Known in-app hops skip OCR and retry "
+        "it only when hierarchy cannot match "
         "a selector or verify arrival; transit screens keep automatic OCR. `--plan` prints the "
-        "annotated route (steps, replayable, destructive) "
-        "without acting. Steps matching `memory.destructive_labels` (delete/sign out/pay/…) are "
-        "refused without `--allow-destructive`. On divergence it hands back the failing step, "
+        "annotated route, including per-step risks, without acting. Before the first route step, "
+        "AUA refuses deeplinks, cross-package actions, settings/data/environment mutation, app "
+        "lifecycle changes, and other non-navigation effects with a visible preview; review it "
+        "before re-running with `--allow-unsafe`. Steps matching `memory.destructive_labels` "
+        "(delete/sign out/pay/…) separately require `--allow-destructive`; mixed routes require "
+        "both flags. Prefer an authored flow for setup or mutation. On divergence it hands back "
+        "the failing step, "
         "the remaining steps, and the current elements — finish that one step manually, then "
         're-run `aua goto "…" --from-here` to resume mid-edge (skips steps that already match '
         "the current screen; also covers mid-auth). Plain `aua goto` still starts from the "
@@ -205,7 +217,10 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
     (
         "Drive by element ID",
         "`aua --format compact analyze` → a list of elements each with an integer `id` + bounds. "
-        'Act on the id: `aua tap-and-analyze <id>`, `aua input-and-analyze <id> "text"`, '
+        "An integer is bound to that one observation frame; after a dynamic update prefer the "
+        "element's stable `resource_id`/`stable_key` via `--rid` or `aua resolve`, rather than "
+        "guessing that the same number still means the same control. Within the current frame: "
+        '`aua tap-and-analyze <id>`, `aua input-and-analyze <id> "text"`, '
         "`aua swipe-and-analyze up`, `aua key-and-analyze back`. "
         'Use `aua has "<text>"` (exit 0/1) to branch cheaply without parsing JSON.',
     ),
@@ -279,6 +294,9 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "know what should come next, say so and the wait becomes evidence-based with your "
         'budget instead of the settle timer: `--until "rid:introCard"`, `--until '
         '"text:Chats"`, `--until "!text:Loading"` (with `--until-timeout MS`). The response '
+        "grammar ANDs comma-separated terms; escape a literal comma as "
+        "`text:Hello\\, friend`. Before accepting a negated text miss, and before timing out "
+        "a positive text term, AUA verifies hierarchy text with its available OCR path. The response "
         "then carries `await_outcome`: `satisfied` / `screen-changed` / `timeout`, and "
         "`await_terms` says which term is missing. Prefer "
         '`wait --for "<text>"` for known targets; reserve `wait --for-stable` for '
@@ -288,7 +306,9 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "Wait on state, never sleep",
         '`aua wait-and-analyze --for "<text>"` waits for text to appear; `aua wait-and-analyze --for-stable` returns once '
         "the screen stops visually changing (grid pixel-hash; looping spinners/video are "
-        "auto-masked so they don't block). Prefer goal waits over `--for-stable` after tabs/taps; "
+        "auto-masked so they don't block). `--after-change` additionally requires a first change, "
+        "visual settle, and a bounded quiet confirmation; a later result that replaces a stable "
+        "loading shell restarts settling. Prefer an explicit final goal over either generic wait; "
         "never fixed sleeps.",
     ),
     (
@@ -327,6 +347,71 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
     (
         "Stop the daemon when done",
         "`aua daemon stop` releases the warm connection.",
+    ),
+]
+
+# ``guide --brief`` is what a fresh agent can afford to read in the middle of a task. Keep this
+# as a deliberately small decision loop rather than reprinting the full operating manual's every
+# feature and exception. The generated skill still receives the complete manual below.
+BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
+    (
+        "Attach automatically and clean up only what you started",
+        "Run `aua devices`, then `aua daemon start` when several calls are coming. AUA leases one "
+        "compatible emulator to the calling agent process automatically: never ask the user for "
+        "a lease or manually steal one. A dead owner makes its device immediately reusable. Prefer "
+        "an existing headed device; if you start a headless emulator, retain its serial and stop "
+        "that emulator before finishing.",
+    ),
+    (
+        "Observe once and use stable selectors",
+        "Start with `aua --format tsv analyze --fields id,text,rid,clickable`. Integer ids belong "
+        "only to that observation frame. On dynamic screens, prefer `--rid <resource-id>` or an "
+        "element's `stable_key`; after any state change, use the action's returned observation or "
+        "`aua resolve <stable_key>` instead of replaying an old numeric id. A numeric id is fine "
+        "only while its frame is still current. Long-press refuses to redirect a caption into a "
+        "sibling control subtree; name the actual acting control instead.",
+    ),
+    (
+        "Choose the highest-level safe navigation",
+        "Use an offered verified `aua goto \"<goal>\"` first, then a matching `aua flow run`, then "
+        "a known deeplink, and manual controls last. A delivered deeplink intent is not arrival: "
+        "accept it only when the returned observation/activity proves the destination. Inspect a "
+        "plan before any route that may delete, pay, send, sign out, mutate settings/data, use a "
+        "deeplink, or leave the app. `goto` refuses those routes before its first step and names "
+        "the required opt-in; exploration never supplies authorization for those effects.",
+    ),
+    (
+        "Act and consume the returned screen",
+        "Use `tap-and-analyze`, `input-and-analyze`, `swipe-and-analyze`, and `key-and-analyze`; "
+        "their `observation` already contains fresh ids. Do not immediately call `analyze` again. "
+        "For your action's expected result add `--until 'rid:resultCard'` or "
+        "`--until '!text:Loading'`; escape a literal comma as `text:Hello\\, friend`. For an "
+        "unattached network-driven update use `wait-and-analyze --after-change --observe`. Prefer "
+        "a positive final affordance over a generic spinner disappearance.",
+    ),
+    (
+        "Let automatic perception escalate",
+        "Hierarchy is fastest and supplies exact selectors. Leave source selection on auto so AUA "
+        "adds OCR/vision only for a thin or opaque tree; paid grounding requires explicit `--deep`. "
+        "Filter in the AUA call (`--where-rid`, `--where-text`, `--clickable`, `--region`) instead "
+        "of piping a large JSON response through ad-hoc scripts.",
+    ),
+    (
+        "Improve the map before probing shortcuts",
+        "Read inline `known_screen`, routes, and research questions. Use "
+        "`aua map --audit --summary` for health counts and `aua explore plan` for work ordered as "
+        "map issues, safe dead ends, then speculative external intents. `goto` must verify every "
+        "hop and stop on divergence; resume from the actual screen rather than replaying blind.",
+    ),
+    (
+        "Keep the playbook concise and current",
+        "Use `aua about` only when you need a recipe or quirk. Before `remember`/`knowledge add`, "
+        "check for an existing equivalent fact and update its evidence instead of adding a "
+        "near-duplicate. Treat version-, flag-, locale-, and account-dependent observations as "
+        "scoped facts, not universal rules. When a new build contradicts one, preserve its "
+        "history with `aua knowledge stale <id>` and add the replacement with fresh evidence. "
+        "`about` and `orient` render only the current accepted projection; replacements deduplicate "
+        "by recipe/deeplink identity and stale or wrong-version facts keep evidence but disappear.",
     ),
 ]
 
@@ -599,11 +684,12 @@ KEY_FLAGS: list[tuple[str, str]] = [
     (
         "map",
         '`--app <pkg>`, `--brief`, `--screen <name>`, `--depth N`, `--find "<goal>"`, '
-        "`--context <id>`, `--all-contexts`, `--audit`, `--json`",
+        "`--context <id>`, `--all-contexts`, `--audit [--summary]`, `--json`",
     ),
     (
         "goto",
         "`<goal>` (fuzzy), `--plan` (annotated route, no taps), `--max-steps N`, "
+        "`--allow-unsafe` (after reviewing disclosed non-navigation effects), "
         "`--allow-destructive`, `--assist` (opt-in planner recovery), `--from-here` "
         "(resume mid-edge after a manual hop / divergence)",
     ),
@@ -839,20 +925,23 @@ def render_markdown(*, brief: bool = False) -> str:
     )
     p.append("")
     p.append("## Session protocol")
-    for i, (title, body) in enumerate(SESSION_PROTOCOL, 1):
+    protocol = BRIEF_SESSION_PROTOCOL if brief else SESSION_PROTOCOL
+    for i, (title, body) in enumerate(protocol, 1):
         p.append(f"{i}. **{title}.** {body}")
 
     if brief:
         p.append("")
         p.append("## Agent best practices (short)")
         p.append(
-            "**Do:** act by id/`--rid`, use action `observation`, `wait --for` (never `sleep`), "
+            "**Do:** prefer stable `--rid`/`stable_key` on dynamic screens, use action "
+            "`observation`, `wait --for` (never `sleep`), "
             "`about`/`goto`/`goto --from-here`/deeplinks/flows, leave OCR auto (map skips when "
             "sure), `aua input-and-analyze` (built-in fast typing + readback), use `aua db` "
             "for private SQLite state. "
             "**Don't:** raw `adb`+screenshots+pixels, `analyze` after every tap, force "
             "`--with-ocr`/`--no-ocr`/vision on every screen, re-walk a goto after a mid-path hop, "
-            "sleep between goto hops, `key back` to dismiss IME, hand-rolled clipboard paste. "
+            "reuse a numeric id after its frame changed, sleep between goto hops, `key back` to "
+            "dismiss IME, hand-rolled clipboard paste. "
             "Full tables: `aua guide` (no `--brief`)."
         )
         p.append("")
@@ -939,9 +1028,13 @@ def render_markdown(*, brief: bool = False) -> str:
         'first; `aua goto "<goal>"` drives a remembered route in one call. **Cross-app auth '
         "legs (Google sign-in via Chrome/GMS, permission dialogs) fold into the origin app's "
         "route** and replay step by step — a redacted account row hands off for one manual tap, "
-        "then re-running `goto` resumes. Replay refuses destructive steps (delete/sign out/…) "
-        "without `--allow-destructive`; an auto-recorded route is provisional until observed "
-        "twice (or landed on as a known post-action screen), and selectorless routes are rejected "
+        "then re-running `goto` resumes. Before its first route step, replay refuses deeplinks, "
+        "cross-package actions, settings/data/environment mutation, lifecycle changes, and other "
+        "non-navigation effects with a visible risk preview; `--allow-unsafe` is a deliberate "
+        "opt-in after review. Destructive steps (delete/sign out/…) separately require "
+        "`--allow-destructive`. An auto-recorded route is provisional until the same "
+        "transition is observed twice (cross-package transit supplies independent corroboration), "
+        "and selectorless routes are rejected "
         "from `goto`. Schema v4 scopes screens/routes to automatically discovered deterministic "
         "feature-flag contexts; exact-context routes outrank trusted `legacy-default` fallbacks. "
         "Stable resource namespaces produce locale-independent destination names, while logical "

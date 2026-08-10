@@ -564,8 +564,9 @@ class Uiautomator2Device(Device):
 
         Order:
         1. Accessibility ``ACTION_SET_TEXT`` via u2 ``set_text`` (replace) — fastest when it works.
-        2. Clipboard set + ``KEYCODE_PASTE`` (previous clipboard restored) — fast for long strings
-           and when ``set_text`` is unavailable; used for append when ``clear=False``.
+        2. Lease-local clipboard set + ``KEYCODE_PASTE`` — fast for long strings and when
+           ``set_text`` is unavailable; the field effect is verified and the transient clipboard
+           is cleared, never restored from unrelated device state.
         3. IME ``send_keys`` — last resort (slow / char-by-char on some devices).
         """
         if clear:
@@ -573,14 +574,17 @@ class Uiautomator2Device(Device):
                 self._d(focused=True).set_text(text)
                 return
             except Exception as exc:
-                logger.debug("set_text on focused field failed (%s); trying clipboard paste", exc)
+                logger.debug(
+                    "set_text on focused field failed (%s); trying clipboard paste",
+                    type(exc).__name__,
+                )
             if self._paste_via_clipboard(text, clear=True):
                 return
             try:
                 self.clear_text()
             except Exception as exc:
                 logger.debug("clear before send_keys failed (%s)", exc)
-            self._call("send_keys", text, clear=False)
+            self._call("send_keys", text, clear=True)
             return
 
         # Append: set_text would replace, so skip straight to paste / keys.
@@ -589,28 +593,75 @@ class Uiautomator2Device(Device):
         self._call("send_keys", text, clear=False)
 
     def _paste_via_clipboard(self, text: str, *, clear: bool) -> bool:
-        """Set clipboard → optional clear → paste → restore clipboard. Returns False on failure."""
-        previous: str | None
-        try:
-            previous = self.get_clipboard()
-        except Exception:
-            previous = None
+        """Paste a transient value, verify the field, and leave no clipboard content behind.
+
+        ``False`` means failure happened *before* paste, so the caller may safely use another
+        input method.  Once KEYCODE_PASTE is sent, an unverifiable outcome raises instead of
+        retrying: a second method could duplicate text that did land.  The old device clipboard
+        is deliberately never read or restored; it may belong to another lease or a human user,
+        and restoring it is precisely how unrelated private text resurfaced in a paste overlay.
+        """
+        clipboard_written = False
+        paste_dispatched = False
+        before = ""
         try:
             if clear:
                 try:
                     self.clear_text()
                 except Exception as exc:
                     logger.debug("clear_text before paste failed (%s)", exc)
+                    return False
+                cleared = self.focused_text()
+                if cleared != "":
+                    logger.debug("could not verify an empty field before clipboard paste")
+                    return False
+            else:
+                current = self.focused_text()
+                if current is None:
+                    logger.debug("could not read focused field before append paste")
+                    return False
+                before = current
+            clipboard_written = True
             self.set_clipboard(text)
+            if self.get_clipboard() != text:
+                logger.debug("clipboard readback did not match the transient input")
+                return False
             self.paste()
-            return True
+            paste_dispatched = True
+
+            expected = text if clear else before + text
+            for attempt in range(4):
+                after = self.focused_text()
+                if after == expected:
+                    return True
+                if attempt < 3:
+                    time.sleep(0.03)
+            raise DeviceError(
+                "clipboard paste was sent but its field effect could not be verified",
+                hint=(
+                    "The transient clipboard was cleared and no second input was attempted. "
+                    "Re-read the field, then retry with a stable selector if it is still empty."
+                ),
+            )
+        except DeviceError:
+            raise
         except Exception as exc:
-            logger.debug("clipboard paste path failed (%s)", exc)
+            # Clipboard exceptions have been known to echo method arguments.  Log only the
+            # exception class so typed values never become diagnostic output.
+            logger.debug("clipboard paste path failed (%s)", type(exc).__name__)
+            if paste_dispatched:
+                raise DeviceError(
+                    "clipboard paste was sent but verification failed",
+                    hint=(
+                        "The transient clipboard was cleared and no second input was attempted. "
+                        "Re-read the focused field before retrying."
+                    ),
+                ) from exc
             return False
         finally:
-            if previous is not None:
+            if clipboard_written:
                 with contextlib.suppress(Exception):
-                    self.set_clipboard(previous)
+                    self.set_clipboard("")
 
     def clear_text(self) -> None:
         try:
@@ -664,9 +715,11 @@ class Uiautomator2Device(Device):
         """Selector for a resource-id. A full ``pkg:id/name`` matches exactly; a bare tail
         (``containerDetail``) matches any id ending in ``:id/<tail>``."""
         if ":id/" in text:
-            return {"resourceId": text} if match is not MatchMode.contains else {
-                "resourceIdMatches": f".*{re.escape(text)}.*"
-            }
+            return (
+                {"resourceId": text}
+                if match is not MatchMode.contains
+                else {"resourceIdMatches": f".*{re.escape(text)}.*"}
+            )
         if match is MatchMode.contains:
             return {"resourceIdMatches": f".*{re.escape(text)}.*"}
         return {"resourceIdMatches": f".*:id/{re.escape(text)}$"}
@@ -716,7 +769,11 @@ class Uiautomator2Device(Device):
         lowered = out.lower()
         if "permission denial" in lowered or "securityexception" in lowered or "error:" in lowered:
             first = next(
-                (line.strip() for line in out.splitlines() if line.strip().startswith(("Error", "java."))),
+                (
+                    line.strip()
+                    for line in out.splitlines()
+                    if line.strip().startswith(("Error", "java."))
+                ),
                 out.strip().splitlines()[-1] if out.strip() else "am start failed",
             )
             raise DeviceError(
@@ -798,9 +855,7 @@ class Uiautomator2Device(Device):
         val = "1" if enabled else "0"
         self._d.shell(f"settings put global airplane_mode_on {val}")
         state = "true" if enabled else "false"
-        self._d.shell(
-            f"am broadcast -a android.intent.action.AIRPLANE_MODE --ez state {state}"
-        )
+        self._d.shell(f"am broadcast -a android.intent.action.AIRPLANE_MODE --ez state {state}")
 
     def get_airplane_mode(self) -> bool | None:
         try:
@@ -915,8 +970,14 @@ class Uiautomator2Device(Device):
         limit = max(1, min(int(time_limit_s), _SCREENRECORD_MAX_S))
         self._recording_proc = subprocess.Popen(  # noqa: S603
             [
-                "adb", "-s", self.serial, "shell", "screenrecord",
-                "--time-limit", str(limit), remote_path,
+                "adb",
+                "-s",
+                self.serial,
+                "shell",
+                "screenrecord",
+                "--time-limit",
+                str(limit),
+                remote_path,
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -1315,7 +1376,11 @@ class Uiautomator2Device(Device):
                     capture_output=True,
                     timeout=15,
                 )
-            except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            except (
+                subprocess.CalledProcessError,
+                FileNotFoundError,
+                subprocess.TimeoutExpired,
+            ) as exc:
                 raise DeviceError(
                     "could not clear logcat buffer",
                     hint="Check `adb` is on PATH and the device is reachable.",
@@ -1323,7 +1388,9 @@ class Uiautomator2Device(Device):
             return ""
         # logcat's own `-T <sec.nsec>` compares against the same clock that stamped the
         # lines, which no amount of host-side parsing can match.
-        native = [] if since_ms is None else ["-T", f"{since_ms // 1000}.{since_ms % 1000:03d}000000"]
+        native = (
+            [] if since_ms is None else ["-T", f"{since_ms // 1000}.{since_ms % 1000:03d}000000"]
+        )
         try:
             return self._logcat_dump(native)
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
@@ -1342,9 +1409,7 @@ class Uiautomator2Device(Device):
         from .logcat import filter_logcat
 
         return "\n".join(
-            filter_logcat(
-                raw, since_ms=since_ms, tz_offset_minutes=self.utc_offset_minutes() or 0
-            )
+            filter_logcat(raw, since_ms=since_ms, tz_offset_minutes=self.utc_offset_minutes() or 0)
         )
 
     def open_link(self, uri: str, *, package: str | None = None) -> None:
@@ -1364,7 +1429,9 @@ class Uiautomator2Device(Device):
         from shlex import quote
 
         try:
-            out = self._d.shell(f"cmd package resolve-activity --brief -a android.intent.action.VIEW -d {quote(uri)}")
+            out = self._d.shell(
+                f"cmd package resolve-activity --brief -a android.intent.action.VIEW -d {quote(uri)}"
+            )
             text = out if isinstance(out, str) else getattr(out, "output", str(out))
         except Exception:
             return []

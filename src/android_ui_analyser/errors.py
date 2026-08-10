@@ -132,6 +132,18 @@ class ElementNotFoundError(AuaError):
     code = "element_not_found"
 
 
+class StaleElementIdError(ElementNotFoundError):
+    """A frame-local id no longer names the element observed under that id.
+
+    This is distinct from a missing id: the id existed in the cached observation, but a fresh
+    read shows that the frame changed before the requested action could be dispatched.  Reporting
+    that explicitly is what lets an agent recover with a selector instead of retrying the same
+    integer against a newly-numbered screen.
+    """
+
+    code = "stale_element_id"
+
+
 class StabilityTimeout(AuaError):
     """``wait --for-stable`` never settled within the timeout (PRD §5, AC14)."""
 
