@@ -2846,7 +2846,8 @@ def app_cmd(
     action: str = typer.Argument(
         ...,
         metavar="ACTION",
-        help="foreground|launch-and-analyze|launch|stop|kill|clear|grant|current.",
+        help="foreground|launch-and-analyze|launch|restart-and-analyze|restart|stop|kill|clear|"
+        "grant|current.",
     ),
     package: str | None = typer.Argument(
         None, metavar="[PKG]", help="Package for launch/stop/kill/clear/grant."
@@ -2888,10 +2889,34 @@ def app_cmd(
     """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        a = action.lower()
-        explicit_analyze = a in ("launch-and-analyze", "launch_and_analyze")
-        if explicit_analyze:
-            a = "launch"
+        a = action.lower().replace("_", "-")
+        explicit_analyze = a in ("launch-and-analyze", "restart-and-analyze")
+        if a in ("launch-and-analyze", "restart-and-analyze"):
+            a = a.removesuffix("-and-analyze")
+        if a == "restart":
+            # Replaces the two-step `adb shell am force-stop` + `adb shell am start -n pkg/act`
+            # that every test setup was hand-rolling. Data is preserved on purpose — a reset that
+            # silently wiped feature-flag overrides and the session would change the very
+            # preconditions it is being used to establish; that is what `clear --yes` is for.
+            if not package:
+                raise UsageError(
+                    "app restart needs a package",
+                    hint="e.g. `aua app restart-and-analyze com.example.app "
+                    "--activity .LaunchActivity`",
+                )
+            engine.app("stop", package=package, confirmed=yes, observe=False)
+            _emit(
+                engine.app(
+                    "launch",
+                    package=package,
+                    activity=activity,
+                    clear_state=False,
+                    confirmed=yes,
+                    observe=True if explicit_analyze else observe,
+                ),
+                fmt,
+            )
+            return
         wiping = a in ("clear", "clear-state", "clear_state") or (
             a == "launch" and clear_state
         )
