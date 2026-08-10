@@ -133,6 +133,8 @@ class GlobalOpts:
     with_image: bool = False
     observe_fields: str | None = None
     until: str | None = None
+    #: `--answers TASK_ID="value"` pairs, applied before the command runs.
+    answers: tuple[str, ...] = ()
     until_timeout: int = 30000
     until_poll: int = 500
     #: Which of the wait-tuning flags the caller actually typed. A bound default is
@@ -241,6 +243,7 @@ def _run(ctx: typer.Context, fn: Callable[[Engine, OutputFormat], T]) -> T:
         _UNTIL = (
             (opts.until, opts.until_timeout, opts.until_poll) if opts.until else None
         )
+        _apply_answers(engine, opts.answers)
         return fn(engine, cfg_fmt)
     except AuaError as err:
         emit_error(err)
@@ -252,6 +255,39 @@ def _run(ctx: typer.Context, fn: Callable[[Engine, OutputFormat], T]) -> T:
         generic.exit_code = ExitCode.INTERNAL
         emit_error(generic)
         raise typer.Exit(int(ExitCode.INTERNAL)) from exc
+
+
+def _apply_answers(engine: Engine, answers: tuple[str, ...]) -> None:
+    """Commit `--answers TASK_ID="value"` before the command the caller actually came to run.
+
+    The map improves as a side effect of using it: whoever navigated to a screen is the only
+    one who knows what it is, and they are already issuing another command. A bad answer is a
+    loud failure, never a silent one — an unknown or ambiguous task id stops the command rather
+    than quietly renaming the wrong screen.
+    """
+    if not answers:
+        return
+    from .memory import AppMemoryStore
+    from .reconcile import ReconciliationStore
+
+    package = engine.current_package()
+    if not package:
+        raise UsageError(
+            "--answers needs to know which app it is about, and no package is in the foreground",
+            hint="Run it alongside a command that touches the app, e.g. `aua analyze --answers …`.",
+        )
+    store = ReconciliationStore(AppMemoryStore(engine.config.memory))
+    for pair in answers:
+        task_id, sep, value = pair.partition("=")
+        if not sep or not value.strip():
+            raise UsageError(
+                f"--answers wants TASK_ID=value, got {pair!r}",
+                hint='e.g. --answers research_23cf9="Dev Tools" — the id comes from `meta.ask.id`.',
+            )
+        try:
+            store.answer(package, task_id.strip(), value.strip().strip("\"'"), agent="inline")
+        except ValueError as exc:
+            raise UsageError(str(exc), hint="`meta.ask.id` on the response that asked.") from exc
 
 
 # --------------------------------------------------------------------------- selectors
@@ -1181,6 +1217,13 @@ def main(
         help="After the action, wait until this holds before observing "
         "(`rid:introCard`, `text:Chats`, `!text:Loading`). Sets await_outcome.",
     ),
+    answers: list[str] | None = typer.Option(
+        None,
+        "--answers",
+        metavar='TASK_ID="value"',
+        help="Answer a map question `meta.ask` raised on an earlier call, e.g. "
+        '--answers research_23cf9="Dev Tools". Repeatable. Applies before the command runs.',
+    ),
     until_timeout: int = typer.Option(
         30000, "--until-timeout", metavar="MS", help="Give up on --until after this long."
     ),
@@ -1244,6 +1287,7 @@ def main(
         no_cache=no_cache,
         with_image=with_image,
         observe_fields=observe_fields,
+        answers=tuple(answers or ()),
         until=until,
         until_timeout=until_timeout,
         until_poll=until_poll,

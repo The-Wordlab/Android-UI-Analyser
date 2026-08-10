@@ -388,6 +388,7 @@ class NavHints(NamedTuple):
     suggested_deeplinks: list[str]  # shortcut jumps: ["open myapp://home", ...]
     map_hint: str | None  # nudge when there's a map but nothing actionable from here
     research_tasks: list[str]  # unresolved map questions ready for an external agent
+    ask: dict[str, str] | None = None  # one question about THIS screen, answerable inline
 
 
 # --------------------------------------------------------------------------- steps
@@ -1644,6 +1645,16 @@ class AppMemoryStore:
         app = self.load(package)
         if app is None:
             return None
+        # The session cursor keeps the name a screen had when the caller arrived, and a rename
+        # moves it. Recording the stale name produced an edge whose source was not a screen —
+        # marked `verified=True`, invisible until a correction refused to commit because of it.
+        # A rename leaves the old name in `aliases`, so the cursor is recoverable rather than lost.
+        from_screen = _resolve_screen_name(app, from_screen) or from_screen
+        to_screen = _resolve_screen_name(app, to_screen) or to_screen
+        if from_screen not in app.screens or to_screen not in app.screens:
+            return None
+        if from_screen == to_screen:
+            return None
         steps = steps or []
         if action is None:
             action = derive_action(steps, package)
@@ -1686,6 +1697,12 @@ class AppMemoryStore:
             context_id=context_id,
             guards=dict(route_context.flags) if route_context else {},
             steps=steps,
+            # First sighting still counts as verified, deliberately: `provisional` does not
+            # mean "less sure" here, it means INVISIBLE — `_adjacency` excludes it, so demoting
+            # every new edge stops `goto` finding any route until each one has been walked
+            # twice, and a map you have to walk twice before it helps is not a map. The real
+            # defect was never the single sighting; it was that nothing ever compared two
+            # recordings of the same deterministic action. `_demote_contradicting_edges` does.
             status=(
                 "rejected"
                 if rejection_reason
@@ -1697,6 +1714,7 @@ class AppMemoryStore:
             rejection_reason=rejection_reason,
             last_seen=now,
         )
+        _demote_contradicting_edges(app, edge)
         app.routes.append(edge)
         self.save(app)
         return edge
@@ -2294,6 +2312,7 @@ class AppMemoryStore:
             suggested_deeplinks=deeplinks,
             map_hint=map_hint,
             research_tasks=research_tasks,
+            ask=ask_about_current_screen(app, current, context_id=sess.active_context_id),
         )
 
     def set_last_goal(self, serial: str, goal: str | None) -> None:
@@ -2335,6 +2354,86 @@ def _suggest_deeplinks(app: AppMap, cap: int) -> list[str]:
     ]
     concrete.sort(key=lambda d: (not d.probed, d.uri))  # probed (known-good) first
     return [f"open {d.uri}" for d in concrete[: max(0, cap)]]
+
+
+def _demote_contradicting_edges(app: AppMap, edge: RouteEdge) -> None:
+    """Two destinations for one deterministic action cannot both be verified.
+
+    A deeplink resolves to one place: same URI, same origin, same flag context, same screen. So
+    a second, different destination means at least one of the two is wrong, and neither has
+    earned trust. Measured 2026-08-10: one URI had been recorded arriving at six different
+    screens and another at four, every row `verified`, because each was written down the first
+    time it was seen and nothing ever compared them. Demoting rather than deleting keeps the
+    evidence — the existing `route_conflict` research task is what resolves which is real.
+    """
+    if "open-link" not in edge.action:
+        return
+    for other in app.routes:
+        if (
+            other.from_screen == edge.from_screen
+            and other.action == edge.action
+            and other.context_id == edge.context_id
+            and other.to_screen != edge.to_screen
+            and other.status == "verified"
+        ):
+            other.status = "provisional"
+
+
+def _resolve_screen_name(app: AppMap, name: str | None) -> str | None:
+    """The name a screen goes by now, following a rename through its aliases."""
+    if not name:
+        return None
+    if name in app.screens:
+        return name
+    for key, rec in app.screens.items():
+        if name in rec.aliases:
+            return key
+    return None
+
+
+def ask_about_current_screen(
+    app: AppMap, current: str | None, *, context_id: str | None = None
+) -> dict[str, str] | None:
+    """The one open question about the screen the caller is looking at, or nothing.
+
+    `research_tasks` lists whatever is open, in map order, so it offers questions about screens
+    the caller has never seen and cannot answer. Measured 2026-08-10: 970 open questions had
+    accumulated at roughly 130 a day and not one had ever been answered.
+
+    The agent standing on a screen is the one who knows what it is, and it is about to run
+    another command anyway. So ask it here, about this screen only, and let the answer ride
+    along on whatever it runs next.
+    """
+    resolved = _resolve_screen_name(app, current)
+    if resolved is None:
+        return None
+    current = resolved
+    rec = app.screens[current]
+    # A rename stamps `explicit`, and a screen can carry several open naming tasks (one per
+    # app version or flag context). Without this, answering re-asked the same question about
+    # the name it had just accepted — the fastest way to teach an agent to ignore the line.
+    if rec.name_source == "explicit":
+        return None
+    for task in app.research_tasks:
+        if task.get("status") != "open" or task.get("issue_type") != "poor_name":
+            continue
+        affected = task.get("affected_ids")
+        if rec.id not in (affected if isinstance(affected, list) else []):
+            continue
+        if context_id is not None and task.get("context_id") not in (
+            None,
+            context_id,
+            LEGACY_CONTEXT_ID,
+        ):
+            continue
+        task_id = str(task.get("id"))
+        return {
+            "id": task_id,
+            "about": current,
+            "q": f"`{current}` is a generated name — what is this screen actually for?",
+            "how": f'add `--answers {task_id}="<name>"` to your next command (any command)',
+        }
+    return None
 
 
 def _research_prompts(

@@ -446,10 +446,16 @@ class Projection:
         return "\n".join(lines)
 
     def _comment_lines(self, payload: dict[str, Any], *, total: int, shown: int) -> list[str]:
-        if self.no_meta:
-            return []
-        screen = payload.get("screen") or {}
         meta = payload.get("meta") or {}
+        if self.no_meta:
+            # `--no-meta` drops diagnostics, not affordances. Measured 2026-08-10: an agent's
+            # first call was `--format tsv analyze --no-meta` — the guide recommends it to cut
+            # noise — so it never saw the `# goto:` or `# aua asks:` lines and navigated the
+            # whole task by tapping. What the call cost is metadata about the call; a route you
+            # can replay and a question you can answer are things to DO, and suppressing those
+            # to save two lines is what made the map invisible in the first place.
+            return _route_comment(meta) + _ask_comment(meta)
+        screen = payload.get("screen") or {}
         head = [f"screen={meta.get('known_screen') or '-'}"]
         if screen.get("package"):
             head.append(f"package={screen['package']}")
@@ -466,7 +472,16 @@ class Projection:
                 summary.append(f"{key}={meta[key]}")
         lines.append("# " + " ".join(summary))
         lines += _route_comment(meta)
+        lines += _ask_comment(meta)
         return lines
+
+
+def _ask_comment(meta: dict[str, Any]) -> list[str]:
+    """The one question this screen raises, and exactly how to answer it in passing."""
+    ask = meta.get("ask")
+    if not isinstance(ask, dict) or not ask.get("id"):
+        return []
+    return [f"# aua asks: {ask.get('q', '')}  -> {ask.get('how', '')}"]
 
 
 def _route_comment(meta: dict[str, Any]) -> list[str]:

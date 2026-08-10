@@ -12,7 +12,7 @@ import os
 import re
 from collections import defaultdict
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -329,6 +329,31 @@ def audit_map(app: AppMap, *, context_id: str | None = None) -> MapAudit:
     )
 
 
+def _resolve_task(app: AppMap, task_id: str) -> dict[str, Any]:
+    """Find an open task by its id, or by any unique suffix of it.
+
+    The id is long and the caller is retyping it into an unrelated command; accepting the tail
+    costs nothing and a wrong tail still fails loudly rather than answering the wrong question.
+    """
+    wanted = task_id.strip()
+    exact = [t for t in app.research_tasks if str(t.get("id")) == wanted]
+    if exact:
+        return exact[0]
+    partial = [
+        t
+        for t in app.research_tasks
+        if t.get("status") == "open" and str(t.get("id")).endswith(wanted)
+    ]
+    if len(partial) == 1:
+        return partial[0]
+    if not partial:
+        raise ValueError(f"unknown research task: {task_id}")
+    raise ValueError(
+        f"{task_id} matches {len(partial)} open tasks — pass more of the id: "
+        + ", ".join(str(t.get("id")) for t in partial[:3])
+    )
+
+
 def validate_map(app: AppMap) -> list[str]:
     errors: list[str] = []
     record_names = [rec.name for rec in app.screens.values()]
@@ -411,6 +436,43 @@ class ReconciliationStore:
         self.store.save(app)
         return tasks
 
+    def answer(
+        self, package: str, task_id: str, value: str, *, agent: str = "cli"
+    ) -> dict[str, object]:
+        """Answer one open question inline, as a side effect of whatever the caller was doing.
+
+        The agent standing on a screen is the one who knows what it is, and it is about to run
+        another command anyway — so the answer rides along on that command instead of becoming
+        a separate chore nobody ever does. Goes through `submit`, so an inline answer gets the
+        same transaction, validation and rollback id as a researched one.
+        """
+        app = self.store.load(package)
+        if app is None:
+            raise ValueError(f"no map for {package}")
+        task = _resolve_task(app, task_id)
+        # Only a naming question can be settled by looking at the screen, and only a naming
+        # question has exactly one screen to rename. Without this guard a `duplicate_screen`
+        # task (two ids) silently renamed the first of the pair, and a route task raised an
+        # error about a screen id that was really a route id.
+        if task.get("issue_type") != "poor_name":
+            raise ValueError(
+                f"task {task.get('id')} is a {task.get('issue_type')} question, which "
+                "`--answers` cannot settle; it takes research — see `aua reconcile plan`"
+            )
+        screen_ids = [str(i) for i in (task.get("affected_ids") or [])]
+        if not screen_ids:
+            raise ValueError(f"task {task.get('id')} names no screen to rename")
+        report = ResearchReport(
+            task_id=str(task.get("id")),
+            agent=agent,
+            verdict="apply",
+            rationale=f"Answered inline by the agent on the screen: {value!r}.",
+            operations=[
+                CorrectionOperation(op="rename", screen_id=screen_ids[0], value=value)
+            ],
+        )
+        return self.submit(package, report)
+
     def submit(self, package: str, report: ResearchReport) -> dict[str, object]:
         app = self.store.load(package)
         if app is None:
@@ -421,15 +483,21 @@ class ReconciliationStore:
         )
         if task is None:
             raise ValueError(f"unknown research task: {report.task_id}")
-        task["status"] = report.verdict if report.verdict != "apply" else "submitted"
+        if report.verdict == "apply":
+            # Nothing is written until `apply` validates, because `apply` is where every
+            # operation is checked and it used to run AFTER this method had already stamped
+            # `status: submitted` and saved. A rejected correction therefore left the task no
+            # longer `open`, so it was never offered again and one mistyped answer retired the
+            # question permanently — `apply` only rolls back its own save. It marks the task
+            # `applied` and drops the pending report itself, so this path writes nothing.
+            event = self.apply(package, report)
+            return {"status": "applied", "event": event.model_dump(mode="json")}
+        task["status"] = report.verdict
         app.pending_reports = [
             item for item in app.pending_reports if item.get("task_id") != report.task_id
         ]
         app.pending_reports.append(report.model_dump(mode="json"))
         self.store.save(app)
-        if report.verdict == "apply":
-            event = self.apply(package, report)
-            return {"status": "applied", "event": event.model_dump(mode="json")}
         return {"status": report.verdict, "task_id": report.task_id}
 
     def apply(self, package: str, report: ResearchReport) -> CorrectionEvent:

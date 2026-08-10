@@ -1279,6 +1279,7 @@ class Engine:
                 slow_controls=self._slow_controls_safe(known_screen),
                 suggested_deeplinks=hints.suggested_deeplinks if hints else [],
                 research_tasks=hints.research_tasks if hints else [],
+                ask=hints.ask if hints else None,
                 map_hint=hints.map_hint if hints else None,
                 capture_hint=self._capture_hint(),
                 lossy_text=_lossy,
@@ -1558,6 +1559,7 @@ class Engine:
                 slow_controls=self._slow_controls_safe(known_screen),
                 suggested_deeplinks=hints.suggested_deeplinks if hints else [],
                 research_tasks=hints.research_tasks if hints else [],
+                ask=hints.ask if hints else None,
                 map_hint=hints.map_hint if hints else None,
                 capture_hint=self._capture_hint(),
                 annotated_image=annotated,
@@ -5059,8 +5061,32 @@ class Engine:
         self._record_action_safe(step)
         self._remember_deeplink_safe(uri, package=target_pkg)
         self._remember_pending_flag_context(uri, target_pkg)
-        return self._observe(
+        result = self._observe(
             ActionResult(ok=True, action="open-link", detail=detail), observe, with_image
+        )
+        self._flag_deeplink_that_did_not_land(result, uri)
+        return result
+
+    def _flag_deeplink_that_did_not_land(self, result: ActionResult, uri: str) -> None:
+        """Say so when the URI was accepted but the app stayed exactly where it was.
+
+        `am start` returning cleanly only means the intent was delivered — an app is free to
+        ignore it, and several only honour a deeplink across a restart. The result still read
+        `ok: true` with `detail: "<uri> → <package>"`, which is indistinguishable from a jump
+        that worked. Measured 2026-08-10: an agent fired a deeplink shortcut, got that response,
+        discovered by eye that nothing had moved, called it "misleading", and never reached for
+        a shortcut again for the rest of the run — it tapped its way through instead.
+        """
+        change = result.change if isinstance(result.change, dict) else None
+        if not change or change.get("activity_changed") is not False:
+            return
+        if change.get("changed") is not False:
+            return
+        result.stale_risk = (
+            f"the app accepted {uri} but did not move: same activity, identical tree. The intent "
+            "was delivered; this app ignored it from the current state. Some deeplinks only apply "
+            "across a restart — `aua app restart-and-analyze <pkg>` then re-open — otherwise "
+            "navigate normally."
         )
 
     def _remember_pending_flag_context(self, uri: str, package: str | None) -> None:

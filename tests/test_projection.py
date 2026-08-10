@@ -390,10 +390,17 @@ def test_tsv_cells_never_contain_tabs_or_newlines() -> None:
     assert len(lines[-1].split("\t")) == 2
 
 
-def test_tsv_no_meta_emits_only_the_payload() -> None:
+def test_tsv_no_meta_drops_the_diagnostics() -> None:
+    """`--no-meta` cuts what the call cost, not what you can do next.
+
+    It used to drop every `#` line, including the `# goto:` routes. An agent whose first call
+    was `--format tsv analyze --no-meta` — which the guide recommends to cut noise — therefore
+    never learned the map existed, and navigated by tapping (measured 2026-08-10).
+    """
     lines = _tsv(SCREEN, no_meta=True)
-    assert not any(line.startswith("#") for line in lines)
-    assert lines[0] == "id\ttext\trid\tclickable"
+    assert not any(line.startswith("# screen=") for line in lines)
+    assert not any(line.startswith("# elements=") for line in lines)
+    assert lines[-1].count("\t"), "the element rows are what --no-meta is asking for"
 
 
 def test_tsv_meta_keys_become_comment_lines() -> None:

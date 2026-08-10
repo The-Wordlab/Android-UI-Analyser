@@ -983,31 +983,74 @@ def start(config: Config, *, serial: str | None = None) -> dict[str, Any]:
     return {"running": False, "pid": proc.pid, "socket": sock, "status": "timeout"}
 
 
-def stop(config: Config) -> dict[str, Any]:
+def live_sockets(config: Config) -> list[str]:
+    """Every daemon socket currently answering, not just this config's.
+
+    `socket_path` appends the serial when one is known, so `--serial X` and a bare call are
+    two different daemons. `stop` only ever knew about its own, and answered `ok: true` while
+    a sibling kept serving — the caller's next command silently went to a process the stop was
+    supposed to have ended. That is how a daemon carrying older code survived a restart and
+    answered as though the restart had worked.
+    """
+    base = Path(socket_path(config))
+    found = []
+    with contextlib.suppress(OSError):
+        for path in sorted(base.parent.glob(base.name.split(".sock")[0] + ".sock*")):
+            if path.suffix == ".pid":
+                continue
+            if _socket_alive(str(path)):
+                found.append(str(path))
+    return found
+
+
+def stop_all(config: Config) -> dict[str, Any]:
+    """Stop every live daemon, whichever serial it was started for."""
+    stopped = []
+    for sock in live_sockets(config):
+        serial = sock.split(".sock.", 1)[1] if ".sock." in sock else None
+        result = stop(config if serial is None else config.model_copy(deep=True), serial=serial)
+        stopped.append({"socket": sock, **{k: result[k] for k in ("status",) if k in result}})
+    return {"stopped": stopped, "remaining": live_sockets(config)}
+
+
+def stop(config: Config, *, serial: str | None = None) -> dict[str, Any]:
     """Stop the daemon by signalling its process, so it runs cleanup on the way out.
 
     SIGTERM is caught by the daemon and trips its stop-event; the accept loop exits and
     ``serve``'s finally releases the device + on-device uiautomator2 server (freeing the
     UiAutomation slot for adb/Maestro). Falls back to unlinking the socket if no pidfile.
     """
-    sock = socket_path(config)
+    sock = socket_path(config, serial) if serial else socket_path(config)
     pid_file = sock + ".pid"
-    if not is_running(config):
+    if not _socket_alive(sock):
         for path in (sock, pid_file):
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(path)
-        return {"running": False, "socket": sock, "status": "not_running"}
+        # Naming the siblings matters more than the "not running" itself: a caller who just
+        # stopped "the" daemon and sees success will send its next command straight into one
+        # of these without knowing it exists.
+        return {
+            "running": False,
+            "socket": sock,
+            "status": "not_running",
+            "others_still_running": live_sockets(config),
+        }
     pid, _ = read_pidfile(pid_file)
     if pid is not None:
         with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
             os.kill(pid, signal.SIGTERM)
         deadline = time.monotonic() + 5.0  # let it run engine.close() on the way out
-        while time.monotonic() < deadline and is_running(config):
+        while time.monotonic() < deadline and _socket_alive(sock):
             time.sleep(0.1)
     for path in (sock, pid_file):
         with contextlib.suppress(FileNotFoundError):
             os.unlink(path)
-    return {"running": is_running(config), "socket": sock, "status": "stopped"}
+    return {
+        "running": _socket_alive(sock),
+        "socket": sock,
+        "status": "stopped",
+        "others_still_running": live_sockets(config),
+    }
 
 
 def status(config: Config) -> dict[str, Any]:

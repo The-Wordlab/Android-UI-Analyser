@@ -219,6 +219,10 @@ class Meta(BaseModel):
         default_factory=list
     )
     research_tasks: list[str] = Field(default_factory=list)
+    # One question about THIS screen, answerable on the caller's next command via `--answers`.
+    # Scoped to where the caller is standing, because that is the only question they can answer
+    # from what is in front of them.
+    ask: dict[str, str] | None = None
     map_hint: str | None = None  # e.g. "12 screens mapped — run `aua map`"
     # Controls on THIS screen that history says are slow, worst first:
     # [{"control": "buttonContinue", "avg_ms": 4800, "max_ms": 6100, "n": 3, ...}].

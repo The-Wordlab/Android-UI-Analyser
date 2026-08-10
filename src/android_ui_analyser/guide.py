@@ -134,7 +134,15 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "Feed research back and correct the map",
         "`aua knowledge add` stores an experience with source/agent/session/evidence so future "
         "runs inherit it. AUA also creates research tasks automatically when a new map entry is "
-        "ambiguous or a route is provisional/unreplayable. Research `meta.research_tasks` (or run "
+        "ambiguous or a route is provisional/unreplayable. **The cheapest of those is answered in "
+        "passing.** A response may carry `meta.ask` — a `# aua asks: …` line under `--format tsv` "
+        "— which is ONE question about the screen you are standing on, almost always *this name "
+        "was generated, what is this screen actually for?*. Answer it by adding "
+        '`--answers <task-id>="<name>"` to your NEXT command, whatever that command is: no extra '
+        "round trip, no separate chore, and any unique tail of the id will do. Worth doing "
+        'because the name you give is what `aua goto "<name>"` and `aua map --find` can then '
+        "reach that screen by — for the rest of this run and for every run after it. Bigger "
+        "corrections still go the long way: research `meta.research_tasks` (or run "
         "`aua reconcile plan`) in source/runtime, then submit the canonical JSON report. "
         "AUA does not spawn the research agent. `verdict=apply` commits every operation "
         "transactionally and returns "
@@ -193,8 +201,10 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "of piping into a filter: `--fields id,text,rid,clickable` (`rid` = the short tail; "
         "`resource_id` = the full selector), `--where-text <substr>`, `--where-rid <substr>`, "
         "`--clickable`, `--region x1,y1,x2,y2` (header = `--region 0,0,1080,300 --clickable`), "
-        "`--limit N`, `--nonempty`, `--no-system`, `--no-ime`, `--meta <csv>` / `--no-meta` (the routes and "
-        "deeplink suggestions are worth reading once, not on every call). On View-based apps "
+        "`--limit N`, `--nonempty`, `--no-system`, `--no-ime`, `--meta <csv>` / `--no-meta` (drops the "
+        "diagnostics — element counts, tier, duration; the `# goto:` routes and any `# aua asks:` "
+        "question SURVIVE it, because those are things to do rather than facts about the call). "
+        "On View-based apps "
         "add `--no-wrappers` to drop the app's own id'd layout scaffolding (`app_bar`, "
         "`content_frame`) — inert, unlabelled boxes that wrap something; leaves and "
         "addressable containers stay. Filters of different "
@@ -337,6 +347,11 @@ ORIENTATION: tuple[tuple[str, str], ...] = (
         "aua input-and-analyze --rid <resourceId> \"text\" --until '!text:Loading'",
         "TYPE — text is positional, and --until belongs HERE, not on a later analyze",
     ),
+    (
+        'aua --answers <id>="<name>" <your next command>',
+        "answer a `# aua asks:` line in passing — names that screen so `goto` / `map --find` "
+        "can reach it, this run and every later one",
+    ),
     ('aua has "Sign in"', "cheap presence check (exit 0 found / 1 not)"),
     (
         "aua app restart-and-analyze <pkg> --activity <activity>",
@@ -389,6 +404,8 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "is usually the whole verdict — followed by the observation's rows; "
         "`delta` omits elements when unchanged; `msgpack` is AUA1 binary/base64), "
         "`--serial`, `--config`, `--profile`, `--timeout`, `--log-level`, `--no-cache`, "
+        '`--answers <task-id>="<name>"` (repeatable; answers the `meta.ask` question about the '
+        "screen you are on, applied before the command itself runs), "
         "`--with-image` (session default: attach raw screenshots on analyze/actions — "
         "prefer off; use only when you must SEE pixels)",
     ),
@@ -683,6 +700,13 @@ AGENT_BEST_PRACTICES_MEMORY: list[tuple[str, str, str]] = [
         "Keep discoveries only in the chat transcript",
         "`aua remember` / `aua knowledge add` (and fix bad names with `memory update`)",
         "The next agent (or you tomorrow) will not see this chat — write it into the playbook.",
+    ),
+    (
+        "Skip past a `# aua asks:` / `meta.ask` line as someone else's chore",
+        'Answer it on your next call: `--answers <task-id>="<real name>"`',
+        "It is one question about the screen in front of you, and you are the only one who can "
+        "answer it. 970 had piled up at ~130/day because no answer had any way to arrive; each "
+        "one you answer is a screen `goto` / `map --find` can reach by name from then on.",
     ),
     (
         "Start timed work before the daemon is warm",
@@ -1029,6 +1053,9 @@ def render_markdown(*, brief: bool = False) -> str:
     p.append(
         '                "known_screen", "known_routes", "suggested_gotos", "research_tasks",'
     )
+    p.append(
+        '                "ask": {"id","about","q","how"},   // answer with --answers id="<name>"'
+    )
     p.append('                "map_hint",')
     p.append('                "annotated_image", "raw_image", "device_serial" } }')
     p.append("```")
@@ -1160,6 +1187,7 @@ def render_json() -> dict[str, object]:
                 "suggested_gotos",
                 "suggested_deeplinks",
                 "research_tasks",
+                "ask",
                 "map_hint",
                 "annotated_image",
                 "raw_image",

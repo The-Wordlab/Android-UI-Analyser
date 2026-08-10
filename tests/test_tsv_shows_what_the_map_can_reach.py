@@ -54,11 +54,19 @@ def test_a_screen_with_no_routes_stays_quiet() -> None:
     assert "goto" not in rendered, "an empty map must not cost a line on every call"
 
 
-def test_no_meta_still_silences_it() -> None:
+def test_no_meta_does_not_silence_it() -> None:
+    """The first version of this fix put the route behind `--no-meta`, which hid it again.
+
+    Measured 2026-08-10, after that first fix shipped: a fresh agent's opening call was
+    `aua --format tsv analyze --no-meta` — the guide recommends `--no-meta` to cut noise — so
+    it never saw the line, and navigated the whole task by tapping. `--no-meta` drops the
+    diagnostics; a route you can replay is not a diagnostic.
+    """
     view = Projection.parse(fmt=OutputFormat.tsv, no_meta=True)
     rendered = view.render_tsv(_screen(suggested_gotos=["goto settings"]))
 
-    assert "goto" not in rendered
+    assert "# goto: settings" in rendered
+    assert "# elements=" not in rendered, "the diagnostics are still cut"
 
 
 def test_the_element_rows_are_untouched() -> None:
