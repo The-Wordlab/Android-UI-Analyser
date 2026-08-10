@@ -1220,11 +1220,12 @@ def _tool_definitions() -> list[types.Tool]:
 def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
     """Call the engine method for ``name`` and return a JSON-serialisable payload."""
     internal_name = _ANALYZED_TOOL_BASES.get(name)
-    observe_fields: str | None = None
     if internal_name is not None:
         name = internal_name
         args = {**args, "observe": True}
-        observe_fields = args.pop("observe_fields", None)
+        # Dropped rather than read: no engine method takes it. The caller's copy in `args_in`
+        # is what trims the folded observation, at the boundary every tool returns through.
+        args.pop("observe_fields", None)
     elif name in _ANALYZED_TOOL_NAMES:
         raise UsageError(
             f"MCP tool '{name}' was renamed to '{_ANALYZED_TOOL_NAMES[name]}'",

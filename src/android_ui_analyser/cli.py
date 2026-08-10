@@ -1097,6 +1097,34 @@ class GuidingGroup(TyperGroup):
             emit_error(err)
             raise typer.Exit(int(err.exit_code)) from None
 
+    def invoke(self, ctx: click.Context) -> Any:
+        """Answer a missing argument with the values it accepts.
+
+        Click prints `Missing argument 'ACTION'` over a usage line that names the argument
+        again and nothing else. The accepted values are right there in the parameter's help and
+        never reach the caller, so the only way on is a second call to `--help`. Measured
+        2026-08-10: two separate agents ran `aua app`, and both spent that extra command.
+        """
+        try:
+            return super().invoke(ctx)
+        except click.MissingParameter as exc:
+            param = exc.param
+            choices = (getattr(param, "help", "") or "").strip().rstrip(".")
+            if not choices or not param:
+                raise
+            metavar = getattr(param, "metavar", None) or param.name.upper()
+            # The group's own `info_name` is `aua`; the command that is missing the argument
+            # is one level down, and naming the wrong one would put a broken example in the
+            # hint — the exact failure this is here to stop.
+            path = getattr(exc.ctx, "command_path", None) or ctx.info_name
+            err = UsageError(
+                f"`{path} {metavar}` needs a value",
+                hint=f"One of: {choices}. Pass it as the first argument, e.g. "
+                f"`{path} {choices.split('|')[0].strip()}`.",
+            )
+            emit_error(err)
+            raise typer.Exit(int(err.exit_code)) from None
+
 
 app = typer.Typer(
     name="aua",

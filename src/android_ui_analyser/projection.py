@@ -19,6 +19,7 @@ Two invariants:
 
 from __future__ import annotations
 
+import difflib
 import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, replace
@@ -57,6 +58,47 @@ FIELD_ALIASES: dict[str, str] = {
 
 # Aliases that render the shortened form of their underlying key.
 _SHORT_FORM_ALIASES = frozenset({"rid"})
+
+_SQUASHED_FIELD_ALIASES: dict[str, str] = {
+    name.replace("_", ""): name for name in FIELD_ALIASES
+}
+
+# The names these columns carry in Android itself. An agent that knows the platform reaches for
+# `contentDescription` and `resource-id` before it reaches for this tool's abbreviations, and it
+# is right to — they are the same attribute on the same node, so this is an alias rather than a
+# guess. Measured 2026-08-10: `--fields id,text,rid,clickable,contentDescription,...` was refused
+# whole, costing a call to correct one word out of seven.
+_ANDROID_FIELD_SPELLINGS: dict[str, str] = {
+    "contentdescription": "content_desc",
+    "description": "content_desc",
+    "resourceid": "resource_id",
+    "resourcename": "resource_id",
+    "classname": "type",
+    "class": "type",
+    "clazz": "type",
+    "packagename": "window",
+    "longclickable": "long_clickable",
+    "stablekey": "stable_key",
+    "elementid": "id",
+    "index": "id",
+}
+
+
+def resolve_field_name(name: str) -> str:
+    """Accept a column under any spelling that unambiguously names the same column.
+
+    Case, `-` and `_` carry no meaning here (`content-desc`, `contentDesc` and `CONTENT_DESC`
+    are one column), and neither does an `is` prefix on a boolean, which is how the attribute
+    reads in Java (`isClickable`).
+    """
+    if name in FIELD_ALIASES:
+        return name
+    squashed = name.lower().replace("-", "").replace("_", "")
+    if squashed in _ANDROID_FIELD_SPELLINGS:
+        return _ANDROID_FIELD_SPELLINGS[squashed]
+    if squashed.startswith("is") and squashed[2:] in _SQUASHED_FIELD_ALIASES:
+        return _SQUASHED_FIELD_ALIASES[squashed[2:]]
+    return _SQUASHED_FIELD_ALIASES.get(squashed, name)
 
 # What `--format tsv` shows when no `--fields` was given: who am I, what does it say,
 # what is its selector, can I tap it.
@@ -278,12 +320,17 @@ class Projection:
     def _parse_fields(raw: str | None) -> tuple[str, ...]:
         if not raw:
             return ()
-        names = _split_csv(raw)
+        names = [resolve_field_name(n) for n in _split_csv(raw)]
         unknown = [n for n in names if n not in FIELD_ALIASES]
         if unknown:
+            near = [
+                f"{n} -> did you mean {', '.join(guesses)}?"
+                for n in unknown
+                if (guesses := difflib.get_close_matches(n.lower(), FIELD_ALIASES, n=2, cutoff=0.6))
+            ]
             raise UsageError(
                 f"unknown --fields name(s): {', '.join(unknown)}",
-                hint=f"Valid names: {_valid_field_names()}.",
+                hint=(f"{' '.join(near)} " if near else "") + f"Valid names: {_valid_field_names()}.",
             )
         return tuple(names)
 
