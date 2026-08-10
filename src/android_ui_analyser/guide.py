@@ -320,6 +320,50 @@ EXIT_CODES: list[tuple[str, str]] = [
     ("8", "`aua expect-and-analyze` / `aua suite run` assertion failed"),
 ]
 
+#: The smallest set of calls that takes a caller from "no idea" to a driven screen. Emitted by
+#: the unknown-command error so that one wrong guess produces the orientation the guide would
+#: have given — an agent that never read the manual reads this instead, once, and then knows.
+ORIENTATION: tuple[tuple[str, str], ...] = (
+    ("aua --format tsv analyze --fields id,text,rid,clickable", "READ the screen as rows"),
+    ("aua tap-and-analyze --rid <resourceId>", "ACT, and receive the resulting screen"),
+    ('aua input-and-analyze --rid <resourceId> "text"', "TYPE — the text is positional"),
+    ("<any action> --until 'text:<label>'", "WAIT for the next screen; never sleep"),
+    ('aua has "Sign in"', "cheap presence check (exit 0 found / 1 not)"),
+    ("aua guide", "the full manual"),
+)
+
+#: What agents type when they mean something else, mapped to what they meant. Click's built-in
+#: suggestion is string distance over command names, which is actively misleading here: it sent
+#: `tree` to `target` and `state` to `paste`, and offered nothing at all for `ui`, `dump` or
+#: `elements`. These are answered, never aliased — see `_REMOVED_ACTION_ALIASES` in cli.py for
+#: why a wrong name that quietly works is worse than one failed call.
+COMMAND_SYNONYMS: dict[str, str] = {
+    "screen": "analyze",
+    "ui": "analyze",
+    "dump": "analyze",
+    "tree": "analyze",
+    "elements": "analyze",
+    "state": "analyze",
+    "read": "analyze",
+    "hierarchy": "analyze",
+    "snapshot": "analyze",
+    "page": "analyze",
+    "view": "analyze",
+    "press": "tap-and-analyze",
+    "touch": "tap-and-analyze",
+    "type": "input-and-analyze",
+    "enter": "input-and-analyze",
+    "fill": "input-and-analyze",
+    "sleep": "wait-and-analyze",
+    "pause": "wait-and-analyze",
+    "find": "has",
+    "exists": "has",
+    "check": "has",
+    "back": "key-and-analyze",
+    "home": "key-and-analyze",
+}
+
+
 KEY_FLAGS: list[tuple[str, str]] = [
     (
         "global, BEFORE the subcommand",

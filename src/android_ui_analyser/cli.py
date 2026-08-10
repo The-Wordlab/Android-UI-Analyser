@@ -21,7 +21,7 @@ from typing import Any, TypeVar
 
 import click
 import typer
-from typer.core import TyperCommand
+from typer.core import TyperCommand, TyperGroup
 
 from . import __version__
 from .config import (
@@ -588,7 +588,7 @@ def _warn_if_redundant_analyze(engine: Engine, args: dict[str, Any] | None = Non
         "screen had not settled yet, do not sleep-then-analyze: re-run the action with "
         "`--until 'text:<label>'` (or `--until '!text:Loading'`), which waits and returns the "
         "settled screen in the same call; for network-driven content use "
-        "`aua wait --after-change --observe`.",
+        "`aua wait-and-analyze --after-change`.",
         action,
     )
 
@@ -814,8 +814,59 @@ _GUIDE_POINTER = (
     "Code skill from the same source."
 )
 
+class UnknownCommand(AuaError):
+    """A name that is not a command, answered with the one that was meant plus how to drive."""
+
+    exit_code = ExitCode.USAGE
+    code = "unknown_command"
+
+    def __init__(self, name: str) -> None:
+        from .guide import COMMAND_SYNONYMS
+
+        self.meant = COMMAND_SYNONYMS.get(name.lower())
+        message = f"`aua {name}` is not a command."
+        if self.meant:
+            message += f" Use `aua {self.meant}`."
+        super().__init__(message, hint=_GUIDE_POINTER)
+
+    def to_dict(self) -> dict[str, object]:
+        from .guide import ORIENTATION
+
+        out = super().to_dict()
+        err = out["error"]
+        if isinstance(err, dict):
+            if self.meant:
+                err["did_you_mean"] = self.meant
+            err["how_to_drive"] = [f"{cmd}  # {why}" for cmd, why in ORIENTATION]
+        return out
+
+
+class GuidingGroup(TyperGroup):
+    """Answer an unknown command with what was meant and how to drive, not a spelling guess.
+
+    Click's fallback is string distance over command names, which is worse than nothing here: it
+    sent `tree` to `target` and `state` to `paste`, and offered no suggestion at all for `ui`,
+    `dump` or `elements`. An agent that guessed has not read the guide, so the failure is the only
+    place it will read anything — it carries the orientation block rather than a usage page.
+    """
+
+    def resolve_command(
+        self, ctx: click.Context, args: list[str]
+    ) -> tuple[str | None, click.Command | None, list[str]]:
+        try:
+            return super().resolve_command(ctx, args)
+        except click.UsageError:
+            name = next((a for a in args if not a.startswith("-")), "")
+            if not name or name in self.commands:
+                raise
+            err = UnknownCommand(name)
+            emit_error(err)
+            raise typer.Exit(int(err.exit_code)) from None
+
+
 app = typer.Typer(
     name="aua",
+    cls=GuidingGroup,
     help=(
         "android-ui-analyser — structured Android UI perception + action for agents.\n\n"
         + _GUIDE_POINTER
@@ -5354,48 +5405,6 @@ for _removed_alias in _REMOVED_ACTION_ALIASES:
     _register_removed_alias(_removed_alias)
 
 
-#: Names that were never commands, but are the first thing an agent types before reading the
-#: guide. They are answered exactly like a removed alias — fail, name the real command — for the
-#: reason recorded above: a name that quietly works leaves the wrong vocabulary in agent memory,
-#: prompts and downstream docs, and nothing ever corrects it. Registering them is still worth it,
-#: because Click's nearest-name hint is actively misleading here: it sends `screen` to
-#: `screenshot`, which returns a PNG rather than the element list the caller wanted.
-_GUESSED_NAMES: tuple[tuple[str, str, str], ...] = (
-    (
-        "screen",
-        "analyze",
-        "`analyze` returns the screen as an element list you can act on by id. `screenshot` — "
-        "which the nearest-name hint suggests — returns a PNG you would then have to look at.",
-    ),
-)
-
-
-class UnknownCommand(AuaError):
-    """A name that never existed, answered with the command that was meant."""
-
-    exit_code = ExitCode.USAGE
-    code = "unknown_command"
-
-
-def _register_guessed_name(name: str, replacement: str, hint: str) -> None:
-    """Register a commonly-guessed name as a command that fails, naming the real one."""
-
-    def _guessed(ctx: typer.Context) -> None:
-        err = UnknownCommand(f"`aua {name}` is not a command. Use `aua {replacement}`.", hint=hint)
-        emit_error(err)
-        raise typer.Exit(int(err.exit_code))
-
-    _guessed.__name__ = "guessed_" + name.replace("-", "_")
-    app.command(
-        name=name,
-        hidden=True,
-        add_help_option=False,
-        context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
-    )(_guessed)
-
-
-for _guessed_name, _real_name, _guess_hint in _GUESSED_NAMES:
-    _register_guessed_name(_guessed_name, _real_name, _guess_hint)
 
 def run() -> None:
     """Console-script entry point: tolerate misplaced global options, then dispatch."""

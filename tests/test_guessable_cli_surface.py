@@ -24,22 +24,59 @@ from android_ui_analyser.projection import Projection, render_action_tsv
 from android_ui_analyser.schema import OutputFormat
 
 
-def test_screen_names_analyze_instead_of_running_it() -> None:
+def _invoke(*args: str) -> tuple[int, dict]:
+    import json
+
     from typer.testing import CliRunner
 
-    result = CliRunner().invoke(app, ["screen"])
-    assert result.exit_code != 0, "a synonym that works keeps the wrong name alive"
+    result = CliRunner().invoke(app, list(args))
     combined = result.output + str(result.stderr or "")
-    assert "analyze" in combined, f"the error must name the real command: {combined!r}"
+    payload: dict = {}
+    for line in combined.splitlines():
+        if line.startswith("{"):
+            payload = json.loads(line).get("error", {})
+            break
+    return result.exit_code, payload
 
 
-def test_screen_does_not_render_a_plausible_help_page() -> None:
-    """Same trap as the removed aliases: `--help` exiting 0 reads as "this command exists"."""
-    from typer.testing import CliRunner
+def test_a_guessed_name_is_answered_with_the_one_that_was_meant() -> None:
+    from android_ui_analyser.guide import COMMAND_SYNONYMS
 
-    result = CliRunner().invoke(app, ["screen", "--help"])
-    assert result.exit_code != 0
-    assert "analyze" in result.output + str(result.stderr or "")
+    for guess, meant in COMMAND_SYNONYMS.items():
+        code, err = _invoke(guess)
+        assert code != 0, f"`aua {guess}` must fail, not quietly work"
+        assert err.get("code") == "unknown_command", f"{guess}: {err!r}"
+        assert err.get("did_you_mean") == meant, f"{guess} should point at {meant}: {err!r}"
+
+
+def test_every_synonym_points_at_a_command_that_exists() -> None:
+    """A wrong name answered with another wrong name is worse than Click's guess."""
+    from typer.main import get_command
+
+    from android_ui_analyser.guide import COMMAND_SYNONYMS
+
+    real = set(get_command(app).commands)
+    unknown = {m for m in COMMAND_SYNONYMS.values() if m not in real}
+    assert not unknown, f"synonyms point at non-existent commands: {unknown}"
+
+
+def test_no_synonym_shadows_a_real_command() -> None:
+    from typer.main import get_command
+
+    from android_ui_analyser.guide import COMMAND_SYNONYMS
+
+    real = set(get_command(app).commands)
+    shadowed = {g for g in COMMAND_SYNONYMS if g in real}
+    assert not shadowed, f"these are real commands and would never reach the handler: {shadowed}"
+
+
+def test_an_unrecognised_name_still_gets_the_orientation() -> None:
+    code, err = _invoke("zzzznope")
+    assert code != 0
+    assert "did_you_mean" not in err, "do not invent a mapping we do not have"
+    how = err.get("how_to_drive") or []
+    assert any("analyze" in line for line in how), f"an empty answer is the failure mode: {how!r}"
+    assert any("--until" in line for line in how), "the sleep habit is what this is for"
 
 
 def test_input_text_is_answered_not_just_rejected() -> None:
