@@ -342,7 +342,11 @@ ORIENTATION: tuple[tuple[str, str], ...] = (
         "aua app restart-and-analyze <pkg> --activity <activity>",
         "back to a known screen — no adb, no sleep",
     ),
-    ("aua guide", "the full manual"),
+    (
+        "aua guide --brief",
+        "the manual, short form — the full `aua guide` is ~46KB and the loop above covers most "
+        "tasks; reach for it only when something above did not answer you",
+    ),
 )
 
 #: What agents type when they mean something else, mapped to what they meant. Click's built-in
