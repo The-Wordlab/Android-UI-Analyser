@@ -1574,9 +1574,9 @@ def input_cmd(
     def go(engine: Engine, fmt: OutputFormat) -> None:
         if text_opt is not None:
             raise UsageError(
-                "input takes the text to type positionally, not with --text",
-                hint=f'e.g. `aua input --rid <resourceId> "{text_opt}"`; on other commands '
-                "--text selects an element by its label, so input cannot reuse it",
+                "input-and-analyze takes the text to type positionally, not with --text",
+                hint=f'e.g. `aua input-and-analyze --rid <resourceId> "{text_opt}"`; on other '
+                "commands --text selects an element by its label, so input cannot reuse it",
             )
         selector = _selector(
             ident=first_arg, by=by, rid=rid, desc=desc, index=index, first=first

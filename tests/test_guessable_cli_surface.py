@@ -52,6 +52,8 @@ def test_input_text_is_answered_not_just_rejected() -> None:
     combined = result.output + str(result.stderr or "")
     assert "positional" in combined, f"the error must say where the text goes: {combined!r}"
     assert "--index" not in combined, "click's nearest-name hint is the thing being replaced"
+    # The example must not teach a name that now exits 2 as a removed alias.
+    assert "`aua input-and-analyze --rid" in combined, f"stale example: {combined!r}"
 
 
 def _action_payload() -> dict:
