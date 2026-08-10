@@ -4107,14 +4107,24 @@ class Engine:
         if not matches:
             needle = rid or text or desc or ""
             near = nearest_elements(elements, needle)
+            # Every row carries both an `id` (this analyze's ordinal) and a `rid` (the app's
+            # resource-id), so `--rid 49` is the natural conflation of the two columns. Answering
+            # it with "nearest: action_bar_root | System UI notification" sends the reader looking
+            # for a spelling mistake that is not there, so name the actual mix-up first.
+            if rid and rid.isdigit():
+                hint = (
+                    f"{rid} is an element id, not a resource-id — ids are positional: "
+                    f"`aua tap-and-analyze {rid}`. Use --rid for the app's resource-id string "
+                    "(the `rid` column), and prefer it: ids are renumbered by every analyze."
+                )
+            elif near:
+                hint = "nearest: " + " | ".join(element_digest(el) for el in near)
+            else:
+                hint = "Run `aua analyze` to see what is on screen."
             raise SelectorNotFoundError(
                 f"no element matches {label} "
                 f"({len(app_elements(elements))} app elements on screen)",
-                hint=(
-                    "nearest: " + " | ".join(element_digest(el) for el in near)
-                    if near
-                    else "Run `aua analyze` to see what is on screen."
-                ),
+                hint=hint,
             )
         if len(matches) > 1:
             if index is not None:

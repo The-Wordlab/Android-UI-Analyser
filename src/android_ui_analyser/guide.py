@@ -324,7 +324,11 @@ EXIT_CODES: list[tuple[str, str]] = [
 #: the unknown-command error so that one wrong guess produces the orientation the guide would
 #: have given — an agent that never read the manual reads this instead, once, and then knows.
 ORIENTATION: tuple[tuple[str, str], ...] = (
-    ("aua --format tsv analyze --fields id,text,rid,clickable", "READ the screen as rows"),
+    (
+        "aua --format tsv analyze --fields id,text,rid,clickable",
+        "READ as rows — `rid` is the app's resource-id (pass with --rid); `id` is this call's "
+        "ordinal (positional, renumbered every analyze)",
+    ),
     (
         "aua tap-and-analyze --rid <resourceId> --until 'text:<label>'",
         "ACT, wait, and get the settled screen — one call",
