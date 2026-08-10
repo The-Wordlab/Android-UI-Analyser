@@ -471,6 +471,42 @@ def _action_dict(result: Any) -> dict[str, Any] | None:
     return data
 
 
+def _predicate_needle(predicate: str) -> str:
+    """The literal a caller was hoping to see, stripped of `!`, `text:`/`rid:` and commas."""
+    first = predicate.split(",")[0].strip().lstrip("!")
+    _, _, value = first.partition(":")
+    return (value or first).strip().strip("'\"")
+
+
+def _await_timeout_note(predicate: str, timeout_ms: int, result: Any) -> str:
+    """Why a `--until` ran out, and what was on screen instead.
+
+    A timed-out predicate and a broken app are indistinguishable from `await_outcome: timeout`
+    alone. Run 8 (2026-08-10) asked for `text:No results` on a screen reading "No apps found" and
+    `text:Sign` on one headed "Create your account": both actions had in fact landed, and both
+    spent the full 30s default before reporting a timeout the caller then had to diagnose by eye.
+    That is 60s of a 165s run. `nearest_elements` already answers the same question for a selector
+    that matched nothing, so answer it here too.
+    """
+    note = (
+        f"the action landed; `--until '{predicate}'` is what ran out after {timeout_ms}ms, so this "
+        "is the predicate, not the app"
+    )
+    observation = getattr(result, "observation", None)
+    elements = getattr(observation, "elements", None)
+    if not elements:
+        return note + ". Re-read the screen to find the exact label."
+    from .selectors import element_digest, nearest_elements
+
+    near = nearest_elements(elements, _predicate_needle(predicate), limit=3)
+    if near:
+        note += ". Closest on screen: " + " | ".join(element_digest(el) for el in near)
+    return (
+        note + ". Match the exact label, or wait for the element you will act on "
+        "(`--until 'rid:<target>'`); the budget is `--until-timeout`, not `--timeout`."
+    )
+
+
 def _await_until(result: Any) -> Any:
     """Honour a global ``--until``: wait for the predicate, then adopt *that* screen.
 
@@ -525,6 +561,9 @@ def _await_until(result: Any) -> Any:
         # action's early readback cannot survive when the evidence-based re-read has none.
         with contextlib.suppress(Exception):
             setattr(result, attr, getattr(awaited, attr, None))
+    if getattr(result, "await_outcome", None) == "timeout":
+        with contextlib.suppress(Exception):
+            result.note = _await_timeout_note(predicate, timeout_ms, result)
     # The action's own settle-derived caveat described a screen we have since re-read.
     if getattr(result, "await_outcome", None) == "satisfied":
         with contextlib.suppress(Exception):
