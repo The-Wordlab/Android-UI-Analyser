@@ -158,7 +158,7 @@ def _parse_await_terms(predicate: str) -> list[_AwaitTerm]:
     if not raw:
         raise UsageError(
             "await needs a predicate",
-            hint="e.g. `aua await 'rid:resultCard,!text:Generating'` — comma-separated terms, "
+            hint="e.g. `aua await-and-analyze 'rid:resultCard,!text:Generating'` — comma-separated terms, "
             "all of which must hold; `!` means must be absent.",
         )
     terms: list[_AwaitTerm] = []
@@ -319,7 +319,7 @@ def _goto_handoff(
         ][:20],
         "hint": hint
         or "route diverged — finish the failed step, then `aua goto \"…\" --from-here` "
-        "(or continue with `aua analyze` + `aua tap`)",
+        "(or continue with `aua analyze` + `aua tap-and-analyze`)",
     }
     if failed_step is not None:
         out["step"] = {"display": step_display(failed_step), **failed_step.model_dump()}
@@ -2795,7 +2795,7 @@ class Engine:
                             res,
                             remaining_steps=first_steps,
                             hint="mid-transit, but no remembered step matches this screen — "
-                            "finish it manually (`aua analyze` + `aua tap`), then re-run `aua goto`",
+                            "finish it manually (`aua analyze` + `aua tap-and-analyze`), then re-run `aua goto`",
                         )
                     # --from-here with no matching step: still try from the start of the edge
                     # (current screen is the edge's from_screen). Agents that are mid-edge
@@ -3045,7 +3045,7 @@ class Engine:
 
         Deeplinks are shortcuts — jump straight to a screen instead of navigating — and
         the app declares them in its source. Found links are recorded so the agent can
-        reuse them (`aua open <uri>`); templated ones (``$id``/``{id}``) are flagged.
+        reuse them (`aua open-and-analyze <uri>`); templated ones (``$id``/``{id}``) are flagged.
         """
         from .explore import mine_deeplinks
 
@@ -3094,7 +3094,7 @@ class Engine:
             out["known"] = {"screens": 0, "routes": 0, "deeplinks": 0}
             out["bootstrap"] = (
                 "no map yet — mine deeplinks first (`aua explore mine <repo> --app "
-                f"{pkg}`), then launch + log in (`aua about` for the recipe) and `aua open` "
+                f"{pkg}`), then launch + log in (`aua about` for the recipe) and `aua open-and-analyze` "
                 "each concrete deeplink, analyzing after each to seed screens fast."
             )
             out["hint"] = "then re-run `aua explore plan`"
@@ -3111,7 +3111,7 @@ class Engine:
             tasks.append(
                 {
                     "kind": "probe_deeplink",
-                    "do": f'aua open "{d.uri}" && aua analyze',
+                    "do": f'aua open-and-analyze "{d.uri}" && aua analyze',
                     "why": "unprobed deeplink shortcut — record where it lands",
                 }
             )
@@ -3122,7 +3122,7 @@ class Engine:
             tasks.append(
                 {
                     "kind": "probe_template",
-                    "do": f'fill the placeholder in "{d.uri}", then `aua open` it',
+                    "do": f'fill the placeholder in "{d.uri}", then `aua open-and-analyze` it',
                     "why": "templated deeplink — a shortcut once you supply the id",
                 }
             )
@@ -4086,7 +4086,7 @@ class Engine:
         if len(given) != 1:
             raise UsageError(
                 "give exactly one selector: --rid <resource-id> | --text <label> | --desc <desc>",
-                hint="e.g. `aua tap --rid notificationsButton` or `aua tap --text 'Create an app'`",
+                hint="e.g. `aua tap-and-analyze --rid notificationsButton` or `aua tap-and-analyze --text 'Create an app'`",
             )
         cached = None if fresh else self._read_cache()
         result = cached if cached is not None else self.analyze(source="hierarchy", record=False)
@@ -4746,7 +4746,7 @@ class Engine:
                 with_image,
             )
         if direction is None:
-            raise UsageError("swipe needs a direction or --coords", hint="e.g. `aua swipe up`")
+            raise UsageError("swipe needs a direction or --coords", hint="e.g. `aua swipe-and-analyze up`")
         d = direction.lower()
         box, real = self._scroll_box(from_id=from_id, selector=selector)
         x1, y1, x2, y2 = self._swipe_path(box, d, percent)
@@ -4767,7 +4767,7 @@ class Engine:
         self._record_action_safe(step)
         # ok stays True — the gesture WAS performed, and a swipe is also used to dismiss or
         # page things where "the screen did not move" is the expected outcome. The verdict
-        # is reported instead of swallowed; `aua scroll` is the strict-exit-code variant.
+        # is reported instead of swallowed; `aua scroll-and-analyze` is the strict-exit-code variant.
         return self._observe(
             ActionResult(
                 ok=True,
@@ -5428,7 +5428,7 @@ class Engine:
                 baseline = fp
         raise StabilityTimeout(
             f"hierarchy did not change within {timeout_ms} ms ({samples} samples)",
-            hint="Increase --timeout, or the screen is idle. Use `aua wait --for` for a label.",
+            hint="Increase --timeout, or the screen is idle. Use `aua wait-and-analyze --for` for a label.",
         )
 
     def _wait_timeout_message(
@@ -5615,7 +5615,7 @@ class Engine:
         if len([v for v in selector.values() if v]) != 1:
             raise UsageError(
                 "expect needs exactly one of --rid / --text / --desc",
-                hint="e.g. `aua expect --rid notificationsButton --exists`",
+                hint="e.g. `aua expect-and-analyze --rid notificationsButton --exists`",
             )
         if absent and exists:
             raise UsageError("--exists and --absent are mutually exclusive")

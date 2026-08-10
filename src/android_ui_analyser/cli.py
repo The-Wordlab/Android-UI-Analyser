@@ -324,7 +324,7 @@ def _selector(
         if not ident:
             raise UsageError(
                 f"--by {by} needs the value as the positional argument",
-                hint="e.g. `aua tap --by id homeTabBROWSE`",
+                hint="e.g. `aua tap-and-analyze --by id homeTabBROWSE`",
             )
         return {kind: ident, "index": index, "first": first}
     if rid or text or desc:
@@ -1232,7 +1232,7 @@ def has(
     list prunes, i.e. Maestro-style ``assertVisible: id:``.
 
     Takes the same one-shot selectors as the action commands, so a check reads like the act
-    it guards: `aua has --rid buttonSettings` then `aua tap --rid buttonSettings`.
+    it guards: `aua has --rid buttonSettings` then `aua tap-and-analyze --rid buttonSettings`.
     """
     def go(engine: Engine, fmt: OutputFormat) -> None:
         target, target_by = _has_target(text, by=by, rid=rid, text_sel=text_sel, desc=desc)
@@ -1291,12 +1291,12 @@ def tap(
 ) -> None:
     """Tap an element — by id from the last analyze, or by a one-shot selector.
 
-    `aua tap 9` · `aua tap --rid notificationsButton` · `aua tap --text "Create an app"` ·
-    `aua tap --by id homeTabBROWSE`. A selector resolves on the live screen in this one
+    `aua tap-and-analyze 9` · `aua tap-and-analyze --rid notificationsButton` · `aua tap-and-analyze --text "Create an app"` ·
+    `aua tap-and-analyze --by id homeTabBROWSE`. A selector resolves on the live screen in this one
     call; matching nothing exits 6 and matching several exits 7 with the candidates — it
     never silently taps nothing.
 
-    `aua tap --point 412,733` addresses a coordinate directly, for a canvas or a grid whose
+    `aua tap-and-analyze --point 412,733` addresses a coordinate directly, for a canvas or a grid whose
     cells publish no node of their own. It is recorded like any other action, so a journey
     across such a surface can still be captured as a flow.
     """
@@ -1368,7 +1368,7 @@ def await_cmd(
     because nothing in the output could tell them apart. Per-term results come back either way,
     so "spinner gone but results absent" reads differently from "spinner still spinning".
 
-        aua await 'rid:resultCard,!text:Generating' --timeout-ms 240000
+        aua await-and-analyze 'rid:resultCard,!text:Generating' --timeout-ms 240000
 
     Deliberately not network idle: this app never is (analytics post continuously, chat
     streams), so idleness would be a flaky proxy for readiness.
@@ -1616,8 +1616,8 @@ def input_cmd(
     Prefers accessibility ``set_text``, then clipboard paste (clipboard restored), then IME
     keys — no need for a manual ``clipboard set`` + ``paste`` workaround.
 
-    `aua input 9 "hello"` · `aua input --rid promptField "hello" --submit` ·
-    `aua input --by id promptField "hello"`. With ``--rid``/``--desc`` the single positional
+    `aua input-and-analyze 9 "hello"` · `aua input-and-analyze --rid promptField "hello" --submit` ·
+    `aua input-and-analyze --by id promptField "hello"`. With ``--rid``/``--desc`` the single positional
     is the text; with ``--by`` (or a plain id) the first positional addresses the field and
     the second is the text. ``--text`` is not a selector here — it would read as the value.
     """
@@ -1638,12 +1638,12 @@ def input_cmd(
         if selector is not None and by is None and second_arg is not None:
             raise UsageError(
                 "with --rid/--desc, pass only the text to type",
-                hint='e.g. `aua input --rid promptField "hello"`',
+                hint='e.g. `aua input-and-analyze --rid promptField "hello"`',
             )
         if typed is None:
             raise UsageError(
                 "input needs the text to type",
-                hint='e.g. `aua input 9 "hello"` or `aua input --rid promptField "hello"`',
+                hint='e.g. `aua input-and-analyze 9 "hello"` or `aua input-and-analyze --rid promptField "hello"`',
             )
         _emit(
             _route(
@@ -1745,11 +1745,11 @@ def swipe(
 ) -> None:
     """Swipe in a direction, from an element, or by explicit coordinates.
 
-    `aua swipe up` · `aua swipe --direction up` · `aua swipe --from-rid notificationList up`.
+    `aua swipe-and-analyze up` · `aua swipe-and-analyze --direction up` · `aua swipe-and-analyze --from-rid notificationList up`.
     No anchor needed: the gesture is aimed at the scrollable container on screen rather than
     the middle of the display, and ``detail`` reports ``moved``/``no-change`` so a swipe that
     did nothing cannot look like a swipe that worked. For list scrolling prefer
-    ``aua scroll``, which turns that verdict into an exit code.
+    ``aua scroll-and-analyze``, which turns that verdict into an exit code.
     """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
@@ -1804,7 +1804,7 @@ def scroll(
 ) -> None:
     """Scroll a container and say what happened — verified, with a real exit code.
 
-    `aua scroll up` · `aua scroll --pages 3` · `aua scroll --to-end` · `aua scroll --to-start`.
+    `aua scroll-and-analyze up` · `aua scroll-and-analyze --pages 3` · `aua scroll-and-analyze --to-end` · `aua scroll-and-analyze --to-start`.
     ``detail`` starts with the outcome: ``moved`` · ``reached-end`` · ``already-at-end``.
     A scroll that moved nothing exits 6 (except with ``--to-end/--to-start``, where already
     being at the end is success), so "nothing left to scroll" is never confused with
@@ -1868,7 +1868,7 @@ def scroll_to(
 ) -> None:
     """Scroll until something is on screen, verifying every step actually moved.
 
-    `aua scroll-to "Red Square Tap"` · `aua scroll-to --rid listRow_7`.
+    `aua scroll-to-and-analyze "Red Square Tap"` · `aua scroll-to-and-analyze --rid listRow_7`.
     ``detail`` starts with the outcome: ``already-visible`` · ``moved`` (with ``dy``) ·
     ``already-at-end`` (nothing scrolled, so it is not on this screen) ·
     ``target-not-found`` (scrolled the whole way, never saw it). The last two exit 6, so a
@@ -1880,7 +1880,7 @@ def scroll_to(
         if not query:
             raise UsageError(
                 "scroll-to needs the text to look for (or --rid)",
-                hint='e.g. `aua scroll-to "Red Square Tap"`',
+                hint='e.g. `aua scroll-to-and-analyze "Red Square Tap"`',
             )
         result = _route(
             engine,
@@ -1934,10 +1934,10 @@ def expect(
 ) -> None:
     """Assert one thing about the screen. Exit 0 = pass, 8 = the assertion failed.
 
-    `aua expect --rid notificationsButton --exists` ·
-    `aua expect --text "Loading" --absent --timeout 5000` ·
-    `aua expect --rid itemDetailLikeCount --text-is "7"` ·
-    `aua expect --rid settingsPushToggleSwitch --checked`
+    `aua expect-and-analyze --rid notificationsButton --exists` ·
+    `aua expect-and-analyze --text "Loading" --absent --timeout 5000` ·
+    `aua expect-and-analyze --rid itemDetailLikeCount --text-is "7"` ·
+    `aua expect-and-analyze --rid settingsPushToggleSwitch --checked`
 
     One acceptance criterion per call, so a criteria list becomes a script instead of a pile
     of eyeballed screenshots. Exit 8 is a *test* failure and stays distinct from 3 (device)
@@ -2037,7 +2037,7 @@ def hide_keyboard(
 
 
 @app.command(name="open-and-analyze", cls=AnalyzeCommand)
-def open(  # noqa: A001 - matches the user-facing verb `aua open`
+def open(  # noqa: A001 - matches the user-facing verb `aua open-and-analyze`
     ctx: typer.Context,
     uri: str = typer.Argument(..., help="Deeplink URI, e.g. 'myapp://set-flags?flag=value'."),
     app_pkg: str | None = typer.Option(
@@ -4364,7 +4364,7 @@ def explore_mine_cmd(
 ) -> None:
     """Scan an app's source for deeplinks (shortcuts) and record them in its playbook.
 
-    Deeplinks let you jump straight to a screen — `aua open "myapp://tools/summarize"`
+    Deeplinks let you jump straight to a screen — `aua open-and-analyze "myapp://tools/summarize"`
     instead of tapping through the app's menus. Run once per app; `aua about` then lists them.
     """
 

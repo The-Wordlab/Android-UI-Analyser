@@ -9,7 +9,7 @@ Exit codes:
     5  config error
     6  selector matched nothing (target/assertion target absent)
     7  selector matched several (caller must disambiguate)
-    8  expectation failed (`aua expect` predicate is false)
+    8  expectation failed (`aua expect-and-analyze` predicate is false)
 
 Codes 6-8 exist so an agent can tell *addressing* failures apart from *device* failures:
 a selector that matches nothing is a script bug, exit 3 is a broken phone. A silent
@@ -154,7 +154,7 @@ class SelectorAmbiguousError(AuaError):
 
 
 class ExpectationFailed(AuaError):
-    """An ``aua expect`` predicate is false — a test failure, not a tool failure."""
+    """An ``aua expect-and-analyze`` predicate is false — a test failure, not a tool failure."""
 
     exit_code = ExitCode.ASSERTION
     code = "expectation_failed"

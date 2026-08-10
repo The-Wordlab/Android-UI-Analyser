@@ -1198,7 +1198,7 @@ class Uiautomator2Device(Device):
                 raise DeviceError(f"action {action_u} unsupported on this node")
             if action_u in ("SET_TEXT", "ACTION_SET_TEXT"):
                 raise DeviceError(
-                    "SET_TEXT via a11y action needs a value — use `aua input` instead",
+                    "SET_TEXT via a11y action needs a value — use `aua input-and-analyze` instead",
                 )
         except DeviceError:
             raise

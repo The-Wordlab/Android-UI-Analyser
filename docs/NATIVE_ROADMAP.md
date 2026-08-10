@@ -6,7 +6,7 @@ cold-start and on-device dump cost without rewriting the Python engine.
 | Phase | Item | Status | Notes |
 |---|---|---|---|
 | **1** | **C thin client (`aua-fast`)** | **done** | Speaks existing daemon JSON-lines protocol; falls back to `aua`. |
-| **2** | **Incremental a11y (host)** | **done (host slice)** | `perf.skip_unchanged_analyze` + XML-hash reuse; `aua wait --changed` / MCP `wait_changed`. **No APK** — true AccessibilityEvent deltas still deferred (OEM/Play risk). |
+| **2** | **Incremental a11y (host)** | **done (host slice)** | `perf.skip_unchanged_analyze` + XML-hash reuse; `aua wait-and-analyze --changed` / MCP `wait_changed`. **No APK** — true AccessibilityEvent deltas still deferred (OEM/Play risk). |
 | **3** | **Binary dump** | **done (host)** | `--format delta` + `--format msgpack` (AUA1 zlib frames). `schemas/hierarchy.fbs` draft for future on-device FlatBuffers. |
 | **4** | **WebSocket push** | **done** | `daemon.push_ws_port` → localhost WS `screen_changed` events; MCP/CLI long-poll via `wait_changed`. |
 | **5** | **Multi-emulator fanout** | **done** | Per-serial daemon sockets (`daemon.sock.<serial>`); `aua fanout [--serials …] <cmd>`. |

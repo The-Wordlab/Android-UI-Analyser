@@ -1,6 +1,6 @@
 """App exploration — mine an app's source tree for deeplinks (PRD §6b).
 
-Deeplinks are shortcuts: `aua open "myapp://tools/summarize"` jumps straight to a
+Deeplinks are shortcuts: `aua open-and-analyze "myapp://tools/summarize"` jumps straight to a
 tool instead of tapping through the app's menus. They're declared in the app's source —
 AndroidManifest intent-filters and Compose/nav `navDeepLink`/`uriPattern` literals — so we
 mine them once and save them to the app's playbook for the agent to reuse.
