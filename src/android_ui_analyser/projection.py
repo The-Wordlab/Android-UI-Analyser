@@ -465,7 +465,29 @@ class Projection:
             if meta.get(key) is not None:
                 summary.append(f"{key}={meta[key]}")
         lines.append("# " + " ".join(summary))
+        lines += _route_comment(meta)
         return lines
+
+
+def _route_comment(meta: dict[str, Any]) -> list[str]:
+    """What this app's map already knows how to reach from here.
+
+    `suggested_gotos` rides on every JSON `analyze`, and TSV dropped it — while the guide and
+    the orientation block both teach `--format tsv analyze --fields …` as the way to read a
+    screen. So the recommended call was the one that hid the map. Measured 2026-08-10: across
+    five fresh-agent runs on an app with 135 remembered screens and 613 routes, not one agent
+    used `goto`, and none could have known it had anything to offer.
+
+    One line, only when there is something to replay, and `--no-meta` still silences it.
+    """
+    gotos = [str(g) for g in (meta.get("suggested_gotos") or [])]
+    if not gotos:
+        return []
+    names = [g.removeprefix("goto ").strip() for g in gotos]
+    return [
+        "# goto: " + " | ".join(names[:4]) + "  (aua goto \"<name>\" replays the remembered "
+        "route — no tapping; `aua map --find \"<goal>\"` for one not listed)"
+    ]
 
 
 def _comment_value(value: Any) -> str:

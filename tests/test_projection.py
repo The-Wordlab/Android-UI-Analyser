@@ -349,18 +349,26 @@ def test_tsv_all_opts_out_of_the_implicit_filters() -> None:
     assert len(view.select(SCREEN)) == len(SCREEN["elements"])
 
 
+def _header_index(lines: list[str]) -> int:
+    """The first non-comment line. Found rather than indexed: the `#` block grew a route line."""
+    return next(i for i, line in enumerate(lines) if not line.startswith("#"))
+
+
 def test_tsv_shape_is_comments_then_header_then_rows() -> None:
     lines = _tsv(SCREEN)
+    head = _header_index(lines)
     assert lines[0].startswith("# screen=my_apps package=com.example.app.dev 1080x2400")
     assert lines[1].startswith("# elements=6 shown=3")
-    assert lines[2] == "id\ttext\trid\tclickable"
-    assert lines[3].split("\t") == ["2", "", "notificationsButton", "true"]
+    assert all(line.startswith("#") for line in lines[:head])
+    assert lines[head] == "id\ttext\trid\tclickable"
+    assert lines[head + 1].split("\t") == ["2", "", "notificationsButton", "true"]
 
 
 def test_tsv_column_order_follows_fields() -> None:
     lines = _tsv(SCREEN, fields="clickable,id,text")
-    assert lines[2] == "clickable\tid\ttext"
-    assert lines[3].split("\t")[:2] == ["true", "2"]
+    head = _header_index(lines)
+    assert lines[head] == "clickable\tid\ttext"
+    assert lines[head + 1].split("\t")[:2] == ["true", "2"]
 
 
 def test_tsv_tri_state_renders_true_false_and_empty_for_unknown() -> None:
