@@ -43,6 +43,50 @@ def test_markdown_covers_required_topics() -> None:
         assert needle in low, needle
 
 
+def test_guide_teaches_agents_to_choose_verified_navigation_first() -> None:
+    manual = guide.render_markdown()
+
+    observe = manual.index("Observe once, then choose the highest-level action")
+    playbook = manual.index("Read the app playbook when the task needs it")
+    deeplinks = manual.index("Take shortcuts with deeplinks")
+    assert observe < playbook < deeplinks
+
+    decision = dict(guide.SESSION_PROTOCOL)["Observe once, then choose the highest-level action"]
+    assert decision.index("# goto:") < decision.index("# flows:")
+    assert decision.index("aua goto") < decision.index("aua flow run")
+    assert decision.index("aua flow run") < decision.index("aua open-and-analyze")
+    assert decision.index("aua open-and-analyze") < decision.index("manual element actions")
+
+    deeplink_detail = dict(guide.SESSION_PROTOCOL)["Take shortcuts with deeplinks"]
+    assert "delivered intent is not proof of arrival" in deeplink_detail
+    assert "stale_risk" in deeplink_detail
+
+    orientation_commands = [command for command, _detail in guide.ORIENTATION]
+    goto = next(
+        i for i, command in enumerate(orientation_commands) if command.startswith("aua goto")
+    )
+    flow = next(
+        i for i, command in enumerate(orientation_commands) if command.startswith("aua flow run")
+    )
+    tap = next(
+        i
+        for i, command in enumerate(orientation_commands)
+        if command.startswith("aua tap-and-analyze")
+    )
+    assert goto < flow < tap
+
+
+def test_guide_explains_that_automatic_leases_follow_the_agent_process() -> None:
+    detail = dict(guide.SESSION_PROTOCOL)["One agent, one emulator — leases are automatic"]
+    for claim in [
+        "no owner prompt",
+        "PID plus start token",
+        "dead owner",
+        "immediately treated as free",
+    ]:
+        assert claim in detail
+
+
 def test_brief_is_shorter_but_keeps_the_protocol() -> None:
     full = guide.render_markdown()
     brief = guide.render_brief()

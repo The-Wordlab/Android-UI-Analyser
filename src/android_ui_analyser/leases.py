@@ -8,16 +8,17 @@ quietly wrong.
 The design keeps two properties that matter more than features:
 
 **No deadlock is possible.** Expiry is computed when a lease is *read*, not by a reaper
-process. A stale lease is simply not a lease. There is no state a crashed agent can leave
-behind that blocks anyone, and no cleanup step anyone can forget — which is exactly the
-failure a "watchdog that frees stuck locks" design invites, because the watchdog becomes one
-more thing that can die holding the world.
+process. A lease owned by a derived agent process expires as soon as that process is gone;
+explicit owners fall back to the TTL. There is no cleanup process that can itself fail.
 
 **Identity has to be stable across an agent's calls, or stickiness inverts into churn.**
 Measured: a session id is *not* stable — consecutive tool calls from one agent reported sids
 40966 then 40979, because each shell invocation gets its own session. Keying on that would
-hand the agent a different emulator every command. Walking up to the first non-shell ancestor
-finds the agent process itself (``claude``, ``cursor``, …), which lives for the whole run.
+hand the agent a different emulator every command. Walking up past the shells *and past the
+per-command launchers* (``uv run``, ``uvx``, ``npx``, ``env``, …) finds the agent process
+itself (``claude``, ``cursor``, …), which lives for the whole run. Stopping at a launcher
+gives a fresh name every invocation, which is worse than no lease: the agent is locked out of
+the device it took a moment earlier, by a holder that no longer exists.
 """
 
 from __future__ import annotations
@@ -25,10 +26,13 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
 from typing import Any
+
+from .atomic import atomic_write_text
 
 # Long enough that a single blocking call cannot outlive it: `--until` waits legitimately run
 # 90-120s on a slow backend, and a lease that expires mid-wait would let another agent seize a
@@ -37,6 +41,15 @@ from typing import Any
 DEFAULT_TTL_S = 900
 
 _SHELLS = {"sh", "bash", "zsh", "dash", "fish", "ksh", "csh", "tcsh", "login", "-zsh", "-bash"}
+
+# Wrappers that exist for the duration of one command. Naming an agent after one of these gives it
+# a fresh identity per invocation, so it cannot re-acquire the device it just leased — the caller
+# above the wrapper is the one that persists.
+_LAUNCHERS = {
+    "uv", "uvx", "pipx", "poetry", "pdm", "rye", "hatch", "pipenv", "conda", "micromamba",
+    "npx", "pnpx", "bunx", "nix", "nix-shell", "direnv", "mise", "asdf",
+    "env", "sudo", "doas", "nohup", "stdbuf", "xargs", "time", "timeout", "caffeinate", "arch",
+}
 
 
 # --------------------------------------------------------------------------- identity
@@ -78,7 +91,7 @@ def _proc_started(pid: int) -> str:
 
 
 def derive_identity() -> str:
-    """The first non-shell ancestor: the agent process, stable for its whole run.
+    """The first ancestor that outlives one command: the agent process, stable for its whole run.
 
     Falls back to this process when the walk finds nothing better, which is the right answer
     for a human at a terminal running one command.
@@ -91,10 +104,14 @@ def derive_identity() -> str:
         if parent is None or parent <= 1:
             break
         name = _proc_name(parent)
-        if name and name not in _SHELLS and not name.startswith("python"):
+        if name and not _is_transient(name):
             return f"{name}-{parent}-{_proc_started(parent)}".strip("-")
         pid = parent
     return f"pid-{os.getpid()}-{_proc_started(os.getpid())}".strip("-")
+
+
+def _is_transient(name: str) -> bool:
+    return name in _SHELLS or name in _LAUNCHERS or name.startswith("python")
 
 
 def resolve_owner(explicit: str | None = None) -> str:
@@ -124,9 +141,36 @@ def _now() -> float:
 
 
 def _expired(entry: dict[str, Any], *, now: float | None = None) -> bool:
+    owner_pid = entry.get("owner_pid")
+    owner_started = entry.get("owner_started")
+    if isinstance(owner_pid, int) and owner_pid > 1:
+        try:
+            os.kill(owner_pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            pass  # It exists, but this caller cannot signal it.
+        if owner_started and _proc_started(owner_pid) != owner_started:
+            return True
     now = _now() if now is None else now
     ttl = float(entry.get("ttl_s") or DEFAULT_TTL_S)
     return (now - float(entry.get("last_activity") or 0)) > ttl
+
+
+# ``{name}-{pid}-{started}``, where *name* can itself contain "-". Anchoring on the
+# digits-only pid and matching greedily makes the last valid pid segment win.
+_OWNER_RE = re.compile(r"^(?P<name>.+)-(?P<pid>\d+)-(?P<started>.+)$")
+
+
+def _owner_process(owner: str) -> tuple[int, str] | None:
+    match = _OWNER_RE.match(owner)
+    if match is None:
+        return None
+    pid = int(match.group("pid"))
+    started = match.group("started")
+    if _proc_started(pid) != started:
+        return None
+    return pid, started
 
 
 def read_lease(cache_dir: str | Path, serial: str) -> dict[str, Any] | None:
@@ -146,10 +190,7 @@ def read_lease(cache_dir: str | Path, serial: str) -> dict[str, Any] | None:
 
 
 def _write(path: Path, entry: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(entry, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    atomic_write_text(path, json.dumps(entry, indent=2) + "\n")
 
 
 def acquire(
@@ -174,6 +215,9 @@ def acquire(
         "needs": list(needs or []),
         "app": app,
     }
+    owner_process = _owner_process(owner)
+    if owner_process is not None:
+        entry["owner_pid"], entry["owner_started"] = owner_process
 
     # Fast path: nobody has ever held it.
     try:
@@ -200,6 +244,8 @@ def acquire(
     if current.get("owner") == owner:
         current["last_activity"] = _now()
         current["ttl_s"] = int(ttl_s)
+        if owner_process is not None:
+            current["owner_pid"], current["owner_started"] = owner_process
         if app:
             current["app"] = app
         if needs:

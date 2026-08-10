@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 import re
 import shutil
 from collections import Counter, deque
@@ -38,6 +37,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from .atomic import atomic_write_text
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .config import MemoryCfg
@@ -842,6 +843,77 @@ def _destination_from_resource(resource_id: str | None) -> str | None:
     return family
 
 
+_ROUTE_CONTROL_TOKENS = {
+    "action",
+    "bar",
+    "bottom",
+    "btn",
+    "button",
+    "card",
+    "cta",
+    "link",
+    "nav",
+    "navigation",
+    "tab",
+}
+
+
+def _contextual_name_from_inbound(
+    pending: list[RouteStep], title: str | None
+) -> str | None:
+    """Derive context for a short title from stable, app-authored route selectors.
+
+    A title such as ``Inbox`` or ``Details`` is often reused in unrelated parts of an app.
+    Selectors can distinguish them without any app-specific vocabulary. For example, the
+    neutral sequence ``workspaceTabMESSAGES`` -> ``workspaceAlerts`` -> title ``Inbox``
+    contains the durable name ``workspace_messages_inbox``.
+
+    The final selector must end in its action label or destination title. A random resource
+    id therefore cannot outrank a good visible title.
+    """
+    title_name = _short(title)
+    if not title_name:
+        return None
+    steps = [
+        step
+        for step in pending
+        if step.kind in {"tap", "long-press", "open-link", "goto"} and step.resource_id
+    ]
+    if not steps:
+        return None
+
+    def semantic_tokens(step: RouteStep) -> list[str]:
+        return [
+            token
+            for token in _resource_slug(step.resource_id).split("_")
+            if token and token not in _ROUTE_CONTROL_TOKENS
+        ]
+
+    def without_suffix(tokens: list[str], value: str | None) -> tuple[list[str], bool]:
+        suffix = [token for token in slug(value).split("_") if token]
+        if suffix and len(tokens) > len(suffix) and tokens[-len(suffix) :] == suffix:
+            return tokens[: -len(suffix)], True
+        return tokens, False
+
+    final = steps[-1]
+    original = semantic_tokens(final)
+    context, trimmed = without_suffix(original, final.label)
+    if not trimmed:
+        context, trimmed = without_suffix(original, title_name)
+    if not trimmed or not context:
+        return None
+
+    for step in steps[:-1]:
+        tokens = semantic_tokens(step)
+        if tokens[: len(context)] == context:
+            context.extend(tokens[len(context) :])
+
+    title_tokens = title_name.split("_")
+    if context[-len(title_tokens) :] != title_tokens:
+        context.extend(title_tokens)
+    return slug("_".join(context)) or None
+
+
 def propose_name(
     *,
     hint: str | None = None,
@@ -1129,10 +1201,7 @@ class AppMemoryStore:
             return
         d = self.app_dir(app.package)
         d.mkdir(parents=True, exist_ok=True)
-        index = self.index_path(app.package)
-        tmp = index.with_suffix(".json.tmp")
-        tmp.write_text(app.model_dump_json(indent=2), encoding="utf-8")
-        os.replace(tmp, index)
+        atomic_write_text(self.index_path(app.package), app.model_dump_json(indent=2))
         self.map_path(app.package).write_text(render_map(app, detail="default"), encoding="utf-8")
 
     def list_apps(self) -> list[str]:
@@ -1160,13 +1229,7 @@ class AppMemoryStore:
         if self._sqlite is not None:
             self._sqlite.save_session(serial, sess)
             return
-        # Atomic replace: daemon + CLI may write concurrently (last-writer-wins is fine,
-        # a torn/half-written JSON is not).
-        path = self.session_path(serial)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(sess.model_dump_json(), encoding="utf-8")
-        os.replace(tmp, path)
+        atomic_write_text(self.session_path(serial), sess.model_dump_json())
 
     def claim_session(self, serial: str, instance: str | None) -> bool:
         """Bind *serial*'s cursor to a device instance, discarding another instance's.
@@ -1443,6 +1506,7 @@ class AppMemoryStore:
         inbound_label: str | None = None,
         inbound_resource_id: str | None = None,
         inbound_kind: str | None = None,
+        route_name: str | None = None,
         screen_height: int | None = None,
         context_id: str = DEFAULT_CONTEXT_ID,
         context_flags: dict[str, str] | None = None,
@@ -1477,6 +1541,8 @@ class AppMemoryStore:
             title = title_of(elements, screen_height)
             base = (
                 name_hint
+                or resource_name
+                or route_name
                 or propose_name(
                     resource_name=resource_name,
                     inbound_label=inbound_label,
@@ -1491,7 +1557,7 @@ class AppMemoryStore:
                 "explicit"
                 if name_hint
                 else "resource"
-                if resource_name
+                if resource_name or route_name
                 else "title"
                 if title and _short(title) not in _GENERIC_TITLES
                 else "resource"
@@ -2082,6 +2148,9 @@ class AppMemoryStore:
         context_flags = sess.active_flags if same_context_owner else {}
         context_verified = sess.context_verified if same_context_owner else False
         inbound_label, inbound_kind, inbound_resource_id = _parse_inbound(list(sess.pending))
+        route_name = _contextual_name_from_inbound(
+            list(sess.pending), title_of(elements, screen_height)
+        )
         outcome = self.record_screen(
             package=package,
             elements=elements,
@@ -2092,6 +2161,7 @@ class AppMemoryStore:
             inbound_label=inbound_label,
             inbound_kind=inbound_kind,
             inbound_resource_id=inbound_resource_id,
+            route_name=route_name,
             screen_height=screen_height,
             context_id=context_id,
             context_flags=context_flags,

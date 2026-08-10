@@ -36,6 +36,11 @@ Requirements: **Python 3.11+**, **`adb` on PATH** (Android SDK platform-tools), 
 - Dev install: `uv pip install -e ".[dev,apple,rapidocr]"` (or `pip`)
 - Tests:       `.venv/bin/pytest` (or `uv run pytest`)
 - Lint/types:  `.venv/bin/ruff check .` · `.venv/bin/mypy`
+- **This is a public, app-agnostic repository.** Never commit private knowledge from a tested
+  app: its name, package or private scheme, resource id, feature flag, screen copy/name, route,
+  or other product detail—not in code, tests, fixtures, comments, docs, generated skills, or
+  agent instructions. Use obviously fictional placeholders. Per-app knowledge belongs only in
+  the user's config or local AUA memory. Run `tests/test_no_app_specific_refs.py` before publishing.
 - Enable git hooks (once per clone): `git config core.hooksPath .githooks` — keeps the SKILL.md copies in sync on every commit
 - **The SKILL.md is generated** — edit `src/android_ui_analyser/guide.py` (the single source),
   never a SKILL.md directly. There are **two** committed copies (project

@@ -115,6 +115,81 @@ def test_same_ui_is_recorded_as_distinct_flag_variants(tmp_path) -> None:
     assert first.name in projected.screens
 
 
+def test_memory_update_renames_the_screen_in_its_active_flag_context(tmp_path) -> None:
+    cfg = make_config(memory={"dir": str(tmp_path / "home")}, daemon={"enabled": False})
+    store = AppMemoryStore(cfg.memory)
+    serial = "rename-context"
+    flags = {"layout_experiment": "a"}
+    context_id = store.activate_flag_context(serial, P, flags, verified=True)
+    old = store.record_screen(
+        package=P,
+        elements=_elements(HOME),
+        name_hint="inbox",
+        context_id=context_id,
+        context_flags=flags,
+        context_verified=True,
+    )
+    sess = store.load_session(serial)
+    sess.current_screen = old.name
+    store.save_session(serial, sess)
+    engine = Engine(
+        cfg,
+        device=FakeDevice(hierarchy_xml=HOME, package=P, serial=serial),
+        factory=ProviderFactory(cfg),
+    )
+
+    result = engine.memory_update("workspace_alerts_inbox")
+
+    app = AppMemoryStore(cfg.memory).load(P)
+    assert result["known"] is True
+    assert result["created"] is False
+    assert result["screen"] == "workspace_alerts_inbox"
+    assert old.name not in app.screens
+    renamed = app.screens["workspace_alerts_inbox"]
+    assert renamed.context_id == context_id
+    assert renamed.name_source == "explicit"
+
+
+def test_stable_route_namespaces_disambiguate_a_short_destination_title(tmp_path) -> None:
+    store = _store(tmp_path)
+    serial = "contextual-name"
+    origin = store.record_screen(
+        package=P,
+        elements=_elements(HOME),
+        name_hint="workspace",
+        screen_height=800,
+    )
+    sess = store.load_session(serial)
+    sess.package = P
+    sess.current_screen = origin.name
+    store.save_session(serial, sess)
+    store.observe_action(
+        serial,
+        RouteStep(kind="tap", label="Messages", resource_id="workspaceTabMESSAGES"),
+    )
+    store.observe_action(
+        serial,
+        RouteStep(kind="tap", label="Alerts", resource_id="workspaceAlerts"),
+    )
+    destination = _hier(
+        _node("android.widget.TextView", text="Inbox", b="[40,120][1040,210]"),
+        _node("android.widget.Button", text="Create", clk=True, b="[40,300][1040,400]"),
+    )
+
+    store.observe_screen(
+        serial,
+        package=P,
+        elements=_elements(destination),
+        screen_height=800,
+    )
+
+    app = store.load(P)
+    record = app.screens["workspace_messages_inbox"]
+    assert record.name_source == "resource"
+    assert record.logical_name == "workspace_messages_inbox"
+    assert any(route.to_screen == record.name for route in app.routes)
+
+
 def test_resource_namespace_keeps_name_stable_across_locales(tmp_path) -> None:
     store = _store(tmp_path)
     english = _hier(

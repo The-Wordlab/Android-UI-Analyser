@@ -19,6 +19,7 @@ The two properties worth pinning are not features:
 from __future__ import annotations
 
 import json
+import os
 import time
 
 from android_ui_analyser import leases as L
@@ -82,6 +83,75 @@ def test_release_frees_the_device_for_others(tmp_path):
     L.acquire(tmp_path, "emulator-5554", owner="claude")
     assert L.release(tmp_path, "emulator-5554", owner="claude") is True
     assert L.acquire(tmp_path, "emulator-5554", owner="cursor") is True
+
+
+def test_lease_expires_immediately_when_derived_owner_process_is_gone(tmp_path, monkeypatch):
+    owner = f"codex-{os.getpid()}-session-start"
+    monkeypatch.setattr(L, "_proc_started", lambda pid: "session-start")
+    assert L.acquire(tmp_path, "emulator-5554", owner=owner) is True
+
+    entry = L.read_lease(tmp_path, "emulator-5554")
+    assert entry["owner_pid"] == os.getpid()
+    assert entry["owner_started"] == "session-start"
+
+    def gone(pid, signal):
+        raise ProcessLookupError
+
+    monkeypatch.setattr(L.os, "kill", gone)
+    assert L.read_lease(tmp_path, "emulator-5554") is None
+
+
+def test_next_agent_automatically_gets_a_device_whose_owner_died(tmp_path, monkeypatch):
+    owner = f"codex-{os.getpid()}-session-start"
+    monkeypatch.setattr(L, "_proc_started", lambda pid: "session-start")
+    first, why = L.choose_device(
+        tmp_path, owner=owner, explicit=None, candidates=CANDIDATES, needs=None
+    )
+    assert why == "assigned"
+
+    def gone(pid, signal):
+        raise ProcessLookupError
+
+    monkeypatch.setattr(L.os, "kill", gone)
+    second, why = L.choose_device(
+        tmp_path, owner="next-agent", explicit=None, candidates=CANDIDATES, needs=None
+    )
+
+    assert (second, why) == (first, "assigned")
+    assert L.holder(tmp_path, first) == "next-agent"
+
+
+def test_reused_owner_pid_does_not_keep_the_old_lease_alive(tmp_path, monkeypatch):
+    owner = f"claude-code-{os.getpid()}-first-start"
+    monkeypatch.setattr(L, "_proc_started", lambda pid: "first-start")
+    assert L.acquire(tmp_path, "emulator-5554", owner=owner) is True
+
+    monkeypatch.setattr(L, "_proc_started", lambda pid: "second-start")
+    assert L.read_lease(tmp_path, "emulator-5554") is None
+
+
+def test_an_inaccessible_owner_process_is_still_alive(tmp_path, monkeypatch):
+    owner = f"codex-{os.getpid()}-session-start"
+    monkeypatch.setattr(L, "_proc_started", lambda pid: "session-start")
+    assert L.acquire(tmp_path, "emulator-5554", owner=owner) is True
+
+    def inaccessible(pid, signal):
+        raise PermissionError
+
+    monkeypatch.setattr(L.os, "kill", inaccessible)
+    assert L.read_lease(tmp_path, "emulator-5554")["owner"] == owner
+
+
+def test_explicit_owner_without_a_process_uses_the_ttl(tmp_path, monkeypatch):
+    def process_check_would_be_wrong(pid, signal):
+        raise AssertionError("an explicit owner is not process-bound")
+
+    monkeypatch.setattr(L.os, "kill", process_check_would_be_wrong)
+    assert L.acquire(tmp_path, "emulator-5554", owner="nightly-agent") is True
+
+    entry = L.read_lease(tmp_path, "emulator-5554")
+    assert "owner_pid" not in entry
+    assert entry["owner"] == "nightly-agent"
 
 
 def test_lease_records_what_it_is_for(tmp_path):

@@ -487,7 +487,7 @@ stored with provenance and context:
 ```bash
 aua knowledge add --app com.example.app --kind claim \
   --text "Catalog uses catalogTabTOOLS under catalog_experiment=a" \
-  --source agent --agent codex --evidence features/apps-hub/…
+  --source agent --agent codex --evidence workspace-alerts
 aua knowledge list --app com.example.app
 aua knowledge stale <knowledge-id> --app com.example.app
 ```
@@ -1211,6 +1211,6 @@ All action commands (`tap`, `long-press`, `input`, `clear`, `swipe`, `scroll-to`
 
 ## Author
 
-Created and maintained by **[Eiliya](https://github.com/eiliya-luzia)** ([eiliya@luzia.com](mailto:eiliya@luzia.com)) at [The Wordlab](https://github.com/The-Wordlab) — design, architecture, and direction. Parts of the implementation were written with AI coding assistants (Claude Code, Cursor); those contributions are recorded as `Co-Authored-By` trailers in the commit history.
+Created and maintained by **Eiliya** — design, architecture, and direction. Parts of the implementation were written with AI coding assistants (Claude Code, Cursor); those contributions are recorded as `Co-Authored-By` trailers in the commit history.
 
 Issues and ideas: [The-Wordlab/Android-UI-Analyser](https://github.com/The-Wordlab/Android-UI-Analyser/issues).

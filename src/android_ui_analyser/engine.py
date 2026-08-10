@@ -37,6 +37,7 @@ from .errors import (
     UsageError,
 )
 from .memory import (
+    DEFAULT_CONTEXT_ID,
     AppMap,
     AppMemoryStore,
     NavHints,
@@ -2104,6 +2105,15 @@ class Engine:
         package = app.get("package") or package
         if not package:
             raise UsageError("could not determine the foreground package to record")
+        # ``memory update --screen`` is the explicit correction path for a bad generated
+        # name. Keep that correction in the same feature-flag context as normal analyze;
+        # recording into ``default`` creates a disconnected duplicate and leaves every
+        # route pointing at the bad name.
+        self._sync_runtime_flag_context(device, package, mem)
+        sess = mem.load_session(device.serial)
+        same_context = sess.package in (None, package)
+        context_id = sess.active_context_id if same_context else DEFAULT_CONTEXT_ID
+        context_flags = sess.active_flags if same_context else {}
         outcome = mem.record_screen(
             package=package,
             elements=elements,
@@ -2112,6 +2122,9 @@ class Engine:
             tier="hierarchy",
             name_hint=screen_name,
             screen_height=h,
+            context_id=context_id,
+            context_flags=context_flags,
+            context_verified=sess.context_verified if same_context else False,
         )
         sess = mem.load_session(device.serial)
         sess.current_screen = outcome.name
@@ -2718,7 +2731,13 @@ class Engine:
                 "hint": "no map for this app yet — explore with `aua analyze`",
             }
         sess = mem.load_session(serial)
+        # The cursor is a memory of the last screen aua *wrote down*; the analyze above is the
+        # screen the device is on now. They diverge whenever a write was lost, so replaying a
+        # route planned from the cursor pressed `back` twice on the Android home screen. Mid-
+        # transit the observed screen belongs to another app, and there the cursor is correct.
         current = sess.current_screen
+        if not transit_resume and res.meta.known_screen:
+            current = res.meta.known_screen
         target = resolve_goal(
             app,
             goal,

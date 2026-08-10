@@ -8,7 +8,6 @@ agent's evidence and operations.  No model/provider is spawned from this module.
 from __future__ import annotations
 
 import json
-import os
 import re
 from collections import defaultdict
 from pathlib import Path
@@ -16,6 +15,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .atomic import atomic_write_text
 from .memory import (
     LEGACY_CONTEXT_ID,
     AppMap,
@@ -753,6 +753,4 @@ class ReconciliationStore:
 
     @staticmethod
     def _atomic_json(path: Path, payload: object) -> None:
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, path)
+        atomic_write_text(path, json.dumps(payload, indent=2, ensure_ascii=False))

@@ -78,12 +78,24 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "with `aua wait-and-analyze --changed` (or MCP `wait_changed`); multi-device with `aua fanout`.",
     ),
     (
-        "Start from the app playbook",
+        "Observe once, then choose the highest-level action",
+        "Start with `aua --format tsv analyze --fields id,text,rid,clickable`. Before doing "
+        "more discovery, read its `# goto:`, `# flows:`, and `# aua asks:` lines. Use this "
+        'decision order: (1) if `# goto:` offers the destination, run `aua goto "<goal>"`; '
+        "it replays and verifies the route, (2) if a saved flow matches the repeated setup or "
+        "journey, run `aua flow run <name>`, (3) only when neither covers the goal, try an "
+        'offered `aua open-and-analyze "<deeplink>"` and verify the screen actually changed, '
+        "then (4) use manual element actions. Do not inventory `about` or raw deeplinks first "
+        "when the observation already offers the goal.",
+    ),
+    (
+        "Read the app playbook when the task needs it",
         "`aua about` prints what the tool already learned about THIS app — a one-line "
         "description, login **recipes** (e.g. how to log in as a test/full user), useful "
         "**deeplinks**, and **notes** (quirks, e.g. a dialog to dismiss after login, or that "
-        "the 'Apps' tab is really Tools). Read it first and follow it — it saves you the "
-        "discovery the last run already did. As you learn things, teach it back with "
+        "the 'Apps' tab is really Tools). Read it when you need a recipe, environment setup, "
+        "an app quirk, or no inline route/flow answers the goal; it is a playbook, not a "
+        "mandatory first round trip. As you learn things, teach it back with "
         '`aua remember --about "…" | --note "…" | --recipe NAME --note "…" | --deeplink URI --note "…"` '
         "so the next run starts even more informed.",
     ),
@@ -99,11 +111,14 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
     ),
     (
         "Take shortcuts with deeplinks",
-        "`aua open-and-analyze \"<uri>\"` fires a deeplink — jump straight to a screen or trigger an app "
-        "action (e.g. set a feature flag) instead of tapping through the UI. Far faster than "
-        "navigating. When an app has known deeplinks, every `analyze` offers the best ones "
-        "inline in `meta.suggested_deeplinks` (e.g. `open myapp://home`) — so to reach the "
-        "screen under test, open the shortcut instead of navigating to it. Some deeplinks "
+        '`aua open-and-analyze "<uri>"` fires a deeplink — jump straight to a screen or trigger an app '
+        "action (e.g. set a feature flag) instead of tapping through the UI. Use one only when "
+        "no verified `goto` or matching flow covers the goal. When an app has known deeplinks, "
+        "every `analyze` offers the best ones inline in `meta.suggested_deeplinks` (e.g. `open "
+        "myapp://home`). A delivered intent is not proof of arrival: accept the shortcut only "
+        "when its returned observation/activity/tree changed as expected. An unchanged result "
+        "or `stale_risk` means the app may have ignored it; return to `goto` or element actions "
+        "instead of assuming you arrived. Some deeplinks "
         "need an app restart to take effect (`aua app stop <pkg>` + `aua app launch <pkg>`). "
         "Don't know the app's deeplinks? `aua explore mine <repo> --app <pkg>` harvests them "
         "from the source once (then they ride inline + show in `aua about`).",
@@ -152,24 +167,25 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "Jump to a known screen in one call",
         '`aua goto "<goal>"` replays the remembered steps of each route edge — by resource-id '
         "first, then label — verifying every hop, including cross-app auth legs (Google sign-in "
-        "through Chrome/GMS is folded into one edge). Prefer it whenever `suggested_gotos` lists "
-        "your target. Known in-app hops skip OCR and retry it only when hierarchy cannot match "
+        "through Chrome/GMS is folded into one edge). For a destination, prefer it over a raw "
+        "deeplink whenever `suggested_gotos` lists the target: `goto` verifies each hop and "
+        "arrival instead of merely delivering an intent. Known in-app hops skip OCR and retry it only when hierarchy cannot match "
         "a selector or verify arrival; transit screens keep automatic OCR. `--plan` prints the "
         "annotated route (steps, replayable, destructive) "
         "without acting. Steps matching `memory.destructive_labels` (delete/sign out/pay/…) are "
         "refused without `--allow-destructive`. On divergence it hands back the failing step, "
         "the remaining steps, and the current elements — finish that one step manually, then "
-        "re-run `aua goto \"…\" --from-here` to resume mid-edge (skips steps that already match "
+        're-run `aua goto "…" --from-here` to resume mid-edge (skips steps that already match '
         "the current screen; also covers mid-auth). Plain `aua goto` still starts from the "
         "current *screen* on the map; `--from-here` is for mid-*edge* (you already tapped some "
         "of the recorded steps yourself).",
     ),
     (
         "Replay whole journeys in one call (flows)",
-        'A flow is a Maestro-style YAML journey you can AUTHOR directly (no walking needed) or '
+        "A flow is a Maestro-style YAML journey you can AUTHOR directly (no walking needed) or "
         "record: `aua flow save <name> --last N` materializes your recent actions (typed values "
         "become required `${PARAM_n}` placeholders — fill them in the file). "
-        '`aua flow run <name> --param K=V` drives the whole journey — launch, taps, waits, '
+        "`aua flow run <name> --param K=V` drives the whole journey — launch, taps, waits, "
         "asserts, cross-app auth, even `goto:` steps — and on divergence returns the failing "
         "step index + remaining steps; fix and resume with `--from-step N`. Flows live under "
         "`<memory.dir>/flows/*.yaml` (`aua flow list|show|delete`); `--dry-run` previews. Use a "
@@ -182,7 +198,7 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "extras. (1) On a `goto`/`flow` divergence, add `--assist` and a fast planner LLM "
         "tries to recover in the same call (dismiss a popup, find the moved element) "
         "before handing off — the divergence hint tells you when it's worth trying. "
-        "(2) `aua navigate \"<goal>\"` drives to a goal with no prior map AND records the "
+        '(2) `aua navigate "<goal>"` drives to a goal with no prior map AND records the '
         "path, so the next `aua goto` is a free deterministic replay. It's OFF by default "
         "and never touches the fast path; destructive taps still need `--allow-destructive`.",
     ),
@@ -190,7 +206,7 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "Drive by element ID",
         "`aua --format compact analyze` → a list of elements each with an integer `id` + bounds. "
         'Act on the id: `aua tap-and-analyze <id>`, `aua input-and-analyze <id> "text"`, '
-        '`aua swipe-and-analyze up`, `aua key-and-analyze back`. '
+        "`aua swipe-and-analyze up`, `aua key-and-analyze back`. "
         'Use `aua has "<text>"` (exit 0/1) to branch cheaply without parsing JSON.',
     ),
     (
@@ -258,14 +274,14 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "for one screen. "
         "**That settle can only wait ~1.1s (max 1.6s).** A slower screen makes the action "
         "report `nothing changed` for a tap that did land, and `stale_risk` appears in "
-        "`detail`. That is *not* evidence the tap missed: it cannot tell \"no effect\" from "
-        "\"not yet\", so **never re-tap on it** — a second tap means a second submit. When you "
+        '`detail`. That is *not* evidence the tap missed: it cannot tell "no effect" from '
+        '"not yet", so **never re-tap on it** — a second tap means a second submit. When you '
         "know what should come next, say so and the wait becomes evidence-based with your "
-        "budget instead of the settle timer: `--until \"rid:introCard\"`, `--until "
-        "\"text:Chats\"`, `--until \"!text:Loading\"` (with `--until-timeout MS`). The response "
+        'budget instead of the settle timer: `--until "rid:introCard"`, `--until '
+        '"text:Chats"`, `--until "!text:Loading"` (with `--until-timeout MS`). The response '
         "then carries `await_outcome`: `satisfied` / `screen-changed` / `timeout`, and "
         "`await_terms` says which term is missing. Prefer "
-        "`wait --for \"<text>\"` for known targets; reserve `wait --for-stable` for "
+        '`wait --for "<text>"` for known targets; reserve `wait --for-stable` for '
         "generation / loading / video.",
     ),
     (
@@ -282,7 +298,7 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "mitmproxy's response hook fires at *stream completion*, so it is the honest signal for a "
         "streamed chat turn; it needs `aua proxy start` running. `log:<substring>` matches logcat "
         "since the wait began and needs no proxy, but is only as good as what the app logs. "
-        "Terms are ANDed, so `--until \"net:POST /v1/chat,text:x =\"` reads as *the backend "
+        'Terms are ANDed, so `--until "net:POST /v1/chat,text:x ="` reads as *the backend '
         "replied and the screen shows it* — which matters because a streamed LaTeX answer reaches "
         "the hierarchy as U+FFFD, so no `text:` term alone can confirm it arrived. Both take a "
         "baseline when the wait starts, so the previous turn's response can never satisfy this "
@@ -290,19 +306,23 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
     ),
     (
         "One agent, one emulator — leases are automatic",
-        "With several agents running at once, every one of them otherwise resolves to \"the "
+        'With several agents running at once, every one of them otherwise resolves to "the '
         "only/first device\" and they drive each other's screens; nothing errors, the results "
         "are just wrong. So each command **claims a lease** on the device it uses and keeps "
         "you on the same one (element ids, app state and the learned map are all per-device). "
-        "You need do nothing. Identify yourself with `--owner <agent>` or `$AUA_OWNER` if you "
-        "want readable output; otherwise it is derived and stable for your process. "
+        "You need do nothing: no lease command and no owner prompt. By default AUA derives the "
+        "long-lived agent process, records its PID plus start token, and keeps that agent sticky "
+        "across its short-lived shell/runner commands. On the next device request, a dead owner "
+        "or reused PID is immediately treated as free and another agent is assigned "
+        "automatically; it does not wait out the TTL. Explicit `--owner <agent>` / `$AUA_OWNER` "
+        "names cannot be tied safely to a process, so only those use the TTL fallback. "
         "Ask for what the device must support with `--needs root,play,proxy` and you get a "
         "capable one or a refusal — never a device that silently cannot do it. "
         "**Exit 9 (`device_leased`) means another agent holds it — that is routable, not "
         "fatal:** drop `--serial` and one will be picked, or take a different emulator; the "
         "hint lists which are free. `aua lease list` shows who holds what, `aua lease "
-        "release` hands one back early. Leases expire on their own, so a crashed agent blocks "
-        "nobody and there is nothing to clean up.",
+        "release` hands one back early. A crashed derived agent therefore blocks nobody and "
+        "there is nothing to clean up.",
     ),
     (
         "Stop the daemon when done",
@@ -320,7 +340,10 @@ ESCALATION_LADDER: list[tuple[str, str, str]] = [
 
 EXIT_CODES: list[tuple[str, str]] = [
     ("0", "success (`has`: text present)"),
-    ("1", "`has`: text not present · OR unexpected internal error (structured `internal_error` on stderr)"),
+    (
+        "1",
+        "`has`: text not present · OR unexpected internal error (structured `internal_error` on stderr)",
+    ),
     ("2", "usage error"),
     ("3", "no device / device error / `wait --for-stable` timeout"),
     ("4", "provider error (fallback chain exhausted)"),
@@ -340,8 +363,20 @@ ORIENTATION: tuple[tuple[str, str], ...] = (
         "ordinal (positional, renumbered every analyze)",
     ),
     (
+        'aua goto "<goal from # goto:>"',
+        "use the offered verified route before a deeplink or manual taps",
+    ),
+    (
+        "aua flow run <name from # flows:> --param K=V",
+        "use a matching saved journey for repeated multi-step setup",
+    ),
+    (
+        'aua open-and-analyze "<offered deeplink>"',
+        "only when no goto/flow covers the goal; trust it only if the returned screen changed",
+    ),
+    (
         "aua tap-and-analyze --rid <resourceId> --until 'text:<label>'",
-        "ACT, wait, and get the settled screen — one call",
+        "manual fallback: ACT, wait, and get the settled screen — one call",
     ),
     (
         "aua input-and-analyze --rid <resourceId> \"text\" --until '!text:Loading'",
@@ -580,7 +615,10 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "/ `dev_profile` / `a11y_scroll` / `flags_apply` / `proxy_start`/`stop` / `mock_replay` "
         "(a `flow:` step runs a saved flow inline — reuse a shared `login` recipe).",
     ),
-    ("open / about / remember", "`open <uri>` deeplink; `about` app playbook; `remember …` teach it"),
+    (
+        "open / about / remember",
+        "`open <uri>` deeplink; `about` app playbook; `remember …` teach it",
+    ),
     (
         "knowledge / reconcile",
         "`knowledge list|show|add|stale`; `reconcile plan|submit|status|apply|rollback` "
@@ -641,7 +679,7 @@ AGENT_BEST_PRACTICES_PERCEPTION: list[tuple[str, str, str]] = [
     (
         "`analyze` after every `tap`/`input` (or always `--no-observe` then re-analyze)",
         "Use the explicit `*-and-analyze` action and consume its compact `observation`; narrow it with "
-        "`--observe-fields`, and add `--until \"<predicate>\"` when the next screen is slow",
+        '`--observe-fields`, and add `--until "<predicate>"` when the next screen is slow',
         "Post-action observation already has fresh ids. Extra analyzes double round trips. "
         "Measured on a 5-scenario run: 37 taps became 73 `analyze` + 37 `wait` calls this way, "
         "roughly 60% of wall-clock spent on avoidable round trips.",
@@ -681,14 +719,15 @@ AGENT_BEST_PRACTICES_PERCEPTION: list[tuple[str, str, str]] = [
 AGENT_BEST_PRACTICES_MEMORY: list[tuple[str, str, str]] = [
     (
         "Re-explore an app from scratch every session",
-        "Read `aua about`, follow `meta.suggested_gotos` / `suggested_deeplinks`, use "
-        '`aua goto "<goal>"` / `aua map --find`',
+        "Analyze once; follow `# goto` / `# flows`; read `aua about` only when you need a "
+        "recipe, environment setup, or app quirk",
         "The map is the previous agent's gift. Ignoring it re-pays discovery cost.",
     ),
     (
         "Tap through 5 screens to reach a known destination",
-        '`aua open-and-analyze "<deeplink>"` or `aua goto "<goal>"` / a saved `aua flow run`',
-        "One call beats a hand-rolled path. Flows collapse whole journeys.",
+        '`aua goto "<goal>"`; then a matching `aua flow run`; then a verified '
+        "`open-and-analyze`; manual actions last",
+        "Verified routes outrank delivered intents; flows collapse whole journeys.",
     ),
     (
         "After a goto handoff / mid-path manual hop, re-walk from the start or invent the rest",
@@ -844,15 +883,13 @@ def render_markdown(*, brief: bool = False) -> str:
     p.append("## The loop")
     p.append("```bash")
     p.append("aua --format tsv analyze         # READ the screen: one element per line, no noise")
-    p.append("aua --format compact analyze     # same screen as JSON, when you need it machine-readable")
+    p.append(
+        "aua --format compact analyze     # same screen as JSON, when you need it machine-readable"
+    )
     p.append('aua ask "describe this screen top-to-bottom"  # screenshot + element graph via VLM')
     p.append("aua tap-and-analyze 4            # act by id and receive the resulting screen")
-    p.append(
-        'aua input-and-analyze 2 "hello@example.com"  # type and receive the resulting screen'
-    )
-    p.append(
-        "aua --format tsv analyze         # only if you need a narrower/fresher filtered view"
-    )
+    p.append('aua input-and-analyze 2 "hello@example.com"  # type and receive the resulting screen')
+    p.append("aua --format tsv analyze         # only if you need a narrower/fresher filtered view")
     p.append("```")
     p.append(
         'Cheap presence check to branch on: `aua has "Sign in"` (exit 0 found / 1 not). '
@@ -938,7 +975,7 @@ def render_markdown(*, brief: bool = False) -> str:
         "# → {serial, port, owner}; pin: export AUA_SERIAL=<serial> AUA_OWNER=<owner>\n"
         "aua --format compact analyze\n"
         "# …\n"
-        "aua emulator stop --serial \"$AUA_SERIAL\"   # only yours — never bare stop --all\n"
+        'aua emulator stop --serial "$AUA_SERIAL"   # only yours — never bare stop --all\n'
         "```\n"
         "Sneak-peek all of them: `aua dashboard` (auto **grid** when multiple are online).\n"
         "Headless on Mac uses **host GPU** (Metal). **Always stop AVDs you started** before "
@@ -1017,7 +1054,9 @@ def render_markdown(*, brief: bool = False) -> str:
     p.append('aua input-and-analyze 25 "How much?"      # id from the tap response')
     p.append("aua tap-and-analyze 26                    # send-button id from that same response")
     p.append('aua wait-and-analyze --for "How much?"     # confirm and receive the settled screen')
-    p.append("aua has --rid resultBubble && echo present  # cheap branch, exit 0 present / 1 absent")
+    p.append(
+        "aua has --rid resultBubble && echo present  # cheap branch, exit 0 present / 1 absent"
+    )
     p.append("aua tap-and-analyze 31                    # continue on another read-back id")
     p.append("```")
     p.append("")
@@ -1030,8 +1069,12 @@ def render_markdown(*, brief: bool = False) -> str:
     p.append('  "action": "tap",')
     p.append('  "observation_present": true,')
     p.append('  "known_screen": "chat",')
-    p.append('  "stable_elements": [{"id": 25, "stable_key": "compose_input"}, {"id": 26, "stable_key": "send"}],')
-    p.append('  "action_diff_summary": {"added": 0, "removed": 0, "changed": 2, "prev_count": 17, "curr_count": 17},')
+    p.append(
+        '  "stable_elements": [{"id": 25, "stable_key": "compose_input"}, {"id": 26, "stable_key": "send"}],'
+    )
+    p.append(
+        '  "action_diff_summary": {"added": 0, "removed": 0, "changed": 2, "prev_count": 17, "curr_count": 17},'
+    )
     p.append('  "note": "No separate analyze needed; state is in observation."')
     p.append("}")
     p.append("```")
@@ -1050,9 +1093,7 @@ def render_markdown(*, brief: bool = False) -> str:
     p.append('                  "scrollable", "long_clickable", "password",  // null = unknown')
     p.append('                  "source": "hierarchy|detection|ocr|grounding", "confidence" } ],')
     p.append('  "meta":     { "duration_ms", "tier_used", "path", "providers_used",')
-    p.append(
-        '                "known_screen", "known_routes", "suggested_gotos", "research_tasks",'
-    )
+    p.append('                "known_screen", "known_routes", "suggested_gotos", "research_tasks",')
     p.append(
         '                "flows": ["name(PARAM)"],          // aua flow run name --param PARAM=v'
     )
@@ -1072,7 +1113,9 @@ def render_markdown(*, brief: bool = False) -> str:
         "flag table above); `--all` turns tsv's implicit noise filtering off."
     )
     p.append("")
-    p.append("Action command responses always include a small contract wrapper so `analyze` is usually not needed:")
+    p.append(
+        "Action command responses always include a small contract wrapper so `analyze` is usually not needed:"
+    )
     p.append("```json")
     p.append('{"ok": true,')
     p.append('  "action": "tap",')
@@ -1082,7 +1125,9 @@ def render_markdown(*, brief: bool = False) -> str:
     p.append('    {"id": 25, "stable_key": "compose_input"},')
     p.append('    {"id": 26, "stable_key": "send"}')
     p.append("  ],")
-    p.append('  "action_diff_summary": {"added": 0, "removed": 0, "changed": 2, "prev_count": 17, "curr_count": 17},')
+    p.append(
+        '  "action_diff_summary": {"added": 0, "removed": 0, "changed": 2, "prev_count": 17, "curr_count": 17},'
+    )
     p.append('  "note": "No separate analyze needed; state is in observation.",')
     p.append('  "observation": { "screen": {...}, "elements": [...], "meta": {...} }')
     p.append("}")
@@ -1220,15 +1265,10 @@ def render_json() -> dict[str, object]:
         "key_flags": [{"scope": s, "flags": f} for s, f in KEY_FLAGS],
         "agent_best_practices": {
             "perception": [
-                {"dont": a, "do": b, "why": c}
-                for a, b, c in AGENT_BEST_PRACTICES_PERCEPTION
+                {"dont": a, "do": b, "why": c} for a, b, c in AGENT_BEST_PRACTICES_PERCEPTION
             ],
-            "memory": [
-                {"dont": a, "do": b, "why": c} for a, b, c in AGENT_BEST_PRACTICES_MEMORY
-            ],
-            "speed": [
-                {"dont": a, "do": b, "why": c} for a, b, c in AGENT_BEST_PRACTICES_SPEED
-            ],
+            "memory": [{"dont": a, "do": b, "why": c} for a, b, c in AGENT_BEST_PRACTICES_MEMORY],
+            "speed": [{"dont": a, "do": b, "why": c} for a, b, c in AGENT_BEST_PRACTICES_SPEED],
         },
     }
 
