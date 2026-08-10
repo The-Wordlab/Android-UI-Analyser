@@ -427,6 +427,54 @@ def _comment_value(value: Any) -> str:
     return _cell(value)
 
 
+def render_action_tsv(data: dict[str, Any], view: Projection | None = None) -> str:
+    """An action envelope as TSV: the envelope as ``#`` lines, then its observation's rows.
+
+    ``--format tsv`` was silently ignored on action responses, so an agent that had settled on
+    TSV for ``analyze`` got JSON back the moment it tapped anything and had to hand-parse it.
+    The envelope is kept because it carries the verdict — ``change.text_added`` is usually the
+    whole reason the action was run.
+    """
+    lines = _envelope_comments(data)
+    payload = data.get("observation")
+    if not isinstance(payload, dict) or not isinstance(payload.get("elements"), list):
+        return "\n".join(lines)
+    projection = view or Projection.parse(fmt=OutputFormat.tsv)
+    return "\n".join([*lines, projection.render_tsv(payload)])
+
+
+def _envelope_comments(data: dict[str, Any]) -> list[str]:
+    """Every scalar (and one nested level of scalars) in the envelope, as ``#key=value``."""
+    lines: list[str] = []
+    for key, value in data.items():
+        if key == "observation":
+            continue
+        lines += [f"# {key}{suffix}={_comment_value(v)}" for suffix, v in _scalars(value)]
+    return lines
+
+
+def _scalars(value: Any) -> list[tuple[str, Any]]:
+    if isinstance(value, (str, int, float, bool)):
+        return [("", value)]
+    if _is_scalar_list(value):
+        return [("", list(value))]
+    if isinstance(value, dict):
+        return [
+            (f".{k}", v)
+            for k, v in value.items()
+            if isinstance(v, (str, int, float, bool)) or _is_scalar_list(v)
+        ]
+    return []
+
+
+def _is_scalar_list(value: Any) -> bool:
+    return (
+        isinstance(value, (list, tuple))
+        and bool(value)
+        and all(v is None or isinstance(v, (str, int, float, bool)) for v in value)
+    )
+
+
 def _has_label(element: dict[str, Any]) -> bool:
     return bool(element.get("text") or element.get("resource_id") or element.get("content_desc"))
 
