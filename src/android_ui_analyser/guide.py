@@ -307,8 +307,10 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "for a pixel change + idle (animation-aware) before dumping the tree, and a screen "
         "whose content is still streaming in has to hold still for one confirming sample — so "
         "you get the *next* screen, not a mid-transition snapshot with the list body missing. "
-        "When returning through nested screens, use `back-until-and-analyze '<destination>'`; "
-        "it re-resolves a labeled Back on every frame. If the first Back icon is unlabeled, "
+        "When returning through nested screens, use `back-until-and-analyze '<known_screen>'` "
+        "when the destination is mapped, or pass positive `rid:`/`text:`/`desc:` evidence. "
+        "It re-resolves a labeled Back on every frame and stops rather than navigating again "
+        "from an unrecognized mapped frame. If the first Back icon is unlabeled, "
         "pass its id from the current observation once with `--back-id <fresh-id>`—AUA still "
         "freshness-checks it and does not reuse that numeric id on later frames. "
         "The observation is **compact by default** (`id,text,rid,clickable`, app nodes only); "
@@ -446,7 +448,8 @@ BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
         "For your action's expected result add `--until 'rid:resultCard'` or "
         "`--until '!text:Loading'`; escape a literal comma as `text:Hello\\, friend`. For a "
         "nested journey, return in one bounded call with `aua back-until-and-analyze "
-        "'rid:<destination>'` instead of replaying frame-local Back ids. For an "
+        "'<known_screen>'` (or `'rid:<destination>'`) instead of replaying frame-local Back "
+        "ids. A bare value is a mapped `known_screen`; text/rid/desc evidence keeps its prefix. For an "
         "unattached network-driven update use `wait-and-analyze --after-change --observe`. Prefer "
         "a positive final affordance over a generic spinner disappearance. If a daemon call "
         "reports `daemon_outcome_unknown`, never repeat the action: wait, then inspect one fresh "
@@ -537,8 +540,8 @@ ORIENTATION: tuple[tuple[str, str], ...] = (
         "TYPE — text is positional, and --until belongs HERE, not on a later analyze",
     ),
     (
-        "aua back-until-and-analyze 'rid:<destination>' [--back-id <fresh-id>]",
-        "RETURN through nested screens in one call; use --back-id only for an unlabeled first Back",
+        "aua back-until-and-analyze '<known_screen>' [--back-id <fresh-id>]",
+        "RETURN through nested screens in one call; use rid:/text:/desc: when it is not mapped",
     ),
     (
         'aua --answers <id>="<name>" <your next command>',
@@ -802,8 +805,9 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "return the post-action screen inline (`observation`, fresh ids), and the explicit "
         "names cannot disable that readback. Prefer `hide-keyboard-and-analyze` over "
         "`key-and-analyze back` when the IME is covering the tree. For nested navigation use "
-        "`back-until-and-analyze '<destination>'`; pass `--back-id <fresh-id>` only when the "
-        "first app-owned Back icon is unlabeled",
+        "`back-until-and-analyze '<known_screen>'` for a mapped destination, or pass positive "
+        "`rid:`/`text:`/`desc:` evidence; use `--back-id <fresh-id>` only when the first "
+        "app-owned Back icon is unlabeled",
     ),
     (
         "logcat",

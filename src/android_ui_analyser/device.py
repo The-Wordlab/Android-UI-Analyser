@@ -54,6 +54,21 @@ def _bounds_from_info(info: dict[str, Any]) -> Bounds | None:
         return None
 
 
+def _foreground_from_window_dump(output: str) -> dict[str, str] | None:
+    """Parse the focused Android component from ``dumpsys window`` output."""
+    for line in output.splitlines():
+        if "mCurrentFocus=" not in line and "mFocusedApp=" not in line:
+            continue
+        match = re.search(r"\bu\d+\s+([^\s/]+)/([^\s}]+)", line)
+        if match is None:
+            continue
+        package, activity = match.groups()
+        if activity.startswith("."):
+            activity = package + activity
+        return {"package": package, "activity": activity}
+    return None
+
+
 class Device(ABC):
     """The device surface the rest of the tool depends on."""
 
@@ -527,6 +542,24 @@ class Uiautomator2Device(Device):
         return self.screenshot()
 
     def current_app(self) -> dict[str, str]:
+        # uiautomator2's `app_current` shells through `dumpsys activity top`. On Android 16
+        # that command waits about five seconds even when the answer is already available,
+        # adding the delay to every observed action's change evidence. `dumpsys window`
+        # exposes the same focused component in ~20ms. Keep u2 as the compatibility fallback.
+        try:
+            proc = subprocess.run(  # noqa: S603
+                ["adb", "-s", self.serial, "shell", "dumpsys", "window"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=1.0,
+            )
+            if proc.returncode == 0:
+                focused = _foreground_from_window_dump(proc.stdout)
+                if focused is not None:
+                    return focused
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+            logger.debug("fast foreground query failed (%s); using u2 app_current", exc)
         info = self._call("app_current") or {}
         return {
             "package": info.get("package", ""),

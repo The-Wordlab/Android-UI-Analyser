@@ -59,7 +59,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         "an unlabeled first Back needs its fresh id.",
         ("back", "return", "compare", "nested", "thread", "recent"),
         25,
-        "aua back-until-and-analyze 'rid:<destination>'",
+        "aua back-until-and-analyze '<known_screen|rid:destination>'",
         "back_until_and_analyze",
         risk="always stops when the foreground leaves the starting package",
     ),

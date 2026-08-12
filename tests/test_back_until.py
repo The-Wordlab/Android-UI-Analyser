@@ -85,6 +85,167 @@ def test_back_until_stops_at_first_satisfied_destination(monkeypatch: Any) -> No
     assert all(call["hierarchy_only"] is True for call in awaits)
 
 
+def test_back_until_accepts_bare_mapped_screen_without_a_failed_probe(monkeypatch: Any) -> None:
+    engine = Engine(
+        make_config(memory={"enabled": False}), device=FakeDevice(package="com.example.app")
+    )
+    results = [
+        _await(ok=False, outcome="timeout", observation=_observation(known_screen="thread")),
+        _await(ok=False, outcome="timeout", observation=_observation(known_screen="detail")),
+        _await(ok=True, outcome="satisfied", observation=_observation(known_screen="home")),
+    ]
+    targets: list[str] = []
+    keys: list[str] = []
+
+    def known(target: str, **_kwargs: Any) -> ActionResult:
+        targets.append(target)
+        return results.pop(0)
+
+    monkeypatch.setattr(engine, "_await_known_screen", known)
+    monkeypatch.setattr(
+        engine,
+        "await_predicate",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("bare mapped screen must not enter generic predicate parsing")
+        ),
+    )
+    monkeypatch.setattr(
+        engine,
+        "key",
+        lambda name, **_kwargs: keys.append(name) or ActionResult(ok=True, action="key"),
+    )
+
+    result = engine.back_until("home", max_steps=2, step_timeout_ms=0)
+
+    assert result.ok is True
+    assert targets == ["home", "home", "home"]
+    assert keys == ["back", "back"]
+
+
+def test_known_screen_wait_uses_read_only_map_recognition(monkeypatch: Any) -> None:
+    engine = Engine(make_config(), device=FakeDevice(package="com.example.app"))
+    observations = [
+        _observation(known_screen=""),
+        _observation(known_screen=""),
+    ]
+    recognized = iter(["detail", "home"])
+    analyze_calls: list[dict[str, Any]] = []
+
+    class Memory:
+        def load(self, package: str) -> Any:
+            assert package == "com.example.app"
+            return type("MappedApp", (), {"screens": {"home": object()}})()
+
+        def recognize_screen(self, *_args: Any, **_kwargs: Any) -> str:
+            return next(recognized)
+
+    engine._mem = Memory()  # type: ignore[assignment]
+    monkeypatch.setattr(
+        engine,
+        "analyze",
+        lambda **kwargs: analyze_calls.append(kwargs) or observations.pop(0),
+    )
+    monkeypatch.setattr(engine_mod.time, "sleep", lambda _seconds: None)
+
+    result = engine._await_known_screen("home", timeout_ms=100, poll_ms=10)
+
+    assert result.ok is True
+    assert result.observation is not None
+    assert result.observation.meta.known_screen == "home"
+    assert analyze_calls == [
+        {"source": "hierarchy", "with_ocr": False, "record": False},
+        {"source": "hierarchy", "with_ocr": False, "record": False},
+    ]
+
+
+def test_back_until_stops_on_unrecognized_mapped_frame_instead_of_overshooting(
+    monkeypatch: Any,
+) -> None:
+    engine = Engine(
+        make_config(memory={"enabled": False}), device=FakeDevice(package="com.example.app")
+    )
+    results = [
+        _await(ok=False, outcome="timeout", observation=_observation(known_screen="detail")),
+        _await(ok=False, outcome="timeout", observation=_observation(known_screen="")),
+    ]
+    keys: list[str] = []
+    monkeypatch.setattr(engine, "_await_known_screen", lambda *_args, **_kwargs: results.pop(0))
+    monkeypatch.setattr(
+        engine,
+        "key",
+        lambda name, **_kwargs: keys.append(name) or ActionResult(ok=True, action="key"),
+    )
+
+    result = engine.back_until("home", max_steps=4, step_timeout_ms=0)
+
+    assert result.ok is False
+    assert result.stop_reason == "screen_unrecognized"
+    assert keys == ["back"]
+    assert result.steps_run and len(result.steps_run) == 1
+
+
+def test_back_until_rejects_unknown_mapped_screen_before_navigation(monkeypatch: Any) -> None:
+    engine = Engine(make_config(), device=FakeDevice(package="com.example.app"))
+
+    class Memory:
+        def load(self, package: str) -> Any:
+            assert package == "com.example.app"
+            return type("MappedApp", (), {"screens": {"home": object()}})()
+
+    engine._mem = Memory()  # type: ignore[assignment]
+    monkeypatch.setattr(engine, "analyze", lambda **_kwargs: _observation(known_screen=""))
+    monkeypatch.setattr(
+        engine,
+        "key",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not navigate")),
+    )
+
+    with pytest.raises(UsageError, match="not a mapped screen"):
+        engine.back_until("typo_destination")
+
+
+def test_back_until_requires_map_for_bare_screen_before_navigation(monkeypatch: Any) -> None:
+    engine = Engine(
+        make_config(memory={"enabled": False}), device=FakeDevice(package="com.example.app")
+    )
+    monkeypatch.setattr(engine, "analyze", lambda **_kwargs: _observation(known_screen="home"))
+    monkeypatch.setattr(
+        engine,
+        "key",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not navigate")),
+    )
+
+    with pytest.raises(UsageError, match="not a mapped screen"):
+        engine.back_until("home")
+
+
+def test_back_until_stops_on_mapped_loading_frame_before_another_back(
+    monkeypatch: Any,
+) -> None:
+    engine = Engine(
+        make_config(memory={"enabled": False}), device=FakeDevice(package="com.example.app")
+    )
+    results = [
+        _await(ok=False, outcome="timeout", observation=_observation(known_screen="detail")),
+        _await(ok=False, outcome="timeout", observation=_observation(known_screen="loading")),
+    ]
+    keys: list[str] = []
+    monkeypatch.setattr(engine, "_await_known_screen", lambda *_args, **_kwargs: results.pop(0))
+    monkeypatch.setattr(engine, "_mapped_screen_state", lambda _observation: "loading")
+    monkeypatch.setattr(
+        engine,
+        "key",
+        lambda name, **_kwargs: keys.append(name) or ActionResult(ok=True, action="key"),
+    )
+
+    result = engine.back_until("home", max_steps=4, step_timeout_ms=0)
+
+    assert result.ok is False
+    assert result.stop_reason == "screen_unstable"
+    assert keys == ["back"]
+    assert result.steps_run and len(result.steps_run) == 1
+
+
 def test_back_until_re_resolves_toolbar_back_on_each_fresh_frame(monkeypatch: Any) -> None:
     engine = Engine(
         make_config(memory={"enabled": False}), device=FakeDevice(package="com.example.app")

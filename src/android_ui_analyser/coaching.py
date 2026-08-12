@@ -210,7 +210,7 @@ def decorate_result(
                     "message": "the same numeric id was reused after the screen changed",
                     "recommended_call": (
                         "Use the fresh observation's --rid/stable_key; for nested Back use "
-                        "aua back-until-and-analyze 'rid:<destination>'."
+                        "aua back-until-and-analyze '<known_screen>'."
                     ),
                 },
             )
@@ -220,7 +220,7 @@ def decorate_result(
                 {
                     "id": "bounded_back_navigation",
                     "message": "repeated Back navigation can stop on semantic destination evidence",
-                    "recommended_call": "aua back-until-and-analyze 'rid:<destination>'",
+                    "recommended_call": "aua back-until-and-analyze '<known_screen>'",
                 },
             )
         streak = 1

@@ -562,14 +562,17 @@ def _tool_definitions() -> list[types.Tool]:
                 "Navigate back in one bounded call until semantic destination evidence is "
                 "present. Re-resolves a visible Back/Navigate-up control on every fresh frame, "
                 "then falls back to hardware Back. Returns the final analyzed screen and always "
-                "stops if the foreground leaves the starting package."
+                "stops if the foreground leaves the starting package. A bare mapped "
+                "known_screen name is accepted directly."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "predicate": {
                         "type": "string",
-                        "description": "ANDed text:/rid:/desc: terms naming the destination.",
+                        "description": (
+                            "Bare mapped known_screen name, or ANDed text:/rid:/desc: terms."
+                        ),
                     },
                     "back_id": {
                         "type": "integer",

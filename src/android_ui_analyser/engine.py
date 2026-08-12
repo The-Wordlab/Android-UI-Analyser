@@ -5925,7 +5925,7 @@ class Engine:
         step_timeout_ms: int = 1_200,
         poll_ms: int = 200,
     ) -> ActionResult:
-        """Navigate back until semantic UI evidence is present, returning one observation.
+        """Navigate back until mapped-screen or semantic UI evidence is present.
 
         Each fresh frame is checked for an unambiguous toolbar Back/Navigate-up affordance and
         that stable selector is preferred; hardware Back is the fallback. This matters on nested
@@ -5933,14 +5933,20 @@ class Engine:
         first mutation, every step is observed, and leaving the starting package stops the
         journey. Cross-package traversal belongs in a risk-preflighted route or flow.
         """
-        terms = _parse_await_terms(predicate)
+        raw_destination = (predicate or "").strip()
+        known_screen_target = (
+            raw_destination
+            if re.fullmatch(r"[A-Za-z0-9_.-]+", raw_destination or "")
+            else None
+        )
+        terms = [] if known_screen_target else _parse_await_terms(predicate)
         unsupported = sorted({term.by for term in terms if term.by in {"net", "log"}})
         if unsupported:
             raise UsageError(
                 "back-until needs screen evidence, not off-screen evidence",
                 hint="Use text:, rid:, or desc: terms so AUA knows where Back arrived.",
             )
-        if not any(not term.negated for term in terms):
+        if not known_screen_target and not any(not term.negated for term in terms):
             raise UsageError(
                 "back-until needs at least one positive destination term",
                 hint="Add text:, rid:, or desc: evidence for the screen you want to reach.",
@@ -5969,14 +5975,22 @@ class Engine:
 
         started_at = time.monotonic()
         device = self.device
-        current = self.await_predicate(
-            predicate,
-            timeout_ms=0,
-            poll_ms=poll_ms,
-            observe=True,
-            rich_ui=False,
-            hierarchy_only=True,
-        )
+
+        def wait_destination(timeout_ms: int) -> ActionResult:
+            if known_screen_target:
+                return self._await_known_screen(
+                    known_screen_target, timeout_ms=timeout_ms, poll_ms=poll_ms
+                )
+            return self.await_predicate(
+                predicate,
+                timeout_ms=timeout_ms,
+                poll_ms=poll_ms,
+                observe=True,
+                rich_ui=False,
+                hierarchy_only=True,
+            )
+
+        current = wait_destination(0)
         origin_package = str(
             current.observation.screen.package if current.observation is not None else ""
         )
@@ -6062,14 +6076,7 @@ class Engine:
                 self.key("back", observe=False, _hierarchy_settle=True)
                 via = "hardware"
             step_deadline = time.monotonic() + (step_timeout_ms / 1000.0)
-            current = self.await_predicate(
-                predicate,
-                timeout_ms=step_timeout_ms,
-                poll_ms=poll_ms,
-                observe=True,
-                rich_ui=False,
-                hierarchy_only=True,
-            )
+            current = wait_destination(step_timeout_ms)
 
             # `await_predicate` deliberately returns screen-changed before trusting terms from
             # a newly resumed Activity. Re-evaluate on that Activity before sending another
@@ -6116,14 +6123,7 @@ class Engine:
                         steps_run=steps_run,
                         started_at=started_at,
                     )
-                current = self.await_predicate(
-                    predicate,
-                    timeout_ms=remaining_ms,
-                    poll_ms=poll_ms,
-                    observe=True,
-                    rich_ui=False,
-                    hierarchy_only=True,
-                )
+                current = wait_destination(remaining_ms)
                 transition_rechecks += 1
             package = self._back_observed_package(current, device)
             steps_run.append(
@@ -6154,6 +6154,32 @@ class Engine:
                     steps_run=steps_run,
                     started_at=started_at,
                 )
+            if known_screen_target and (
+                current.observation is None or not current.observation.meta.known_screen
+            ):
+                return self._back_until_result(
+                    current,
+                    ok=False,
+                    reason="screen_unrecognized",
+                    detail=(
+                        "the post-Back frame was not recognized by the app map; stopped "
+                        "rather than risk overshooting the requested screen"
+                    ),
+                    steps_run=steps_run,
+                    started_at=started_at,
+                )
+            if known_screen_target and self._mapped_screen_state(current.observation) == "loading":
+                return self._back_until_result(
+                    current,
+                    ok=False,
+                    reason="screen_unstable",
+                    detail=(
+                        "the post-Back frame is still a mapped loading state; stopped rather "
+                        "than navigate again before it settles"
+                    ),
+                    steps_run=steps_run,
+                    started_at=started_at,
+                )
             if before and after and before == after:
                 return self._back_until_result(
                     current,
@@ -6172,6 +6198,77 @@ class Engine:
             steps_run=steps_run,
             started_at=started_at,
         )
+
+    def _await_known_screen(
+        self, target: str, *, timeout_ms: int, poll_ms: int
+    ) -> ActionResult:
+        """Observe hierarchy frames until memory recognizes *target*, within one Back step."""
+        started_at = time.monotonic()
+        deadline = started_at + max(0.0, timeout_ms / 1000.0)
+        checks = 0
+        while True:
+            checks += 1
+            observation = self.analyze(source="hierarchy", with_ocr=False, record=False)
+            package = observation.screen.package or ""
+            memory = self._memory
+            app = memory.load(package) if memory is not None and package else None
+            if memory is None or app is None or target not in app.screens:
+                scope = package or "the foreground app"
+                raise UsageError(
+                    f"{target!r} is not a mapped screen for {scope}",
+                    hint=(
+                        "Use `aua map --find <goal>` to discover exact screen names, or pass "
+                        "positive text:/rid:/desc: destination evidence."
+                    ),
+                )
+            resolved_target = target
+            actual = memory.recognize_screen(
+                self.device.serial,
+                package=package,
+                elements=observation.elements,
+                activity=observation.screen.activity,
+                screen_height=observation.screen.height,
+            )
+            # `record=False` intentionally leaves map metadata blank. Surface the result of
+            # this read-only anchor recognition so the caller can reuse the final frame and so
+            # the next Back is allowed only from a stable mapped intermediate screen.
+            observation.meta.known_screen = actual
+            satisfied = bool(actual and actual.casefold() == resolved_target.casefold())
+            elapsed = int((time.monotonic() - started_at) * 1000)
+            if satisfied or time.monotonic() >= deadline:
+                outcome = "satisfied" if satisfied else "timeout"
+                return ActionResult(
+                    ok=satisfied,
+                    action="await",
+                    detail=(
+                        f"{outcome} after {elapsed}ms ({checks} checks)"
+                        + ("" if satisfied else f"; current screen: {actual or 'unknown'}")
+                    ),
+                    observation=observation,
+                    observation_present=True,
+                    await_outcome=outcome,
+                    await_terms=[
+                        {
+                            "term": f"screen:{resolved_target}",
+                            "present": satisfied,
+                            "satisfied": satisfied,
+                        }
+                    ],
+                    elapsed_ms=elapsed,
+                )
+            time.sleep(max(0.01, poll_ms / 1000.0))
+
+    def _mapped_screen_state(self, observation: AnalyzeResult | None) -> str | None:
+        """Return a recognized screen's remembered state without changing app memory."""
+        if observation is None or not observation.meta.known_screen:
+            return None
+        package = observation.screen.package or ""
+        memory = self._memory
+        app = memory.load(package) if memory is not None and package else None
+        if app is None:
+            return None
+        record = app.screens.get(observation.meta.known_screen)
+        return record.state if record is not None else None
 
     @staticmethod
     def _semantic_back_selector(

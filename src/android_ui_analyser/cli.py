@@ -2390,7 +2390,10 @@ def back_until_cmd(
     ctx: typer.Context,
     predicate: str = typer.Argument(
         ...,
-        help="Destination evidence, e.g. 'rid:bottomNav' or 'text:Grammar,text:Mathematics'.",
+        help=(
+            "Mapped known_screen name or destination evidence, e.g. 'home', 'rid:bottomNav', "
+            "or 'text:Grammar,text:Mathematics'."
+        ),
     ),
     max_steps: int = typer.Option(
         4,
@@ -2433,7 +2436,7 @@ def back_until_cmd(
         help="Exact content description for Back, re-resolved on each frame.",
     ),
 ) -> None:
-    """Return from nested screens in one bounded call, stopping on semantic evidence."""
+    """Return from nested screens, stopping on a mapped screen or semantic evidence."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
         if _UNTIL is not None:

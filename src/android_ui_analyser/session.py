@@ -460,7 +460,7 @@ def review_session_events(state: SessionState, events: Sequence[dict[str, Any]])
         advice.append(
             {
                 "id": "bounded_back_navigation",
-                "recommended_call": "aua back-until-and-analyze 'rid:<destination>'",
+                "recommended_call": "aua back-until-and-analyze '<known_screen>'",
             }
         )
     if patterns.get("reused_numeric_id"):
@@ -469,7 +469,7 @@ def review_session_events(state: SessionState, events: Sequence[dict[str, Any]])
                 "id": "do_not_reuse_frame_id",
                 "recommended_call": (
                     "Use a fresh --rid/stable_key; for nested Back use "
-                    "aua back-until-and-analyze 'rid:<destination>'."
+                    "aua back-until-and-analyze '<known_screen>'."
                 ),
             }
         )
