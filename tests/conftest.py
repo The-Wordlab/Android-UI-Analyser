@@ -101,6 +101,7 @@ class FakeDevice(Device):
         prefs: dict[str, dict[str, str]] | None = None,
         app_files: dict[str, bytes] | None = None,
         run_as_error: str | None = None,
+        network_preference: str = "wifi",
     ) -> None:
         self.serial = serial
         # shared_prefs XML the app "owns": filename → {key: value}, served over `run-as`
@@ -130,6 +131,7 @@ class FakeDevice(Device):
         self._airplane = False
         self._wifi_enabled = True
         self._mobile_data_enabled = True
+        self._network_preference = network_preference
         self._location: tuple[float, float] | None = None
         self._recording: str | None = None
         self._logcat_lines: list[str] = []
@@ -393,10 +395,14 @@ class FakeDevice(Device):
             self._settings[("global", "mobile_data")] = "0"
             return ""
         if command == "dumpsys connectivity":
-            if self._wifi_enabled:
+            if self._wifi_enabled and (
+                self._network_preference == "wifi" or not self._mobile_data_enabled
+            ):
                 transport = "WIFI"
             elif self._mobile_data_enabled and not self._airplane:
                 transport = "CELLULAR"
+            elif self._wifi_enabled:
+                transport = "WIFI"
             else:
                 return "Active default network: none\n"
             return (

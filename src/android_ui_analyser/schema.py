@@ -465,6 +465,22 @@ class NetworkState(BaseModel):
     offline: bool | None = None
 
 
+class NetworkShaping(BaseModel):
+    """Observed bandwidth, latency, or packet-loss shaping for a network profile."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mechanism: str
+    upload_bps: int | None = None
+    download_bps: int | None = None
+    min_latency_ms: int | None = None
+    max_latency_ms: int | None = None
+    interface: str | None = None
+    loss_percent: float | None = None
+    qdisc: str | None = None
+    root_enabled: bool | None = None
+
+
 class NetworkResult(BaseModel):
     """Result of deterministic network status/offline/restore operations."""
 
@@ -474,6 +490,8 @@ class NetworkResult(BaseModel):
     action: str
     state: NetworkState
     saved_state: NetworkState | None = None
+    profile: str | None = None
+    shaping: NetworkShaping | None = None
     verified: bool | None = None
     detail: str | None = None
 

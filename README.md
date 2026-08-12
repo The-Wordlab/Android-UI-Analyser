@@ -778,6 +778,25 @@ VPN remains active. The per-device restore point survives separate CLI invocatio
 after a failed verification; repeated offline calls never overwrite the original state. Restore
 points are boot-aware so a recycled emulator serial cannot apply settings from an older boot.
 
+For constrained-but-online scenarios, apply exactly one reversible profile:
+
+```bash
+aua network profile list
+aua network profile apply wifi-only
+aua network profile apply cellular-only
+aua network profile apply slow                 # emulator EDGE bandwidth + 80-400 ms latency
+aua --needs root network profile apply lossy --loss-percent 10
+aua network profile status
+aua network profile restore
+```
+
+Profiles never stack with offline mode or each other. `slow` uses the Android Emulator console
+and fails on physical devices. `lossy` uses `tc netem` on the active interface, requires a
+rootable Google APIs AVD, preserves whether adbd was originally rooted, and refuses to overwrite
+an unfamiliar existing root qdisc. The loss applies to packets leaving the selected interface.
+Restore points stay in place until live evidence confirms the
+original conditions returned.
+
 ---
 
 ## Proxy / mock (HTTPS record & replay)
@@ -883,7 +902,7 @@ Tools include (non-exhaustive): `analyze_screen`, `tap_and_analyze`,
 `emulator_list` / `emulator_status` / `emulator_start` / `emulator_stop` (stop before exit —
 MCP also auto-stops emulators it started when the server process ends), `open_link_and_analyze`,
 `app`, `resolve`, clipboard/paste/copy/erase,
-location/orientation/airplane/network/media/record/clock,
+location/orientation/airplane/network/network-profile/media/record/clock,
 `capture_*`, `dev_profile`, `a11y_scroll_and_analyze`, `flags_apply_and_analyze`,
 `database_list` / `database_schema` / `database_query` / `database_execute` /
 `database_backup` / `database_backups` / `database_restore`,
@@ -1175,6 +1194,7 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 | `aua orientation set\|get` | Screen orientation |
 | `aua airplane on\|off\|toggle` | Airplane mode |
 | `aua network status\|offline\|restore` | Verified, saved, reversible network isolation |
+| `aua network profile list\|apply\|status\|restore` | Reversible Wi-Fi, cellular, slow, and lossy conditions |
 | `aua media add PATH` | Push media into the gallery |
 | `aua record start\|stop PATH` | Screen recording |
 | `aua clock set --ms <unix-ms>` | Set device clock (emulator / rooted) |

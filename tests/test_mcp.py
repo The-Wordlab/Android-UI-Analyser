@@ -106,6 +106,10 @@ def test_mcp_lists_core_tools() -> None:
         "network_status",
         "network_offline",
         "network_restore",
+        "network_profile_list",
+        "network_profile_status",
+        "network_profile_apply",
+        "network_profile_restore",
         "media_add",
         "record_start",
         "record_stop",
@@ -170,6 +174,29 @@ def test_mcp_network_offline_and_restore_roundtrip() -> None:
     assert offline["state"]["offline"] is True
     assert restored["ok"] is True
     assert restored["state"]["offline"] is False
+
+
+def test_mcp_network_profile_roundtrip() -> None:
+    server = build_server(_engine())
+
+    async def run() -> tuple[dict, dict, dict]:  # type: ignore[type-arg]
+        async with create_connected_server_and_client_session(server) as client:
+            listed = await client.call_tool("network_profile_list", {})
+            applied = await client.call_tool(
+                "network_profile_apply",
+                {"profile": "wifi-only", "timeout_ms": 0},
+            )
+            restored = await client.call_tool("network_profile_restore", {"timeout_ms": 0})
+            return (
+                json.loads(_first_text(listed)),
+                json.loads(_first_text(applied)),
+                json.loads(_first_text(restored)),
+            )
+
+    listed, applied, restored = anyio.run(run)
+    assert "lossy" in listed["names"]
+    assert applied["verified"] is True
+    assert restored["verified"] is True
 
 
 def test_mcp_observed_actions_are_named_and_force_analysis() -> None:

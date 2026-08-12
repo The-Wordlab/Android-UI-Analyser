@@ -761,6 +761,52 @@ def _tool_definitions() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="network_profile_list",
+            description="List reversible Wi-Fi, cellular, slow, and lossy profiles.",
+            inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
+        ),
+        types.Tool(
+            name="network_profile_status",
+            description="Read the active network profile and verify its current evidence.",
+            inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
+        ),
+        types.Tool(
+            name="network_profile_apply",
+            description=(
+                "Apply one reversible profile: wifi-only, cellular-only, slow, or lossy. "
+                "Restore the active profile before applying another."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "profile": {
+                        "type": "string",
+                        "enum": ["wifi-only", "cellular-only", "slow", "lossy"],
+                    },
+                    "loss_percent": {
+                        "type": "number",
+                        "minimum": 0.1,
+                        "maximum": 100,
+                        "default": 10,
+                    },
+                    "timeout_ms": {"type": "integer", "minimum": 0, "default": 15000},
+                },
+                "required": ["profile"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="network_profile_restore",
+            description="Restore and verify conditions saved before the active profile.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "timeout_ms": {"type": "integer", "minimum": 0, "default": 20000}
+                },
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
             name="media_add",
             description="Push a local media file onto the device (DCIM/Camera by default).",
             inputSchema={
@@ -1576,6 +1622,22 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         )
     if name == "network_restore":
         return _dump(engine.network_restore(timeout_ms=int(args.get("timeout_ms", 15_000))))
+    if name == "network_profile_list":
+        return _dump(engine.network_profile_list())
+    if name == "network_profile_status":
+        return _dump(engine.network_profile_status())
+    if name == "network_profile_apply":
+        return _dump(
+            engine.network_profile_apply(
+                str(args["profile"]),
+                loss_percent=float(args.get("loss_percent", 10.0)),
+                timeout_ms=int(args.get("timeout_ms", 15_000)),
+            )
+        )
+    if name == "network_profile_restore":
+        return _dump(
+            engine.network_profile_restore(timeout_ms=int(args.get("timeout_ms", 20_000)))
+        )
     if name == "media_add":
         return _dump(engine.media_add(args["path"]))
     if name == "record_start":

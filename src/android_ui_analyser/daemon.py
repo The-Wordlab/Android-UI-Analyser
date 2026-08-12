@@ -316,6 +316,21 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
             result = engine.network_restore(**args)
             return _result_ok(result.model_dump(mode="json"))
 
+        elif cmd == "network_profile_list":
+            return _result_ok(engine.network_profile_list())
+
+        elif cmd == "network_profile_status":
+            result = engine.network_profile_status()
+            return _result_ok(result.model_dump(mode="json"))
+
+        elif cmd == "network_profile_apply":
+            result = engine.network_profile_apply(**args)
+            return _result_ok(result.model_dump(mode="json"))
+
+        elif cmd == "network_profile_restore":
+            result = engine.network_profile_restore(**args)
+            return _result_ok(result.model_dump(mode="json"))
+
         elif cmd == "media_add":
             result = engine.media_add(**args)
             return _result_ok(result.model_dump(mode="json"))
@@ -505,6 +520,8 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
                 "hide_keyboard, paste, copy_text, erase, clipboard_set, clipboard_get, "
                 "location_set, orientation_set, orientation_get, airplane_set, airplane_toggle, "
                 "network_status, network_offline, network_restore, "
+                "network_profile_list, network_profile_status, network_profile_apply, "
+                "network_profile_restore, "
                 "media_add, record_start, record_stop, clock_set, open_link, resolve, wait, wait_stable, "
                 "wait_changed, wait_after_change, "
                 "memory_update, goto, flow_run, flow_save, navigate, orient, list_devices, app, "

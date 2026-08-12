@@ -6477,9 +6477,17 @@ class Engine:
         )
 
     def network_offline(self, *, verify: bool = True, timeout_ms: int = 10_000) -> NetworkResult:
-        from . import network
+        from . import network, network_profiles
 
         device = self.device
+        profile = network_profiles.load_profile(
+            network_profiles.profile_path(self.config.cache.dir, device.serial)
+        )
+        if profile is not None and not network_profiles.stale_profile(profile, device):
+            raise UsageError(
+                f"network profile {profile.profile!r} is active",
+                hint="Run `aua network profile restore` before entering offline mode.",
+            )
         path = network.backup_path(self.config.cache.dir, device.serial)
         initial = network.read_network_state(device)
         backup = network.save_backup(path, device=device, state=initial)
@@ -6534,6 +6542,256 @@ class Engine:
                 "original network state restored"
                 if verified
                 else "restore verification timed out; restore point retained"
+            ),
+        )
+
+    def network_profile_list(self) -> dict[str, Any]:
+        from . import network_profiles
+
+        return {
+            "ok": True,
+            "action": "network-profile-list",
+            "profiles": [
+                {
+                    "name": "wifi-only",
+                    "effect": "enable Wi-Fi and disable mobile data",
+                    "needs": [],
+                },
+                {
+                    "name": "cellular-only",
+                    "effect": "disable Wi-Fi and enable mobile data",
+                    "needs": [],
+                },
+                {
+                    "name": "slow",
+                    "effect": "EDGE bandwidth with 80-400 ms latency",
+                    "needs": ["emulator"],
+                },
+                {
+                    "name": "lossy",
+                    "effect": "outbound packet loss on the active interface",
+                    "needs": ["root"],
+                },
+            ],
+            "names": list(network_profiles.PROFILE_NAMES),
+        }
+
+    def network_profile_status(self) -> NetworkResult:
+        from . import network, network_profiles
+
+        device = self.device
+        path = network_profiles.profile_path(self.config.cache.dir, device.serial)
+        backup = network_profiles.load_profile(path)
+        state = network.read_network_state(device)
+        if backup is None:
+            return NetworkResult(
+                ok=True,
+                action="network-profile-status",
+                state=state,
+                verified=True,
+                detail="no active network profile",
+            )
+        if network_profiles.stale_profile(backup, device):
+            return NetworkResult(
+                ok=True,
+                action="network-profile-status",
+                profile=backup.profile,
+                state=state,
+                saved_state=backup.network_state,
+                verified=False,
+                detail="profile restore point belongs to a previous device boot",
+            )
+
+        shaping = None
+        if backup.profile in ("wifi-only", "cellular-only"):
+            verified = network_profiles.profile_verified(backup.profile, state)
+        elif backup.profile == "slow":
+            current = network_profiles.read_emulator_shape(device.serial)
+            shaping = current.evidence()
+            verified = bool(
+                current.upload_bps > 0
+                and current.download_bps > 0
+                and current.min_latency_ms >= 80
+                and current.max_latency_ms >= 400
+            )
+        else:
+            if backup.interface is None:
+                verified = False
+            else:
+                shaping = network_profiles.qdisc_evidence(
+                    device.serial,
+                    backup.interface,
+                    root=network_profiles.root_enabled(device.serial),
+                )
+                verified = bool(
+                    shaping.qdisc == "netem"
+                    and shaping.loss_percent is not None
+                    and backup.loss_percent is not None
+                    and abs(shaping.loss_percent - backup.loss_percent) < 0.01
+                )
+        return NetworkResult(
+            ok=True,
+            action="network-profile-status",
+            profile=backup.profile,
+            state=state,
+            saved_state=backup.network_state,
+            shaping=shaping,
+            verified=verified,
+            detail="profile verified" if verified else "profile could not be verified",
+        )
+
+    def network_profile_apply(
+        self,
+        profile: str,
+        *,
+        loss_percent: float = 10.0,
+        timeout_ms: int = 15_000,
+    ) -> NetworkResult:
+        from . import network, network_profiles
+
+        name = network_profiles.normalize_profile(profile)
+        if not 0.1 <= loss_percent <= 100:
+            raise UsageError("--loss-percent must be between 0.1 and 100")
+        device = self.device
+        path = network_profiles.profile_path(self.config.cache.dir, device.serial)
+        initial = network.read_network_state(device)
+        if network.load_backup(network.backup_path(self.config.cache.dir, device.serial)) is not None:
+            raise UsageError(
+                "verified offline mode is active",
+                hint="Run `aua network restore` before applying a network profile.",
+            )
+        active_profile = network_profiles.load_profile(path)
+        if active_profile is not None and not network_profiles.stale_profile(
+            active_profile,
+            device,
+        ):
+            raise UsageError(
+                f"network profile {active_profile.profile!r} is already active",
+                hint="Run `aua network profile restore` before applying another profile.",
+            )
+
+        if name in ("wifi-only", "cellular-only"):
+            backup = network_profiles.save_profile(
+                path,
+                device=device,
+                profile=name,
+                network_state=initial,
+            )
+            network_profiles.apply_radio_profile(device, name)
+            state, verified = network_profiles.wait_for_radio_profile(
+                device,
+                name,
+                timeout_ms=timeout_ms,
+            )
+            shaping = None
+        elif name == "slow":
+            original_shape = network_profiles.read_emulator_shape(device.serial)
+            backup = network_profiles.save_profile(
+                path,
+                device=device,
+                profile=name,
+                network_state=initial,
+                emulator_shape=original_shape,
+            )
+            current_shape = network_profiles.set_emulator_shape(
+                device.serial,
+                speed="edge",
+                delay="edge",
+            )
+            state = network.read_network_state(device)
+            shaping = current_shape.evidence()
+            verified = bool(
+                current_shape.upload_bps > 0
+                and current_shape.download_bps > 0
+                and current_shape.min_latency_ms >= 80
+                and current_shape.max_latency_ms >= 400
+            )
+        else:
+            interface, original_qdisc, was_root = network_profiles.prepare_loss(device.serial)
+            try:
+                backup = network_profiles.save_profile(
+                    path,
+                    device=device,
+                    profile=name,
+                    network_state=initial,
+                    interface=interface,
+                    original_qdisc=original_qdisc,
+                    loss_percent=loss_percent,
+                    root_was_enabled=was_root,
+                )
+            except Exception:
+                network_profiles.safe_unroot_after_failed_apply(
+                    device.serial,
+                    was_root=was_root,
+                )
+                raise
+            shaping = network_profiles.set_loss(
+                device.serial,
+                interface=interface,
+                loss_percent=loss_percent,
+            )
+            state = network.read_network_state(device)
+            verified = bool(
+                shaping.qdisc == "netem"
+                and shaping.loss_percent is not None
+                and abs(shaping.loss_percent - loss_percent) < 0.01
+            )
+
+        return NetworkResult(
+            ok=verified,
+            action="network-profile-apply",
+            profile=name,
+            state=state,
+            saved_state=backup.network_state,
+            shaping=shaping,
+            verified=verified,
+            detail=(
+                f"{name} profile verified"
+                if verified
+                else f"{name} profile verification timed out; restore point retained"
+            ),
+        )
+
+    def network_profile_restore(self, *, timeout_ms: int = 20_000) -> NetworkResult:
+        from . import network, network_profiles
+
+        device = self.device
+        path = network_profiles.profile_path(self.config.cache.dir, device.serial)
+        backup = network_profiles.require_current_profile(path, device=device)
+        shaping = None
+        if backup.profile in ("wifi-only", "cellular-only"):
+            state, verified = network_profiles.restore_radio_profile(
+                device,
+                backup.network_state,
+                timeout_ms=timeout_ms,
+            )
+        elif backup.profile == "slow":
+            if backup.emulator_shape is None:
+                raise UsageError("slow profile restore point has no original emulator shape")
+            current = network_profiles.restore_emulator_shape(
+                device.serial,
+                backup.emulator_shape,
+            )
+            shaping = current.evidence()
+            verified = network_profiles.shape_matches(current, backup.emulator_shape)
+            state = network.read_network_state(device)
+        else:
+            shaping, verified = network_profiles.remove_loss(device.serial, backup)
+            state = network.read_network_state(device)
+        if verified:
+            path.unlink(missing_ok=True)
+        return NetworkResult(
+            ok=verified,
+            action="network-profile-restore",
+            profile=backup.profile,
+            state=state,
+            saved_state=backup.network_state,
+            shaping=shaping,
+            verified=verified,
+            detail=(
+                "original network conditions restored"
+                if verified
+                else "profile restore verification failed; restore point retained"
             ),
         )
 

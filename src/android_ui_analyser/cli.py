@@ -3655,6 +3655,89 @@ def network_restore_cmd(
     _run(ctx, go)
 
 
+network_profile_app = typer.Typer(
+    help="Apply one reversible network condition at a time."
+)
+network_app.add_typer(network_profile_app, name="profile")
+
+
+@network_profile_app.command("list")
+def network_profile_list_cmd(ctx: typer.Context) -> None:
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.network_profile_list(), fmt)
+
+    _run(ctx, go)
+
+
+@network_profile_app.command("status")
+def network_profile_status_cmd(ctx: typer.Context) -> None:
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.network_profile_status(), fmt)
+
+    _run(ctx, go)
+
+
+@network_profile_app.command("apply")
+def network_profile_apply_cmd(
+    ctx: typer.Context,
+    profile: str = typer.Argument(
+        ...,
+        help="wifi-only | cellular-only | slow | lossy",
+    ),
+    loss_percent: float = typer.Option(
+        10.0,
+        "--loss-percent",
+        min=0.1,
+        max=100.0,
+        help="Packet loss for the lossy profile (rootable emulator required).",
+    ),
+    timeout_ms: int = typer.Option(
+        15_000,
+        "--timeout",
+        min=0,
+        help="Milliseconds to wait for the requested condition to verify.",
+    ),
+) -> None:
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        result = engine.network_profile_apply(
+            profile,
+            loss_percent=loss_percent,
+            timeout_ms=timeout_ms,
+        )
+        _emit(result, fmt)
+        _exit_unless_ok(
+            result,
+            ExitCode.DEVICE,
+            code="network_profile_verification_failed",
+            hint="Inspect `aua network profile status`, then restore before retrying.",
+        )
+
+    _run(ctx, go)
+
+
+@network_profile_app.command("restore")
+def network_profile_restore_cmd(
+    ctx: typer.Context,
+    timeout_ms: int = typer.Option(
+        20_000,
+        "--timeout",
+        min=0,
+        help="Milliseconds to wait for the original conditions to return.",
+    ),
+) -> None:
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        result = engine.network_profile_restore(timeout_ms=timeout_ms)
+        _emit(result, fmt)
+        _exit_unless_ok(
+            result,
+            ExitCode.DEVICE,
+            code="network_profile_restore_failed",
+            hint="The restore point was retained; inspect profile status and retry.",
+        )
+
+    _run(ctx, go)
+
+
 media_app = typer.Typer(help="Push media into the device gallery (Maestro addMedia).")
 app.add_typer(media_app, name="media")
 

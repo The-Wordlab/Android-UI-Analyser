@@ -334,6 +334,16 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "matches the saved controls and prior connectivity.",
     ),
     (
+        "Use reversible profiles for constrained networks",
+        "Run `aua network profile list`, then `profile apply wifi-only|cellular-only|slow|lossy`. "
+        "Every profile saves the original conditions, verifies live evidence, and refuses to "
+        "stack with offline mode or another profile; always finish with `network profile "
+        "restore`. `slow` uses Android Emulator bandwidth/latency shaping. `lossy` adds outbound "
+        "packet loss with `tc "
+        "netem`, requires a rootable Google APIs AVD (`--needs root`), and refuses to replace an "
+        "unknown existing traffic shaper.",
+    ),
+    (
         "One agent, one emulator — leases are automatic",
         'With several agents running at once, every one of them otherwise resolves to "the '
         "only/first device\" and they drive each other's screens; nothing errors, the results "
@@ -633,8 +643,9 @@ KEY_FLAGS: list[tuple[str, str]] = [
     (
         "location / orientation / airplane / network / media / record / clock",
         "`location set LAT,LON`, `orientation set|get`, `airplane on|off|toggle`, "
-        "`network status|offline --verify|restore` (offline mode is saved, verified, and "
-        "reversible), `media add PATH`, `record start|stop PATH`, `clock set --ms <unix-ms>` / "
+        "`network status|offline --verify|restore`, `network profile "
+        "list|apply|status|restore` (all modes are saved, verified, and reversible), "
+        "`media add PATH`, `record start|stop PATH`, `clock set --ms <unix-ms>` / "
         "`clock restore` (time travel invalidates auth — always restore)",
     ),
     (
