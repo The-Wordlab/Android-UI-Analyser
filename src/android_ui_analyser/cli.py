@@ -2865,15 +2865,16 @@ def session_start_cmd(
     headed: bool = typer.Option(
         False,
         "--headed",
-        help="With --start-emulator, show its window instead of using headless mode.",
+        help=(
+            "Require a visible emulator for this session; when --start-emulator boots one, "
+            "show its window instead of using headless mode."
+        ),
     ),
     avd: str | None = typer.Option(None, "--avd", help="AVD name when several are configured."),
 ) -> None:
     """Observe once and return the safest exact CLI and MCP next call."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        if headed and not start_emulator:
-            raise UsageError("--headed requires --start-emulator")
         result = _route(
             engine,
             "session_start",
@@ -3842,8 +3843,22 @@ app.add_typer(network_app, name="network")
 
 
 @network_app.command("status")
-def network_status_cmd(ctx: typer.Context) -> None:
+def network_status_cmd(
+    ctx: typer.Context,
+    verify: bool = typer.Option(
+        True,
+        "--verify/--no-verify",
+        help=(
+            "Read Android's current radio controls and active default network. Status is "
+            "already a read-back operation; --verify is accepted for command-family parity."
+        ),
+    ),
+) -> None:
     def go(engine: Engine, fmt: OutputFormat) -> None:
+        # Reading status is itself the verification. Keep the explicit flag as an intuitive,
+        # command-family-compatible spelling without asking older daemon/Engine adapters to
+        # implement a second behavior.
+        _ = verify
         _emit(_route(engine, "network_status"), fmt)
 
     _run(ctx, go)

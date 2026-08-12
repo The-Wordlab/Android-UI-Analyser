@@ -168,7 +168,7 @@ def test_cli_network_offline_and_restore(monkeypatch: pytest.MonkeyPatch) -> Non
     dev = FakeDevice(serial="fake-cli-network")
     monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
 
-    status = runner.invoke(app, ["--serial", dev.serial, "network", "status"])
+    status = runner.invoke(app, ["--serial", dev.serial, "network", "status", "--verify"])
     assert status.exit_code == 0, status.output
     assert json.loads(status.stdout)["state"]["active_transports"] == ["wifi"]
 

@@ -5,12 +5,18 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from typer.testing import CliRunner
+
+from android_ui_analyser import engine as engine_mod
 from android_ui_analyser import journal, network, network_profiles
+from android_ui_analyser.cli import app
 from android_ui_analyser.coaching import decorate_result
 from android_ui_analyser.daemon import dispatch
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.schema import AnalyzeResult, Meta, Screen
 from conftest import FakeDevice, make_config
+
+runner = CliRunner()
 
 
 def _observation(serial: str) -> AnalyzeResult:
@@ -38,6 +44,28 @@ def _engine(tmp_path: Path, serial: str = "goal-life") -> Engine:
 def _start(engine: Engine, monkeypatch: Any) -> dict[str, Any]:
     monkeypatch.setattr(engine, "analyze", lambda **_kwargs: _observation(engine.device.serial))
     return engine.session_start("verify cached results while offline")
+
+
+def test_cli_headed_accepts_an_already_attached_emulator(monkeypatch: Any) -> None:
+    device = FakeDevice(serial="goal-headed-attached")
+    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: device)
+    monkeypatch.setattr(Engine, "analyze", lambda self, **_kwargs: _observation(device.serial))
+
+    result = runner.invoke(
+        app,
+        [
+            "--serial",
+            device.serial,
+            "session",
+            "start",
+            "--goal",
+            "inspect the visible screen",
+            "--headed",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert '"session_id"' in result.stdout
 
 
 def test_journal_automatically_correlates_active_session_and_review_finds_waste(

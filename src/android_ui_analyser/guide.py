@@ -61,7 +61,8 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "If `aua devices` is empty and you need to **verify a change without bothering the "
         "user** (no emulator window on their desktop), boot one quietly: "
         '`aua session start --goal "…" --start-emulator` (or `aua emulator start --headless`). '
-        "When the user needs to watch, add `--headed`; startup ownership is then recorded so "
+        "When the user needs to watch, add `--headed`; it is valid with an already attached "
+        "visible emulator, and if AUA must start one its ownership is recorded so "
         "`aua session finish` stops only that AVD. Headless uses `-no-window` + **host GPU** on Mac — not "
         "SwiftShader; pick `--avd <name>` when several AVDs exist — `aua emulator list`). "
         "Prefer an already running device when one is attached; don't kill the user's headed "
@@ -420,8 +421,9 @@ BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
         "Run `aua devices`, then `aua daemon start` when several calls are coming. AUA leases one "
         "compatible emulator to the calling agent process automatically: never ask the user for "
         "a lease or manually steal one. A dead owner makes its device immediately reusable. Prefer "
-        "an existing headed device; when none exists, `session start --start-emulator` is the "
-        "explicit boot permission (`--headed` shows it), and `session finish` owns its cleanup.",
+        "an existing headed device (`--headed` is valid there too); when none exists, "
+        "`session start --start-emulator` is the explicit boot permission (`--headed` shows "
+        "it), and `session finish` owns its cleanup.",
     ),
     (
         "Observe once and use stable selectors",
@@ -705,7 +707,7 @@ KEY_FLAGS: list[tuple[str, str]] = [
     (
         "location / orientation / airplane / network / media / record / clock",
         "`location set LAT,LON`, `orientation set|get`, `airplane on|off|toggle`, "
-        "`network status|offline --verify|restore`, `network profile "
+        "`network status [--verify]|offline --verify|restore`, `network profile "
         "list|apply|status|restore` (all modes are saved, verified, and reversible), "
         "`media add PATH`, `record start|stop PATH`, `clock set --ms <unix-ms>` / "
         "`clock restore` (time travel invalidates auth — always restore)",

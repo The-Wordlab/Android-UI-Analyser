@@ -160,6 +160,13 @@ def test_mcp_back_until_contract_is_bounded_and_never_allows_package_change() ->
     assert tool.inputSchema["allOf"] == [{"not": {"required": ["back_id", "back_selector"]}}]
 
 
+def test_mcp_accepts_intuitive_session_and_network_verification_options() -> None:
+    tools = {item.name: item for item in _tool_definitions()}
+
+    assert tools["session_start"].inputSchema["properties"]["headed"]["default"] is False
+    assert tools["network_status"].inputSchema["properties"]["verify"]["default"] is True
+
+
 def test_mcp_initialization_teaches_goal_first_protocol() -> None:
     instructions = build_server(_engine()).create_initialization_options().instructions
 
@@ -213,7 +220,9 @@ def test_mcp_session_and_reach_dispatch_contract(monkeypatch: pytest.MonkeyPatch
     async def run() -> list[dict[str, object]]:
         async with create_connected_server_and_client_session(server) as client:
             results = [
-                await client.call_tool("session_start", {"goal": "open settings"}),
+                await client.call_tool(
+                    "session_start", {"goal": "open settings", "headed": True}
+                ),
                 await client.call_tool("reach", {"goal": "settings", "poll_ms": 25}),
                 await client.call_tool("session_review", {"session_id": "session-1"}),
                 await client.call_tool("session_finish", {"session_id": "session-1"}),
@@ -228,7 +237,7 @@ def test_mcp_session_and_reach_dispatch_contract(monkeypatch: pytest.MonkeyPatch
             {
                 "goal": "open settings",
                 "start_emulator": False,
-                "headed": False,
+                "headed": True,
                 "avd": None,
             },
         ),

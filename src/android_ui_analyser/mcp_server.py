@@ -278,7 +278,9 @@ def _tool_definitions() -> list[types.Tool]:
                     "headed": {
                         "type": "boolean",
                         "default": False,
-                        "description": "Show the newly started emulator window.",
+                        "description": (
+                            "Require a visible emulator; if AUA starts one, show its window."
+                        ),
                     },
                     "avd": {"type": "string", "description": "AVD name when several exist."},
                 },
@@ -1092,8 +1094,23 @@ def _tool_definitions() -> list[types.Tool]:
         ),
         types.Tool(
             name="network_status",
-            description=("Read airplane, Wi-Fi, mobile-data, and active default-network state."),
-            inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
+            description=(
+                "Read and verify airplane, Wi-Fi, mobile-data, and active default-network state."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "verify": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": (
+                            "Accepted for CLI/MCP command-family parity; status always reads "
+                            "back the current Android state."
+                        ),
+                    }
+                },
+                "additionalProperties": False,
+            },
         ),
         types.Tool(
             name="network_offline",
@@ -1684,8 +1701,6 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         goal = args.get("goal")
         return {"capabilities": capabilities_for_goal(str(goal)) if goal else capability_manifest()}
     if name == "session_start":
-        if args.get("headed") and not args.get("start_emulator"):
-            raise UsageError("headed requires start_emulator=true")
         started = _dump(
             _engine_method(engine, "session_start")(
                 str(args["goal"]),

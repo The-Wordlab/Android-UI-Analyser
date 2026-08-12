@@ -705,6 +705,8 @@ def test_back_until_stops_after_one_no_progress_hardware_back(monkeypatch: Any) 
 
     assert result.ok is False
     assert result.stop_reason == "no_progress"
+    assert "reuse this returned observation" in result.detail
+    assert "--back-id <fresh-id>" in result.detail
     assert keys == ["back"]
     assert result.steps_run and result.steps_run[0]["changed"] is False
 

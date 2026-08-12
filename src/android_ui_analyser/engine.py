@@ -6208,11 +6208,18 @@ class Engine:
                     started_at=started_at,
                 )
             if before and after and before == after:
+                retry_hint = (
+                    "; reuse this returned observation and retry once with --back-id <fresh-id> "
+                    "only if that id is visibly the app-owned unlabeled Back control, or use "
+                    "--back-rid/--back-desc for a semantic Back control"
+                    if via == "hardware"
+                    else ""
+                )
                 return self._back_until_result(
                     current,
                     ok=False,
                     reason="no_progress",
-                    detail=f"{via} Back produced no semantic screen change",
+                    detail=f"{via} Back produced no semantic screen change{retry_hint}",
                     steps_run=steps_run,
                     started_at=started_at,
                 )
