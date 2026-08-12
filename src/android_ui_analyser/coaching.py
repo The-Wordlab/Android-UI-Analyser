@@ -5,6 +5,8 @@ from __future__ import annotations
 import contextlib
 from typing import Any
 
+from .selectors import is_back_resource_id
+
 _MANUAL_ACTIONS = frozenset(
     {
         "tap",
@@ -21,6 +23,10 @@ _MANUAL_ACTIONS = frozenset(
 )
 
 
+def _mapping(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
 def _base_command(value: Any) -> str:
     command = str(value or "").removesuffix("_and_analyze")
     return "input" if command == "input_text" else command
@@ -34,6 +40,40 @@ def _payload(result: Any) -> dict[str, Any] | None:
             value = result.model_dump(mode="json")
             return value if isinstance(value, dict) else None
     return None
+
+
+def _is_back_event(event: dict[str, Any]) -> bool:
+    args = _mapping(event.get("args"))
+    selector = _mapping(args.get("selector"))
+    command = _base_command(event.get("cmd"))
+    semantic_selector = (
+        is_back_resource_id(str(selector.get("rid") or ""))
+        or str(selector.get("desc") or "").casefold() in {"back", "navigate up", "up"}
+        or str(selector.get("text") or "").casefold() == "back"
+    )
+    return (command == "key" and str(args.get("name")).casefold() == "back") or (
+        command == "tap" and semantic_selector
+    )
+
+
+def _reuses_numeric_id_across_frames(current: dict[str, Any], previous: dict[str, Any]) -> bool:
+    current_args = _mapping(current.get("args"))
+    previous_args = _mapping(previous.get("args"))
+    element_id = current_args.get("element_id")
+    if not isinstance(element_id, int) or element_id != previous_args.get("element_id"):
+        return False
+
+    def screen(event: dict[str, Any]) -> str | None:
+        result = _mapping(event.get("result"))
+        observation = _mapping(result.get("observation"))
+        meta = observation.get("meta")
+        if isinstance(meta, str):
+            return meta
+        if isinstance(meta, dict) and meta.get("known_screen"):
+            return str(meta["known_screen"])
+        return None
+
+    return bool(screen(current) and screen(previous) and screen(current) != screen(previous))
 
 
 def _append(result: Any, advice: dict[str, str]) -> Any:
@@ -57,7 +97,14 @@ def _append(result: Any, advice: dict[str, str]) -> Any:
     return result
 
 
-def decorate_result(engine: Any, cmd: str, result: Any) -> Any:
+def decorate_result(
+    engine: Any,
+    cmd: str,
+    result: Any,
+    *,
+    args: dict[str, Any] | None = None,
+    current_recorded: bool = True,
+) -> Any:
     """Attach one actionable hint when the current call reveals an avoidable pattern."""
     serial = None
     with contextlib.suppress(Exception):
@@ -71,7 +118,27 @@ def decorate_result(engine: Any, cmd: str, result: Any) -> Any:
     owner = getattr(engine, "_lease_owner_resolved", None)
     if owner:
         events = [event for event in events if event.get("owner") in (None, owner)]
+    # A global action `--until` journals its internal predicate adoption. It is part of the
+    # same agent call, so it must not break a manual-path/back-navigation streak.
+    events = [
+        event
+        for event in events
+        if not (
+            _base_command(event.get("cmd")) == "await_predicate"
+            and isinstance(event.get("args"), dict)
+            and event["args"].get("adopt_action") is True
+        )
+    ]
     normalized = _base_command(cmd)
+    if not current_recorded:
+        events.append(
+            {
+                "cmd": cmd,
+                "args": args or {},
+                "result": _payload(result) or {},
+                "owner": owner,
+            }
+        )
     prior = events[:-1] if events and _base_command(events[-1].get("cmd")) == normalized else events
 
     if normalized == "analyze" and prior:
@@ -130,6 +197,32 @@ def decorate_result(engine: Any, cmd: str, result: Any) -> Any:
             )
 
     if normalized in _MANUAL_ACTIONS:
+        if (
+            normalized == "tap"
+            and events
+            and prior
+            and _reuses_numeric_id_across_frames(events[-1], prior[-1])
+        ):
+            return _append(
+                result,
+                {
+                    "id": "do_not_reuse_frame_id",
+                    "message": "the same numeric id was reused after the screen changed",
+                    "recommended_call": (
+                        "Use the fresh observation's --rid/stable_key; for nested Back use "
+                        "aua back-until-and-analyze 'rid:<destination>'."
+                    ),
+                },
+            )
+        if events and _is_back_event(events[-1]) and prior and _is_back_event(prior[-1]):
+            return _append(
+                result,
+                {
+                    "id": "bounded_back_navigation",
+                    "message": "repeated Back navigation can stop on semantic destination evidence",
+                    "recommended_call": "aua back-until-and-analyze 'rid:<destination>'",
+                },
+            )
         streak = 1
         for event in reversed(prior):
             if _base_command(event.get("cmd")) not in _MANUAL_ACTIONS:

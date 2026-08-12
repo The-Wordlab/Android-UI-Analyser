@@ -2373,6 +2373,87 @@ def key(
     _run(ctx, go)
 
 
+@app.command(name="back-until-and-analyze", cls=AnalyzeCommand)
+def back_until_cmd(
+    ctx: typer.Context,
+    predicate: str = typer.Argument(
+        ...,
+        help="Destination evidence, e.g. 'rid:bottomNav' or 'text:Grammar,text:Mathematics'.",
+    ),
+    max_steps: int = typer.Option(
+        4,
+        "--max-steps",
+        min=1,
+        max=12,
+        help="Maximum semantic Back/navigation-up steps before returning unmet evidence.",
+    ),
+    step_timeout_ms: int = typer.Option(
+        1_200,
+        "--step-timeout",
+        min=0,
+        help="Milliseconds to wait for the destination after each Back press.",
+    ),
+    poll_ms: int = typer.Option(
+        200,
+        "--poll",
+        min=10,
+        help="Milliseconds between semantic destination checks.",
+    ),
+    back_id: int | None = typer.Option(
+        None,
+        "--back-id",
+        min=0,
+        help="Fresh frame-local id for an unlabeled Back control; used only for the first step.",
+    ),
+    back_rid: str | None = typer.Option(
+        None,
+        "--back-rid",
+        help="Stable resource id for the app-owned Back control, re-resolved on each frame.",
+    ),
+    back_text: str | None = typer.Option(
+        None,
+        "--back-text",
+        help="Exact visible text for the app-owned Back control, re-resolved on each frame.",
+    ),
+    back_desc: str | None = typer.Option(
+        None,
+        "--back-desc",
+        help="Exact content description for Back, re-resolved on each frame.",
+    ),
+) -> None:
+    """Return from nested screens in one bounded call, stopping on semantic evidence."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        if _UNTIL is not None:
+            raise UsageError(
+                "back-until owns its destination predicate; do not combine it with global --until",
+                hint="Pass the destination as the command argument, for example "
+                "`aua back-until-and-analyze 'rid:bottomNav'`.",
+            )
+        supplied = {"rid": back_rid, "text": back_text, "desc": back_desc}
+        selector = {key: value for key, value in supplied.items() if value}
+        if len(selector) > 1 or (back_id is not None and selector):
+            raise UsageError(
+                "choose only one of --back-id, --back-rid, --back-text, or --back-desc"
+            )
+        result = _route(
+            engine,
+            "back_until",
+            predicate=predicate,
+            back_id=back_id,
+            back_selector=selector or None,
+            max_steps=max_steps,
+            step_timeout_ms=step_timeout_ms,
+            poll_ms=poll_ms,
+        )
+        _emit(result, fmt)
+        ok = result.get("ok") if isinstance(result, dict) else getattr(result, "ok", None)
+        if ok is False:
+            raise typer.Exit(1)
+
+    _run(ctx, go)
+
+
 @app.command(name="hide-keyboard-and-analyze", cls=AnalyzeCommand)
 def hide_keyboard(
     ctx: typer.Context,
@@ -2779,13 +2860,13 @@ def session_start_cmd(
         if headed and not start_emulator:
             raise UsageError("--headed requires --start-emulator")
         result = _route(
-                engine,
-                "session_start",
-                goal=goal,
-                start_emulator=start_emulator,
-                headed=headed,
-                avd=avd,
-            )
+            engine,
+            "session_start",
+            goal=goal,
+            start_emulator=start_emulator,
+            headed=headed,
+            avd=avd,
+        )
         if isinstance(result, dict) and _OBSERVATION_VIEW is not None:
             result = trim_observation_payload(result, _OBSERVATION_VIEW, fmt=fmt)
         _emit(result, fmt)

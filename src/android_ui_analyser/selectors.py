@@ -7,6 +7,7 @@ Public entry points used by the engine and re-exported from :mod:`engine` for
 from __future__ import annotations
 
 import difflib
+import re
 from collections.abc import Sequence
 from typing import Any, NamedTuple
 
@@ -16,6 +17,20 @@ from .schema import Element
 _SELECTOR_FIELDS = ("rid", "text", "desc")
 _MAX_CANDIDATES = 8  # candidate elements echoed back in an ambiguous/not-found error
 _NEAREST_FLOOR = 0.3  # similarity below which a "did you mean" suggestion is noise
+
+
+def is_back_resource_id(resource_id: str | None) -> bool:
+    """True when the resource-id's final camel/snake token is exactly ``back``."""
+    tail = (resource_id or "").rsplit("/", 1)[-1]
+    words = [
+        word.casefold()
+        for word in re.split(
+            r"[^A-Za-z0-9]+",
+            re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", tail),
+        )
+        if word
+    ]
+    return bool(words and words[-1] == "back")
 
 
 def selector_label(selector: dict[str, Any]) -> str:
@@ -168,6 +183,7 @@ def _one_obvious(cands: Sequence[Element]) -> Element | None:
     for keyed in ([c for c in cands if c.resource_id], [c for c in cands if c.content_desc]):
         if len(keyed) == 1:
             return keyed[0]
+
     # Same standing: the smallest box is the most specific control, but only if it is
     # strictly smaller than every other, so "smallest" is never a coin toss either.
     def area(el: Element) -> int:
@@ -425,8 +441,7 @@ def ocr_added_app_content(elements: Sequence[Element]) -> bool:
             continue
         cx, cy = el.center
         inside_chrome = any(
-            c.bounds[0] <= cx <= c.bounds[2] and c.bounds[1] <= cy <= c.bounds[3]
-            for c in chrome
+            c.bounds[0] <= cx <= c.bounds[2] and c.bounds[1] <= cy <= c.bounds[3] for c in chrome
         )
         if not inside_chrome:
             return True
@@ -444,9 +459,7 @@ def app_elements(elements: Sequence[Element]) -> list[Element]:
     return [el for el in elements if not is_system_rid(el.resource_id)]
 
 
-def nearest_elements(
-    elements: Sequence[Element], needle: str, limit: int = 5
-) -> list[Element]:
+def nearest_elements(elements: Sequence[Element], needle: str, limit: int = 5) -> list[Element]:
     """Best "did you mean" candidates for a selector that matched nothing.
 
     App elements are ranked alone; system chrome is only offered when the app contributed

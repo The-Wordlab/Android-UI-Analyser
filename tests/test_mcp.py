@@ -17,7 +17,7 @@ from mcp.shared.memory import create_connected_server_and_client_session
 
 import android_ui_analyser.engine as engine_mod
 from android_ui_analyser.engine import Engine
-from android_ui_analyser.mcp_server import build_server
+from android_ui_analyser.mcp_server import _tool_definitions, build_server
 from android_ui_analyser.schema import ActionResult, AnalyzeResult
 from conftest import FakeDevice, make_config
 
@@ -71,6 +71,7 @@ def test_mcp_lists_core_tools() -> None:
         "input_and_analyze",
         "swipe_and_analyze",
         "key_and_analyze",
+        "back_until_and_analyze",
         "wait_and_analyze",
         "wait_changed_and_analyze",
         "has",
@@ -146,6 +147,17 @@ def test_mcp_lists_core_tools() -> None:
         "flow_list",
         "flow_save",
     } <= set(names)
+
+
+def test_mcp_back_until_contract_is_bounded_and_never_allows_package_change() -> None:
+    tool = next(item for item in _tool_definitions() if item.name == "back_until_and_analyze")
+    properties = tool.inputSchema["properties"]
+
+    assert properties["max_steps"]["default"] == 4
+    assert properties["max_steps"]["maximum"] == 12
+    assert properties["back_selector"]["maxProperties"] == 1
+    assert "allow_package_change" not in properties
+    assert tool.inputSchema["allOf"] == [{"not": {"required": ["back_id", "back_selector"]}}]
 
 
 def test_mcp_initialization_teaches_goal_first_protocol() -> None:

@@ -142,6 +142,133 @@ def test_analyze_after_session_start_receives_immediate_reuse_advice(
     assert decorated["advice"][0]["id"] == "reuse_observation"
 
 
+def test_review_recommends_one_bounded_call_for_repeated_semantic_back(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    engine = _engine(tmp_path, "goal-back-review")
+    started = _start(engine, monkeypatch)
+    common = {
+        "cache_dir": engine.config.cache.dir,
+        "serial": engine.device.serial,
+        "source": "cli",
+        "owner": None,
+        "ok": True,
+    }
+    journal.record(
+        **common,
+        cmd="key",
+        args={"name": "back"},
+        result={"ok": True, "action": "key", "observation": {"elements": []}},
+    )
+    journal.record(
+        **common,
+        cmd="tap",
+        args={"selector": {"rid": "buttonNavBack"}},
+        result={"ok": True, "action": "tap", "observation": {"elements": []}},
+    )
+
+    review = engine.session_review(started["session_id"])
+
+    assert review["patterns"]["repeated_back"][0]["calls"] == 2
+    assert review["advice"][-1]["id"] == "bounded_back_navigation"
+
+
+def test_review_flags_same_numeric_id_reused_across_changed_frames(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    engine = _engine(tmp_path, "goal-frame-id-review")
+    started = _start(engine, monkeypatch)
+    common = {
+        "cache_dir": engine.config.cache.dir,
+        "serial": engine.device.serial,
+        "source": "cli",
+        "owner": None,
+        "ok": True,
+        "cmd": "tap",
+        "args": {"element_id": 22, "selector": None},
+    }
+    journal.record(
+        **common,
+        result={
+            "ok": True,
+            "action": "tap",
+            "observation": {"elements": [], "meta": {"known_screen": "nested-two"}},
+        },
+    )
+    journal.record(
+        **common,
+        result={
+            "ok": True,
+            "action": "tap",
+            "observation": {"elements": [], "meta": {"known_screen": "nested-one"}},
+        },
+    )
+
+    review = engine.session_review(started["session_id"])
+
+    assert review["patterns"]["reused_numeric_id"][0]["element_id"] == 22
+    assert review["advice"][-1]["id"] == "do_not_reuse_frame_id"
+    assert review["avoidable_calls"] == 0
+
+
+def test_mcp_style_unrecorded_action_gets_same_numeric_id_reuse_coaching(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    engine = _engine(tmp_path, "goal-frame-id-mcp")
+    _start(engine, monkeypatch)
+    journal.record(
+        cache_dir=engine.config.cache.dir,
+        serial=engine.device.serial,
+        source="mcp",
+        owner=None,
+        ok=True,
+        cmd="tap_and_analyze",
+        args={"element_id": 22},
+        result={
+            "ok": True,
+            "action": "tap",
+            "observation": {"elements": [], "meta": {"known_screen": "nested-two"}},
+        },
+    )
+
+    decorated = decorate_result(
+        engine,
+        "tap_and_analyze",
+        {
+            "ok": True,
+            "action": "tap",
+            "observation": {"elements": [], "meta": {"known_screen": "nested-one"}},
+        },
+        args={"element_id": 22},
+        current_recorded=False,
+    )
+
+    assert decorated["advice"][0]["id"] == "do_not_reuse_frame_id"
+
+
+def test_playback_resource_id_is_not_classified_as_back_navigation(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    engine = _engine(tmp_path, "goal-playback")
+    started = _start(engine, monkeypatch)
+    common = {
+        "cache_dir": engine.config.cache.dir,
+        "serial": engine.device.serial,
+        "source": "cli",
+        "owner": None,
+        "ok": True,
+        "cmd": "tap",
+        "args": {"selector": {"rid": "mediaPlayback"}},
+        "result": {"ok": True, "action": "tap", "observation": {"elements": []}},
+    }
+    journal.record(**common)
+    journal.record(**common)
+
+    review = engine.session_review(started["session_id"])
+
+    assert "repeated_back" not in review["patterns"]
+
+
 def test_finish_restores_network_state_created_by_session(tmp_path: Path, monkeypatch: Any) -> None:
     engine = _engine(tmp_path, "goal-owned")
     started = _start(engine, monkeypatch)

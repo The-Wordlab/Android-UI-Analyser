@@ -144,7 +144,7 @@ _ANALYZED_TOOL_NAMES: dict[str, str] = {
 _ANALYZED_TOOL_BASES = {public: base for base, public in _ANALYZED_TOOL_NAMES.items()}
 _POST_ACTION_WAIT_TOOLS = frozenset({*_ANALYZED_TOOL_BASES, "app_launch_and_analyze"})
 _OBSERVATION_TOOL_NAMES = frozenset(
-    {*_POST_ACTION_WAIT_TOOLS, "await_and_analyze", "session_start"}
+    {*_POST_ACTION_WAIT_TOOLS, "await_and_analyze", "back_until_and_analyze", "session_start"}
 )
 
 
@@ -553,6 +553,61 @@ def _tool_definitions() -> list[types.Tool]:
                     "with_image": _WITH_IMAGE_PROP,
                 },
                 "required": ["name"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="back_until_and_analyze",
+            description=(
+                "Navigate back in one bounded call until semantic destination evidence is "
+                "present. Re-resolves a visible Back/Navigate-up control on every fresh frame, "
+                "then falls back to hardware Back. Returns the final analyzed screen and always "
+                "stops if the foreground leaves the starting package."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "predicate": {
+                        "type": "string",
+                        "description": "ANDed text:/rid:/desc: terms naming the destination.",
+                    },
+                    "back_id": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": (
+                            "Fresh frame-local id for an unlabeled Back control; first step only."
+                        ),
+                    },
+                    "back_selector": {
+                        "type": "object",
+                        "description": (
+                            "Optional app-owned Back selector, re-resolved on every frame."
+                        ),
+                        "properties": {
+                            "rid": {"type": "string"},
+                            "text": {"type": "string"},
+                            "desc": {"type": "string"},
+                        },
+                        "minProperties": 1,
+                        "maxProperties": 1,
+                        "additionalProperties": False,
+                    },
+                    "max_steps": {
+                        "type": "integer",
+                        "default": 4,
+                        "minimum": 1,
+                        "maximum": 12,
+                    },
+                    "step_timeout_ms": {
+                        "type": "integer",
+                        "default": 1200,
+                        "minimum": 0,
+                    },
+                    "poll_ms": {"type": "integer", "default": 200, "minimum": 10},
+                    "observe_fields": _OBSERVE_FIELDS_PROP,
+                },
+                "required": ["predicate"],
+                "allOf": [{"not": {"required": ["back_id", "back_selector"]}}],
                 "additionalProperties": False,
             },
         ),
@@ -1791,6 +1846,17 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 observe=args.get("observe", True),
             )
         )
+    if name == "back_until_and_analyze":
+        return _dump(
+            engine.back_until(
+                args["predicate"],
+                back_id=args.get("back_id"),
+                back_selector=args.get("back_selector"),
+                max_steps=int(args.get("max_steps", 4)),
+                step_timeout_ms=int(args.get("step_timeout_ms", 1200)),
+                poll_ms=int(args.get("poll_ms", 200)),
+            )
+        )
     if name == "wait_changed":
         return _dump(
             engine.wait_changed(
@@ -2422,7 +2488,13 @@ def build_server(engine: Engine) -> Server:
             payload = _fold_action_until(engine, name, args_in, payload)
             from .coaching import decorate_result
 
-            payload = decorate_result(engine, name, payload)
+            payload = decorate_result(
+                engine,
+                name,
+                payload,
+                args=args_in,
+                current_recorded=False,
+            )
             # Trim the folded observation the same way the CLI does. Applied here, at the one
             # boundary every tool returns through, rather than at ~40 `_dump` sites — and via the
             # shared helper, because these two surfaces had already drifted once: MCP was

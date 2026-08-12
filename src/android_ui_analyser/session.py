@@ -32,6 +32,7 @@ from .memory import (
     step_display,
 )
 from .schema import AnalyzeResult
+from .selectors import is_back_resource_id
 
 
 class GoalCall(BaseModel):
@@ -223,6 +224,10 @@ _WAIT_COMMANDS = frozenset(
 )
 
 
+def _mapping(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
 def _base_command(value: Any) -> str:
     command = str(value or "").removesuffix("_and_analyze")
     aliases = {"input_text": "input", "analyze_screen": "analyze"}
@@ -246,6 +251,8 @@ def review_session_events(state: SessionState, events: Sequence[dict[str, Any]])
         "deeplink_over_verified_navigation": [],
         "airplane_for_offline": [],
         "predicate_timeout": [],
+        "repeated_back": [],
+        "reused_numeric_id": [],
     }
     duration_ms = sum(
         float(event["duration_ms"])
@@ -253,6 +260,7 @@ def review_session_events(state: SessionState, events: Sequence[dict[str, Any]])
         if isinstance(event.get("duration_ms"), (int, float))
     )
     manual_streak: list[dict[str, Any]] = []
+    back_streak: list[dict[str, Any]] = []
     previous: dict[str, Any] | None = None
     top_level: list[dict[str, Any]] = []
     seen_invocations: set[str] = set()
@@ -294,16 +302,64 @@ def review_session_events(state: SessionState, events: Sequence[dict[str, Any]])
             avoidable["wait_after_observed_action"].append(
                 {"ts_ms": event.get("ts_ms"), "after": (previous or {}).get("cmd")}
             )
-        if (
-            base == "has"
-            and previous is not None
-            and _base_command(previous.get("cmd")) == "has"
-        ):
+        if base == "has" and previous is not None and _base_command(previous.get("cmd")) == "has":
             avoidable["consecutive_has"].append({"ts_ms": event.get("ts_ms")})
         if base in {"open_link", "open"} and state.recommended_kind in {"goto", "flow"}:
             avoidable["deeplink_over_verified_navigation"].append({"ts_ms": event.get("ts_ms")})
         if base.startswith("airplane") and "offline" in state.goal.casefold():
             avoidable["airplane_for_offline"].append({"ts_ms": event.get("ts_ms")})
+        event_args = _mapping(event.get("args"))
+        previous_args = _mapping(previous.get("args") if previous is not None else None)
+        event_result = _mapping(event.get("result"))
+        previous_result = _mapping(previous.get("result") if previous is not None else None)
+
+        def observed_screen(value: dict[str, Any]) -> str | None:
+            observation = value.get("observation")
+            if not isinstance(observation, dict):
+                return None
+            meta = observation.get("meta")
+            if isinstance(meta, str):
+                return meta
+            if isinstance(meta, dict) and meta.get("known_screen"):
+                return str(meta["known_screen"])
+            return None
+
+        numeric_id = event_args.get("element_id")
+        previous_numeric_id = previous_args.get("element_id")
+        if (
+            base == "tap"
+            and previous is not None
+            and _base_command(previous.get("cmd")) == "tap"
+            and isinstance(numeric_id, int)
+            and numeric_id == previous_numeric_id
+            and observed_screen(event_result)
+            and observed_screen(event_result) != observed_screen(previous_result)
+        ):
+            avoidable["reused_numeric_id"].append(
+                {
+                    "ts_ms": event.get("ts_ms"),
+                    "element_id": numeric_id,
+                    "from_screen": observed_screen(previous_result),
+                    "to_screen": observed_screen(event_result),
+                }
+            )
+        selector = _mapping(event_args.get("selector"))
+        semantic_selector = (
+            is_back_resource_id(str(selector.get("rid") or ""))
+            or str(selector.get("desc") or "").casefold() in {"back", "navigate up", "up"}
+            or str(selector.get("text") or "").casefold() == "back"
+        )
+        is_back = (base == "key" and str(event_args.get("name")).casefold() == "back") or (
+            base == "tap" and semantic_selector
+        )
+        if is_back:
+            back_streak.append(event)
+        elif base in _ACTION_COMMANDS:
+            if len(back_streak) >= 2:
+                avoidable["repeated_back"].append(
+                    {"calls": len(back_streak), "from_ms": back_streak[0].get("ts_ms")}
+                )
+            back_streak = []
         if base in _ACTION_COMMANDS:
             manual_streak.append(event)
         else:
@@ -317,12 +373,21 @@ def review_session_events(state: SessionState, events: Sequence[dict[str, Any]])
         avoidable["manual_path"].append(
             {"calls": len(manual_streak), "from_ms": manual_streak[0].get("ts_ms")}
         )
+    if len(back_streak) >= 2:
+        avoidable["repeated_back"].append(
+            {"calls": len(back_streak), "from_ms": back_streak[0].get("ts_ms")}
+        )
 
     patterns = {name: rows for name, rows in avoidable.items() if rows}
     avoidable_calls = sum(
-        len(rows) if name != "manual_path" else sum(max(1, int(row["calls"]) - 1) for row in rows)
-        for name, rows in patterns.items()
+        len(patterns.get(name, []))
+        for name in ("redundant_analyze", "wait_after_observed_action", "consecutive_has")
     )
+    manual_savings = sum(max(1, int(row["calls"]) - 1) for row in patterns.get("manual_path", []))
+    back_savings = sum(max(1, int(row["calls"]) - 1) for row in patterns.get("repeated_back", []))
+    # A repeated Back streak is normally contained in the same manual journey. Do not claim
+    # both a flow saving and a back-until saving for the same top-level calls.
+    avoidable_calls += manual_savings or back_savings
     advice: list[dict[str, str]] = []
     if patterns.get("redundant_analyze"):
         advice.append(
@@ -361,7 +426,26 @@ def review_session_events(state: SessionState, events: Sequence[dict[str, Any]])
                 ),
             }
         )
-    high_level = sum(counts.get(name, 0) for name in ("session_start", "reach", "goto", "flow_run"))
+    if patterns.get("repeated_back"):
+        advice.append(
+            {
+                "id": "bounded_back_navigation",
+                "recommended_call": "aua back-until-and-analyze 'rid:<destination>'",
+            }
+        )
+    if patterns.get("reused_numeric_id"):
+        advice.append(
+            {
+                "id": "do_not_reuse_frame_id",
+                "recommended_call": (
+                    "Use a fresh --rid/stable_key; for nested Back use "
+                    "aua back-until-and-analyze 'rid:<destination>'."
+                ),
+            }
+        )
+    high_level = sum(
+        counts.get(name, 0) for name in ("session_start", "reach", "goto", "flow_run", "back_until")
+    )
     return {
         "ok": not any(not event.get("ok") for event in top_level),
         "session_id": state.session_id,

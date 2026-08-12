@@ -54,6 +54,16 @@ CAPABILITIES: tuple[Capability, ...] = (
         risk="expanded steps are preflighted before automatic selection",
     ),
     Capability(
+        "back_until",
+        "Exit nested screens in one bounded call, re-resolving Back on every fresh frame; "
+        "an unlabeled first Back needs its fresh id.",
+        ("back", "return", "compare", "nested", "thread", "recent"),
+        25,
+        "aua back-until-and-analyze 'rid:<destination>'",
+        "back_until_and_analyze",
+        risk="always stops when the foreground leaves the starting package",
+    ),
+    Capability(
         "deeplink",
         "Open a known shortcut only after goto/flow; the returned screen must prove arrival.",
         ("deeplink", "deep link", "open", "shortcut"),
@@ -197,7 +207,8 @@ def render_mcp_instructions() -> str:
         "goto, matching saved flow, proven deeplink, or manual analyzed action in that order. "
         "Use the returned recommended_call. Analyzed actions already return fresh screen ids; "
         "do not call analyze_screen next. Put semantic arrival terms in until, including "
-        "comma-separated positive and negative terms. Use network_offline, never airplane mode, "
+        "comma-separated positive and negative terms. Use back_until_and_analyze for nested "
+        "returns; an unlabeled first Back requires its fresh back_id. Use network_offline, never airplane mode, "
         "to prove offline behavior and always call network_restore or session_finish. Use "
         "session_review to find avoidable calls. Unsafe or destructive effects require explicit "
         "authorization. capabilities(goal) provides progressive discovery for uncommon tasks."

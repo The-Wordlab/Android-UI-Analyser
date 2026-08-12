@@ -113,6 +113,11 @@ def summarize_result(result: Any) -> Any:
             "finished",
             "errors",
             "cleanup",
+            "await_outcome",
+            "await_terms",
+            "elapsed_ms",
+            "stop_reason",
+            "steps_run",
         ):
             if key in result:
                 slim[key] = _truncate(result[key], 200)

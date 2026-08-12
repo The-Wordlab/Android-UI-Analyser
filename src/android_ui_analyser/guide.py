@@ -304,6 +304,10 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "for a pixel change + idle (animation-aware) before dumping the tree, and a screen "
         "whose content is still streaming in has to hold still for one confirming sample — so "
         "you get the *next* screen, not a mid-transition snapshot with the list body missing. "
+        "When returning through nested screens, use `back-until-and-analyze '<destination>'`; "
+        "it re-resolves a labeled Back on every frame. If the first Back icon is unlabeled, "
+        "pass its id from the current observation once with `--back-id <fresh-id>`—AUA still "
+        "freshness-checks it and does not reuse that numeric id on later frames. "
         "The observation is **compact by default** (`id,text,rid,clickable`, app nodes only); "
         "widen it with `--observe-fields all` or any field list. You therefore never need the "
         "`--no-observe` + `analyze` pair to get a cheap read — that pair costs two round trips "
@@ -401,7 +405,7 @@ BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
         "`goto`, matching saved flow, proven deeplink, or manual analyzed action in that order, "
         "and returns one exact CLI and MCP `recommended_call`. Follow that call instead of "
         "calling analyze again or inventorying commands. Offline goals receive verified, "
-        "reversible isolation before UI actions. Use `aua capabilities --goal \"…\"` only "
+        'reversible isolation before UI actions. Use `aua capabilities --goal "…"` only '
         "when you need another goal-specific capability, and finish reversible work with "
         "`aua session finish`.",
     ),
@@ -437,7 +441,9 @@ BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
         "Use `tap-and-analyze`, `input-and-analyze`, `swipe-and-analyze`, and `key-and-analyze`; "
         "their `observation` already contains fresh ids. Do not immediately call `analyze` again. "
         "For your action's expected result add `--until 'rid:resultCard'` or "
-        "`--until '!text:Loading'`; escape a literal comma as `text:Hello\\, friend`. For an "
+        "`--until '!text:Loading'`; escape a literal comma as `text:Hello\\, friend`. For a "
+        "nested journey, return in one bounded call with `aua back-until-and-analyze "
+        "'rid:<destination>'` instead of replaying frame-local Back ids. For an "
         "unattached network-driven update use `wait-and-analyze --after-change --observe`. Prefer "
         "a positive final affordance over a generic spinner disappearance.",
     ),
@@ -522,6 +528,10 @@ ORIENTATION: tuple[tuple[str, str], ...] = (
     (
         "aua input-and-analyze --rid <resourceId> \"text\" --until '!text:Loading'",
         "TYPE — text is positional, and --until belongs HERE, not on a later analyze",
+    ),
+    (
+        "aua back-until-and-analyze 'rid:<destination>' [--back-id <fresh-id>]",
+        "RETURN through nested screens in one call; use --back-id only for an unlabeled first Back",
     ),
     (
         'aua --answers <id>="<name>" <your next command>',
@@ -784,7 +794,9 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "observed actions (`*_and_analyze` MCP / `*-and-analyze` CLI)",
         "return the post-action screen inline (`observation`, fresh ids), and the explicit "
         "names cannot disable that readback. Prefer `hide-keyboard-and-analyze` over "
-        "`key-and-analyze back` when the IME is covering the tree",
+        "`key-and-analyze back` when the IME is covering the tree. For nested navigation use "
+        "`back-until-and-analyze '<destination>'`; pass `--back-id <fresh-id>` only when the "
+        "first app-owned Back icon is unlabeled",
     ),
     (
         "logcat",

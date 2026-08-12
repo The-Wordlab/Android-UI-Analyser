@@ -91,6 +91,7 @@ from .selectors import (
     app_elements,
     drop_redundant_ocr,
     element_digest,
+    is_back_resource_id,
     match_selector,
     nearest_elements,
     ocr_added_app_content,
@@ -5897,6 +5898,380 @@ class Engine:
             self.device.press(name)
         self._record_action_safe(step)
         return self._observe(ActionResult(ok=True, action="key", detail=name), observe, with_image)
+
+    def back_until(
+        self,
+        predicate: str,
+        *,
+        back_id: int | None = None,
+        back_selector: dict[str, str] | None = None,
+        max_steps: int = 4,
+        step_timeout_ms: int = 1_200,
+        poll_ms: int = 200,
+    ) -> ActionResult:
+        """Navigate back until semantic UI evidence is present, returning one observation.
+
+        Each fresh frame is checked for an unambiguous toolbar Back/Navigate-up affordance and
+        that stable selector is preferred; hardware Back is the fallback. This matters on nested
+        Compose screens that consume the hardware event. The predicate is validated before the
+        first mutation, every step is observed, and leaving the starting package stops the
+        journey. Cross-package traversal belongs in a risk-preflighted route or flow.
+        """
+        terms = _parse_await_terms(predicate)
+        unsupported = sorted({term.by for term in terms if term.by in {"net", "log"}})
+        if unsupported:
+            raise UsageError(
+                "back-until needs screen evidence, not off-screen evidence",
+                hint="Use text:, rid:, or desc: terms so AUA knows where Back arrived.",
+            )
+        if not any(not term.negated for term in terms):
+            raise UsageError(
+                "back-until needs at least one positive destination term",
+                hint="Add text:, rid:, or desc: evidence for the screen you want to reach.",
+            )
+        if back_selector is not None and not isinstance(back_selector, dict):
+            raise UsageError("back_selector must be an object with one of rid, text, or desc")
+        selector = {key: value for key, value in (back_selector or {}).items() if value}
+        if back_id is not None and selector:
+            raise UsageError("choose either back_id or back_selector, not both")
+        if back_id is not None and back_id < 0:
+            raise UsageError("back_id must be a non-negative id from the current observation")
+        if selector and (len(selector) != 1 or next(iter(selector)) not in {"rid", "text", "desc"}):
+            raise UsageError("back_selector must contain exactly one of rid, text, or desc")
+        if not 1 <= max_steps <= 12:
+            raise UsageError("back-until --max-steps must be between 1 and 12")
+        if step_timeout_ms < 0 or poll_ms < 10:
+            raise UsageError("back-until timeouts must be non-negative and poll at least 10ms")
+
+        # Bind an explicit ordinal to the caller's cached frame before the predicate precheck
+        # analyzes again. The ordinal itself is never identity: it must be remapped from this
+        # original element onto the fresh precheck observation before any action is authorized.
+        back_binding: Element | None = None
+        if back_id is not None:
+            cached = self._read_cache()
+            back_binding = cached.element_by_id(back_id) if cached is not None else None
+
+        started_at = time.monotonic()
+        device = self.device
+        foreground_package = str((device.current_app() or {}).get("package") or "")
+        current = self.await_predicate(
+            predicate,
+            timeout_ms=0,
+            poll_ms=poll_ms,
+            observe=True,
+        )
+        origin_package = str(
+            (current.observation.screen.package if current.observation is not None else "")
+            or foreground_package
+        )
+        if current.ok:
+            current.action = "back-until"
+            current.detail = "destination already satisfied; steps=0"
+            current.stop_reason = "already_satisfied"
+            current.steps_run = []
+            current.verified = True
+            return current
+
+        steps_run: list[dict[str, Any]] = []
+        for steps in range(1, max_steps + 1):
+            before = self._back_observation_identity(current.observation)
+            requested_id: int | None = None
+            explicit_id_invalid = False
+            if steps == 1 and back_id is not None:
+                if back_binding is None or current.observation is None:
+                    explicit_id_invalid = True
+                else:
+                    from .identity import remap_ids
+
+                    requested_id = remap_ids([back_binding], current.observation.elements).get(
+                        back_binding.id
+                    )
+                    explicit_id_invalid = requested_id is None
+            status, selected, frame_id = self._semantic_back_selector(
+                current.observation,
+                selector or None,
+                frame_id=requested_id,
+            )
+            if explicit_id_invalid:
+                status = "invalid"
+            if status == "ambiguous":
+                return self._back_until_result(
+                    current,
+                    ok=False,
+                    reason="ambiguous_back_affordance",
+                    detail="several Back/Navigate-up controls are visible; supply --back-rid/text/desc",
+                    steps_run=steps_run,
+                    started_at=started_at,
+                )
+            if status == "invalid":
+                return self._back_until_result(
+                    current,
+                    ok=False,
+                    reason="no_back_affordance",
+                    detail="the explicit Back id is not a fresh enabled app-owned control",
+                    steps_run=steps_run,
+                    started_at=started_at,
+                )
+            if selected is not None:
+                try:
+                    if frame_id is not None:
+                        # The unlabeled top-left navigation affordance has no semantic selector.
+                        # Its id came from this exact observation, and `tap` immediately remaps
+                        # that binding against a fresh hierarchy before touching the device.
+                        self.tap(element_id=frame_id, observe=False)
+                    else:
+                        self.tap(selector=selected, observe=False)
+                except SelectorAmbiguousError:
+                    return self._back_until_result(
+                        current,
+                        ok=False,
+                        reason="ambiguous_back_affordance",
+                        detail="the selected Back affordance became ambiguous before action",
+                        steps_run=steps_run,
+                        started_at=started_at,
+                    )
+                except (ElementNotFoundError, SelectorNotFoundError, StaleElementIdError):
+                    return self._back_until_result(
+                        current,
+                        ok=False,
+                        reason="no_back_affordance",
+                        detail="the selected Back affordance disappeared before action",
+                        steps_run=steps_run,
+                        started_at=started_at,
+                    )
+                via = "affordance"
+            else:
+                self.key("back", observe=False)
+                via = "hardware"
+            step_deadline = time.monotonic() + (step_timeout_ms / 1000.0)
+            current = self.await_predicate(
+                predicate,
+                timeout_ms=step_timeout_ms,
+                poll_ms=poll_ms,
+                observe=True,
+            )
+
+            # `await_predicate` deliberately returns screen-changed before trusting terms from
+            # a newly resumed Activity. Re-evaluate on that Activity before sending another
+            # navigation action, or a destination that just appeared could be overshot. A chain
+            # of Activity transitions is observed only within this step's original deadline;
+            # if it remains unstable, stop rather than act on an unchecked screen.
+            transition_rechecks = 0
+            while not current.ok and current.await_outcome == "screen-changed":
+                package = self._back_observed_package(current, device)
+                if origin_package and package and package != origin_package:
+                    steps_run.append(
+                        self._back_step_evidence(
+                            index=steps - 1,
+                            via=via,
+                            selector=selected,
+                            before=before,
+                            observation=current.observation,
+                        )
+                    )
+                    return self._back_until_result(
+                        current,
+                        ok=False,
+                        reason="package_changed",
+                        detail=f"foreground left {origin_package} for {package}",
+                        steps_run=steps_run,
+                        started_at=started_at,
+                    )
+                remaining_ms = max(0, int((step_deadline - time.monotonic()) * 1000))
+                if transition_rechecks >= 3 or (transition_rechecks and remaining_ms == 0):
+                    steps_run.append(
+                        self._back_step_evidence(
+                            index=steps - 1,
+                            via=via,
+                            selector=selected,
+                            before=before,
+                            observation=current.observation,
+                        )
+                    )
+                    return self._back_until_result(
+                        current,
+                        ok=False,
+                        reason="screen_unstable",
+                        detail="screen kept changing before destination evidence could be checked",
+                        steps_run=steps_run,
+                        started_at=started_at,
+                    )
+                current = self.await_predicate(
+                    predicate,
+                    timeout_ms=remaining_ms,
+                    poll_ms=poll_ms,
+                    observe=True,
+                )
+                transition_rechecks += 1
+            package = self._back_observed_package(current, device)
+            steps_run.append(
+                self._back_step_evidence(
+                    index=steps - 1,
+                    via=via,
+                    selector=selected,
+                    before=before,
+                    observation=current.observation,
+                )
+            )
+            if origin_package and package and package != origin_package:
+                return self._back_until_result(
+                    current,
+                    ok=False,
+                    reason="package_changed",
+                    detail=f"foreground left {origin_package} for {package}",
+                    steps_run=steps_run,
+                    started_at=started_at,
+                )
+            after = self._back_observation_identity(current.observation)
+            if current.ok:
+                return self._back_until_result(
+                    current,
+                    ok=True,
+                    reason="predicate_satisfied",
+                    detail=f"satisfied after {steps} back-navigation step(s)",
+                    steps_run=steps_run,
+                    started_at=started_at,
+                )
+            if before and after and before == after:
+                return self._back_until_result(
+                    current,
+                    ok=False,
+                    reason="no_progress",
+                    detail=f"{via} Back produced no semantic screen change",
+                    steps_run=steps_run,
+                    started_at=started_at,
+                )
+
+        return self._back_until_result(
+            current,
+            ok=False,
+            reason="max_steps",
+            detail=f"destination unmet after max_steps={max_steps}",
+            steps_run=steps_run,
+            started_at=started_at,
+        )
+
+    @staticmethod
+    def _semantic_back_selector(
+        observation: AnalyzeResult | None,
+        override: dict[str, str] | None = None,
+        *,
+        frame_id: int | None = None,
+    ) -> tuple[str, dict[str, str] | None, int | None]:
+        """One app-owned Back selector, plus none/ambiguous status."""
+        if override:
+            return "one", override, None
+        if observation is None:
+            return "none", None, None
+        if frame_id is not None:
+            element = observation.element_by_id(frame_id)
+            if element is None:
+                return "invalid", None, None
+            if (
+                element.clickable is not True
+                or element.enabled is False
+                or element.window not in {None, "app"}
+            ):
+                return "invalid", None, None
+            return "one", {"frame_id": str(frame_id)}, frame_id
+        candidates: list[tuple[dict[str, str], int | None]] = []
+        bottom = int(observation.screen.height * _SYSTEM_BAR_BAND)
+        for element in observation.elements:
+            if element.clickable is not True or element.enabled is False:
+                continue
+            if element.window not in {None, "app"}:
+                continue
+            rid = (element.resource_id or "").strip()
+            if (
+                ":" in rid
+                and observation.screen.package
+                and not rid.startswith(observation.screen.package + ":")
+            ):
+                continue
+            if element.bounds[1] >= bottom:
+                continue
+            desc = (element.content_desc or "").strip()
+            text = (element.text or "").strip()
+            if is_back_resource_id(rid):
+                candidates.append(({"rid": rid}, None))
+            elif desc.casefold() in {"back", "navigate up", "up"}:
+                candidates.append(({"desc": desc}, None))
+            elif text.casefold() == "back":
+                candidates.append(({"text": text}, None))
+        if not candidates:
+            return "none", None, None
+        if len(candidates) > 1:
+            return "ambiguous", None, None
+        selected, frame_id = candidates[0]
+        return "one", selected, frame_id
+
+    @staticmethod
+    def _back_observation_identity(observation: AnalyzeResult | None) -> str | None:
+        if observation is None:
+            return None
+        labels = tuple(
+            (
+                (element.resource_id or "")[:80],
+                (element.content_desc or "")[:80],
+                (element.text or "")[:80],
+                element.bounds,
+            )
+            for element in observation.elements
+            if element.resource_id or element.content_desc or element.text
+        )
+        fingerprint = hashlib.sha256(
+            repr((observation.screen.package, observation.meta.known_screen, labels)).encode()
+        ).hexdigest()[:12]
+        if observation.meta.known_screen:
+            return f"{observation.meta.known_screen}:{fingerprint}"
+        return fingerprint
+
+    @staticmethod
+    def _back_observed_package(current: ActionResult, device: Device) -> str:
+        return str(
+            (current.observation.screen.package if current.observation is not None else "")
+            or (device.current_app() or {}).get("package")
+            or ""
+        )
+
+    @classmethod
+    def _back_step_evidence(
+        cls,
+        *,
+        index: int,
+        via: str,
+        selector: dict[str, str] | None,
+        before: str | None,
+        observation: AnalyzeResult | None,
+    ) -> dict[str, Any]:
+        after = cls._back_observation_identity(observation)
+        return {
+            "index": index,
+            "via": via,
+            **({"selector": selector} if selector is not None else {}),
+            "from_screen": before,
+            "to_screen": after,
+            "changed": bool(before and after and before != after),
+        }
+
+    @staticmethod
+    def _back_until_result(
+        current: ActionResult,
+        *,
+        ok: bool,
+        reason: str,
+        detail: str,
+        steps_run: list[dict[str, Any]],
+        started_at: float,
+    ) -> ActionResult:
+        current.ok = ok
+        current.action = "back-until"
+        current.detail = detail
+        current.stop_reason = reason
+        current.steps_run = steps_run
+        current.elapsed_ms = int((time.monotonic() - started_at) * 1000)
+        current.verified = ok
+        return current
 
     def hide_keyboard(
         self, *, observe: bool = True, with_image: bool | str | None = None

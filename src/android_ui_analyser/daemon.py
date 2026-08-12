@@ -268,6 +268,10 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
             result = engine.key(**args)
             return _result_ok(result.model_dump(mode="json"))
 
+        elif cmd == "back_until":
+            result = engine.back_until(**args)
+            return _result_ok(result.model_dump(mode="json"))
+
         elif cmd == "double_tap":
             result = engine.double_tap(**args)
             return _result_ok(result.model_dump(mode="json"))
@@ -676,14 +680,8 @@ def _journal_dispatch(
     from . import journal as journal_mod
 
     nested = response.get("result")
-    ok = bool(response.get("ok")) and not (
-        isinstance(nested, dict) and nested.get("ok") is False
-    )
-    extra = (
-        {"invocation_id": request["invocation_id"]}
-        if request.get("invocation_id")
-        else None
-    )
+    ok = bool(response.get("ok")) and not (isinstance(nested, dict) and nested.get("ok") is False)
+    extra = {"invocation_id": request["invocation_id"]} if request.get("invocation_id") else None
     journal_mod.record(
         cache_dir=engine.config.cache.dir,
         serial=serial,
@@ -766,6 +764,7 @@ _LONG_POLL_COMMANDS = frozenset(
         "wait_changed",
         "wait_after_change",
         "await_predicate",
+        "back_until",
         "goto",
         "flow_run",
         "navigate",

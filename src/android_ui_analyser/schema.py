@@ -435,6 +435,9 @@ class ActionResult(BaseModel):
     # tells a failed load from a slow one.
     await_terms: list[dict[str, Any]] | None = None
     elapsed_ms: int | None = None
+    # Bounded multi-step actions expose why they stopped and a compact semantic hop trace.
+    stop_reason: str | None = None
+    steps_run: list[dict[str, Any]] | None = None
 
     def render(self, fmt: OutputFormat | str = OutputFormat.json) -> str:
         fmt = OutputFormat(fmt)
