@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from android_ui_analyser import journal, network, network_profiles
+from android_ui_analyser.coaching import decorate_result
 from android_ui_analyser.daemon import dispatch
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.schema import AnalyzeResult, Meta, Screen
@@ -70,6 +71,75 @@ def test_journal_automatically_correlates_active_session_and_review_finds_waste(
         "reuse_observation",
         "combine_assertions",
     }
+
+
+def test_review_counts_folded_until_as_one_call_and_reports_its_timeout(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    engine = _engine(tmp_path, "goal-folded-until")
+    started = _start(engine, monkeypatch)
+    common = {
+        "cache_dir": engine.config.cache.dir,
+        "serial": engine.device.serial,
+        "source": "cli",
+        "owner": None,
+        "extra": {"invocation_id": "one-agent-call"},
+    }
+    journal.record(
+        **common,
+        cmd="tap",
+        args={"selector": {"rid": "next"}},
+        ok=True,
+        duration_ms=500,
+        result={"ok": True, "action": "tap", "observation": {"elements": []}},
+    )
+    journal.record(
+        **common,
+        cmd="await_predicate",
+        args={"predicate": "text:Destination", "adopt_action": True},
+        ok=False,
+        duration_ms=5_000,
+        result={"ok": False, "action": "await", "detail": "timeout after 5000ms"},
+    )
+
+    review = engine.session_review(started["session_id"])
+
+    assert review["calls"] == 1
+    assert review["engine_events"] == 2
+    assert review["duration_ms"] == 5_500
+    assert "wait_after_observed_action" not in review["patterns"]
+    assert review["patterns"]["predicate_timeout"][0]["predicate"] == "text:Destination"
+    assert review["advice"][-1]["id"] == "exact_arrival_predicate"
+
+
+def test_analyze_after_session_start_receives_immediate_reuse_advice(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    engine = _engine(tmp_path, "goal-reuse-advice")
+    started = _start(engine, monkeypatch)
+    common = {
+        "cache_dir": engine.config.cache.dir,
+        "serial": engine.device.serial,
+        "source": "cli",
+        "owner": None,
+    }
+    journal.record(
+        **common,
+        cmd="session_start",
+        ok=True,
+        result={**started, "observation": {"elements": [], "meta": {"known_screen": "home"}}},
+    )
+    journal.record(
+        **common,
+        cmd="analyze",
+        args={"source": "auto", "with_ocr": None},
+        ok=True,
+        result={"ok": True, "elements": []},
+    )
+
+    decorated = decorate_result(engine, "analyze", {"ok": True, "elements": []})
+
+    assert decorated["advice"][0]["id"] == "reuse_observation"
 
 
 def test_finish_restores_network_state_created_by_session(tmp_path: Path, monkeypatch: Any) -> None:

@@ -56,7 +56,17 @@ def _parse_bool(raw: str | None) -> bool | None:
 
 
 def _setting_bool(device: Any, namespace: str, key: str) -> bool | None:
-    return _parse_bool(_shell_or_none(device, f"settings get {namespace} {key}"))
+    raw = _shell_or_none(device, f"settings get {namespace} {key}")
+    if key == "wifi_on" and raw:
+        # Android exposes additional Wi-Fi states here: 2 is the enabled airplane-mode
+        # override and 3 is disabled. Connectivity remains the final verification oracle,
+        # but preserving this control accurately is required for a reliable restore.
+        value = raw.strip().splitlines()[0].strip()
+        if value in {"1", "2"}:
+            return True
+        if value in {"0", "3"}:
+            return False
+    return _parse_bool(raw)
 
 
 def _feature_bool(device: Any, feature: str) -> bool | None:

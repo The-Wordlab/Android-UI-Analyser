@@ -74,6 +74,32 @@ def decorate_result(engine: Any, cmd: str, result: Any) -> Any:
     normalized = _base_command(cmd)
     prior = events[:-1] if events and _base_command(events[-1].get("cmd")) == normalized else events
 
+    if normalized == "analyze" and prior:
+        previous = prior[-1]
+        previous_result = previous.get("result")
+        intentionally_different = False
+        current_args = events[-1].get("args") if events else {}
+        if isinstance(current_args, dict):
+            intentionally_different = bool(
+                current_args.get("source") == "vision"
+                or current_args.get("query")
+                or current_args.get("with_ocr") is not None
+                or current_args.get("fields")
+            )
+        if (
+            isinstance(previous_result, dict)
+            and previous_result.get("observation")
+            and not intentionally_different
+        ):
+            return _append(
+                result,
+                {
+                    "id": "reuse_observation",
+                    "message": f"{previous.get('cmd')} already returned the current screen",
+                    "recommended_call": "Reuse its observation and take the next action.",
+                },
+            )
+
     if normalized == "has" and prior and _base_command(prior[-1].get("cmd")) == "has":
         return _append(
             result,

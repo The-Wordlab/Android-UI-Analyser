@@ -92,6 +92,30 @@ def test_network_offline_is_verified_and_restore_is_reversible(tmp_path: Path) -
     assert not saved.exists()
 
 
+class _WifiOverrideDevice(FakeDevice):
+    """Android reports 2 while Wi-Fi is enabled through its airplane-mode override."""
+
+    def shell(self, command: str) -> str:
+        if command == "settings get global wifi_on" and self._wifi_enabled:
+            self.calls.append(("shell", (command,)))
+            return "2"
+        return super().shell(command)
+
+
+def test_wifi_override_state_is_preserved_and_restored(tmp_path: Path) -> None:
+    dev = _WifiOverrideDevice(serial="fake-wifi-override")
+    eng = Engine(make_config(cache={"dir": str(tmp_path)}), device=dev)
+
+    assert eng.network_status().state.wifi_enabled is True
+    assert eng.network_offline(timeout_ms=0).saved_state.wifi_enabled is True
+    restored = eng.network_restore(timeout_ms=0)
+
+    assert restored.ok is True
+    assert restored.state.wifi_enabled is True
+    assert ("shell", ("svc wifi enable",)) in dev.calls
+    assert not backup_path(tmp_path, dev.serial).exists()
+
+
 class _StubbornNetworkDevice(FakeDevice):
     def shell(self, command: str) -> str:
         if command == "dumpsys connectivity":

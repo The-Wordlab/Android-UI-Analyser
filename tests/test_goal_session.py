@@ -129,7 +129,28 @@ def test_risky_flow_is_previewed_and_never_selected_automatically() -> None:
     assert candidate.call.executes is False
     assert {risk["code"] for risk in candidate.risks} == {"app_lifecycle"}
     assert plan.selected_candidate is None
+    assert plan.recommended_call.kind == "network_offline"
+    assert plan.recommended_call.cli == "aua network offline --verify"
     assert "network offline --verify" in plan.warnings[0]
+
+
+def test_goal_matching_ignores_conjunctions_and_requires_whole_words() -> None:
+    unrelated = Flow(
+        name="reset_account_google_login",
+        app=_PKG,
+        description="Reset the account and continue with login",
+        steps=[RouteStep(kind="tap", resource_id="resetAccount")],
+    )
+
+    plan = plan_goal_session(
+        "compare Grammar and Mathematics while offline",
+        _observation(),
+        flows=[unrelated],
+    )
+
+    assert not any(candidate.kind == "flow" for candidate in plan.candidates)
+    assert plan.recommended_call.kind == "network_offline"
+    assert plan.observation_note.startswith("This is the current settled screen")
 
 
 def test_session_start_uses_exactly_one_analyze(monkeypatch, tmp_path) -> None:

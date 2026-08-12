@@ -109,6 +109,10 @@ def summarize_result(result: Any) -> Any:
             "goal_hash",
             "recommended_call",
             "advice",
+            "verified",
+            "finished",
+            "errors",
+            "cleanup",
         ):
             if key in result:
                 slim[key] = _truncate(result[key], 200)

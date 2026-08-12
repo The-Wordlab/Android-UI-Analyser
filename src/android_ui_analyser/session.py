@@ -73,6 +73,9 @@ class GoalSessionPlan(BaseModel):
     goal: str
     package: str | None = None
     current_screen: str | None = None
+    observation_note: str = (
+        "This is the current settled screen. Reuse it; do not call analyze next."
+    )
     observation: AnalyzeResult
     candidates: list[GoalCandidate] = Field(default_factory=list)
     selected_candidate: str | None = None
@@ -242,16 +245,45 @@ def review_session_events(state: SessionState, events: Sequence[dict[str, Any]])
         "manual_path": [],
         "deeplink_over_verified_navigation": [],
         "airplane_for_offline": [],
+        "predicate_timeout": [],
     }
-    duration_ms = 0.0
+    duration_ms = sum(
+        float(event["duration_ms"])
+        for event in scoped
+        if isinstance(event.get("duration_ms"), (int, float))
+    )
     manual_streak: list[dict[str, Any]] = []
     previous: dict[str, Any] | None = None
+    top_level: list[dict[str, Any]] = []
+    seen_invocations: set[str] = set()
     for event in scoped:
+        args_value = event.get("args")
+        args: dict[str, Any] = args_value if isinstance(args_value, dict) else {}
+        result_value = event.get("result")
+        result: dict[str, Any] = result_value if isinstance(result_value, dict) else {}
+        if _base_command(event.get("cmd")) in _WAIT_COMMANDS and args.get("adopt_action") is True:
+            if str(result.get("detail") or "").startswith("timeout after"):
+                avoidable["predicate_timeout"].append(
+                    {
+                        "ts_ms": event.get("ts_ms"),
+                        "predicate": args.get("predicate"),
+                        "duration_ms": event.get("duration_ms"),
+                    }
+                )
+            continue
+        invocation_id = event.get("invocation_id") or (event.get("extra") or {}).get(
+            "invocation_id"
+        )
+        if isinstance(invocation_id, str):
+            if invocation_id in seen_invocations:
+                continue
+            seen_invocations.add(invocation_id)
+        top_level.append(event)
+
+    for event in top_level:
         cmd = str(event.get("cmd") or "?")
         base = _base_command(cmd)
         counts[cmd] = counts.get(cmd, 0) + 1
-        if isinstance(event.get("duration_ms"), (int, float)):
-            duration_ms += float(event["duration_ms"])
         prior_result = (previous or {}).get("result")
         prior_observed = isinstance(prior_result, dict) and bool(prior_result.get("observation"))
         if base == "analyze" and prior_observed:
@@ -320,19 +352,31 @@ def review_session_events(state: SessionState, events: Sequence[dict[str, Any]])
         advice.append(
             {"id": "verified_offline", "recommended_call": "aua network offline --verify"}
         )
+    if patterns.get("predicate_timeout"):
+        advice.append(
+            {
+                "id": "exact_arrival_predicate",
+                "recommended_call": (
+                    "Use the exact destination label or rid returned by the prior observation."
+                ),
+            }
+        )
     high_level = sum(counts.get(name, 0) for name in ("session_start", "reach", "goto", "flow_run"))
     return {
-        "ok": not any(not event.get("ok") for event in scoped),
+        "ok": not any(not event.get("ok") for event in top_level),
         "session_id": state.session_id,
         "goal_hash": state.goal_hash,
         "serial": state.serial,
         "started_ms": state.started_ms,
         "finished_ms": state.finished_ms,
-        "calls": len(scoped),
-        "failures": sum(1 for event in scoped if not event.get("ok")),
+        "calls": len(top_level),
+        "engine_events": len(scoped),
+        "failures": sum(1 for event in top_level if not event.get("ok")),
         "duration_ms": round(duration_ms, 1),
         "commands": counts,
-        "high_level_navigation_ratio": round(high_level / len(scoped), 3) if scoped else 0.0,
+        "high_level_navigation_ratio": (
+            round(high_level / len(top_level), 3) if top_level else 0.0
+        ),
         "avoidable_calls": avoidable_calls,
         "estimated_calls_saved_next_run": avoidable_calls,
         "patterns": patterns,
@@ -345,6 +389,7 @@ _LOW_SIGNAL = frozenset(
     {
         "a",
         "an",
+        "and",
         "android",
         "app",
         "check",
@@ -366,6 +411,8 @@ _LOW_SIGNAL = frozenset(
         "use",
         "verify",
         "navigate",
+        "or",
+        "then",
         "with",
     }
 )
@@ -382,10 +429,12 @@ def _match_score(goal: str, *values: str | None) -> int:
         return 0
     phrase = goal.casefold().strip()
     terms = _goal_terms(goal)
-    score = sum(5 for term in terms if term in haystack)
+    haystack_terms = set(_GOAL_WORD.findall(haystack))
+    matched = [term for term in terms if term in haystack_terms]
+    score = 5 * len(matched)
     if phrase and phrase in haystack:
         score += 40
-    if terms and all(term in haystack for term in terms):
+    if terms and len(matched) == len(terms):
         score += 20
     return score
 
@@ -598,7 +647,7 @@ def _flow_candidates(
                 call=call,
             )
         )
-    return sorted(out, key=lambda item: (-item.score, item.name))
+    return sorted(out, key=lambda item: (-item.score, item.name))[:5]
 
 
 def _deeplink_candidates(goal: str, app: AppMap, *, target: str | None) -> list[GoalCandidate]:
@@ -641,7 +690,7 @@ def _deeplink_candidates(goal: str, app: AppMap, *, target: str | None) -> list[
                 call=call,
             )
         )
-    return sorted(out, key=lambda item: (-item.score, item.name))
+    return sorted(out, key=lambda item: (-item.score, item.name))[:5]
 
 
 def plan_goal_session(
@@ -703,7 +752,17 @@ def plan_goal_session(
             "Deeplinks rank after verified routes and saved flows and require explicit unsafe "
             "authorization plus arrival evidence."
         )
-    if selected is not None:
+    if "offline" in goal.casefold():
+        recommendation = GoalCall(
+            kind="network_offline",
+            cli="aua network offline --verify",
+            mcp={"tool": "network_offline", "arguments": {"verify": True}},
+            reason=(
+                "The goal requires a proven offline state. AUA saves the current controls so "
+                "session finish can restore them."
+            ),
+        )
+    elif selected is not None:
         recommendation = selected.call.model_copy(update={"candidate_id": selected.id})
     elif candidates:
         candidate = candidates[0]

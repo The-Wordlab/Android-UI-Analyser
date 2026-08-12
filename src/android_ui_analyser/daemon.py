@@ -675,7 +675,15 @@ def _journal_dispatch(
             serial = engine.config.device.serial
     from . import journal as journal_mod
 
-    ok = bool(response.get("ok"))
+    nested = response.get("result")
+    ok = bool(response.get("ok")) and not (
+        isinstance(nested, dict) and nested.get("ok") is False
+    )
+    extra = (
+        {"invocation_id": request["invocation_id"]}
+        if request.get("invocation_id")
+        else None
+    )
     journal_mod.record(
         cache_dir=engine.config.cache.dir,
         serial=serial,
@@ -684,8 +692,17 @@ def _journal_dispatch(
         args=request.get("args") if isinstance(request.get("args"), dict) else {},
         ok=ok,
         duration_ms=duration_ms,
-        result=response.get("result") if ok else None,
-        error=response.get("error") if not ok else None,
+        result=response.get("result"),
+        error=(
+            response.get("error")
+            if response.get("error")
+            else (
+                {"code": "result_not_ok", "message": "command returned ok=false"}
+                if not ok
+                else None
+            )
+        ),
+        extra=extra,
         owner=request.get("owner") or getattr(engine, "_lease_owner_resolved", None),
     )
 
@@ -768,12 +785,20 @@ class DaemonClient:
             resp = client.call("analyze", source="auto")
     """
 
-    def __init__(self, sock_path: str, *, timeout: float = 5.0, owner: str | None = None) -> None:
+    def __init__(
+        self,
+        sock_path: str,
+        *,
+        timeout: float = 5.0,
+        owner: str | None = None,
+        invocation_id: str | None = None,
+    ) -> None:
         self._sock_path = sock_path
         self._timeout = timeout
         # Resolved in THIS process; the daemon would resolve a different name. See
         # `_adopt_client_owner`.
         self._owner = owner
+        self._invocation_id = invocation_id
 
     def __enter__(self) -> DaemonClient:
         return self
@@ -794,6 +819,8 @@ class DaemonClient:
             request["journal"] = False
         if self._owner:
             request["owner"] = self._owner
+        if self._invocation_id:
+            request["invocation_id"] = self._invocation_id
         payload = json.dumps(request, ensure_ascii=False).encode() + b"\n"
 
         # A request that carries its own deadline needs a socket timeout above it. Naming the

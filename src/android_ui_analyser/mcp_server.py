@@ -143,7 +143,9 @@ _ANALYZED_TOOL_NAMES: dict[str, str] = {
 }
 _ANALYZED_TOOL_BASES = {public: base for base, public in _ANALYZED_TOOL_NAMES.items()}
 _POST_ACTION_WAIT_TOOLS = frozenset({*_ANALYZED_TOOL_BASES, "app_launch_and_analyze"})
-_OBSERVATION_TOOL_NAMES = frozenset({*_POST_ACTION_WAIT_TOOLS, "await_and_analyze"})
+_OBSERVATION_TOOL_NAMES = frozenset(
+    {*_POST_ACTION_WAIT_TOOLS, "await_and_analyze", "session_start"}
+)
 
 
 def _validate_until(name: str, args: dict[str, Any]) -> None:

@@ -45,8 +45,10 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "device, reuses the warm daemon, observes the foreground app once, and returns relevant "
         "capabilities plus one exact `recommended_call` in both CLI and MCP form. Its selection "
         "order is verified context-compatible `goto`, a matching safe flow, a proven deeplink, "
-        "then a manual analyzed action. The command is recommendation-first: risky candidates "
-        "are previewed and never receive authorization from the goal text. Use `aua session "
+        "then a manual analyzed action; an offline goal first receives verified reversible "
+        "network isolation. The returned compact observation is the current screen: reuse it "
+        "and do not follow session start with analyze. The command is recommendation-first: "
+        "risky candidates are previewed and never receive authorization from the goal text. Use `aua session "
         "review` to see avoidable calls and `aua session finish` to perform session-owned "
         "reversible cleanup.",
     ),
@@ -93,7 +95,8 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
     ),
     (
         "Observe once, then choose the highest-level action",
-        "Start with `aua --format tsv analyze --fields id,text,rid,clickable`. Before doing "
+        "Reuse the observation returned by `session start`; when no goal session exists, start "
+        "with `aua --format tsv analyze --fields id,text,rid,clickable`. Before doing "
         "more discovery, read its `# goto:`, `# flows:`, and `# aua asks:` lines. Use this "
         'decision order: (1) if `# goto:` offers the destination, run `aua goto "<goal>"`; '
         "it replays and verifies the route, (2) if a saved flow matches the repeated setup or "
@@ -397,8 +400,10 @@ BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
         "automatically, starts/reuses the warm transport, observes once, ranks a verified "
         "`goto`, matching saved flow, proven deeplink, or manual analyzed action in that order, "
         "and returns one exact CLI and MCP `recommended_call`. Follow that call instead of "
-        'inventorying commands. Use `aua capabilities --goal "…"` only when you need another '
-        "goal-specific capability, and finish reversible work with `aua session finish`.",
+        "calling analyze again or inventorying commands. Offline goals receive verified, "
+        "reversible isolation before UI actions. Use `aua capabilities --goal \"…\"` only "
+        "when you need another goal-specific capability, and finish reversible work with "
+        "`aua session finish`.",
     ),
     (
         "Attach automatically and clean up only what you started",
@@ -410,7 +415,8 @@ BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
     ),
     (
         "Observe once and use stable selectors",
-        "Start with `aua --format tsv analyze --fields id,text,rid,clickable`. Integer ids belong "
+        "Reuse the compact observation returned by session start. Without a goal session, use "
+        "`aua --format tsv analyze --fields id,text,rid,clickable`. Integer ids belong "
         "only to that observation frame. On dynamic screens, prefer `--rid <resource-id>` or an "
         "element's `stable_key`; after any state change, use the action's returned observation or "
         "`aua resolve <stable_key>` instead of replaying an old numeric id. A numeric id is fine "

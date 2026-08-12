@@ -15,6 +15,7 @@ import os
 import shutil
 import sys
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -233,12 +234,13 @@ def _run(ctx: typer.Context, fn: Callable[[Engine, OutputFormat], T]) -> T:
         if opts.until:
             _parse_await_terms(opts.until)
         engine = opts.engine()
-        global _OBSERVATION_VIEW, _UNTIL, _ENGINE
+        global _OBSERVATION_VIEW, _UNTIL, _ENGINE, _INVOCATION_ID
         spec = opts.observe_fields
         if spec is None:
             spec = getattr(engine.config.output, "observation_fields", None)
         _OBSERVATION_VIEW = Projection.for_observation(spec, fmt=cfg_fmt)
         _ENGINE = engine
+        _INVOCATION_ID = uuid.uuid4().hex
         if not opts.until:
             # `--until-timeout` only bounds a `--until`, so on its own it does nothing at all.
             # A fresh agent passed `--until-timeout 3000` believing it had a "safety bound",
@@ -472,6 +474,7 @@ _OBSERVATION_VIEW: Projection | None = None
 # session-wide and every action command would otherwise need four more parameters.
 _UNTIL: tuple[str, int, int] | None = None
 _ENGINE: Any = None
+_INVOCATION_ID: str | None = None
 
 
 def _project_observation(result: Any, fmt: OutputFormat) -> dict[str, Any] | None:
@@ -711,6 +714,8 @@ def _warn_if_redundant_analyze(engine: Engine, args: dict[str, Any] | None = Non
         return
     action = prev.get("action")
     if not isinstance(action, str):
+        action = "session start" if previous.get("cmd") == "session_start" else None
+    if action is None:
         return
     # If the user already asked for an intentionally different view (query/source), do not warn.
     latest_args = latest.get("args") or {}
@@ -973,6 +978,7 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
                 client = daemon_mod.DaemonClient(
                     daemon_mod.socket_path(cfg),
                     owner=_leases.resolve_owner(getattr(engine, "_lease_owner", None)),
+                    invocation_id=_INVOCATION_ID,
                 )
                 cmd = _DAEMON_CMD.get(method, method)
                 resp = client.call(cmd, **kwargs)
@@ -1002,16 +1008,19 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
                 source="cli",
                 cmd=_DAEMON_CMD.get(method, method),
                 args=kwargs,
-                ok=True,
+                ok=not (isinstance(result, dict) and result.get("ok") is False)
+                and not (hasattr(result, "ok") and result.ok is False),
                 duration_ms=(time.monotonic() - t0) * 1000.0,
                 result=result,
                 owner=getattr(engine, "_lease_owner_resolved", None),
+                extra={"invocation_id": _INVOCATION_ID} if _INVOCATION_ID else None,
             )
         from .coaching import decorate_result
 
         return decorate_result(engine, _DAEMON_CMD.get(method, method), result)
     except AuaError as err:
         with contextlib.suppress(Exception):
+            error_value = err.to_dict().get("error")
             journal_mod.record(
                 cache_dir=cfg.cache.dir,
                 serial=serial,
@@ -1020,8 +1029,9 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
                 args=kwargs,
                 ok=False,
                 duration_ms=(time.monotonic() - t0) * 1000.0,
-                error=err.to_dict().get("error"),
+                error=error_value if isinstance(error_value, dict) else None,
                 owner=getattr(engine, "_lease_owner_resolved", None),
+                extra={"invocation_id": _INVOCATION_ID} if _INVOCATION_ID else None,
             )
         raise
 
@@ -2768,17 +2778,17 @@ def session_start_cmd(
     def go(engine: Engine, fmt: OutputFormat) -> None:
         if headed and not start_emulator:
             raise UsageError("--headed requires --start-emulator")
-        _emit(
-            _route(
+        result = _route(
                 engine,
                 "session_start",
                 goal=goal,
                 start_emulator=start_emulator,
                 headed=headed,
                 avd=avd,
-            ),
-            fmt,
-        )
+            )
+        if isinstance(result, dict) and _OBSERVATION_VIEW is not None:
+            result = trim_observation_payload(result, _OBSERVATION_VIEW, fmt=fmt)
+        _emit(result, fmt)
 
     _run(ctx, go)
 
@@ -3738,7 +3748,7 @@ app.add_typer(network_app, name="network")
 @network_app.command("status")
 def network_status_cmd(ctx: typer.Context) -> None:
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(engine.network_status(), fmt)
+        _emit(_route(engine, "network_status"), fmt)
 
     _run(ctx, go)
 
@@ -3759,7 +3769,7 @@ def network_offline_cmd(
     ),
 ) -> None:
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        result = engine.network_offline(verify=verify, timeout_ms=timeout_ms)
+        result = _route(engine, "network_offline", verify=verify, timeout_ms=timeout_ms)
         _emit(result, fmt)
         _exit_unless_ok(
             result,
@@ -3782,7 +3792,7 @@ def network_restore_cmd(
     ),
 ) -> None:
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        result = engine.network_restore(timeout_ms=timeout_ms)
+        result = _route(engine, "network_restore", timeout_ms=timeout_ms)
         _emit(result, fmt)
         _exit_unless_ok(
             result,
