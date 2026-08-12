@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Keep both SKILL.md copies regenerated from guide.py (the single source) so they never
-# drift: the project skill (.claude/skills/...) and the plugin skill (skills/...).
+# Keep both SKILL.md copies and Codex UI metadata regenerated from guide.py (the single
+# source) so they never drift.
 #
 # Idempotent and NON-BLOCKING: if the dev env (`aua`) isn't available, it warns and skips
 # rather than failing the commit. Enable once per clone:
@@ -27,6 +27,7 @@ fi
 
 project=".claude/skills/android-ui-analyser/SKILL.md"
 plugin="skills/android-ui-analyser/SKILL.md"
+codex_metadata="skills/android-ui-analyser/agents/openai.yaml"
 
 for path in "$project" "$plugin"; do
   if ! run_aua guide --emit-skill "$path" >/dev/null 2>&1; then
@@ -35,8 +36,13 @@ for path in "$project" "$plugin"; do
   fi
 done
 
-git add -- "$project" "$plugin"
-if ! git diff --cached --quiet -- "$project" "$plugin"; then
-  echo "pre-commit: re-synced SKILL.md from guide.py (staged project + plugin copies)." >&2
+if ! run_aua guide --emit-codex-metadata "$codex_metadata" >/dev/null 2>&1; then
+  echo "pre-commit: Codex metadata sync failed — skipping generated-skill sync." >&2
+  exit 0
+fi
+
+git add -- "$project" "$plugin" "$codex_metadata"
+if ! git diff --cached --quiet -- "$project" "$plugin" "$codex_metadata"; then
+  echo "pre-commit: re-synced generated agent skills from guide.py." >&2
 fi
 exit 0

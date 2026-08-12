@@ -1,4 +1,4 @@
-# android-ui-analyser (`aua`) — guide for Claude Code
+# android-ui-analyser (`aua`) — agent development guide
 
 This repo **is** the `aua` CLI: it gives an AI agent structured "what's on screen and where"
 for an Android device/emulator, so you act on **integer element IDs, not pixels**.
@@ -7,9 +7,8 @@ accessibility tree can't see (Compose/Flutter/WebView/canvas/games).
 
 ## If you were handed this repo to USE the tool — set it up
 
-Run the bootstrap. It installs the `aua` CLI **globally** and installs the Claude Code skill at
-**user level** (`~/.claude/skills/`), so the skill auto-activates in **every** project, not just
-this one:
+Run the bootstrap. It installs the `aua` CLI **globally** plus equivalent Claude Code and Codex
+skills at user level, so the operating protocol is available in every project:
 
 ```bash
 ./install.sh        # idempotent — installs aua + the skill, then runs `aua doctor`
@@ -25,8 +24,9 @@ If it still doesn't resolve, `install.sh` fell back to the project venv — use
 `<repo>/.venv/bin/aua` by absolute path (or install `uv`/`pipx` and re-run `./install.sh`).
 
 Then connect an Android device or emulator (README → "Connect a device or emulator") and run
-`aua doctor` until `adb` and `devices` are OK. After that, in **any** project, just drive the
-app — the skill is active. The operating manual is `aua guide`.
+`aua doctor` until `adb` and `devices` are OK. Start runtime work with
+`aua session start --goal "<what must be verified>"`; the same contract is MCP initialization
+guidance. The operating manual is `aua guide --brief`.
 
 Requirements: **Python 3.11+**, **`adb` on PATH** (Android SDK platform-tools), and a
 **device/emulator** (Android 7.0+). See README → Requirements.
@@ -42,11 +42,12 @@ Requirements: **Python 3.11+**, **`adb` on PATH** (Android SDK platform-tools), 
   agent instructions. Use obviously fictional placeholders. Per-app knowledge belongs only in
   the user's config or local AUA memory. Run `tests/test_no_app_specific_refs.py` before publishing.
 - Enable git hooks (once per clone): `git config core.hooksPath .githooks` — keeps the SKILL.md copies in sync on every commit
-- **The SKILL.md is generated** — edit `src/android_ui_analyser/guide.py` (the single source),
+- **The agent guidance is generated** — edit `src/android_ui_analyser/guide.py` (the single source),
   never a SKILL.md directly. There are **two** committed copies (project
   `.claude/skills/android-ui-analyser/SKILL.md` + plugin `skills/android-ui-analyser/SKILL.md`);
-  the pre-commit hook (`.githooks/pre-commit`) regenerates and stages **both** from `guide.py`
-  on every commit, so they can't drift. To regenerate by hand: `aua guide --emit-skill <path>`.
+  Codex UI metadata is `skills/android-ui-analyser/agents/openai.yaml`. The pre-commit hook
+  regenerates and stages all three from `guide.py` on every commit. To regenerate by hand use
+  `aua guide --emit-skill <path>` / `aua guide --emit-codex-metadata <path>`.
   When releasing a skill/CLI change, bump `version` in both `.claude-plugin/plugin.json` and
   `.claude-plugin/marketplace.json` so `/plugin update` picks it up.
 - **Plugin/marketplace**: the repo is its own Claude Code plugin marketplace

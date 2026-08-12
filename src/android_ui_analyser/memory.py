@@ -516,7 +516,17 @@ _SAFE_GOTO_STEP_KINDS = frozenset(
 )
 _SETTINGS_STEP_KINDS = frozenset({"flags-apply", "dev-profile"})
 _DATA_STEP_KINDS = frozenset({"input", "clear", "paste"})
-_ENVIRONMENT_STEP_KINDS = frozenset({"proxy-start", "proxy-stop", "mock-replay"})
+_ENVIRONMENT_STEP_KINDS = frozenset(
+    {
+        "proxy-start",
+        "proxy-stop",
+        "mock-replay",
+        "network-offline",
+        "network-restore",
+        "network-profile",
+        "network-profile-restore",
+    }
+)
 _LIFECYCLE_STEP_KINDS = frozenset({"launch-app", "stop-app"})
 _EXTERNAL_URI_SCHEMES = frozenset(
     {"http", "https", "intent", "market", "mailto", "tel", "sms", "geo", "file", "content"}

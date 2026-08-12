@@ -105,6 +105,10 @@ def summarize_result(result: Any) -> Any:
             "via",
             "error",
             "message",
+            "session_id",
+            "goal_hash",
+            "recommended_call",
+            "advice",
         ):
             if key in result:
                 slim[key] = _truncate(result[key], 200)
@@ -180,14 +184,27 @@ def record(
         }
         if owner:
             event["owner"] = owner
+        correlation = dict(extra or {})
+        with contextlib.suppress(Exception):
+            from .session import active_session_metadata
+
+            for key, value in active_session_metadata(cache_dir, serial, owner).items():
+                correlation.setdefault(key, value)
+        if isinstance(result, dict):
+            for key in ("session_id", "goal_hash"):
+                if result.get(key):
+                    correlation.setdefault(key, result[key])
+        for key in ("session_id", "goal_hash", "invocation_id"):
+            if correlation.get(key):
+                event[key] = correlation[key]
         if duration_ms is not None:
             event["duration_ms"] = round(float(duration_ms), 1)
         if error:
             event["error"] = _truncate(error, 300)
         if result is not None:
             event["result"] = summarize_result(result)
-        if extra:
-            event["extra"] = _truncate(extra, 200)
+        if correlation:
+            event["extra"] = _truncate(correlation, 200)
         line = json.dumps(event, ensure_ascii=False, default=str) + "\n"
         with _lock:
             if path.is_file() and path.stat().st_size > _MAX_FILE_BYTES:

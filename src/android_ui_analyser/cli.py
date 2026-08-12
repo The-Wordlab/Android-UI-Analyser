@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import shutil
 import sys
 import time
@@ -64,7 +65,12 @@ T = TypeVar("T")
 
 # Sentinel produced by an optional-value flag (``--annotate``/``--emit-skill``) given bare.
 ANNOTATE_DEFAULT = "\x00aua_annotate_default"
-_OPTIONAL_VALUE_OPTS = {"--annotate", "--emit-skill", "--with-image"}
+_OPTIONAL_VALUE_OPTS = {
+    "--annotate",
+    "--emit-skill",
+    "--emit-codex-metadata",
+    "--with-image",
+}
 
 _LOG_LEVELS = {
     "error": logging.ERROR,
@@ -971,7 +977,9 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
                 cmd = _DAEMON_CMD.get(method, method)
                 resp = client.call(cmd, **kwargs)
                 if resp.get("ok"):
-                    return resp.get("result")
+                    from .coaching import decorate_result
+
+                    return decorate_result(engine, cmd, resp.get("result"))
                 raise _daemon_error(resp.get("error", {}))
         except AuaError:
             raise
@@ -999,7 +1007,9 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
                 result=result,
                 owner=getattr(engine, "_lease_owner_resolved", None),
             )
-        return result
+        from .coaching import decorate_result
+
+        return decorate_result(engine, _DAEMON_CMD.get(method, method), result)
     except AuaError as err:
         with contextlib.suppress(Exception):
             journal_mod.record(
@@ -1021,8 +1031,8 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
 
 _GUIDE_POINTER = (
     "Run `aua guide` for the full agent operating manual (session protocol, escalation "
-    "ladder, memory, schema, exit codes); `aua guide --emit-skill` regenerates the Claude "
-    "Code skill from the same source."
+    "ladder, memory, schema, exit codes); `aua guide --emit-skill` regenerates the shared "
+    "Claude/Codex skill from the same source."
 )
 
 #: Lines per page of `--help` / `guide`. Sized so one page survives a tool-output limit whole.
@@ -1182,6 +1192,18 @@ app = typer.Typer(
     add_completion=False,
     pretty_exceptions_enable=False,
 )
+
+
+@app.command("capabilities")
+def capabilities_cmd(
+    ctx: typer.Context,
+    goal: str | None = typer.Option(None, "--goal", help="Rank capabilities for this goal."),
+) -> None:
+    """Discover the canonical CLI/MCP capability catalogue without needing a device."""
+    from .capabilities import capabilities_for_goal, capability_manifest
+
+    payload = capabilities_for_goal(goal) if goal else capability_manifest()
+    _echo_json({"goal": goal, "capabilities": payload}, _opts(ctx).fmt())
 
 
 @app.callback()
@@ -2715,6 +2737,123 @@ def navigate(
     _run(ctx, go)
 
 
+# --------------------------------------------------------------------------- goal sessions
+
+
+session_app = typer.Typer(
+    help="Goal-aware bootstrap, efficiency review, and reversible cleanup.",
+    no_args_is_help=True,
+)
+app.add_typer(session_app, name="session")
+
+
+@session_app.command("start")
+def session_start_cmd(
+    ctx: typer.Context,
+    goal: str = typer.Option(..., "--goal", help="The end-to-end Android verification goal."),
+    start_emulator: bool = typer.Option(
+        False,
+        "--start-emulator",
+        help="When no device is attached, explicitly permit AUA to boot an AVD.",
+    ),
+    headed: bool = typer.Option(
+        False,
+        "--headed",
+        help="With --start-emulator, show its window instead of using headless mode.",
+    ),
+    avd: str | None = typer.Option(None, "--avd", help="AVD name when several are configured."),
+) -> None:
+    """Observe once and return the safest exact CLI and MCP next call."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        if headed and not start_emulator:
+            raise UsageError("--headed requires --start-emulator")
+        _emit(
+            _route(
+                engine,
+                "session_start",
+                goal=goal,
+                start_emulator=start_emulator,
+                headed=headed,
+                avd=avd,
+            ),
+            fmt,
+        )
+
+    _run(ctx, go)
+
+
+@session_app.command("review")
+def session_review_cmd(
+    ctx: typer.Context,
+    session_id: str | None = typer.Option(None, "--session-id", help="Review a prior session."),
+) -> None:
+    """Report calls, failures, avoidable patterns, and estimated savings."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(_route(engine, "session_review", session_id=session_id), fmt)
+
+    _run(ctx, go)
+
+
+@session_app.command("finish")
+def session_finish_cmd(
+    ctx: typer.Context,
+    session_id: str | None = typer.Option(None, "--session-id", help="Finish a prior session."),
+) -> None:
+    """Restore only session-owned reversible state and return the final review."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        result = _route(engine, "session_finish", session_id=session_id)
+        _emit(result, fmt)
+        if isinstance(result, dict) and not result.get("ok", False):
+            raise typer.Exit(1)
+
+    _run(ctx, go)
+
+
+@app.command("reach")
+def reach_cmd(
+    ctx: typer.Context,
+    goal: str = typer.Argument(..., help="Natural-language destination."),
+    until: str | None = typer.Option(
+        None,
+        "--until",
+        help="Semantic arrival evidence, e.g. 'rid:result,!text:Loading'.",
+    ),
+    timeout_ms: int = typer.Option(30_000, "--timeout-ms", help="Arrival evidence timeout."),
+    poll_ms: int = typer.Option(300, "--poll-ms", help="Arrival evidence polling interval."),
+    allow_unsafe: bool = typer.Option(
+        False, "--allow-unsafe", help="Permit disclosed unsafe effects."
+    ),
+    allow_destructive: bool = typer.Option(
+        False, "--allow-destructive", help="Permit disclosed destructive effects."
+    ),
+    assist: bool = typer.Option(False, "--assist", help="Permit configured planner recovery."),
+) -> None:
+    """Reach a goal through verified goto, then a matching safe flow, with arrival proof."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        if until:
+            _parse_await_terms(until)
+        result = _route(
+            engine,
+            "reach",
+            goal=goal,
+            until=until,
+            timeout_ms=timeout_ms,
+            interval_ms=poll_ms,
+            allow_unsafe=allow_unsafe,
+            allow_destructive=allow_destructive,
+            assist=assist,
+        )
+        _emit(result, fmt)
+        if isinstance(result, dict) and not result.get("ok", False):
+            raise typer.Exit(1)
+
+    _run(ctx, go)
+
+
 # --------------------------------------------------------------------------- device/session
 
 
@@ -3655,9 +3794,7 @@ def network_restore_cmd(
     _run(ctx, go)
 
 
-network_profile_app = typer.Typer(
-    help="Apply one reversible network condition at a time."
-)
+network_profile_app = typer.Typer(help="Apply one reversible network condition at a time.")
 network_app.add_typer(network_profile_app, name="profile")
 
 
@@ -4191,7 +4328,7 @@ def _build_doctor_report(engine: Engine) -> dict[str, Any]:
     except Exception as exc:  # pragma: no cover - defensive
         checks["emulator"] = {"ok": False, "detail": str(exc)}
 
-    checks["skill"] = _installed_skill_check()
+    checks["skills"] = _installed_skill_checks()
 
     try:
         providers = engine.provider_status()
@@ -4204,10 +4341,18 @@ def _build_doctor_report(engine: Engine) -> dict[str, Any]:
 
 # Where `install.sh` puts the user-level skill. Checked rather than rewritten: doctor
 # reports, it does not mutate the user's Claude Code config.
-_USER_SKILL = Path.home() / ".claude" / "skills" / "android-ui-analyser" / "SKILL.md"
+_CLAUDE_USER_SKILL = Path.home() / ".claude" / "skills" / "android-ui-analyser" / "SKILL.md"
+# Backward-compatible test/extension seam for the original single-skill check.
+_USER_SKILL = _CLAUDE_USER_SKILL
+_CODEX_USER_SKILL = (
+    Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+    / "skills"
+    / "android-ui-analyser"
+    / "SKILL.md"
+)
 
 
-def _installed_skill_check() -> dict[str, Any]:
+def _installed_skill_check(path: Path | None = None) -> dict[str, Any]:
     """Is the *installed* SKILL.md still what ``guide.py`` renders?
 
     The pre-commit hook keeps the two in-repo copies in sync, but nothing syncs the copy
@@ -4219,6 +4364,7 @@ def _installed_skill_check() -> dict[str, Any]:
     following stale instructions does not error, it just uses flags that no longer exist and
     misses ones that do.
     """
+    target = path or _USER_SKILL
     try:
         from . import guide as guide_mod
 
@@ -4226,23 +4372,32 @@ def _installed_skill_check() -> dict[str, Any]:
     except Exception as exc:  # pragma: no cover - defensive
         return {"ok": False, "detail": f"could not render the guide: {exc}"}
 
-    if not _USER_SKILL.is_file():
+    if not target.is_file():
         return {
             "ok": True,  # not every install wants the user-level skill; absence is not breakage
-            "detail": f"no user-level skill at {_USER_SKILL} (plugin/project copies still apply)",
+            "detail": f"no user-level skill at {target} (plugin/project copies still apply)",
         }
     try:
-        installed = _USER_SKILL.read_text(encoding="utf-8")
+        installed = target.read_text(encoding="utf-8")
     except OSError as exc:
         return {"ok": False, "detail": f"unreadable: {exc}"}
 
     if installed == expected:
-        return {"ok": True, "detail": f"{_USER_SKILL} matches guide.py"}
+        return {"ok": True, "detail": f"{target} matches guide.py"}
     return {
         "ok": False,
-        "detail": f"{_USER_SKILL} is stale — agents are reading older instructions than this build",
-        "hint": f"aua guide --emit-skill {_USER_SKILL}",
+        "detail": f"{target} is stale — agents are reading older instructions than this build",
+        "hint": f"aua guide --emit-skill {target}",
     }
+
+
+def _installed_skill_checks() -> dict[str, Any]:
+    checks: dict[str, Any] = {
+        "claude": _installed_skill_check(_CLAUDE_USER_SKILL),
+        "codex": _installed_skill_check(_CODEX_USER_SKILL),
+    }
+    checks["ok"] = all(bool(value.get("ok")) for value in checks.values())
+    return checks
 
 
 def _render_doctor_pretty(report: dict[str, Any]) -> str:
@@ -4274,11 +4429,17 @@ def _render_doctor_pretty(report: dict[str, Any]) -> str:
             )
         lines.append(f"[{mark(emu.get('ok', False))}] emulator      {detail}")
 
-    skill = checks.get("skill", {})
-    if skill:
-        lines.append(f"[{mark(skill.get('ok', False))}] skill         {skill.get('detail', '')}")
-        if skill.get("hint"):
-            lines.append(f"               hint: {skill['hint']}")
+    skills = checks.get("skills", {})
+    if not skills and checks.get("skill"):
+        skills = {"claude": checks["skill"]}
+    for name in ("claude", "codex"):
+        skill = skills.get(name, {}) if isinstance(skills, dict) else {}
+        if skill:
+            lines.append(
+                f"[{mark(skill.get('ok', False))}] skill:{name:<6} {skill.get('detail', '')}"
+            )
+            if skill.get("hint"):
+                lines.append(f"               hint: {skill['hint']}")
 
     lines.append("")
     lines.append("Providers:")
@@ -5792,14 +5953,31 @@ def guide_cmd(
         help="Regenerate the Claude Code SKILL.md from this manual (default skill path).",
         show_default=False,
     ),
+    emit_codex_metadata: str | None = typer.Option(
+        None,
+        "--emit-codex-metadata",
+        metavar="[PATH]",
+        help="Write deterministic Codex agents/openai.yaml metadata.",
+        show_default=False,
+    ),
 ) -> None:
     """Print the agent operating manual (the single source for the SKILL.md), §17b."""
     from . import guide as guide_mod
 
     opts = _opts(ctx)
+    if emit_codex_metadata is not None:
+        path = (
+            Path("agents/openai.yaml")
+            if emit_codex_metadata == ANNOTATE_DEFAULT
+            else Path(emit_codex_metadata)
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(guide_mod.render_codex_agent_metadata(), encoding="utf-8")
+        typer.echo(str(path))
+        return
     if emit_skill is not None:
-        path = None if emit_skill == ANNOTATE_DEFAULT else emit_skill
-        target = guide_mod.emit_skill(path)
+        skill_path = None if emit_skill == ANNOTATE_DEFAULT else emit_skill
+        target = guide_mod.emit_skill(skill_path)
         typer.echo(str(target))
         return
     if as_json:

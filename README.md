@@ -364,17 +364,25 @@ cd Android-UI-Analyser
 ./install.sh
 ```
 
-It installs `aua` globally (via `uv tool`/`pipx`, with a venv fallback), installs the skill at **user level** (`~/.claude/skills/`), and runs `aua doctor`. The repo's [`CLAUDE.md`](CLAUDE.md) is auto-loaded when Claude Code opens the clone, so you can also just tell a fresh session:
+It installs `aua` globally (via `uv tool`/`pipx`, with a venv fallback), installs equivalent
+Claude Code (`~/.claude/skills/`) and Codex (`$CODEX_HOME/skills/`, default `~/.codex/skills/`)
+skills at user level, and runs `aua doctor`. The repo's [`CLAUDE.md`](CLAUDE.md) is auto-loaded
+when Claude Code opens the clone, so you can also just tell a fresh session:
 
 > "Clone `git@github.com:The-Wordlab/Android-UI-Analyser.git` and run its `install.sh` to set up the `aua` Android UI testing skill, then use it to &lt;your task&gt;."
 
 ### Then: connect a device
 
-Either path leaves one thing to do: attach a [device or emulator](#connect-a-device-or-emulator). Run `aua doctor` until `adb` and `devices` show OK — after that, in **any** project, just ask Claude Code to test your app and the skill activates automatically.
+Either path leaves one thing to do: attach a [device or emulator](#connect-a-device-or-emulator).
+Run `aua doctor` until `adb` and `devices` show OK. A fresh CLI task starts with
+`aua session start --goal "<what must be verified>"`; MCP clients receive the same goal-first
+protocol during initialization.
 
 ### Keeping the skill current
 
-The SKILL.md is **generated** from the same source as `aua guide`, so it never drifts from the CLI. After upgrading `aua`: plugin users get the refreshed skill via `/plugin update`; user-level installs re-run `aua guide --emit-skill ~/.claude/skills/android-ui-analyser/SKILL.md`.
+The SKILL.md and Codex `agents/openai.yaml` are **generated** from the same source as `aua guide`,
+so they do not drift from the CLI/MCP capability contract. After upgrading, re-run `./install.sh`;
+`aua doctor` reports Claude and Codex skill drift separately.
 
 ### Prefer MCP?
 
@@ -1169,7 +1177,11 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 
 | Command | What it does |
 |---|---|
-| `aua doctor` | Check environment: adb, uiautomator2, devices, provider readiness, emulator tooling |
+| `aua doctor` | Check environment plus separate Claude/Codex installed-skill freshness |
+| `aua capabilities [--goal "…"]` | Discover the canonical CLI/MCP capability catalogue |
+| `aua session start --goal "…"` | Observe once, rank safe routes/flows, and return one exact next CLI + MCP call |
+| `aua session review\|finish` | Quantify avoidable calls; restore only session-owned reversible state |
+| `aua reach "<goal>" [--until …]` | Use verified goto then a matching safe flow, with semantic arrival proof |
 | `aua devices` | List attached devices/emulators |
 | `aua analyze` | Capture the screen → element list with IDs (the core command) |
 | `aua resolve <id\|key>` | Remap a prior id / `stable_key` onto the current screen |
@@ -1192,7 +1204,7 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 | `aua clipboard set\|get` / `paste` / `copy` | Clipboard helpers |
 | `aua location set LAT,LON` | Mock GPS |
 | `aua orientation set\|get` | Screen orientation |
-| `aua airplane on\|off\|toggle` | Airplane mode |
+| `aua airplane on\|off\|toggle` | Radio control only; not proof of offline connectivity |
 | `aua network status\|offline\|restore` | Verified, saved, reversible network isolation |
 | `aua network profile list\|apply\|status\|restore` | Reversible Wi-Fi, cellular, slow, and lossy conditions |
 | `aua media add PATH` | Push media into the gallery |
@@ -1213,7 +1225,7 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 | `aua dev` / `aua a11y` | Dev options helpers / a11y scroll |
 | `aua map` | Show the active-context map (`--all-contexts`, `--audit`, or `--find "<goal>"`) |
 | `aua goto "<goal>"` | Drive the remembered route to a known screen — taps + verifies each hop (`--plan` previews, `--max-steps N`) |
-| `aua flow run\|save\|list\|…` | Maestro-style YAML journeys |
+| `aua flow run\|save\|list\|…` | Maestro-style YAML journeys with goal aliases, arrival predicates, and reversible network steps |
 | `aua navigate "<goal>"` | Opt-in planner drive (needs `planner.enabled`) |
 | `aua memory show\|path\|update\|forget` | Manage the per-app learned layout (`memory.backend: sqlite` optional) |
 | `aua knowledge list\|show\|add\|stale` | Manage scoped, provenance-bearing learned facts |
@@ -1221,7 +1233,7 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 | `aua about` / `aua remember` / `aua orient` | App playbook + orientation blob |
 | `aua config init\|show\|path` | Manage configuration |
 | `aua daemon start\|status\|stop` | Manage the optional warm-state daemon |
-| `aua guide` | Print the agent operating manual (`--emit-skill` writes the Claude Code skill) |
+| `aua guide` | Print the canonical manual (`--emit-skill` / `--emit-codex-metadata`) |
 | `aua mcp` | Run the MCP server over stdio |
 
 All action commands (`tap`, `long-press`, `input`, `clear`, `swipe`, `scroll-to`, `key`, …) **return the post-action screen inline by default** (an `observation` with fresh element IDs), so you rarely need a follow-up `analyze`. Pass **`--no-observe`** to skip it. Prefer **`aua --format tsv analyze`** when reading a screen; use global **`aua --with-image …`** only when you must see pixels.

@@ -1,0 +1,734 @@
+"""Goal-aware session bootstrap and safe navigation recommendations.
+
+This module is deliberately interface agnostic.  CLI and MCP adapters both consume the
+same typed plan, while :class:`~android_ui_analyser.engine.Engine` supplies the one screen
+observation and the local memory records.  Planning is pure: it never connects to a device
+or executes a remembered action.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import shlex
+import time
+import uuid
+from collections.abc import Iterable, Sequence
+from pathlib import Path
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from .atomic import atomic_write_text
+from .flows import Flow
+from .memory import (
+    AppMap,
+    RouteEdge,
+    _shortest_path,
+    is_destructive_step,
+    resolve_goal,
+    route_step_risks,
+    step_display,
+)
+from .schema import AnalyzeResult
+
+
+class GoalCall(BaseModel):
+    """One exact next call, expressed for both supported agent interfaces."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: str
+    cli: str
+    mcp: dict[str, Any]
+    reason: str
+    candidate_id: str | None = None
+    executes: bool = True
+
+
+class GoalCandidate(BaseModel):
+    """A ranked navigation option and the evidence/risk behind it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    kind: Literal["goto", "flow", "deeplink", "arrived"]
+    name: str
+    target: str | None = None
+    score: int = 0
+    safe: bool
+    status: str
+    risks: list[dict[str, str]] = Field(default_factory=list)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    call: GoalCall
+
+
+class GoalSessionPlan(BaseModel):
+    """Structured result returned by ``session start``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ok: bool = True
+    goal: str
+    package: str | None = None
+    current_screen: str | None = None
+    observation: AnalyzeResult
+    candidates: list[GoalCandidate] = Field(default_factory=list)
+    selected_candidate: str | None = None
+    recommended_call: GoalCall
+    warnings: list[str] = Field(default_factory=list)
+    relevant_capabilities: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class SessionState(BaseModel):
+    """Small persisted owner/device scope for review and reversible cleanup."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str
+    goal: str
+    goal_hash: str
+    serial: str
+    owner: str | None = None
+    started_ms: int
+    recommended_kind: str
+    recommended_cli: str
+    network_backup_preexisting: bool = False
+    network_profile_preexisting: bool = False
+    emulator_started: bool = False
+    finished_ms: int | None = None
+
+
+def _safe_token(value: str) -> str:
+    readable = "".join(char if char.isalnum() or char in "-_." else "_" for char in value)
+    return readable[:80] or "unknown"
+
+
+def _session_dir(cache_dir: str | Path) -> Path:
+    return Path(cache_dir).expanduser() / "sessions"
+
+
+def _session_path(cache_dir: str | Path, session_id: str) -> Path:
+    return _session_dir(cache_dir) / f"{_safe_token(session_id)}.json"
+
+
+def _active_path(cache_dir: str | Path, serial: str, owner: str | None) -> Path:
+    identity = hashlib.sha256((owner or "anonymous").encode()).hexdigest()[:12]
+    return _session_dir(cache_dir) / f"active-{_safe_token(serial)}-{identity}.txt"
+
+
+def _write_state(cache_dir: str | Path, state: SessionState) -> None:
+    path = _session_path(cache_dir, state.session_id)
+    atomic_write_text(path, state.model_dump_json(indent=2))
+    if state.finished_ms is None:
+        atomic_write_text(_active_path(cache_dir, state.serial, state.owner), state.session_id)
+
+
+def create_session_state(
+    cache_dir: str | Path,
+    *,
+    goal: str,
+    serial: str,
+    owner: str | None,
+    recommended_kind: str,
+    recommended_cli: str,
+    network_backup_preexisting: bool,
+    network_profile_preexisting: bool,
+    emulator_started: bool = False,
+) -> SessionState:
+    state = SessionState(
+        session_id=uuid.uuid4().hex,
+        goal=goal,
+        goal_hash=hashlib.sha256(goal.encode()).hexdigest()[:16],
+        serial=serial,
+        owner=owner,
+        started_ms=int(time.time() * 1000),
+        recommended_kind=recommended_kind,
+        recommended_cli=recommended_cli,
+        network_backup_preexisting=network_backup_preexisting,
+        network_profile_preexisting=network_profile_preexisting,
+        emulator_started=emulator_started,
+    )
+    _write_state(cache_dir, state)
+    return state
+
+
+def load_session_state(
+    cache_dir: str | Path,
+    *,
+    session_id: str | None = None,
+    serial: str | None = None,
+    owner: str | None = None,
+) -> SessionState | None:
+    if session_id is None:
+        if not serial:
+            return None
+        pointer = _active_path(cache_dir, serial, owner)
+        try:
+            session_id = pointer.read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+    try:
+        payload = json.loads(_session_path(cache_dir, session_id).read_text(encoding="utf-8"))
+        return SessionState.model_validate(payload)
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def active_session_metadata(
+    cache_dir: str | Path, serial: str | None, owner: str | None
+) -> dict[str, str]:
+    """Return journal-safe correlation fields without exposing the natural-language goal."""
+    if not serial:
+        return {}
+    state = load_session_state(cache_dir, serial=serial, owner=owner)
+    if state is None or state.finished_ms is not None:
+        return {}
+    return {"session_id": state.session_id, "goal_hash": state.goal_hash}
+
+
+def finish_session_state(cache_dir: str | Path, state: SessionState) -> SessionState:
+    finished = state.model_copy(update={"finished_ms": int(time.time() * 1000)})
+    _write_state(cache_dir, finished)
+    pointer = _active_path(cache_dir, state.serial, state.owner)
+    try:
+        if pointer.read_text(encoding="utf-8").strip() == state.session_id:
+            pointer.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return finished
+
+
+_ACTION_COMMANDS = frozenset(
+    {
+        "tap",
+        "long_press",
+        "tap_point",
+        "input",
+        "input_text",
+        "clear",
+        "swipe",
+        "scroll",
+        "scroll_to",
+        "key",
+        "open_link",
+    }
+)
+_WAIT_COMMANDS = frozenset(
+    {"wait", "wait_stable", "wait_changed", "wait_after_change", "await_predicate", "await"}
+)
+
+
+def _base_command(value: Any) -> str:
+    command = str(value or "").removesuffix("_and_analyze")
+    aliases = {"input_text": "input", "analyze_screen": "analyze"}
+    return aliases.get(command, command)
+
+
+def review_session_events(state: SessionState, events: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Classify avoidable call patterns without conflating concurrent owners."""
+    scoped = [
+        event
+        for event in events
+        if (event.get("session_id") or (event.get("extra") or {}).get("session_id"))
+        == state.session_id
+    ]
+    counts: dict[str, int] = {}
+    avoidable: dict[str, list[dict[str, Any]]] = {
+        "redundant_analyze": [],
+        "wait_after_observed_action": [],
+        "consecutive_has": [],
+        "manual_path": [],
+        "deeplink_over_verified_navigation": [],
+        "airplane_for_offline": [],
+    }
+    duration_ms = 0.0
+    manual_streak: list[dict[str, Any]] = []
+    previous: dict[str, Any] | None = None
+    for event in scoped:
+        cmd = str(event.get("cmd") or "?")
+        base = _base_command(cmd)
+        counts[cmd] = counts.get(cmd, 0) + 1
+        if isinstance(event.get("duration_ms"), (int, float)):
+            duration_ms += float(event["duration_ms"])
+        prior_result = (previous or {}).get("result")
+        prior_observed = isinstance(prior_result, dict) and bool(prior_result.get("observation"))
+        if base == "analyze" and prior_observed:
+            avoidable["redundant_analyze"].append(
+                {"ts_ms": event.get("ts_ms"), "after": (previous or {}).get("cmd")}
+            )
+        if base in _WAIT_COMMANDS and prior_observed:
+            avoidable["wait_after_observed_action"].append(
+                {"ts_ms": event.get("ts_ms"), "after": (previous or {}).get("cmd")}
+            )
+        if (
+            base == "has"
+            and previous is not None
+            and _base_command(previous.get("cmd")) == "has"
+        ):
+            avoidable["consecutive_has"].append({"ts_ms": event.get("ts_ms")})
+        if base in {"open_link", "open"} and state.recommended_kind in {"goto", "flow"}:
+            avoidable["deeplink_over_verified_navigation"].append({"ts_ms": event.get("ts_ms")})
+        if base.startswith("airplane") and "offline" in state.goal.casefold():
+            avoidable["airplane_for_offline"].append({"ts_ms": event.get("ts_ms")})
+        if base in _ACTION_COMMANDS:
+            manual_streak.append(event)
+        else:
+            if len(manual_streak) >= 4:
+                avoidable["manual_path"].append(
+                    {"calls": len(manual_streak), "from_ms": manual_streak[0].get("ts_ms")}
+                )
+            manual_streak = []
+        previous = event
+    if len(manual_streak) >= 4:
+        avoidable["manual_path"].append(
+            {"calls": len(manual_streak), "from_ms": manual_streak[0].get("ts_ms")}
+        )
+
+    patterns = {name: rows for name, rows in avoidable.items() if rows}
+    avoidable_calls = sum(
+        len(rows) if name != "manual_path" else sum(max(1, int(row["calls"]) - 1) for row in rows)
+        for name, rows in patterns.items()
+    )
+    advice: list[dict[str, str]] = []
+    if patterns.get("redundant_analyze"):
+        advice.append(
+            {
+                "id": "reuse_observation",
+                "recommended_call": "Use the action response's observation.",
+            }
+        )
+    if patterns.get("wait_after_observed_action"):
+        advice.append(
+            {"id": "fold_until", "recommended_call": "Put --until on the analyzed action."}
+        )
+    if patterns.get("consecutive_has"):
+        advice.append(
+            {
+                "id": "combine_assertions",
+                "recommended_call": "Use await-and-analyze with comma-separated terms or a suite.",
+            }
+        )
+    if patterns.get("manual_path"):
+        advice.append({"id": "save_flow", "recommended_call": "aua flow save <name>"})
+    if patterns.get("deeplink_over_verified_navigation"):
+        advice.append(
+            {"id": "prefer_verified_navigation", "recommended_call": state.recommended_cli}
+        )
+    if patterns.get("airplane_for_offline"):
+        advice.append(
+            {"id": "verified_offline", "recommended_call": "aua network offline --verify"}
+        )
+    high_level = sum(counts.get(name, 0) for name in ("session_start", "reach", "goto", "flow_run"))
+    return {
+        "ok": not any(not event.get("ok") for event in scoped),
+        "session_id": state.session_id,
+        "goal_hash": state.goal_hash,
+        "serial": state.serial,
+        "started_ms": state.started_ms,
+        "finished_ms": state.finished_ms,
+        "calls": len(scoped),
+        "failures": sum(1 for event in scoped if not event.get("ok")),
+        "duration_ms": round(duration_ms, 1),
+        "commands": counts,
+        "high_level_navigation_ratio": round(high_level / len(scoped), 3) if scoped else 0.0,
+        "avoidable_calls": avoidable_calls,
+        "estimated_calls_saved_next_run": avoidable_calls,
+        "patterns": patterns,
+        "advice": advice,
+    }
+
+
+_GOAL_WORD = re.compile(r"[a-z0-9]+")
+_LOW_SIGNAL = frozenset(
+    {
+        "a",
+        "an",
+        "android",
+        "app",
+        "check",
+        "do",
+        "for",
+        "in",
+        "is",
+        "it",
+        "of",
+        "on",
+        "open",
+        "reach",
+        "screen",
+        "test",
+        "that",
+        "the",
+        "this",
+        "to",
+        "use",
+        "verify",
+        "navigate",
+        "with",
+    }
+)
+
+
+def _goal_terms(goal: str) -> list[str]:
+    terms = [word for word in _GOAL_WORD.findall(goal.casefold()) if word not in _LOW_SIGNAL]
+    return terms or _GOAL_WORD.findall(goal.casefold())
+
+
+def _match_score(goal: str, *values: str | None) -> int:
+    haystack = " ".join(value for value in values if value).casefold()
+    if not haystack:
+        return 0
+    phrase = goal.casefold().strip()
+    terms = _goal_terms(goal)
+    score = sum(5 for term in terms if term in haystack)
+    if phrase and phrase in haystack:
+        score += 40
+    if terms and all(term in haystack for term in terms):
+        score += 20
+    return score
+
+
+def _edge_risks(
+    path: Sequence[RouteEdge], *, package: str | None, destructive_labels: Sequence[str]
+) -> list[dict[str, str]]:
+    risks: list[dict[str, str]] = []
+    for edge_index, edge in enumerate(path):
+        if not edge.steps:
+            risks.append(
+                {
+                    "code": "legacy_route",
+                    "reason": "route has no inspectable structured steps",
+                    "path": f"route[{edge_index}]",
+                }
+            )
+            continue
+        for step_index, step in enumerate(edge.steps):
+            for item in route_step_risks(
+                step,
+                origin_package=package,
+                destructive_labels=destructive_labels,
+                path=f"route[{edge_index}].steps[{step_index}]",
+            ):
+                if item not in risks:
+                    risks.append(item)
+    return risks
+
+
+def _flow_risks(
+    flow: Flow, *, package: str | None, destructive_labels: Sequence[str]
+) -> list[dict[str, str]]:
+    risks: list[dict[str, str]] = []
+    for index, step in enumerate(flow.steps):
+        for item in route_step_risks(
+            step,
+            origin_package=flow.app or package,
+            destructive_labels=destructive_labels,
+            path=f"steps[{index}]",
+        ):
+            if item not in risks:
+                risks.append(item)
+        # Keep the destructive fact explicit even if a future risk classifier treats the
+        # step as otherwise safe.
+        if is_destructive_step(step, destructive_labels):
+            item = {
+                "code": "destructive",
+                "reason": "label matches the configured destructive-action vocabulary",
+                "path": f"steps[{index}]",
+            }
+            if item not in risks:
+                risks.append(item)
+    required = sorted(name for name, default in flow.params.items() if not default)
+    if required:
+        risks.append(
+            {
+                "code": "required_params",
+                "reason": "flow requires parameter values: " + ", ".join(required),
+                "path": "params",
+            }
+        )
+    return risks
+
+
+def _goto_candidate(
+    goal: str,
+    observation: AnalyzeResult,
+    app: AppMap,
+    *,
+    context_id: str,
+    current_screen: str | None,
+    destructive_labels: Sequence[str],
+) -> GoalCandidate | None:
+    target = resolve_goal(app, goal, start=current_screen, context_id=context_id)
+    if target is None:
+        # Natural goals commonly start with an action verb ("open saved items"), while the
+        # map correctly names the destination only "saved_items".  Retry with low-signal
+        # orchestration words removed; target resolution and context checks remain canonical.
+        destination_terms = " ".join(_goal_terms(goal))
+        if destination_terms and destination_terms != goal.casefold().strip():
+            target = resolve_goal(
+                app,
+                destination_terms,
+                start=current_screen,
+                context_id=context_id,
+            )
+    if target is None:
+        return None
+    quoted = shlex.quote(goal)
+    if current_screen == target:
+        call = GoalCall(
+            kind="arrived",
+            cli=f"aua reach {quoted}",
+            mcp={"tool": "reach", "arguments": {"goal": goal}},
+            reason=f"The one observation already identifies the destination as {target}.",
+        )
+        return GoalCandidate(
+            id=f"arrived:{target}",
+            kind="arrived",
+            name=target,
+            target=target,
+            score=10_000,
+            safe=True,
+            status="already_there",
+            evidence={"known_screen": observation.meta.known_screen},
+            call=call,
+        )
+    path = _shortest_path(app, target, start=current_screen, context_id=context_id)
+    if not path:
+        return None
+    risks = _edge_risks(path, package=app.package, destructive_labels=destructive_labels)
+    safe = not risks
+    call = GoalCall(
+        kind="goto" if safe else "goto_plan",
+        cli=f"aua goto {quoted}" + (" --plan" if not safe else ""),
+        mcp={
+            "tool": "goto",
+            "arguments": {"goal": goal, **({"plan": True} if not safe else {})},
+        },
+        reason=(
+            "A verified route is available in the active app-map context."
+            if safe
+            else "Review the full route risk preview before authorizing any side effect."
+        ),
+        executes=safe,
+    )
+    return GoalCandidate(
+        id=f"goto:{target}",
+        kind="goto",
+        name=target,
+        target=target,
+        score=8_000 - len(path),
+        safe=safe,
+        status="verified" if safe else "requires_review",
+        risks=risks,
+        evidence={
+            "context_id": context_id,
+            "route": [
+                {
+                    "from": edge.from_screen,
+                    "to": edge.to_screen,
+                    "steps": [step_display(step) for step in edge.steps],
+                    "status": edge.status,
+                }
+                for edge in path
+            ],
+        },
+        call=call,
+    )
+
+
+def _flow_candidates(
+    goal: str,
+    observation: AnalyzeResult,
+    flows: Iterable[Flow],
+    *,
+    destructive_labels: Sequence[str],
+) -> list[GoalCandidate]:
+    out: list[GoalCandidate] = []
+    for flow in flows:
+        if flow.app not in (None, observation.screen.package):
+            continue
+        score = _match_score(
+            goal,
+            flow.name,
+            flow.description,
+            flow.arrival,
+            *flow.aliases,
+        )
+        if score <= 0:
+            continue
+        risks = _flow_risks(
+            flow,
+            package=observation.screen.package,
+            destructive_labels=destructive_labels,
+        )
+        safe = not risks
+        cli_name = shlex.quote(flow.name)
+        call = GoalCall(
+            kind="flow" if safe else "flow_preview",
+            cli=f"aua flow run {cli_name}" + (" --dry-run" if not safe else ""),
+            mcp={
+                "tool": "flow_run",
+                "arguments": {"name": flow.name, **({"dry_run": True} if not safe else {})},
+            },
+            reason=(
+                "A matching saved journey can perform the setup in one call."
+                if safe
+                else "Preview this matching journey before supplying parameters or authorizing effects."
+            ),
+            executes=safe,
+        )
+        out.append(
+            GoalCandidate(
+                id=f"flow:{flow.name}",
+                kind="flow",
+                name=flow.name,
+                score=4_000 + score,
+                safe=safe,
+                status="ready" if safe else "requires_review",
+                risks=risks,
+                evidence={
+                    "description": flow.description,
+                    "aliases": flow.aliases,
+                    "arrival": flow.arrival,
+                    "steps": [step_display(step) for step in flow.steps],
+                    "params": sorted(flow.params),
+                },
+                call=call,
+            )
+        )
+    return sorted(out, key=lambda item: (-item.score, item.name))
+
+
+def _deeplink_candidates(goal: str, app: AppMap, *, target: str | None) -> list[GoalCandidate]:
+    out: list[GoalCandidate] = []
+    for index, link in enumerate(app.deeplinks):
+        score = _match_score(goal, link.uri, link.note, link.landed)
+        if target and link.landed == target:
+            score += 100
+        if score <= 0:
+            continue
+        uri = shlex.quote(link.uri)
+        call = GoalCall(
+            kind="deeplink_preview",
+            cli=f"aua open-and-analyze {uri}",
+            mcp={"tool": "open_link", "arguments": {"uri": link.uri, "observe": True}},
+            reason=(
+                "This shortcut was probed before, but intent delivery still does not prove arrival."
+                if link.probed
+                else "This remembered shortcut has not been probed; inspect it only after routes and flows."
+            ),
+            executes=False,
+        )
+        out.append(
+            GoalCandidate(
+                id=f"deeplink:{index}",
+                kind="deeplink",
+                name=link.uri,
+                target=link.landed,
+                score=2_000 + score + (50 if link.probed else 0),
+                safe=False,
+                status="probed" if link.probed else "unprobed",
+                risks=[
+                    {
+                        "code": "deeplink_effect",
+                        "reason": "intent delivery does not prove navigation or exclude state mutation",
+                        "path": "deeplink",
+                    }
+                ],
+                evidence={"note": link.note, "probed": link.probed, "landed": link.landed},
+                call=call,
+            )
+        )
+    return sorted(out, key=lambda item: (-item.score, item.name))
+
+
+def plan_goal_session(
+    goal: str,
+    observation: AnalyzeResult,
+    *,
+    app: AppMap | None = None,
+    context_id: str = "default",
+    current_screen: str | None = None,
+    flows: Iterable[Flow] = (),
+    destructive_labels: Sequence[str] = (),
+    relevant_capabilities: Iterable[dict[str, Any]] = (),
+) -> GoalSessionPlan:
+    """Rank known ways to reach *goal* without performing another observation or action."""
+    if not goal.strip():
+        raise ValueError("goal must not be empty")
+    screen = observation.meta.known_screen or current_screen
+    candidates: list[GoalCandidate] = []
+    goto_candidate: GoalCandidate | None = None
+    if app is not None and app.package == observation.screen.package:
+        goto_candidate = _goto_candidate(
+            goal,
+            observation,
+            app,
+            context_id=context_id,
+            current_screen=screen,
+            destructive_labels=destructive_labels,
+        )
+        if goto_candidate is not None:
+            candidates.append(goto_candidate)
+    candidates.extend(
+        _flow_candidates(
+            goal,
+            observation,
+            flows,
+            destructive_labels=destructive_labels,
+        )
+    )
+    if app is not None and app.package == observation.screen.package:
+        candidates.extend(
+            _deeplink_candidates(
+                goal,
+                app,
+                target=goto_candidate.target if goto_candidate is not None else None,
+            )
+        )
+    # Tier is intentional, not score-only: goto → flow → deeplink.  Scores rank peers.
+    order = {"arrived": 0, "goto": 0, "flow": 1, "deeplink": 2}
+    candidates.sort(key=lambda item: (order[item.kind], -item.score, item.name))
+    selected = next((candidate for candidate in candidates if candidate.safe), None)
+    warnings: list[str] = []
+    if "offline" in goal.casefold() or "airplane" in goal.casefold():
+        warnings.append(
+            "Use `aua network offline --verify`, not airplane mode, and restore connectivity "
+            "with `aua network restore` or `aua session finish`."
+        )
+    if any(candidate.kind == "deeplink" for candidate in candidates):
+        warnings.append(
+            "Deeplinks rank after verified routes and saved flows and require explicit unsafe "
+            "authorization plus arrival evidence."
+        )
+    if selected is not None:
+        recommendation = selected.call.model_copy(update={"candidate_id": selected.id})
+    elif candidates:
+        candidate = candidates[0]
+        recommendation = candidate.call.model_copy(update={"candidate_id": candidate.id})
+        warnings.append("No automatically safe navigation option matched; review before acting.")
+    else:
+        recommendation = GoalCall(
+            kind="map_find",
+            cli=f"aua map --find {shlex.quote(goal)}",
+            mcp={"tool": "map_find", "arguments": {"goal": goal}},
+            reason="No context-compatible route, matching flow, or relevant deeplink is known.",
+            executes=False,
+        )
+        warnings.append(
+            "Continue from the returned observation with semantic selectors; repeated manual "
+            "navigation can be saved as a flow."
+        )
+    return GoalSessionPlan(
+        goal=goal,
+        package=observation.screen.package,
+        current_screen=screen,
+        observation=observation,
+        candidates=candidates,
+        selected_candidate=selected.id if selected is not None else None,
+        recommended_call=recommendation,
+        warnings=warnings,
+        relevant_capabilities=list(relevant_capabilities),
+    )

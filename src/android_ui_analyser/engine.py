@@ -2387,6 +2387,24 @@ class Engine:
                     return StepFailure("unsupported_action", i, s), res
                 if not self.flags_apply(s.arg, observe=False).get("ok", True):
                     return StepFailure("assert_failed", i, s), res
+            elif kind == "network-offline":
+                if not self.network_offline(verify=True, timeout_ms=s.timeout_ms or 10_000).ok:
+                    return StepFailure("assert_failed", i, s), res
+                reanalyze = False
+            elif kind == "network-restore":
+                if not self.network_restore(timeout_ms=s.timeout_ms or 15_000).ok:
+                    return StepFailure("assert_failed", i, s), res
+                reanalyze = False
+            elif kind == "network-profile":
+                if not s.arg:
+                    return StepFailure("unsupported_action", i, s), res
+                if not self.network_profile_apply(s.arg, timeout_ms=s.timeout_ms or 20_000).ok:
+                    return StepFailure("assert_failed", i, s), res
+                reanalyze = False
+            elif kind == "network-profile-restore":
+                if not self.network_profile_restore(timeout_ms=s.timeout_ms or 20_000).ok:
+                    return StepFailure("assert_failed", i, s), res
+                reanalyze = False
             elif kind == "proxy-start":
                 self.proxy_start()
                 reanalyze = False
@@ -2724,6 +2742,7 @@ class Engine:
         assist: bool = False,
         from_here: bool = False,
         _attempted_route_ids: set[str] | None = None,
+        _observation: AnalyzeResult | None = None,
     ) -> dict[str, Any]:
         """Drive to a remembered screen via the app map (PRD §6b).
 
@@ -2748,7 +2767,10 @@ class Engine:
             raise UsageError("memory is disabled", hint="Set `memory.enabled: true` in config.")
         # Known routes normally replay stable hierarchy selectors. Keep the happy path free
         # of OCR; `_run_steps` retries with it only when a remembered label is absent.
-        res = self.analyze(source="hierarchy", with_ocr=False)
+        # ``reach`` already paid for one bootstrap observation.  Accept it through a private
+        # seam so the high-level one-call path does not immediately read the same screen again.
+        # Public CLI/MCP goto behavior is unchanged.
+        res = _observation or self.analyze(source="hierarchy", with_ocr=False)
         serial = res.meta.device_serial or self.device.serial
         package = res.screen.package or self.current_package()
         if not package:
@@ -2863,9 +2885,7 @@ class Engine:
                 "risks": risk_rows,
                 # Kept for compatibility with callers that consumed the original plan field.
                 "destructive": [
-                    step.label
-                    for step in (steps or [])
-                    if is_destructive_step(step, lexicon)
+                    step.label for step in (steps or []) if is_destructive_step(step, lexicon)
                 ],
             }
 
@@ -3201,6 +3221,8 @@ class Engine:
         from_step: int = 0,
         allow_destructive: bool = True,
         assist: bool = False,
+        allow_unsafe: bool = True,
+        _observation: AnalyzeResult | None = None,
     ) -> dict[str, Any]:
         """Replay a named (or ``--file``) flow in one call — the whole journey.
 
@@ -3238,6 +3260,8 @@ class Engine:
             base_dir = store.flows_dir()
         else:
             raise UsageError("flow run needs a NAME or --file", hint="see `aua flow list`")
+        if flow.arrival:
+            _parse_await_terms(flow.arrival)
         steps = resolve_params(flow, params or {})
         if base_dir is not None:
             # A path *inside* a flow belongs to the flow, not to the caller's cwd.
@@ -3278,13 +3302,14 @@ class Engine:
                 res=res_in,
                 executed=ex,
                 flow_dir=base_dir,
+                allow_unsafe_route_effects=allow_unsafe,
             )
             for e in ex:
                 e["index"] += slice_start  # absolute flow indices
             executed.extend(ex)
             return f, r, (slice_start + f.at if f is not None else None)
 
-        fail, res, idx = _exec(from_step, None)
+        fail, res, idx = _exec(from_step, _observation)
         if fail is not None and assist and self.factory.is_enabled("planner"):
             objective = (
                 f"A UI automation step could not run: {step_display(fail.step)}. If a "
@@ -3323,7 +3348,7 @@ class Engine:
                 ][:20],
                 "hint": hint,
             }
-        return {
+        out = {
             "ok": True,
             "flow": flow.name,
             "steps_run": executed,
@@ -3331,6 +3356,18 @@ class Engine:
             # destination elements (ids) so the caller can act without a re-analyze
             "elements": [e.compact() for e in res.elements],
         }
+        if flow.arrival:
+            arrival = self.await_predicate(
+                flow.arrival,
+                timeout_ms=30_000,
+                poll_ms=300,
+                observe=True,
+            )
+            out["arrival"] = arrival.model_dump(mode="json")
+            out["ok"] = arrival.ok
+            if not arrival.ok:
+                out["code"] = f"arrival_{arrival.await_outcome or 'unverified'}"
+        return out
 
     def explore_mine(
         self, source: str, *, package: str | None = None, save: bool = True
@@ -3482,8 +3519,7 @@ class Engine:
             "erase",
         }
         destructive_words.update(
-            word.casefold().replace(" ", "")
-            for word in self.config.memory.destructive_labels
+            word.casefold().replace(" ", "") for word in self.config.memory.destructive_labels
         )
         for d in app.deeplinks:
             if d.probed:
@@ -3568,6 +3604,347 @@ class Engine:
         }
         if warnings:
             out["warnings"] = warnings
+        return out
+
+    def _goal_session_plan(self, goal: str, observation: AnalyzeResult) -> Any:
+        """Build the shared CLI/MCP goal plan from an observation already in hand."""
+        from .capabilities import capabilities_for_goal
+        from .flows import Flow, FlowStore
+        from .session import plan_goal_session
+
+        mem = self._memory
+        app: AppMap | None = None
+        current_screen = observation.meta.known_screen
+        context_id = DEFAULT_CONTEXT_ID
+        package = observation.screen.package
+        if mem is not None and package:
+            app = mem.load(package)
+            session = mem.load_session(observation.meta.device_serial or self.device.serial)
+            current_screen = observation.meta.known_screen or session.current_screen
+            context_id = session.active_context_id
+
+        flows: list[Flow] = []
+        # A malformed flow must not prevent a new agent from starting a session.  It stays
+        # visible through `flow list`, whose error is the right repair surface.
+        with contextlib.suppress(Exception):
+            store = FlowStore(self.config.memory)
+            for item in store.list():
+                name = item.get("name")
+                if not isinstance(name, str) or item.get("error"):
+                    continue
+                flow = store.load(name)
+                if flow.app in (None, package):
+                    flows.append(flow)
+
+        return plan_goal_session(
+            goal,
+            observation,
+            app=app,
+            context_id=context_id,
+            current_screen=current_screen,
+            flows=flows,
+            destructive_labels=self.config.memory.destructive_labels,
+            relevant_capabilities=capabilities_for_goal(goal),
+        )
+
+    def session_start(
+        self,
+        goal: str,
+        *,
+        observation: AnalyzeResult | None = None,
+        start_emulator: bool = False,
+        headed: bool = False,
+        avd: str | None = None,
+    ) -> dict[str, Any]:
+        """Observe once and return the safest goal-specific CLI and MCP next call.
+
+        Supplying *observation* is an internal composition seam used by ``reach``.  Adapters
+        expose only the goal: a normal bootstrap always performs exactly one analyze.
+        """
+        if not goal.strip():
+            raise UsageError("session start needs a non-empty goal")
+        emulator_started = False
+        if observation is None and start_emulator and self._device is None:
+            online = [device for device in self.list_devices() if device.state == "device"]
+            if not online:
+                from . import emulator as emulator_mod
+                from . import leases
+
+                boot_owner = leases.resolve_owner(getattr(self, "_lease_owner", None))
+                boot = emulator_mod.start(
+                    avd,
+                    headless=not headed,
+                    cache_dir=self.config.cache.dir,
+                    owner=boot_owner,
+                )
+                serial = str(boot["serial"])
+                self.config.device.serial = serial
+                self._lease_serial = serial
+                self._lease_owner_resolved = boot_owner
+                emulator_started = True
+        try:
+            observed = observation or self.analyze(source="hierarchy", with_ocr=False)
+        except Exception:
+            if emulator_started:
+                from . import emulator as emulator_mod
+
+                with contextlib.suppress(Exception):
+                    emulator_mod.stop(
+                        serial=self.config.device.serial,
+                        cache_dir=self.config.cache.dir,
+                        requested_by="session-start-rollback",
+                    )
+            raise
+        plan = self._goal_session_plan(goal, observed)
+        from . import network, network_profiles
+        from .session import create_session_state
+
+        serial = observed.meta.device_serial or self.device.serial
+        session_owner = getattr(self, "_lease_owner_resolved", None)
+        state = create_session_state(
+            self.config.cache.dir,
+            goal=goal,
+            serial=serial,
+            owner=session_owner,
+            recommended_kind=plan.recommended_call.kind,
+            recommended_cli=plan.recommended_call.cli,
+            network_backup_preexisting=network.backup_path(self.config.cache.dir, serial).is_file(),
+            network_profile_preexisting=network_profiles.profile_path(
+                self.config.cache.dir, serial
+            ).is_file(),
+            emulator_started=emulator_started,
+        )
+        self._session_id = state.session_id
+        out = plan.model_dump(mode="json")
+        out.update(
+            session_id=state.session_id,
+            goal_hash=state.goal_hash,
+            owner=state.owner,
+            serial=state.serial,
+            cleanup=[
+                "network_restore",
+                "network_profile_restore",
+                *(["owned_emulator_stop"] if emulator_started else []),
+            ],
+            emulator_started=emulator_started,
+        )
+        return out
+
+    def _session_state(self, session_id: str | None = None) -> Any:
+        from .session import load_session_state
+
+        resolved = session_id or getattr(self, "_session_id", None)
+        state = load_session_state(self.config.cache.dir, session_id=resolved) if resolved else None
+        if state is None:
+            serial = self.device.serial
+            state = load_session_state(
+                self.config.cache.dir,
+                serial=serial,
+                owner=getattr(self, "_lease_owner_resolved", None),
+            )
+        if state is None:
+            raise UsageError(
+                "no active AUA goal session",
+                hint='Start one with `aua session start --goal "<goal>"`.',
+            )
+        self._session_id = state.session_id
+        return state
+
+    def session_review(self, session_id: str | None = None) -> dict[str, Any]:
+        """Return owner-isolated call efficiency and concrete next-run improvements."""
+        from . import journal as journal_mod
+        from .session import review_session_events
+
+        state = self._session_state(session_id)
+        events = journal_mod.read_since(
+            self.config.cache.dir,
+            state.serial,
+            since_ms=state.started_ms,
+            limit=2_000,
+        )
+        return review_session_events(state, events)
+
+    def session_finish(self, session_id: str | None = None) -> dict[str, Any]:
+        """Restore only reversible state created after this session started, then review it."""
+        from . import network, network_profiles
+        from .session import finish_session_state
+
+        state = self._session_state(session_id)
+        cleanup: list[dict[str, Any]] = []
+        errors: list[dict[str, str]] = []
+
+        def restore(name: str, fn: Any) -> None:
+            try:
+                result = fn()
+                payload = (
+                    result.model_dump(mode="json") if hasattr(result, "model_dump") else result
+                )
+                cleanup.append(
+                    {"action": name, "ok": bool(payload.get("ok", True)), "result": payload}
+                )
+                if not payload.get("ok", True):
+                    errors.append(
+                        {"action": name, "message": str(payload.get("detail") or "restore failed")}
+                    )
+            except AuaError as exc:
+                errors.append({"action": name, "message": exc.message})
+
+        if (
+            not state.network_profile_preexisting
+            and network_profiles.profile_path(self.config.cache.dir, state.serial).is_file()
+        ):
+            restore("network_profile_restore", self.network_profile_restore)
+        if (
+            not state.network_backup_preexisting
+            and network.backup_path(self.config.cache.dir, state.serial).is_file()
+        ):
+            restore("network_restore", self.network_restore)
+
+        if state.emulator_started:
+            from . import emulator as emulator_mod
+
+            restore(
+                "owned_emulator_stop",
+                lambda: emulator_mod.stop(
+                    serial=state.serial,
+                    cache_dir=self.config.cache.dir,
+                    requested_by="session-finish",
+                ),
+            )
+
+        if not errors:
+            state = finish_session_state(self.config.cache.dir, state)
+        review = self.session_review(state.session_id)
+        return {
+            "ok": not errors,
+            "session_id": state.session_id,
+            "finished": not errors,
+            "cleanup": cleanup,
+            "errors": errors,
+            "review": review,
+            "hint": (
+                "session finished; only session-owned reversible state was restored"
+                if not errors
+                else "cleanup is incomplete; fix the reported device access and run session finish again"
+            ),
+        }
+
+    def reach(
+        self,
+        goal: str,
+        *,
+        until: str | None = None,
+        timeout_ms: int = 30_000,
+        interval_ms: int = 300,
+        allow_unsafe: bool = False,
+        allow_destructive: bool = False,
+        assist: bool = False,
+    ) -> dict[str, Any]:
+        """Use the safest known route or flow, then optionally verify arrival evidence.
+
+        Selection is the same pure plan returned by :meth:`session_start`.  A safe verified
+        goto wins, followed by a safe matching flow.  A deeplink or risky journey is never
+        selected unless its exact risk class was explicitly authorized.  The initial
+        observation is reused by route/flow execution instead of being immediately repeated.
+        """
+        if not goal.strip():
+            raise UsageError("reach needs a non-empty goal")
+        if until is not None:
+            _parse_await_terms(until)  # reject invalid evidence before any action
+        observation = self.analyze(source="hierarchy", with_ocr=False)
+        plan = self._goal_session_plan(goal, observation)
+
+        def authorized(candidate: Any) -> bool:
+            if candidate.safe:
+                return True
+            codes = {risk.get("code") for risk in candidate.risks}
+            if "required_params" in codes or "legacy_route" in codes:
+                return False
+            if "destructive" in codes and not allow_destructive:
+                return False
+            return not (codes - {"destructive"}) or allow_unsafe
+
+        candidate = next(
+            (
+                item
+                for item in plan.candidates
+                if item.kind in {"arrived", "goto", "flow", "deeplink"} and authorized(item)
+            ),
+            None,
+        )
+        if candidate is None:
+            return {
+                "ok": False,
+                "code": "navigation_unavailable",
+                "goal": goal,
+                "observation": observation.model_dump(mode="json"),
+                "candidates": [item.model_dump(mode="json") for item in plan.candidates],
+                "recommended_call": plan.recommended_call.model_dump(mode="json"),
+                "warnings": plan.warnings,
+            }
+
+        navigation: dict[str, Any]
+        if candidate.kind == "arrived":
+            navigation = {
+                "ok": True,
+                "arrived": True,
+                "already_there": True,
+                "target": candidate.target,
+                "final_screen": observation.meta.known_screen,
+                "elements": [element.compact() for element in observation.elements],
+            }
+        elif candidate.kind == "goto":
+            navigation = self.goto(
+                goal,
+                allow_unsafe=allow_unsafe,
+                allow_destructive=allow_destructive,
+                assist=assist,
+                _observation=observation,
+            )
+        elif candidate.kind == "flow":
+            navigation = self.flow_run(
+                candidate.name,
+                allow_destructive=allow_destructive,
+                allow_unsafe=allow_unsafe,
+                assist=assist,
+                _observation=observation,
+            )
+        else:
+            action = self.open_link(candidate.name, observe=True)
+            landed = action.observation.meta.known_screen if action.observation else None
+            expected = candidate.target
+            proven = expected is not None and landed == expected
+            navigation = {
+                "ok": action.ok and (proven or until is not None),
+                "action": action.model_dump(mode="json"),
+                "expected_screen": expected,
+                "final_screen": landed,
+                "arrival_proven": proven,
+            }
+            if action.ok and not proven and until is None:
+                navigation.update(
+                    code="arrival_unproven",
+                    hint="Intent delivery is not arrival; provide --until semantic evidence.",
+                )
+
+        out: dict[str, Any] = {
+            "ok": bool(navigation.get("ok")),
+            "goal": goal,
+            "strategy": candidate.kind,
+            "candidate": candidate.model_dump(mode="json"),
+            "navigation": navigation,
+        }
+        if out["ok"] and until is not None:
+            awaited = self.await_predicate(
+                until,
+                timeout_ms=timeout_ms,
+                poll_ms=interval_ms,
+                observe=True,
+            )
+            out["await"] = awaited.model_dump(mode="json")
+            out["ok"] = awaited.ok
+            if not awaited.ok:
+                out["code"] = f"arrival_{awaited.await_outcome or 'unverified'}"
         return out
 
     def navigate(
@@ -3711,6 +4088,53 @@ class Engine:
         if counts["stale_or_scoped_out"]:
             out["playbook_filtered"] = counts["stale_or_scoped_out"]
         return out
+
+    def map_find(self, goal: str, *, package: str | None = None) -> dict[str, Any]:
+        """Return a context-compatible route preview for a goal without executing it."""
+        mem = self._memory
+        if mem is None:
+            raise UsageError("memory is disabled", hint="Set `memory.enabled: true` in config.")
+        pkg = package or self.current_package()
+        if not pkg:
+            raise UsageError("could not determine the foreground package")
+        app = mem.load(pkg)
+        if app is None:
+            return {"ok": False, "goal": goal, "package": pkg, "code": "map_unknown"}
+        session = mem.load_session(self.device.serial)
+        context_id = session.active_context_id
+        start = session.current_screen
+        target = resolve_goal(app, goal, start=start, context_id=context_id)
+        path = _shortest_path(app, target, start=start, context_id=context_id) if target else None
+        if not target or not path:
+            return {
+                "ok": False,
+                "goal": goal,
+                "package": pkg,
+                "current_screen": start,
+                "context_id": context_id,
+                "code": "route_unknown",
+            }
+        return {
+            "ok": True,
+            "goal": goal,
+            "package": pkg,
+            "current_screen": start,
+            "target": target,
+            "context_id": context_id,
+            "route": [
+                {
+                    "from": edge.from_screen,
+                    "to": edge.to_screen,
+                    "status": edge.status,
+                    "steps": [step_display(step) for step in edge.steps],
+                }
+                for edge in path
+            ],
+            "recommended_call": {
+                "cli": f"aua goto {goal!r}",
+                "mcp": {"tool": "goto", "arguments": {"goal": goal}},
+            },
+        }
 
     # ----------------------------------------------------------------- wait --for-stable
 
@@ -4091,9 +4515,7 @@ class Engine:
                 change: dict[str, Any] | None = None
                 with contextlib.suppress(Exception):
                     change = self._change_summary(before_state, obs)
-                if ready is not None and (
-                    confirmed_stable or ready.get("confirmation_timeout")
-                ):
+                if ready is not None and (confirmed_stable or ready.get("confirmation_timeout")):
                     ready["semantic_confirmation"] = self._change_has_semantic_effect(change)
 
                 # Post-action analyzes deliberately do not write memory because their frame may
@@ -5862,9 +6284,7 @@ class Engine:
                     for element in observed.elements:
                         if term.by == "text":
                             values.extend(
-                                value
-                                for value in (element.text, element.content_desc)
-                                if value
+                                value for value in (element.text, element.content_desc) if value
                             )
                         elif element.content_desc:
                             values.append(element.content_desc)
@@ -6452,13 +6872,34 @@ class Engine:
 
     def airplane_set(self, enabled: bool) -> ActionResult:
         self.device.set_airplane_mode(enabled)
-        return ActionResult(ok=True, action="airplane-set", detail="on" if enabled else "off")
+        return ActionResult(
+            ok=True,
+            action="airplane-set",
+            detail="on" if enabled else "off",
+            note=(
+                "airplane mode is not proof of offline connectivity because Wi-Fi may remain "
+                "active; for offline tests use `aua network offline --verify` and always "
+                "restore with `aua network restore`"
+                if enabled
+                else None
+            ),
+        )
 
     def airplane_toggle(self) -> ActionResult:
         cur = self.device.get_airplane_mode()
         enabled = not cur if cur is not None else True
         self.device.set_airplane_mode(enabled)
-        return ActionResult(ok=True, action="airplane-toggle", detail="on" if enabled else "off")
+        return ActionResult(
+            ok=True,
+            action="airplane-toggle",
+            detail="on" if enabled else "off",
+            note=(
+                "airplane mode is not proof of offline connectivity; use verified reversible "
+                "`network offline` for offline tests"
+                if enabled
+                else None
+            ),
+        )
 
     def network_status(self) -> NetworkResult:
         from . import network
@@ -6655,7 +7096,10 @@ class Engine:
         device = self.device
         path = network_profiles.profile_path(self.config.cache.dir, device.serial)
         initial = network.read_network_state(device)
-        if network.load_backup(network.backup_path(self.config.cache.dir, device.serial)) is not None:
+        if (
+            network.load_backup(network.backup_path(self.config.cache.dir, device.serial))
+            is not None
+        ):
             raise UsageError(
                 "verified offline mode is active",
                 hint="Run `aua network restore` before applying a network profile.",

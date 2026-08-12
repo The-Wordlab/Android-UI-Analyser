@@ -18,7 +18,7 @@ from mcp.shared.memory import create_connected_server_and_client_session
 import android_ui_analyser.engine as engine_mod
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.mcp_server import build_server
-from android_ui_analyser.schema import AnalyzeResult
+from android_ui_analyser.schema import ActionResult, AnalyzeResult
 from conftest import FakeDevice, make_config
 
 # A labeled hierarchy so the forced/auto path yields elements without real providers.
@@ -136,7 +136,105 @@ def test_mcp_lists_core_tools() -> None:
         "knowledge_list",
         "knowledge_add",
         "knowledge_stale",
+        "capabilities",
+        "session_start",
+        "session_review",
+        "session_finish",
+        "orient",
+        "reach",
+        "await_and_analyze",
+        "flow_list",
+        "flow_save",
     } <= set(names)
+
+
+def test_mcp_initialization_teaches_goal_first_protocol() -> None:
+    instructions = build_server(_engine()).create_initialization_options().instructions
+
+    assert instructions is not None
+    assert "session_start(goal)" in instructions
+    assert "goto" in instructions and "matching saved flow" in instructions
+    assert "network_offline" in instructions and "never airplane mode" in instructions
+
+
+def test_mcp_capabilities_progressively_discover_goal_features() -> None:
+    server = build_server(_engine())
+
+    async def run() -> dict:
+        async with create_connected_server_and_client_session(server) as client:
+            result = await client.call_tool(
+                "capabilities", {"goal": "verify a cached screen while offline"}
+            )
+            return json.loads(_first_text(result))
+
+    data = anyio.run(run)
+    ids = {item["id"] for item in data["capabilities"]}
+    assert {"session", "goto", "flow", "network_offline", "action_until"} <= ids
+
+
+def test_mcp_session_and_reach_dispatch_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    eng = _engine()
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def session_start(goal: str, **kwargs: object) -> dict[str, object]:
+        calls.append(("session_start", {"goal": goal, **kwargs}))
+        return {"ok": True, "session_id": "session-1"}
+
+    def session_review(*, session_id: str | None = None) -> dict[str, object]:
+        calls.append(("session_review", {"session_id": session_id}))
+        return {"ok": True, "session_id": session_id}
+
+    def session_finish(*, session_id: str | None = None) -> dict[str, object]:
+        calls.append(("session_finish", {"session_id": session_id}))
+        return {"ok": True, "session_id": session_id}
+
+    def reach(goal: str, **kwargs: object) -> dict[str, object]:
+        calls.append(("reach", {"goal": goal, **kwargs}))
+        return {"ok": True, "goal": goal, "via": "goto"}
+
+    monkeypatch.setattr(eng, "session_start", session_start, raising=False)
+    monkeypatch.setattr(eng, "session_review", session_review, raising=False)
+    monkeypatch.setattr(eng, "session_finish", session_finish, raising=False)
+    monkeypatch.setattr(eng, "reach", reach, raising=False)
+    server = build_server(eng)
+
+    async def run() -> list[dict[str, object]]:
+        async with create_connected_server_and_client_session(server) as client:
+            results = [
+                await client.call_tool("session_start", {"goal": "open settings"}),
+                await client.call_tool("reach", {"goal": "settings", "poll_ms": 25}),
+                await client.call_tool("session_review", {"session_id": "session-1"}),
+                await client.call_tool("session_finish", {"session_id": "session-1"}),
+            ]
+            return [json.loads(_first_text(result)) for result in results]
+
+    outputs = anyio.run(run)
+    assert all(output["ok"] for output in outputs)
+    assert calls == [
+        (
+            "session_start",
+            {
+                "goal": "open settings",
+                "start_emulator": False,
+                "headed": False,
+                "avd": None,
+            },
+        ),
+        (
+            "reach",
+            {
+                "goal": "settings",
+                "until": None,
+                "timeout_ms": 30000,
+                "interval_ms": 25,
+                "allow_unsafe": False,
+                "allow_destructive": False,
+                "assist": False,
+            },
+        ),
+        ("session_review", {"session_id": "session-1"}),
+        ("session_finish", {"session_id": "session-1"}),
+    ]
 
 
 def test_mcp_analyze_screen_returns_schema_valid_json() -> None:
@@ -163,9 +261,7 @@ def test_mcp_network_offline_and_restore_roundtrip() -> None:
 
     async def run() -> tuple[dict, dict]:  # type: ignore[type-arg]
         async with create_connected_server_and_client_session(server) as client:
-            offline = await client.call_tool(
-                "network_offline", {"verify": True, "timeout_ms": 0}
-            )
+            offline = await client.call_tool("network_offline", {"verify": True, "timeout_ms": 0})
             restored = await client.call_tool("network_restore", {"timeout_ms": 0})
             return json.loads(_first_text(offline)), json.loads(_first_text(restored))
 
@@ -225,6 +321,137 @@ def test_mcp_observed_actions_are_named_and_force_analysis() -> None:
     assert "observe" not in schema["properties"], "the renamed tool cannot contradict its name"
     assert old["error"]["code"] == "usage"
     assert "tap_and_analyze" in old["error"]["message"]
+
+
+def test_mcp_analyzed_actions_advertise_and_fold_until(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    eng = _engine()
+    awaited: dict[str, object] = {}
+
+    def fake_await(predicate: str, **kwargs: object) -> ActionResult:
+        awaited.update(predicate=predicate, **kwargs)
+        return ActionResult(
+            ok=True,
+            action="await",
+            await_outcome="satisfied",
+            await_terms=[{"term": "rid:destination", "present": True, "satisfied": True}],
+            elapsed_ms=7,
+            observation=eng.analyze(source="hierarchy"),
+            observation_present=True,
+        )
+
+    monkeypatch.setattr(eng, "await_predicate", fake_await)
+    server = build_server(eng)
+
+    async def run() -> tuple[dict, dict]:  # type: ignore[type-arg]
+        async with create_connected_server_and_client_session(server) as client:
+            listed = await client.list_tools()
+            tap_tool = next(tool for tool in listed.tools if tool.name == "tap_and_analyze")
+            before = await client.call_tool("analyze_screen", {"source": "hierarchy"})
+            button = next(
+                element
+                for element in json.loads(_first_text(before))["elements"]
+                if element["text"] == "Continue"
+            )
+            result = await client.call_tool(
+                "tap_and_analyze",
+                {
+                    "id": button["id"],
+                    "until": "rid:destination",
+                    "until_timeout": 1234,
+                    "until_poll": 42,
+                },
+            )
+            return json.loads(_first_text(result)), tap_tool.inputSchema
+
+    data, schema = anyio.run(run)
+    assert {"until", "until_timeout", "until_poll"} <= set(schema["properties"])
+    assert data["action"] == "tap" and data["await_outcome"] == "satisfied"
+    assert data["observation_present"] is True
+    assert awaited == {
+        "predicate": "rid:destination",
+        "timeout_ms": 1234,
+        "poll_ms": 42,
+        "observe": True,
+        "adopt_action": True,
+    }
+
+
+def test_mcp_until_is_validated_before_action() -> None:
+    eng = _engine()
+    server = build_server(eng)
+
+    async def run() -> dict:
+        async with create_connected_server_and_client_session(server) as client:
+            before = await client.call_tool("analyze_screen", {"source": "hierarchy"})
+            button = next(
+                element
+                for element in json.loads(_first_text(before))["elements"]
+                if element["text"] == "Continue"
+            )
+            result = await client.call_tool(
+                "tap_and_analyze", {"id": button["id"], "until": "rid:"}
+            )
+            return json.loads(_first_text(result))
+
+    before_calls = list(eng.device.calls)  # type: ignore[attr-defined]
+    data = anyio.run(run)
+    assert data["error"]["code"] == "usage"
+    assert eng.device.calls == before_calls  # type: ignore[attr-defined]
+
+
+def test_mcp_await_and_analyze_returns_term_evidence() -> None:
+    server = build_server(_engine())
+
+    async def run() -> dict:
+        async with create_connected_server_and_client_session(server) as client:
+            result = await client.call_tool(
+                "await_and_analyze",
+                {"predicate": "text:Continue,!text:Loading", "timeout_ms": 0},
+            )
+            return json.loads(_first_text(result))
+
+    data = anyio.run(run)
+    assert data["await_outcome"] == "satisfied"
+    assert [term["satisfied"] for term in data["await_terms"]] == [True, True]
+    assert data["observation_present"] is True
+
+
+def test_mcp_top_level_call_is_redacted_and_journaled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from android_ui_analyser import journal
+
+    eng = _engine()
+
+    def database_query(*args: object, **kwargs: object) -> dict[str, object]:
+        return {"ok": True, "rows": [["value"]]}
+
+    monkeypatch.setattr(eng, "database_query", database_query)
+    server = build_server(eng)
+
+    async def run() -> None:
+        async with create_connected_server_and_client_session(server) as client:
+            await client.call_tool(
+                "database_query",
+                {
+                    "package": "com.example.fixture",
+                    "database": "fixture.db",
+                    "sql": "SELECT value FROM records WHERE id = ?",
+                    "parameters": ["private-value"],
+                },
+            )
+
+    anyio.run(run)
+    event = journal.read_since(eng.config.cache.dir, eng.device.serial, limit=5)[-1]
+    assert event["source"] == "mcp" and event["cmd"] == "database_query"
+    assert event["owner"]
+    assert event["duration_ms"] >= 0
+    assert event["args"]["sql"].startswith("<redacted SQL:")
+    assert event["args"]["parameters"] == "<redacted>"
+    assert event["extra"]["invocation_id"]
+    assert event["result"]["ok"] is True
 
 
 def test_mcp_map_audit_and_reconcile_plan_roundtrip() -> None:

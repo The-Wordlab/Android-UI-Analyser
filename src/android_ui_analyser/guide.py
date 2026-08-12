@@ -22,13 +22,14 @@ from .projection import FIELD_ALIASES, TSV_DEFAULT_FIELDS
 # auto-activate the skill on Android-UI tasks — keep it stable across regenerations.
 SKILL_NAME = "android-ui-analyser"
 SKILL_DESCRIPTION = (
-    "Drive and inspect an Android app's UI on a device/emulator with the `aua` "
+    "Plan, drive, inspect, and verify an Android app's UI on a device/emulator with the `aua` "
     "(android-ui-analyser) CLI. Returns the screen as a list of elements with stable integer "
     "IDs + bounding boxes, then acts BY ID — tap/input/swipe/key — so you never guess pixel "
     'coordinates. Use whenever the task involves an Android device/emulator: "test the '
-    'Android app", "what\'s on screen", "tap/type/swipe the X", "is <text> visible", "drive '
+    'Android app", "what\'s on screen", "tap/type/swipe the X", "is the named text visible", "drive '
     'the emulator", automating or debugging an Android UI flow, checking a screen after a '
-    "change, or inspecting/seeding a debuggable app's SQLite database. Hierarchy-first "
+    "change, testing offline/network behavior, or inspecting/seeding a debuggable app's "
+    "SQLite database. Start goal-oriented work with `aua session start --goal`; hierarchy-first "
     "(tens of ms); falls back to OCR/detection/grounding vision on "
     "Compose/Flutter/WebView/canvas/game screens the accessibility tree can't see."
 )
@@ -39,10 +40,23 @@ DEFAULT_SKILL_PATH = Path(".claude/skills/android-ui-analyser/SKILL.md")
 
 SESSION_PROTOCOL: list[tuple[str, str]] = [
     (
+        "Start from the user's goal",
+        'Run `aua session start --goal "<what you must verify>"` first. It leases an available '
+        "device, reuses the warm daemon, observes the foreground app once, and returns relevant "
+        "capabilities plus one exact `recommended_call` in both CLI and MCP form. Its selection "
+        "order is verified context-compatible `goto`, a matching safe flow, a proven deeplink, "
+        "then a manual analyzed action. The command is recommendation-first: risky candidates "
+        "are previewed and never receive authorization from the goal text. Use `aua session "
+        "review` to see avoidable calls and `aua session finish` to perform session-owned "
+        "reversible cleanup.",
+    ),
+    (
         "Ensure a device is available (headless is fine)",
         "If `aua devices` is empty and you need to **verify a change without bothering the "
         "user** (no emulator window on their desktop), boot one quietly: "
-        "`aua emulator start --headless` (uses `-no-window` + **host GPU** on Mac — not "
+        '`aua session start --goal "…" --start-emulator` (or `aua emulator start --headless`). '
+        "When the user needs to watch, add `--headed`; startup ownership is then recorded so "
+        "`aua session finish` stops only that AVD. Headless uses `-no-window` + **host GPU** on Mac — not "
         "SwiftShader; pick `--avd <name>` when several AVDs exist — `aua emulator list`). "
         "Prefer an already running device when one is attached; don't kill the user's headed "
         "emulator unless they asked. For **HTTPS proxy / mock record** you need a *rootable* "
@@ -202,7 +216,11 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "step index + remaining steps; fix and resume with `--from-step N`. Flows live under "
         "`<memory.dir>/flows/*.yaml` (`aua flow list|show|delete`); `--dry-run` previews. Use a "
         "flow for any setup you repeat (reset account, log in, reach the screen under test) — "
-        "one call instead of a dozen.",
+        "one call instead of a dozen. Give reusable flows goal-facing `aliases:` and an "
+        "`arrival:` predicate so goal planning can find them and replay can prove completion. "
+        "Offline journeys may use `network_offline`, `network_restore`, `network_profile`, or "
+        "`network_profile_restore` "
+        "steps; environment-changing flows are risk-previewed before automatic selection.",
     ),
     (
         "Optional: let a fast model recover or explore (opt-in)",
@@ -374,12 +392,21 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
 # feature and exception. The generated skill still receives the complete manual below.
 BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
     (
+        "Start from the user's goal",
+        'Run `aua session start --goal "<what you must verify>"`. It attaches and leases '
+        "automatically, starts/reuses the warm transport, observes once, ranks a verified "
+        "`goto`, matching saved flow, proven deeplink, or manual analyzed action in that order, "
+        "and returns one exact CLI and MCP `recommended_call`. Follow that call instead of "
+        'inventorying commands. Use `aua capabilities --goal "…"` only when you need another '
+        "goal-specific capability, and finish reversible work with `aua session finish`.",
+    ),
+    (
         "Attach automatically and clean up only what you started",
         "Run `aua devices`, then `aua daemon start` when several calls are coming. AUA leases one "
         "compatible emulator to the calling agent process automatically: never ask the user for "
         "a lease or manually steal one. A dead owner makes its device immediately reusable. Prefer "
-        "an existing headed device; if you start a headless emulator, retain its serial and stop "
-        "that emulator before finishing.",
+        "an existing headed device; when none exists, `session start --start-emulator` is the "
+        "explicit boot permission (`--headed` shows it), and `session finish` owns its cleanup.",
     ),
     (
         "Observe once and use stable selectors",
@@ -392,7 +419,7 @@ BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
     ),
     (
         "Choose the highest-level safe navigation",
-        "Use an offered verified `aua goto \"<goal>\"` first, then a matching `aua flow run`, then "
+        'Use an offered verified `aua goto "<goal>"` first, then a matching `aua flow run`, then '
         "a known deeplink, and manual controls last. A delivered deeplink intent is not arrival: "
         "accept it only when the returned observation/activity proves the destination. Inspect a "
         "plan before any route that may delete, pay, send, sign out, mutate settings/data, use a "
@@ -461,6 +488,10 @@ EXIT_CODES: list[tuple[str, str]] = [
 #: the unknown-command error so that one wrong guess produces the orientation the guide would
 #: have given — an agent that never read the manual reads this instead, once, and then knows.
 ORIENTATION: tuple[tuple[str, str], ...] = (
+    (
+        'aua session start --goal "<what you must verify>"',
+        "attach, observe once, and receive the safest exact next call plus cleanup",
+    ),
     (
         "aua --format tsv analyze --fields id,text,rid,clickable",
         "READ as rows — `rid` is the app's resource-id (pass with --rid); `id` is this call's "
@@ -720,7 +751,8 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "[--no-allow-destructive] [--assist]`, `save <name> [--last N] [--force]`, "
         "`list|show|delete`. Steps incl. `launch_app`/`stop_app`/`open_link`/`goto`/`flow` "
         "/ `dev_profile` / `a11y_scroll` / `flags_apply` / `proxy_start`/`stop` / `mock_replay` "
-        "(a `flow:` step runs a saved flow inline — reuse a shared `login` recipe).",
+        "/ `network_offline`/`network_restore`/`network_profile`/`network_profile_restore`. Top-level `aliases:` help "
+        "goal matching and `arrival:` proves completion (a `flow:` step runs a saved flow inline).",
     ),
     (
         "open / about / remember",
@@ -1300,6 +1332,8 @@ def render_brief() -> str:
 
 def render_json() -> dict[str, object]:
     """Structured form of the manual for programmatic consumers."""
+    from .capabilities import capability_manifest
+
     return {
         "name": SKILL_NAME,
         "summary": (
@@ -1384,6 +1418,7 @@ def render_json() -> dict[str, object]:
             "memory": [{"dont": a, "do": b, "why": c} for a, b, c in AGENT_BEST_PRACTICES_MEMORY],
             "speed": [{"dont": a, "do": b, "why": c} for a, b, c in AGENT_BEST_PRACTICES_SPEED],
         },
+        "capabilities": capability_manifest(),
     }
 
 
@@ -1422,3 +1457,23 @@ def emit_skill(path: str | Path | None = None) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(render_skill(), encoding="utf-8")
     return target
+
+
+def render_codex_agent_metadata() -> str:
+    """Deterministic Codex UI metadata shipped beside the same canonical skill body."""
+    return (
+        "interface:\n"
+        '  display_name: "Android UI Analyser"\n'
+        '  short_description: "Drive and verify Android apps with semantic UI evidence"\n'
+        '  default_prompt: "Use $android-ui-analyser to verify the requested Android behavior efficiently."\n'
+    )
+
+
+def emit_skill_bundle(directory: str | Path) -> Path:
+    """Install one generated skill body plus Codex metadata into a skill directory."""
+    root = Path(directory)
+    emit_skill(root / "SKILL.md")
+    agents = root / "agents"
+    agents.mkdir(parents=True, exist_ok=True)
+    (agents / "openai.yaml").write_text(render_codex_agent_metadata(), encoding="utf-8")
+    return root

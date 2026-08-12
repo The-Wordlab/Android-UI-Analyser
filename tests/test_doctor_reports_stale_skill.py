@@ -43,6 +43,23 @@ def test_absent_skill_is_not_a_failure(monkeypatch, tmp_path):
     assert cli._installed_skill_check()["ok"] is True
 
 
+def test_doctor_checks_claude_and_codex_install_targets(monkeypatch, tmp_path):
+    claude = tmp_path / "claude" / "SKILL.md"
+    codex = tmp_path / "codex" / "SKILL.md"
+    claude.parent.mkdir(parents=True)
+    codex.parent.mkdir(parents=True)
+    claude.write_text(guide_mod.render_skill(), encoding="utf-8")
+    codex.write_text(guide_mod.render_skill() + "\nold", encoding="utf-8")
+    monkeypatch.setattr(cli, "_CLAUDE_USER_SKILL", claude)
+    monkeypatch.setattr(cli, "_CODEX_USER_SKILL", codex)
+
+    checks = cli._installed_skill_checks()
+
+    assert checks["claude"]["ok"] is True
+    assert checks["codex"]["ok"] is False
+    assert checks["ok"] is False
+
+
 def test_check_is_wired_into_the_pretty_report():
     rendered = cli._render_doctor_pretty(
         {"checks": {"skill": {"ok": False, "detail": "stale", "hint": "aua guide --emit-skill X"}}}

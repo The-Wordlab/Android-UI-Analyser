@@ -391,6 +391,8 @@ class ActionResult(BaseModel):
     action_diff_summary: dict[str, Any] | None = None
     # Inline hint when an action already returns usable screen state.
     note: str | None = None
+    # Structured one-call efficiency recommendation (CLI and MCP share the same ids/text).
+    advice: list[dict[str, str]] | None = None
     # Why the folded observation may not show the action's effect — e.g. the post-action screen was
     # byte-identical to the pre-action one. Carries the reason, not a bare flag, so a reader can
     # judge it. Absent when the observation is trustworthy, so its presence is the signal.

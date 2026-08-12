@@ -12,15 +12,20 @@ tests can drive it in-process; ``run_stdio()`` is what ``aua mcp`` invokes.
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
+import time
+import uuid
 from pathlib import Path
 from typing import Any
 
 import mcp.types as types
 from mcp.server.lowlevel import Server
 
+from . import __version__
+from .capabilities import capabilities_for_goal, capability_manifest, render_mcp_instructions
 from .config import load_config
-from .engine import Engine
+from .engine import Engine, _parse_await_terms
 from .errors import AuaError, UsageError
 from .projection import Projection, trim_observation_payload
 from .schema import OutputFormat
@@ -52,6 +57,11 @@ def _dump(result: Any) -> Any:
     return result.model_dump(mode="json") if hasattr(result, "model_dump") else result
 
 
+def _engine_method(engine: Engine, name: str) -> Any:
+    """Late-bind a new parity method while CLI/engine and MCP land concurrently."""
+    return getattr(engine, name)
+
+
 _WITH_IMAGE_PROP: dict[str, Any] = {
     "type": "boolean",
     "description": "Also attach a post-action screenshot (overrides configure default).",
@@ -69,6 +79,27 @@ _OBSERVE_PROP: dict[str, Any] = {
     "type": "boolean",
     "default": True,
     "description": "Also return the post-action screen analysis.",
+}
+_UNTIL_PROPS: dict[str, dict[str, Any]] = {
+    "until": {
+        "type": "string",
+        "description": (
+            "After the action, wait for comma-separated semantic terms such as "
+            "'rid:result,!text:Loading', then return that settled screen in this same call."
+        ),
+    },
+    "until_timeout": {
+        "type": "integer",
+        "default": 30000,
+        "minimum": 0,
+        "description": "Maximum milliseconds to wait for until.",
+    },
+    "until_poll": {
+        "type": "integer",
+        "default": 500,
+        "minimum": 10,
+        "description": "Milliseconds between until predicate checks.",
+    },
 }
 _DATABASE_PARAMS_PROP: dict[str, Any] = {
     "oneOf": [
@@ -111,6 +142,72 @@ _ANALYZED_TOOL_NAMES: dict[str, str] = {
     "flags_apply": "flags_apply_and_analyze",
 }
 _ANALYZED_TOOL_BASES = {public: base for base, public in _ANALYZED_TOOL_NAMES.items()}
+_POST_ACTION_WAIT_TOOLS = frozenset({*_ANALYZED_TOOL_BASES, "app_launch_and_analyze"})
+_OBSERVATION_TOOL_NAMES = frozenset({*_POST_ACTION_WAIT_TOOLS, "await_and_analyze"})
+
+
+def _validate_until(name: str, args: dict[str, Any]) -> None:
+    """Validate a folded action wait before the action can mutate device state."""
+    predicate = args.get("until")
+    dangling = [key for key in ("until_timeout", "until_poll") if key in args]
+    if predicate:
+        _parse_await_terms(str(predicate))
+        return
+    if name in _POST_ACTION_WAIT_TOOLS and dangling:
+        raise UsageError(
+            f"{' and '.join(dangling)} only bounds `until`, and no until predicate was given",
+            hint="Name the semantic arrival evidence in `until`, for example "
+            "'rid:result,!text:Loading'.",
+        )
+
+
+def _fold_action_until(
+    engine: Engine,
+    name: str,
+    args: dict[str, Any],
+    payload: Any,
+) -> Any:
+    """Adopt predicate evidence as an action's final observation, like CLI ``--until``."""
+    predicate = args.get("until")
+    if name not in _POST_ACTION_WAIT_TOOLS or not predicate or not isinstance(payload, dict):
+        return payload
+    if not payload.get("ok") or payload.get("observation_present") is None:
+        return payload
+    awaited = _dump(
+        engine.await_predicate(
+            str(predicate),
+            timeout_ms=int(args.get("until_timeout", 30000)),
+            poll_ms=int(args.get("until_poll", 500)),
+            observe=True,
+            adopt_action=True,
+        )
+    )
+    if not isinstance(awaited, dict):
+        return payload
+    for key in (
+        "await_outcome",
+        "await_terms",
+        "elapsed_ms",
+        "observation",
+        "observation_present",
+        "known_screen",
+        "stable_elements",
+        "action_diff_summary",
+        "change",
+        "next_actions",
+        "routes",
+        "note",
+    ):
+        payload[key] = awaited.get(key)
+    if awaited.get("await_outcome") == "timeout":
+        payload["note"] = (
+            f"the action landed; `until` timed out after "
+            f"{int(args.get('until_timeout', 30000))}ms. Match the exact screen label or "
+            "resource-id; this is a predicate timeout, not proof that the action failed."
+        )
+    elif awaited.get("await_outcome") == "satisfied":
+        payload["stale_risk"] = None
+    return payload
 
 
 def _as_analyzed_tool(tool: types.Tool) -> types.Tool:
@@ -124,6 +221,7 @@ def _as_analyzed_tool(tool: types.Tool) -> types.Tool:
     # `observe` contradicted the name; a *width* control does not. Without it MCP had no cost
     # control at all and returned the whole tree on every action, while the CLI trimmed by default.
     properties["observe_fields"] = _OBSERVE_FIELDS_PROP
+    properties.update(_UNTIL_PROPS)
     schema["properties"] = properties
     return types.Tool(
         name=public_name,
@@ -143,6 +241,211 @@ def _tool_definitions() -> list[types.Tool]:
     match_enum = ["exact", "contains", "regex"]
     source_enum = ["auto", "hierarchy", "vision"]
     tools = [
+        types.Tool(
+            name="capabilities",
+            description=(
+                "Discover AUA capabilities, ranked for an optional goal. Start a new kind of "
+                "task here only when session_start did not already surface what you need."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "goal": {
+                        "type": "string",
+                        "description": "Optional natural-language task used to rank the catalogue.",
+                    }
+                },
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="session_start",
+            description=(
+                "Start goal-aware Android work: observe once, surface relevant capabilities, "
+                "and return the safest exact recommended call. Use this first."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "goal": {"type": "string", "description": "The end-to-end test goal."},
+                    "start_emulator": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Explicitly permit booting an AVD when no device is attached.",
+                    },
+                    "headed": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Show the newly started emulator window.",
+                    },
+                    "avd": {"type": "string", "description": "AVD name when several exist."},
+                },
+                "required": ["goal"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="session_review",
+            description=(
+                "Review this AUA session's top-level calls, elapsed time, failures, redundant "
+                "patterns, recommendation use, and estimated savings."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {"session_id": {"type": "string"}},
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="session_finish",
+            description=(
+                "Finish the session, restore session-owned reversible state, stop only emulators "
+                "started by it, and return the final efficiency review."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {"session_id": {"type": "string"}},
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="orient",
+            description=(
+                "Return the current app's known screens, verified route suggestions, recipes, "
+                "deeplinks, notes, and research tasks without navigating."
+            ),
+            inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
+        ),
+        types.Tool(
+            name="reach",
+            description=(
+                "Reach a semantic destination in one call using the safest verified option: "
+                "goto, then a matching safe flow, then an explicitly permitted deeplink or assist."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "goal": {"type": "string"},
+                    "until": {
+                        "type": "string",
+                        "description": "Arrival predicate, for example 'rid:result,!text:Loading'.",
+                    },
+                    "timeout_ms": {"type": "integer", "default": 30000, "minimum": 0},
+                    "poll_ms": {"type": "integer", "default": 300, "minimum": 10},
+                    "allow_unsafe": {"type": "boolean", "default": False},
+                    "allow_destructive": {"type": "boolean", "default": False},
+                    "assist": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Permit configured planner assistance after deterministic options.",
+                    },
+                },
+                "required": ["goal"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="await_and_analyze",
+            description=(
+                "Wait for all comma-separated positive/negative semantic terms and return the "
+                "settled analyzed screen plus per-term evidence in one call."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "predicate": {
+                        "type": "string",
+                        "description": "For example 'rid:result,!text:Loading'.",
+                    },
+                    "timeout_ms": {"type": "integer", "default": 60000, "minimum": 0},
+                    "poll_ms": {"type": "integer", "default": 500, "minimum": 10},
+                    "match": {
+                        "type": "string",
+                        "enum": match_enum,
+                        "default": "contains",
+                    },
+                    "ignore_case": {"type": "boolean", "default": False},
+                    "observe_fields": _OBSERVE_FIELDS_PROP,
+                },
+                "required": ["predicate"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="flow_list",
+            description="List saved flows with app, step count, parameters, description, and path.",
+            inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
+        ),
+        types.Tool(
+            name="flow_save",
+            description=(
+                "Materialize recent recorded actions into an editable reusable flow. Redacted "
+                "inputs become required placeholders."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "last": {"type": "integer", "default": 12, "minimum": 1},
+                    "force": {"type": "boolean", "default": False},
+                },
+                "required": ["name"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="map_find",
+            description="Find a context-compatible learned route and return its exact goto call without acting.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "goal": {"type": "string"},
+                    "package": {"type": "string"},
+                },
+                "required": ["goal"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="suite_run",
+            description="Run a YAML acceptance checklist as one grouped assertion call.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "text": {"type": "string", "description": "Inline YAML when path is '-'."},
+                    "continue_on_fail": {"type": "boolean", "default": False},
+                },
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="logcat_mark",
+            description="Set a named device-clock logcat mark before the action under test.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "default": "default"},
+                    "clear": {"type": "boolean", "default": False},
+                },
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="logcat_dump",
+            description="Read only logcat lines since a named mark, with optional grep/tag filters.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "since": {"type": "string"},
+                    "grep": {"type": "string"},
+                    "tag": {"type": "string"},
+                    "lines": {"type": "integer", "minimum": 1},
+                },
+                "additionalProperties": False,
+            },
+        ),
         types.Tool(
             name="analyze_screen",
             description="Analyze the current screen and return Set-of-Marks JSON "
@@ -729,9 +1032,7 @@ def _tool_definitions() -> list[types.Tool]:
         ),
         types.Tool(
             name="network_status",
-            description=(
-                "Read airplane, Wi-Fi, mobile-data, and active default-network state."
-            ),
+            description=("Read airplane, Wi-Fi, mobile-data, and active default-network state."),
             inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
         ),
         types.Tool(
@@ -754,9 +1055,7 @@ def _tool_definitions() -> list[types.Tool]:
             description="Restore and verify the network controls saved by network_offline.",
             inputSchema={
                 "type": "object",
-                "properties": {
-                    "timeout_ms": {"type": "integer", "minimum": 0, "default": 15000}
-                },
+                "properties": {"timeout_ms": {"type": "integer", "minimum": 0, "default": 15000}},
                 "additionalProperties": False,
             },
         ),
@@ -800,9 +1099,7 @@ def _tool_definitions() -> list[types.Tool]:
             description="Restore and verify conditions saved before the active profile.",
             inputSchema={
                 "type": "object",
-                "properties": {
-                    "timeout_ms": {"type": "integer", "minimum": 0, "default": 20000}
-                },
+                "properties": {"timeout_ms": {"type": "integer", "minimum": 0, "default": 20000}},
                 "additionalProperties": False,
             },
         ),
@@ -1140,6 +1437,7 @@ def _tool_definitions() -> list[types.Tool]:
                         "description": "Required when clear_state=true because it wipes app data.",
                     },
                     "with_image": _WITH_IMAGE_PROP,
+                    **_UNTIL_PROPS,
                 },
                 "required": ["package"],
                 "additionalProperties": False,
@@ -1304,6 +1602,7 @@ def _tool_definitions() -> list[types.Tool]:
 
 def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
     """Call the engine method for ``name`` and return a JSON-serialisable payload."""
+    args = dict(args)
     internal_name = _ANALYZED_TOOL_BASES.get(name)
     if internal_name is not None:
         name = internal_name
@@ -1311,6 +1610,8 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         # Dropped rather than read: no engine method takes it. The caller's copy in `args_in`
         # is what trims the folded observation, at the boundary every tool returns through.
         args.pop("observe_fields", None)
+        for wrapper_arg in _UNTIL_PROPS:
+            args.pop(wrapper_arg, None)
     elif name in _ANALYZED_TOOL_NAMES:
         raise UsageError(
             f"MCP tool '{name}' was renamed to '{_ANALYZED_TOOL_NAMES[name]}'",
@@ -1319,6 +1620,108 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         )
     img = _with_image(engine, args)
 
+    if name == "capabilities":
+        goal = args.get("goal")
+        return {"capabilities": capabilities_for_goal(str(goal)) if goal else capability_manifest()}
+    if name == "session_start":
+        if args.get("headed") and not args.get("start_emulator"):
+            raise UsageError("headed requires start_emulator=true")
+        started = _dump(
+            _engine_method(engine, "session_start")(
+                str(args["goal"]),
+                start_emulator=bool(args.get("start_emulator", False)),
+                headed=bool(args.get("headed", False)),
+                avd=args.get("avd"),
+            )
+        )
+        if isinstance(started, dict) and started.get("emulator_started"):
+            serial = started.get("serial")
+            if isinstance(serial, str) and serial:
+                _mcp_started_serials().add(serial)
+            owner = started.get("owner")
+            if owner:
+                _mcp_started_owners().add(str(owner))
+        return started
+    if name == "session_review":
+        return _dump(_engine_method(engine, "session_review")(session_id=args.get("session_id")))
+    if name == "session_finish":
+        finished = _dump(
+            _engine_method(engine, "session_finish")(session_id=args.get("session_id"))
+        )
+        if isinstance(finished, dict) and finished.get("ok"):
+            for item in finished.get("cleanup") or []:
+                if not isinstance(item, dict) or item.get("action") != "owned_emulator_stop":
+                    continue
+                _mcp_started_serials().discard(str(getattr(engine.config.device, "serial", "")))
+        return finished
+    if name == "orient":
+        return _dump(engine.orient())
+    if name == "reach":
+        return _dump(
+            _engine_method(engine, "reach")(
+                str(args["goal"]),
+                until=args.get("until"),
+                timeout_ms=int(args.get("timeout_ms", 30000)),
+                interval_ms=int(args.get("poll_ms", 300)),
+                allow_unsafe=bool(args.get("allow_unsafe", False)),
+                allow_destructive=bool(args.get("allow_destructive", False)),
+                assist=bool(args.get("assist", False)),
+            )
+        )
+    if name == "await_and_analyze":
+        return _dump(
+            engine.await_predicate(
+                str(args["predicate"]),
+                timeout_ms=int(args.get("timeout_ms", 60000)),
+                poll_ms=int(args.get("poll_ms", 500)),
+                match=args.get("match", "contains"),
+                ignore_case=bool(args.get("ignore_case", False)),
+                observe=True,
+            )
+        )
+    if name == "flow_list":
+        from .flows import FlowStore
+
+        return {"flows": FlowStore(engine.config.memory).list()}
+    if name == "flow_save":
+        return _dump(
+            engine.flow_save(
+                str(args["name"]),
+                last=int(args.get("last", 12)),
+                force=bool(args.get("force", False)),
+            )
+        )
+    if name == "map_find":
+        return _dump(
+            engine.map_find(
+                str(args["goal"]),
+                package=args.get("package"),
+            )
+        )
+    if name == "suite_run":
+        return _dump(
+            engine.suite_run(
+                str(args["path"]),
+                text=args.get("text"),
+                continue_on_fail=bool(args.get("continue_on_fail", False)),
+            )
+        )
+    if name == "logcat_mark":
+        return _dump(
+            engine.logcat_mark(
+                str(args.get("name", "default")),
+                clear=bool(args.get("clear", False)),
+            )
+        )
+    if name == "logcat_dump":
+        return _dump(
+            engine.logcat(
+                since=args.get("since"),
+                grep=args.get("grep"),
+                tag=args.get("tag"),
+                lines=args.get("lines"),
+            )
+        )
     if name == "analyze_screen":
         result = engine.analyze(
             source=args.get("source", "auto"),
@@ -1635,9 +2038,7 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
             )
         )
     if name == "network_profile_restore":
-        return _dump(
-            engine.network_profile_restore(timeout_ms=int(args.get("timeout_ms", 20_000)))
-        )
+        return _dump(engine.network_profile_restore(timeout_ms=int(args.get("timeout_ms", 20_000))))
     if name == "media_add":
         return _dump(engine.media_add(args["path"]))
     if name == "record_start":
@@ -1822,6 +2223,8 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
             )
         )
     if name == "app_launch_and_analyze":
+        for wrapper_arg in _UNTIL_PROPS:
+            args.pop(wrapper_arg, None)
         return _dump(
             engine.app(
                 "launch",
@@ -1884,7 +2287,7 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         return _dump(result)
     if name == "configure":
         if "with_image" in args:
-            engine._default_with_image = args["with_image"]  # type: ignore[attr-defined]
+            engine._default_with_image = args["with_image"]
         return {
             "ok": True,
             "with_image": getattr(engine, "_default_with_image", None),
@@ -1959,7 +2362,11 @@ def cleanup_mcp_emulators(cache_dir: str | Path | None = None) -> dict[str, Any]
 
 def build_server(engine: Engine) -> Server:
     """Build a low-level MCP :class:`Server` bound to ``engine`` (for stdio + tests)."""
-    server: Server = Server(SERVER_NAME)
+    server: Server = Server(
+        SERVER_NAME,
+        version=__version__,
+        instructions=render_mcp_instructions(),
+    )
 
     @server.list_tools()
     async def list_tools() -> list[types.Tool]:
@@ -1967,14 +2374,58 @@ def build_server(engine: Engine) -> Server:
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.ContentBlock]:
+        from . import journal as journal_mod
+
+        args_in = arguments or {}
+        invocation_id = uuid.uuid4().hex
+        started_at = time.monotonic()
+        payload: Any = None
+
+        def journal_call(*, ok: bool, error: dict[str, Any] | None = None) -> None:
+            from . import leases
+
+            device = getattr(engine, "_device", None)
+            serial = getattr(device, "serial", None) or getattr(
+                engine.config.device, "serial", None
+            )
+            session_id = (
+                (payload.get("session_id") if isinstance(payload, dict) else None)
+                or args_in.get("session_id")
+                or getattr(engine, "_session_id", None)
+            )
+            extra: dict[str, Any] = {"invocation_id": invocation_id}
+            if session_id:
+                extra["session_id"] = str(session_id)
+            with contextlib.suppress(Exception):
+                journal_mod.record(
+                    cache_dir=engine.config.cache.dir,
+                    serial=serial,
+                    source="mcp",
+                    cmd=name,
+                    args=args_in,
+                    ok=ok,
+                    duration_ms=(time.monotonic() - started_at) * 1000.0,
+                    result=payload,
+                    error=error,
+                    extra=extra,
+                    owner=leases.resolve_owner(
+                        getattr(engine, "_lease_owner_resolved", None)
+                        or getattr(engine, "_lease_owner", None)
+                    ),
+                )
+
         try:
-            args_in = arguments or {}
+            _validate_until(name, args_in)
             payload = _dispatch(engine, name, args_in)
+            payload = _fold_action_until(engine, name, args_in, payload)
+            from .coaching import decorate_result
+
+            payload = decorate_result(engine, name, payload)
             # Trim the folded observation the same way the CLI does. Applied here, at the one
             # boundary every tool returns through, rather than at ~40 `_dump` sites — and via the
             # shared helper, because these two surfaces had already drifted once: MCP was
             # returning every field of every element on every action while the CLI trimmed.
-            if isinstance(payload, dict) and name in _ANALYZED_TOOL_BASES:
+            if isinstance(payload, dict) and name in _OBSERVATION_TOOL_NAMES:
                 spec = args_in.get("observe_fields")
                 if spec is None:
                     spec = getattr(engine.config.output, "observation_fields", None)
@@ -1982,8 +2433,14 @@ def build_server(engine: Engine) -> Server:
                 payload = trim_observation_payload(payload, view, fmt=OutputFormat.json)
             text = json.dumps(payload, ensure_ascii=False)
         except AuaError as err:
+            error = err.to_dict().get("error")
+            journal_call(ok=False, error=error if isinstance(error, dict) else None)
             text = json.dumps(err.to_dict(), ensure_ascii=False)
             return [types.TextContent(type="text", text=text)]
+        except Exception as err:
+            journal_call(ok=False, error={"code": "error", "message": str(err)})
+            raise
+        journal_call(ok=not (isinstance(payload, dict) and payload.get("ok") is False))
         blocks: list[types.ContentBlock] = [types.TextContent(type="text", text=text)]
         image = _image_block(name, payload)
         if image is not None:

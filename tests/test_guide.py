@@ -141,6 +141,17 @@ def test_skill_frontmatter_has_name_and_trigger_description() -> None:
     assert "android" in meta["description"].lower()  # trigger description preserved
 
 
+def test_codex_metadata_and_bundle_share_the_canonical_skill(tmp_path: Path) -> None:
+    root = tmp_path / "android-ui-analyser"
+    written = guide.emit_skill_bundle(root)
+
+    assert written == root
+    assert (root / "SKILL.md").read_text(encoding="utf-8") == guide.render_skill()
+    metadata = (root / "agents" / "openai.yaml").read_text(encoding="utf-8")
+    assert metadata == guide.render_codex_agent_metadata()
+    assert "$android-ui-analyser" in metadata
+
+
 # --------------------------------------------------------------------------- CLI
 
 
@@ -176,3 +187,10 @@ def test_cli_emit_skill_bare_uses_default_path(tmp_path: Path, monkeypatch) -> N
     out = tmp_path / ".claude" / "skills" / "android-ui-analyser" / "SKILL.md"
     assert out.is_file()
     assert out.read_text() == guide.render_skill()
+
+
+def test_cli_emits_codex_metadata(tmp_path: Path) -> None:
+    out = tmp_path / "agents" / "openai.yaml"
+    res = runner.invoke(app, ["guide", "--emit-codex-metadata", str(out)])
+    assert res.exit_code == 0, res.stderr
+    assert out.read_text(encoding="utf-8") == guide.render_codex_agent_metadata()

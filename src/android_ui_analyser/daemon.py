@@ -184,6 +184,18 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
             result: Any = engine.analyze(**args)
             return _result_ok(result.model_dump(mode="json"))
 
+        elif cmd == "session_start":
+            return _result_ok(engine.session_start(**args))
+
+        elif cmd == "session_review":
+            return _result_ok(engine.session_review(**args))
+
+        elif cmd == "session_finish":
+            return _result_ok(engine.session_finish(**args))
+
+        elif cmd == "reach":
+            return _result_ok(engine.reach(**args))
+
         elif cmd == "ask_screen":
             result = engine.ask_screen(**args)
             return _result_ok(result)
@@ -740,6 +752,8 @@ _LONG_POLL_COMMANDS = frozenset(
         "goto",
         "flow_run",
         "navigate",
+        "reach",
+        "session_finish",
     }
 )
 
@@ -959,9 +973,7 @@ def reap(config: Config) -> dict[str, Any]:
         for path in (sock, str(pid_file)):
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(path)
-        reaped.append(
-            {"pid": pid, "socket": sock, "reason": "orphaned_venv" if alive else "dead"}
-        )
+        reaped.append({"pid": pid, "socket": sock, "reason": "orphaned_venv" if alive else "dead"})
     return {"ok": True, "action": "daemon-reap", "reaped": reaped, "count": len(reaped)}
 
 

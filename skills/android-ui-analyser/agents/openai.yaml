@@ -1,0 +1,4 @@
+interface:
+  display_name: "Android UI Analyser"
+  short_description: "Drive and verify Android apps with semantic UI evidence"
+  default_prompt: "Use $android-ui-analyser to verify the requested Android behavior efficiently."

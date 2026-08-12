@@ -68,6 +68,10 @@ _KINDS = {
     "proxy_start": "proxy-start",
     "proxy_stop": "proxy-stop",
     "mock_replay": "mock-replay",
+    "network_offline": "network-offline",
+    "network_restore": "network-restore",
+    "network_profile": "network-profile",
+    "network_profile_restore": "network-profile-restore",
 }
 _KEYS = {kind: key for key, kind in _KINDS.items()}
 _ELEMENT_KINDS = ("tap", "long-press", "clear")
@@ -89,6 +93,7 @@ _ARG_ALIAS = {
     "dev-profile": "name",
     "flags-apply": "path",
     "mock-replay": "name",
+    "network-profile": "name",
 }
 # Accepted by `scroll_to: {direction: ...}` — the same vocabulary `_swipe_path` takes, so the
 # flow surface and the CLI's `--direction` mean exactly one thing between them.
@@ -102,6 +107,9 @@ _BARE_KINDS = frozenset(
         "paste",
         "proxy-start",
         "proxy-stop",
+        "network-offline",
+        "network-restore",
+        "network-profile-restore",
     }
 )
 
@@ -112,6 +120,8 @@ class Flow(BaseModel):
     name: str
     app: str | None = None  # primary package: origin for package-relative steps / goto
     description: str | None = None
+    aliases: list[str] = Field(default_factory=list)
+    arrival: str | None = None
     params: dict[str, str] = Field(default_factory=dict)  # "" = required, else default
     steps: list[RouteStep]
 
@@ -149,7 +159,7 @@ def _parse_step(item: Any, index: int) -> RouteStep:
             f"a bare string step must be one of {', '.join(sorted(_BARE_KINDS))}, got {item!r}",
         )
     if not isinstance(item, dict) or len(item) != 1:
-        raise _step_error(index, "expected a single-key mapping like `tap: \"Send\"`")
+        raise _step_error(index, 'expected a single-key mapping like `tap: "Send"`')
     ((key, value),) = item.items()
     kind = _KINDS.get(str(key))
     if kind is None:
@@ -170,7 +180,9 @@ def _parse_step(item: Any, index: int) -> RouteStep:
             return RouteStep(kind=kind)
         raise _step_error(index, "input needs a mapping: `input: {id: ..., text: ...}`")
     if not isinstance(value, dict):
-        raise _step_error(index, f"step value must be a string or mapping, got {type(value).__name__}")
+        raise _step_error(
+            index, f"step value must be a string or mapping, got {type(value).__name__}"
+        )
 
     v = dict(value)
     kw: dict[str, Any] = {"kind": kind}
@@ -200,7 +212,16 @@ def _parse_step(item: Any, index: int) -> RouteStep:
             raise _step_error(index, "input needs `text:` (a literal or ${PARAM})")
         if not (kw["resource_id"] or kw["label"]):
             raise _step_error(index, "input needs an `id:` or `label:` field selector")
-    elif kind in ("wait-stable", "hide-keyboard", "paste", "proxy-start", "proxy-stop"):
+    elif kind in (
+        "wait-stable",
+        "hide-keyboard",
+        "paste",
+        "proxy-start",
+        "proxy-stop",
+        "network-offline",
+        "network-restore",
+        "network-profile-restore",
+    ):
         pass
     elif kind == "a11y-scroll":
         kw["resource_id"] = v.pop("id", None) or v.pop("rid", None)
@@ -276,10 +297,15 @@ def parse_flow_yaml(text: str, *, name: str | None = None) -> Flow:
     params = data.get("params") or {}
     if not isinstance(params, dict):
         raise UsageError("`params:` must be a mapping of NAME: default (empty = required)")
+    aliases = data.get("aliases") or []
+    if not isinstance(aliases, list):
+        raise UsageError("`aliases:` must be a list of goal phrases")
     return Flow(
         name=str(data.get("name") or name or "flow"),
         app=data.get("app"),
         description=data.get("description"),
+        aliases=[str(value) for value in aliases],
+        arrival=str(data["arrival"]) if data.get("arrival") else None,
         params={str(k): "" if v is None else str(v) for k, v in params.items()},
         steps=steps,
     )
@@ -330,7 +356,16 @@ def _render_step(s: RouteStep) -> dict[str, Any] | str:
             body["text"] = s.label
         body.update(extras)
         return {key: body}
-    if s.kind in ("wait-stable", "proxy-start", "proxy-stop", "hide-keyboard", "paste"):
+    if s.kind in (
+        "wait-stable",
+        "proxy-start",
+        "proxy-stop",
+        "network-offline",
+        "network-restore",
+        "network-profile-restore",
+        "hide-keyboard",
+        "paste",
+    ):
         return {key: extras} if extras else key
     if extras:
         return {key: {_ARG_ALIAS[s.kind]: s.arg, **extras}}
@@ -343,6 +378,10 @@ def render_flow_yaml(flow: Flow) -> str:
         doc["app"] = flow.app
     if flow.description:
         doc["description"] = flow.description
+    if flow.aliases:
+        doc["aliases"] = flow.aliases
+    if flow.arrival:
+        doc["arrival"] = flow.arrival
     if flow.params:
         doc["params"] = dict(flow.params)
     doc["steps"] = [_render_step(s) for s in flow.steps]
@@ -610,6 +649,8 @@ class FlowStore:
                         "steps": len(flow.steps),
                         "params": sorted(flow.params),
                         "description": flow.description,
+                        "aliases": flow.aliases,
+                        "arrival": flow.arrival,
                         "path": str(p),
                     }
                 )
