@@ -66,6 +66,7 @@ from .schema import (
     HasResult,
     MatchMode,
     Meta,
+    NetworkResult,
     PathKind,
     ResolveResult,
     Screen,
@@ -6458,6 +6459,83 @@ class Engine:
         enabled = not cur if cur is not None else True
         self.device.set_airplane_mode(enabled)
         return ActionResult(ok=True, action="airplane-toggle", detail="on" if enabled else "off")
+
+    def network_status(self) -> NetworkResult:
+        from . import network
+
+        device = self.device
+        path = network.backup_path(self.config.cache.dir, device.serial)
+        backup = network.load_backup(path)
+        state = network.read_network_state(device)
+        return NetworkResult(
+            ok=True,
+            action="network-status",
+            state=state,
+            saved_state=backup.state if backup is not None else None,
+            verified=state.active_network is not None,
+            detail="restore point available" if backup is not None else "no restore point",
+        )
+
+    def network_offline(self, *, verify: bool = True, timeout_ms: int = 10_000) -> NetworkResult:
+        from . import network
+
+        device = self.device
+        path = network.backup_path(self.config.cache.dir, device.serial)
+        initial = network.read_network_state(device)
+        backup = network.save_backup(path, device=device, state=initial)
+        network.apply_offline_controls(device, initial)
+        if verify:
+            state, verified = network.wait_for_state(
+                device,
+                network.offline_verified,
+                timeout_ms=timeout_ms,
+            )
+        else:
+            state = network.read_network_state(device)
+            verified = None
+        return NetworkResult(
+            ok=bool(verified) if verify else True,
+            action="network-offline",
+            state=state,
+            saved_state=backup.state,
+            verified=verified,
+            detail=(
+                "offline verified"
+                if verified
+                else (
+                    "offline controls applied without verification"
+                    if not verify
+                    else "offline verification timed out; restore point retained"
+                )
+            ),
+        )
+
+    def network_restore(self, *, timeout_ms: int = 15_000) -> NetworkResult:
+        from . import network
+
+        device = self.device
+        path = network.backup_path(self.config.cache.dir, device.serial)
+        backup = network.require_current_backup(path, device=device)
+        network.restore_controls(device, backup.state)
+        state, verified = network.wait_for_state(
+            device,
+            lambda current: network.restored_verified(current, backup.state),
+            timeout_ms=timeout_ms,
+        )
+        if verified:
+            path.unlink(missing_ok=True)
+        return NetworkResult(
+            ok=verified,
+            action="network-restore",
+            state=state,
+            saved_state=backup.state,
+            verified=verified,
+            detail=(
+                "original network state restored"
+                if verified
+                else "restore verification timed out; restore point retained"
+            ),
+        )
 
     def media_add(self, path: str, *, remote_dir: str = "/sdcard/DCIM/Camera") -> ActionResult:
         remote = self.device.add_media(path, remote_dir=remote_dir)

@@ -325,6 +325,15 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "one. Still not network idle: this app never is.",
     ),
     (
+        "Use verified network isolation, not airplane mode",
+        "Android may keep Wi-Fi active after `airplane on`, so that command is never proof the "
+        "device is offline. Use `aua network offline --verify`: it snapshots airplane, Wi-Fi, "
+        "and mobile-data controls, disables them, and refuses success while ConnectivityService "
+        "still reports an active default transport. Inspect with `aua network status`, then "
+        "always run `aua network restore`; the restore point is deleted only after read-back "
+        "matches the saved controls and prior connectivity.",
+    ),
+    (
         "One agent, one emulator — leases are automatic",
         'With several agents running at once, every one of them otherwise resolves to "the '
         "only/first device\" and they drive each other's screens; nothing errors, the results "
@@ -622,9 +631,10 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "`erase [ID] --chars N` (Maestro eraseText; omit ``--chars`` to clear the whole field)",
     ),
     (
-        "location / orientation / airplane / media / record / clock",
+        "location / orientation / airplane / network / media / record / clock",
         "`location set LAT,LON`, `orientation set|get`, `airplane on|off|toggle`, "
-        "`media add PATH`, `record start|stop PATH`, `clock set --ms <unix-ms>` / "
+        "`network status|offline --verify|restore` (offline mode is saved, verified, and "
+        "reversible), `media add PATH`, `record start|stop PATH`, `clock set --ms <unix-ms>` / "
         "`clock restore` (time travel invalidates auth — always restore)",
     ),
     (

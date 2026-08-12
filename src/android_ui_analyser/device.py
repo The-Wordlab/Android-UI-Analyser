@@ -859,7 +859,8 @@ class Uiautomator2Device(Device):
 
     def get_airplane_mode(self) -> bool | None:
         try:
-            raw = str(self._d.shell("settings get global airplane_mode_on")).strip()
+            out = self._d.shell("settings get global airplane_mode_on")
+            raw = str(out if isinstance(out, str) else getattr(out, "output", out)).strip()
             if raw in ("0", "1"):
                 return raw == "1"
         except Exception:  # pragma: no cover

@@ -103,6 +103,9 @@ def test_mcp_lists_core_tools() -> None:
         "orientation_get",
         "airplane_set",
         "airplane_toggle",
+        "network_status",
+        "network_offline",
+        "network_restore",
         "media_add",
         "record_start",
         "record_stop",
@@ -149,6 +152,24 @@ def test_mcp_analyze_screen_returns_schema_valid_json() -> None:
     parsed = AnalyzeResult.model_validate(data)
     assert parsed.screen.source.value == "hierarchy"
     assert len(parsed.elements) == 3
+
+
+def test_mcp_network_offline_and_restore_roundtrip() -> None:
+    server = build_server(_engine())
+
+    async def run() -> tuple[dict, dict]:  # type: ignore[type-arg]
+        async with create_connected_server_and_client_session(server) as client:
+            offline = await client.call_tool(
+                "network_offline", {"verify": True, "timeout_ms": 0}
+            )
+            restored = await client.call_tool("network_restore", {"timeout_ms": 0})
+            return json.loads(_first_text(offline)), json.loads(_first_text(restored))
+
+    offline, restored = anyio.run(run)
+    assert offline["ok"] is True
+    assert offline["state"]["offline"] is True
+    assert restored["ok"] is True
+    assert restored["state"]["offline"] is False
 
 
 def test_mcp_observed_actions_are_named_and_force_analysis() -> None:

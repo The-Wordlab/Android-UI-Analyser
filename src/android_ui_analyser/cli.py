@@ -3590,6 +3590,71 @@ def airplane_toggle_cmd(ctx: typer.Context) -> None:
     _run(ctx, go)
 
 
+network_app = typer.Typer(
+    help="Inspect connectivity or enter a verified, reversible offline state."
+)
+app.add_typer(network_app, name="network")
+
+
+@network_app.command("status")
+def network_status_cmd(ctx: typer.Context) -> None:
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.network_status(), fmt)
+
+    _run(ctx, go)
+
+
+@network_app.command("offline")
+def network_offline_cmd(
+    ctx: typer.Context,
+    verify: bool = typer.Option(
+        True,
+        "--verify/--no-verify",
+        help="Read back radio controls and the active default network (recommended).",
+    ),
+    timeout_ms: int = typer.Option(
+        10_000,
+        "--timeout",
+        min=0,
+        help="Milliseconds to wait for Android to detach active transports.",
+    ),
+) -> None:
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        result = engine.network_offline(verify=verify, timeout_ms=timeout_ms)
+        _emit(result, fmt)
+        _exit_unless_ok(
+            result,
+            ExitCode.DEVICE,
+            code="network_verification_failed",
+            hint="Inspect `aua network status`, then retry or run `aua network restore`.",
+        )
+
+    _run(ctx, go)
+
+
+@network_app.command("restore")
+def network_restore_cmd(
+    ctx: typer.Context,
+    timeout_ms: int = typer.Option(
+        15_000,
+        "--timeout",
+        min=0,
+        help="Milliseconds to wait for the saved controls and connectivity to return.",
+    ),
+) -> None:
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        result = engine.network_restore(timeout_ms=timeout_ms)
+        _emit(result, fmt)
+        _exit_unless_ok(
+            result,
+            ExitCode.DEVICE,
+            code="network_restore_failed",
+            hint="The restore point was retained; inspect `aua network status` and retry.",
+        )
+
+    _run(ctx, go)
+
+
 media_app = typer.Typer(help="Push media into the device gallery (Maestro addMedia).")
 app.add_typer(media_app, name="media")
 

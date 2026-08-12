@@ -128,6 +128,8 @@ class FakeDevice(Device):
         self._clipboard = ""
         self._orientation = "n"
         self._airplane = False
+        self._wifi_enabled = True
+        self._mobile_data_enabled = True
         self._location: tuple[float, float] | None = None
         self._recording: str | None = None
         self._logcat_lines: list[str] = []
@@ -366,8 +368,43 @@ class FakeDevice(Device):
                 ("secure", "anr_show_background"): "0",
                 ("global", "always_finish_activities"): "0",
                 ("global", "http_proxy"): ":0",
+                ("global", "wifi_on"): "1" if self._wifi_enabled else "0",
+                ("global", "mobile_data"): "1" if self._mobile_data_enabled else "0",
             }
         parts = command.split()
+        if command == "pm has-feature android.hardware.wifi":
+            return "true"
+        if command == "pm has-feature android.hardware.telephony":
+            return "true"
+        if command == "svc wifi enable":
+            self._wifi_enabled = True
+            self._settings[("global", "wifi_on")] = "1"
+            return ""
+        if command == "svc wifi disable":
+            self._wifi_enabled = False
+            self._settings[("global", "wifi_on")] = "0"
+            return ""
+        if command == "svc data enable":
+            self._mobile_data_enabled = True
+            self._settings[("global", "mobile_data")] = "1"
+            return ""
+        if command == "svc data disable":
+            self._mobile_data_enabled = False
+            self._settings[("global", "mobile_data")] = "0"
+            return ""
+        if command == "dumpsys connectivity":
+            if self._wifi_enabled:
+                transport = "WIFI"
+            elif self._mobile_data_enabled and not self._airplane:
+                transport = "CELLULAR"
+            else:
+                return "Active default network: none\n"
+            return (
+                "Active default network: 100\n"
+                "Current Networks:\n"
+                f"  NetworkAgentInfo{{network{{100}} nc{{[ Transports: {transport} "
+                "Capabilities: INTERNET&VALIDATED&TRUSTED ]}}\n"
+            )
         if len(parts) >= 4 and parts[0] == "settings" and parts[1] == "get":
             return str(self._settings.get((parts[2], parts[3]), "null"))
         if len(parts) >= 5 and parts[0] == "settings" and parts[1] == "put":

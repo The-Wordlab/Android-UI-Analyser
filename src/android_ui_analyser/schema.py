@@ -448,6 +448,42 @@ class ActionResult(BaseModel):
         return json.dumps(data, indent=indent, separators=sep, ensure_ascii=False)
 
 
+class NetworkState(BaseModel):
+    """Observed Android connectivity controls and the active default network."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    airplane_mode: bool | None = None
+    wifi_supported: bool | None = None
+    wifi_enabled: bool | None = None
+    cellular_supported: bool | None = None
+    mobile_data_enabled: bool | None = None
+    active_network: bool | None = None
+    active_network_id: str | None = None
+    active_transports: list[str] = Field(default_factory=list)
+    internet_validated: bool | None = None
+    offline: bool | None = None
+
+
+class NetworkResult(BaseModel):
+    """Result of deterministic network status/offline/restore operations."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ok: bool
+    action: str
+    state: NetworkState
+    saved_state: NetworkState | None = None
+    verified: bool | None = None
+    detail: str | None = None
+
+    def render(self, fmt: OutputFormat | str = OutputFormat.json) -> str:
+        data = {k: v for k, v in self.model_dump(mode="json").items() if v is not None}
+        indent = 2 if OutputFormat(fmt) is OutputFormat.pretty else None
+        sep = None if indent else (",", ":")
+        return json.dumps(data, indent=indent, separators=sep, ensure_ascii=False)
+
+
 class ResolveResult(BaseModel):
     """Remap a previous-frame id or ``stable_key`` onto the current screen."""
 

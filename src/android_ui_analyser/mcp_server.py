@@ -728,6 +728,39 @@ def _tool_definitions() -> list[types.Tool]:
             inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
         ),
         types.Tool(
+            name="network_status",
+            description=(
+                "Read airplane, Wi-Fi, mobile-data, and active default-network state."
+            ),
+            inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
+        ),
+        types.Tool(
+            name="network_offline",
+            description=(
+                "Save current network controls, disable transports, and verify the device "
+                "has no active default network. Always pair with network_restore."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "verify": {"type": "boolean", "default": True},
+                    "timeout_ms": {"type": "integer", "minimum": 0, "default": 10000},
+                },
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="network_restore",
+            description="Restore and verify the network controls saved by network_offline.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "timeout_ms": {"type": "integer", "minimum": 0, "default": 15000}
+                },
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
             name="media_add",
             description="Push a local media file onto the device (DCIM/Camera by default).",
             inputSchema={
@@ -1532,6 +1565,17 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         return _dump(engine.airplane_set(bool(args["enabled"])))
     if name == "airplane_toggle":
         return _dump(engine.airplane_toggle())
+    if name == "network_status":
+        return _dump(engine.network_status())
+    if name == "network_offline":
+        return _dump(
+            engine.network_offline(
+                verify=bool(args.get("verify", True)),
+                timeout_ms=int(args.get("timeout_ms", 10_000)),
+            )
+        )
+    if name == "network_restore":
+        return _dump(engine.network_restore(timeout_ms=int(args.get("timeout_ms", 15_000))))
     if name == "media_add":
         return _dump(engine.media_add(args["path"]))
     if name == "record_start":

@@ -760,6 +760,26 @@ Everything else (and any unknown flags) exec's the full Python CLI. Host-side sp
 
 ---
 
+## Verified offline mode
+
+Airplane mode alone does not prove an Android device is offline because Wi-Fi may remain active.
+Use the reversible network workflow for offline scenarios:
+
+```bash
+aua network status
+aua network offline --verify   # snapshots controls, disables transports, verifies read-back
+# …exercise the offline scenario…
+aua network restore            # restores and verifies the original controls/connectivity
+```
+
+`network offline` checks airplane mode, Wi-Fi, mobile-data state, and ConnectivityService's
+active default network. It exits non-zero if a transport such as Wi-Fi, cellular, Ethernet, or
+VPN remains active. The per-device restore point survives separate CLI invocations and is kept
+after a failed verification; repeated offline calls never overwrite the original state. Restore
+points are boot-aware so a recycled emulator serial cannot apply settings from an older boot.
+
+---
+
 ## Proxy / mock (HTTPS record & replay)
 
 Optional extra: `pip`/`uv` install with `[proxy]` (pulls `mitmproxy`). Apps whose Network
@@ -862,7 +882,8 @@ Tools include (non-exhaustive): `analyze_screen`, `tap_and_analyze`,
 `expect`, `screenshot`, `inspect`, `goto`, `flow_run`, `navigate`, `list_devices`,
 `emulator_list` / `emulator_status` / `emulator_start` / `emulator_stop` (stop before exit —
 MCP also auto-stops emulators it started when the server process ends), `open_link_and_analyze`,
-`app`, `resolve`, clipboard/paste/copy/erase, location/orientation/airplane/media/record/clock,
+`app`, `resolve`, clipboard/paste/copy/erase,
+location/orientation/airplane/network/media/record/clock,
 `capture_*`, `dev_profile`, `a11y_scroll_and_analyze`, `flags_apply_and_analyze`,
 `database_list` / `database_schema` / `database_query` / `database_execute` /
 `database_backup` / `database_backups` / `database_restore`,
@@ -1153,6 +1174,7 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 | `aua location set LAT,LON` | Mock GPS |
 | `aua orientation set\|get` | Screen orientation |
 | `aua airplane on\|off\|toggle` | Airplane mode |
+| `aua network status\|offline\|restore` | Verified, saved, reversible network isolation |
 | `aua media add PATH` | Push media into the gallery |
 | `aua record start\|stop PATH` | Screen recording |
 | `aua clock set --ms <unix-ms>` | Set device clock (emulator / rooted) |
