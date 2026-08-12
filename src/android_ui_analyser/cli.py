@@ -38,6 +38,7 @@ from .engine import Engine, _parse_await_terms, _parse_point
 from .errors import (
     AuaError,
     ConfigError,
+    DaemonBusyError,
     DeviceError,
     DeviceLeasedError,
     ExitCode,
@@ -990,6 +991,17 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
         except AuaError:
             raise
         except Exception as exc:  # pragma: no cover - daemon optional / unreachable
+            # A serialized daemon may be busy in a long Engine call and unable to answer its
+            # two-second health ping.  Its live pidfile still proves that it owns the device;
+            # falling back here would let a second Engine mutate the same screen concurrently.
+            if "daemon_mod" in locals() and daemon_mod.process_running(cfg):
+                raise DaemonBusyError(
+                    "the live AUA daemon is still handling another request",
+                    hint=(
+                        "Wait for that call to finish and inspect its result. Do not start "
+                        "another daemon or repeat a state-changing action."
+                    ),
+                ) from exc
             logger.debug("daemon route unavailable, running in-process: %s", exc)
     # In-process path — journal here (daemon path is journaled inside the daemon).
     from . import journal as journal_mod

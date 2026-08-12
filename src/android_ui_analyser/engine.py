@@ -4436,6 +4436,7 @@ class Engine:
         *,
         settle: bool = True,
         record_screen: bool = False,
+        hierarchy_only: bool = False,
     ) -> ActionResult:
         """Attach the post-action screen so callers skip a separate ``analyze`` round-trip.
 
@@ -4512,10 +4513,19 @@ class Engine:
 
                 # Analyze only after the confirmation. Besides being safer, this avoids paying
                 # for and returning an OCR-enriched read of a frame we already distrust.
-                obs = self._analyze_post_action(with_image, record_screen=record_screen)
+                if hierarchy_only:
+                    obs = self.analyze(
+                        source="hierarchy",
+                        with_ocr=False,
+                        record=record_screen,
+                        with_image=self._effective_with_image(with_image),
+                    )
+                else:
+                    obs = self._analyze_post_action(with_image, record_screen=record_screen)
                 change: dict[str, Any] | None = None
-                with contextlib.suppress(Exception):
-                    change = self._change_summary(before_state, obs)
+                if not hierarchy_only:
+                    with contextlib.suppress(Exception):
+                        change = self._change_summary(before_state, obs)
                 if ready is not None and (confirmed_stable or ready.get("confirmation_timeout")):
                     ready["semantic_confirmation"] = self._change_has_semantic_effect(change)
 
@@ -5296,6 +5306,7 @@ class Engine:
         selector: dict[str, Any] | None = None,
         observe: bool = True,
         with_image: bool | str | None = None,
+        _hierarchy_settle: bool = False,
     ) -> ActionResult:
         named = self._target(element_id, selector)
         # The label a caller names is often not the node that acts — see `_acting_target`.
@@ -5314,7 +5325,7 @@ class Engine:
         cx, _ = self._tap_point(el, needle)
         _, cy = self._aim(el)
         step = self._step("tap", el)  # built pre-action: needs the cached package
-        with self._acting(_action_mark("tap", el)):
+        with self._acting(_action_mark("tap", el), capture_pre_action=not _hierarchy_settle):
             self.device.click(cx, cy)
         self._record_action_safe(step)
         return self._observe(
@@ -5878,7 +5889,12 @@ class Engine:
         )
 
     def key(
-        self, name: str, *, observe: bool = True, with_image: bool | str | None = None
+        self,
+        name: str,
+        *,
+        observe: bool = True,
+        with_image: bool | str | None = None,
+        _hierarchy_settle: bool = False,
     ) -> ActionResult:
         candidate = name.strip()
         known = (
@@ -5894,7 +5910,7 @@ class Engine:
                 + ", KEYCODE_*, or a keycode number.",
             )
         step = self._step("key", arg=name)
-        with self._acting(f"key:{name}"):
+        with self._acting(f"key:{name}", capture_pre_action=not _hierarchy_settle):
             self.device.press(name)
         self._record_action_safe(step)
         return self._observe(ActionResult(ok=True, action="key", detail=name), observe, with_image)
@@ -5953,17 +5969,19 @@ class Engine:
 
         started_at = time.monotonic()
         device = self.device
-        foreground_package = str((device.current_app() or {}).get("package") or "")
         current = self.await_predicate(
             predicate,
             timeout_ms=0,
             poll_ms=poll_ms,
             observe=True,
+            rich_ui=False,
+            hierarchy_only=True,
         )
         origin_package = str(
-            (current.observation.screen.package if current.observation is not None else "")
-            or foreground_package
+            current.observation.screen.package if current.observation is not None else ""
         )
+        if not origin_package:
+            origin_package = str((device.current_app() or {}).get("package") or "")
         if current.ok:
             current.action = "back-until"
             current.detail = "destination already satisfied; steps=0"
@@ -6018,9 +6036,9 @@ class Engine:
                         # The unlabeled top-left navigation affordance has no semantic selector.
                         # Its id came from this exact observation, and `tap` immediately remaps
                         # that binding against a fresh hierarchy before touching the device.
-                        self.tap(element_id=frame_id, observe=False)
+                        self.tap(element_id=frame_id, observe=False, _hierarchy_settle=True)
                     else:
-                        self.tap(selector=selected, observe=False)
+                        self.tap(selector=selected, observe=False, _hierarchy_settle=True)
                 except SelectorAmbiguousError:
                     return self._back_until_result(
                         current,
@@ -6041,7 +6059,7 @@ class Engine:
                     )
                 via = "affordance"
             else:
-                self.key("back", observe=False)
+                self.key("back", observe=False, _hierarchy_settle=True)
                 via = "hardware"
             step_deadline = time.monotonic() + (step_timeout_ms / 1000.0)
             current = self.await_predicate(
@@ -6049,6 +6067,8 @@ class Engine:
                 timeout_ms=step_timeout_ms,
                 poll_ms=poll_ms,
                 observe=True,
+                rich_ui=False,
+                hierarchy_only=True,
             )
 
             # `await_predicate` deliberately returns screen-changed before trusting terms from
@@ -6101,6 +6121,8 @@ class Engine:
                     timeout_ms=remaining_ms,
                     poll_ms=poll_ms,
                     observe=True,
+                    rich_ui=False,
+                    hierarchy_only=True,
                 )
                 transition_rechecks += 1
             package = self._back_observed_package(current, device)
@@ -6510,6 +6532,8 @@ class Engine:
         ignore_case: bool = False,
         observe: bool = False,
         adopt_action: bool = False,
+        rich_ui: bool = True,
+        hierarchy_only: bool = False,
     ) -> ActionResult:
         """Wait until *predicate* holds, and say **which** of three things ended the wait.
 
@@ -6632,7 +6656,7 @@ class Engine:
             positive result time out even though OCR could read it. Rich verification is bounded:
             once before accepting a negated UI term and once at the deadline for a positive miss.
             """
-            if not ui_terms:
+            if not rich_ui or not ui_terms:
                 return None
             try:
                 observed = self.analyze(source="hierarchy", with_ocr=True, record=False)
@@ -6678,7 +6702,12 @@ class Engine:
             return rich
 
         started_at = time.monotonic()
-        origin = snapshot()
+        # Internal hierarchy-only navigation already obtains a fresh observation before the
+        # next action. Android's `app_current` is unexpectedly expensive on some devices
+        # (~5s per call), and polling it before/after each 1.2s Back step made the "bounded"
+        # primitive take 31s. Package boundaries are verified from that observation by
+        # `back_until`, so omit redundant activity RPCs on this private fast path.
+        origin = ("", "") if hierarchy_only else snapshot()
         deadline = started_at + max(0.0, timeout_ms / 1000.0)
         next_negative_rich_at = started_at
         negative_ui_terms = any(term.negated for term in ui_terms)
@@ -6697,6 +6726,7 @@ class Engine:
                         origin,
                         observe,
                         adopt_action,
+                        hierarchy_only=hierarchy_only,
                     )
                 # A negated accessibility miss is not proof of visual absence. Verify with OCR,
                 # but at most every two seconds while a canvas/loading label remains visible.
@@ -6713,9 +6743,10 @@ class Engine:
                             origin,
                             observe,
                             adopt_action,
+                            hierarchy_only=hierarchy_only,
                         )
                     results = rich
-            now = snapshot()
+            now = origin if hierarchy_only else snapshot()
             if now != origin and any(now):
                 return self._await_result(
                     "screen-changed",
@@ -6726,6 +6757,7 @@ class Engine:
                     now,
                     observe,
                     adopt_action,
+                    hierarchy_only=hierarchy_only,
                 )
             if time.monotonic() >= deadline:
                 rich = evaluate_rich()
@@ -6739,6 +6771,7 @@ class Engine:
                         origin,
                         observe,
                         adopt_action,
+                        hierarchy_only=hierarchy_only,
                     )
                 return self._await_result(
                     "timeout",
@@ -6749,6 +6782,7 @@ class Engine:
                     now,
                     observe,
                     adopt_action,
+                    hierarchy_only=hierarchy_only,
                 )
             time.sleep(max(0.01, poll_ms / 1000.0))
             results = evaluate()
@@ -6763,6 +6797,8 @@ class Engine:
         now: tuple[str, str],
         observe: bool,
         adopt_action: bool = False,
+        *,
+        hierarchy_only: bool = False,
     ) -> ActionResult:
         elapsed = int((time.monotonic() - started_at) * 1000)
         unmet = [t["term"] for t in terms if not t["satisfied"]]
@@ -6792,6 +6828,7 @@ class Engine:
             # A timeout is explicitly not final evidence; recording it would merely replace an
             # early loading shell with a later loading shell and consume the action anyway.
             record_screen=adopt_action and outcome != "timeout",
+            hierarchy_only=hierarchy_only,
         )
 
     def wait(
@@ -8604,7 +8641,9 @@ class Engine:
             return None
 
     @contextlib.contextmanager
-    def _acting(self, label: str | None = None) -> Iterator[None]:
+    def _acting(
+        self, label: str | None = None, *, capture_pre_action: bool = True
+    ) -> Iterator[None]:
         """Bracket a device interaction: open the log window, then drop the stale id cache.
 
         Wrap the interaction rather than following it, because the two halves belong on
@@ -8629,10 +8668,14 @@ class Engine:
         # Any speculative hierarchy dump is stale the moment we touch the device.
         self._prefetch.invalidate()
         # Pixel fingerprint for settle-then-observe: must be taken BEFORE the gesture.
-        with contextlib.suppress(Exception):
-            from . import imaging
+        self._pre_action_sig = None
+        if capture_pre_action:
+            with contextlib.suppress(Exception):
+                from . import imaging
 
-            self._pre_action_sig = imaging.frame_signature(self._screenshot(max_reuse_ms=40.0))
+                self._pre_action_sig = imaging.frame_signature(
+                    self._screenshot(max_reuse_ms=40.0)
+                )
         # Cheap tree fingerprint from the last analyze (no extra dump) — used to
         # early-accept observe once the accessibility tree has moved and stabilised.
         self._pre_action_tree_fp = self._tree_fingerprint()

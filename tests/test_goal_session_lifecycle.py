@@ -112,6 +112,90 @@ def test_review_counts_folded_until_as_one_call_and_reports_its_timeout(
     assert review["advice"][-1]["id"] == "exact_arrival_predicate"
 
 
+def test_review_succeeds_while_reporting_run_failures_without_poisoning_itself(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    engine = _engine(tmp_path, "goal-review-verdict")
+    started = _start(engine, monkeypatch)
+    journal.record(
+        cache_dir=engine.config.cache.dir,
+        serial=engine.device.serial,
+        source="cli",
+        owner=None,
+        cmd="tap",
+        ok=False,
+        error={"code": "selector_not_found", "message": "moved"},
+    )
+
+    review = engine.session_review(started["session_id"])
+
+    assert review["ok"] is True
+    assert review["run_ok"] is False
+    assert review["failures"] == 1
+
+    journal.record(
+        cache_dir=engine.config.cache.dir,
+        serial=engine.device.serial,
+        source="cli",
+        owner=None,
+        cmd="session_review",
+        ok=False,
+        result={"ok": False, "run_ok": False},
+    )
+    reviewed_again = engine.session_review(started["session_id"])
+    assert reviewed_again["failures"] == 1, "a prior review must not become a new run failure"
+
+
+def test_review_marks_historical_duplicate_invocation_unknown_without_guessing_visibility(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    engine = _engine(tmp_path, "goal-recovered-invocation")
+    started = _start(engine, monkeypatch)
+    common = {
+        "cache_dir": engine.config.cache.dir,
+        "serial": engine.device.serial,
+        "source": "daemon",
+        "owner": None,
+        "cmd": "tap",
+        "extra": {"invocation_id": "same-agent-call"},
+    }
+    journal.record(
+        **common,
+        ok=False,
+        error={"code": "selector_not_found", "message": "transient"},
+    )
+    journal.record(
+        **common,
+        ok=True,
+        result={"ok": True, "action": "tap", "observation": {"elements": []}},
+    )
+    journal.record(
+        cache_dir=engine.config.cache.dir,
+        serial=engine.device.serial,
+        source="cli",
+        owner=None,
+        cmd="analyze",
+        ok=True,
+        result={"ok": True, "elements": []},
+    )
+
+    review = engine.session_review(started["session_id"])
+
+    assert review["ok"] is True
+    assert review["run_ok"] is None
+    assert review["failures"] == 0
+    assert review["calls"] == 2
+    assert "redundant_analyze" not in review["patterns"]
+    assert review["patterns"]["ambiguous_invocation"] == [
+        {
+            "invocation_id": "same-agent-call",
+            "cmd": "tap",
+            "outcomes": [False, True],
+        }
+    ]
+    assert review["advice"][-1]["id"] == "daemon_outcome_unknown"
+
+
 def test_analyze_after_session_start_receives_immediate_reuse_advice(
     tmp_path: Path, monkeypatch: Any
 ) -> None:

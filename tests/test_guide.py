@@ -106,6 +106,8 @@ def test_brief_prefers_stable_selectors_and_current_playbook_facts() -> None:
         "near-duplicate",
         "map --audit --summary",
         "text:Hello\\, friend",
+        "daemon_outcome_unknown",
+        "competing controller",
     ]:
         assert claim in brief
 
@@ -115,6 +117,14 @@ def test_json_is_structured() -> None:
     assert {"session_protocol", "escalation_ladder", "exit_codes", "schema_fields"} <= set(j)
     assert any("daemon" in step["detail"].lower() for step in j["session_protocol"])
     assert any("grounding" in row["tier"].lower() for row in j["escalation_ladder"])
+
+
+def test_mcp_initialization_teaches_uncertain_daemon_outcomes() -> None:
+    from android_ui_analyser.capabilities import render_mcp_instructions
+
+    text = render_mcp_instructions()
+    assert "daemon_outcome_unknown" in text
+    assert "never repeat" in text
 
 
 # --------------------------------------------------------------------------- no drift

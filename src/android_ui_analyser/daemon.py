@@ -39,7 +39,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .errors import AuaError
+from .errors import AuaError, DaemonOutcomeUnknownError
 
 if TYPE_CHECKING:
     from .config import Config
@@ -651,11 +651,12 @@ def serve(
         with contextlib.suppress(Exception):
             engine.close()
         srv.close()
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(sock_path)
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(sock_path + ".pid")
-        logger.info("daemon stopped, socket removed: %s", sock_path)
+        removed = _remove_owned_daemon_files(sock_path, owner_pid=os.getpid())
+        logger.info(
+            "daemon stopped, %s: %s",
+            "socket removed" if removed else "successor socket preserved",
+            sock_path,
+        )
 
 
 def _journal_dispatch(
@@ -788,12 +789,13 @@ class DaemonClient:
         self,
         sock_path: str,
         *,
-        timeout: float = 5.0,
+        timeout: float | None = None,
         owner: str | None = None,
         invocation_id: str | None = None,
     ) -> None:
         self._sock_path = sock_path
-        self._timeout = timeout
+        self._timeout = 5.0 if timeout is None else timeout
+        self._uses_default_timeout = timeout is None
         # Resolved in THIS process; the daemon would resolve a different name. See
         # `_adopt_client_owner`.
         self._owner = owner
@@ -834,11 +836,23 @@ class DaemonClient:
             timeout = max(timeout, ms / 1000.0 + 5.0)
         elif cmd in _LONG_POLL_COMMANDS:
             timeout = max(timeout, 60.0)
+        elif self._uses_default_timeout and cmd != "ping":
+            # Post-action observation may legitimately take more than five seconds (for
+            # example while Android resumes a cached activity).  The old five-second socket
+            # default made the caller time out while the daemon kept working, then `_route`
+            # replayed the same mutation in-process.  Normal routed work gets a response
+            # budget generous enough for local perception; explicit health probes keep their
+            # caller-selected short timeout.
+            timeout = max(timeout, 60.0)
 
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(timeout)
+        request_may_have_arrived = False
         try:
             sock.connect(self._sock_path)
+            # `sendall` can fail after a partial write, so uncertainty begins before it is
+            # called, not after it returns.
+            request_may_have_arrived = True
             sock.sendall(payload)
 
             # Read until newline.
@@ -850,7 +864,24 @@ class DaemonClient:
                 buf += chunk
 
             line = buf.split(b"\n", 1)[0]
-            return json.loads(line)
+            if not line:
+                raise OSError("daemon closed the connection without a response")
+            response = json.loads(line)
+            if not isinstance(response, dict):
+                raise ValueError("daemon response is not an object")
+            return response
+        except DaemonOutcomeUnknownError:
+            raise
+        except (OSError, ValueError) as exc:
+            if request_may_have_arrived:
+                raise DaemonOutcomeUnknownError(
+                    f"the daemon may have accepted `{cmd}` but its response was not received",
+                    hint=(
+                        "Do not repeat the action. Wait for the daemon, then inspect the current "
+                        "screen once; use that observation to decide the next step."
+                    ),
+                ) from exc
+            raise
         finally:
             with contextlib.suppress(OSError):
                 sock.close()
@@ -872,7 +903,7 @@ class DaemonClient:
             if isinstance(result, dict) and result.get("pong"):
                 return result.get("version")
             return False
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError, DaemonOutcomeUnknownError):
             # A daemon mid-shutdown may accept the connection but send nothing (empty line
             # → JSONDecodeError); treat any non-response as "not running".
             return False
@@ -925,13 +956,30 @@ def _socket_alive(sock: str) -> bool:
     try:
         with DaemonClient(sock, timeout=2.0) as client:
             return client.ping()
-    except OSError:
+    except (OSError, AuaError):
         return False
+
+
+def _socket_process_alive(sock: str) -> bool:
+    """Return whether the pidfile names a live daemon process for *sock*.
+
+    AUA's daemon intentionally serves one Engine call at a time.  A health ping timing out while
+    that process is busy is not evidence that it died, and must never authorize another process
+    to take over the same device.
+    """
+    pid, _ = read_pidfile(sock + ".pid")
+    return pid is not None and _pid_alive(pid)
+
+
+def process_running(config: Config, *, serial: str | None = None) -> bool:
+    """Return whether the daemon process for this config still owns its socket/device."""
+    return _socket_process_alive(socket_path(config, serial=serial))
 
 
 def is_running(config: Config) -> bool:
     """Return True if a daemon is live at *config*'s socket path."""
-    return _socket_alive(socket_path(config))
+    sock = socket_path(config)
+    return _socket_process_alive(sock) or _socket_alive(sock)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -970,6 +1018,29 @@ def read_pidfile(path: str | Path) -> tuple[int | None, str | None]:
     return (int(pid) if isinstance(pid, int) else None), (exe if isinstance(exe, str) else None)
 
 
+def _remove_owned_daemon_files(sock: str, *, owner_pid: int) -> bool:
+    """Remove socket ownership files only when their pidfile still names this daemon.
+
+    An older process can survive after its socket is unlinked and a successor binds the same
+    pathname.  Its eventual ``serve`` cleanup must not unlink the successor's live socket and
+    pidfile, or that successor becomes an invisible second device controller.
+    """
+    pid_file = sock + ".pid"
+    pid, _ = read_pidfile(pid_file)
+    if pid != owner_pid:
+        logger.warning(
+            "daemon %s no longer owns %s (pidfile names %s); preserving successor files",
+            owner_pid,
+            sock,
+            pid,
+        )
+        return False
+    for path in (sock, pid_file):
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(path)
+    return True
+
+
 def reap(config: Config) -> dict[str, Any]:
     """Clean up daemons that outlived the session that spawned them.
 
@@ -1005,11 +1076,18 @@ def reap(config: Config) -> dict[str, Any]:
 
 def running_version(config: Config) -> str | None | bool:
     """The live daemon's aua version (string / None if unknown / False if down)."""
+    sock = socket_path(config)
     try:
-        with DaemonClient(socket_path(config), timeout=2.0) as client:
-            return client.pong_version()
-    except OSError:
-        return False
+        with DaemonClient(sock, timeout=2.0) as client:
+            version = client.pong_version()
+    except (OSError, AuaError):
+        version = False
+    # A busy serialized daemon cannot answer the ping until its current device operation
+    # completes.  Preserve the historical `None` meaning of "live, version unavailable" so
+    # routing queues on that process instead of falling back concurrently.
+    if version is False and _socket_process_alive(sock):
+        return None
+    return version
 
 
 def start(config: Config, *, serial: str | None = None) -> dict[str, Any]:
@@ -1026,6 +1104,14 @@ def start(config: Config, *, serial: str | None = None) -> dict[str, Any]:
     # Adopt on the socket we are about to bind, not on the config-derived one: with an
     # explicit --serial those differ, and checking the wrong one spawns a second daemon
     # for a device that already has one.
+    if _socket_process_alive(sock):
+        pid, _ = read_pidfile(sock + ".pid")
+        return {
+            "running": True,
+            "pid": pid,
+            "socket": sock,
+            "status": "already_running",
+        }
     if _socket_alive(sock):
         return {"running": True, "pid": None, "socket": sock, "status": "already_running"}
 
@@ -1080,7 +1166,7 @@ def live_sockets(config: Config) -> list[str]:
         for path in sorted(base.parent.glob(base.name.split(".sock")[0] + ".sock*")):
             if path.suffix == ".pid":
                 continue
-            if _socket_alive(str(path)):
+            if _socket_process_alive(str(path)) or _socket_alive(str(path)):
                 found.append(str(path))
     return found
 
@@ -1104,7 +1190,7 @@ def stop(config: Config, *, serial: str | None = None) -> dict[str, Any]:
     """
     sock = socket_path(config, serial) if serial else socket_path(config)
     pid_file = sock + ".pid"
-    if not _socket_alive(sock):
+    if not (_socket_process_alive(sock) or _socket_alive(sock)):
         for path in (sock, pid_file):
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(path)
@@ -1122,8 +1208,18 @@ def stop(config: Config, *, serial: str | None = None) -> dict[str, Any]:
         with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
             os.kill(pid, signal.SIGTERM)
         deadline = time.monotonic() + 5.0  # let it run engine.close() on the way out
-        while time.monotonic() < deadline and _socket_alive(sock):
+        while time.monotonic() < deadline and _socket_process_alive(sock):
             time.sleep(0.1)
+        if _socket_process_alive(sock):
+            # SIGTERM asks the serialized accept loop to stop after its current Engine call.
+            # Removing ownership evidence while that call is still active would let `start`
+            # create a competing daemon against the same device.
+            return {
+                "running": True,
+                "socket": sock,
+                "status": "stopping_busy",
+                "others_still_running": live_sockets(config),
+            }
     for path in (sock, pid_file):
         with contextlib.suppress(FileNotFoundError):
             os.unlink(path)

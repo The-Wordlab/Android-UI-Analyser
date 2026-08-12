@@ -15,10 +15,15 @@ from __future__ import annotations
 import contextlib
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+
+import pytest
 
 from android_ui_analyser import cli
 from android_ui_analyser import daemon as daemon_mod
+from android_ui_analyser.config import Config
+from android_ui_analyser.errors import DaemonBusyError, DaemonOutcomeUnknownError
 
 
 def test_touching_a_source_file_does_not_change_the_fingerprint() -> None:
@@ -116,3 +121,71 @@ def test_a_restart_that_does_not_resolve_skew_reports_failure() -> None:
     """If the replacement still serves other code, say so — the caller must fall back."""
     fake = FakeDaemonModule(restart_matches=False)
     assert cli._replace_skewed_daemon(fake, _Cfg(), "0.6.0+srcOLD") is False
+
+
+def _route_config(tmp_path: Path) -> Config:
+    cfg = Config()
+    cfg.daemon.enabled = True
+    cfg.daemon.socket = str(tmp_path / "daemon.sock")
+    cfg.cache.dir = str(tmp_path / "cache")
+    cfg.device.serial = "fictional-5554"
+    return cfg
+
+
+def test_route_never_replays_a_request_whose_daemon_outcome_is_unknown(
+    tmp_path: Path, monkeypatch
+) -> None:
+    cfg = _route_config(tmp_path)
+    mutations: list[int] = []
+
+    class UnknownClient:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def call(self, _cmd: str, **_kwargs: Any) -> dict[str, Any]:
+            raise DaemonOutcomeUnknownError("response timed out")
+
+    engine = SimpleNamespace(
+        config=cfg,
+        _lease_owner=None,
+        _lease_owner_resolved=None,
+        tap=lambda **_kwargs: mutations.append(1),
+    )
+    monkeypatch.setattr(daemon_mod, "is_running", lambda _cfg: True)
+    monkeypatch.setattr(daemon_mod, "running_version", lambda _cfg: daemon_mod._aua_version())
+    monkeypatch.setattr(daemon_mod, "DaemonClient", UnknownClient)
+
+    with pytest.raises(DaemonOutcomeUnknownError):
+        cli._route(engine, "tap", element_id=1)
+
+    assert mutations == []
+
+
+def test_route_refuses_in_process_fallback_while_daemon_pid_is_live(
+    tmp_path: Path, monkeypatch
+) -> None:
+    cfg = _route_config(tmp_path)
+    mutations: list[int] = []
+
+    class BusyClient:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def call(self, _cmd: str, **_kwargs: Any) -> dict[str, Any]:
+            raise OSError("busy socket")
+
+    engine = SimpleNamespace(
+        config=cfg,
+        _lease_owner=None,
+        _lease_owner_resolved=None,
+        tap=lambda **_kwargs: mutations.append(1),
+    )
+    monkeypatch.setattr(daemon_mod, "is_running", lambda _cfg: True)
+    monkeypatch.setattr(daemon_mod, "running_version", lambda _cfg: None)
+    monkeypatch.setattr(daemon_mod, "DaemonClient", BusyClient)
+    monkeypatch.setattr(daemon_mod, "process_running", lambda _cfg: True)
+
+    with pytest.raises(DaemonBusyError):
+        cli._route(engine, "tap", element_id=1)
+
+    assert mutations == []

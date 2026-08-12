@@ -82,6 +82,25 @@ class DeviceError(AuaError):
     code = "device"
 
 
+class DaemonBusyError(AuaError):
+    """A live daemon owns the device but cannot accept another call yet."""
+
+    exit_code = ExitCode.DEVICE
+    code = "daemon_busy"
+
+
+class DaemonOutcomeUnknownError(AuaError):
+    """A daemon accepted a request but its response did not reach this caller.
+
+    Retrying a state-changing request in-process can execute it twice.  This error is therefore
+    deliberately structured and terminal at the routing boundary: the caller may inspect the
+    current screen after the daemon becomes responsive, but must not replay the action blindly.
+    """
+
+    exit_code = ExitCode.DEVICE
+    code = "daemon_outcome_unknown"
+
+
 class DeviceLeasedError(AuaError):
     """The requested device is held by another agent, or nothing free matches ``--needs``.
 

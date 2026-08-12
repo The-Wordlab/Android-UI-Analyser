@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 
 from android_ui_analyser.daemon import _LONG_POLL_COMMANDS, DaemonClient
+from android_ui_analyser.errors import DaemonOutcomeUnknownError
 
 
 def _socket_timeout(cmd: str, **args: Any) -> float:
@@ -79,3 +80,71 @@ def test_await_predicate_is_in_the_long_poll_set() -> None:
 
 def test_an_ordinary_command_keeps_the_short_default() -> None:
     assert _socket_timeout("analyze") == 5.0
+
+
+def test_default_routed_work_gets_a_generous_response_budget(monkeypatch) -> None:
+    captured: dict[str, float] = {}
+
+    class _Probe:
+        def settimeout(self, value: float) -> None:
+            captured["timeout"] = value
+
+        def connect(self, _path: str) -> None:
+            raise OSError("probe")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("android_ui_analyser.daemon.socket.socket", lambda *_a, **_k: _Probe())
+    with pytest.raises(OSError, match="probe"):
+        DaemonClient("/nonexistent.sock").call("tap", element_id=1)
+
+    assert captured["timeout"] >= 60.0
+
+
+def test_timeout_after_send_is_structured_unknown_outcome_not_safe_retry(monkeypatch) -> None:
+    sent: list[bytes] = []
+
+    class _DelayedResponse:
+        def settimeout(self, _value: float) -> None:
+            pass
+
+        def connect(self, _path: str) -> None:
+            pass
+
+        def sendall(self, payload: bytes) -> None:
+            sent.append(payload)
+
+        def recv(self, _size: int) -> bytes:
+            raise TimeoutError("daemon still executing")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "android_ui_analyser.daemon.socket.socket", lambda *_a, **_k: _DelayedResponse()
+    )
+
+    with pytest.raises(DaemonOutcomeUnknownError) as raised:
+        DaemonClient("/daemon.sock").call("tap", element_id=1)
+
+    assert len(sent) == 1
+    assert raised.value.code == "daemon_outcome_unknown"
+    assert "Do not repeat" in str(raised.value.hint)
+
+
+def test_connect_failure_before_send_remains_safe_for_availability_fallback(monkeypatch) -> None:
+    class _NoDaemon:
+        def settimeout(self, _value: float) -> None:
+            pass
+
+        def connect(self, _path: str) -> None:
+            raise OSError("nothing listening")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("android_ui_analyser.daemon.socket.socket", lambda *_a, **_k: _NoDaemon())
+
+    with pytest.raises(OSError, match="nothing listening"):
+        DaemonClient("/daemon.sock").call("tap", element_id=1)

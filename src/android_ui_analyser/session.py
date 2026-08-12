@@ -253,6 +253,7 @@ def review_session_events(state: SessionState, events: Sequence[dict[str, Any]])
         "predicate_timeout": [],
         "repeated_back": [],
         "reused_numeric_id": [],
+        "ambiguous_invocation": [],
     }
     duration_ms = sum(
         float(event["duration_ms"])
@@ -263,7 +264,8 @@ def review_session_events(state: SessionState, events: Sequence[dict[str, Any]])
     back_streak: list[dict[str, Any]] = []
     previous: dict[str, Any] | None = None
     top_level: list[dict[str, Any]] = []
-    seen_invocations: set[str] = set()
+    invocation_indexes: dict[str, int] = {}
+    ambiguous_invocations: dict[str, dict[str, Any]] = {}
     for event in scoped:
         args_value = event.get("args")
         args: dict[str, Any] = args_value if isinstance(args_value, dict) else {}
@@ -283,10 +285,38 @@ def review_session_events(state: SessionState, events: Sequence[dict[str, Any]])
             "invocation_id"
         )
         if isinstance(invocation_id, str):
-            if invocation_id in seen_invocations:
+            if invocation_id in invocation_indexes:
+                # Historical daemons could time out after executing a mutation, after which
+                # `_route` replayed it in-process under the same invocation id. Journal order
+                # cannot reveal which response the caller saw: the daemon's delayed success may
+                # be written after the CLI failure that was actually returned. Treat that call
+                # as unknown, not as success/failure, and never use either observation to accuse
+                # the caller's next analyze of being redundant.
+                index = invocation_indexes[invocation_id]
+                first = top_level[index]
+                row = ambiguous_invocations.setdefault(
+                    invocation_id,
+                    {
+                        "invocation_id": invocation_id,
+                        "cmd": first.get("cmd"),
+                        "outcomes": [bool(first.get("ok"))],
+                    },
+                )
+                outcomes = row["outcomes"]
+                if isinstance(outcomes, list):
+                    outcomes.append(bool(event.get("ok")))
+                top_level[index] = {
+                    **first,
+                    "ok": True,
+                    "result": {},
+                    "error": None,
+                    "ambiguous_invocation": True,
+                }
                 continue
-            seen_invocations.add(invocation_id)
+            invocation_indexes[invocation_id] = len(top_level)
         top_level.append(event)
+
+    avoidable["ambiguous_invocation"] = list(ambiguous_invocations.values())
 
     for event in top_level:
         cmd = str(event.get("cmd") or "?")
@@ -443,11 +473,30 @@ def review_session_events(state: SessionState, events: Sequence[dict[str, Any]])
                 ),
             }
         )
+    if patterns.get("ambiguous_invocation"):
+        advice.append(
+            {
+                "id": "daemon_outcome_unknown",
+                "recommended_call": (
+                    "Do not infer or replay the action; inspect one fresh screen after the "
+                    "daemon responds."
+                ),
+            }
+        )
     high_level = sum(
         counts.get(name, 0) for name in ("session_start", "reach", "goto", "flow_run", "back_until")
     )
+    failures = sum(
+        1
+        for event in top_level
+        if not event.get("ok") and _base_command(event.get("cmd")) != "session_review"
+    )
     return {
-        "ok": not any(not event.get("ok") for event in top_level),
+        # The review command succeeded even when the run being reviewed contained recoverable
+        # failures. Keeping those two meanings in one `ok` made the review journal itself as a
+        # failure, so every later review looked worse merely because an agent inspected it.
+        "ok": True,
+        "run_ok": None if ambiguous_invocations and failures == 0 else failures == 0,
         "session_id": state.session_id,
         "goal_hash": state.goal_hash,
         "serial": state.serial,
@@ -455,7 +504,7 @@ def review_session_events(state: SessionState, events: Sequence[dict[str, Any]])
         "finished_ms": state.finished_ms,
         "calls": len(top_level),
         "engine_events": len(scoped),
-        "failures": sum(1 for event in top_level if not event.get("ok")),
+        "failures": failures,
         "duration_ms": round(duration_ms, 1),
         "commands": counts,
         "high_level_navigation_ratio": (

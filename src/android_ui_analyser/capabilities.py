@@ -210,6 +210,10 @@ def render_mcp_instructions() -> str:
         "comma-separated positive and negative terms. Use back_until_and_analyze for nested "
         "returns; an unlabeled first Back requires its fresh back_id. Use network_offline, never airplane mode, "
         "to prove offline behavior and always call network_restore or session_finish. Use "
-        "session_review to find avoidable calls. Unsafe or destructive effects require explicit "
+        "session_review to find avoidable calls (`ok` is review success; `run_ok` is run health, "
+        "and null means an older duplicated invocation has no provable caller-visible outcome). "
+        "If a daemon call reports daemon_outcome_unknown, never repeat it: wait, then inspect "
+        "one fresh screen. A busy live daemon remains the sole device controller. "
+        "Unsafe or destructive effects require explicit "
         "authorization. capabilities(goal) provides progressive discovery for uncommon tasks."
     )

@@ -48,9 +48,12 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "then a manual analyzed action; an offline goal first receives verified reversible "
         "network isolation. The returned compact observation is the current screen: reuse it "
         "and do not follow session start with analyze. The command is recommendation-first: "
-        "risky candidates are previewed and never receive authorization from the goal text. Use `aua session "
-        "review` to see avoidable calls and `aua session finish` to perform session-owned "
-        "reversible cleanup.",
+        "risky candidates are previewed and never receive authorization from the goal text. "
+        "Use `aua session review` to see avoidable calls: `ok` means the review completed, "
+        "while `run_ok` and `failures` describe the run without making the review itself "
+        "another failure (`run_ok: null` means an older duplicated invocation had no provable "
+        "caller-visible outcome). Use `aua session finish` to perform session-owned reversible "
+        "cleanup.",
     ),
     (
         "Ensure a device is available (headless is fine)",
@@ -445,7 +448,11 @@ BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
         "nested journey, return in one bounded call with `aua back-until-and-analyze "
         "'rid:<destination>'` instead of replaying frame-local Back ids. For an "
         "unattached network-driven update use `wait-and-analyze --after-change --observe`. Prefer "
-        "a positive final affordance over a generic spinner disappearance.",
+        "a positive final affordance over a generic spinner disappearance. If a daemon call "
+        "reports `daemon_outcome_unknown`, never repeat the action: wait, then inspect one fresh "
+        "screen. AUA treats a live busy daemon as the device owner and will not spawn or fall "
+        "back to a competing controller; superseded daemon cleanup cannot remove its "
+        "successor's ownership files.",
     ),
     (
         "Let automatic perception escalate",

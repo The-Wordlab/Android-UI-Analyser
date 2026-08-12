@@ -60,7 +60,13 @@ def test_back_until_stops_at_first_satisfied_destination(monkeypatch: Any) -> No
         _await(ok=True, outcome="satisfied", observation=_observation(known_screen="home")),
     ]
     keys: list[str] = []
-    monkeypatch.setattr(engine, "await_predicate", lambda *_args, **_kwargs: results.pop(0))
+    awaits: list[dict[str, Any]] = []
+
+    def awaited(*_args: Any, **kwargs: Any) -> ActionResult:
+        awaits.append(kwargs)
+        return results.pop(0)
+
+    monkeypatch.setattr(engine, "await_predicate", awaited)
     monkeypatch.setattr(
         engine,
         "key",
@@ -74,6 +80,9 @@ def test_back_until_stops_at_first_satisfied_destination(monkeypatch: Any) -> No
     assert result.detail == "satisfied after 2 back-navigation step(s)"
     assert result.observation is not None
     assert keys == ["back", "back"]
+    assert awaits
+    assert all(call["rich_ui"] is False for call in awaits)
+    assert all(call["hierarchy_only"] is True for call in awaits)
 
 
 def test_back_until_re_resolves_toolbar_back_on_each_fresh_frame(monkeypatch: Any) -> None:
@@ -113,12 +122,15 @@ def test_back_until_re_resolves_toolbar_back_on_each_fresh_frame(monkeypatch: An
         _await(ok=True, outcome="satisfied"),
     ]
     selectors: list[dict[str, Any]] = []
+    fast: list[bool] = []
     monkeypatch.setattr(engine, "await_predicate", lambda *_args, **_kwargs: results.pop(0))
     monkeypatch.setattr(
         engine,
         "tap",
         lambda *args, **kwargs: (
-            selectors.append(kwargs["selector"]) or ActionResult(ok=True, action="tap")
+            selectors.append(kwargs["selector"])
+            or fast.append(kwargs["_hierarchy_settle"])
+            or ActionResult(ok=True, action="tap")
         ),
     )
     monkeypatch.setattr(
@@ -134,6 +146,7 @@ def test_back_until_re_resolves_toolbar_back_on_each_fresh_frame(monkeypatch: An
         {"rid": "com.example.app:id/buttonNavBack"},
         {"rid": "com.example.app:id/buttonNavBack"},
     ]
+    assert fast == [True, True]
 
 
 def test_back_until_uses_explicit_fresh_unlabeled_id_then_semantic_controls(

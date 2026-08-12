@@ -189,3 +189,60 @@ def test_pidfile_roundtrip_and_legacy_parse(tmp_path: Path) -> None:
 
     path.write_text("not-a-pid")
     assert daemon_mod.read_pidfile(path) == (None, None)
+
+
+def test_busy_live_pid_counts_as_running_without_spawning_a_competitor(
+    tmp_path: Path, monkeypatch
+) -> None:
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    cfg = SimpleNamespace(
+        cache=SimpleNamespace(dir=str(cache)),
+        daemon=SimpleNamespace(socket=str(cache / "daemon.sock")),
+        device=SimpleNamespace(serial="fictional-5554"),
+    )
+    sock = daemon_mod.socket_path(cfg)
+    Path(sock).touch()
+    Path(sock + ".pid").write_text(
+        json.dumps({"pid": os.getpid(), "exe": sys.executable}), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        daemon_mod.subprocess,
+        "Popen",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("must not spawn")),
+    )
+    monkeypatch.setattr(daemon_mod, "_socket_alive", lambda _sock: False)
+
+    assert daemon_mod.is_running(cfg) is True
+    started = daemon_mod.start(cfg)
+
+    assert started["status"] == "already_running"
+    assert started["pid"] == os.getpid()
+
+
+def test_superseded_daemon_cleanup_preserves_successor_socket_and_pidfile(tmp_path: Path) -> None:
+    sock = str(tmp_path / "daemon.sock")
+    Path(sock).touch()
+    Path(sock + ".pid").write_text(
+        json.dumps({"pid": 222, "exe": "/fictional/python"}), encoding="utf-8"
+    )
+
+    removed = daemon_mod._remove_owned_daemon_files(sock, owner_pid=111)
+
+    assert removed is False
+    assert Path(sock).exists()
+    assert daemon_mod.read_pidfile(sock + ".pid")[0] == 222
+
+
+def test_current_daemon_cleanup_removes_its_own_socket_and_pidfile(tmp_path: Path) -> None:
+    sock = str(tmp_path / "daemon.sock")
+    Path(sock).touch()
+    Path(sock + ".pid").write_text(
+        json.dumps({"pid": 111, "exe": "/fictional/python"}), encoding="utf-8"
+    )
+
+    removed = daemon_mod._remove_owned_daemon_files(sock, owner_pid=111)
+
+    assert removed is True
+    assert not Path(sock).exists()
+    assert not Path(sock + ".pid").exists()

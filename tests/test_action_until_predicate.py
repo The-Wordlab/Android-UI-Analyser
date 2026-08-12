@@ -17,7 +17,7 @@ from types import SimpleNamespace
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.memory import AppMemoryStore, RouteStep
 from android_ui_analyser.providers.registry import ProviderFactory
-from android_ui_analyser.schema import ActionResult, Element, Source
+from android_ui_analyser.schema import ActionResult, AnalyzeResult, Element, Meta, Screen, Source
 from conftest import FakeDevice, make_config
 
 
@@ -264,3 +264,55 @@ def test_positive_text_gets_one_rich_verification_before_timeout(tmp_path) -> No
 
     assert out.await_outcome == "satisfied"
     assert out.await_terms and out.await_terms[0]["present"] is True
+
+
+def test_internal_hierarchy_only_wait_skips_visual_verification_and_escalation(
+    tmp_path, monkeypatch
+) -> None:
+    dev = FakeDevice(package="com.example.app", text_index={})
+    cfg = make_config(memory={"dir": str(tmp_path / "home")}, daemon={"enabled": False})
+    eng = Engine(cfg, device=dev, factory=ProviderFactory(cfg))
+    analyzed: list[dict[str, object]] = []
+
+    def hierarchy(**kwargs):  # type: ignore[no-untyped-def]
+        analyzed.append(kwargs)
+        return AnalyzeResult(
+            screen=Screen(
+                width=1080,
+                height=2400,
+                package="com.example.app",
+                source="hierarchy",
+            ),
+            elements=[],
+            meta=Meta(duration_ms=1, tier_used="hierarchy", path="hierarchy"),
+        )
+
+    monkeypatch.setattr(eng, "analyze", hierarchy)
+    monkeypatch.setattr(
+        eng,
+        "_analyze_post_action",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("must not escalate intermediate navigation")
+        ),
+    )
+
+    out = eng.await_predicate(
+        "text:Destination",
+        timeout_ms=0,
+        poll_ms=10,
+        observe=True,
+        rich_ui=False,
+        hierarchy_only=True,
+    )
+
+    assert out.await_outcome == "timeout"
+    assert out.observation is not None
+    assert not any(name == "current_app" for name, _args in dev.calls)
+    assert analyzed == [
+        {
+            "source": "hierarchy",
+            "with_ocr": False,
+            "record": False,
+            "with_image": None,
+        }
+    ]
