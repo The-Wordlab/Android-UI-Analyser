@@ -113,6 +113,25 @@ def test_a_settle_timeout_is_also_flagged(tmp_path: Path, monkeypatch) -> None:
     assert risk and "timed out" in risk
 
 
+def test_a_settle_timeout_with_fresh_semantic_change_is_not_called_stale() -> None:
+    ready = {
+        "changed": True,
+        "masked": 0,
+        "ms": 1100,
+        "timeout": True,
+        "via": "timeout",
+    }
+
+    assert (
+        Engine._stale_observation_risk(
+            True,
+            ready,
+            semantic_change_confirmed=True,
+        )
+        is None
+    )
+
+
 def test_the_risk_is_visible_at_the_top_level_without_corrupting_detail(tmp_path: Path) -> None:
     """A runner reading only the terse form must find the caveat — in its own field.
 

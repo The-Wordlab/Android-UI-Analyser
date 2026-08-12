@@ -3727,6 +3727,18 @@ class Engine:
                 "network_profile_restore",
                 *(["owned_emulator_stop"] if emulator_started else []),
             ],
+            cleanup_call={
+                "cli": f"aua --serial {state.serial} session finish",
+                "mcp": {
+                    "tool": "session_finish",
+                    "arguments": {"session_id": state.session_id},
+                },
+                "reason": (
+                    "Run this once when finished. It restores only session-owned reversible "
+                    "state and returns the efficiency review; do not restore the network "
+                    "separately first."
+                ),
+            },
             emulator_started=emulator_started,
         )
         return out
@@ -4558,6 +4570,7 @@ class Engine:
                     settle,
                     ready,
                     destination_confirmed=destination_confirmed,
+                    semantic_change_confirmed=self._change_has_semantic_effect(change),
                 )
                 if caveat:
                     obs.meta.stale_risk = caveat
@@ -4593,7 +4606,14 @@ class Engine:
                 result.known_screen = obs.meta.known_screen
                 result.stable_elements = self._stable_elements(obs.elements)
                 result.action_diff_summary = self._compact_action_diff(obs.meta.element_diff)
-                result.note = "No separate analyze needed; state is in observation."
+                if ready and ready.get("timeout") and self._change_has_semantic_effect(change):
+                    result.note = (
+                        "Fresh hierarchy confirms the action changed the screen. Use this "
+                        "observation; if an exact destination is still absent, run one exact "
+                        "predicate wait instead of a predicate-less settle wait."
+                    )
+                else:
+                    result.note = "No separate analyze needed; state is in observation."
         else:
             self._pre_action_sig = None
             if self.config.perf.prefetch:
@@ -4610,6 +4630,7 @@ class Engine:
         ready: dict[str, Any] | None,
         *,
         destination_confirmed: bool = False,
+        semantic_change_confirmed: bool = False,
     ) -> str | None:
         """Why this post-action observation may describe the screen as it was *before* the action.
 
@@ -4668,6 +4689,12 @@ class Engine:
                 "layout/node movement. The action may have a visual-only effect — do not repeat a "
                 "mutating action from this readback alone."
             )
+        if ready.get("timeout") and semantic_change_confirmed:
+            # The visual settle budget expired, but the fresh hierarchy has different text,
+            # focus, or Activity. It may still be rendering, yet it demonstrably does not
+            # predate the action. Calling that stale made fresh agents start a predicate-less
+            # 60s wait even when the requested content was already present.
+            return None
         if ready.get("timeout"):
             return (
                 f"post-action wait timed out (via={via}) — this observation may be mid-transition "

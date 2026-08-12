@@ -877,8 +877,9 @@ def plan_goal_session(
     warnings: list[str] = []
     if "offline" in goal.casefold() or "airplane" in goal.casefold():
         warnings.append(
-            "Use `aua network offline --verify`, not airplane mode, and restore connectivity "
-            "with `aua network restore` or `aua session finish`."
+            "Use `aua network offline --verify`, not airplane mode. Because this is a goal "
+            "session, end with its exact `cleanup_call`; one `aua session finish` restores "
+            "session-owned connectivity and returns the review."
         )
     if any(candidate.kind == "deeplink" for candidate in candidates):
         warnings.append(

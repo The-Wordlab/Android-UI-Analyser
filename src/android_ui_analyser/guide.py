@@ -52,8 +52,9 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "Use `aua session review` to see avoidable calls: `ok` means the review completed, "
         "while `run_ok` and `failures` describe the run without making the review itself "
         "another failure (`run_ok: null` means an older duplicated invocation had no provable "
-        "caller-visible outcome). Use `aua session finish` to perform session-owned reversible "
-        "cleanup.",
+        "caller-visible outcome). End with the exact `cleanup_call` returned by session start: "
+        "one `aua session finish` performs session-owned reversible cleanup and review. Do not "
+        "run `network restore` separately first.",
     ),
     (
         "Ensure a device is available (headless is fine)",
@@ -445,6 +446,10 @@ BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
         "Act and consume the returned screen",
         "Use `tap-and-analyze`, `input-and-analyze`, `swipe-and-analyze`, and `key-and-analyze`; "
         "their `observation` already contains fresh ids. Do not immediately call `analyze` again. "
+        "Verify the exact depth the user named: an intermediate card/detail page with an "
+        "`Open` control does not prove that a conversation, thread, document, or tool itself "
+        "opens. Continue through the returned `next_actions` until the requested content and "
+        "interactive affordance are visible. Never invent a rid that was not returned. "
         "For your action's expected result add `--until 'rid:resultCard'` or "
         "`--until '!text:Loading'`; escape a literal comma as `text:Hello\\, friend`. For a "
         "nested journey, return in one bounded call with `aua back-until-and-analyze "

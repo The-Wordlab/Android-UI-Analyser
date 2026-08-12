@@ -177,6 +177,17 @@ def test_session_start_uses_exactly_one_analyze(monkeypatch, tmp_path) -> None:
     assert result["observation"]["meta"]["known_screen"] == "home"
     assert result["recommended_call"]["kind"] == "map_find"
     assert result["relevant_capabilities"]
+    assert result["cleanup_call"] == {
+        "cli": "aua --serial goal-emulator session finish",
+        "mcp": {
+            "tool": "session_finish",
+            "arguments": {"session_id": result["session_id"]},
+        },
+        "reason": (
+            "Run this once when finished. It restores only session-owned reversible state "
+            "and returns the efficiency review; do not restore the network separately first."
+        ),
+    }
 
 
 def test_reach_reuses_bootstrap_observation_for_goto(monkeypatch) -> None:
