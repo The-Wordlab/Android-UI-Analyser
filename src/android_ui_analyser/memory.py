@@ -315,6 +315,9 @@ class RouteStep(BaseModel):
     #            (flows also: launch-app | wait-for | wait-stable | assert-visible | goto |
     #             repeat | retry | hide-keyboard | paste | …)
     label: str | None = None  # redacted-safe element label (may be '<redacted>')
+    # New recordings keep descriptions distinct from visible text.  Older routes/flows used
+    # ``label`` for either and remain valid; ``by is None`` preserves that tolerant matching.
+    content_desc: str | None = None
     resource_id: str | None = None  # resource-id TAIL, the primary replay selector
     arg: str | None = None  # kind-specific: key name / swipe direction / query / package
     text: str | None = None  # input value — FLOWS ONLY, never set by auto-recording
@@ -324,6 +327,12 @@ class RouteStep(BaseModel):
     timeout_ms: int | None = None  # wait-for / wait-stable / assert-visible override
     by: str | None = None  # match target by: text (default) | id (resource-id) | desc
     index: int | None = None  # nth (0-based) of several matches, as the CLI's --index
+    # Capture-only provenance.  Flow rendering deliberately omits these per-action fields: the
+    # selected homogeneous segment promotes origin/context to the Flow itself.
+    origin_package: str | None = None
+    context_id: str | None = None
+    capture_segment: int | None = None
+    capture_order: int | None = None
     # scroll-to: which way to swipe WHILE SEARCHING, as the CLI's --direction (default "up",
     # i.e. look further down the list). A grid that opens already scrolled past its target
     # needs "down" — searching the wrong way reads as a missing element, not a missed search.
@@ -400,6 +409,14 @@ class SessionState(BaseModel):
     pending_since: str | None = None  # ISO ts of the first pending step (TTL guard)
     pending_overflow: bool = False  # cap hit → the eventual edge is dropped, never garbled
     recent: list[RouteStep] = Field(default_factory=list)  # rolling journal (`flow save`)
+    # A boundary advances when the foreground changes to a non-transit app or the deterministic
+    # memory context changes.  The journal is retained so ``flow save --last N`` can disclose a
+    # requested crossing, but only actions stamped with the newest segment may be selected.
+    capture_segment: int = 0
+    capture_boundary_reason: str | None = None
+    # Monotonic action watermark. Unlike ``len(recent)``, this keeps identifying new actions
+    # after the rolling journal reaches its cap and drops one old entry for every new one.
+    next_capture_order: int = 0
     last_goal: str | None = None  # last `goto`/find target (boosts ranked suggestions)
     active_context_id: str = DEFAULT_CONTEXT_ID
     active_flags: dict[str, str] = Field(default_factory=dict)
@@ -444,6 +461,8 @@ def step_display(step: RouteStep) -> str:
     if kind in ("tap", "long-press", "clear"):
         if step.label:
             return f"{kind} '{step.label}'"
+        if step.content_desc:
+            return f"{kind} [desc:{step.content_desc}]"
         if step.resource_id:
             return f"{kind} [#{step.resource_id}]"
         return f"{kind} [unlabeled]"
@@ -493,11 +512,18 @@ def is_destructive_step(step: RouteStep, lexicon: Sequence[str]) -> bool:
     """
     if step.kind not in ("tap", "long-press"):
         return False
-    label = (step.label or "").strip()
-    if not label or label in REDACT_TOKENS:
-        return False
-    low = label.lower()
-    return any(re.search(rf"\b{re.escape(w.lower())}\b", low) for w in lexicon)
+    labels = [
+        value.strip().lower()
+        for value in (step.label, step.content_desc)
+        if value and value not in REDACT_TOKENS
+    ]
+    if resource := _resource_slug(step.resource_id):
+        labels.append(resource.replace("_", " "))
+    return any(
+        re.search(rf"\b{re.escape(word.lower())}\b", label)
+        for label in labels
+        for word in lexicon
+    )
 
 
 _SAFE_GOTO_STEP_KINDS = frozenset(
@@ -705,7 +731,10 @@ _LONGNUM = re.compile(r"\d{6,}")
 
 
 def _is_secret_field(el: Element) -> bool:
-    parts = " ".join(p for p in (el.resource_id, el.content_desc, el.type) if p)
+    rid_tail = _id_tail(el.resource_id) or ""
+    rid_words = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", rid_tail)
+    rid_words = re.sub(r"[^A-Za-z0-9]+", " ", rid_words)
+    parts = " ".join(p for p in (el.resource_id, rid_words, el.content_desc, el.type) if p)
     return bool(_SECRET_HINT.search(parts))
 
 
@@ -771,6 +800,90 @@ def redact_label(el: Element, *, redact: bool = True) -> str | None:
     if redact and (_is_secret_field(el) or _looks_pii(text)):
         return "<redacted>"
     return text[:60]
+
+
+def recorded_selector(
+    el: Element, *, elements: Sequence[Element] = ()
+) -> dict[str, str | None]:
+    """The safest reusable selector for a newly recorded action.
+
+    Resource ids are locale-independent and win when their tail is stable.  A content
+    description is next, kept distinct so replay does not accidentally match visible copy.
+    Visible text is the last semantic fallback.  PII, dynamic values and input *values* are
+    never selectors; returning no selector is intentional and makes ``flow save`` refuse the
+    brittle capture with edit guidance.
+    """
+    tail = _id_tail(el.resource_id)
+    secret_field = _is_secret_field(el)
+    rid_matches = [other for other in elements if _id_tail(other.resource_id) == tail]
+    if (
+        tail
+        and not _looks_dynamic(tail)
+        and not _looks_pii(tail)
+        and (not elements or len(rid_matches) == 1)
+    ):
+        # Keep safe copy/description as human/search/destructive-risk evidence. ``by=id``
+        # makes it non-selector evidence even though YAML preserves it for review.
+        supplemental_desc = (el.content_desc or "").strip()
+        desc = (
+            supplemental_desc[:60]
+            if supplemental_desc
+            and not secret_field
+            and not _looks_dynamic(supplemental_desc)
+            and not _looks_pii(supplemental_desc)
+            else None
+        )
+        supplemental = "" if _is_input(el) else (el.text or "").strip()
+        label = (
+            supplemental[:60]
+            if supplemental
+            and not secret_field
+            and not _looks_dynamic(supplemental)
+            and not _looks_pii(supplemental)
+            else None
+        )
+        return {"resource_id": tail, "content_desc": desc, "label": label, "by": "id"}
+
+    desc = (el.content_desc or "").strip()
+    persisted_desc = desc[:60]
+    desc_matches = [
+        other
+        for other in elements
+        if (other.content_desc or "").strip()[:60] == persisted_desc
+    ]
+    if (
+        desc
+        and not _is_secret_field(el)
+        and not _looks_dynamic(desc)
+        and not _looks_pii(desc)
+        and (not elements or len(desc_matches) == 1)
+    ):
+        return {
+            "resource_id": None,
+            "content_desc": persisted_desc,
+            "label": None,
+            "by": "desc",
+        }
+
+    # An EditText's visible text is the value the user typed, not the field's identity.
+    text = "" if _is_input(el) else (el.text or "").strip()
+    persisted_text = text[:60]
+    text_matches = [other for other in elements if (other.text or "").strip()[:60] == persisted_text]
+    if (
+        text
+        and not _is_secret_field(el)
+        and not _looks_dynamic(text)
+        and not _looks_pii(text)
+        and (not elements or len(text_matches) == 1)
+    ):
+        return {
+            "resource_id": None,
+            "content_desc": None,
+            "label": persisted_text,
+            "by": "text",
+        }
+
+    return {"resource_id": None, "content_desc": None, "label": None, "by": None}
 
 
 # --------------------------------------------------------- signatures & key elements
@@ -1535,6 +1648,30 @@ class AppMemoryStore:
                 return session
         return None
 
+    @staticmethod
+    def _advance_capture_segment(sess: SessionState, reason: str) -> None:
+        """Start an empty recorded-flow segment without erasing boundary evidence."""
+        sess.capture_segment += 1
+        sess.capture_boundary_reason = reason
+
+    @staticmethod
+    def _route_step(step: RouteStep, origin_package: str) -> RouteStep:
+        """Drop session-only capture provenance before a step enters the durable map."""
+        update: dict[str, object] = {
+            "origin_package": None,
+            "context_id": None,
+            "capture_segment": None,
+            "capture_order": None,
+        }
+        if step.package == origin_package:
+            update["package"] = None
+        if step.substeps:
+            update["substeps"] = [
+                AppMemoryStore._route_step(substep, origin_package)
+                for substep in step.substeps
+            ]
+        return step.model_copy(update=update)
+
     def activate_flag_context(
         self,
         serial: str,
@@ -1557,7 +1694,17 @@ class AppMemoryStore:
         )
         merged.update(flags)
         context_id = context_id_for_flags(merged)
-        if sess.active_context_id != context_id or sess.package not in (None, package):
+        context_changed = sess.active_context_id != context_id
+        package_changed = sess.package not in (None, package)
+        if context_changed or package_changed:
+            if sess.package is not None:
+                if package_changed:
+                    reason = f"origin app changed from {sess.package} to {package}"
+                else:
+                    reason = (
+                        f"memory context changed from {sess.active_context_id} to {context_id}"
+                    )
+                self._advance_capture_segment(sess, reason)
             sess.current_screen = None
             sess.pending = []
             sess.pending_since = None
@@ -1601,7 +1748,20 @@ class AppMemoryStore:
             return
         sess = self.load_session(serial)
         if sess.package not in (None, package):
+            previous_package = sess.package
+            self._advance_capture_segment(
+                sess,
+                f"origin app changed from {previous_package} to {package}",
+            )
+            # A flag deeplink can retarget another app without producing an observation.
+            # Treat that as the same hard journey boundary as a foreign screen so older
+            # actions/pending flags cannot be attributed to the new origin.
+            sess.current_screen = None
+            sess.pending = []
+            sess.pending_since = None
+            sess.pending_overflow = False
             sess.active_flags = {}
+            sess.pending_flags = {}
             sess.active_context_id = DEFAULT_CONTEXT_ID
             sess.context_verified = False
         sess.package = package
@@ -1626,16 +1786,37 @@ class AppMemoryStore:
     def clear_context(self, serial: str, package: str) -> None:
         """Forget session flag identity after app data is explicitly cleared."""
         sess = self.load_session(serial)
-        if sess.package != package:
+        owned = sess.package == package
+        transit = sess.package is not None and matches_any(package, self.cfg.transit_packages)
+        if not (owned or transit):
             return
+        # Clearing app data is a hard, non-recorded journey boundary even when the app was
+        # already in the default/no-flags context.  Actions captured before and after it must
+        # never be materialized into one reusable flow.
+        self._advance_capture_segment(sess, f"app data cleared for {package}")
         sess.current_screen = None
         sess.pending = []
         sess.pending_since = None
         sess.pending_overflow = False
-        sess.active_context_id = DEFAULT_CONTEXT_ID
-        sess.active_flags = {}
-        sess.pending_flags = {}
-        sess.context_verified = False
+        if owned:
+            sess.active_context_id = DEFAULT_CONTEXT_ID
+            sess.active_flags = {}
+            sess.pending_flags = {}
+            sess.context_verified = False
+        self.save_session(serial, sess)
+
+    def mark_capture_boundary(self, serial: str, package: str, reason: str) -> None:
+        """Separate recorded actions around an external mutation we do not journal."""
+        sess = self.load_session(serial)
+        if sess.package != package and not (
+            sess.package is not None and matches_any(package, self.cfg.transit_packages)
+        ):
+            return
+        self._advance_capture_segment(sess, reason)
+        sess.current_screen = None
+        sess.pending = []
+        sess.pending_since = None
+        sess.pending_overflow = False
         self.save_session(serial, sess)
 
     # -- recording --------------------------------------------------------
@@ -2364,6 +2545,25 @@ class AppMemoryStore:
         if step.text is not None:
             step = step.model_copy(update={"text": None})
         sess = self.load_session(serial)
+        # Stamp the action before it enters either journal.  ``step.package`` is where the
+        # control was physically acted on; origin/context describe the app journey that owns
+        # it.  Transit packages therefore remain inside one capture segment by design.
+        next_order = max(
+            sess.next_capture_order,
+            max(
+                (recorded.capture_order + 1 for recorded in sess.recent if recorded.capture_order is not None),
+                default=0,
+            ),
+        )
+        step = step.model_copy(
+            update={
+                "origin_package": sess.package or step.package,
+                "context_id": sess.active_context_id,
+                "capture_segment": sess.capture_segment,
+                "capture_order": next_order,
+            }
+        )
+        sess.next_capture_order = next_order + 1
         sess.recent.append(step)
         sess.recent = sess.recent[-_RECENT_CAP:]
         # A persistent top-level navigation control expresses a fresh destination. If sparse
@@ -2469,10 +2669,7 @@ class AppMemoryStore:
             and not sess.pending_overflow
             and _pending_fresh(sess.pending_since)
         ):
-            steps = [
-                s.model_copy(update={"package": None}) if s.package == package else s
-                for s in pending
-            ]
+            steps = [self._route_step(step, package) for step in pending]
             route = self.record_route(
                 package,
                 prev,
@@ -2488,6 +2685,11 @@ class AppMemoryStore:
             )
         sess.current_screen = outcome.name
         if not same_context_owner:
+            old_package = sess.package
+            self._advance_capture_segment(
+                sess,
+                f"foreground app changed from {old_package or 'unknown'} to {package}",
+            )
             sess.active_context_id = DEFAULT_CONTEXT_ID
             sess.active_flags = {}
             sess.pending_flags = {}
@@ -2568,7 +2770,25 @@ class AppMemoryStore:
             return None
         sess = self.load_session(serial)
         if sess.package != package:
-            return None  # foreign/transit observation — leave the journey state alone
+            if sess.package is not None and matches_any(package, self.cfg.transit_packages):
+                return None  # configured transit remains part of the origin journey
+            old_package = sess.package
+            if old_package is not None:
+                self._advance_capture_segment(
+                    sess,
+                    f"foreground app changed from {old_package} to {package}",
+                )
+            sess.package = package
+            sess.current_screen = None
+            sess.pending = []
+            sess.pending_since = None
+            sess.pending_overflow = False
+            sess.active_context_id = DEFAULT_CONTEXT_ID
+            sess.active_flags = {}
+            sess.pending_flags = {}
+            sess.context_verified = False
+            self.save_session(serial, sess)
+            return None
         if sess.pending and _infer_state(elements) == "loading":
             return None  # awaited/final observation must consume the route, not this shell
         app = self.load(package)
@@ -2590,10 +2810,7 @@ class AppMemoryStore:
         prev = sess.current_screen
         if prev and name != prev:
             if sess.pending and not sess.pending_overflow and _pending_fresh(sess.pending_since):
-                steps = [
-                    s.model_copy(update={"package": None}) if s.package == package else s
-                    for s in sess.pending
-                ]
+                steps = [self._route_step(step, package) for step in sess.pending]
                 self.record_route(
                     package,
                     prev,
@@ -2914,7 +3131,11 @@ def _route_rejection_reason(steps: list[RouteStep]) -> str | None:
         return "too many destination actions accumulated without a recognized screen"
     for step in destination_steps:
         if step.kind in {"tap", "long-press"}:
-            if step.resource_id or (step.label and step.label not in REDACT_TOKENS):
+            if (
+                step.resource_id
+                or step.content_desc
+                or (step.label and step.label not in REDACT_TOKENS)
+            ):
                 return None
         elif step.arg:
             return None
@@ -2956,9 +3177,11 @@ def _parse_inbound(
             continue
         if s.label and s.label not in REDACT_TOKENS:
             label = s.label
+        elif s.content_desc:
+            label = s.content_desc
         if s.resource_id:
             resource_id = s.resource_id
-        if s.label or s.resource_id or s.arg:
+        if s.label or s.content_desc or s.resource_id or s.arg:
             kind = s.kind
     return label, kind, resource_id
 

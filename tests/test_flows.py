@@ -9,12 +9,15 @@ files, and the plumbing (CLI group, daemon dispatch).
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from android_ui_analyser.cli import app
 from android_ui_analyser.daemon import dispatch
+from android_ui_analyser.engine import Engine
 from android_ui_analyser.errors import UsageError
 from android_ui_analyser.flows import (
     Flow,
@@ -24,7 +27,14 @@ from android_ui_analyser.flows import (
     resolve_params,
     steps_from_recent,
 )
-from android_ui_analyser.memory import AppMemoryStore, RouteStep
+from android_ui_analyser.memory import (
+    AppMemoryStore,
+    RouteStep,
+    SessionState,
+    context_id_for_flags,
+)
+from android_ui_analyser.schema import ActionResult
+from android_ui_analyser.selectors import match_step
 from conftest import make_config
 from test_memory import APPS, HOME, P, _elements, _engine, _hier, _node, _store
 from test_navigation import ScriptedDevice
@@ -116,6 +126,45 @@ def test_render_round_trips() -> None:
     assert again.params == flow.params
 
 
+def test_desc_selector_round_trips_distinctly_and_matches_only_description() -> None:
+    flow = parse_flow_yaml('steps:\n  - tap: {desc: "Open details", by: desc}\n')
+    rendered = render_flow_yaml(flow)
+    assert "desc: Open details" in rendered
+    assert "by: desc" in rendered
+    assert "text:" not in rendered
+    step = parse_flow_yaml(rendered).steps[0]
+    assert step.by == "desc" and step.content_desc == "Open details" and step.label is None
+    elements = _elements(
+        _hier(
+            _node("android.widget.Button", text="Open details", b="[0,0][100,50]"),
+            _node("android.widget.Button", desc="Open details", b="[0,50][100,100]"),
+        )
+    )
+    assert match_step(elements, step) is elements[1]
+
+
+def test_legacy_id_and_text_keeps_text_fallback_but_strict_capture_does_not() -> None:
+    elements = _elements(_hier(_node("android.widget.Button", text="Continue", b="[0,0][100,50]")))
+    legacy = parse_flow_yaml("steps:\n  - tap: {id: oldButton, text: Continue}\n").steps[0]
+    assert legacy.by is None
+    assert match_step(elements, legacy) is elements[0]
+
+    strict = parse_flow_yaml("steps:\n  - tap: {id: oldButton, text: Continue, by: id}\n").steps[0]
+    assert strict.by == "id"
+    assert "by: id" in render_flow_yaml(Flow(name="strict", steps=[strict]))
+    assert match_step(elements, strict) is None
+
+
+def test_legacy_desc_keeps_text_or_description_fallback() -> None:
+    elements = _elements(_hier(_node("android.widget.Button", text="Continue", b="[0,0][100,50]")))
+    legacy = parse_flow_yaml("steps:\n  - tap: {desc: Continue}\n").steps[0]
+    assert legacy.by is None and legacy.content_desc == "Continue"
+    assert match_step(elements, legacy) is elements[0]
+
+    strict = parse_flow_yaml("steps:\n  - tap: {desc: Continue, by: desc}\n").steps[0]
+    assert match_step(elements, strict) is None
+
+
 # --------------------------------------------------------------------------- params
 
 
@@ -128,7 +177,7 @@ def test_resolve_params_defaults_and_overrides() -> None:
 
 
 def test_resolve_params_missing_required_raises() -> None:
-    flow = parse_flow_yaml("params: {ACCOUNT: \"\"}\nsteps:\n  - tap: \"${ACCOUNT}\"\n")
+    flow = parse_flow_yaml('params: {ACCOUNT: ""}\nsteps:\n  - tap: "${ACCOUNT}"\n')
     try:
         resolve_params(flow, {})
         raise AssertionError("expected UsageError")
@@ -139,7 +188,7 @@ def test_resolve_params_missing_required_raises() -> None:
 
 
 def test_resolve_params_undeclared_placeholder_raises() -> None:
-    flow = parse_flow_yaml("steps:\n  - tap: \"${NOPE}\"\n")
+    flow = parse_flow_yaml('steps:\n  - tap: "${NOPE}"\n')
     try:
         resolve_params(flow, {})
         raise AssertionError("expected UsageError")
@@ -226,6 +275,26 @@ steps:
     assert [s["index"] for s in resumed["steps_run"]] == [2]
 
 
+def test_named_flow_failure_resumes_by_storage_key_not_declared_name(tmp_path: Path) -> None:
+    cfg = make_config(memory={"dir": str(tmp_path / "home")})
+    store = FlowStore(cfg.memory)
+    store.flows_dir().mkdir(parents=True)
+    (store.flows_dir() / "open_cached.yaml").write_text(
+        f"name: Friendly cached title\napp: {P}\nsteps:\n"
+        "  - tap: {text: Definitely missing}\n",
+        encoding="utf-8",
+    )
+    device = ScriptedDevice([HOME], package=P, serial="emu-storage-resume")
+
+    result = Engine(cfg, device=device).flow_run("open_cached")
+
+    assert result["ok"] is False
+    assert result["flow"] == "open_cached"
+    assert result["declared_name"] == "Friendly cached title"
+    assert result["resume_call"] == "aua flow run open_cached --from-step 0"
+    assert result["resume_call"] in result["hint"]
+
+
 def test_flow_run_allows_destructive_by_default_unlike_goto(tmp_path: Path) -> None:
     danger = _hier(
         _node("android.widget.TextView", text="Confirm", rid="x:id/h", b="[40,120][1040,210]"),
@@ -246,7 +315,7 @@ def test_flow_run_allows_destructive_by_default_unlike_goto(tmp_path: Path) -> N
 
     flow_file = tmp_path / "reset.yaml"
     flow_file.write_text(
-        "name: reset\napp: com.example.app\nsteps:\n  - tap: \"Delete my account\"\n",
+        'name: reset\napp: com.example.app\nsteps:\n  - tap: "Delete my account"\n',
         encoding="utf-8",
     )
 
@@ -283,10 +352,48 @@ def test_flow_run_goto_step_composes_map_navigation(tmp_path: Path) -> None:
     assert sum(1 for c in dev.calls if c[0] == "click") == 1
 
 
+def test_no_allow_destructive_scans_the_whole_flow_before_step_zero(tmp_path: Path) -> None:
+    flow_file = tmp_path / "late-danger.yaml"
+    flow_file.write_text(
+        f"name: late_danger\napp: {P}\nsteps:\n"
+        "  - key: back\n"
+        "  - repeat:\n      times: 1\n      steps:\n"
+        "        - tap: {id: deleteAccount}\n",
+        encoding="utf-8",
+    )
+    device = ScriptedDevice([HOME], package=P, serial="emu-late-danger")
+
+    result = _engine(tmp_path, device).flow_run(
+        file=str(flow_file), allow_destructive=False
+    )
+
+    assert result["ok"] is False and result["code"] == "destructive_step"
+    assert result["steps_run"] == []
+    assert not any(call[0] in {"press", "click"} for call in device.calls)
+
+
+def test_composite_failure_reports_the_parent_index_for_safe_resume(tmp_path: Path) -> None:
+    flow_file = tmp_path / "composite-failure.yaml"
+    flow_file.write_text(
+        f"name: composite_failure\napp: {P}\nsteps:\n"
+        "  - key: back\n"
+        "  - repeat:\n      times: 2\n      steps:\n"
+        "        - tap: {id: definitelyMissing}\n",
+        encoding="utf-8",
+    )
+    device = ScriptedDevice([HOME, HOME], package=P, serial="emu-composite-failure")
+
+    result = _engine(tmp_path, device).flow_run(file=str(flow_file))
+
+    assert result["ok"] is False and result["step_index"] == 1
+    assert result["remaining_steps"][0].startswith("repeat")
+    assert sum(1 for call in device.calls if call[0] == "press") == 1
+
+
 def test_flow_run_launch_app_step(tmp_path: Path) -> None:
     flow_file = tmp_path / "l.yaml"
     flow_file.write_text(
-        f"name: l\napp: {P}\nsteps:\n  - launch_app: {P}\n  - assert_visible: \"Home\"\n",
+        f'name: l\napp: {P}\nsteps:\n  - launch_app: {P}\n  - assert_visible: "Home"\n',
         encoding="utf-8",
     )
     dev = ScriptedDevice([HOME], package=P, serial="emu-launch", text_index={"Home": (0, 0, 9, 9)})
@@ -322,12 +429,15 @@ def test_flow_save_materializes_recent_with_placeholders(tmp_path: Path) -> None
     send = next(e.id for e in res.elements if e.text == "Send")
     eng.tap(send, observe=False)
 
-    out = eng.flow_save("my_flow")
+    preview = eng.flow_save("my_flow")
+    assert preview["ok"] and preview["saved"] is False
+    assert not Path(preview["path"]).exists()
+    out = eng.flow_save("my_flow", save=True)
     assert out["ok"] and out["steps"] == 2 and out["params_needed"] == ["PARAM_1"]
     saved = Path(out["path"]).read_text(encoding="utf-8")
     assert "a very secret prompt" not in saved  # privacy: typed values never persisted
     assert "${PARAM_1}" in saved
-    assert "Send" in saved
+    assert "id: send" in saved
 
 
 def test_flow_save_requires_force_to_overwrite(tmp_path: Path) -> None:
@@ -335,13 +445,15 @@ def test_flow_save_requires_force_to_overwrite(tmp_path: Path) -> None:
     eng = _engine(tmp_path, dev)
     res = eng.analyze(source="hierarchy")
     eng.tap(res.elements[1].id, observe=False)
-    assert eng.flow_save("dup")["ok"]
+    assert eng.flow_save("dup", save=True)["ok"]
     try:
-        eng.flow_save("dup")
+        eng.flow_save("dup", save=True)
         raise AssertionError("expected UsageError")
     except UsageError as exc:
         assert "--force" in (exc.hint or "")
-    assert eng.flow_save("dup", force=True)["ok"]
+    with pytest.raises(UsageError, match="--force only applies"):
+        eng.flow_save("dup", force=True)
+    assert eng.flow_save("dup", save=True, force=True)["ok"]
 
 
 def test_flow_save_dry_run_previews_without_writing(tmp_path: Path) -> None:
@@ -354,8 +466,650 @@ def test_flow_save_dry_run_previews_without_writing(tmp_path: Path) -> None:
 
     assert out["dry_run"] is True
     assert "tap:" in out["preview"]
-    assert out["preview_call"].endswith("preview_only --dry-run")
+    assert out["saved"] is False
+    assert out["save_call"].endswith("preview_only --last 12 --save")
     assert not Path(out["path"]).exists()
+
+
+def test_recording_skips_a_duplicate_resource_id_for_unique_description(tmp_path: Path) -> None:
+    screen = _hier(
+        _node(
+            "android.widget.Button",
+            text="First",
+            rid="android:id/title",
+            desc="Open first item",
+            clk=True,
+            b="[0,0][500,100]",
+        ),
+        _node(
+            "android.widget.Button",
+            text="Second",
+            rid="android:id/title",
+            desc="Open second item",
+            clk=True,
+            b="[0,100][500,200]",
+        ),
+    )
+    eng = _engine(tmp_path, ScriptedDevice([screen], package=P, serial="emu-duplicate-rid"))
+    res = eng.analyze(source="hierarchy")
+    eng.tap(res.elements[1].id, observe=False)
+
+    recorded = AppMemoryStore(eng.config.memory).load_session("emu-duplicate-rid").recent[-1]
+    assert recorded.resource_id is None
+    assert recorded.by == "desc" and recorded.content_desc == "Open second item"
+    preview = eng.flow_save("second_item")
+    assert "desc: Open second item" in preview["preview"]
+    assert "id: title" not in preview["preview"]
+
+
+def test_flow_save_refuses_when_no_unique_privacy_safe_selector_exists(tmp_path: Path) -> None:
+    screen = _hier(
+        _node(
+            "android.widget.Button",
+            text="john@example.test",
+            rid="android:id/title",
+            desc="john@example.test",
+            clk=True,
+            b="[0,0][500,100]",
+        ),
+        _node(
+            "android.widget.Button",
+            text="jane@example.test",
+            rid="android:id/title",
+            desc="jane@example.test",
+            clk=True,
+            b="[0,100][500,200]",
+        ),
+    )
+    eng = _engine(tmp_path, ScriptedDevice([screen], package=P, serial="emu-unsafe-selector"))
+    res = eng.analyze(source="hierarchy")
+    eng.tap(res.elements[1].id, observe=False)
+
+    preview = eng.flow_save("unsafe_selector")
+    assert preview["ok"] is False and preview["saved"] is False
+    assert "no unique stable id" in preview["selector_warnings"][0]
+    assert not Path(preview["path"]).exists()
+
+
+def test_unique_resource_id_saves_even_when_visible_label_is_pii(tmp_path: Path) -> None:
+    screen = _hier(
+        _node(
+            "android.widget.Button",
+            text="person@example.test",
+            rid="com.example.app:id/accountButton",
+            clk=True,
+            b="[0,0][500,100]",
+        )
+    )
+    eng = _engine(tmp_path, ScriptedDevice([screen], package=P, serial="emu-pii-with-rid"))
+    res = eng.analyze(source="hierarchy")
+    eng.tap(res.elements[0].id, observe=False)
+
+    preview = eng.flow_save("account")
+    assert preview["ok"] is True
+    assert "id: accountButton" in preview["preview"]
+    assert "person@example.test" not in preview["preview"]
+
+
+def test_flow_save_uses_only_newest_provenance_segment(tmp_path: Path) -> None:
+    dev = ScriptedDevice([HOME], package=P, serial="emu-segmented")
+    eng = _engine(tmp_path, dev)
+    eng.analyze(source="hierarchy")
+    store = AppMemoryStore(eng.config.memory)
+    sess = store.load_session(dev.serial)
+    sess.capture_segment = 2
+    sess.recent = [
+        RouteStep(
+            kind="tap",
+            resource_id="oldButton",
+            by="id",
+            origin_package="com.example.other",
+            context_id="default",
+            capture_segment=1,
+        ),
+        RouteStep(
+            kind="tap",
+            resource_id="apps",
+            by="id",
+            origin_package=P,
+            context_id="default",
+            capture_segment=2,
+        ),
+    ]
+    store.save_session(dev.serial, sess)
+
+    preview = eng.flow_save("newest", last=2)
+    assert preview["scope"]["selected"] == 1
+    assert preview["scope"]["boundary_omitted"] == 1
+    assert f"app: {P}" in preview["preview"]
+    assert "oldButton" not in preview["preview"]
+
+
+def test_action_waits_for_async_screen_provenance_before_journaling(tmp_path: Path) -> None:
+    cfg = make_config(
+        memory={"dir": str(tmp_path / "home")},
+        daemon={"enabled": False},
+        perf={"async_memory": True, "skip_unchanged_memory": False},
+    )
+    dev = ScriptedDevice([HOME], package=P, serial="emu-async-provenance")
+    eng = Engine(cfg, device=dev)
+    mem = eng._memory
+    assert mem is not None
+    mem.save_session(
+        dev.serial,
+        SessionState(
+            package="com.example.previous",
+            active_context_id="flags-old",
+            capture_segment=4,
+        ),
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    original = mem.observe_screen
+
+    def blocked_observe_screen(*args: object, **kwargs: object) -> str | None:
+        entered.set()
+        assert release.wait(timeout=5)
+        return original(*args, **kwargs)  # type: ignore[arg-type]
+
+    mem.observe_screen = blocked_observe_screen  # type: ignore[method-assign]
+    res = eng.analyze(source="hierarchy")
+    assert entered.wait(timeout=2)
+    done = threading.Event()
+
+    def act() -> None:
+        eng.tap(next(e.id for e in res.elements if e.text == "Apps"), observe=False)
+        done.set()
+
+    actor = threading.Thread(target=act)
+    actor.start()
+    assert not done.wait(timeout=0.1), "action journal raced the blocked screen writer"
+    release.set()
+    actor.join(timeout=5)
+    assert done.is_set()
+
+    sess = mem.load_session(dev.serial)
+    assert sess.package == P and sess.active_context_id == "default"
+    assert sess.capture_segment == 5
+    assert len(sess.recent) == 1
+    recorded = sess.recent[0]
+    assert recorded.origin_package == P
+    assert recorded.context_id == "default"
+    assert recorded.capture_segment == 5
+
+
+def test_app_lifecycle_waits_for_async_screen_provenance_before_boundary(
+    tmp_path: Path,
+) -> None:
+    cfg = make_config(
+        memory={"dir": str(tmp_path / "home")},
+        daemon={"enabled": False},
+        perf={"async_memory": True, "skip_unchanged_memory": False},
+    )
+    dev = ScriptedDevice([HOME], package=P, serial="emu-async-lifecycle")
+    eng = Engine(cfg, device=dev)
+    mem = eng._memory
+    assert mem is not None
+    entered = threading.Event()
+    release = threading.Event()
+    original = mem.observe_screen
+
+    def blocked_observe_screen(*args: object, **kwargs: object) -> str | None:
+        entered.set()
+        assert release.wait(timeout=5)
+        return original(*args, **kwargs)  # type: ignore[arg-type]
+
+    mem.observe_screen = blocked_observe_screen  # type: ignore[method-assign]
+    eng.analyze(source="hierarchy")
+    assert entered.wait(timeout=2)
+    done = threading.Event()
+
+    def stop() -> None:
+        eng.app("stop", package=P)
+        done.set()
+
+    worker = threading.Thread(target=stop)
+    worker.start()
+    assert not done.wait(timeout=0.1), "lifecycle boundary raced the screen writer"
+    release.set()
+    worker.join(timeout=5)
+    assert done.is_set()
+    session = mem.load_session(dev.serial)
+    assert session.package == P
+    assert session.capture_segment == 1
+    assert session.capture_boundary_reason == f"app process stopped for {P}"
+
+
+def test_paste_is_journaled_as_lossy_so_flow_save_refuses_it(tmp_path: Path) -> None:
+    dev = ScriptedDevice([HOME], package=P, serial="emu-paste-capture")
+    eng = _engine(tmp_path, dev)
+    eng.analyze(source="hierarchy")
+
+    eng.paste(observe=False)
+    preview = eng.flow_save("clipboard_dependent")
+
+    assert preview["ok"] is False and preview["saveable"] is False
+    assert any("clipboard value" in warning for warning in preview["capture_warnings"])
+
+
+def test_flow_save_infers_arrival_only_from_fresh_mapped_destination(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.record_screen(package=P, elements=_elements(HOME), name_hint="home")
+    store.record_screen(package=P, elements=_elements(APPS), name_hint="apps")
+    dev = ScriptedDevice([HOME, APPS], package=P, serial="emu-arrival-save")
+    eng = _engine(tmp_path, dev)
+    res = eng.analyze(source="hierarchy")
+    eng.tap(next(e.id for e in res.elements if e.text == "Apps"), observe=False)
+
+    preview = eng.flow_save("to_apps")
+    assert preview["arrival_proof"] == {
+        "status": "verified",
+        "screen": "apps",
+        "reason": "current destination was freshly recognized as a mapped screen",
+    }
+    assert "arrival_screen: apps" in preview["preview"]
+    assert "arrival_status: mapped" in preview["preview"]
+
+
+def test_flow_save_does_not_persist_stale_mapped_arrival(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store(tmp_path)
+    store.record_screen(package=P, elements=_elements(HOME), name_hint="home")
+    eng = _engine(tmp_path, ScriptedDevice([HOME], package=P, serial="emu-save-stale-arrival"))
+    current = eng.analyze(source="hierarchy")
+    eng.key("back", observe=False)
+    app_map = store.load(P)
+    assert app_map is not None
+    app_map.screens["home"].stale = True
+    store.save(app_map)
+    monkeypatch.setattr(eng, "analyze", lambda **_kwargs: current)
+
+    preview = eng.flow_save("stale_arrival_capture")
+
+    assert preview["arrival_proof"]["status"] == "unverified"
+    assert "no fresh map record" in preview["arrival_proof"]["reason"]
+    assert "arrival_screen:" not in preview["preview"]
+
+
+def test_flow_run_fails_when_mapped_arrival_screen_does_not_match(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.record_screen(package=P, elements=_elements(HOME), name_hint="home")
+    store.record_screen(package=P, elements=_elements(APPS), name_hint="apps")
+    FlowStore(make_config(memory={"dir": str(tmp_path / "home")}).memory).save(
+        Flow(
+            name="wrong_arrival",
+            app=P,
+            arrival_screen="apps",
+            arrival_status="mapped",
+            steps=[RouteStep(kind="key", arg="back")],
+        )
+    )
+    eng = _engine(tmp_path, ScriptedDevice([HOME], package=P, serial="emu-arrival-run"))
+
+    result = eng.flow_run("wrong_arrival")
+    assert result["ok"] is False
+    assert result["code"] == "arrival_screen_unverified"
+    assert result["arrival_screen"] == {
+        "expected": "apps",
+        "recognized": "home",
+        "verified": False,
+    }
+
+
+def test_explicit_legacy_flow_reports_execution_without_claiming_arrival(tmp_path: Path) -> None:
+    flow_file = tmp_path / "legacy_recipe.yaml"
+    flow_file.write_text(
+        f"name: legacy_recipe\napp: {P}\nsteps:\n  - key: back\n",
+        encoding="utf-8",
+    )
+    result = _engine(
+        tmp_path,
+        ScriptedDevice([HOME], package=P, serial="emu-legacy-unverified"),
+    ).flow_run(file=str(flow_file))
+
+    assert result["ok"] is True  # the explicitly requested step executed
+    assert result["arrival_verified"] is False
+    assert result["arrival_status"] == "unverified"
+
+
+def test_flow_run_refuses_wrong_foreground_before_first_action(tmp_path: Path) -> None:
+    other = _hier(
+        _node(
+            "android.widget.Button",
+            text="Unrelated",
+            rid="other:id/unrelated",
+            clk=True,
+            pkg="com.example.other",
+        )
+    )
+    flow_file = tmp_path / "owned.yaml"
+    flow_file.write_text(
+        f"name: owned\napp: {P}\nsteps:\n  - tap: Apps\n",
+        encoding="utf-8",
+    )
+    device = ScriptedDevice(
+        [other],
+        package="com.example.other",
+        serial="emu-wrong-foreground",
+    )
+
+    with pytest.raises(UsageError, match="foreground package"):
+        _engine(tmp_path, device).flow_run(file=str(flow_file))
+    assert not any(call[0] == "click" for call in device.calls)
+
+
+def test_leading_launch_may_establish_flow_origin_before_other_steps(tmp_path: Path) -> None:
+    other = _hier(
+        _node(
+            "android.widget.TextView",
+            text="Other",
+            rid="other:id/title",
+            pkg="com.example.other",
+        )
+    )
+
+    class LaunchingDevice(ScriptedDevice):
+        def launch_app(self, package: str, *, activity: str | None = None) -> None:
+            super().launch_app(package, activity=activity)
+            self._xml = HOME
+
+    flow_file = tmp_path / "launch_owned.yaml"
+    flow_file.write_text(
+        f"name: launch_owned\napp: {P}\nsteps:\n  - launch_app: {P}\n  - assert_visible: Home\n",
+        encoding="utf-8",
+    )
+    device = LaunchingDevice(
+        [other],
+        package="com.example.other",
+        serial="emu-launch-establishes",
+        text_index={"Home": (0, 0, 10, 10)},
+    )
+    result = _engine(tmp_path, device).flow_run(file=str(flow_file))
+
+    assert result["ok"] is True
+    assert ("launch_app", (P,)) in device.calls
+
+
+def test_flow_execution_forces_fresh_runtime_flag_context(tmp_path: Path) -> None:
+    flag_name = "catalog_variant"
+    expected_context = context_id_for_flags({flag_name: "b"})
+    cfg = make_config(
+        memory={"dir": str(tmp_path / "home")},
+        daemon={"enabled": False},
+        flags={
+            "prefs_files": {P: "catalog_flags.xml"},
+            "context_keys": {P: [flag_name]},
+            "context_refresh_s": 9999,
+        },
+    )
+    FlowStore(cfg.memory).save(
+        Flow(
+            name="variant_recipe",
+            app=P,
+            context_id=expected_context,
+            steps=[RouteStep(kind="key", arg="back")],
+        )
+    )
+    device = ScriptedDevice(
+        [HOME],
+        package=P,
+        serial="emu-context-refresh",
+        prefs={"catalog_flags.xml": {flag_name: "b"}},
+    )
+    AppMemoryStore(cfg.memory).save_session(
+        device.serial,
+        SessionState(package=P, active_context_id="default"),
+    )
+    eng = Engine(cfg, device=device)
+    # Model a recent ordinary refresh: only flow entry's forced read may discover the change.
+    eng._flag_context_checked_at[P] = float("inf")
+
+    result = eng.flow_run("variant_recipe")
+
+    assert result["ok"] is True
+    assert (
+        AppMemoryStore(cfg.memory).load_session(device.serial).active_context_id == expected_context
+    )
+
+
+def test_combined_arrival_checks_mapped_screen_on_predicate_terminal_frame(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store(tmp_path)
+    store.record_screen(package=P, elements=_elements(HOME), name_hint="home")
+    store.record_screen(package=P, elements=_elements(APPS), name_hint="apps")
+    FlowStore(make_config(memory={"dir": str(tmp_path / "home")}).memory).save(
+        Flow(
+            name="combined_proof",
+            app=P,
+            arrival="text:Ready",
+            arrival_screen="apps",
+            arrival_status="mapped",
+            steps=[RouteStep(kind="key", arg="back")],
+        )
+    )
+    eng = _engine(tmp_path, ScriptedDevice([HOME, APPS], package=P, serial="emu-combined"))
+    terminal = eng.analyze(source="hierarchy")
+    terminal.meta.known_screen = "home"
+    monkeypatch.setattr(
+        eng,
+        "await_predicate",
+        lambda *_args, **_kwargs: ActionResult(
+            ok=True,
+            action="await",
+            await_outcome="satisfied",
+            observation=terminal,
+        ),
+    )
+
+    result = eng.flow_run("combined_proof")
+
+    assert result["ok"] is False
+    assert result["code"] == "arrival_screen_unverified"
+    assert result["arrival_screen"]["recognized"] == "home"
+
+
+def test_mapped_arrival_rejects_a_stale_map_record(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.record_screen(package=P, elements=_elements(HOME), name_hint="home")
+    eng = _engine(tmp_path, ScriptedDevice([HOME], package=P, serial="emu-stale-arrival"))
+    terminal = eng.analyze(source="hierarchy")
+    app_map = store.load(P)
+    assert app_map is not None
+    app_map.screens["home"].stale = True
+    store.save(app_map)
+    FlowStore(make_config(memory={"dir": str(tmp_path / "home")}).memory).save(
+        Flow(
+            name="stale_destination",
+            app=P,
+            arrival_screen="home",
+            arrival_status="mapped",
+            steps=[RouteStep(kind="key", arg="back")],
+        )
+    )
+    # Preserve a terminal observation whose name was recognized before the record became stale;
+    # a stale cursor/name must not prove arrival without a fresh compatible map record.
+    eng.analyze = lambda **_kwargs: terminal  # type: ignore[method-assign]
+
+    with pytest.raises(UsageError, match="unavailable mapped arrival"):
+        eng.flow_run("stale_destination")
+    assert not any(call[0] == "press" for call in eng.device.calls)
+
+
+def test_nested_flow_enforces_its_own_app_before_any_substep(tmp_path: Path) -> None:
+    cfg = make_config(memory={"dir": str(tmp_path / "home")}, daemon={"enabled": False})
+    FlowStore(cfg.memory).save(
+        Flow(
+            name="foreign_child",
+            app="com.example.foreign",
+            steps=[RouteStep(kind="key", arg="back")],
+        )
+    )
+    parent = tmp_path / "parent_foreign.yaml"
+    parent.write_text(
+        f"name: parent_foreign\napp: {P}\nsteps:\n  - flow: foreign_child\n",
+        encoding="utf-8",
+    )
+    device = ScriptedDevice([HOME], package=P, serial="emu-nested-foreign")
+    with pytest.raises(UsageError, match="not parent app"):
+        Engine(cfg, device=device).flow_run(file=str(parent))
+    assert not any(call[0] == "press" for call in device.calls)
+
+
+def test_nested_explicit_context_is_refused_before_an_earlier_parent_step(
+    tmp_path: Path,
+) -> None:
+    cfg = make_config(memory={"dir": str(tmp_path / "home")}, daemon={"enabled": False})
+    FlowStore(cfg.memory).save(
+        Flow(
+            name="context_child",
+            app=P,
+            context_id="flags-other",
+            steps=[RouteStep(kind="key", arg="back")],
+        )
+    )
+    parent = tmp_path / "parent_context.yaml"
+    parent.write_text(
+        f"name: parent_context\napp: {P}\nsteps:\n"
+        "  - key: back\n  - flow: context_child\n",
+        encoding="utf-8",
+    )
+    device = ScriptedDevice([HOME], package=P, serial="emu-nested-context")
+
+    with pytest.raises(UsageError, match="uses context"):
+        Engine(cfg, device=device).flow_run(file=str(parent))
+
+    assert not any(call[0] == "press" for call in device.calls)
+
+
+def test_nested_flow_arrival_failure_fails_the_parent_step(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.record_screen(package=P, elements=_elements(HOME), name_hint="home")
+    store.record_screen(package=P, elements=_elements(APPS), name_hint="apps")
+    cfg = make_config(memory={"dir": str(tmp_path / "home")}, daemon={"enabled": False})
+    FlowStore(cfg.memory).save(
+        Flow(
+            name="child_with_proof",
+            app=P,
+            arrival_screen="apps",
+            arrival_status="mapped",
+            steps=[RouteStep(kind="key", arg="back")],
+        )
+    )
+    parent = tmp_path / "parent_proof.yaml"
+    parent.write_text(
+        f"name: parent_proof\napp: {P}\nsteps:\n  - flow: child_with_proof\n",
+        encoding="utf-8",
+    )
+    result = Engine(
+        cfg,
+        device=ScriptedDevice([HOME], package=P, serial="emu-nested-proof"),
+    ).flow_run(file=str(parent))
+
+    assert result["ok"] is False
+    assert result["code"] == "arrival_screen_unverified"
+    assert result["failed_step"]["display"] == "flow child_with_proof"
+
+
+@pytest.mark.parametrize("arrival", ["!text:Loading", "unknown:state"])
+def test_nested_flow_invalid_arrival_is_refused_before_substeps(
+    tmp_path: Path,
+    arrival: str,
+) -> None:
+    cfg = make_config(memory={"dir": str(tmp_path / "home")}, daemon={"enabled": False})
+    child_path = FlowStore(cfg.memory).path("child_with_invalid_proof")
+    child_path.parent.mkdir(parents=True, exist_ok=True)
+    child_path.write_text(
+        f"name: child_with_invalid_proof\napp: {P}\narrival: {arrival!r}\n"
+        "steps:\n  - key: back\n",
+        encoding="utf-8",
+    )
+    parent = tmp_path / "parent_invalid_proof.yaml"
+    parent.write_text(
+        f"name: parent_invalid_proof\napp: {P}\nsteps:\n"
+        "  - key: back\n"
+        "  - flow: child_with_invalid_proof\n",
+        encoding="utf-8",
+    )
+    device = ScriptedDevice([HOME], package=P, serial="emu-nested-invalid-proof")
+
+    with pytest.raises(UsageError):
+        Engine(cfg, device=device).flow_run(file=str(parent))
+
+    assert not any(call[0] == "press" for call in device.calls)
+
+
+def test_missing_nested_flow_is_refused_before_earlier_parent_action(tmp_path: Path) -> None:
+    cfg = make_config(memory={"dir": str(tmp_path / "home")}, daemon={"enabled": False})
+    parent = tmp_path / "parent_missing_child.yaml"
+    parent.write_text(
+        f"name: parent_missing_child\napp: {P}\nsteps:\n"
+        "  - key: back\n"
+        "  - flow: child_that_does_not_exist\n",
+        encoding="utf-8",
+    )
+    device = ScriptedDevice([HOME], package=P, serial="emu-nested-missing-child")
+
+    with pytest.raises(UsageError, match="no flow named"):
+        Engine(cfg, device=device).flow_run(file=str(parent))
+
+    assert device.calls == []
+
+
+def test_nested_missing_params_are_refused_before_earlier_parent_action(tmp_path: Path) -> None:
+    cfg = make_config(memory={"dir": str(tmp_path / "home")}, daemon={"enabled": False})
+    child = Flow(
+        name="child_missing_param",
+        app=P,
+        params={"TARGET": ""},
+        steps=[RouteStep(kind="tap", label="${TARGET}")],
+    )
+    FlowStore(cfg.memory).save(child)
+    parent = tmp_path / "parent_missing_param.yaml"
+    parent.write_text(
+        f"name: parent_missing_param\napp: {P}\nsteps:\n"
+        "  - key: back\n"
+        "  - flow: child_missing_param\n",
+        encoding="utf-8",
+    )
+    device = ScriptedDevice([HOME], package=P, serial="emu-nested-missing-param")
+
+    with pytest.raises(UsageError, match="missing flow param"):
+        Engine(cfg, device=device).flow_run(file=str(parent))
+
+    assert device.calls == []
+
+
+def test_nested_cycle_is_refused_before_any_flow_action(tmp_path: Path) -> None:
+    cfg = make_config(memory={"dir": str(tmp_path / "home")}, daemon={"enabled": False})
+    store = FlowStore(cfg.memory)
+    store.save(
+        Flow(
+            name="cycle_a",
+            app=P,
+            steps=[
+                RouteStep(kind="key", arg="back"),
+                RouteStep(kind="flow", arg="cycle_b"),
+            ],
+        )
+    )
+    store.save(
+        Flow(
+            name="cycle_b",
+            app=P,
+            steps=[
+                RouteStep(kind="key", arg="menu"),
+                RouteStep(kind="flow", arg="cycle_a"),
+            ],
+        )
+    )
+    device = ScriptedDevice([HOME], package=P, serial="emu-nested-cycle")
+
+    with pytest.raises(UsageError, match="nested flow cycle"):
+        Engine(cfg, device=device).flow_run("cycle_a")
+
+    assert device.calls == []
 
 
 def test_steps_from_recent_parameterizes_redacted_labels() -> None:
@@ -383,6 +1137,9 @@ def test_flow_store_save_load_list_delete(tmp_path: Path) -> None:
     assert store.load("alpha").steps[0].label == "Apps"
     listed = store.list()
     assert listed and listed[0]["name"] == "alpha" and listed[0]["steps"] == 1
+    assert listed[0]["context_compatible"] is None
+    compatible = store.list(active_package=P, active_context_id="default")
+    assert compatible[0]["context_compatible"] is True
     assert store.delete("alpha") is True
     assert store.delete("alpha") is False
 
@@ -423,6 +1180,32 @@ def test_cli_flow_run_param_parsing_error() -> None:
     assert out.exit_code != 0
 
 
+def test_cli_flow_save_help_is_preview_first() -> None:
+    out = runner.invoke(app, ["flow", "save", "--help"])
+    assert out.exit_code == 0
+    assert "--save" in out.stdout
+    assert "writes nothing" in out.stdout
+    assert "Deprecated compatibility alias" in out.stdout
+
+
+def test_cli_flow_save_selector_refusal_exits_nonzero(monkeypatch: pytest.MonkeyPatch) -> None:
+    from android_ui_analyser import cli as cli_mod
+
+    monkeypatch.setattr(
+        cli_mod,
+        "_route",
+        lambda *_args, **_kwargs: {
+            "ok": False,
+            "action": "flow-save-preview",
+            "saved": False,
+            "selector_warnings": ["step 1 has no safe selector"],
+        },
+    )
+    out = runner.invoke(app, ["flow", "save", "unsafe"])
+    assert out.exit_code == 1
+    assert json.loads(out.stdout)["saved"] is False
+
+
 # --------------------------------------------------------------------------- daemon
 
 
@@ -432,12 +1215,18 @@ def test_daemon_dispatch_flow_run_and_save() -> None:
             return {"ok": True, "flow": kw.get("name")}
 
         def flow_save(self, **kw: object) -> dict[str, object]:
-            return {"ok": True, "flow": kw.get("name"), "action": "flow-save"}
+            return {
+                "ok": True,
+                "flow": kw.get("name"),
+                "action": "flow-save",
+                "saved": kw.get("save"),
+            }
 
     r = dispatch(FakeEng(), {"cmd": "flow_run", "args": {"name": "f", "dry_run": True}})
     assert r["ok"] and r["result"]["flow"] == "f"
-    r2 = dispatch(FakeEng(), {"cmd": "flow_save", "args": {"name": "f"}})
+    r2 = dispatch(FakeEng(), {"cmd": "flow_save", "args": {"name": "f", "save": True}})
     assert r2["ok"] and r2["result"]["action"] == "flow-save"
+    assert r2["result"]["saved"] is True
 
 
 def test_engine_flow_save_uses_session_store(tmp_path: Path) -> None:
@@ -449,11 +1238,11 @@ def test_engine_flow_save_uses_session_store(tmp_path: Path) -> None:
     eng.tap(apps_id, observe=False)
     eng.analyze(source="hierarchy")
 
-    out = eng.flow_save("journeyed", last=5)
+    out = eng.flow_save("journeyed", last=5, save=True)
     assert out["ok"]
     flow = FlowStore(eng.config.memory).load("journeyed")
     assert flow.app == P
-    assert any(s.kind == "tap" and s.label == "Apps" for s in flow.steps)
+    assert any(s.kind == "tap" and s.resource_id == "nav_apps" for s in flow.steps)
     # the session store agrees
     sess = AppMemoryStore(eng.config.memory).load_session("emu-journal")
     assert sess.recent
@@ -503,7 +1292,9 @@ def test_playbook_projection_hides_stale_facts_and_deduplicates_replacements(tmp
     store.remember_recipe(P, "open_library", "tap the catalog tab")
     store.remember_note(P, "The archive is on the old toolbar")
     app_map = store.load(P)
-    stale = next(item for item in app_map.knowledge if item.text == "The archive is on the old toolbar")
+    stale = next(
+        item for item in app_map.knowledge if item.text == "The archive is on the old toolbar"
+    )
     stale.status = "stale"
     store.save(app_map)
 
@@ -661,11 +1452,17 @@ def test_flow_composition_runs_sub_flow(tmp_path) -> None:
     # A `setup` flow (tap Apps) reused by a parent flow via `flow:`.
     cfg = make_config(memory={"dir": str(tmp_path / "home")}, daemon={"enabled": False})
     store = FlowStore(cfg.memory)
-    store.save(Flow(name="go_apps", app=P, steps=[RouteStep(kind="tap", label="Apps", resource_id="nav_apps")]))
+    store.save(
+        Flow(
+            name="go_apps",
+            app=P,
+            steps=[RouteStep(kind="tap", label="Apps", resource_id="nav_apps")],
+        )
+    )
 
     parent = tmp_path / "parent.yaml"
     parent.write_text(
-        "name: parent\napp: com.example.app\nsteps:\n  - flow: go_apps\n  - assert_visible: \"Images\"\n",
+        'name: parent\napp: com.example.app\nsteps:\n  - flow: go_apps\n  - assert_visible: "Images"\n',
         encoding="utf-8",
     )
     flow = parse_flow_yaml(parent.read_text(), name="parent")
@@ -681,6 +1478,47 @@ def test_flow_composition_runs_sub_flow(tmp_path) -> None:
     out = eng.flow_run(file=str(parent))
     assert out["ok"] is True, out
     assert sum(1 for c in dev.calls if c[0] == "click") == 1  # the sub-flow's tap ran
+    nested_tap = next(row for row in out["steps_run"] if row.get("flow_path"))
+    assert nested_tap["index"] == 0
+    assert nested_tap["path"] == [0, 0]
+    assert nested_tap["flow_path"] == ["go_apps"]
+
+
+def test_nested_composite_steps_keep_the_full_audit_path(tmp_path) -> None:
+    cfg = make_config(memory={"dir": str(tmp_path / "home")}, daemon={"enabled": False})
+    store = FlowStore(cfg.memory)
+    store.save(
+        Flow(
+            name="nested_composite",
+            app=P,
+            steps=[
+                RouteStep(
+                    kind="repeat",
+                    repeat=1,
+                    substeps=[
+                        RouteStep(
+                            kind="retry",
+                            max_retries=1,
+                            substeps=[RouteStep(kind="key", arg="back")],
+                        )
+                    ],
+                )
+            ],
+        )
+    )
+    parent = tmp_path / "parent-composite.yaml"
+    parent.write_text(
+        f"name: parent_composite\napp: {P}\nsteps:\n  - flow: nested_composite\n",
+        encoding="utf-8",
+    )
+    device = ScriptedDevice([HOME, HOME], package=P, serial="emu-composite-audit")
+
+    result = Engine(cfg, device=device).flow_run(file=str(parent))
+
+    leaf = next(row for row in result["steps_run"] if row["step"] == "key 'back'")
+    assert leaf["index"] == 0
+    assert leaf["path"] == [0, 0, 0, 0, 0, 0]
+    assert leaf["flow_path"] == ["nested_composite"]
 
 
 def test_flow_composition_run_flow_alias_and_render(tmp_path) -> None:
@@ -690,7 +1528,7 @@ def test_flow_composition_run_flow_alias_and_render(tmp_path) -> None:
     assert "flow: login" in render_flow_yaml(flow)
 
 
-def test_flow_composition_missing_sub_flow_diverges(tmp_path) -> None:
+def test_flow_composition_missing_sub_flow_is_preflighted(tmp_path) -> None:
     cfg = make_config(memory={"dir": str(tmp_path / "home")}, daemon={"enabled": False})
     f = tmp_path / "p.yaml"
     f.write_text("name: p\napp: com.example.app\nsteps:\n  - flow: nonexistent\n", encoding="utf-8")
@@ -699,9 +1537,9 @@ def test_flow_composition_missing_sub_flow_diverges(tmp_path) -> None:
 
     dev = ScriptedDevice([HOME], package=P, serial="emu-nosub")
     eng = Engine(cfg, device=dev, factory=ProviderFactory(cfg))
-    out = eng.flow_run(file=str(f))
-    assert out["ok"] is False and out["code"] == "route_unknown"
-    assert out["failed_step"]["display"] == "flow nonexistent"
+    with pytest.raises(UsageError, match="no flow named 'nonexistent'"):
+        eng.flow_run(file=str(f))
+    assert dev.calls == []
 
 
 # --------------------------------------------------------------- resource-id matching (by=id)
@@ -760,7 +1598,9 @@ def test_cli_has_by_id(tmp_path, monkeypatch) -> None:
     import android_ui_analyser.engine as engine_mod
     from conftest import FakeDevice
 
-    dev = FakeDevice(hierarchy_xml=HOME, package=P, resource_index={"x:id/containerHome": (0, 0, 9, 9)})
+    dev = FakeDevice(
+        hierarchy_xml=HOME, package=P, resource_index={"x:id/containerHome": (0, 0, 9, 9)}
+    )
     monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
     ok = runner.invoke(app, ["has", "containerHome", "--by", "id"])
     assert ok.exit_code == 0, ok.stderr

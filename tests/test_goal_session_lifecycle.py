@@ -761,3 +761,47 @@ def test_explicit_session_emulator_start_is_owned_and_finished(
     assert starts[0]["headless"] is False
     assert stops[0]["serial"] == "emulator-5590"
     assert finished["ok"] is True
+
+
+def test_owned_emulator_is_uncached_when_stop_succeeds_despite_restore_error(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    from android_ui_analyser import emulator
+
+    cfg = make_config(
+        cache={"dir": str(tmp_path / "cache")},
+        memory={"enabled": False, "dir": str(tmp_path / "memory")},
+    )
+    engine = Engine(cfg)
+    monkeypatch.setattr(engine, "list_devices", lambda: [])
+    monkeypatch.setattr(
+        emulator,
+        "start",
+        lambda _avd, **_kwargs: {"ok": True, "serial": "emulator-5592"},
+    )
+    monkeypatch.setattr(
+        emulator,
+        "stop",
+        lambda **_kwargs: {"ok": True, "stopped": ["emulator-5592"]},
+    )
+    monkeypatch.setattr(engine, "analyze", lambda **_kwargs: _observation("emulator-5592"))
+
+    started = engine.session_start("inspect offline state", start_emulator=True)
+    engine._device = FakeDevice(serial="emulator-5592")
+    backup = network.backup_path(engine.config.cache.dir, "emulator-5592")
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    backup.write_text("session-owned", encoding="utf-8")
+    monkeypatch.setattr(
+        engine,
+        "network_restore",
+        lambda: {"ok": False, "detail": "network could not be restored"},
+    )
+    closed: list[str] = []
+    monkeypatch.setattr(engine, "close", lambda: closed.append("emulator-5592"))
+
+    finished = engine.session_finish(started["session_id"])
+
+    assert finished["ok"] is False
+    assert closed == ["emulator-5592"]
+    stop = next(item for item in finished["cleanup"] if item["action"] == "owned_emulator_stop")
+    assert stop["result"]["stopped"] == ["emulator-5592"]

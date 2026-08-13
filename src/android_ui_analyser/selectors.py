@@ -481,7 +481,9 @@ def nearest_elements(elements: Sequence[Element], needle: str, limit: int = 5) -
     return near or [el for _v, el in ranked[:limit]]
 
 
-def _pick(candidates: list[Element], index: int | None) -> Element | None:
+def _pick(
+    candidates: list[Element], index: int | None, *, require_unique: bool = False
+) -> Element | None:
     """The nth candidate when the step asked for one, else the best/first.
 
     Out of range returns None rather than falling back to the first match: a flow that
@@ -491,6 +493,8 @@ def _pick(candidates: list[Element], index: int | None) -> Element | None:
     if not candidates:
         return None
     if index is None:
+        if require_unique and len(candidates) != 1:
+            return None
         return candidates[0]
     return candidates[index] if 0 <= index < len(candidates) else None
 
@@ -507,7 +511,10 @@ def match_step(elements: list[Element], step: RouteStep) -> Element | None:
     so the rid/exact/substring precedence is unchanged when no index is given.
     """
     rid = (step.resource_id or "").lower()
-    if rid:
+    # Explicit selector mode is authoritative. New recordings retain supplemental fields
+    # for risk/evidence, but those must never outrank the selected identity and tap a
+    # different control.
+    if rid and step.by in (None, "id"):
         matches = [
             e
             for e in elements
@@ -520,20 +527,57 @@ def match_step(elements: list[Element], step: RouteStep) -> Element | None:
                     (e.bounds[2] - e.bounds[0]) * (e.bounds[3] - e.bounds[1]),
                 )
             )
-            return _pick(matches, step.index)
+            return _pick(matches, step.index, require_unique=step.by == "id")
+        if step.by == "id":
+            return None
+    desc = (step.content_desc or "").strip()
+    if desc and step.by in (None, "desc"):
+        def values(e: Element) -> list[str]:
+            if step.by == "desc":
+                return [(e.content_desc or "").strip()]
+            # Legacy YAML accepted ``desc:`` as the old untyped label selector.  Keep its
+            # historic text-or-description fallback unless an explicit ``by: desc`` marks a
+            # new strict recording.
+            return [(e.text or "").strip(), (e.content_desc or "").strip()]
+
+        exact_desc = [e for e in elements if desc in values(e)]
+        if exact_desc:
+            return _pick(exact_desc, step.index, require_unique=step.by == "desc")
+        low_desc = desc.lower()
+        loose_desc = [
+            e
+            for e in elements
+            if any(
+                value and (value.startswith(low_desc) or low_desc in value)
+                for value in (candidate.lower() for candidate in values(e))
+            )
+        ]
+        if loose_desc:
+            return _pick(loose_desc, step.index, require_unique=step.by == "desc")
+        if step.by == "desc":
+            return None
     label = (step.label or "").strip()
     if not label or label in REDACT_TOKENS:
         return None
-    exact = [e for e in elements if (e.text or e.content_desc or "") == label]
+    # ``by=text`` is the precise new-capture contract.  ``by=None`` is the legacy schema,
+    # where label historically meant visible text *or* description, so retain that fallback.
+    exact = [
+        e
+        for e in elements
+        if ((e.text or "") if step.by == "text" else (e.text or e.content_desc or "")) == label
+    ]
     if exact:
-        return _pick(exact, step.index)
+        return _pick(exact, step.index, require_unique=step.by == "text")
     low = label.lower()
     loose = [
         e
         for e in elements
-        if (t := (e.text or e.content_desc or "").lower()) and (t.startswith(low) or low in t)
+        if (
+            t := ((e.text or "") if step.by == "text" else (e.text or e.content_desc or "")).lower()
+        )
+        and (t.startswith(low) or low in t)
     ]
-    return _pick(loose, step.index)
+    return _pick(loose, step.index, require_unique=step.by == "text")
 
 
 # Private alias kept for engine call sites that used ``_match_step``.

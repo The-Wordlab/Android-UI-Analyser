@@ -21,6 +21,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from .atomic import atomic_write_text
+from .errors import UsageError
 from .flows import Flow
 from .memory import (
     AppMap,
@@ -163,9 +164,13 @@ def goal_phases(goal: str) -> list[GoalPhase]:
         if offline_here:
             transition = _OFFLINE_GOAL.search(objective)
             prefix = transition.group(0).casefold() if transition is not None else ""
-            if transition is not None and transition.start() == 0 and (
-                prefix.startswith(("go ", "switch ", "airplane "))
-                or prefix.startswith(("offline", "fully offline"))
+            if (
+                transition is not None
+                and transition.start() == 0
+                and (
+                    prefix.startswith(("go ", "switch ", "airplane "))
+                    or prefix.startswith(("offline", "fully offline"))
+                )
             ):
                 objective = _OFFLINE_GOAL.sub("", objective, count=1).strip(" ,;.")
                 objective = re.sub(r"^(?:and|before)\s+", "", objective, flags=re.IGNORECASE)
@@ -211,7 +216,7 @@ def phase_progress(state: SessionState, *, compact: bool = False) -> dict[str, A
             None
             if current is None
             else {
-                "cli": f"--phase-done {current.id}=\"<evidence from the current result>\"",
+                "cli": f'--phase-done {current.id}="<evidence from the current result>"',
                 "mcp": {"phase_done": {"id": current.id, "evidence": "<evidence>"}},
                 "note": (
                     "Acknowledge this phase on the next AUA call; it adds no extra round trip."
@@ -808,7 +813,13 @@ def _edge_risks(
 
 
 def _flow_risks(
-    flow: Flow, *, package: str | None, destructive_labels: Sequence[str]
+    flow: Flow,
+    *,
+    package: str | None,
+    destructive_labels: Sequence[str],
+    mapped_screens: dict[str, Any] | None = None,
+    context_id: str | None = None,
+    resolved_evidence: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     risks: list[dict[str, str]] = []
     for index, step in enumerate(flow.steps):
@@ -830,6 +841,14 @@ def _flow_risks(
             }
             if item not in risks:
                 risks.append(item)
+    if resolved_evidence is not None:
+        # Preserve `nested_execution` from the wrapper step: a goal match is evidence for
+        # relevance, never authorization to execute another authored journey.  Add the
+        # recursively resolved child effects alongside it so review can see what that child
+        # would actually change rather than receiving only the generic delegation warning.
+        for item in resolved_evidence.get("risks") or []:
+            if isinstance(item, dict) and item not in risks:
+                risks.append(item)
     required = sorted(name for name, default in flow.params.items() if not default)
     if required:
         risks.append(
@@ -839,6 +858,46 @@ def _flow_risks(
                 "path": "params",
             }
         )
+    arrival_invalid = False
+    if flow.arrival:
+        try:
+            # Shared grammar, imported lazily to keep this pure planner module free of an
+            # Engine import cycle at module load time.
+            from .engine import _parse_await_terms
+
+            _parse_await_terms(flow.arrival, require_positive=True)
+        except UsageError:
+            arrival_invalid = True
+    if arrival_invalid:
+        risks.append(
+            {
+                "code": "arrival_invalid",
+                "reason": "the declared flow arrival is invalid or has no positive evidence",
+                "path": "arrival",
+            }
+        )
+    elif not flow.arrival_screen and not flow.arrival:
+        risks.append(
+            {
+                "code": "arrival_unverified",
+                "reason": "the flow declares no mapped arrival screen or positive arrival evidence",
+                "path": "arrival",
+            }
+        )
+    if flow.arrival_screen:
+        record = mapped_screens.get(flow.arrival_screen) if mapped_screens is not None else None
+        if (
+            record is None
+            or getattr(record, "stale", True)
+            or getattr(record, "context_id", None) not in {context_id, "legacy-default"}
+        ):
+            risks.append(
+                {
+                    "code": "arrival_screen_invalid",
+                    "reason": "the claimed mapped arrival is missing, stale, or context-incompatible",
+                    "path": "arrival_screen",
+                }
+            )
     return risks
 
 
@@ -947,17 +1006,23 @@ def _flow_candidates(
     observation: AnalyzeResult,
     flows: Iterable[Flow],
     *,
+    context_id: str,
     destructive_labels: Sequence[str],
+    mapped_screens: dict[str, Any] | None = None,
+    resolved_flow_evidence: dict[str, dict[str, Any]] | None = None,
 ) -> list[GoalCandidate]:
     out: list[GoalCandidate] = []
     for flow in flows:
         if flow.app not in (None, observation.screen.package):
+            continue
+        if flow.context_id not in (None, context_id):
             continue
         score = _match_score(
             goal,
             flow.name,
             flow.description,
             flow.arrival,
+            flow.arrival_screen,
             *flow.aliases,
         )
         # One incidental shared word is not intent.  In a multi-part test goal it made a
@@ -966,10 +1031,14 @@ def _flow_candidates(
         # while longer goals need several terms or an exact phrase.
         if score < 20:
             continue
+        resolved_evidence = (resolved_flow_evidence or {}).get(flow.name)
         risks = _flow_risks(
             flow,
             package=observation.screen.package,
             destructive_labels=destructive_labels,
+            mapped_screens=mapped_screens,
+            context_id=context_id,
+            resolved_evidence=resolved_evidence,
         )
         safe = not risks
         cli_name = shlex.quote(flow.name)
@@ -983,7 +1052,10 @@ def _flow_candidates(
             reason=(
                 "A matching saved journey can perform the setup in one call."
                 if safe
-                else "Preview this matching journey before supplying parameters or authorizing effects."
+                else (
+                    "Preview this matching journey before supplying parameters, authorizing "
+                    "effects, or relying on an unverified arrival."
+                )
             ),
             executes=safe,
         )
@@ -1000,7 +1072,19 @@ def _flow_candidates(
                     "description": flow.description,
                     "aliases": flow.aliases,
                     "arrival": flow.arrival,
+                    "arrival_screen": flow.arrival_screen,
+                    "arrival_status": flow.arrival_status or "unverified",
+                    "context_id": flow.context_id,
                     "steps": [step_display(step) for step in flow.steps],
+                    **(
+                        {
+                            "resolved_steps": resolved_evidence.get("steps", []),
+                            "resolved_effects": resolved_evidence.get("effects", []),
+                            "resolved_flow_graph": resolved_evidence.get("flow_graph", []),
+                        }
+                        if resolved_evidence is not None
+                        else {}
+                    ),
                     "params": sorted(flow.params),
                 },
                 call=call,
@@ -1062,6 +1146,7 @@ def plan_goal_session(
     flows: Iterable[Flow] = (),
     destructive_labels: Sequence[str] = (),
     relevant_capabilities: Iterable[dict[str, Any]] = (),
+    resolved_flow_evidence: dict[str, dict[str, Any]] | None = None,
 ) -> GoalSessionPlan:
     """Rank known ways to reach *goal* without performing another observation or action."""
     if not goal.strip():
@@ -1085,7 +1170,10 @@ def plan_goal_session(
             goal,
             observation,
             flows,
+            context_id=context_id,
             destructive_labels=destructive_labels,
+            mapped_screens=app.screens if app is not None else None,
+            resolved_flow_evidence=resolved_flow_evidence,
         )
     )
     if app is not None and app.package == observation.screen.package:

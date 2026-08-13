@@ -527,25 +527,33 @@ def _tool_definitions() -> list[types.Tool]:
         ),
         types.Tool(
             name="flow_list",
-            description="List saved flows with app, step count, parameters, description, and path.",
+            description=(
+                "List saved flows with app/context compatibility, step count, parameters, "
+                "arrival proof, description, and path."
+            ),
             inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
         ),
         types.Tool(
             name="flow_save",
             description=(
-                "Materialize recent recorded actions into an editable reusable flow. Redacted "
-                "inputs become required placeholders."
+                "Preview recent recorded actions as an editable reusable flow without writing. "
+                "Set save=true only after reviewing scope, selectors, and arrival proof."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "name": {"type": "string"},
                     "last": {"type": "integer", "default": 12, "minimum": 1},
+                    "save": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Write the previewed flow; default false writes nothing.",
+                    },
                     "force": {"type": "boolean", "default": False},
                     "dry_run": {
                         "type": "boolean",
                         "default": False,
-                        "description": "Preview generated YAML without writing it.",
+                        "description": "Deprecated non-writing alias; preview is already default.",
                     },
                 },
                 "required": ["name"],
@@ -1908,11 +1916,16 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         finished = _dump(
             _engine_method(engine, "session_finish")(session_id=args.get("session_id"))
         )
-        if isinstance(finished, dict) and finished.get("ok"):
+        if isinstance(finished, dict):
             for item in finished.get("cleanup") or []:
                 if not isinstance(item, dict) or item.get("action") != "owned_emulator_stop":
                     continue
-                _mcp_started_serials().discard(str(getattr(engine.config.device, "serial", "")))
+                result = item.get("result")
+                if not isinstance(result, dict):
+                    continue
+                for serial in result.get("stopped") or []:
+                    if isinstance(serial, str):
+                        _mcp_started_serials().discard(serial)
         return finished
     if name == "orient":
         return _dump(engine.orient())
@@ -1940,14 +1953,13 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
             )
         )
     if name == "flow_list":
-        from .flows import FlowStore
-
-        return {"flows": FlowStore(engine.config.memory).list()}
+        return engine.flow_list()
     if name == "flow_save":
         return _dump(
             engine.flow_save(
                 str(args["name"]),
                 last=int(args.get("last", 12)),
+                save=bool(args.get("save", False)),
                 force=bool(args.get("force", False)),
                 dry_run=bool(args.get("dry_run", False)),
             )
@@ -2184,6 +2196,12 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
             tracked = _mcp_started_serials()
             for s in stopped:
                 tracked.discard(s)
+            # A long-lived MCP Engine may otherwise keep a Device and memory cursor bound to
+            # the boot that was just stopped. Drop only when its attached serial was stopped;
+            # the next tool call reconnects and claims the new boot instance before reading.
+            attached = getattr(engine, "_device", None)
+            if attached is not None and attached.serial in stopped:
+                engine.close()
         return out
     if name == "double_tap":
         return _dump(
@@ -2775,6 +2793,8 @@ def run_stdio() -> None:
             from .jobs import manager_for
 
             manager_for(engine).shutdown()
+        with contextlib.suppress(Exception):
+            engine.close()
         with contextlib.suppress(Exception):
             cleanup_mcp_emulators(engine.config.cache.dir)
 

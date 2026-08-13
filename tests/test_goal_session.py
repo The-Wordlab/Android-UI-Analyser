@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.flows import Flow
 from android_ui_analyser.memory import AppMap, Deeplink, RouteEdge, RouteStep, ScreenRecord
-from android_ui_analyser.schema import AnalyzeResult, Meta, Screen
+from android_ui_analyser.schema import ActionResult, AnalyzeResult, Meta, Screen
 from android_ui_analyser.session import GoalCall, GoalCandidate, GoalSessionPlan, plan_goal_session
 from conftest import FakeDevice, make_config
 
@@ -215,11 +216,81 @@ def test_risky_flow_is_previewed_and_never_selected_automatically() -> None:
     assert candidate.safe is False
     assert candidate.call.cli == "aua flow run offline_saved_items --dry-run"
     assert candidate.call.executes is False
-    assert {risk["code"] for risk in candidate.risks} == {"app_lifecycle"}
+    assert {risk["code"] for risk in candidate.risks} == {
+        "app_lifecycle",
+        "arrival_unverified",
+    }
     assert plan.selected_candidate is None
     assert plan.recommended_call.kind == "network_offline"
     assert plan.recommended_call.cli == "aua network offline --verify"
     assert "network offline --verify" in plan.warnings[0]
+
+
+def test_unverified_flow_needs_positive_reach_evidence(monkeypatch: Any, tmp_path: Path) -> None:
+    """A one-call recipe may execute explicitly, but absence of proof is not arrival."""
+    engine = Engine(make_config(memory={"enabled": False}), device=FakeDevice())
+    observed = _observation()
+    candidate = GoalCandidate(
+        id="flow:open_catalog",
+        kind="flow",
+        name="open_catalog",
+        safe=False,
+        status="requires_review",
+        risks=[
+            {
+                "code": "arrival_unverified",
+                "reason": "no declared arrival",
+                "path": "arrival",
+            }
+        ],
+        call=GoalCall(
+            kind="flow_preview",
+            cli="aua flow run open_catalog --dry-run",
+            mcp={"tool": "flow_run", "arguments": {"name": "open_catalog", "dry_run": True}},
+            reason="preview unverified recipe",
+            executes=False,
+        ),
+    )
+    plan = GoalSessionPlan(
+        goal="open catalog",
+        package=_PKG,
+        current_screen="home",
+        observation=observed,
+        candidates=[candidate],
+        recommended_call=candidate.call,
+    )
+    flow_calls: list[AnalyzeResult] = []
+
+    monkeypatch.setattr(engine, "analyze", lambda **_kwargs: observed)
+    monkeypatch.setattr(engine, "_goal_session_plan", lambda *_args: plan)
+    monkeypatch.setattr(
+        engine,
+        "flow_run",
+        lambda _name, **kwargs: (
+            flow_calls.append(kwargs["_observation"])
+            or {"ok": True, "arrival_verified": False, "arrival_status": "unverified"}
+        ),
+    )
+
+    refused = engine.reach("open catalog")
+    assert refused["ok"] is False and refused["code"] == "navigation_unavailable"
+    assert flow_calls == []
+    still_refused = engine.reach("open catalog", allow_unsafe=True)
+    assert still_refused["ok"] is False
+    assert flow_calls == []
+
+    monkeypatch.setattr(
+        engine,
+        "await_predicate",
+        lambda *_args, **_kwargs: ActionResult(
+            ok=True,
+            action="await",
+            await_outcome="satisfied",
+        ),
+    )
+    proven = engine.reach("open catalog", until="text:Catalog ready")
+    assert proven["ok"] is True and proven["strategy"] == "flow"
+    assert flow_calls == [observed]
 
 
 def test_goal_matching_ignores_conjunctions_and_requires_whole_words() -> None:
@@ -239,6 +310,144 @@ def test_goal_matching_ignores_conjunctions_and_requires_whole_words() -> None:
     assert not any(candidate.kind == "flow" for candidate in plan.candidates)
     assert plan.recommended_call.kind == "network_offline"
     assert plan.observation_note.startswith("This is the current settled screen")
+
+
+def test_reach_never_authorizes_nested_execution_or_invalid_authored_arrival(
+    monkeypatch,
+) -> None:
+    observed = _observation()
+    engine = Engine(make_config(memory={"enabled": False}), device=FakeDevice())
+    calls: list[str] = []
+    monkeypatch.setattr(engine, "analyze", lambda **_kwargs: observed)
+    monkeypatch.setattr(
+        engine,
+        "flow_run",
+        lambda name, **_kwargs: calls.append(name) or {"ok": True},
+    )
+
+    for code in ("nested_execution", "arrival_invalid", "arrival_screen_invalid"):
+        candidate = GoalCandidate(
+            id=f"flow:{code}",
+            kind="flow",
+            name=code,
+            safe=False,
+            status="requires_review",
+            risks=[{"code": code, "reason": "must be explicit", "path": "steps[0]"}],
+            call=GoalCall(
+                kind="flow_preview",
+                cli=f"aua flow run {code} --dry-run",
+                mcp={"tool": "flow_run", "arguments": {"name": code, "dry_run": True}},
+                reason="preview",
+                executes=False,
+            ),
+        )
+        plan = GoalSessionPlan(
+            goal="open catalog",
+            package=_PKG,
+            current_screen="home",
+            observation=observed,
+            candidates=[candidate],
+            recommended_call=candidate.call,
+        )
+        monkeypatch.setattr(engine, "_goal_session_plan", lambda *_args, p=plan: p)
+        result = engine.reach(
+            "open catalog",
+            until="text:Catalog ready",
+            allow_unsafe=True,
+            allow_destructive=True,
+        )
+        assert result["ok"] is False and result["code"] == "navigation_unavailable"
+
+    assert calls == []
+
+
+def test_planner_rejects_a_stale_or_missing_mapped_arrival() -> None:
+    app = AppMap(package=_PKG, screens={"home": _record("home")})
+    flow = Flow(
+        name="missing_destination",
+        app=_PKG,
+        description="Open missing destination",
+        arrival_screen="not_in_map",
+        arrival_status="mapped",
+        steps=[RouteStep(kind="tap", resource_id="savedItems")],
+    )
+
+    plan = plan_goal_session(
+        "open missing destination",
+        _observation(),
+        app=app,
+        flows=[flow],
+    )
+
+    candidate = next(item for item in plan.candidates if item.id == "flow:missing_destination")
+    assert candidate.safe is False and candidate.call.executes is False
+    assert {risk["code"] for risk in candidate.risks} == {"arrival_screen_invalid"}
+    assert plan.selected_candidate is None
+
+    without_map = plan_goal_session(
+        "open missing destination",
+        _observation(),
+        flows=[flow],
+    )
+    candidate_without_map = next(
+        item for item in without_map.candidates if item.id == "flow:missing_destination"
+    )
+    assert candidate_without_map.safe is False
+    assert {risk["code"] for risk in candidate_without_map.risks} == {
+        "arrival_screen_invalid"
+    }
+
+
+def test_goto_never_authorizes_nested_execution_before_an_earlier_route_step(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    app = AppMap(
+        package=_PKG,
+        screens={"home": _record("home"), "saved_items": _record("saved_items")},
+        routes=[
+            RouteEdge(
+                id="nested-route",
+                from_screen="home",
+                to_screen="saved_items",
+                action="compound route",
+                context_id="default",
+                steps=[
+                    RouteStep(kind="key", arg="back"),
+                    RouteStep(kind="flow", arg="child"),
+                ],
+                status="verified",
+                last_seen=_NOW,
+            )
+        ],
+    )
+    engine = Engine(
+        make_config(memory={"enabled": True, "dir": str(tmp_path / "memory")}),
+        device=FakeDevice(),
+    )
+    monkeypatch.setattr(engine, "analyze", lambda **_kwargs: _observation())
+    mem = type("M", (), {})()
+    engine._mem = mem
+    mem.load = lambda _package: app
+    mem.set_last_goal = lambda *_args, **_kwargs: None
+    mem.load_session = lambda _serial: type(
+        "S",
+        (),
+        {
+            "active_context_id": "default",
+            "package": _PKG,
+            "current_screen": "home",
+            "last_goal": None,
+        },
+    )()
+    calls: list[str] = []
+    monkeypatch.setattr(engine, "key", lambda *_args, **_kwargs: calls.append("key"))
+
+    result = engine.goto("saved items", allow_unsafe=True, allow_destructive=True)
+
+    assert result["ok"] is False and result["code"] == "unsafe_route"
+    assert {risk["code"] for risk in result["risks"]} == {"nested_execution"}
+    assert calls == []
 
 
 def test_one_incidental_goal_word_cannot_recommend_a_risky_flow() -> None:

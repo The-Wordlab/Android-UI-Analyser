@@ -5630,28 +5630,41 @@ def flow_run_cmd(
 def flow_save_cmd(
     ctx: typer.Context,
     name: str = typer.Argument(..., help="Name for the saved flow."),
-    last: int = typer.Option(12, "--last", help="How many recent actions to materialize."),
-    force: bool = typer.Option(False, "--force", help="Overwrite an existing flow."),
+    last: int = typer.Option(
+        12,
+        "--last",
+        min=1,
+        help="How many recent actions to materialize.",
+    ),
+    save: bool = typer.Option(
+        False,
+        "--save",
+        help="Write the previewed flow. Without this flag, flow save writes nothing.",
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="With --save, overwrite an existing flow."
+    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
-        help="Preview the generated YAML without writing the flow file.",
+        help="Deprecated compatibility alias for the default non-writing preview.",
     ),
 ) -> None:
-    """Materialize the session's recent actions into an editable flow YAML."""
+    """Preview recent actions as flow YAML; add --save after reviewing it."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(
-            _route(
-                engine,
-                "flow_save",
-                name=name,
-                last=last,
-                force=force,
-                dry_run=dry_run,
-            ),
-            fmt,
+        result = _route(
+            engine,
+            "flow_save",
+            name=name,
+            last=last,
+            save=save,
+            force=force,
+            dry_run=dry_run,
         )
+        _emit(result, fmt)
+        if isinstance(result, dict) and result.get("ok") is False:
+            raise typer.Exit(1)
 
     _run(ctx, go)
 
@@ -5663,10 +5676,7 @@ def flow_list_cmd(ctx: typer.Context) -> None:
     def go(engine: Engine, fmt: OutputFormat) -> None:
         import json
 
-        from .flows import FlowStore
-
-        flows = FlowStore(_opts(ctx).load().memory).list()
-        typer.echo(json.dumps({"flows": flows}, indent=2, ensure_ascii=False))
+        typer.echo(json.dumps(engine.flow_list(), indent=2, ensure_ascii=False))
 
     _run(ctx, go)
 

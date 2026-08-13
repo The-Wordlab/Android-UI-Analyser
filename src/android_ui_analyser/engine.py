@@ -21,6 +21,7 @@ from collections import Counter
 from collections.abc import Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
+from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -41,6 +42,7 @@ from .errors import (
 )
 from .memory import (
     DEFAULT_CONTEXT_ID,
+    LEGACY_CONTEXT_ID,
     AppMap,
     AppMemoryStore,
     NavHints,
@@ -52,7 +54,7 @@ from .memory import (
     is_destructive_step,
     matches_any,
     playbook_view,
-    redact_label,
+    recorded_selector,
     resolve_goal,
     route_step_risks,
     screen_skips_ocr,
@@ -151,6 +153,39 @@ class _AwaitTerm(NamedTuple):
     by: str  # text | rid | desc — the same vocabulary every selector uses
     value: str
     negated: bool
+
+
+class _ResolvedFlowNode(NamedTuple):
+    """One immutable nested-flow snapshot validated before device mutation."""
+
+    flow: Any
+    directory: Path | None
+    source_id: str
+    steps: list[RouteStep]
+
+
+class _ResolvedFlagsResource(NamedTuple):
+    """Parsed flags file retained across flow preflight and execution."""
+
+    source_path: str
+    app: str | None
+    pairs: dict[str, str]
+
+
+class _ResolvedCassetteResource(NamedTuple):
+    """Parsed cassette retained across flow preflight and execution."""
+
+    name: str
+    source_path: Path
+    entries: list[dict[str, Any]]
+
+
+class _ResolvedFlowPlan(NamedTuple):
+    """The complete filesystem snapshot authorized by one flow preflight."""
+
+    flow_graph: dict[tuple[str | None, str], _ResolvedFlowNode]
+    flags: dict[int, _ResolvedFlagsResource]
+    cassettes: dict[int, _ResolvedCassetteResource]
 
 
 def _split_await_terms(predicate: str) -> list[str]:
@@ -552,7 +587,11 @@ class Engine:
         self._last_hierarchy_hash: str | None = None
         self._last_analyze_result: AnalyzeResult | None = None
         self._mem_lock = threading.Lock()
+        self._mem_threads_lock = threading.Lock()
         self._mem_thread: threading.Thread | None = None
+        self._mem_threads: list[threading.Thread] = []
+        self._claimed_instance_token: str | None = None
+        self._action_recording_suppression = 0
         # Set only by the warm daemon/MCP job manager. Supported wait loops consult the event
         # between device reads; the manager object is transport state, intentionally typed Any
         # here to avoid making the interface-agnostic Engine import its adapter.
@@ -574,7 +613,23 @@ class Engine:
         """Lazily connect; doctor/devices/config work without ever touching this."""
         if self._device is None:
             self._device = connect(self._lease_device())
+            self._claim_memory_session()
         return self._device
+
+    def _claim_memory_session(self) -> None:
+        """Bind already-open memory to a device connected later in this Engine lifetime."""
+        if self._mem is None or self._device is None:
+            return
+        with contextlib.suppress(Exception), self._mem_lock:
+            token = self._device.instance_token()
+            if token is None:
+                # A transient unreadable boot id is not proof and must be retried at the next
+                # session boundary; never mark the cached Device as safely claimed.
+                return
+            if token == self._claimed_instance_token:
+                return
+            self._mem.claim_session(self._device.serial, token)
+            self._claimed_instance_token = token
 
     def _lease_device(self) -> str | None:
         """The serial this engine may use, claiming a lease on it.
@@ -649,7 +704,7 @@ class Engine:
         self._last_analyze_elements = None
         self._last_hierarchy_hash = None
         self._last_analyze_result = None
-        self._session_id = None
+        self._session_id: str | None = None
         self._prefetch.invalidate()
         self._gate_cache = type(self._gate_cache)()
 
@@ -662,24 +717,48 @@ class Engine:
         agent actually reads: not the orientation block, not the analyze header. That is the
         same omission that kept `goto` unused across five runs.
 
-        Cached per package: flows are files on disk that do not change mid-session, and this
-        is on the analyze path.
+        Cached per package/context and directory fingerprint. Flows are deliberately editable
+        YAML, so a long-lived daemon must notice save/delete/rename/manual edits without a
+        restart; statting the small flat directory is cheaper than parsing it every frame.
         """
         if not package:
             return []
-        cached = self._flows_cache.get(package)
+        # A package with no package-matching cursor is in its default context until runtime
+        # flags prove otherwise. Treating that as None hid every auto-recorded default-context
+        # flow on the first frame after returning from a foreign app.
+        context_id: str | None = DEFAULT_CONTEXT_ID
+        if self._memory is not None and self._device is not None:
+            with contextlib.suppress(Exception):
+                session = self._memory.load_session(self._device.serial)
+                if session.package == package:
+                    context_id = session.active_context_id
+        from .flows import FlowStore
+
+        store = FlowStore(self.config.memory)
+        fingerprint: tuple[tuple[str, int, int], ...] = ()
+        with contextlib.suppress(OSError):
+            fingerprint = tuple(
+                (path.name, stat.st_mtime_ns, stat.st_size)
+                for path in sorted(store.flows_dir().glob("*.yaml"))
+                if (stat := path.stat())
+            )
+        cache_key = f"{package}\0{context_id or ''}\0{fingerprint!r}"
+        cached = self._flows_cache.get(cache_key)
         if cached is not None:
             return cached
         names: list[str] = []
         with contextlib.suppress(Exception):
-            from .flows import FlowStore
-
-            for flow in FlowStore(self.config.memory).list():
+            for flow in store.list():
+                if flow.get("error"):
+                    continue
                 if flow.get("app") not in (None, package):
                     continue
+                if flow.get("context_id") not in (None, context_id):
+                    continue
                 params = ", ".join(flow.get("params") or [])
-                names.append(f"{flow['name']}({params})" if params else str(flow["name"]))
-        self._flows_cache[package] = names
+                runnable = flow.get("storage_name") or flow["name"]
+                names.append(f"{runnable}({params})" if params else str(runnable))
+        self._flows_cache[cache_key] = names
         return names
 
     def renew_lease(self) -> None:
@@ -1195,6 +1274,12 @@ class Engine:
     ) -> AnalyzeResult:
         t0 = time.perf_counter()
         device, w, h = self._context()
+        if self.config.memory.enabled:
+            # Re-check a long-lived daemon's boot identity before it reads or writes any
+            # serial-scoped cursor. This is a cheap no-op for the same token and retries a
+            # transiently unreadable first token; a reboot on the same serial clears history.
+            _ = self._memory
+            self._claim_memory_session()
         providers_used: list[str] = []
         img: ScreenImage | None = None
         package: str | None = None
@@ -1841,9 +1926,7 @@ class Engine:
             # making them wait out a uiautomator2 connect timeout to learn nothing. Every
             # path that has a session worth protecting has already connected, because the
             # earliest readers here are handed a live `device` by their caller.
-            if self._device is not None:
-                with contextlib.suppress(Exception):
-                    self._mem.claim_session(self._device.serial, self._device.instance_token())
+            self._claim_memory_session()
         return self._mem
 
     def _version_for(self, device: Device, package: str) -> str | None:
@@ -1855,14 +1938,21 @@ class Engine:
                 self._version_cache[package] = None
         return self._version_cache[package]
 
-    def _sync_runtime_flag_context(self, device: Device, package: str, mem: AppMemoryStore) -> bool:
+    def _sync_runtime_flag_context(
+        self,
+        device: Device,
+        package: str,
+        mem: AppMemoryStore,
+        *,
+        force: bool = False,
+    ) -> bool:
         """Discover already-active feature flags before assigning a screen context."""
         cfg = self.config.flags
         configured = package in cfg.prefs_files or package in cfg.context_keys
         if not cfg.auto_context or not configured:
             return False
         now = time.monotonic()
-        if now - self._flag_context_checked_at.get(package, float("-inf")) < max(
+        if not force and now - self._flag_context_checked_at.get(package, float("-inf")) < max(
             0.0, cfg.context_refresh_s
         ):
             return False
@@ -1989,8 +2079,17 @@ class Engine:
                             logger.debug("async memory record failed: %s", exc)
 
                 t = threading.Thread(target=_bg, name="aua-mem-record", daemon=True)
-                self._mem_thread = t
-                t.start()
+                # Register the writer before exposing it to an action/save caller.  Pruning
+                # after append but before start used to immediately drop the new thread
+                # because ``is_alive()`` is false until ``start()`` returns, recreating the
+                # exact provenance race this list is meant to prevent.
+                with self._mem_threads_lock:
+                    self._mem_threads = [
+                        thread for thread in self._mem_threads if thread.is_alive()
+                    ]
+                    self._mem_thread = t
+                    self._mem_threads.append(t)
+                    t.start()
                 # Recognise synchronously rather than reusing the remembered name: the write
                 # above has not landed yet, so `self._last_known_screen` still holds the
                 # PREVIOUS screen's name. Reporting it labelled the device launcher and a
@@ -2030,14 +2129,70 @@ class Engine:
             logger.debug("memory record_screen failed: %s", exc)
             return None, None
 
+    def _join_memory_writers(self, *, timeout_s: float = 5.0) -> bool:
+        """Wait for every queued async screen write within one bounded deadline.
+
+        ``_mem_thread`` retained only the newest writer.  When observations arrived faster
+        than their asynchronous map writes, an older queued writer could outlive it and stamp
+        a package/context boundary *after* the next action had already been journaled.  Keep
+        all outstanding writers ordered ahead of action capture and artifact materialisation.
+        """
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        while True:
+            with self._mem_threads_lock:
+                pending = [
+                    thread
+                    for thread in self._mem_threads
+                    if thread is not threading.current_thread() and thread.is_alive()
+                ]
+                latest = self._mem_thread
+                if (
+                    latest is not None
+                    and latest is not threading.current_thread()
+                    and latest.is_alive()
+                    and latest not in pending
+                ):
+                    # Compatibility for integrations/tests that set the historical singular
+                    # writer handle directly. Production writers are also kept in the list.
+                    pending.append(latest)
+            if not pending:
+                with self._mem_threads_lock:
+                    self._mem_threads = [
+                        thread for thread in self._mem_threads if thread.is_alive()
+                    ]
+                return True
+            for thread in pending:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                thread.join(timeout=remaining)
+
     def _record_action_safe(self, step: RouteStep) -> None:
+        if self._action_recording_suppression:
+            return
         mem = self._memory
         if mem is None or self._device is None:
             return
         try:
-            mem.observe_action(self._device.serial, step)
+            self._claim_memory_session()
+            # Async screen recording and the action journal both update SessionState.  Let the
+            # screen writer finish first so the action is stamped with its newly established
+            # origin/context/segment and cannot be overwritten by a stale save.
+            if not self._join_memory_writers(timeout_s=5.0):
+                raise RuntimeError("memory screen provenance is still being finalized")
+            with self._mem_lock:
+                mem.observe_action(self._device.serial, step)
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug("memory record_action failed: %s", exc)
+
+    @contextlib.contextmanager
+    def _without_action_recording(self) -> Iterator[None]:
+        """Collapse an internally composed operation into its one public journal step."""
+        self._action_recording_suppression += 1
+        try:
+            yield
+        finally:
+            self._action_recording_suppression -= 1
 
     def _mark_logcat(self, name: str) -> None:
         """Best-effort device-clock logcat mark (never fails the action that triggered it)."""
@@ -2198,11 +2353,25 @@ class Engine:
         # while the cache still describes the screen we are acting from — afterwards it
         # describes the destination, which is not where the click was spent.
         self._last_action_site = self._action_site(element)
-        label = redact_label(element, redact=self.config.memory.redact) if element else None
+        selector = (
+            recorded_selector(
+                element,
+                elements=(self._last_analyze_result.elements if self._last_analyze_result else ()),
+            )
+            if element
+            else {
+                "label": None,
+                "content_desc": None,
+                "resource_id": None,
+                "by": None,
+            }
+        )
         return RouteStep(
             kind=kind,
-            label=label,
-            resource_id=_id_tail(element.resource_id) if element else None,
+            label=selector["label"],
+            content_desc=selector["content_desc"],
+            resource_id=selector["resource_id"],
+            by=selector["by"],
             arg=arg,
             submit=submit,
             package=self._cached_package(),
@@ -2312,6 +2481,7 @@ class Engine:
         hierarchy_ocr: bool = True,
         flow_dir: Path | None = None,
         allow_unsafe_route_effects: bool = True,
+        flow_plan: _ResolvedFlowPlan | None = None,
     ) -> tuple[StepFailure | None, AnalyzeResult]:
         """Execute *steps* with selector matching, settle waits, and re-perception.
 
@@ -2361,8 +2531,14 @@ class Engine:
                         retry_el = _match_step(retry.elements, s)
                         if retry_el is not None:
                             res, el = retry, retry_el
-                if el is None and scroll_fallback and (s.label or s.resource_id):
-                    self.scroll_to(s.label or s.resource_id or "", observe=False)
+                selector_value = s.resource_id or s.content_desc or s.label
+                if el is None and scroll_fallback and selector_value:
+                    self.scroll_to(
+                        selector_value,
+                        observe=False,
+                        by=s.by
+                        or ("id" if s.resource_id else "desc" if s.content_desc else "text"),
+                    )
                     res = self._analyze_route_step(
                         steps, i, origin_package, hierarchy_ocr=hierarchy_ocr
                     )
@@ -2474,7 +2650,14 @@ class Engine:
             elif kind == "flags-apply":
                 if not s.arg:
                     return StepFailure("unsupported_action", i, s), res
-                if not self.flags_apply(s.arg, observe=False).get("ok", True):
+                flags_snapshot = flow_plan.flags.get(id(s)) if flow_plan is not None else None
+                if flow_plan is not None and flags_snapshot is None:
+                    return StepFailure("resource_snapshot_missing", i, s), res
+                if not self.flags_apply(
+                    s.arg,
+                    observe=False,
+                    _snapshot=flags_snapshot,
+                ).get("ok", True):
                     return StepFailure("assert_failed", i, s), res
             elif kind == "network-offline":
                 if not self.network_offline(verify=True, timeout_ms=s.timeout_ms or 10_000).ok:
@@ -2503,11 +2686,17 @@ class Engine:
             elif kind == "mock-replay":
                 if not s.arg:
                     return StepFailure("unsupported_action", i, s), res
-                self.mock_replay(s.arg)
+                cassette_snapshot = (
+                    flow_plan.cassettes.get(id(s)) if flow_plan is not None else None
+                )
+                if flow_plan is not None and cassette_snapshot is None:
+                    return StepFailure("resource_snapshot_missing", i, s), res
+                self.mock_replay(s.arg, _snapshot=cassette_snapshot)
                 reanalyze = False
             elif kind == "repeat":
                 times = max(1, s.repeat or 1)
-                for _ in range(times):
+                for iteration in range(times):
+                    sub_executed: list[dict[str, Any]] = []
                     subfail, res = self._run_steps(
                         s.substeps,
                         origin_package=origin_package,
@@ -2515,21 +2704,35 @@ class Engine:
                         allow_goto_steps=allow_goto_steps,
                         scroll_fallback=scroll_fallback,
                         res=res,
-                        executed=executed,
+                        executed=sub_executed,
                         flow_depth=flow_depth,
                         hierarchy_ocr=hierarchy_ocr,
                         # substeps came from the same file, so "next to me" is unchanged
                         flow_dir=flow_dir,
                         allow_unsafe_route_effects=allow_unsafe_route_effects,
+                        flow_plan=flow_plan,
                     )
+                    if executed is not None:
+                        for row in sub_executed:
+                            child_path = row.get("path")
+                            if not isinstance(child_path, list):
+                                child_path = [row.get("index")]
+                            executed.append(
+                                {
+                                    **row,
+                                    "index": i,
+                                    "path": [i, iteration, *child_path],
+                                }
+                            )
                     if subfail is not None:
-                        return subfail, res
+                        return StepFailure(subfail.code, i, s), res
                 reanalyze = False
                 settle = False
             elif kind == "retry":
                 attempts = max(1, s.max_retries or 3)
-                subfail: StepFailure | None = StepFailure("assert_failed", i, s)
-                for _ in range(attempts):
+                subfail = StepFailure("assert_failed", i, s)
+                for attempt in range(attempts):
+                    sub_executed = []
                     subfail, res = self._run_steps(
                         s.substeps,
                         origin_package=origin_package,
@@ -2537,17 +2740,30 @@ class Engine:
                         allow_goto_steps=allow_goto_steps,
                         scroll_fallback=scroll_fallback,
                         res=res,
-                        executed=executed,
+                        executed=sub_executed,
                         flow_depth=flow_depth,
                         hierarchy_ocr=hierarchy_ocr,
                         # substeps came from the same file, so "next to me" is unchanged
                         flow_dir=flow_dir,
                         allow_unsafe_route_effects=allow_unsafe_route_effects,
+                        flow_plan=flow_plan,
                     )
+                    if executed is not None:
+                        for row in sub_executed:
+                            child_path = row.get("path")
+                            if not isinstance(child_path, list):
+                                child_path = [row.get("index")]
+                            executed.append(
+                                {
+                                    **row,
+                                    "index": i,
+                                    "path": [i, attempt, *child_path],
+                                }
+                            )
                     if subfail is None:
                         break
                 if subfail is not None:
-                    return subfail, res
+                    return StepFailure(subfail.code, i, s), res
                 reanalyze = False
                 settle = False
             elif kind == "goto":
@@ -2567,33 +2783,51 @@ class Engine:
                 # Run a saved flow inline (Maestro's runFlow) — reuse shared recipes.
                 if not allow_goto_steps or not s.arg or flow_depth >= _MAX_FLOW_DEPTH:
                     return StepFailure("unsupported_action", i, s), res
-                from .flows import anchor_paths, resolve_params
-
                 try:
-                    sub, sub_dir = self._resolve_nested_flow(s.arg, flow_dir)
+                    key = self._flow_ref_key(s.arg, flow_dir)
+                    node = flow_plan.flow_graph.get(key) if flow_plan is not None else None
+                    if node is None:
+                        node = self._resolve_nested_flow_node(s.arg, flow_dir)
                 except UsageError:
                     return StepFailure("route_unknown", i, s), res
-                sub_steps = resolve_params(sub, {})
-                if sub_dir is not None:
-                    # A path inside the SUB-flow belongs to the sub-flow. Anchoring only the
-                    # top-level flow's steps left a nested `flags_apply: flags/guest.yaml`
-                    # resolving against the daemon's cwd — the same defect one level down.
-                    sub_steps = anchor_paths(sub_steps, sub_dir)
-                subfail, res = self._run_steps(
+                sub, sub_dir, _source_id, sub_steps = node
+                nested_executed: list[dict[str, Any]] = []
+                subfail, res = self._execute_flow_steps(
+                    sub,
                     sub_steps,
-                    origin_package=sub.app or origin_package,
-                    allow_destructive=allow_destructive,
-                    allow_goto_steps=True,
-                    scroll_fallback=scroll_fallback,
                     res=res,
-                    executed=executed,
+                    allow_destructive=allow_destructive,
+                    scroll_fallback=scroll_fallback,
+                    executed=nested_executed,
                     flow_depth=flow_depth + 1,
                     hierarchy_ocr=hierarchy_ocr,
                     flow_dir=sub_dir,
                     allow_unsafe_route_effects=allow_unsafe_route_effects,
+                    flow_plan=flow_plan,
                 )
+                if executed is not None:
+                    for row in nested_executed:
+                        child_path = row.get("path")
+                        if not isinstance(child_path, list):
+                            child_path = [row.get("index")]
+                        prior_flow_path = row.get("flow_path")
+                        if not isinstance(prior_flow_path, list):
+                            prior_flow_path = []
+                        executed.append(
+                            {
+                                **row,
+                                "index": i,
+                                "path": [i, *child_path],
+                                "flow_path": [s.arg, *prior_flow_path],
+                            }
+                        )
                 if subfail is not None:
                     return StepFailure(subfail.code, i, s), res  # surface sub-failure here
+                arrival_verified, arrival_code, res, _arrival_evidence = (
+                    self._flow_arrival_evidence(sub, res)
+                )
+                if arrival_verified is False:
+                    return StepFailure(arrival_code or "arrival_unverified", i, s), res
                 settle = False  # the sub-flow already settled
             else:
                 return StepFailure("unsupported_action", i, s), res
@@ -2611,8 +2845,12 @@ class Engine:
                 )
         return None, res
 
-    def _resolve_nested_flow(self, ref: str, flow_dir: Path | None) -> tuple[Any, Path | None]:
-        """Load a nested ``flow:`` reference — by path when it looks like one — as (flow, dir).
+    @staticmethod
+    def _flow_ref_key(ref: str, flow_dir: Path | None) -> tuple[str | None, str]:
+        return (str(flow_dir.resolve()) if flow_dir is not None else None, ref)
+
+    def _resolve_nested_flow_node(self, ref: str, flow_dir: Path | None) -> _ResolvedFlowNode:
+        """Load and resolve one nested flow as an immutable execution snapshot.
 
         Nested flows resolved by *name* from AUA's own memory directory only, so a promoted
         flow that referenced a sibling broke for anyone whose memory directory did not happen
@@ -2627,18 +2865,30 @@ class Engine:
         somebody else's flow instead is not. The searched candidates are logged, because the
         executor's ``StepFailure`` carries a code and a step but no message.
         """
-        from .flows import FlowStore, looks_like_path, nested_flow_candidates, parse_flow_yaml
+        from .flows import (
+            FlowStore,
+            anchor_paths,
+            looks_like_path,
+            nested_flow_candidates,
+            parse_flow_yaml,
+            resolve_params,
+        )
 
         store = FlowStore(self.config.memory)
         if not looks_like_path(ref):
-            return store.load(ref), store.flows_dir()
+            path = store.path(ref).resolve()
+            flow = store.load(ref)
+            directory = path.parent
+            steps = anchor_paths(resolve_params(flow, {}), directory)
+            return _ResolvedFlowNode(flow, directory, str(path), steps)
         candidates = nested_flow_candidates(ref, flow_dir, store.flows_dir())
         for cand in candidates:
             if cand.is_file():
-                return (
-                    parse_flow_yaml(cand.read_text(encoding="utf-8"), name=cand.stem),
-                    cand.resolve().parent,
-                )
+                path = cand.resolve()
+                flow = parse_flow_yaml(path.read_text(encoding="utf-8"), name=path.stem)
+                directory = path.parent
+                steps = anchor_paths(resolve_params(flow, {}), directory)
+                return _ResolvedFlowNode(flow, directory, str(path), steps)
         logger.warning(
             "nested flow %r not found; looked in: %s",
             ref,
@@ -2648,6 +2898,541 @@ class Engine:
             f"no flow file for nested reference {ref!r}",
             hint="Tried: " + ", ".join(str(c) for c in candidates),
         )
+
+    def _resolve_nested_flow(self, ref: str, flow_dir: Path | None) -> tuple[Any, Path | None]:
+        """Compatibility wrapper returning the parsed flow and its source directory."""
+        node = self._resolve_nested_flow_node(ref, flow_dir)
+        return node.flow, node.directory
+
+    @staticmethod
+    def _flow_graph_identity(flow: Any, flow_dir: Path | None) -> str:
+        directory = str(flow_dir.resolve()) if flow_dir is not None else "<memory>"
+        return f"{directory}::{flow.name}"
+
+    def _preflight_nested_flow_graph(
+        self,
+        steps: list[RouteStep],
+        *,
+        flow_dir: Path | None,
+        flow_app: str | None = None,
+        context_id: str | None = None,
+        flow_depth: int = 0,
+        ancestors: tuple[str, ...] = (),
+        plan: _ResolvedFlowPlan | None = None,
+        goto_allowed: bool = True,
+    ) -> _ResolvedFlowPlan:
+        """Resolve and validate every composed flow before the first device mutation.
+
+        Nested flows used to be loaded only when execution reached their step. A missing file,
+        unbound parameter, invalid arrival predicate, or cycle could therefore be discovered
+        after earlier parent steps had already changed the device. This filesystem-only walk
+        proves the whole graph is runnable first; runtime app/context checks still happen on
+        the fresh observation at the point each child begins.
+        """
+        if plan is None:
+            plan = _ResolvedFlowPlan({}, {}, {})
+
+        for index, step in enumerate(steps):
+            if step.substeps:
+                self._preflight_nested_flow_graph(
+                    step.substeps,
+                    flow_dir=flow_dir,
+                    flow_app=flow_app,
+                    context_id=context_id,
+                    flow_depth=flow_depth,
+                    ancestors=ancestors,
+                    plan=plan,
+                    goto_allowed=False,
+                )
+            if step.kind == "flags-apply":
+                if not step.arg:
+                    raise UsageError("flags_apply step needs a flags file")
+                from .flags import load_flags_file
+
+                app, pairs = load_flags_file(step.arg)
+                plan.flags[id(step)] = _ResolvedFlagsResource(
+                    str(Path(step.arg).expanduser().resolve()),
+                    app,
+                    deepcopy(pairs),
+                )
+            elif step.kind == "mock-replay":
+                if not step.arg:
+                    raise UsageError("mock_replay step needs a cassette name or path")
+                from . import proxy_mock as pm
+
+                cassette = pm.cassette_dir(self.config.memory.dir) / f"{step.arg}.yaml"
+                alternate = Path(step.arg).expanduser()
+                selected = alternate if alternate.is_file() else cassette
+                plan.cassettes[id(step)] = _ResolvedCassetteResource(
+                    step.arg,
+                    selected.resolve(),
+                    deepcopy(pm.load_cassette(selected)),
+                )
+            elif step.kind == "goto":
+                if not step.arg:
+                    raise UsageError("goto step needs a mapped screen goal")
+                mem = self._memory
+                mapped_app = mem.load(flow_app) if mem is not None and flow_app else None
+                if mapped_app is None or resolve_goal(
+                    mapped_app,
+                    step.arg,
+                    context_id=context_id,
+                    destructive_labels=self.config.memory.destructive_labels,
+                ) is None:
+                    raise UsageError(
+                        f"goto target {step.arg!r} is not mapped for {flow_app or 'this flow'}",
+                        hint="record/map the destination before composing it into a flow",
+                    )
+                if not goto_allowed or flow_depth > 0 or index != 0:
+                    raise UsageError(
+                        "goto inside a flow must be its first top-level step",
+                        hint=(
+                            "A later goto's route origin depends on earlier mutations and cannot "
+                            "be authorized atomically; capture the exact route steps instead."
+                        ),
+                    )
+            if step.kind != "flow":
+                continue
+            if not step.arg:
+                raise UsageError("nested flow step needs a flow name or path")
+            if flow_depth >= _MAX_FLOW_DEPTH:
+                raise UsageError(
+                    f"nested flow depth exceeds {_MAX_FLOW_DEPTH}",
+                    hint="remove the recursive reference or flatten the composed flow",
+                )
+            key = self._flow_ref_key(step.arg, flow_dir)
+            node = plan.flow_graph.get(key)
+            if node is None:
+                node = self._resolve_nested_flow_node(step.arg, flow_dir)
+                plan.flow_graph[key] = node
+            child, child_dir, identity, child_steps = node
+            child_app = child.app or flow_app
+            child_context = child.context_id or context_id
+            if child.app is not None and child.app != flow_app:
+                raise UsageError(
+                    f"nested flow {step.arg!r} belongs to {child.app}, not parent app {flow_app}",
+                    hint=(
+                        "Keep cross-app transit as explicit package-stamped steps in one flow "
+                        "so its entry contract can be verified before the first mutation."
+                    ),
+                )
+            if child.context_id is not None and child.context_id != context_id:
+                raise UsageError(
+                    f"nested flow {step.arg!r} uses context {child.context_id}, not {context_id}",
+                    hint="compose only flows recorded for the same app context",
+                )
+            self._validate_flow_arrival_screen(child, child_app, child_context)
+            if identity in ancestors:
+                chain = " -> ".join((*ancestors, identity))
+                raise UsageError(
+                    f"nested flow cycle detected: {chain}",
+                    hint="remove one of the recursive flow references",
+                )
+            if child.arrival:
+                _parse_await_terms(child.arrival, require_positive=True)
+            self._preflight_nested_flow_graph(
+                child_steps,
+                flow_dir=child_dir,
+                flow_app=child_app,
+                context_id=child_context,
+                flow_depth=flow_depth + 1,
+                ancestors=(*ancestors, identity),
+                plan=plan,
+                goto_allowed=False,
+            )
+        return plan
+
+    def _resolved_flow_disclosure(
+        self,
+        steps: list[RouteStep],
+        *,
+        flow_dir: Path | None,
+        flow_app: str | None,
+        plan: _ResolvedFlowPlan,
+        path_prefix: str = "steps",
+        index_offset: int = 0,
+    ) -> dict[str, Any]:
+        """Describe the exact recursively resolved graph without exposing resource payloads.
+
+        A ``flow`` step is itself conservatively non-authorizable, but that generic fact is not
+        enough for review: the referenced child may change settings, data, or the environment.
+        The preflight plan already pins every child file, so disclosure walks those same nodes
+        instead of reopening YAML. Parsed flag values and cassette bodies deliberately remain
+        private to the execution plan and never enter this result (or rendered flow YAML).
+        """
+        lexicon = self.config.memory.destructive_labels
+        all_risks: list[dict[str, str]] = []
+        graph: list[dict[str, Any]] = []
+
+        def add_risks(items: Sequence[dict[str, str]]) -> None:
+            for item in items:
+                if item not in all_risks:
+                    all_risks.append(item)
+
+        def walk(
+            current: list[RouteStep],
+            *,
+            directory: Path | None,
+            origin_package: str | None,
+            prefix: str,
+            offset: int = 0,
+        ) -> list[dict[str, Any]]:
+            rows: list[dict[str, Any]] = []
+            for index, step in enumerate(current):
+                absolute_index = index + offset
+                path = f"{prefix}[{absolute_index}]"
+                risks = route_step_risks(
+                    step,
+                    origin_package=origin_package,
+                    destructive_labels=lexicon,
+                    path=path,
+                )
+                add_risks(risks)
+                row: dict[str, Any] = {
+                    "index": absolute_index,
+                    "path": path,
+                    "step": step_display(step),
+                    "kind": step.kind,
+                    "risks": risks,
+                }
+                if step.substeps:
+                    row["substeps"] = walk(
+                        step.substeps,
+                        directory=directory,
+                        origin_package=origin_package,
+                        prefix=f"{path}.substeps",
+                    )
+                if step.kind == "flow" and step.arg:
+                    node = plan.flow_graph.get(self._flow_ref_key(step.arg, directory))
+                    if node is not None:
+                        child, child_dir, source_id, child_steps = node
+                        edge = {
+                            "path": path,
+                            "reference": step.arg,
+                            "name": child.name,
+                            "source": source_id,
+                            "app": child.app or origin_package,
+                            "context_id": child.context_id,
+                        }
+                        graph.append(edge)
+                        child_rows = walk(
+                            child_steps,
+                            directory=child_dir,
+                            origin_package=child.app or origin_package,
+                            prefix=f"{path}.resolved_flow.steps",
+                        )
+                        row["resolved_flow"] = {
+                            **edge,
+                            "arrival": child.arrival,
+                            "arrival_screen": child.arrival_screen,
+                            "arrival_status": child.arrival_status or "unverified",
+                            "steps": child_rows,
+                        }
+                nested_rows = [
+                    *row.get("substeps", []),
+                    *((row.get("resolved_flow") or {}).get("steps") or []),
+                ]
+                row["destructive"] = any(risk.get("code") == "destructive" for risk in risks) or any(
+                    bool(nested.get("destructive")) for nested in nested_rows
+                )
+                row["effects"] = sorted(
+                    {
+                        str(risk.get("code"))
+                        for risk in risks
+                        if risk.get("code") is not None
+                    }
+                    | {
+                        str(effect)
+                        for nested in nested_rows
+                        for effect in nested.get("effects", [])
+                    }
+                )
+                rows.append(row)
+            return rows
+
+        resolved_steps = walk(
+            steps,
+            directory=flow_dir,
+            origin_package=flow_app,
+            prefix=path_prefix,
+            offset=index_offset,
+        )
+        return {
+            "steps": resolved_steps,
+            "risks": all_risks,
+            "effects": sorted(
+                {
+                    str(risk.get("code"))
+                    for risk in all_risks
+                    if risk.get("code") is not None
+                }
+            ),
+            "flow_graph": graph,
+        }
+
+    def _validate_flow_arrival_screen(
+        self,
+        flow: Any,
+        package: str | None,
+        context_id: str | None,
+    ) -> None:
+        """Prove a declared mapped arrival exists, is fresh, and fits the known context."""
+        if not flow.arrival_screen:
+            return
+        mem = self._memory
+        app = mem.load(package) if mem is not None and package else None
+        record = app.screens.get(flow.arrival_screen) if app is not None else None
+        context_ok = bool(
+            record is not None
+            and (
+                context_id is None
+                or record.context_id in {context_id, LEGACY_CONTEXT_ID}
+            )
+        )
+        if record is None or record.stale or not context_ok:
+            raise UsageError(
+                f"flow '{flow.name}' claims unavailable mapped arrival {flow.arrival_screen!r}",
+                hint="record a fresh same-context destination or use a positive arrival predicate",
+            )
+
+    @staticmethod
+    def _flow_leading_launch_establishes_origin(flow: Any, steps: list[RouteStep]) -> bool:
+        """Whether the first step explicitly brings the flow's owning app to foreground."""
+        if not flow.app or not steps or steps[0].kind != "launch-app":
+            return False
+        return (steps[0].arg or flow.app) == flow.app
+
+    def _flow_runtime_state(
+        self,
+        flow: Any,
+        observation: AnalyzeResult,
+        *,
+        refresh_context: bool,
+        transit_step: RouteStep | None = None,
+    ) -> tuple[str | None, dict[str, Any] | None]:
+        """Return active context and an entry-contract mismatch, if any.
+
+        The observation is the foreground truth.  Session state contributes a feature-flag
+        context only when it belongs to that same package; a cursor from another app must not
+        authorize a replay.  Explicit flow execution forces one runtime flag read so a recent
+        out-of-band flag change cannot be hidden by the normal short refresh cache.  A resumed
+        flow may continue inside configured transit only when the origin-owned session and the
+        next step's explicit package both corroborate that exact foreground.
+        """
+        observed_package = observation.screen.package or self.current_package()
+        mem = self._memory
+        active_context: str | None = DEFAULT_CONTEXT_ID if mem is None else None
+        owner_mismatch = bool(flow.app and observed_package != flow.app)
+        transit_resume = False
+        if mem is not None and self._device is not None and observed_package:
+            # Serialize with async screen recording: otherwise an older background session write
+            # can land after this forced flag read and put the stale context back.
+            with self._mem_lock:
+                session = mem.load_session(self._device.serial)
+                transit_resume = bool(
+                    owner_mismatch
+                    and transit_step is not None
+                    and transit_step.package == observed_package
+                    and matches_any(observed_package, self.config.memory.transit_packages)
+                    and session.package == flow.app
+                )
+                if refresh_context and not owner_mismatch:
+                    self._sync_runtime_flag_context(
+                        self._device,
+                        observed_package,
+                        mem,
+                        force=True,
+                    )
+                    session = mem.load_session(self._device.serial)
+                if session.package == observed_package or transit_resume:
+                    active_context = session.active_context_id
+
+        if owner_mismatch and not transit_resume:
+            return None, {
+                "code": "flow_app_mismatch",
+                "expected_package": flow.app,
+                "observed_package": observed_package,
+                "reason": "the flow's owning app is not in the foreground",
+            }
+
+        if flow.context_id and active_context != flow.context_id:
+            return active_context, {
+                "code": "flow_context_mismatch",
+                "expected_context_id": flow.context_id,
+                "active_context_id": active_context,
+                "observed_package": observed_package,
+                "reason": "the active app context does not match the recorded flow context",
+            }
+        return active_context, None
+
+    def _execute_flow_steps(
+        self,
+        flow: Any,
+        steps: list[RouteStep],
+        *,
+        res: AnalyzeResult,
+        allow_destructive: bool,
+        scroll_fallback: bool,
+        flow_depth: int,
+        hierarchy_ocr: bool,
+        flow_dir: Path | None,
+        allow_unsafe_route_effects: bool,
+        executed: list[dict[str, Any]],
+        allow_transit_resume: bool = False,
+        flow_plan: _ResolvedFlowPlan | None = None,
+    ) -> tuple[StepFailure | None, AnalyzeResult]:
+        """Execute a resolved flow after enforcing its package/context entry contract."""
+
+        def run_chunk(
+            chunk: list[RouteStep], start: int, current: AnalyzeResult
+        ) -> tuple[StepFailure | None, AnalyzeResult]:
+            chunk_executed: list[dict[str, Any]] = []
+            failure, latest = self._run_steps(
+                chunk,
+                origin_package=flow.app,
+                allow_destructive=allow_destructive,
+                allow_goto_steps=True,
+                scroll_fallback=scroll_fallback,
+                res=current,
+                executed=chunk_executed,
+                flow_depth=flow_depth,
+                hierarchy_ocr=hierarchy_ocr,
+                flow_dir=flow_dir,
+                allow_unsafe_route_effects=allow_unsafe_route_effects,
+                flow_plan=flow_plan,
+            )
+            for row in chunk_executed:
+                row["index"] += start
+            executed.extend(chunk_executed)
+            if failure is not None:
+                failure = StepFailure(failure.code, failure.at + start, failure.step)
+            return failure, latest
+
+        _active_context, mismatch = self._flow_runtime_state(
+            flow,
+            res,
+            refresh_context=True,
+            transit_step=steps[0] if allow_transit_resume and steps else None,
+        )
+        start = 0
+        if mismatch is not None:
+            if not (
+                mismatch["code"] == "flow_app_mismatch"
+                and self._flow_leading_launch_establishes_origin(flow, steps)
+            ):
+                return StepFailure(mismatch["code"], 0, steps[0]), res
+
+            # A wrong foreground is allowed only for this explicit establishing launch.  Verify
+            # its observed result (including flags) before a second flow action is authorized.
+            failure, res = run_chunk(steps[:1], 0, res)
+            if failure is not None:
+                return failure, res
+            _active_context, mismatch = self._flow_runtime_state(flow, res, refresh_context=True)
+            if mismatch is not None:
+                return StepFailure(mismatch["code"], 0, steps[0]), res
+            start = 1
+
+        if start == len(steps):
+            return None, res
+        return run_chunk(steps[start:], start, res)
+
+    def _flow_arrival_evidence(
+        self,
+        flow: Any,
+        res: AnalyzeResult,
+    ) -> tuple[bool | None, str | None, AnalyzeResult, dict[str, Any]]:
+        """Verify every declared arrival condition against one terminal observation.
+
+        ``None`` means the flow declared no arrival proof.  That remains executable when the
+        caller names the flow directly, but it is never presented as verified arrival.
+        """
+        declared = bool(flow.arrival_screen or flow.arrival)
+        predicate_ok = True
+        predicate_code: str | None = None
+        evidence: dict[str, Any] = {}
+        terminal = res
+        terminal_is_fresh = False
+        if flow.arrival:
+            arrival = self.await_predicate(
+                flow.arrival,
+                timeout_ms=30_000,
+                poll_ms=300,
+                observe=True,
+            )
+            evidence["arrival"] = arrival.model_dump(mode="json")
+            predicate_ok = arrival.ok
+            if not arrival.ok:
+                predicate_code = f"arrival_{arrival.await_outcome or 'unverified'}"
+            # When a legacy predicate and mapped screen are both present, this exact folded
+            # observation is the screen proof too.  Checking the earlier last-step frame would
+            # combine two different moments and could accept a transient destination.
+            if arrival.observation is not None:
+                terminal = arrival.observation
+                terminal_is_fresh = True
+
+        screen_ok = True
+        if flow.arrival_screen:
+            if not terminal_is_fresh:
+                # Some valid flow steps intentionally do not re-perceive (notably stop_app,
+                # because the app has just disappeared).  Their returned ``res`` describes the
+                # screen from before the step and must never satisfy mapped arrival proof.  A
+                # no-cache hierarchy read makes the proof about the device now; predicate-based
+                # arrivals already supplied their own terminal observation above.
+                terminal = self.analyze(
+                    source="hierarchy",
+                    with_ocr=False,
+                    no_cache=True,
+                )
+            expected = flow.arrival_screen
+            recognized = terminal.meta.known_screen
+            _active_context, runtime_mismatch = self._flow_runtime_state(
+                flow,
+                terminal,
+                refresh_context=True,
+            )
+            record_ok = runtime_mismatch is None
+            mem = self._memory
+            package = terminal.screen.package
+            if record_ok and mem is not None and package:
+                from .memory import LEGACY_CONTEXT_ID
+
+                app = mem.load(package)
+                record = app.screens.get(expected) if app is not None else None
+                session = mem.load_session(self.device.serial)
+                allowed_contexts = {session.active_context_id, LEGACY_CONTEXT_ID}
+                record_ok = bool(
+                    record is not None
+                    and not record.stale
+                    and record.context_id in allowed_contexts
+                    and session.package == package
+                )
+            elif record_ok:
+                # ``known_screen`` is map-derived. With no usable map/session there is no way
+                # to prove that a supplied or cached name is fresh for this app context.
+                record_ok = False
+            screen_ok = recognized == expected and record_ok
+            evidence["arrival_screen"] = {
+                "expected": expected,
+                "recognized": recognized,
+                "verified": screen_ok,
+            }
+        else:
+            evidence["arrival_screen"] = {
+                "expected": None,
+                "recognized": terminal.meta.known_screen,
+                "verified": False,
+                "status": flow.arrival_status or "unverified",
+            }
+
+        verified = declared and predicate_ok and screen_ok
+        evidence["arrival_verified"] = bool(verified)
+        evidence["arrival_status"] = "verified" if verified else "unverified"
+        code = None
+        if declared and not screen_ok:
+            code = "arrival_screen_unverified"
+        elif declared and not predicate_ok:
+            code = predicate_code
+        return (bool(verified) if declared else None), code, terminal, evidence
 
     def _settle_for_next_step(self, nxt: RouteStep | None) -> bool:
         """Synchronize on the next step's known selector instead of a full pixel settle.
@@ -2663,6 +3448,8 @@ class Engine:
         if nxt.kind in ("tap", "long-press", "input", "clear", "a11y-scroll"):
             if nxt.resource_id:
                 return self.has(nxt.resource_id, timeout_ms=timeout_ms, by="id").found
+            if nxt.content_desc:
+                return self.has(nxt.content_desc, timeout_ms=timeout_ms, by="desc").found
             label = nxt.label
             if label and label not in ("<filled>", "<redacted>"):
                 return self.has(label, timeout_ms=timeout_ms, by="text").found
@@ -2775,7 +3562,13 @@ class Engine:
                 return False, res  # invalid/off-screen id → hand off rather than guess
             if el is not None:  # destructive guard applies to the planner too
                 probe = RouteStep(
-                    kind="tap", label=redact_label(el, redact=self.config.memory.redact)
+                    kind="tap",
+                    # This probe is transient policy evidence, not persisted memory. Include
+                    # every semantic surface so a resource-only `deleteAccount`/`signOut`
+                    # control cannot bypass a label-only guard (including when copy redacts).
+                    label=el.text,
+                    content_desc=el.content_desc,
+                    resource_id=el.resource_id,
                 )
                 if is_destructive_step(probe, lexicon) and not allow_destructive:
                     return False, res
@@ -2947,6 +3740,7 @@ class Engine:
             if mid is not None:
                 path, resume_from = mid
                 from_here_preset = True
+
         def edge_preview(edge: RouteEdge) -> dict[str, Any]:
             steps = edge.steps or _parse_legacy_steps(edge.action)
             risk_rows: list[dict[str, Any]] = []
@@ -3023,6 +3817,19 @@ class Engine:
                     path=f"route[{edge_index}].steps[{step_index}]",
                 ):
                     code = risk["code"]
+                    # Learned routes never execute another route/flow. This is not an opt-in
+                    # side effect: `_run_steps` has no safe semantics for it, so author an
+                    # explicit flow instead of mutating earlier hops and failing late.
+                    if code == "nested_execution":
+                        blocked.append(
+                            {
+                                "edge_index": edge_index,
+                                "step_index": step_index,
+                                "step": step_display(step),
+                                **risk,
+                            }
+                        )
+                        continue
                     if code == "destructive" and allow_destructive:
                         continue
                     if code != "destructive" and allow_unsafe:
@@ -3341,6 +4148,7 @@ class Engine:
         from .flows import FlowStore, anchor_paths, parse_flow_yaml, resolve_params
 
         base_dir: Path | None = None
+        flow_file: Path | None = None
         if file:
             path = Path(file).expanduser()
             if not path.is_file():
@@ -3358,15 +4166,42 @@ class Engine:
                     else None,
                 )
             flow = parse_flow_yaml(path.read_text(encoding="utf-8"), name=path.stem)
-            base_dir = path.resolve().parent
+            flow_file = path.resolve()
+            root_source_id = str(flow_file)
+            base_dir = flow_file.parent
         elif name:
             store = FlowStore(self.config.memory)
             flow = store.load(name)
+            root_source_id = str(store.path(name).resolve())
             base_dir = store.flows_dir()
         else:
             raise UsageError("flow run needs a NAME or --file", hint="see `aua flow list`")
+        # A flow's optional YAML `name:` is display metadata. Named replay is addressed by
+        # its storage key (the filename), while file replay must keep using the exact file.
+        # Returning or suggesting the display name made failed journeys impossible to resume
+        # whenever those identities differed.
+        runnable_name = name or flow.name
+        resume_prefix = (
+            f"aua flow run --file {shlex.quote(str(flow_file))}"
+            if flow_file is not None
+            else f"aua flow run {shlex.quote(runnable_name)}"
+        )
+        identity: dict[str, Any] = {"flow": runnable_name}
+        if flow.name != runnable_name:
+            identity["declared_name"] = flow.name
+        if flow_file is not None:
+            identity["file"] = str(flow_file)
+        active_context: str | None = None
+        if flow.context_id and self._memory is not None and self._device is not None:
+            session = self._memory.load_session(self._device.serial)
+            # Dry-run is intentionally device-read-free. Disclose compatibility only when the
+            # persisted context belongs to this flow's app; another foreground's cursor is not
+            # evidence either way.
+            if flow.app is None or session.package == flow.app:
+                active_context = session.active_context_id
         if flow.arrival:
-            _parse_await_terms(flow.arrival)
+            _parse_await_terms(flow.arrival, require_positive=True)
+        self._validate_flow_arrival_screen(flow, flow.app, flow.context_id)
         steps = resolve_params(flow, params or {})
         if base_dir is not None:
             # A path *inside* a flow belongs to the flow, not to the caller's cwd.
@@ -3374,47 +4209,140 @@ class Engine:
         if not 0 <= from_step < len(steps):
             raise UsageError(f"--from-step {from_step} out of range (flow has {len(steps)} steps)")
         steps_slice = steps[from_step:]
+        flow_plan = self._preflight_nested_flow_graph(
+            steps_slice,
+            flow_dir=base_dir,
+            flow_app=flow.app,
+            context_id=flow.context_id,
+            ancestors=(root_source_id,),
+        )
+        disclosure = self._resolved_flow_disclosure(
+            steps_slice,
+            flow_dir=base_dir,
+            flow_app=flow.app,
+            plan=flow_plan,
+            index_offset=from_step,
+        )
         lexicon = self.config.memory.destructive_labels
+
+        def step_is_destructive(step: RouteStep, directory: Path | None) -> bool:
+            if is_destructive_step(step, lexicon):
+                return True
+            if any(step_is_destructive(child, directory) for child in step.substeps):
+                return True
+            if step.kind == "flow" and step.arg:
+                node = flow_plan.flow_graph.get(self._flow_ref_key(step.arg, directory))
+                return bool(
+                    node
+                    and any(step_is_destructive(child, node.directory) for child in node.steps)
+                )
+            return False
+
+        destructive_indices = [
+            from_step + index
+            for index, step in enumerate(steps_slice)
+            if step_is_destructive(step, base_dir)
+        ]
         if dry_run:
             return {
                 "ok": True,
-                "flow": flow.name,
+                **identity,
                 "dry_run": True,
                 "app": flow.app,
+                "context_id": flow.context_id,
+                "arrival": flow.arrival,
+                "arrival_screen": flow.arrival_screen,
+                "arrival_status": flow.arrival_status or "unverified",
+                "active_context_id": active_context,
+                "context_compatible": (
+                    None
+                    if flow.context_id is not None and active_context is None
+                    else flow.context_id in (None, active_context)
+                ),
+                "would_execute": False,
                 "params_declared": sorted(flow.params),
-                "steps": [
-                    {
-                        "index": from_step + i,
-                        "step": step_display(s),
-                        "destructive": is_destructive_step(s, lexicon),
-                    }
-                    for i, s in enumerate(steps_slice)
-                ],
+                "steps": disclosure["steps"],
+                "risks": disclosure["risks"],
+                "effects": disclosure["effects"],
+                "flow_graph": disclosure["flow_graph"],
                 "note": "not executed (--dry-run)",
             }
+
+        if destructive_indices and not allow_destructive:
+            index = destructive_indices[0]
+            return {
+                "ok": False,
+                "code": "destructive_step",
+                **identity,
+                "step_index": index,
+                "failed_step": {
+                    "display": step_display(steps[index]),
+                    **steps[index].model_dump(),
+                },
+                "steps_run": [],
+                "remaining_steps": [step_display(step) for step in steps[index:]],
+                "hint": "review the full flow, then rerun with --allow-destructive",
+            }
+
+        # Execution always begins from a current foreground observation. ``reach`` hands its
+        # just-captured frame through the private seam; direct flow_run pays for exactly one.
+        res = _observation or self.analyze(source="hierarchy", with_ocr=False)
+        active_context, entry_mismatch = self._flow_runtime_state(
+            flow,
+            res,
+            refresh_context=True,
+            transit_step=steps_slice[0] if from_step > 0 else None,
+        )
+        if entry_mismatch is not None and not (
+            entry_mismatch["code"] == "flow_app_mismatch"
+            and self._flow_leading_launch_establishes_origin(flow, steps_slice)
+        ):
+            if entry_mismatch["code"] == "flow_context_mismatch":
+                raise UsageError(
+                    f"flow '{flow.name}' was recorded for context {flow.context_id}, but the "
+                    f"active context is {active_context}",
+                    hint="activate the recorded feature/flag context before replaying this flow",
+                )
+            raise UsageError(
+                f"flow '{flow.name}' belongs to {flow.app}, but the foreground package is "
+                f"{res.screen.package or 'unknown'}",
+                hint=(
+                    "bring the owning app to foreground, or make launch_app for that exact "
+                    "package the flow's first step"
+                ),
+            )
         executed: list[dict[str, Any]] = []
 
         def _exec(
             slice_start: int, res_in: AnalyzeResult | None
         ) -> tuple[Any, AnalyzeResult, int | None]:
             ex: list[dict[str, Any]] = []
-            f, r = self._run_steps(
+            # ``res_in`` is always present: either the fresh top-level entry observation or
+            # the fresh handoff returned by a failed/assisted attempt.
+            assert res_in is not None
+            f, r = self._execute_flow_steps(
+                flow,
                 steps[slice_start:],
-                origin_package=flow.app,
-                allow_destructive=allow_destructive,
-                allow_goto_steps=True,
-                scroll_fallback=True,
                 res=res_in,
+                allow_destructive=allow_destructive,
+                scroll_fallback=True,
                 executed=ex,
+                flow_depth=0,
+                hierarchy_ocr=True,
                 flow_dir=base_dir,
                 allow_unsafe_route_effects=allow_unsafe,
+                allow_transit_resume=slice_start > 0,
+                flow_plan=flow_plan,
             )
             for e in ex:
                 e["index"] += slice_start  # absolute flow indices
+                path = e.get("path")
+                if isinstance(path, list) and path and isinstance(path[0], int):
+                    e["path"] = [path[0] + slice_start, *path[1:]]
             executed.extend(ex)
             return f, r, (slice_start + f.at if f is not None else None)
 
-        fail, res, idx = _exec(from_step, _observation)
+        fail, res, idx = _exec(from_step, res)
         if fail is not None and assist and self.factory.is_enabled("planner"):
             objective = (
                 f"A UI automation step could not run: {step_display(fail.step)}. If a "
@@ -3430,7 +4358,7 @@ class Engine:
             assert idx is not None
             hint = (
                 "fix the flow or finish the step manually, then resume with "
-                f"`aua flow run {flow.name} --from-step {idx}`"
+                f"`{resume_prefix} --from-step {idx}`"
             )
             if not assist:
                 hint += (
@@ -3440,7 +4368,7 @@ class Engine:
             return {
                 "ok": False,
                 "code": fail.code,
-                "flow": flow.name,
+                **identity,
                 "step_index": idx,
                 "failed_step": {"display": step_display(fail.step), **fail.step.model_dump()},
                 "steps_run": executed,
@@ -3452,26 +4380,24 @@ class Engine:
                     if (e.text or e.content_desc)
                 ][:20],
                 "hint": hint,
+                "resume_call": f"{resume_prefix} --from-step {idx}",
             }
+        arrival_verified, arrival_code, res, arrival_evidence = self._flow_arrival_evidence(
+            flow,
+            res,
+        )
         out = {
             "ok": True,
-            "flow": flow.name,
+            **identity,
             "steps_run": executed,
             "final_screen": res.meta.known_screen,
             # destination elements (ids) so the caller can act without a re-analyze
             "elements": [e.compact() for e in res.elements],
+            **arrival_evidence,
         }
-        if flow.arrival:
-            arrival = self.await_predicate(
-                flow.arrival,
-                timeout_ms=30_000,
-                poll_ms=300,
-                observe=True,
-            )
-            out["arrival"] = arrival.model_dump(mode="json")
-            out["ok"] = arrival.ok
-            if not arrival.ok:
-                out["code"] = f"arrival_{arrival.await_outcome or 'unverified'}"
+        if arrival_verified is False:
+            out["ok"] = False
+            out["code"] = arrival_code or "arrival_unverified"
         return out
 
     def explore_mine(
@@ -3676,62 +4602,314 @@ class Engine:
         *,
         last: int = 12,
         force: bool = False,
+        save: bool = False,
         dry_run: bool = False,
     ) -> dict[str, Any]:
-        """Materialize the session's recent recorded actions into an editable flow file.
+        """Preview or save a trustworthy homogeneous suffix of recorded actions.
 
         Redacted inputs/labels become required ``${PARAM_n}`` placeholders — typed
         values are never recorded, so the agent fills them in the saved YAML.
         """
-        from .flows import Flow, FlowStore, check_saveable, render_flow_yaml, steps_from_recent
+        from .flows import (
+            Flow,
+            FlowStore,
+            check_saveable,
+            recorded_step_blockers,
+            render_flow_yaml,
+            steps_from_recent,
+        )
 
         mem = self._memory
         if mem is None:
             raise UsageError("memory is disabled", hint="Set `memory.enabled: true` in config.")
+        if force and not save:
+            raise UsageError(
+                "--force only applies when --save writes the previewed flow",
+                hint="preview first, then add --save --force to replace the existing file",
+            )
+        if dry_run and save:
+            raise UsageError("--dry-run and --save cannot be combined")
+
+        # Terminal proof must describe the screen on the device now, never the cursor left by
+        # an older observation.  This read also applies any foreground/context boundary before
+        # the journal suffix is selected.
+        current = self.analyze(source="hierarchy", with_ocr=False)
+        if not self._join_memory_writers(timeout_s=5.0):
+            raise UsageError(
+                "recorded-flow provenance is still being finalized",
+                hint="retry `aua flow save` after the current memory update completes",
+            )
         sess = mem.load_session(self.device.serial)
-        recent = sess.recent[-max(1, last) :]
-        if not recent:
+        if last < 1:
+            raise UsageError("flow save --last must be at least 1")
+        requested = last
+        journal = list(sess.recent)
+        if not journal:
             raise UsageError(
                 "no recorded actions to save",
                 hint="drive the app first (tap/input/…), then `aua flow save <name>`",
             )
-        steps, params = steps_from_recent(recent)
+
+        warnings: list[str] = []
+        newest = journal[-1]
+        segment_id: int | None
+        origin: str | None
+        context_id: str | None
+        if newest.capture_segment is not None:
+            if not newest.origin_package:
+                raise UsageError(
+                    "recorded actions have no proven origin package",
+                    hint="analyze the app first, then repeat the intended actions before saving",
+                )
+            if newest.capture_segment != sess.capture_segment:
+                raise UsageError(
+                    "no actions exist in the current capture segment",
+                    hint=(
+                        f"the segment was reset because {sess.capture_boundary_reason}; drive the "
+                        "intended app/context again before saving"
+                        if sess.capture_boundary_reason
+                        else "drive the intended app/context again before saving"
+                    ),
+                )
+            segment_id = newest.capture_segment
+            segment = [step for step in journal if step.capture_segment == segment_id]
+            origin = newest.origin_package
+            context_id = newest.context_id
+        else:
+            # One-release compatibility for journals captured before per-action provenance.
+            # Transit packages remain folded into the owning app; a foreign non-transit action
+            # starts the suffix.  The uncertainty is disclosed rather than presented as proof.
+            segment_id = None
+            origin = (
+                sess.package
+                if newest.package is None
+                or matches_any(newest.package, self.config.memory.transit_packages)
+                else newest.package
+            )
+            suffix: list[RouteStep] = []
+            for step in reversed(journal):
+                pkg = step.package
+                if pkg not in (None, origin) and not matches_any(
+                    pkg, self.config.memory.transit_packages
+                ):
+                    break
+                suffix.append(step)
+            segment = list(reversed(suffix))
+            # A legacy step has no capture-time context.  The session's *current* context may
+            # have changed since the action, so attaching it would turn uncertainty into false
+            # typed provenance (and could make the flow replay in the wrong variant).
+            context_id = None
+            warnings.append(
+                "legacy recorded actions have no per-action origin/context provenance; "
+                "the newest package-compatible suffix was selected conservatively"
+            )
+
+        selected = segment[-requested:]
+        boundary_omitted = max(0, min(requested, len(journal)) - len(selected))
+        if boundary_omitted:
+            warnings.append(
+                f"requested --last {requested} crosses a capture boundary; omitted "
+                f"{boundary_omitted} older action(s) and used only the newest homogeneous suffix"
+            )
+        if not selected:
+            raise UsageError(
+                "no actions exist in the current capture segment",
+                hint=(
+                    f"the segment was reset because {sess.capture_boundary_reason}; drive the "
+                    "intended app/context again before saving"
+                    if sess.capture_boundary_reason
+                    else "drive the intended app/context again before saving"
+                ),
+            )
+        if segment_id is not None:
+            expected_provenance = (segment_id, origin, context_id)
+            if any(
+                (step.capture_segment, step.origin_package, step.context_id)
+                != expected_provenance
+                for step in selected
+            ):
+                raise UsageError(
+                    "selected recorded actions have mixed origin/context provenance",
+                    hint=(
+                        "nothing was saved; drive the journey again after a clean app/context "
+                        "boundary, or request a smaller homogeneous --last suffix"
+                    ),
+                )
+
+        arrival_screen: str | None = None
+        arrival_reason: str
+        if current.screen.package != origin:
+            arrival_reason = (
+                f"current package {current.screen.package or 'unknown'} is not the selected "
+                f"segment origin {origin or 'unknown'}"
+            )
+        elif sess.active_context_id != context_id:
+            arrival_reason = (
+                f"current context {sess.active_context_id} does not match selected context "
+                f"{context_id}"
+            )
+        elif current.meta.known_screen:
+            from .memory import LEGACY_CONTEXT_ID
+
+            app = mem.load(origin) if origin else None
+            mapped = app.screens.get(current.meta.known_screen) if app is not None else None
+            if (
+                mapped is not None
+                and not mapped.stale
+                and mapped.context_id in {context_id, LEGACY_CONTEXT_ID}
+            ):
+                arrival_screen = current.meta.known_screen
+                arrival_reason = "current destination was freshly recognized as a mapped screen"
+            else:
+                arrival_reason = (
+                    "current known_screen has no fresh map record in the selected capture context"
+                )
+        else:
+            arrival_reason = "current destination is not a mapped known_screen"
+
+        store = FlowStore(self.config.memory)
+        path = store.path(name)
+        capture_blockers = recorded_step_blockers(selected)
+        if capture_blockers:
+            return {
+                "ok": False,
+                "action": "flow-save-preview",
+                "flow": name,
+                "path": str(path),
+                "saved": False,
+                "saveable": False,
+                "steps": len(selected),
+                "scope": {
+                    "requested_last": requested,
+                    "selected": len(selected),
+                    "origin_package": origin,
+                    "context_id": context_id,
+                    "capture_segment": segment_id,
+                    "boundary_omitted": boundary_omitted,
+                },
+                "capture_warnings": capture_blockers,
+                # One-release response alias for callers that handled selector refusals.
+                "selector_warnings": capture_blockers,
+                "arrival_proof": {
+                    "status": "verified" if arrival_screen else "unverified",
+                    "screen": arrival_screen,
+                    "reason": arrival_reason,
+                },
+                "hint": (
+                    "Nothing was written. Re-record with fully captured replay arguments and "
+                    "a unique stable, privacy-safe selector, or author the step explicitly in YAML."
+                ),
+                **({"warnings": warnings} if warnings else {}),
+            }
+
+        materialized = [
+            step.model_copy(update={"package": None}) if step.package == origin else step
+            for step in selected
+        ]
+        steps, params = steps_from_recent(materialized)
+
         flow = Flow(
             name=name,
-            app=sess.package,
+            app=origin,
+            context_id=context_id,
             description=f"Recorded from the last {len(steps)} session actions",
+            arrival_screen=arrival_screen,
+            arrival_status="mapped" if arrival_screen else "unverified",
             params=params,
             steps=steps,
         )
-        warnings = check_saveable(flow)  # refuses outright if the flow could not run
-        store = FlowStore(self.config.memory)
-        path = store.path(name)
-        if not dry_run:
+        preview = render_flow_yaml(flow)
+        save_call = f"aua flow save {shlex.quote(name)} --last {requested} --save"
+        if force:
+            save_call += " --force"
+        warnings.extend(check_saveable(flow))
+        should_save = save and not dry_run
+        if should_save:
             path = store.save(flow, force=force)
+            self._flows_cache.clear()
         out = {
             "ok": True,
-            "action": "flow-save",
+            "action": "flow-save" if should_save else "flow-save-preview",
             "flow": name,
             "path": str(path),
             "steps": len(steps),
             "params_needed": sorted(params),
+            "saved": should_save,
+            "saveable": True,
             "dry_run": dry_run,
-            "preview": render_flow_yaml(flow),
-            "preview_call": f"aua flow run {shlex.quote(name)} --dry-run",
+            "scope": {
+                "requested_last": requested,
+                "selected": len(selected),
+                "origin_package": origin,
+                "context_id": context_id,
+                "capture_segment": segment_id,
+                "boundary_omitted": boundary_omitted,
+            },
+            "arrival_proof": {
+                "status": "verified" if arrival_screen else "unverified",
+                "screen": arrival_screen,
+                "reason": arrival_reason,
+            },
+            "preview": preview,
             "hint": (
-                "review this YAML, then re-run without --dry-run to save it"
-                if dry_run
-                else "edit the YAML / fill ${PARAM_n}, then run the exact preview_call before replay"
+                "saved; edit/fill ${PARAM_n}, then preview replay with the run_preview_call"
+                if should_save
+                else "nothing written; review the scope, selectors, and arrival proof, then run save_call"
             ),
         }
+        if should_save:
+            out["run_preview_call"] = f"aua flow run {shlex.quote(name)} --dry-run"
+        else:
+            out["save_call"] = save_call
+        if dry_run:
+            warnings.append(
+                "--dry-run remains a deprecated non-writing alias; flow save previews by default"
+            )
         if warnings:
             out["warnings"] = warnings
         return out
 
+    def flow_list(self) -> dict[str, Any]:
+        """List flows and disclose compatibility with the attached session when known."""
+        from .flows import FlowStore
+
+        package: str | None = None
+        context_id: str | None = None
+        mem = self._memory
+        can_observe_foreground = self._device is not None
+        if not can_observe_foreground:
+            # CLI invocations and a newly constructed MCP engine are fresh here.  Discover an
+            # already-online target before using the lazy device property: an absent/offline
+            # device must leave this read-only listing available rather than paying a failed u2
+            # connection (or changing the device state to make one available).
+            with contextlib.suppress(Exception):
+                configured_serial = self.config.device.serial
+                can_observe_foreground = any(
+                    info.state == "device"
+                    and (configured_serial is None or info.serial == configured_serial)
+                    for info in self.list_devices()
+                )
+        if can_observe_foreground:
+            with contextlib.suppress(Exception):
+                package = self.current_package()
+                device = self._device
+                if mem is not None and device is not None and package is not None:
+                    session = mem.load_session(device.serial)
+                    if session.package == package:
+                        context_id = session.active_context_id
+        return {
+            "flows": FlowStore(self.config.memory).list(
+                active_package=package if context_id is not None else None,
+                active_context_id=context_id,
+            ),
+            "active_package": package,
+            "active_context_id": context_id,
+        }
+
     def _goal_session_plan(self, goal: str, observation: AnalyzeResult) -> Any:
         """Build the shared CLI/MCP goal plan from an observation already in hand."""
         from .capabilities import capabilities_for_goal
-        from .flows import Flow, FlowStore
+        from .flows import Flow, FlowStore, anchor_paths, resolve_params
         from .session import plan_goal_session
 
         mem = self._memory
@@ -3742,21 +4920,49 @@ class Engine:
         if mem is not None and package:
             app = mem.load(package)
             session = mem.load_session(observation.meta.device_serial or self.device.serial)
-            current_screen = observation.meta.known_screen or session.current_screen
-            context_id = session.active_context_id
+            if session.package == package:
+                current_screen = observation.meta.known_screen or session.current_screen
+                context_id = session.active_context_id
 
         flows: list[Flow] = []
+        resolved_flow_evidence: dict[str, dict[str, Any]] = {}
         # A malformed flow must not prevent a new agent from starting a session.  It stays
         # visible through `flow list`, whose error is the right repair surface.
-        with contextlib.suppress(Exception):
-            store = FlowStore(self.config.memory)
-            for item in store.list():
-                name = item.get("name")
-                if not isinstance(name, str) or item.get("error"):
-                    continue
-                flow = store.load(name)
-                if flow.app in (None, package):
-                    flows.append(flow)
+        store = FlowStore(self.config.memory)
+        for item in store.list():
+            storage_name = item.get("storage_name")
+            if not isinstance(storage_name, str) or item.get("error"):
+                continue
+            try:
+                flow = store.load(storage_name)
+            except Exception:
+                # Isolate each artifact: one renamed/corrupt flow must not hide every valid
+                # recommendation that follows it alphabetically.
+                continue
+            if flow.app in (None, package) and flow.context_id in (None, context_id):
+                source = store.path(storage_name).resolve()
+                with contextlib.suppress(Exception):
+                    resolved_steps = anchor_paths(resolve_params(flow, {}), source.parent)
+                    resolved_plan = self._preflight_nested_flow_graph(
+                        resolved_steps,
+                        flow_dir=source.parent,
+                        flow_app=flow.app,
+                        context_id=flow.context_id,
+                        ancestors=(str(source),),
+                    )
+                    resolved_flow_evidence[storage_name] = self._resolved_flow_disclosure(
+                        resolved_steps,
+                        flow_dir=source.parent,
+                        flow_app=flow.app,
+                        plan=resolved_plan,
+                    )
+                # `flow run` loads by storage key, not by the optional declared display name.
+                # Keep aliases/description for goal matching while emitting an executable call.
+                declared_name = flow.name
+                aliases = list(flow.aliases)
+                if declared_name != storage_name and declared_name not in aliases:
+                    aliases.append(declared_name)
+                flows.append(flow.model_copy(update={"name": storage_name, "aliases": aliases}))
 
         return plan_goal_session(
             goal,
@@ -3767,6 +4973,7 @@ class Engine:
             flows=flows,
             destructive_labels=self.config.memory.destructive_labels,
             relevant_capabilities=capabilities_for_goal(goal),
+            resolved_flow_evidence=resolved_flow_evidence,
         )
 
     def session_start(
@@ -3827,6 +5034,7 @@ class Engine:
                         cache_dir=self.config.cache.dir,
                         requested_by="session-start-rollback",
                     )
+                self.close()
             raise
         plan = self._goal_session_plan(goal, observed)
         from . import network, network_profiles
@@ -4099,7 +5307,7 @@ class Engine:
         cleanup: list[dict[str, Any]] = []
         errors: list[dict[str, str]] = []
 
-        def restore(name: str, fn: Any) -> None:
+        def restore(name: str, fn: Any) -> dict[str, Any] | None:
             try:
                 result = fn()
                 payload = (
@@ -4112,8 +5320,10 @@ class Engine:
                     errors.append(
                         {"action": name, "message": str(payload.get("detail") or "restore failed")}
                     )
+                return payload
             except AuaError as exc:
                 errors.append({"action": name, "message": exc.message})
+                return None
 
         if (
             not state.network_profile_preexisting
@@ -4129,7 +5339,7 @@ class Engine:
         if state.emulator_started:
             from . import emulator as emulator_mod
 
-            restore(
+            stopped = restore(
                 "owned_emulator_stop",
                 lambda: emulator_mod.stop(
                     serial=state.serial,
@@ -4137,6 +5347,15 @@ class Engine:
                     requested_by="session-finish",
                 ),
             )
+            stopped_serials = stopped.get("stopped", []) if stopped is not None else []
+            if (
+                state.serial in stopped_serials
+                and self._device is not None
+                and self._device.serial == state.serial
+            ):
+                # Closing is tied to the owned stop itself, not unrelated restore errors. A
+                # failed network cleanup must never leave a dead emulator cached in this Engine.
+                self.close()
 
         if not errors:
             state = finish_session_state(self.config.cache.dir, state)
@@ -4184,7 +5403,19 @@ class Engine:
             if candidate.safe:
                 return True
             codes = {risk.get("code") for risk in candidate.risks}
-            if "required_params" in codes or "legacy_route" in codes:
+            # A positive caller-owned predicate is stronger than an old flow's absent arrival
+            # metadata. It authorizes only that missing-proof risk; every side effect retains
+            # its normal opt-in requirement.
+            if until is not None:
+                codes.discard("arrival_unverified")
+            if (
+                "required_params" in codes
+                or "legacy_route" in codes
+                or "arrival_unverified" in codes
+                or "arrival_invalid" in codes
+                or "arrival_screen_invalid" in codes
+                or "nested_execution" in codes
+            ):
                 return False
             if "destructive" in codes and not allow_destructive:
                 return False
@@ -4297,7 +5528,7 @@ class Engine:
             )
         mem = self._memory
         serial = self.device.serial
-        recent_before = len(mem.load_session(serial).recent) if mem else 0
+        capture_before = mem.load_session(serial).next_capture_order if mem else None
         res = self.analyze(source="auto")  # perceive + record the starting screen
         arrived, res = self._drive_with_planner(
             goal,
@@ -4306,24 +5537,164 @@ class Engine:
             allow_destructive=allow_destructive,
             until=until,
         )
-        flow_saved: str | None = None
-        if save_flow and mem is not None:
-            from .flows import Flow, FlowStore, steps_from_recent
 
-            taken = mem.load_session(serial).recent[recent_before:]
-            if taken:
-                steps, params = steps_from_recent(taken)
-                path = FlowStore(self.config.memory).save(
+        def save_refusal(code: str, reason: str, hint: str) -> dict[str, Any]:
+            """Report that navigation finished but its requested artifact was not trustworthy."""
+            return {
+                "ok": False,
+                "code": code,
+                "goal": goal,
+                "arrived": arrived,
+                "final_screen": res.meta.known_screen,
+                "package": res.screen.package,
+                "elements": [e.compact() for e in res.elements],
+                "flow_save": {
+                    "name": save_flow,
+                    "saved": False,
+                    "reason": reason,
+                },
+                "hint": hint,
+            }
+
+        flow_saved: str | None = None
+        if save_flow:
+            from .flows import Flow, FlowStore, recorded_step_blockers, steps_from_recent
+
+            if mem is None:
+                return save_refusal(
+                    "flow_capture_memory_disabled",
+                    "memory is disabled, so the planner path was not recorded",
+                    "Enable memory before using `navigate --save-flow`.",
+                )
+            if not self._join_memory_writers(timeout_s=5.0):
+                return save_refusal(
+                    "flow_capture_pending",
+                    "recorded-flow provenance is still being finalized",
+                    "Retry `navigate --save-flow` after the current memory update completes.",
+                )
+
+            # The final observation can complete asynchronously and establish an app/context
+            # boundary.  Read the journal only after that write has landed, then require every
+            # selected action to belong to the finalized current segment.
+            session = mem.load_session(serial)
+            retained_orders = sorted(
+                step.capture_order
+                for step in session.recent
+                if step.capture_order is not None
+            )
+            if (
+                capture_before is not None
+                and retained_orders
+                and retained_orders[0] > capture_before
+            ):
+                return save_refusal(
+                    "flow_capture_overflow",
+                    "the planner journey exceeded the rolling action journal and its beginning was dropped",
+                    "Capture a shorter journey (40 actions or fewer), or split it into composed flows.",
+                )
+            taken = [
+                step
+                for step in session.recent
+                if capture_before is not None
+                and step.capture_order is not None
+                and step.capture_order >= capture_before
+            ]
+            if not taken:
+                return save_refusal(
+                    "flow_capture_empty",
+                    "the finalized planner journal contains no new replayable actions",
+                    "Drive at least one action, or omit --save-flow when already at the goal.",
+                )
+            newest = taken[-1]
+            homogeneous = bool(
+                newest.capture_segment is not None
+                and newest.origin_package is not None
+                and all(
+                    step.capture_segment == newest.capture_segment
+                    and step.origin_package == newest.origin_package
+                    and step.context_id == newest.context_id
+                    for step in taken
+                )
+            )
+            if not homogeneous:
+                return save_refusal(
+                    "flow_capture_mixed",
+                    "the planner path crosses an app/context boundary or lacks provenance",
+                    "Save a smaller homogeneous journey with `flow save`.",
+                )
+            if not (
+                newest.capture_segment == session.capture_segment
+                and newest.origin_package == session.package
+                and newest.context_id == session.active_context_id
+            ):
+                boundary = session.capture_boundary_reason or "the foreground app/context changed"
+                return save_refusal(
+                    "flow_capture_boundary",
+                    f"the recorded actions belong to an older capture segment ({boundary})",
+                    "Drive the intended app/context again before saving a flow.",
+                )
+            blockers = recorded_step_blockers(taken)
+            if blockers:
+                return save_refusal(
+                    "flow_capture_lossy",
+                    "the planner path cannot be replayed exactly: " + "; ".join(blockers),
+                    "Author the missing replay details explicitly in a flow YAML file.",
+                )
+            origin = newest.origin_package
+            materialized = [
+                step.model_copy(update={"package": None}) if step.package == origin else step
+                for step in taken
+            ]
+            steps, params = steps_from_recent(materialized)
+            arrival_screen: str | None = None
+            if (
+                arrived
+                and res.screen.package == origin
+                and session.package == origin
+                and session.active_context_id == newest.context_id
+                and res.meta.known_screen
+            ):
+                from .memory import LEGACY_CONTEXT_ID
+
+                app = mem.load(origin) if origin else None
+                record = app.screens.get(res.meta.known_screen) if app is not None else None
+                if (
+                    record is not None
+                    and not record.stale
+                    and record.context_id in {newest.context_id, LEGACY_CONTEXT_ID}
+                ):
+                    arrival_screen = res.meta.known_screen
+            flow_store = FlowStore(self.config.memory)
+            if flow_store.path(save_flow).exists():
+                return save_refusal(
+                    "flow_capture_exists",
+                    f"flow '{save_flow}' already exists and was not overwritten",
+                    "Choose a new name or explicitly manage the existing flow first.",
+                )
+            try:
+                path = flow_store.save(
                     Flow(
                         name=save_flow,
-                        app=res.screen.package,
+                        app=origin,
+                        context_id=newest.context_id,
                         description=f"Recorded by `aua navigate`: {goal}",
+                        arrival_screen=arrival_screen,
+                        arrival_status="mapped" if arrival_screen else "unverified",
                         params=params,
                         steps=steps,
                     ),
-                    force=True,
+                    force=False,
                 )
-                flow_saved = str(path)
+            except UsageError as exc:
+                return save_refusal(
+                    "flow_capture_save_refused",
+                    str(exc),
+                    "Nothing was overwritten; choose another name or repair the existing flow.",
+                )
+            flow_saved = str(path)
+            # Long-lived daemon/MCP engines may already have rendered flow hints for this app.
+            # The newly saved journey must be discoverable on the very next observation.
+            self._flows_cache.clear()
         out: dict[str, Any] = {
             "ok": arrived,
             "goal": goal,
@@ -4345,11 +5716,15 @@ class Engine:
         """Release the device (and its on-device uiautomator2 server). Idempotent."""
         with contextlib.suppress(Exception):
             self.capture_stop()
+        # An async observation may still be reading this Device and finalising the session
+        # provenance.  Flush it before closing the transport or letting a daemon process exit.
+        self._join_memory_writers(timeout_s=5.0)
         dev = self._device
         if dev is not None:
             with contextlib.suppress(Exception):
                 dev.close()
             self._device = None
+            self._claimed_instance_token = None
 
     def orient(self) -> dict[str, Any]:
         """What the tool already knows about the foreground app (for ``daemon start``).
@@ -6395,9 +7770,7 @@ class Engine:
         """
         raw_destination = (predicate or "").strip()
         known_screen_target = (
-            raw_destination
-            if re.fullmatch(r"[A-Za-z0-9_.-]+", raw_destination or "")
-            else None
+            raw_destination if re.fullmatch(r"[A-Za-z0-9_.-]+", raw_destination or "") else None
         )
         terms = [] if known_screen_target else _parse_await_terms(predicate)
         unsupported = sorted({term.by for term in terms if term.by in {"net", "log"}})
@@ -6666,9 +8039,7 @@ class Engine:
             started_at=started_at,
         )
 
-    def _await_known_screen(
-        self, target: str, *, timeout_ms: int, poll_ms: int
-    ) -> ActionResult:
+    def _await_known_screen(self, target: str, *, timeout_ms: int, poll_ms: int) -> ActionResult:
         """Observe hierarchy frames until memory recognizes *target*, within one Back step."""
         started_at = time.monotonic()
         deadline = started_at + max(0.0, timeout_ms / 1000.0)
@@ -7836,6 +9207,9 @@ class Engine:
     def paste(self, *, observe: bool = True, with_image: bool | str | None = None) -> ActionResult:
         with self._acting():
             self.device.paste()
+        # The clipboard value is deliberately not captured. Keep a lossy journal marker so a
+        # recorded-flow preview refuses to pretend the resulting journey is self-contained.
+        self._record_action_safe(RouteStep(kind="paste"))
         return self._observe(ActionResult(ok=True, action="paste"), observe, with_image)
 
     def copy_text(
@@ -7939,7 +9313,7 @@ class Engine:
         else:
             state = network.read_network_state(device)
             verified = None
-        return NetworkResult(
+        result = NetworkResult(
             ok=bool(verified) if verify else True,
             action="network-offline",
             state=state,
@@ -7955,6 +9329,8 @@ class Engine:
                 )
             ),
         )
+        self._record_action_safe(RouteStep(kind="network-offline"))
+        return result
 
     def network_restore(self, *, timeout_ms: int = 15_000) -> NetworkResult:
         from . import network
@@ -7970,7 +9346,7 @@ class Engine:
         )
         if verified:
             path.unlink(missing_ok=True)
-        return NetworkResult(
+        result = NetworkResult(
             ok=verified,
             action="network-restore",
             state=state,
@@ -7982,6 +9358,8 @@ class Engine:
                 else "restore verification timed out; restore point retained"
             ),
         )
+        self._record_action_safe(RouteStep(kind="network-restore"))
+        return result
 
     def network_profile_list(self) -> dict[str, Any]:
         from . import network_profiles
@@ -8178,7 +9556,7 @@ class Engine:
                 and abs(shaping.loss_percent - loss_percent) < 0.01
             )
 
-        return NetworkResult(
+        result = NetworkResult(
             ok=verified,
             action="network-profile-apply",
             profile=name,
@@ -8192,6 +9570,8 @@ class Engine:
                 else f"{name} profile verification timed out; restore point retained"
             ),
         )
+        self._record_action_safe(RouteStep(kind="network-profile", arg=name))
+        return result
 
     def network_profile_restore(self, *, timeout_ms: int = 20_000) -> NetworkResult:
         from . import network, network_profiles
@@ -8221,7 +9601,7 @@ class Engine:
             state = network.read_network_state(device)
         if verified:
             path.unlink(missing_ok=True)
-        return NetworkResult(
+        result = NetworkResult(
             ok=verified,
             action="network-profile-restore",
             profile=backup.profile,
@@ -8235,6 +9615,8 @@ class Engine:
                 else "profile restore verification failed; restore point retained"
             ),
         )
+        self._record_action_safe(RouteStep(kind="network-profile-restore"))
+        return result
 
     def media_add(self, path: str, *, remote_dir: str = "/sdcard/DCIM/Camera") -> ActionResult:
         remote = self.device.add_media(path, remote_dir=remote_dir)
@@ -8343,6 +9725,7 @@ class Engine:
                 f"unknown dev profile {name!r}",
                 hint="Use `ac` (anim off + crashes on) or `default` (restore).",
             )
+        self._record_action_safe(RouteStep(kind="dev-profile", arg=n))
         return {"ok": True, "action": f"dev-profile-{n}", **state}
 
     def a11y_scroll(
@@ -8423,6 +9806,11 @@ class Engine:
         templates = dict(self.config.flags.templates)
         uri = build_uri(package, pairs, templates)
         entry = (activity or self._foreground_activity(package)) if restart else None
+        mem = self._memory
+        if mem is not None and not self._join_memory_writers(timeout_s=5.0):
+            # `flags_apply` suppresses the internal open-link journal so the outer operation
+            # is captured once. Preserve provenance ordering explicitly before that mutation.
+            raise UsageError("memory provenance is still being finalized")
         self.open_link(uri, package=package, pin_package=True, observe=False)
         # Read back BEFORE the force-stop: the file on disk is the proof the app committed
         # the override, and killing a process with a pending async write would lose it.
@@ -8443,19 +9831,22 @@ class Engine:
             activity=restarted.activity,
             restart_error=restarted.error,
         )
-        if restarted.ok and self._memory is not None:
+        if restarted.ok and mem is not None:
             active = prefs.applied if prefs is not None and prefs.verified else pairs
             fully_verified = bool(
                 prefs is not None and prefs.verified and not prefs.ignored and not prefs.mismatched
             )
-            self._memory.activate_flag_context(
-                self.device.serial,
-                package,
-                active,
-                app_version=self._version_for(self.device, package),
-                verified=fully_verified,
-            )
-            payload["context_id"] = self._memory.load_session(self.device.serial).active_context_id
+            if not self._join_memory_writers(timeout_s=5.0):
+                raise UsageError("memory provenance is still being finalized")
+            with self._mem_lock:
+                mem.activate_flag_context(
+                    self.device.serial,
+                    package,
+                    active,
+                    app_version=self._version_for(self.device, package),
+                    verified=fully_verified,
+                )
+                payload["context_id"] = mem.load_session(self.device.serial).active_context_id
         observed = self._observe(
             ActionResult(ok=True, action="flags-set"), observe, with_image
         ).model_dump(mode="json", exclude_none=True)
@@ -8577,26 +9968,36 @@ class Engine:
         activity: str | None = None,
         verify: bool = True,
         prefs_file: str | None = None,
+        _snapshot: _ResolvedFlagsResource | None = None,
     ) -> dict[str, Any]:
         from .flags import load_flags_file
 
-        app, pairs = load_flags_file(path)
+        if _snapshot is None:
+            app, pairs = load_flags_file(path)
+            source_path = str(Path(path).expanduser().resolve())
+        else:
+            app, pairs = _snapshot.app, deepcopy(_snapshot.pairs)
+            source_path = _snapshot.source_path
         pkg = package or app or self.current_package()
         if not pkg:
             raise UsageError(
                 "flags apply needs a package",
                 hint="Put `app: <pkg>` in the YAML or pass `--package`.",
             )
-        return self.flags_set(
-            pkg,
-            pairs,
-            observe=observe,
-            with_image=with_image,
-            restart=restart,
-            activity=activity,
-            verify=verify,
-            prefs_file=prefs_file,
-        )
+        with self._without_action_recording():
+            result = self.flags_set(
+                pkg,
+                pairs,
+                observe=observe,
+                with_image=with_image,
+                restart=restart,
+                activity=activity,
+                verify=verify,
+                prefs_file=prefs_file,
+            )
+        if result.get("ok", True):
+            self._record_action_safe(RouteStep(kind="flags-apply", arg=source_path))
+        return result
 
     def proxy_start(
         self,
@@ -8768,17 +10169,27 @@ class Engine:
             hint="Use `aua mock record start NAME` or `aua mock record stop`.",
         )
 
-    def mock_replay(self, name: str) -> dict[str, Any]:
+    def mock_replay(
+        self,
+        name: str,
+        *,
+        _snapshot: _ResolvedCassetteResource | None = None,
+    ) -> dict[str, Any]:
         from . import proxy_mock as pm
 
         cache = Path(self.config.cache.dir).expanduser()
-        path = pm.cassette_dir(self.config.memory.dir) / f"{name}.yaml"
-        if not path.is_file():
-            # also accept a direct path
-            alt = Path(name).expanduser()
-            path = alt if alt.is_file() else path
-        entries = pm.load_cassette(path)
+        if _snapshot is None:
+            path = pm.cassette_dir(self.config.memory.dir) / f"{name}.yaml"
+            if not path.is_file():
+                # also accept a direct path
+                alt = Path(name).expanduser()
+                path = alt if alt.is_file() else path
+            entries = pm.load_cassette(path)
+        else:
+            path = _snapshot.source_path
+            entries = deepcopy(_snapshot.entries)
         pm.write_rules(pm.rules_path(cache), entries)
+        self._record_action_safe(RouteStep(kind="mock-replay", arg=name))
         return {
             "ok": True,
             "action": "mock-replay",
@@ -8841,6 +10252,9 @@ class Engine:
                     "launch --clear wipes app data (flags + session) — pass --yes",
                     hint="`aua app launch <pkg> --clear --yes`",
                 )
+            mem = self._memory
+            if mem is not None and not self._join_memory_writers(timeout_s=5.0):
+                raise UsageError("memory provenance is still being finalized")
             with self._acting():
                 if clear_state:
                     device.clear_app(package)
@@ -8848,15 +10262,21 @@ class Engine:
                 # activities (e.g. a Dev Tools menu) and default resolution is
                 # nondeterministic.
                 device.launch_app(package, activity=activity)
-            if self._memory is not None:
-                if clear_state:
-                    self._memory.clear_context(device.serial, package)
-                else:
-                    self._memory.promote_pending_context(
-                        device.serial,
-                        package,
-                        app_version=self._version_for(device, package),
-                    )
+            if mem is not None:
+                with self._mem_lock:
+                    if clear_state:
+                        mem.clear_context(device.serial, package)
+                    else:
+                        mem.mark_capture_boundary(
+                            device.serial,
+                            package,
+                            f"app process launched for {package}",
+                        )
+                        mem.promote_pending_context(
+                            device.serial,
+                            package,
+                            app_version=self._version_for(device, package),
+                        )
             detail = f"{package}/{activity}" if activity else package
             if clear_state:
                 detail = f"{detail} (cleared)"
@@ -8885,14 +10305,34 @@ class Engine:
         if a in ("kill", "force-stop"):
             if not package:
                 raise UsageError("app kill needs a package name")
+            mem = self._memory
+            if mem is not None and not self._join_memory_writers(timeout_s=5.0):
+                raise UsageError("memory provenance is still being finalized")
             with self._acting():
                 device.stop_app(package)
+            if mem is not None:
+                with self._mem_lock:
+                    mem.mark_capture_boundary(
+                        device.serial,
+                        package,
+                        f"app process stopped for {package}",
+                    )
             return ActionResult(ok=True, action="app-kill", detail=package)
         if a == "stop":
             if not package:
                 raise UsageError("app stop needs a package name")
+            mem = self._memory
+            if mem is not None and not self._join_memory_writers(timeout_s=5.0):
+                raise UsageError("memory provenance is still being finalized")
             with self._acting():
                 device.stop_app(package)
+            if mem is not None:
+                with self._mem_lock:
+                    mem.mark_capture_boundary(
+                        device.serial,
+                        package,
+                        f"app process stopped for {package}",
+                    )
             return ActionResult(ok=True, action="app-stop", detail=package)
         if a in ("clear", "clear-state", "clear_state"):
             if not package:
@@ -8903,10 +10343,14 @@ class Engine:
                     "— pass --yes / --yes-wipe-flags to confirm",
                     hint="Then re-apply flag overrides / re-login before asserting experiment UI.",
                 )
+            mem = self._memory
+            if mem is not None and not self._join_memory_writers(timeout_s=5.0):
+                raise UsageError("memory provenance is still being finalized")
             with self._acting():
                 device.clear_app(package)
-            if self._memory is not None:
-                self._memory.clear_context(device.serial, package)
+            if mem is not None:
+                with self._mem_lock:
+                    mem.clear_context(device.serial, package)
             return ActionResult(ok=True, action="app-clear", detail=package)
         if a in ("grant", "grant-permissions", "grant_permissions"):
             if not package:
@@ -9259,9 +10703,7 @@ class Engine:
             with contextlib.suppress(Exception):
                 from . import imaging
 
-                self._pre_action_sig = imaging.frame_signature(
-                    self._screenshot(max_reuse_ms=40.0)
-                )
+                self._pre_action_sig = imaging.frame_signature(self._screenshot(max_reuse_ms=40.0))
         # Cheap tree fingerprint from the last analyze (no extra dump) — used to
         # early-accept observe once the accessibility tree has moved and stabilised.
         self._pre_action_tree_fp = self._tree_fingerprint()

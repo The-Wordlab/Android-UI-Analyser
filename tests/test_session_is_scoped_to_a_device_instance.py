@@ -100,9 +100,97 @@ def test_an_empty_cursor_is_stamped_without_being_reported_as_foreign(tmp_path: 
     store = _store(tmp_path)
 
     assert store.claim_session(_SERIAL, "first-boot") is False
-    assert store.load_session(_SERIAL).instance == "first-boot"
+
+
+def test_long_lived_engine_reclaims_memory_after_its_emulator_is_stopped(
+    tmp_path: Path,
+) -> None:
+    class BootDevice(FakeDevice):
+        def __init__(self, token: str) -> None:
+            super().__init__(serial=_SERIAL)
+            self.token = token
+
+        def instance_token(self) -> str:
+            return self.token
+
+    cfg = make_config(memory={"dir": str(tmp_path / "mem")}, daemon={"enabled": False})
+    first = BootDevice("boot-one")
+    engine = Engine(cfg, device=first)
+    store = engine._memory
+    assert store is not None
+    store.save_session(
+        _SERIAL,
+        SessionState(
+            package="com.example.app",
+            instance="boot-one",
+            recent=_journey("from old boot"),
+        ),
+    )
+
+    # MCP's stop path invalidates the cached Device; model it without killing a real AVD.
+    engine.close()
+    second = BootDevice("boot-two")
+    engine._device = second
+    engine._claim_memory_session()
+
+    fresh = store.load_session(_SERIAL)
+    assert fresh.instance == "boot-two"
+    assert fresh.recent == []
     # And the stamp survives, so the next command is a no-op rather than a re-claim.
-    assert store.claim_session(_SERIAL, "first-boot") is False
+    assert store.claim_session(_SERIAL, "boot-two") is False
+
+
+def test_long_lived_engine_retries_an_initially_unreadable_boot_token(tmp_path: Path) -> None:
+    class BootDevice(FakeDevice):
+        def __init__(self) -> None:
+            super().__init__(serial=_SERIAL, hierarchy_xml=_XML, package="com.test.app")
+            self.tokens: list[str | None] = [None, "new-boot"]
+
+        def instance_token(self) -> str | None:
+            return self.tokens.pop(0) if self.tokens else "new-boot"
+
+    cfg = make_config(memory={"dir": str(tmp_path / "mem")}, daemon={"enabled": False})
+    device = BootDevice()
+    engine = Engine(cfg, device=device)
+    store = engine._memory
+    assert store is not None
+    store.save_session(
+        _SERIAL,
+        SessionState(instance="old-boot", recent=_journey("stale action")),
+    )
+
+    engine.analyze(source="hierarchy", with_ocr=False)
+
+    fresh = store.load_session(_SERIAL)
+    assert fresh.instance == "new-boot"
+    assert fresh.recent == []
+
+
+def test_engine_close_flushes_async_memory_before_device_teardown(tmp_path: Path) -> None:
+    events: list[str] = []
+
+    class Writer:
+        alive = True
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+            events.append("memory")
+            self.alive = False
+
+    device = FakeDevice(serial=_SERIAL)
+    device.close = lambda: events.append("device")  # type: ignore[method-assign]
+    engine = Engine(
+        make_config(memory={"dir": str(tmp_path / "mem")}, daemon={"enabled": False}),
+        device=device,
+    )
+    engine._mem_thread = Writer()  # type: ignore[assignment]
+
+    engine.close()
+
+    assert events == ["memory", "device"]
 
 
 def test_an_unstamped_legacy_session_with_history_is_not_trusted(tmp_path: Path) -> None:
@@ -166,3 +254,40 @@ def test_reading_memory_without_a_device_does_not_connect_one(
     eng = Engine(make_config(memory={"dir": str(tmp_path / "mem")}))
 
     assert eng._memory is not None  # the store is usable; no device was touched
+
+
+def test_a_device_connected_after_memory_open_still_claims_its_boot_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Fresh MCP-style engines may inspect memory before their first device operation."""
+    from android_ui_analyser import engine as engine_mod
+
+    class _StampedDevice(FakeDevice):
+        def instance_token(self) -> str | None:
+            return "boot-after-memory-open"
+
+    cfg = make_config(
+        memory={"dir": str(tmp_path / "mem")},
+        device={"serial": _SERIAL},
+        lease={"enabled": False},
+    )
+    store = AppMemoryStore(cfg.memory)
+    store.save_session(
+        _SERIAL,
+        SessionState(
+            package="com.example.app",
+            instance="previous-boot",
+            recent=_journey("stale action"),
+        ),
+    )
+    device = _StampedDevice(hierarchy_xml=_XML, serial=_SERIAL)
+    monkeypatch.setattr(engine_mod, "connect", lambda serial: device)
+    engine = Engine(cfg)
+
+    assert engine._memory is not None
+    assert engine._device is None
+    assert engine.device is device
+
+    claimed = store.load_session(_SERIAL)
+    assert claimed.instance == "boot-after-memory-open"
+    assert claimed.recent == []

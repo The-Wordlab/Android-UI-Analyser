@@ -17,7 +17,12 @@ from mcp.shared.memory import create_connected_server_and_client_session
 
 import android_ui_analyser.engine as engine_mod
 from android_ui_analyser.engine import Engine
-from android_ui_analyser.mcp_server import _fold_action_until, _tool_definitions, build_server
+from android_ui_analyser.mcp_server import (
+    _fold_action_until,
+    _mcp_started_serials,
+    _tool_definitions,
+    build_server,
+)
 from android_ui_analyser.schema import ActionResult, AnalyzeResult
 from conftest import FakeDevice, make_config
 
@@ -167,6 +172,14 @@ def test_mcp_accepts_intuitive_session_and_network_verification_options() -> Non
     assert tools["network_status"].inputSchema["properties"]["verify"]["default"] is True
 
 
+def test_mcp_flow_save_is_preview_first_with_explicit_commit() -> None:
+    tool = next(item for item in _tool_definitions() if item.name == "flow_save")
+    props = tool.inputSchema["properties"]
+    assert props["save"]["default"] is False
+    assert "writes nothing" in props["save"]["description"]
+    assert "Deprecated" in props["dry_run"]["description"]
+
+
 def test_mcp_initialization_teaches_goal_first_protocol() -> None:
     instructions = build_server(_engine()).create_initialization_options().instructions
 
@@ -258,6 +271,45 @@ def test_mcp_session_and_reach_dispatch_contract(monkeypatch: pytest.MonkeyPatch
         ("session_review", {"session_id": "session-1"}),
         ("session_finish", {"session_id": "session-1"}),
     ]
+
+
+def test_mcp_finish_forgets_the_stopped_serial_even_when_other_cleanup_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _engine()
+    monkeypatch.setattr(
+        engine,
+        "session_finish",
+        lambda **_kwargs: {
+            "ok": False,
+            "cleanup": [
+                {
+                    "action": "owned_emulator_stop",
+                    "ok": True,
+                    "result": {"ok": True, "stopped": ["emulator-5592"]},
+                }
+            ],
+            "errors": [{"action": "network_restore", "message": "still offline"}],
+        },
+    )
+    tracked = _mcp_started_serials()
+    previous = set(tracked)
+    tracked.clear()
+    tracked.update({"emulator-5592", "emulator-5594"})
+
+    async def run() -> dict[str, object]:
+        server = build_server(engine)
+        async with create_connected_server_and_client_session(server) as client:
+            result = await client.call_tool("session_finish", {"session_id": "session-1"})
+            return json.loads(_first_text(result))
+
+    try:
+        output = anyio.run(run)
+        assert output["ok"] is False
+        assert tracked == {"emulator-5594"}
+    finally:
+        tracked.clear()
+        tracked.update(previous)
 
 
 def test_mcp_analyze_screen_returns_schema_valid_json() -> None:

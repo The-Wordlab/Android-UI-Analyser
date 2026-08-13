@@ -448,11 +448,12 @@ A **flow** is a Maestro-style YAML journey — authored directly by you/your age
 aua flow run reset_account_google_login --param ACCOUNT="Engineering Team"
 aua flow run smoke --dry-run          # print the resolved steps, act on nothing
 aua flow run smoke --from-step 4      # resume after fixing a divergence
-aua flow save reach_checkout --last 8 # materialize your recent actions into YAML
+aua flow save reach_checkout --last 8        # preview scope/selectors/proof; writes nothing
+aua flow save reach_checkout --last 8 --save # save only after review
 aua flow list · aua flow show <name> · aua flow delete <name>
 ```
 
-Flows live flat under `<memory.dir>/flows/<name>.yaml` (they span packages by design — the auth leg is the point). Step vocabulary: `launch_app`, `tap` (by `id:` tail or `text:`), `input` (with `${PARAM}` substitution), `key`, `swipe`, `scroll_to`, `wait_for`, `wait_stable`, `assert_visible`, and `goto:` to compose map navigation. `flow save` never persists typed values — inputs become required `${PARAM_n}` placeholders you fill in the file. Flows are deliberate authored intent, so destructive steps run by default (`--no-allow-destructive` opts back into the guard). On divergence you get the failing step index, the remaining steps, and the current elements — fix, then `--from-step N`.
+Flows live flat under `<memory.dir>/flows/<name>.yaml` (they span transit packages by design — an auth leg stays with its origin app). Step vocabulary: `launch_app`, `tap` (by `id:`, `desc:`, or `text:`), `input` (with `${PARAM}` substitution), `key`, `swipe`, `scroll_to`, `wait_for`, `wait_stable`, `assert_visible`, and `goto:` to compose map navigation. `flow save` selects only the newest same-origin/context capture segment and is preview-first; only `--save` writes. New recordings prefer a unique stable resource id, then a unique non-PII content description, then unique stable non-PII text, and refuse a step with no safe selector. It never persists typed values — inputs become required `${PARAM_n}` placeholders. A freshly recognized mapped destination is stored as `arrival_screen`; otherwise `arrival_status: unverified` is explicit. Flows are deliberate authored intent, so destructive steps run by default (`--no-allow-destructive` opts back into the guard). On divergence you get the failing step index, the remaining steps, and the current elements — fix, then `--from-step N`.
 
 ```yaml
 # ~/.android-ui-analyser/flows/reset_account_google_login.yaml

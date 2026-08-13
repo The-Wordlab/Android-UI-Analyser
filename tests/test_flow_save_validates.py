@@ -24,8 +24,14 @@ from __future__ import annotations
 import pytest
 
 from android_ui_analyser.errors import UsageError
-from android_ui_analyser.flows import Flow, check_saveable, steps_from_recent
-from android_ui_analyser.memory import RouteStep
+from android_ui_analyser.flows import (
+    Flow,
+    check_saveable,
+    parse_flow_yaml,
+    render_flow_yaml,
+    steps_from_recent,
+)
+from android_ui_analyser.memory import RouteStep, is_destructive_step
 
 
 def test_an_input_without_a_selector_is_refused():
@@ -52,7 +58,9 @@ def test_an_undeclared_parameter_is_refused():
 
 def test_a_declared_but_empty_parameter_only_warns():
     warnings = check_saveable(
-        Flow(name="fillme", steps=[RouteStep(kind="tap", label="${PARAM_1}")], params={"PARAM_1": ""})
+        Flow(
+            name="fillme", steps=[RouteStep(kind="tap", label="${PARAM_1}")], params={"PARAM_1": ""}
+        )
     )
     assert any("PARAM_1" in w for w in warnings), warnings
 
@@ -87,3 +95,116 @@ def test_a_volatile_selector_is_still_written():
         Flow(name="volatile", steps=[RouteStep(kind="tap", label="clip.m4a, 2.1 MB")])
     )
     assert warnings  # returning rather than raising is the assertion
+
+
+def test_id_selector_keeps_supplemental_destructive_label_after_round_trip() -> None:
+    flow = Flow(
+        name="guarded",
+        steps=[
+            RouteStep(
+                kind="tap",
+                resource_id="genericButton",
+                label="Delete",
+                by="id",
+            )
+        ],
+    )
+    loaded = parse_flow_yaml(render_flow_yaml(flow)).steps[0]
+    assert loaded.by == "id"
+    assert loaded.resource_id == "genericButton"
+    assert loaded.label == "Delete"
+    assert is_destructive_step(loaded, ["delete"])
+
+
+def test_id_selector_keeps_supplemental_destructive_description_after_round_trip() -> None:
+    flow = Flow(
+        name="guarded_desc",
+        steps=[
+            RouteStep(
+                kind="tap",
+                resource_id="genericButton",
+                content_desc="Delete account",
+                by="id",
+            )
+        ],
+    )
+    loaded = parse_flow_yaml(render_flow_yaml(flow)).steps[0]
+    assert loaded.by == "id"
+    assert loaded.resource_id == "genericButton"
+    assert loaded.content_desc == "Delete account"
+    assert is_destructive_step(loaded, ["delete"])
+
+
+@pytest.mark.parametrize(
+    ("kind", "default"),
+    [
+        ("key", "unsupported"),
+        ("tap-point", "-1,2"),
+        ("swipe", "diagonal"),
+        ("scroll", "forward"),
+        ("a11y-scroll", "sideways"),
+        ("dev-profile", "battery"),
+        ("network-profile", "airplane"),
+    ],
+)
+def test_invalid_finite_default_is_refused_recursively(kind: str, default: str) -> None:
+    leaf = RouteStep(
+        kind=kind,
+        arg="${VALUE}",
+        resource_id="catalogList" if kind == "a11y-scroll" else None,
+    )
+    flow = Flow(
+        name=f"invalid_{kind}",
+        params={"VALUE": default},
+        steps=[RouteStep(kind="repeat", repeat=1, substeps=[leaf])],
+    )
+
+    with pytest.raises(UsageError):
+        check_saveable(flow)
+
+
+def test_save_validation_materializes_chained_defaults() -> None:
+    flow = Flow(
+        name="default_chain",
+        params={"PROFILE": "${BASE_PROFILE}", "BASE_PROFILE": "wifi_only"},
+        steps=[RouteStep(kind="network-profile", arg="${PROFILE}")],
+    )
+
+    assert check_saveable(flow) == []
+
+
+def test_required_empty_finite_parameter_remains_saveable_metadata() -> None:
+    flow = Flow(
+        name="required_direction",
+        params={"DIRECTION": ""},
+        steps=[RouteStep(kind="swipe", arg="${DIRECTION}")],
+    )
+
+    warnings = check_saveable(flow)
+
+    assert any("DIRECTION" in warning for warning in warnings)
+
+
+@pytest.mark.parametrize(
+    "arrival",
+    ["!text:Loading", "unknown:state", "text:", "text:Ready\\"],
+)
+def test_invalid_or_absence_only_arrival_is_refused_before_save(arrival: str) -> None:
+    flow = Flow(
+        name="invalid_arrival",
+        arrival=arrival,
+        steps=[RouteStep(kind="key", arg="back")],
+    )
+
+    with pytest.raises(UsageError):
+        check_saveable(flow)
+
+
+def test_combined_positive_and_negative_arrival_is_saveable() -> None:
+    flow = Flow(
+        name="proved_arrival",
+        arrival="rid:cachedContent,!text:Loading",
+        steps=[RouteStep(kind="key", arg="back")],
+    )
+
+    assert check_saveable(flow) == []

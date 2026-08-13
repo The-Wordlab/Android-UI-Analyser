@@ -11,7 +11,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from android_ui_analyser.engine import Engine
+from android_ui_analyser.flows import FlowStore
+from android_ui_analyser.memory import AppMemoryStore, RouteStep
 from android_ui_analyser.providers.base import PlannerDecision
 from android_ui_analyser.providers.registry import ProviderFactory
 from conftest import StubPlanner, make_chain, make_config
@@ -39,6 +43,15 @@ DANGER = _hier(
         "android.widget.Button",
         text="Delete my account",
         rid="x:id/del",
+        clk=True,
+        b="[40,300][1040,400]",
+    ),
+)
+RESOURCE_ONLY_DANGER = _hier(
+    _node("android.widget.TextView", text="Confirm", rid="x:id/header", b="[40,120][1040,210]"),
+    _node(
+        "android.widget.Button",
+        rid="x:id/deleteAccount",
         clk=True,
         b="[40,300][1040,400]",
     ),
@@ -95,9 +108,7 @@ def test_drive_is_noop_when_planner_disabled(tmp_path, monkeypatch) -> None:
     stub = StubPlanner(decide_fn=_tap_label("nope"))
     _wire(monkeypatch, eng, stub)
     res = eng.analyze(source="hierarchy")
-    ok, _ = eng._drive_with_planner(
-        "reach x", res=res, max_steps=3, allow_destructive=False
-    )
+    ok, _ = eng._drive_with_planner("reach x", res=res, max_steps=3, allow_destructive=False)
     assert ok is False and stub.calls == 0  # disabled → never consulted
 
 
@@ -107,9 +118,7 @@ def test_drive_respects_destructive_guard(tmp_path, monkeypatch) -> None:
     stub = StubPlanner(decide_fn=_tap_label("Delete my account"))
     _wire(monkeypatch, eng, stub)
     res = eng.analyze(source="hierarchy")
-    ok, _ = eng._drive_with_planner(
-        "wipe it", res=res, max_steps=3, allow_destructive=False
-    )
+    ok, _ = eng._drive_with_planner("wipe it", res=res, max_steps=3, allow_destructive=False)
     assert ok is False
     assert not any(c[0] == "click" for c in dev.calls)  # the destructive tap was refused
 
@@ -119,6 +128,30 @@ def test_drive_respects_destructive_guard(tmp_path, monkeypatch) -> None:
     res2 = eng2.analyze(source="hierarchy")
     eng2._drive_with_planner("wipe it", res=res2, max_steps=1, allow_destructive=True)
     assert any(c[0] == "click" for c in dev2.calls)  # allowed with the flag
+
+
+def test_drive_guard_uses_resource_id_when_destructive_control_has_no_label(
+    tmp_path, monkeypatch
+) -> None:
+    dev = ScriptedDevice([RESOURCE_ONLY_DANGER], package=P, serial="emu-a2-resource")
+    eng = _engine(tmp_path, dev, planner_enabled=True)
+    res = eng.analyze(source="hierarchy")
+    target = next(element for element in res.elements if element.resource_id.endswith("deleteAccount"))
+    _wire(
+        monkeypatch,
+        eng,
+        StubPlanner(decisions=[PlannerDecision(action="tap", target_id=target.id)]),
+    )
+
+    ok, _ = eng._drive_with_planner(
+        "wipe it",
+        res=res,
+        max_steps=1,
+        allow_destructive=False,
+    )
+
+    assert ok is False
+    assert not any(call[0] == "click" for call in dev.calls)
 
 
 def test_drive_gives_up_on_invalid_target(tmp_path, monkeypatch) -> None:
@@ -272,8 +305,6 @@ def test_navigate_until_stops_early(tmp_path, monkeypatch) -> None:
 
 
 def test_navigate_save_flow_writes_reusable_yaml(tmp_path, monkeypatch) -> None:
-    from android_ui_analyser.flows import FlowStore
-
     dev = ScriptedDevice([HOME, APPS, IMAGES], package=P, serial="emu-n3")
     eng = _engine(tmp_path, dev, planner_enabled=True)
     _wire(monkeypatch, eng, StubPlanner(decide_fn=_to_images_decider()))
@@ -283,6 +314,121 @@ def test_navigate_save_flow_writes_reusable_yaml(tmp_path, monkeypatch) -> None:
     assert flow.app == P
     labels = [s.label for s in flow.steps if s.kind == "tap"]
     assert "Apps" in labels and "Images" in labels
+
+
+def test_navigate_saved_flow_refreshes_same_engine_discovery_cache(
+    tmp_path, monkeypatch
+) -> None:
+    dev = ScriptedDevice([HOME, APPS, IMAGES], package=P, serial="emu-n3-cache")
+    eng = _engine(tmp_path, dev, planner_enabled=True)
+    _wire(monkeypatch, eng, StubPlanner(decide_fn=_to_images_decider()))
+    assert eng._flows_for(P) == []
+
+    out = eng.navigate("open images", save_flow="to_images_cache")
+
+    assert out["ok"] is True
+    assert "to_images_cache" in eng._flows_for(P)
+
+
+def test_navigate_save_flow_refuses_lossy_recorded_actions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dev = ScriptedDevice([HOME], package=P, serial="emu-navigate-lossy")
+    eng = _engine(tmp_path, dev, planner_enabled=True)
+    _wire(monkeypatch, eng, StubPlanner(decisions=[PlannerDecision(action="done")]))
+    original = eng._drive_with_planner
+
+    def record_lossy(*args, **kwargs):
+        store = AppMemoryStore(eng.config.memory)
+        store.observe_action(
+            dev.serial,
+            RouteStep(
+                kind="swipe",
+                arg="up",
+                package=P,
+            ),
+        )
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(eng, "_drive_with_planner", record_lossy)
+
+    result = eng.navigate("inspect catalog", save_flow="lossy_capture")
+
+    assert result["ok"] is False
+    assert result["code"] == "flow_capture_lossy"
+    assert result["flow_save"]["saved"] is False
+    assert not FlowStore(eng.config.memory).path("lossy_capture").exists()
+
+
+def test_navigate_save_flow_refuses_mixed_capture_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dev = ScriptedDevice([HOME], package=P, serial="emu-navigate-mixed")
+    eng = _engine(tmp_path, dev, planner_enabled=True)
+    _wire(monkeypatch, eng, StubPlanner(decisions=[PlannerDecision(action="done")]))
+    original = eng._drive_with_planner
+
+    def record_mixed(*args, **kwargs):
+        store = AppMemoryStore(eng.config.memory)
+        session = store.load_session(dev.serial)
+        start_order = session.next_capture_order
+        session.recent.extend(
+            [
+                RouteStep(
+                    kind="key",
+                    arg="back",
+                    package=P,
+                    origin_package=P,
+                    context_id="default",
+                    capture_segment=1,
+                    capture_order=start_order,
+                ),
+                RouteStep(
+                    kind="key",
+                    arg="back",
+                    package="com.example.other",
+                    origin_package="com.example.other",
+                    context_id="default",
+                    capture_segment=2,
+                    capture_order=start_order + 1,
+                ),
+            ]
+        )
+        session.next_capture_order = start_order + 2
+        store.save_session(dev.serial, session)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(eng, "_drive_with_planner", record_mixed)
+
+    result = eng.navigate("inspect catalog", save_flow="mixed_capture")
+
+    assert result["ok"] is False
+    assert result["code"] == "flow_capture_mixed"
+    assert result["flow_save"]["saved"] is False
+    assert not FlowStore(eng.config.memory).path("mixed_capture").exists()
+
+
+def test_navigate_save_flow_refuses_a_journey_truncated_by_the_rolling_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dev = ScriptedDevice([HOME], package=P, serial="emu-navigate-overflow")
+    eng = _engine(tmp_path, dev, planner_enabled=True)
+    _wire(monkeypatch, eng, StubPlanner(decisions=[PlannerDecision(action="done")]))
+
+    def record_overflow(*_args, **_kwargs):
+        store = AppMemoryStore(eng.config.memory)
+        for _ in range(41):
+            store.observe_action(dev.serial, RouteStep(kind="key", arg="back", package=P))
+        return True, eng.analyze(source="hierarchy")
+
+    monkeypatch.setattr(eng, "_drive_with_planner", record_overflow)
+
+    result = eng.navigate("inspect catalog", max_steps=50, save_flow="overflow_capture")
+
+    assert result["ok"] is False
+    assert result["code"] == "flow_capture_overflow"
+    assert result["flow_save"]["saved"] is False
+    assert not FlowStore(eng.config.memory).path("overflow_capture").exists()
 
 
 def test_daemon_dispatch_navigate() -> None:

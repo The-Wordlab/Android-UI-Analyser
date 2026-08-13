@@ -202,7 +202,9 @@ def test_a_sub_flows_own_relative_path_anchors_to_the_sub_flow(
     root = tmp_path / "flows"
     (root / "common" / "flags").mkdir(parents=True)
     (root / "derived").mkdir(parents=True)
-    (root / "common" / "flags" / "guest.yaml").write_text("flags: {}\n", encoding="utf-8")
+    (root / "common" / "flags" / "guest.yaml").write_text(
+        "flags:\n  fictional_variant: guest\n", encoding="utf-8"
+    )
     (root / "common" / "shared_auth.yaml").write_text(
         'name: shared_auth\napp: com.example.app\nsteps:\n  - flags_apply: flags/guest.yaml\n',
         encoding="utf-8",
@@ -221,8 +223,8 @@ def test_a_sub_flows_own_relative_path_anchors_to_the_sub_flow(
     assert seen == [str(root / "common" / "flags" / "guest.yaml")], seen
 
 
-def test_nesting_depth_still_bounds_a_cycle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Paths make a self-reference easy to write, so the existing depth cap must still catch it."""
+def test_nesting_cycle_is_refused_before_execution(tmp_path: Path) -> None:
+    """Paths make self-reference easy, so reject the graph before touching the device."""
     root = tmp_path / "flows"
     root.mkdir(parents=True)
     (root / "loop.yaml").write_text(
@@ -230,7 +232,70 @@ def test_nesting_depth_still_bounds_a_cycle(tmp_path: Path, monkeypatch: pytest.
     )
     eng = _engine(tmp_path)
 
-    out = eng.flow_run(file=str(root / "loop.yaml"))
+    with pytest.raises(UsageError, match="nested flow cycle"):
+        eng.flow_run(file=str(root / "loop.yaml"))
+    assert eng.device.calls == []
 
-    assert out["ok"] is False, "an unbounded cycle would hang instead"
-    assert out.get("code") == "unsupported_action", out
+
+def test_distinct_sibling_files_may_share_a_declared_name(tmp_path: Path) -> None:
+    root = tmp_path / "flows"
+    root.mkdir()
+    (root / "first.yaml").write_text(
+        "name: shared\napp: com.example.app\nsteps:\n  - tap: 'Sign in'\n",
+        encoding="utf-8",
+    )
+    (root / "second.yaml").write_text(
+        "name: shared\napp: com.example.app\nsteps:\n  - tap: Apps\n",
+        encoding="utf-8",
+    )
+    (root / "parent.yaml").write_text(
+        "name: parent\napp: com.example.app\nsteps:\n"
+        "  - flow: first.yaml\n  - flow: second.yaml\n",
+        encoding="utf-8",
+    )
+
+    out = _engine(tmp_path).flow_run(file=str(root / "parent.yaml"))
+
+    assert out["ok"] is True
+    assert [row["step"] for row in out["steps_run"] if row["step"].startswith("tap")] == [
+        "tap 'Sign in'",
+        "tap 'Apps'",
+    ]
+
+
+def test_nested_execution_reuses_the_preflighted_file_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "flows"
+    root.mkdir()
+    child = root / "child.yaml"
+    child.write_text(
+        "name: child\napp: com.example.app\nsteps:\n  - tap: 'Sign in'\n",
+        encoding="utf-8",
+    )
+    parent = root / "parent.yaml"
+    parent.write_text(
+        "name: parent\napp: com.example.app\nsteps:\n  - flow: child.yaml\n",
+        encoding="utf-8",
+    )
+    eng = _engine(tmp_path)
+    original = eng._resolve_nested_flow_node
+    loads = 0
+
+    def resolve(ref: str, directory: Path | None):
+        nonlocal loads
+        node = original(ref, directory)
+        loads += 1
+        child.write_text(
+            "name: child\napp: com.example.app\nsteps:\n  - key: back\n",
+            encoding="utf-8",
+        )
+        return node
+
+    monkeypatch.setattr(eng, "_resolve_nested_flow_node", resolve)
+
+    out = eng.flow_run(file=str(parent))
+
+    assert out["ok"] is True
+    assert loads == 1
+    assert not any(call[0] == "press" for call in eng.device.calls)

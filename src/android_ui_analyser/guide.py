@@ -225,16 +225,24 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
     (
         "Replay whole journeys in one call (flows)",
         "A flow is a Maestro-style YAML journey you can AUTHOR directly (no walking needed) or "
-        "record: `aua flow save <name> --last N --dry-run` previews the exact generated YAML "
-        "without writing it; remove `--dry-run` to save after review (typed values "
-        "become required `${PARAM_n}` placeholders — fill them in the file). "
+        "record: `aua flow save <name> --last N` is preview-first and writes nothing. It shows "
+        "the selected origin/context segment, any package/context boundary or selector warning, "
+        "and mapped-screen arrival proof. Add `--save` only after review (typed values become "
+        "required `${PARAM_n}` placeholders — fill them in the file); `--dry-run` remains a "
+        "deprecated non-writing alias. New recordings choose one safe selector per action: a "
+        "unique stable resource id, otherwise a unique non-PII content description (`desc:`), "
+        "otherwise unique stable non-PII text. A capture with no safe selector is refused with "
+        "edit/re-record guidance. "
         "`aua flow run <name> --param K=V` drives the whole journey — launch, taps, waits, "
         "asserts, cross-app auth, even `goto:` steps — and on divergence returns the failing "
         "step index + remaining steps; fix and resume with `--from-step N`. Flows live under "
         "`<memory.dir>/flows/*.yaml` (`aua flow list|show|delete`); `--dry-run` previews. Use a "
         "flow for any setup you repeat (reset account, log in, reach the screen under test) — "
-        "one call instead of a dozen. Give reusable flows goal-facing `aliases:` and an "
-        "`arrival:` predicate so goal planning can find them and replay can prove completion. "
+        "one call instead of a dozen. Recorded flows persist `context_id`, `arrival_status`, and "
+        "`arrival_screen` only when the current destination is freshly recognized in the same "
+        "origin/context; replay verifies that known-screen name. Unmapped destinations are "
+        "explicitly unverified, never given a fabricated text predicate. Authored legacy "
+        "`arrival:` predicates remain supported. Give reusable flows goal-facing `aliases:`. "
         "Offline journeys may use `network_offline`, `network_restore`, `network_profile`, or "
         "`network_profile_restore` "
         "steps; environment-changing flows are risk-previewed before automatic selection.",
@@ -830,11 +838,13 @@ KEY_FLAGS: list[tuple[str, str]] = [
     (
         "flow",
         "`run <name> [--param K=V] [--file PATH] [--dry-run] [--from-step N] "
-        "[--no-allow-destructive] [--assist]`, `save <name> [--last N] [--force]`, "
+        "[--no-allow-destructive] [--assist]`, `save <name> [--last N] [--save] "
+        "[--force] [--dry-run (deprecated)]`, "
         "`list|show|delete`. Steps incl. `launch_app`/`stop_app`/`open_link`/`goto`/`flow` "
         "/ `dev_profile` / `a11y_scroll` / `flags_apply` / `proxy_start`/`stop` / `mock_replay` "
         "/ `network_offline`/`network_restore`/`network_profile`/`network_profile_restore`. Top-level `aliases:` help "
-        "goal matching and `arrival:` proves completion (a `flow:` step runs a saved flow inline).",
+        "goal matching; `arrival_screen:` is mapped-screen proof for new recordings while legacy "
+        "`arrival:` predicates remain supported (a `flow:` step runs a saved flow inline).",
     ),
     (
         "open / about / remember",
@@ -1276,8 +1286,8 @@ def render_markdown(*, brief: bool = False) -> str:
     p.append("")
     p.append("# Replay a whole journey (authored or recorded) in ONE call:")
     p.append('aua flow run reset_account_google_login --param ACCOUNT="Engineering Team"')
-    p.append("aua flow save reach_checkout --last 8 --dry-run  # review generated YAML")
-    p.append("aua flow save reach_checkout --last 8            # save after review")
+    p.append("aua flow save reach_checkout --last 8         # preview only; writes nothing")
+    p.append("aua flow save reach_checkout --last 8 --save  # commit after reviewing proof/warnings")
     p.append("")
     p.append("# Starter journey: open → tap → input → tap → wait → has → tap. Every action")
     p.append("# returns the post-action screen, so each id below comes from the previous call:")
