@@ -19,6 +19,7 @@ Supported commands
 ping, analyze, ask_screen, has, inspect, screenshot, tap, long_press, input, clear,
 swipe, scroll_to, key, open_link, wait, wait_stable, wait_after_change, memory_update, goto,
 flow_run, flow_save, navigate, orient, list_devices, app, logcat,
+job_start, job_status, job_wait, job_cancel, job_list,
 logcat_mark, suite_run, database_list, database_schema, database_query,
 database_execute, database_backup, database_backups, database_restore
 """
@@ -71,6 +72,9 @@ class _Activity:
 
 def _idle_tick(engine: Engine, activity: _Activity) -> bool:
     """Apply the idle policy; return True when the daemon should shut itself down."""
+    jobs = getattr(engine, "_aua_job_manager", None)
+    if jobs is not None and jobs.active() is not None:
+        return False
     idle = activity.idle_s()
     pause_after = int(getattr(engine.config.capture, "idle_pause_s", 0) or 0)
     if pause_after > 0 and idle >= pause_after:
@@ -180,7 +184,30 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
         if cmd == "ping":
             return _result_ok({"pong": True, "version": _aua_version()})
 
-        elif cmd == "analyze":
+        from .jobs import manager_for, reject_if_active
+
+        if cmd == "job_start":
+            jobs = manager_for(engine)
+            operation = str(args.get("operation", ""))
+            job_args = {key: value for key, value in args.items() if key != "operation"}
+            return _result_ok(jobs.start(operation, job_args))
+        if cmd == "job_status":
+            return _result_ok(manager_for(engine).status(str(args.get("job_id") or "")))
+        if cmd == "job_wait":
+            return _result_ok(
+                manager_for(engine).wait(
+                    str(args.get("job_id") or ""),
+                    timeout_ms=int(args.get("timeout_ms", 5_000)),
+                )
+            )
+        if cmd == "job_cancel":
+            return _result_ok(manager_for(engine).cancel(str(args.get("job_id") or "")))
+        if cmd == "job_list":
+            return _result_ok(manager_for(engine).list(limit=int(args.get("limit", 20))))
+        if hasattr(engine, "config"):
+            reject_if_active(engine, str(cmd))
+
+        if cmd == "analyze":
             result: Any = engine.analyze(**args)
             return _result_ok(result.model_dump(mode="json"))
 
@@ -189,6 +216,9 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
 
         elif cmd == "session_review":
             return _result_ok(engine.session_review(**args))
+
+        elif cmd == "session_progress":
+            return _result_ok(engine.session_progress(**args))
 
         elif cmd == "session_finish":
             return _result_ok(engine.session_finish(**args))
@@ -540,6 +570,7 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
                 "network_profile_restore, "
                 "media_add, record_start, record_stop, clock_set, open_link, resolve, wait, wait_stable, "
                 "wait_changed, wait_after_change, "
+                "job_start, job_status, job_wait, job_cancel, job_list, "
                 "memory_update, goto, flow_run, flow_save, navigate, orient, list_devices, app, "
                 "database_list, database_schema, database_query, database_execute, "
                 "database_backup, database_backups, database_restore, "
@@ -643,6 +674,10 @@ def serve(
                     conn.close()
 
     finally:
+        with contextlib.suppress(Exception):
+            from .jobs import manager_for
+
+            manager_for(engine).shutdown()
         # Release the device + its on-device uiautomator2 server so the UiAutomation slot
         # is free for adb/Maestro after the daemon exits (otherwise it leaks).
         with contextlib.suppress(Exception):

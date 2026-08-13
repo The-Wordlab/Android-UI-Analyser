@@ -130,6 +130,46 @@ def decorate_result(
         )
     ]
     normalized = _base_command(cmd)
+    # Goal progress is durable across short-lived CLI processes. Environment checkpoints can
+    # advance from deterministic tool evidence; UI checkpoints advance only when the agent
+    # explicitly acknowledges evidence on its next call via --phase-done / phase_done.
+    try:
+        from .session import complete_environment_phase, phase_progress
+
+        state = engine._session_state()  # noqa: SLF001 - shared Engine/session contract
+        data = _payload(result) or {}
+        state = complete_environment_phase(
+            engine.config.cache.dir,
+            state,
+            command=normalized,
+            result=data,
+        )
+        observation_payload: Any = data.get("observation")
+        if observation_payload is None and "screen" in data and "elements" in data:
+            observation_payload = data
+        observation = None
+        if isinstance(observation_payload, dict):
+            from .schema import AnalyzeResult
+
+            with contextlib.suppress(Exception):
+                observation = AnalyzeResult.model_validate(observation_payload)
+        stale_deeplink = normalized in {"open_link", "open_link_and_analyze", "open_and_analyze"} and bool(
+            data.get("stale_risk")
+        )
+        refreshed = engine.session_progress(
+            state.session_id,
+            observation=observation,
+            _avoid_deeplinks=stale_deeplink,
+        )
+        progress = refreshed.get("goal_progress") or phase_progress(state)
+        if isinstance(result, dict):
+            result["goal_progress"] = progress
+        elif hasattr(result, "goal_progress"):
+            result.goal_progress = progress
+        elif hasattr(result, "meta") and hasattr(result.meta, "goal_progress"):
+            result.meta.goal_progress = progress
+    except Exception:  # pragma: no cover - session coaching must never break a tool call
+        pass
     if not current_recorded:
         events.append(
             {
@@ -181,8 +221,11 @@ def decorate_result(
         data = _payload(result) or {}
         route_values = data.get("routes")
         routes = route_values if isinstance(route_values, list) else []
-        observation = data.get("observation") or {}
-        meta = observation.get("meta") if isinstance(observation, dict) else {}
+        observation_data = data.get("observation") or {}
+        meta_value = (
+            observation_data.get("meta") if isinstance(observation_data, dict) else None
+        )
+        meta: dict[str, Any] = meta_value if isinstance(meta_value, dict) else {}
         flow_values = meta.get("flows") if isinstance(meta, dict) else None
         flows = flow_values if isinstance(flow_values, list) else []
         if routes or flows:

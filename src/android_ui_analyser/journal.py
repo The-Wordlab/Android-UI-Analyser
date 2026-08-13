@@ -108,6 +108,7 @@ def summarize_result(result: Any) -> Any:
             "session_id",
             "goal_hash",
             "recommended_call",
+            "goal_progress",
             "advice",
             "verified",
             "finished",

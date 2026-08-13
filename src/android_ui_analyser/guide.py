@@ -45,8 +45,12 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "device, reuses the warm daemon, observes the foreground app once, and returns relevant "
         "capabilities plus one exact `recommended_call` in both CLI and MCP form. Its selection "
         "order is verified context-compatible `goto`, a matching safe flow, a proven deeplink, "
-        "then a manual analyzed action; an offline goal first receives verified reversible "
-        "network isolation. The returned compact observation is the current screen: reuse it "
+        "then a manual analyzed action. Explicit sequence words create durable ordered phases, "
+        "so an online preparation remains before a later offline transition. Every result carries "
+        "`goal_progress`; when its evidence completes the active checkpoint, add the returned "
+        "`--phase-done phase_N=\"evidence\"` to your next AUA call (MCP: `phase_done`). This "
+        "advances the goal without another round trip. Deterministic offline evidence advances "
+        "automatically. The returned compact observation is the current screen: reuse it "
         "and do not follow session start with analyze. The command is recommendation-first: "
         "risky candidates are previewed and never receive authorization from the goal text. "
         "Use `aua session review` to see avoidable calls: `ok` means the review completed, "
@@ -344,6 +348,16 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "never fixed sleeps.",
     ),
     (
+        "Detach only waits that may outlive one agent call",
+        "For a slow read-only condition, start `aua job start await --predicate "
+        "'rid:result,!text:Loading' --timeout-ms 180000`. It returns immediately with a durable "
+        "`job_id`; reconnect with `aua job status <id>`, wait at most ten seconds with `aua job "
+        "wait <id>`, or stop at the next safe device-read boundary with `aua job cancel <id>`. "
+        "The warm daemon remains responsive, but serializes every other device operation behind "
+        "the job so no tap or analysis races it. `wait-stable`, `wait-changed`, and "
+        "`wait-after-change` are also supported. Jobs do not detach mutating actions.",
+    ),
+    (
         "Wait on the backend when the screen cannot tell you",
         "`await` / `--until` terms are not limited to what is drawn. `net:<[METHOD ]PATH[=STATUS]>` "
         "waits for a completed HTTP exchange (`net:POST /v1/chat`, `net:/v1/chat=200`) — "
@@ -411,8 +425,9 @@ BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
         "automatically, starts/reuses the warm transport, observes once, ranks a verified "
         "`goto`, matching saved flow, proven deeplink, or manual analyzed action in that order, "
         "and returns one exact CLI and MCP `recommended_call`. Follow that call instead of "
-        "calling analyze again or inventorying commands. Offline goals receive verified, "
-        'reversible isolation before UI actions. Use `aua capabilities --goal "…"` only '
+        "calling analyze again or inventorying commands. Ordered `goal_progress` accompanies "
+        "every result; carry its `--phase-done` / MCP `phase_done` checkpoint on your next call "
+        'after evidence is visible, rather than spending a call on progress. Use `aua capabilities --goal "…"` only '
         "when you need another goal-specific capability, and finish reversible work with "
         "`aua session finish`.",
     ),
@@ -462,7 +477,9 @@ BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
         "reports `daemon_outcome_unknown`, never repeat the action: wait, then inspect one fresh "
         "screen. AUA treats a live busy daemon as the device owner and will not spawn or fall "
         "back to a competing controller; superseded daemon cleanup cannot remove its "
-        "successor's ownership files.",
+        "successor's ownership files. If a read-only wait may exceed one agent call, use `aua job "
+        "start await --predicate '…'`; reconnect by its id with `job status`, or cancel it. Other "
+        "device operations stay serialized until that job ends.",
     ),
     (
         "Let automatic perception escalate",
@@ -549,6 +566,10 @@ ORIENTATION: tuple[tuple[str, str], ...] = (
     (
         "aua back-until-and-analyze '<known_screen>' [--back-id <fresh-id>]",
         "RETURN through nested screens in one call; use rid:/text:/desc: when it is not mapped",
+    ),
+    (
+        "aua job start await --predicate 'rid:<ready>,!text:Loading' --timeout-ms 180000",
+        "DETACH only a long read-only wait; reconnect with `aua job status <job_id>` instead of restarting it",
     ),
     (
         'aua --answers <id>="<name>" <your next command>',
@@ -639,6 +660,13 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "`daemon start --quiet` skips the app-orientation blob (48 screens, mined deeplinks, "
         "notes); read it deliberately with `aua orient` instead — useful once per session, noise "
         "on every restart",
+    ),
+    (
+        "job",
+        "`job start await --predicate <terms> [--timeout-ms N] [--poll-ms N]` or start "
+        "`wait-stable|wait-changed|wait-after-change`; reconnect with `job status <id>`, make a "
+        "bounded `job wait <id> --timeout-ms N` call (maximum 10000), `job cancel <id>`, or "
+        "`job list`. Jobs are read-only and serialize other device calls while active.",
     ),
     (
         "emulator",
@@ -1240,6 +1268,10 @@ def render_markdown(*, brief: bool = False) -> str:
         "aua has --rid resultBubble && echo present  # cheap branch, exit 0 present / 1 absent"
     )
     p.append("aua tap-and-analyze 31                    # continue on another read-back id")
+    p.append("")
+    p.append("# A wait longer than one agent call: start once, reconnect by id, never restart it:")
+    p.append("aua job start await --predicate 'rid:answer,!text:Loading' --timeout-ms 180000")
+    p.append("aua job status <job_id>                  # or: job wait / job cancel")
     p.append("```")
     p.append("")
     p.append("An action response carries its own state, so a follow-up `analyze` is usually")

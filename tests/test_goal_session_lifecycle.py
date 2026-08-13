@@ -5,15 +5,22 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
 from typer.testing import CliRunner
 
 from android_ui_analyser import engine as engine_mod
 from android_ui_analyser import journal, network, network_profiles
-from android_ui_analyser.cli import app
+from android_ui_analyser.cli import _apply_phases_done, app
 from android_ui_analyser.coaching import decorate_result
 from android_ui_analyser.daemon import dispatch
 from android_ui_analyser.engine import Engine
-from android_ui_analyser.schema import AnalyzeResult, Meta, Screen
+from android_ui_analyser.schema import AnalyzeResult, Element, Meta, Screen, Source
+from android_ui_analyser.session import (
+    complete_environment_phase,
+    goal_phases,
+    mark_phase_complete,
+    phase_progress,
+)
 from conftest import FakeDevice, make_config
 
 runner = CliRunner()
@@ -31,6 +38,134 @@ def _observation(serial: str) -> AnalyzeResult:
             device_serial=serial,
         ),
     )
+
+
+def _apps_observation(serial: str) -> AnalyzeResult:
+    observed = _observation(serial)
+    observed.elements = [
+        Element(
+            id=36,
+            type="android.widget.TextView",
+            text="Grammar 1 hr. ago",
+            bounds=(0, 300, 900, 420),
+            center=(450, 360),
+            clickable=True,
+            source=Source.hierarchy,
+        ),
+        Element(
+            id=37,
+            type="android.widget.TextView",
+            text="Mathematics 12 hr. ago",
+            bounds=(0, 430, 900, 550),
+            center=(450, 490),
+            clickable=True,
+            source=Source.hierarchy,
+        ),
+    ]
+    return observed
+
+
+def test_goal_phases_preserve_order_without_splitting_ordinary_and() -> None:
+    phases = goal_phases(
+        "Verify the visible Grammar conversation opens offline with cached content and no "
+        "loading. Compare the Mathematics item; finally restore connectivity before finishing."
+    )
+
+    assert [(phase.kind, phase.status) for phase in phases] == [
+        ("environment", "active"),
+        ("verify", "pending"),
+        ("verify", "pending"),
+        ("cleanup", "pending"),
+    ]
+    assert "cached content and no loading" in phases[1].objective
+    assert "Mathematics" in phases[2].objective
+
+
+def test_goal_phases_keep_online_setup_before_later_offline_transition() -> None:
+    phases = goal_phases(
+        "Establish the Grammar thread online; then switch offline; then verify Grammar; "
+        "finally restore network"
+    )
+
+    assert [phase.kind for phase in phases] == ["verify", "environment", "verify", "cleanup"]
+    assert phases[0].objective == "Establish the Grammar thread online"
+    assert phases[0].status == "active"
+    assert phases[1].status == "pending"
+
+
+def test_verified_environment_phase_advances_and_evidence_checkpoints_stay_ordered(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    engine = _engine(tmp_path, "goal-phases")
+    monkeypatch.setattr(engine, "analyze", lambda **_kwargs: _apps_observation(engine.device.serial))
+    started = engine.session_start(
+        "Verify Grammar opens offline. Compare Mathematics; restore connectivity."
+    )
+    state = engine._session_state(started["session_id"])
+
+    state = complete_environment_phase(
+        engine.config.cache.dir,
+        state,
+        command="network_offline",
+        result={"ok": True, "verified": True, "state": {"offline": True}},
+    )
+    progress = phase_progress(state)
+    assert progress["current"]["objective"] == "Verify Grammar opens offline"
+    assert progress["next_call"]["cli"] == "aua tap-and-analyze 36"
+
+    with pytest.raises(ValueError, match="complete 'phase_2' first"):
+        mark_phase_complete(
+            engine.config.cache.dir,
+            state,
+            phase_id="phase_3",
+            evidence="Mathematics visible",
+        )
+    state = mark_phase_complete(
+        engine.config.cache.dir,
+        state,
+        phase_id="phase_2",
+        evidence="cached Grammar thread visible and Loading absent",
+    )
+    assert "Mathematics" in phase_progress(state)["current"]["objective"]
+
+
+def test_cli_phase_checkpoint_advances_without_a_device_call(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    engine = _engine(tmp_path, "goal-phase-cli")
+    monkeypatch.setattr(engine, "analyze", lambda **_kwargs: _apps_observation(engine.device.serial))
+    started = engine.session_start("Verify Grammar. Compare Mathematics")
+    before_calls = list(engine.device.calls)
+
+    _apply_phases_done(engine, ("phase_1=Grammar thread content visible",))
+
+    progress = engine.session_progress(started["session_id"])["goal_progress"]
+    assert progress["current"]["id"] == "phase_2"
+    assert engine.device.calls == before_calls
+
+
+def test_stale_deeplink_is_not_recommended_again_for_active_phase(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    engine = _engine(tmp_path, "goal-stale-deeplink")
+    observed = _apps_observation(engine.device.serial)
+    monkeypatch.setattr(engine, "analyze", lambda **_kwargs: observed)
+    engine.session_start("Establish Grammar online; then switch offline")
+
+    decorated = decorate_result(
+        engine,
+        "open_link",
+        {
+            "ok": True,
+            "stale_risk": "the delivered intent did not move",
+            "observation": observed.model_dump(mode="json"),
+        },
+        current_recorded=False,
+    )
+
+    call = decorated["goal_progress"]["next_call"]
+    assert call["kind"] == "manual_action"
+    assert "open-and-analyze" not in call["cli"]
 
 
 def _engine(tmp_path: Path, serial: str = "goal-life") -> Engine:

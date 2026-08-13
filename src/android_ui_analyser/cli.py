@@ -143,6 +143,8 @@ class GlobalOpts:
     until: str | None = None
     #: `--answers TASK_ID="value"` pairs, applied before the command runs.
     answers: tuple[str, ...] = ()
+    #: `--phase-done PHASE_ID="evidence"` checkpoints, applied before the next command.
+    phases_done: tuple[str, ...] = ()
     until_timeout: int = 30000
     until_poll: int = 500
     #: Which of the wait-tuning flags the caller actually typed. A bound default is
@@ -257,6 +259,7 @@ def _run(ctx: typer.Context, fn: Callable[[Engine, OutputFormat], T]) -> T:
                 )
         _UNTIL = (opts.until, opts.until_timeout, opts.until_poll) if opts.until else None
         _apply_answers(engine, opts.answers)
+        _apply_phases_done(engine, opts.phases_done)
         return fn(engine, cfg_fmt)
     except AuaError as err:
         emit_error(err)
@@ -301,6 +304,24 @@ def _apply_answers(engine: Engine, answers: tuple[str, ...]) -> None:
             store.answer(package, task_id.strip(), value.strip().strip("\"'"), agent="inline")
         except ValueError as exc:
             raise UsageError(str(exc), hint="`meta.ask.id` on the response that asked.") from exc
+
+
+def _apply_phases_done(engine: Engine, phases_done: tuple[str, ...]) -> None:
+    """Checkpoint proven phase evidence on the caller's next real AUA command."""
+    for pair in phases_done:
+        phase_id, sep, evidence = pair.partition("=")
+        if not sep or not phase_id.strip() or not evidence.strip():
+            raise UsageError(
+                f"--phase-done wants PHASE_ID=evidence, got {pair!r}",
+                hint=(
+                    "Use the current goal_progress.checkpoint, for example "
+                    "--phase-done phase_2=\"cached thread visible and Loading absent\"."
+                ),
+            )
+        engine.session_mark_phase(
+            phase_id.strip(),
+            evidence.strip().strip("\"'"),
+        )
 
 
 # --------------------------------------------------------------------------- selectors
@@ -862,6 +883,11 @@ _DAEMON_ONLY_METHODS = frozenset(
         "capture_on",
         "capture_off",
         "capture_prune",
+        "job_start",
+        "job_status",
+        "job_wait",
+        "job_cancel",
+        "job_list",
     }
 )
 
@@ -1279,6 +1305,15 @@ def main(
         help="Answer a map question `meta.ask` raised on an earlier call, e.g. "
         '--answers research_23cf9="Dev Tools". Repeatable. Applies before the command runs.',
     ),
+    phase_done: list[str] | None = typer.Option(
+        None,
+        "--phase-done",
+        metavar='PHASE_ID="evidence"',
+        help=(
+            "Acknowledge the current goal phase using evidence from the previous result while "
+            "running this next command; repeatable and adds no extra device call."
+        ),
+    ),
     until_timeout: int = typer.Option(
         30000, "--until-timeout", metavar="MS", help="Give up on --until after this long."
     ),
@@ -1343,6 +1378,7 @@ def main(
         with_image=with_image,
         observe_fields=observe_fields,
         answers=tuple(answers or ()),
+        phases_done=tuple(phase_done or ()),
         until=until,
         until_timeout=until_timeout,
         until_poll=until_poll,
@@ -2903,6 +2939,19 @@ def session_review_cmd(
     _run(ctx, go)
 
 
+@session_app.command("progress")
+def session_progress_cmd(
+    ctx: typer.Context,
+    session_id: str | None = typer.Option(None, "--session-id", help="Inspect a prior session."),
+) -> None:
+    """Return ordered goal phases and the current phase's exact next call."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(_route(engine, "session_progress", session_id=session_id), fmt)
+
+    _run(ctx, go)
+
+
 @session_app.command("finish")
 def session_finish_cmd(
     ctx: typer.Context,
@@ -2915,6 +2964,123 @@ def session_finish_cmd(
         _emit(result, fmt)
         if isinstance(result, dict) and not result.get("ok", False):
             raise typer.Exit(1)
+
+    _run(ctx, go)
+
+
+# --------------------------------------------------------------------------- durable jobs
+
+
+job_app = typer.Typer(
+    help="Run long read-only waits with reconnectable status and cancellation.",
+    no_args_is_help=True,
+)
+app.add_typer(job_app, name="job")
+
+
+@job_app.command("start")
+def job_start_cmd(
+    ctx: typer.Context,
+    operation: str = typer.Argument(
+        ...,
+        help="await|wait-stable|wait-changed|wait-after-change",
+    ),
+    predicate: str | None = typer.Option(
+        None,
+        "--predicate",
+        help="Semantic predicate for await, e.g. 'rid:result,!text:Loading'.",
+    ),
+    timeout_ms: int | None = typer.Option(None, "--timeout-ms", help="Complete job budget."),
+    poll_ms: int = typer.Option(120, "--poll-ms", help="Milliseconds between device reads."),
+    settle_ms: int = typer.Option(1_200, "--settle-ms", help="Visual settle duration."),
+    confirmation_ms: int = typer.Option(
+        1_800,
+        "--confirmation-ms",
+        help="Quiet confirmation after a late screen change.",
+    ),
+    observe: bool = typer.Option(
+        True,
+        "--observe/--no-observe",
+        help="Attach a fresh analyzed screen to a successful terminal result.",
+    ),
+) -> None:
+    """Start one durable wait and immediately return its job id."""
+    normalized = operation.casefold().replace("_", "-")
+    defaults = {
+        "await": 60_000,
+        "wait-stable": 30_000,
+        "wait-changed": 15_000,
+        "wait-after-change": 60_000,
+    }
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        effective_timeout = timeout_ms if timeout_ms is not None else defaults.get(normalized, 0)
+        args: dict[str, Any] = {
+            "operation": normalized,
+            "timeout_ms": effective_timeout,
+            "poll_ms": poll_ms,
+            "observe": observe,
+        }
+        if predicate is not None:
+            args["predicate"] = predicate
+        if normalized in {"wait-stable", "wait-after-change"}:
+            args["settle_ms"] = settle_ms
+        if normalized == "wait-after-change":
+            args["confirmation_ms"] = confirmation_ms
+        _emit(_route(engine, "job_start", **args), fmt)
+
+    _run(ctx, go)
+
+
+@job_app.command("status")
+def job_status_cmd(ctx: typer.Context, job_id: str = typer.Argument(...)) -> None:
+    """Reconnect to a job without restarting its wait."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(_route(engine, "job_status", job_id=job_id), fmt)
+
+    _run(ctx, go)
+
+
+@job_app.command("wait")
+def job_wait_cmd(
+    ctx: typer.Context,
+    job_id: str = typer.Argument(...),
+    timeout_ms: int = typer.Option(
+        5_000,
+        "--timeout-ms",
+        min=0,
+        max=10_000,
+        help="Bound this reconnect call; the underlying job keeps running.",
+    ),
+) -> None:
+    """Wait briefly for completion; return running state when the call budget expires."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(_route(engine, "job_wait", job_id=job_id, timeout_ms=timeout_ms), fmt)
+
+    _run(ctx, go)
+
+
+@job_app.command("cancel")
+def job_cancel_cmd(ctx: typer.Context, job_id: str = typer.Argument(...)) -> None:
+    """Request cancellation at the worker's next safe device-read boundary."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(_route(engine, "job_cancel", job_id=job_id), fmt)
+
+    _run(ctx, go)
+
+
+@job_app.command("list")
+def job_list_cmd(
+    ctx: typer.Context,
+    limit: int = typer.Option(20, "--limit", min=1, max=100),
+) -> None:
+    """List recent jobs visible to the current owner."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(_route(engine, "job_list", limit=limit), fmt)
 
     _run(ctx, go)
 

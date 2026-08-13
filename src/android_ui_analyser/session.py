@@ -85,6 +85,20 @@ class GoalSessionPlan(BaseModel):
     relevant_capabilities: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class GoalPhase(BaseModel):
+    """One durable, ordered checkpoint in an end-to-end verification goal."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    objective: str
+    kind: Literal["environment", "verify", "cleanup"] = "verify"
+    status: Literal["pending", "active", "completed"] = "pending"
+    completed_ms: int | None = None
+    evidence: str | None = None
+    recommended_call: dict[str, Any] | None = None
+
+
 class SessionState(BaseModel):
     """Small persisted owner/device scope for review and reversible cleanup."""
 
@@ -101,7 +115,183 @@ class SessionState(BaseModel):
     network_backup_preexisting: bool = False
     network_profile_preexisting: bool = False
     emulator_started: bool = False
+    phases: list[GoalPhase] = Field(default_factory=list)
     finished_ms: int | None = None
+
+
+_SEQUENCE_BOUNDARY = re.compile(
+    r"\s*(?:[.;]\s+|\bthen\b|\bafter that\b|\bnext\b|\bfinally\b|\bcompare\b)",
+    re.IGNORECASE,
+)
+_RESTORE_GOAL = re.compile(
+    r"\b(?:restore|re-enable|reconnect)\b.{0,48}\b(?:network|connectivity|wi-?fi|internet)\b",
+    re.IGNORECASE,
+)
+_OFFLINE_GOAL = re.compile(
+    r"\b(?:(?:go|switch|work|test|verify)\s+)?(?:fully\s+)?offline\b(?:\s+(?:mode|state))?"
+    r"|\bairplane mode\b",
+    re.IGNORECASE,
+)
+
+
+def goal_phases(goal: str) -> list[GoalPhase]:
+    """Extract conservative ordered checkpoints without pretending to understand the app.
+
+    Only explicit sequence markers split the user's prose. Ordinary ``and`` stays inside one
+    checkpoint, so "open and verify" is not turned into two invented tasks. Offline setup and
+    connectivity cleanup are deterministic environment phases; UI checkpoints remain explicit
+    evidence contracts owned by the agent using the app.
+    """
+    cleaned = " ".join(goal.strip().split())
+    segments = [part.strip(" ,") for part in _SEQUENCE_BOUNDARY.split(cleaned) if part.strip(" ,")]
+    phases: list[GoalPhase] = []
+    offline_added = False
+    cleanup_added = False
+    for segment in segments or [cleaned]:
+        cleanup_here = bool(_RESTORE_GOAL.search(segment))
+        objective = _RESTORE_GOAL.sub("", segment).strip(" ,;.")
+        offline_here = bool(_OFFLINE_GOAL.search(objective))
+        if offline_here and not offline_added:
+            phases.append(
+                GoalPhase(
+                    id=f"phase_{len(phases) + 1}",
+                    objective="Establish and verify the requested offline network state",
+                    kind="environment",
+                )
+            )
+            offline_added = True
+        if offline_here:
+            transition = _OFFLINE_GOAL.search(objective)
+            prefix = transition.group(0).casefold() if transition is not None else ""
+            if transition is not None and transition.start() == 0 and (
+                prefix.startswith(("go ", "switch ", "airplane "))
+                or prefix.startswith(("offline", "fully offline"))
+            ):
+                objective = _OFFLINE_GOAL.sub("", objective, count=1).strip(" ,;.")
+                objective = re.sub(r"^(?:and|before)\s+", "", objective, flags=re.IGNORECASE)
+        if objective and objective.casefold() not in {"and", "before finishing"}:
+            phases.append(
+                GoalPhase(
+                    id=f"phase_{len(phases) + 1}",
+                    objective=objective,
+                    kind="verify",
+                )
+            )
+        if cleanup_here and not cleanup_added:
+            phases.append(
+                GoalPhase(
+                    id=f"phase_{len(phases) + 1}",
+                    objective="Restore the session-owned network state",
+                    kind="cleanup",
+                )
+            )
+            cleanup_added = True
+    if not phases:
+        phases.append(GoalPhase(id="phase_1", objective=cleaned, kind="verify"))
+    phases[0].status = "active"
+    return phases
+
+
+def phase_progress(state: SessionState) -> dict[str, Any]:
+    """Return the compact public progress contract for CLI and MCP results."""
+    phases = state.phases or goal_phases(state.goal)
+    current = next((phase for phase in phases if phase.status != "completed"), None)
+    completed = sum(phase.status == "completed" for phase in phases)
+    return {
+        "session_id": state.session_id,
+        "completed": completed,
+        "total": len(phases),
+        "done": current is None,
+        "current": current.model_dump(mode="json") if current is not None else None,
+        "next_call": current.recommended_call if current is not None else None,
+        "phases": [phase.model_dump(mode="json") for phase in phases],
+        "checkpoint": (
+            None
+            if current is None
+            else {
+                "cli": f"--phase-done {current.id}=\"<evidence from the current result>\"",
+                "mcp": {"phase_done": {"id": current.id, "evidence": "<evidence>"}},
+                "note": (
+                    "Acknowledge this phase on the next AUA call; it adds no extra round trip."
+                ),
+            }
+        ),
+    }
+
+
+def mark_phase_complete(
+    cache_dir: str | Path,
+    state: SessionState,
+    *,
+    phase_id: str,
+    evidence: str,
+) -> SessionState:
+    """Complete only the current phase, preserving ordered goal semantics."""
+    evidence = " ".join(evidence.strip().split())
+    if not evidence:
+        raise ValueError("phase evidence must not be empty")
+    phases = [phase.model_copy(deep=True) for phase in (state.phases or goal_phases(state.goal))]
+    current_index = next(
+        (index for index, phase in enumerate(phases) if phase.status != "completed"), None
+    )
+    if current_index is None:
+        raise ValueError("all goal phases are already complete")
+    current = phases[current_index]
+    if current.id != phase_id:
+        raise ValueError(
+            f"{phase_id!r} is not the current goal phase; complete {current.id!r} first"
+        )
+    current.status = "completed"
+    current.completed_ms = int(time.time() * 1000)
+    current.evidence = evidence[:600]
+    if current_index + 1 < len(phases):
+        phases[current_index + 1].status = "active"
+    updated = state.model_copy(update={"phases": phases})
+    _write_state(cache_dir, updated)
+    return updated
+
+
+def update_phase_recommendation(
+    cache_dir: str | Path,
+    state: SessionState,
+    *,
+    phase_id: str,
+    call: dict[str, Any],
+) -> SessionState:
+    """Persist a fresh-screen next call for one incomplete phase."""
+    phases = [phase.model_copy(deep=True) for phase in (state.phases or goal_phases(state.goal))]
+    phase = next((item for item in phases if item.id == phase_id), None)
+    if phase is None or phase.status == "completed":
+        return state
+    phase.recommended_call = call
+    updated = state.model_copy(update={"phases": phases})
+    _write_state(cache_dir, updated)
+    return updated
+
+
+def complete_environment_phase(
+    cache_dir: str | Path,
+    state: SessionState,
+    *,
+    command: str,
+    result: dict[str, Any],
+) -> SessionState:
+    """Advance deterministic offline/cleanup phases from verified tool evidence."""
+    phases = state.phases or goal_phases(state.goal)
+    current = next((phase for phase in phases if phase.status != "completed"), None)
+    if current is None:
+        return state
+    if current.kind == "environment" and command == "network_offline":
+        network_value = result.get("state")
+        network_state: dict[str, Any] = network_value if isinstance(network_value, dict) else {}
+        if result.get("ok") and result.get("verified") and network_state.get("offline") is True:
+            return mark_phase_complete(
+                cache_dir,
+                state,
+                phase_id=current.id,
+                evidence="AUA verified no active default network and offline=true",
+            )
+    return state
 
 
 def _safe_token(value: str) -> str:
@@ -153,6 +343,7 @@ def create_session_state(
         network_backup_preexisting=network_backup_preexisting,
         network_profile_preexisting=network_profile_preexisting,
         emulator_started=emulator_started,
+        phases=goal_phases(goal),
     )
     _write_state(cache_dir, state)
     return state
@@ -193,7 +384,14 @@ def active_session_metadata(
 
 
 def finish_session_state(cache_dir: str | Path, state: SessionState) -> SessionState:
-    finished = state.model_copy(update={"finished_ms": int(time.time() * 1000)})
+    phases = [phase.model_copy(deep=True) for phase in (state.phases or goal_phases(state.goal))]
+    now_ms = int(time.time() * 1000)
+    for phase in phases:
+        if phase.kind == "cleanup" and phase.status != "completed":
+            phase.status = "completed"
+            phase.completed_ms = now_ms
+            phase.evidence = "session finish restored session-owned reversible state"
+    finished = state.model_copy(update={"finished_ms": now_ms, "phases": phases})
     _write_state(cache_dir, finished)
     pointer = _active_path(cache_dir, state.serial, state.owner)
     try:

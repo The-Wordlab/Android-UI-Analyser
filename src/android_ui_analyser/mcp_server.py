@@ -146,6 +146,19 @@ _POST_ACTION_WAIT_TOOLS = frozenset({*_ANALYZED_TOOL_BASES, "app_launch_and_anal
 _OBSERVATION_TOOL_NAMES = frozenset(
     {*_POST_ACTION_WAIT_TOOLS, "await_and_analyze", "back_until_and_analyze", "session_start"}
 )
+_PHASE_DONE_PROP = {
+    "type": "object",
+    "description": (
+        "Optional checkpoint from the previous result. It advances the current goal phase "
+        "without an extra tool call before this tool runs."
+    ),
+    "properties": {
+        "id": {"type": "string"},
+        "evidence": {"type": "string", "minLength": 1},
+    },
+    "required": ["id", "evidence"],
+    "additionalProperties": False,
+}
 
 
 def _validate_until(name: str, args: dict[str, Any]) -> None:
@@ -235,6 +248,17 @@ def _as_analyzed_tool(tool: types.Tool) -> types.Tool:
     )
 
 
+def _with_phase_checkpoint(tool: types.Tool) -> types.Tool:
+    """Give every MCP operation the same no-extra-call phase checkpoint as the CLI."""
+    if tool.name == "session_start":
+        return tool
+    schema = dict(tool.inputSchema)
+    properties = dict(schema.get("properties") or {})
+    properties["phase_done"] = _PHASE_DONE_PROP
+    schema["properties"] = properties
+    return types.Tool(name=tool.name, description=tool.description, inputSchema=schema)
+
+
 # --------------------------------------------------------------------------- tool specs
 
 
@@ -301,6 +325,19 @@ def _tool_definitions() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="session_progress",
+            description=(
+                "Return ordered goal phases, the active checkpoint, and one exact next call. "
+                "Analyzed tool results include this automatically; call explicitly only after "
+                "reconnecting."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {"session_id": {"type": "string"}},
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
             name="session_finish",
             description=(
                 "Finish the session, restore session-owned reversible state, stop only emulators "
@@ -309,6 +346,88 @@ def _tool_definitions() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {"session_id": {"type": "string"}},
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="job_start",
+            description=(
+                "Start one durable read-only wait and return immediately with a reconnectable "
+                "job id. Ordinary device tools are serialized until it finishes or is cancelled."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "operation": {
+                        "type": "string",
+                        "enum": ["await", "wait-stable", "wait-changed", "wait-after-change"],
+                    },
+                    "predicate": {
+                        "type": "string",
+                        "description": "Required for await, e.g. 'rid:result,!text:Loading'.",
+                    },
+                    "timeout_ms": {"type": "integer", "minimum": 1, "default": 60000},
+                    "poll_ms": {"type": "integer", "minimum": 10, "default": 120},
+                    "settle_ms": {"type": "integer", "minimum": 1, "default": 1200},
+                    "confirmation_ms": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "default": 1800,
+                    },
+                    "observe": {"type": "boolean", "default": True},
+                },
+                "required": ["operation"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="job_status",
+            description="Reconnect to a durable wait by id without restarting it.",
+            inputSchema={
+                "type": "object",
+                "properties": {"job_id": {"type": "string"}},
+                "required": ["job_id"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="job_wait",
+            description=(
+                "Wait at most 10 seconds for a durable job; a running result keeps the same id."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "string"},
+                    "timeout_ms": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 10000,
+                        "default": 5000,
+                    },
+                },
+                "required": ["job_id"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="job_cancel",
+            description="Cancel a durable wait at its next safe device-read boundary.",
+            inputSchema={
+                "type": "object",
+                "properties": {"job_id": {"type": "string"}},
+                "required": ["job_id"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="job_list",
+            description="List recent durable waits visible to this owner.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}
+                },
                 "additionalProperties": False,
             },
         ),
@@ -1671,7 +1790,7 @@ def _tool_definitions() -> list[types.Tool]:
             },
         ),
     ]
-    return [_as_analyzed_tool(tool) for tool in tools]
+    return [_with_phase_checkpoint(_as_analyzed_tool(tool)) for tool in tools]
 
 
 # --------------------------------------------------------------------------- dispatch
@@ -1695,6 +1814,26 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
             hint="The renamed tool already returns the analyzed resulting screen; use its "
             "`observation` and do not call `analyze_screen` afterward.",
         )
+    from .jobs import manager_for, reject_if_active
+
+    jobs = manager_for(engine)
+    if name == "job_start":
+        operation = str(args.pop("operation", ""))
+        return jobs.start(operation, args)
+    if name == "job_status":
+        return jobs.status(str(args.get("job_id") or ""))
+    if name == "job_wait":
+        return jobs.wait(
+            str(args.get("job_id") or ""),
+            timeout_ms=int(args.get("timeout_ms", 5_000)),
+        )
+    if name == "job_cancel":
+        return jobs.cancel(str(args.get("job_id") or ""))
+    if name == "job_list":
+        return jobs.list(limit=int(args.get("limit", 20)))
+    if name not in {"capabilities", "session_progress", "session_review", "configure"}:
+        reject_if_active(engine, name)
+
     img = _with_image(engine, args)
 
     if name == "capabilities":
@@ -1719,6 +1858,8 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         return started
     if name == "session_review":
         return _dump(_engine_method(engine, "session_review")(session_id=args.get("session_id")))
+    if name == "session_progress":
+        return _dump(_engine_method(engine, "session_progress")(session_id=args.get("session_id")))
     if name == "session_finish":
         finished = _dump(
             _engine_method(engine, "session_finish")(session_id=args.get("session_id"))
@@ -2462,7 +2603,8 @@ def build_server(engine: Engine) -> Server:
     async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.ContentBlock]:
         from . import journal as journal_mod
 
-        args_in = arguments or {}
+        args_in = dict(arguments or {})
+        phase_done = args_in.pop("phase_done", None)
         invocation_id = uuid.uuid4().hex
         started_at = time.monotonic()
         payload: Any = None
@@ -2501,6 +2643,11 @@ def build_server(engine: Engine) -> Server:
                 )
 
         try:
+            if isinstance(phase_done, dict):
+                _engine_method(engine, "session_mark_phase")(
+                    str(phase_done.get("id") or ""),
+                    str(phase_done.get("evidence") or ""),
+                )
             _validate_until(name, args_in)
             payload = _dispatch(engine, name, args_in)
             payload = _fold_action_until(engine, name, args_in, payload)
@@ -2567,6 +2714,10 @@ def run_stdio() -> None:
     try:
         anyio.run(_serve)
     finally:
+        with contextlib.suppress(Exception):
+            from .jobs import manager_for
+
+            manager_for(engine).shutdown()
         with contextlib.suppress(Exception):
             cleanup_mcp_emulators(engine.config.cache.dir)
 

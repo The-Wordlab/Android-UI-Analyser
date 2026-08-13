@@ -257,6 +257,9 @@ class Meta(BaseModel):
     fingerprint: str | None = None
     # How the result was produced (e.g. hierarchy, hierarchy-unchanged, vision).
     via: str | None = None
+    # Active goal-session phase and one exact next call. Attached best-effort after perception;
+    # absent outside a goal session.
+    goal_progress: dict[str, Any] | None = None
 
 
 class AnalyzeResult(BaseModel):
@@ -393,6 +396,7 @@ class ActionResult(BaseModel):
     note: str | None = None
     # Structured one-call efficiency recommendation (CLI and MCP share the same ids/text).
     advice: list[dict[str, str]] | None = None
+    goal_progress: dict[str, Any] | None = None
     # Why the folded observation may not show the action's effect — e.g. the post-action screen was
     # byte-identical to the pre-action one. Carries the reason, not a bare flag, so a reader can
     # judge it. Absent when the observation is trustworthy, so its presence is the signal.
@@ -499,6 +503,7 @@ class NetworkResult(BaseModel):
     shaping: NetworkShaping | None = None
     verified: bool | None = None
     detail: str | None = None
+    goal_progress: dict[str, Any] | None = None
 
     def render(self, fmt: OutputFormat | str = OutputFormat.json) -> str:
         data = {k: v for k, v in self.model_dump(mode="json").items() if v is not None}

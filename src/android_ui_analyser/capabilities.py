@@ -29,7 +29,7 @@ class Capability:
 CAPABILITIES: tuple[Capability, ...] = (
     Capability(
         "session",
-        "Start from a goal: attach, observe once, and receive the safest exact next call.",
+        "Start from a goal: observe once, track ordered phases, and receive the exact next call.",
         ("test", "verify", "inspect", "navigate", "open", "offline", "android"),
         0,
         'aua session start --goal "<goal>"',
@@ -87,6 +87,14 @@ CAPABILITIES: tuple[Capability, ...] = (
         45,
         "aua await-and-analyze 'rid:<ready>,!text:Loading' --observe",
         "await_and_analyze",
+    ),
+    Capability(
+        "job",
+        "Run a long read-only wait in the warm process with reconnectable status and cancellation.",
+        ("wait", "long", "slow", "loading", "generate", "render", "background", "cancel"),
+        46,
+        "aua job start await --predicate 'rid:<ready>,!text:Loading'",
+        "job_start",
     ),
     Capability(
         "network_offline",
@@ -205,11 +213,15 @@ def render_mcp_instructions() -> str:
     return (
         "Start Android work with session_start(goal). It observes once and ranks a verified "
         "goto, matching saved flow, proven deeplink, or manual analyzed action in that order. "
-        "Use the returned recommended_call. Analyzed actions already return fresh screen ids; "
+        "Use the returned recommended_call. For multi-phase goals, every result carries "
+        "goal_progress; acknowledge a completed checkpoint with phase_done on the next tool "
+        "call, which costs no extra round trip. Analyzed actions already return fresh screen ids; "
         "do not call analyze_screen next. Put semantic arrival terms in until, including "
         "comma-separated positive and negative terms. Use back_until_and_analyze for nested "
         "returns; an unlabeled first Back requires its fresh back_id. Use network_offline, never airplane mode, "
         "to prove offline behavior and always call network_restore or session_finish. Use "
+        "job_start for a long read-only wait; reconnect with job_status, bound a poll with "
+        "job_wait, or stop it with job_cancel. Do not issue another device tool while it runs. Use "
         "session_review to find avoidable calls (`ok` is review success; `run_ok` is run health, "
         "and null means an older duplicated invocation has no provable caller-visible outcome). "
         "If a daemon call reports daemon_outcome_unknown, never repeat it: wait, then inspect "

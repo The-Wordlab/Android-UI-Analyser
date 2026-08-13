@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "android-ui-analyser"
-version = "0.8.4"
+version = "0.9.0"
 description = "Fast, configurable CLI that gives an AI agent structured 'what's on screen and where' for Android UI testing — hierarchy-first, with pluggable vision/OCR/grounding fallbacks."
 readme = "README.md"
 requires-python = ">=3.11"

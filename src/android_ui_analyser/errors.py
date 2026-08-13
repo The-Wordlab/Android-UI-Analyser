@@ -170,6 +170,13 @@ class StabilityTimeout(AuaError):
     code = "wait_timeout"
 
 
+class JobCancelledError(AuaError):
+    """A background read-only job stopped at the caller's explicit request."""
+
+    exit_code = ExitCode.DEVICE
+    code = "job_cancelled"
+
+
 class SelectorNotFoundError(AuaError):
     """A ``--rid``/``--text``/``--by`` selector matched no element on screen."""
 

@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 import re
+import shlex
 import threading
 import time
 from collections import Counter
@@ -30,6 +31,7 @@ from .errors import (
     AuaError,
     DeviceError,
     ElementNotFoundError,
+    JobCancelledError,
     ProviderError,
     SelectorAmbiguousError,
     SelectorNotFoundError,
@@ -502,6 +504,11 @@ class Engine:
         self._last_analyze_result: AnalyzeResult | None = None
         self._mem_lock = threading.Lock()
         self._mem_thread: threading.Thread | None = None
+        # Set only by the warm daemon/MCP job manager. Supported wait loops consult the event
+        # between device reads; the manager object is transport state, intentionally typed Any
+        # here to avoid making the interface-agnostic Engine import its adapter.
+        self._job_cancel_event: threading.Event | None = None
+        self._aua_job_manager: Any = None
 
     def _effective_with_image(self, with_image: bool | str | None) -> bool | str | None:
         """Per-call ``with_image`` overrides the session default; ``False`` forces off."""
@@ -3716,7 +3723,25 @@ class Engine:
             emulator_started=emulator_started,
         )
         self._session_id = state.session_id
+        # Seed every UI checkpoint from the one bootstrap observation. Later analyzed actions
+        # refresh only the active phase's call, so progression never needs a discovery-only
+        # round trip.
+        for phase in state.phases:
+            call = self._phase_recommended_call(state, phase, observed)
+            if call is not None:
+                from .session import update_phase_recommendation
+
+                state = update_phase_recommendation(
+                    self.config.cache.dir,
+                    state,
+                    phase_id=phase.id,
+                    call=call,
+                )
         out = plan.model_dump(mode="json")
+        from .session import phase_progress
+
+        progress = phase_progress(state)
+        phase_call = progress.get("next_call")
         out.update(
             session_id=state.session_id,
             goal_hash=state.goal_hash,
@@ -3740,8 +3765,147 @@ class Engine:
                 ),
             },
             emulator_started=emulator_started,
+            goal_progress=progress,
         )
+        if len(state.phases) > 1 and isinstance(phase_call, dict):
+            # A multi-phase goal's first ordered checkpoint is the actual next action. The
+            # whole-goal planner remains useful for candidate evidence, but must not jump over
+            # an online preparation phase merely because a later sentence says "offline".
+            out["recommended_call"] = phase_call
         return out
+
+    def _phase_recommended_call(
+        self,
+        state: Any,
+        phase: Any,
+        observation: AnalyzeResult | None,
+        *,
+        avoid_deeplinks: bool = False,
+    ) -> dict[str, Any] | None:
+        """Return one safe exact call for a phase, using only the supplied fresh frame."""
+        if phase.kind == "environment":
+            return {
+                "kind": "network_offline",
+                "cli": "aua network offline --verify",
+                "mcp": {"tool": "network_offline", "arguments": {"verify": True}},
+                "reason": "This phase requires verified reversible network isolation.",
+                "executes": True,
+            }
+        if phase.kind == "cleanup":
+            return {
+                "kind": "session_finish",
+                "cli": f"aua --serial {state.serial} session finish",
+                "mcp": {
+                    "tool": "session_finish",
+                    "arguments": {"session_id": state.session_id},
+                },
+                "reason": "This is the final phase; restore only session-owned reversible state.",
+                "executes": True,
+            }
+        if observation is None:
+            return phase.recommended_call
+
+        # Offline is already its own deterministic phase. Removing that word here prevents the
+        # UI checkpoint planner from recommending network isolation again after it completed.
+        ui_goal = re.sub(r"\boffline\b|\bairplane mode\b", " ", phase.objective, flags=re.I)
+        ui_goal = " ".join(ui_goal.split()) or phase.objective
+        plan = self._goal_session_plan(ui_goal, observation)
+        if plan.recommended_call.kind not in {"network_offline", "map_find"} and not (
+            avoid_deeplinks and plan.recommended_call.kind.startswith("deeplink")
+        ):
+            return plan.recommended_call.model_dump(mode="json")
+
+        from .session import _goal_terms
+
+        terms = set(_goal_terms(ui_goal))
+        ranked: list[tuple[int, Any]] = []
+        for element in observation.elements:
+            if not element.clickable or element.enabled is False:
+                continue
+            label = " ".join(
+                value for value in (element.text, element.content_desc, element.resource_id) if value
+            )
+            words = set(re.findall(r"[a-z0-9]+", label.casefold()))
+            score = len(terms & words)
+            if score:
+                ranked.append((score, element))
+        if ranked:
+            _score, element = max(ranked, key=lambda item: (item[0], -item[1].id))
+            if element.resource_id:
+                rid = element.resource_id.rsplit("/", 1)[-1]
+                cli = f"aua tap-and-analyze --rid {shlex.quote(rid)}"
+            else:
+                cli = f"aua tap-and-analyze {element.id}"
+            return {
+                "kind": "manual_action",
+                "cli": cli,
+                "mcp": {"tool": "tap_and_analyze", "arguments": {"id": element.id}},
+                "reason": (
+                    f"The current frame has one goal-relevant enabled control: "
+                    f"{(element.text or element.content_desc or element.resource_id or element.id)!r}."
+                ),
+                "executes": True,
+            }
+        return {
+            "kind": "manual_observation",
+            "cli": "Reuse this result's observation and act on its next_actions; do not analyze again",
+            "mcp": {"tool": "capabilities", "arguments": {"goal": ui_goal}},
+            "reason": (
+                "No verified route, matching flow, or unambiguous goal-labelled control is "
+                "available on this frame."
+            ),
+            "executes": False,
+        }
+
+    def session_mark_phase(
+        self,
+        phase_id: str,
+        evidence: str,
+        *,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Acknowledge current-phase evidence without adding a dedicated device read."""
+        from .session import mark_phase_complete, phase_progress
+
+        state = self._session_state(session_id)
+        try:
+            state = mark_phase_complete(
+                self.config.cache.dir,
+                state,
+                phase_id=phase_id,
+                evidence=evidence,
+            )
+        except ValueError as exc:
+            raise UsageError(str(exc)) from exc
+        return {"ok": True, "goal_progress": phase_progress(state)}
+
+    def session_progress(
+        self,
+        session_id: str | None = None,
+        *,
+        observation: AnalyzeResult | None = None,
+        _avoid_deeplinks: bool = False,
+    ) -> dict[str, Any]:
+        """Return and, when possible, refresh the current phase's one exact next call."""
+        from .session import phase_progress, update_phase_recommendation
+
+        state = self._session_state(session_id)
+        current = next((phase for phase in state.phases if phase.status != "completed"), None)
+        if current is not None:
+            call = self._phase_recommended_call(
+                state,
+                current,
+                observation,
+                avoid_deeplinks=_avoid_deeplinks,
+            )
+            if call is not None and call != current.recommended_call:
+                state = update_phase_recommendation(
+                    self.config.cache.dir,
+                    state,
+                    phase_id=current.id,
+                    call=call,
+                )
+        return {"ok": True, "goal_progress": phase_progress(state)}
 
     def _session_state(self, session_id: str | None = None) -> Any:
         from .session import load_session_state
@@ -4149,6 +4313,45 @@ class Engine:
             },
         }
 
+    def _job_checkpoint(self) -> None:
+        """Abort a supported background wait at the next safe device-read boundary."""
+        event = getattr(self, "_job_cancel_event", None)
+        if event is not None and event.is_set():
+            raise JobCancelledError("background wait cancelled")
+
+    def _job_sleep(self, seconds: float) -> None:
+        """Sleep interruptibly when this Engine is executing a background job."""
+        event = getattr(self, "_job_cancel_event", None)
+        if event is None:
+            time.sleep(seconds)
+            return
+        if event.wait(max(0.0, seconds)):
+            raise JobCancelledError("background wait cancelled")
+
+    def _job_requires_warm_transport(self) -> None:
+        raise UsageError(
+            "background jobs require a warm AUA daemon or MCP server",
+            hint="Enable the daemon and retry, or use the normal foreground wait command.",
+        )
+
+    # These adapters are reached only when a CLI job command cannot route to the warm daemon.
+    # The actual job manager lives at the daemon/MCP boundary so the worker survives the short
+    # client process and status/cancel calls reconnect to the same Engine.
+    def job_start(self, **_kwargs: Any) -> None:
+        self._job_requires_warm_transport()
+
+    def job_status(self, **_kwargs: Any) -> None:
+        self._job_requires_warm_transport()
+
+    def job_wait(self, **_kwargs: Any) -> None:
+        self._job_requires_warm_transport()
+
+    def job_cancel(self, **_kwargs: Any) -> None:
+        self._job_requires_warm_transport()
+
+    def job_list(self, **_kwargs: Any) -> None:
+        self._job_requires_warm_transport()
+
     # ----------------------------------------------------------------- wait --for-stable
 
     def wait_stable(
@@ -4182,6 +4385,7 @@ class Engine:
             gs = imaging.GridSettle(streak=imaging.ANIMATION_STREAK)
             stable_since: float | None = None
             while True:
+                self._job_checkpoint()
                 img = device.screenshot()
                 samples += 1
                 now = time.monotonic()
@@ -4213,11 +4417,12 @@ class Engine:
                         f"screen did not settle within {timeout_ms} ms ({samples} samples)",
                         hint=hint,
                     )
-                time.sleep(interval_ms / 1000.0)
+                self._job_sleep(interval_ms / 1000.0)
         else:
             last: int | None = None
             stable_since_legacy: float | None = None
             while True:
+                self._job_checkpoint()
                 current = imaging.dhash(device.screenshot())
                 samples += 1
                 now = time.monotonic()
@@ -4242,7 +4447,7 @@ class Engine:
                         f"screen did not settle within {timeout_ms} ms ({samples} samples)",
                         hint="Increase --timeout/--settle, or the screen is still animating.",
                     )
-                time.sleep(interval_ms / 1000.0)
+                self._job_sleep(interval_ms / 1000.0)
 
     # ----------------------------------------------------------------- has (T0)
 
@@ -6843,8 +7048,10 @@ class Engine:
         next_negative_rich_at = started_at
         negative_ui_terms = any(term.negated for term in ui_terms)
         checks = 0
+        self._job_checkpoint()
         results = evaluate()
         while True:
+            self._job_checkpoint()
             checks += 1
             if all(t["satisfied"] for t in results):
                 if not negative_ui_terms:
@@ -6915,7 +7122,7 @@ class Engine:
                     adopt_action,
                     hierarchy_only=hierarchy_only,
                 )
-            time.sleep(max(0.01, poll_ms / 1000.0))
+            self._job_sleep(max(0.01, poll_ms / 1000.0))
             results = evaluate()
 
     def _await_result(
@@ -7055,8 +7262,9 @@ class Engine:
         deadline = time.monotonic() + timeout_ms / 1000.0
         samples = 0
         while time.monotonic() < deadline:
-            time.sleep(max(0.05, interval / 1000.0))
+            self._job_sleep(max(0.05, interval / 1000.0))
             samples += 1
+            self._job_checkpoint()
             fp = self.hierarchy_fingerprint()
             if fp and baseline and fp != baseline:
                 return self._observe(
@@ -7129,7 +7337,7 @@ class Engine:
             )
             changed_again = False
             while time.monotonic() < confirm_deadline:
-                time.sleep(max(0.01, interval_ms / 1000.0))
+                self._job_sleep(max(0.01, interval_ms / 1000.0))
                 current = self.hierarchy_fingerprint()
                 if baseline and current and current != baseline:
                     changed_again = True
