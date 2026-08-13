@@ -851,7 +851,13 @@ def _goto_candidate(
     current_screen: str | None,
     destructive_labels: Sequence[str],
 ) -> GoalCandidate | None:
-    target = resolve_goal(app, goal, start=current_screen, context_id=context_id)
+    target = resolve_goal(
+        app,
+        goal,
+        start=current_screen,
+        context_id=context_id,
+        destructive_labels=destructive_labels,
+    )
     if target is None:
         # Natural goals commonly start with an action verb ("open saved items"), while the
         # map correctly names the destination only "saved_items".  Retry with low-signal
@@ -863,6 +869,7 @@ def _goto_candidate(
                 destination_terms,
                 start=current_screen,
                 context_id=context_id,
+                destructive_labels=destructive_labels,
             )
     if target is None:
         return None
@@ -885,7 +892,13 @@ def _goto_candidate(
             evidence={"known_screen": observation.meta.known_screen},
             call=call,
         )
-    path = _shortest_path(app, target, start=current_screen, context_id=context_id)
+    path = _shortest_path(
+        app,
+        target,
+        start=current_screen,
+        context_id=context_id,
+        destructive_labels=destructive_labels,
+    )
     if not path:
         return None
     risks = _edge_risks(path, package=app.package, destructive_labels=destructive_labels)

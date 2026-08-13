@@ -670,6 +670,23 @@ def route_step_risks(
     return risks
 
 
+def route_edge_is_safe(
+    edge: RouteEdge,
+    *,
+    origin_package: str | None,
+    destructive_labels: Sequence[str],
+) -> bool:
+    """Whether an edge is structured and every recorded step is navigation-only."""
+    return bool(edge.steps) and not any(
+        route_step_risks(
+            step,
+            origin_package=origin_package,
+            destructive_labels=destructive_labels,
+        )
+        for step in edge.steps
+    )
+
+
 # --------------------------------------------------------------------------- redaction
 
 
@@ -2645,6 +2662,11 @@ class AppMemoryStore:
                 f"{e.action} → {e.to_screen}"
                 for e in sorted(adj.get(current or "", []), key=lambda x: x.to_screen)
                 if e.to_screen in app.screens and not app.screens[e.to_screen].stale
+                and route_edge_is_safe(
+                    e,
+                    origin_package=app.package,
+                    destructive_labels=self.cfg.destructive_labels,
+                )
             ]
             if include_navigation
             else []
@@ -2667,13 +2689,32 @@ class AppMemoryStore:
             reachable = {
                 name
                 for name in visible
-                if _shortest_path(app, name, context_id=sess.active_context_id)
+                if _shortest_path(
+                    app,
+                    name,
+                    context_id=sess.active_context_id,
+                    destructive_labels=self.cfg.destructive_labels,
+                    safe_only=True,
+                )
             }
         # Suggestions are advertised as ready-to-run commands. Never suggest a stale screen or
         # an unreachable fallback merely because it ranks highly; `goto` would reject it and the
         # agent would learn that map hints are guesses. Legacy screens are fallback-only when the
         # active context has no healthy screens of its own.
-        pool = [n for n in visible if n != current and n in reachable]
+        pool = [
+            name
+            for name in visible
+            if name != current
+            and name in reachable
+            and _shortest_path(
+                app,
+                name,
+                start=current,
+                context_id=sess.active_context_id,
+                destructive_labels=self.cfg.destructive_labels,
+                safe_only=True,
+            )
+        ]
         ranked = sorted(
             pool,
             key=lambda n: _rank_score(
@@ -3348,11 +3389,20 @@ def _shortest_path(
     *,
     include_provisional: bool = False,
     exclude_route_ids: set[str] | None = None,
+    destructive_labels: Sequence[str] = (),
+    safe_only: bool = False,
 ) -> list[RouteEdge]:
-    """Shortest route to *target*; ``[]`` if already there / no path.
+    """Safest shortest route to *target*; ``[]`` if already there / no path.
 
     With *start* given, search only from that screen (used by ``goto`` from the agent's
     current position); otherwise search from roots, then any screen (the original behaviour).
+    Navigation-only routes are searched first, even when an unsafe route is shorter or more
+    travelled. If none exists, the ordinary shortest route remains discoverable so callers can
+    return a plan/risk preview. ``safe_only`` suppresses that fallback for surfaces which
+    advertise a route as immediately executable.
+
+    Pre-v2 routes have no structured steps to classify, so they participate only in the
+    compatibility fallback; execution-time parsing and guards still decide whether they run.
     """
     adj = _adjacency(app, context_id, include_provisional=include_provisional)
     excluded = exclude_route_ids or set()
@@ -3371,25 +3421,49 @@ def _shortest_path(
             or rec.context_id in (context_id, LEGACY_CONTEXT_ID)
         ]
         starts = roots + [name for name in visible if name not in roots]
-    for start in starts:
-        visited = {start}
-        queue: deque[tuple[str, list[RouteEdge]]] = deque([(start, [])])
-        while queue:
-            node, path = queue.popleft()
-            # Among parallel edges to the same screen, prefer a replayable (steps-bearing)
-            # one, then the most-travelled — BFS shortest-path is unaffected.
-            edges = sorted(
-                (edge for edge in adj.get(node, []) if edge.id not in excluded),
-                key=lambda e: (not e.steps, -e.count, e.action),
-            )
-            for e in edges:
-                if e.to_screen in visited:
-                    continue
-                new_path = path + [e]
-                if e.to_screen == target:
-                    return new_path
-                visited.add(e.to_screen)
-                queue.append((e.to_screen, new_path))
+
+    def edge_is_safe(edge: RouteEdge) -> bool:
+        return route_edge_is_safe(
+            edge,
+            origin_package=app.package,
+            destructive_labels=destructive_labels,
+        )
+
+    def search(*, require_safe: bool) -> list[RouteEdge] | None:
+        for origin in starts:
+            visited = {origin}
+            queue: deque[tuple[str, list[RouteEdge]]] = deque([(origin, [])])
+            while queue:
+                node, path = queue.popleft()
+                # Among parallel edges to the same screen, prefer a replayable
+                # (steps-bearing) one, then the most-travelled. Safety is a whole-path
+                # constraint, not a tie-breaker: the safe BFS completes before fallback.
+                edges = sorted(
+                    (
+                        edge
+                        for edge in adj.get(node, [])
+                        if edge.id not in excluded and (not require_safe or edge_is_safe(edge))
+                    ),
+                    key=lambda e: (not e.steps, -e.count, e.action),
+                )
+                for edge in edges:
+                    if edge.to_screen in visited:
+                        continue
+                    new_path = path + [edge]
+                    if edge.to_screen == target:
+                        return new_path
+                    visited.add(edge.to_screen)
+                    queue.append((edge.to_screen, new_path))
+        return None
+
+    safe = search(require_safe=True)
+    if safe is not None:
+        return safe
+    if safe_only:
+        return []
+    fallback = search(require_safe=False)
+    if fallback is not None:
+        return fallback
     return []
 
 
@@ -3494,6 +3568,7 @@ def resolve_goal(
     half_life_days: float = 3.0,
     last_goal: str | None = None,
     context_id: str | None = None,
+    destructive_labels: Sequence[str] = (),
 ) -> str | None:
     """Best screen name for a fuzzy *goal* (powers ``aua goto``).
 
@@ -3510,7 +3585,13 @@ def resolve_goal(
     now = now or datetime.now().astimezone()
 
     def key(name: str) -> tuple[bool, bool, bool, bool, float, int]:
-        path = _shortest_path(app, name, start=start, context_id=context_id)
+        path = _shortest_path(
+            app,
+            name,
+            start=start,
+            context_id=context_id,
+            destructive_labels=destructive_labels,
+        )
         reachable = (
             bool(path)
             or name == start

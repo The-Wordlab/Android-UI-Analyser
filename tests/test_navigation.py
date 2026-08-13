@@ -22,6 +22,7 @@ from android_ui_analyser.daemon import DaemonClient, dispatch, stop
 from android_ui_analyser.device import Uiautomator2Device
 from android_ui_analyser.memory import (
     AppMemoryStore,
+    RouteStep,
     ScreenRecord,
     SessionState,
     _rank_score,
@@ -91,8 +92,18 @@ def _build_three(tmp_path: Path) -> AppMemoryStore:
     store.record_screen(package=P, elements=_elements(HOME), activity=".Home", name_hint="home")
     store.record_screen(package=P, elements=_elements(APPS), activity=".Apps", name_hint="apps")
     store.record_screen(package=P, elements=_elements(IMAGES), activity=".Img", name_hint="images")
-    store.record_route(P, "home", "apps", "tap 'Apps'")
-    store.record_route(P, "apps", "images", "tap 'Images'")
+    store.record_route(
+        P,
+        "home",
+        "apps",
+        steps=[RouteStep(kind="tap", label="Apps", resource_id="nav_apps")],
+    )
+    store.record_route(
+        P,
+        "apps",
+        "images",
+        steps=[RouteStep(kind="tap", label="Images", resource_id="tool_images")],
+    )
     return store
 
 
@@ -199,6 +210,26 @@ def test_navigation_hints_never_advertise_stale_or_unreachable_gotos(tmp_path: P
     assert "goto images" not in hints.suggested_gotos
     assert "goto orphan" not in hints.suggested_gotos
     assert not any("images" in route for route in hints.known_routes)
+
+
+def test_navigation_hints_do_not_advertise_unsafe_only_goto_as_ready(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.record_screen(package=P, elements=_elements(HOME), name_hint="home")
+    store.record_screen(package=P, elements=_elements(APPS), name_hint="catalog")
+    store.record_route(
+        P,
+        "home",
+        "catalog",
+        steps=[RouteStep(kind="open-link", arg="fiction://catalog")],
+    )
+    session = store.load_session("unsafe-inline-hint")
+    session.current_screen = "home"
+    store.save_session("unsafe-inline-hint", session)
+
+    hints = store.navigation_hints("unsafe-inline-hint", P)
+
+    assert "goto catalog" not in hints.suggested_gotos
+    assert not any("catalog" in route for route in hints.known_routes)
 
 
 def test_session_back_compat_without_last_goal() -> None:

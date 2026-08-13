@@ -65,6 +65,22 @@ def _apps_observation(serial: str) -> AnalyzeResult:
     return observed
 
 
+def _control_observation(serial: str, label: str) -> AnalyzeResult:
+    observed = _observation(serial)
+    observed.elements = [
+        Element(
+            id=41,
+            type="android.widget.Button",
+            text=label,
+            bounds=(40, 300, 800, 420),
+            center=(420, 360),
+            clickable=True,
+            source=Source.hierarchy,
+        )
+    ]
+    return observed
+
+
 def test_goal_phases_preserve_order_without_splitting_ordinary_and() -> None:
     phases = goal_phases(
         "Verify the visible Grammar conversation opens offline with cached content and no "
@@ -200,6 +216,44 @@ def test_stale_deeplink_is_not_recommended_again_for_active_phase(
         }
     ]
     assert "phases" in engine.session_progress()["goal_progress"]
+
+
+def test_goal_session_does_not_recommend_configured_destructive_manual_control(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    cfg = make_config(
+        cache={"dir": str(tmp_path / "cache")},
+        memory={
+            "enabled": False,
+            "dir": str(tmp_path / "memory"),
+            "destructive_labels": ["archive"],
+        },
+    )
+    engine = Engine(cfg, device=FakeDevice(serial="goal-destructive-control"))
+    observed = _control_observation(engine.device.serial, "Archive")
+    monkeypatch.setattr(engine, "analyze", lambda **_kwargs: observed)
+
+    started = engine.session_start("Archive catalog. Then inspect details")
+
+    assert started["recommended_call"]["kind"] == "manual_observation"
+    assert started["recommended_call"]["executes"] is False
+    assert "tap-and-analyze" not in started["recommended_call"]["cli"]
+
+
+def test_goal_session_does_not_execute_weak_incidental_one_token_control(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    engine = _engine(tmp_path, "goal-weak-control")
+    observed = _control_observation(engine.device.serial, "Online")
+    monkeypatch.setattr(engine, "analyze", lambda **_kwargs: observed)
+
+    started = engine.session_start(
+        "Establish cached catalog online. Then verify the catalog details"
+    )
+
+    assert started["recommended_call"]["kind"] == "manual_observation"
+    assert started["recommended_call"]["executes"] is False
+    assert "tap-and-analyze" not in started["recommended_call"]["cli"]
 
 
 def _engine(tmp_path: Path, serial: str = "goal-life") -> Engine:

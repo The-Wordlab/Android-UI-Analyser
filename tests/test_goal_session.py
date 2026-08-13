@@ -109,6 +109,94 @@ def test_plan_ranks_active_verified_goto_then_matching_flow_then_deeplink() -> N
     assert plan.candidates[-1].status == "probed"
 
 
+def test_plan_recommends_longer_safe_goto_instead_of_one_hop_unsafe_route() -> None:
+    app = AppMap(
+        package=_PKG,
+        screens={
+            "home": _record("home"),
+            "catalog": _record("catalog"),
+            "saved_items": _record("saved_items"),
+        },
+        routes=[
+            RouteEdge(
+                id="unsafe-shortcut",
+                from_screen="home",
+                to_screen="saved_items",
+                action="open catalog://saved-items",
+                steps=[RouteStep(kind="open-link", arg="catalog://saved-items")],
+                count=50,
+                status="verified",
+                last_seen=_NOW,
+            ),
+            RouteEdge(
+                id="safe-catalog",
+                from_screen="home",
+                to_screen="catalog",
+                action="tap 'Catalog'",
+                steps=[RouteStep(kind="tap", label="Catalog", resource_id="nav_catalog")],
+                status="verified",
+                last_seen=_NOW,
+            ),
+            RouteEdge(
+                id="safe-saved",
+                from_screen="catalog",
+                to_screen="saved_items",
+                action="tap 'Saved items'",
+                steps=[RouteStep(kind="tap", label="Saved items", resource_id="saved_items")],
+                status="verified",
+                last_seen=_NOW,
+            ),
+        ],
+    )
+
+    plan = plan_goal_session(
+        "open saved items",
+        _observation(),
+        app=app,
+        current_screen="home",
+    )
+
+    candidate = plan.candidates[0]
+    assert candidate.safe is True and candidate.call.kind == "goto"
+    assert [edge["to"] for edge in candidate.evidence["route"]] == [
+        "catalog",
+        "saved_items",
+    ]
+    assert plan.recommended_call.cli == "aua goto 'open saved items'"
+
+
+def test_plan_keeps_unsafe_only_goto_discoverable_as_review_not_execution() -> None:
+    app = AppMap(
+        package=_PKG,
+        screens={"home": _record("home"), "saved_items": _record("saved_items")},
+        routes=[
+            RouteEdge(
+                id="unsafe-only",
+                from_screen="home",
+                to_screen="saved_items",
+                action="open catalog://saved-items",
+                steps=[RouteStep(kind="open-link", arg="catalog://saved-items")],
+                status="verified",
+                last_seen=_NOW,
+            )
+        ],
+    )
+
+    plan = plan_goal_session(
+        "open saved items",
+        _observation(),
+        app=app,
+        current_screen="home",
+    )
+
+    candidate = plan.candidates[0]
+    assert candidate.safe is False and candidate.status == "requires_review"
+    assert candidate.call.kind == "goto_plan" and candidate.call.executes is False
+    assert plan.selected_candidate is None
+    assert plan.recommended_call.cli == "aua goto 'open saved items' --plan"
+    assert plan.recommended_call.executes is False
+
+
 def test_risky_flow_is_previewed_and_never_selected_automatically() -> None:
     flow = Flow(
         name="offline_saved_items",

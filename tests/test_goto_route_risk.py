@@ -16,7 +16,7 @@ from android_ui_analyser.mcp_server import build_server
 from android_ui_analyser.memory import AppMemoryStore, RouteStep, route_step_risks
 from conftest import FakeDevice, make_config
 from test_memory import APPS, HOME, P, _elements, _engine, _store
-from test_navigation import ScriptedDevice
+from test_navigation import IMAGES, ScriptedDevice
 
 runner = CliRunner()
 
@@ -163,6 +163,100 @@ def test_goto_still_executes_navigation_only_tap(tmp_path: Path) -> None:
     assert result["ok"] is True and result["arrived"] is True
     assert result["route"][0]["risk"] == "safe_navigation"
     assert sum(call[0] == "click" for call in device.calls) == 1
+
+
+def test_goto_prefers_longer_safe_route_over_frequent_one_hop_deeplink(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    store.record_screen(package=P, elements=_elements(HOME), name_hint="home")
+    store.record_screen(package=P, elements=_elements(APPS), name_hint="catalog")
+    store.record_screen(package=P, elements=_elements(IMAGES), name_hint="gallery")
+    for _ in range(8):
+        store.record_route(
+            P,
+            "home",
+            "gallery",
+            steps=[RouteStep(kind="open-link", arg="fiction://gallery")],
+        )
+    store.record_route(
+        P,
+        "home",
+        "catalog",
+        steps=[RouteStep(kind="tap", label="Apps", resource_id="nav_apps")],
+    )
+    store.record_route(
+        P,
+        "catalog",
+        "gallery",
+        steps=[RouteStep(kind="tap", label="Images", resource_id="tool_images")],
+    )
+    device = ScriptedDevice([HOME, APPS, IMAGES], package=P, serial="risk-safe-longer")
+    engine = _engine(tmp_path, device)
+
+    result = engine.goto("gallery")
+
+    assert result["ok"] is True and result["arrived"] is True
+    assert [(edge["from"], edge["to"]) for edge in result["route"]] == [
+        ("home", "catalog"),
+        ("catalog", "gallery"),
+    ]
+    assert sum(call[0] == "click" for call in device.calls) == 2
+    assert not any(call[0] == "open_link" for call in device.calls)
+
+
+def test_map_find_returns_review_plan_when_only_route_is_unsafe(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.record_screen(package=P, elements=_elements(HOME), name_hint="home")
+    store.record_screen(package=P, elements=_elements(APPS), name_hint="catalog")
+    store.record_route(
+        P,
+        "home",
+        "catalog",
+        steps=[RouteStep(kind="open-link", arg="fiction://catalog")],
+    )
+    session = store.load_session("map-find-unsafe")
+    session.current_screen = "home"
+    store.save_session("map-find-unsafe", session)
+    engine = _engine(
+        tmp_path,
+        FakeDevice(hierarchy_xml=HOME, package=P, serial="map-find-unsafe"),
+    )
+
+    result = engine.map_find("catalog")
+
+    assert result["ok"] is True
+    assert result["safe"] is False and result["status"] == "requires_review"
+    assert result["recommended_call"]["cli"] == "aua goto 'catalog' --plan"
+    assert result["recommended_call"]["executes"] is False
+    assert result["required_opt_in"] == ["--allow-unsafe"]
+    assert result["risks"][0]["code"] == "deeplink_effect"
+
+
+def test_map_find_returns_executable_goto_for_safe_structured_route(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.record_screen(package=P, elements=_elements(HOME), name_hint="home")
+    store.record_screen(package=P, elements=_elements(APPS), name_hint="catalog")
+    store.record_route(
+        P,
+        "home",
+        "catalog",
+        steps=[RouteStep(kind="tap", label="Apps", resource_id="nav_apps")],
+    )
+    session = store.load_session("map-find-safe")
+    session.current_screen = "home"
+    store.save_session("map-find-safe", session)
+    engine = _engine(
+        tmp_path,
+        FakeDevice(hierarchy_xml=HOME, package=P, serial="map-find-safe"),
+    )
+
+    result = engine.map_find("catalog")
+
+    assert result["safe"] is True and result["status"] == "ready"
+    assert result["recommended_call"]["cli"] == "aua goto 'catalog'"
+    assert result["recommended_call"]["executes"] is True
+    assert result["risks"] == []
 
 
 def test_cli_goto_requires_the_explicit_unsafe_opt_in(monkeypatch) -> None:  # type: ignore[no-untyped-def]

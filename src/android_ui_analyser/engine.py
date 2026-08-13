@@ -2847,6 +2847,7 @@ class Engine:
         current = sess.current_screen
         if not transit_resume and res.meta.known_screen:
             current = res.meta.known_screen
+        lexicon = self.config.memory.destructive_labels
         target = resolve_goal(
             app,
             goal,
@@ -2854,6 +2855,7 @@ class Engine:
             half_life_days=self.config.memory.rank_half_life_days,
             last_goal=sess.last_goal,
             context_id=sess.active_context_id,
+            destructive_labels=lexicon,
         )
         if target is None:
             return {
@@ -2882,6 +2884,7 @@ class Engine:
             start=current,
             context_id=sess.active_context_id,
             exclude_route_ids=_attempted_route_ids,
+            destructive_labels=lexicon,
         )
         resume_from = 0
         from_here_preset = False
@@ -2892,8 +2895,6 @@ class Engine:
             if mid is not None:
                 path, resume_from = mid
                 from_here_preset = True
-        lexicon = self.config.memory.destructive_labels
-
         def edge_preview(edge: RouteEdge) -> dict[str, Any]:
             steps = edge.steps or _parse_legacy_steps(edge.action)
             risk_rows: list[dict[str, Any]] = []
@@ -3090,6 +3091,7 @@ class Engine:
                 start=reached,
                 context_id=latest_sess.active_context_id,
                 exclude_route_ids=attempted_route_ids,
+                destructive_labels=lexicon,
             ):
                 return None
             follow = self.goto(
@@ -3886,20 +3888,44 @@ class Engine:
         ):
             return plan.recommended_call.model_dump(mode="json")
 
-        from .session import _goal_terms
+        from .session import _goal_terms, _match_score
 
-        terms = set(_goal_terms(ui_goal))
+        goal_terms = set(_goal_terms(ui_goal))
         ranked: list[tuple[int, Any]] = []
         for element in observation.elements:
             if not element.clickable or element.enabled is False:
                 continue
+            resource_label = re.sub(
+                r"(?<=[a-z0-9])(?=[A-Z])",
+                " ",
+                (element.resource_id or "").rsplit("/", 1)[-1],
+            ).replace("_", " ")
             label = " ".join(
-                value for value in (element.text, element.content_desc, element.resource_id) if value
+                value for value in (element.text, element.content_desc, resource_label) if value
             )
-            words = set(re.findall(r"[a-z0-9]+", label.casefold()))
-            score = len(terms & words)
-            if score:
-                ranked.append((score, element))
+            # A configured destructive control is never an execution recommendation. A bare
+            # one-token control sharing only one word with a longer goal is weak evidence too;
+            # keep it visible in the observation instead of turning it into an execution call.
+            if is_destructive_step(
+                RouteStep(kind="tap", label=label),
+                self.config.memory.destructive_labels,
+            ):
+                continue
+            semantic_label = element.text or element.content_desc or resource_label
+            control_terms = set(_goal_terms(semantic_label))
+            matched_terms = goal_terms & control_terms
+            if not matched_terms:
+                continue
+            weak_one_token = (
+                len(matched_terms) == 1
+                and len(goal_terms) > 1
+                and len(control_terms) == 1
+                and ui_goal.casefold().strip() not in semantic_label.casefold()
+            )
+            if weak_one_token:
+                continue
+            score = _match_score(ui_goal, label)
+            ranked.append((score, element))
         if ranked:
             _score, element = max(ranked, key=lambda item: (item[0], -item[1].id))
             if element.resource_id:
@@ -4351,8 +4377,25 @@ class Engine:
         session = mem.load_session(self.device.serial)
         context_id = session.active_context_id
         start = session.current_screen
-        target = resolve_goal(app, goal, start=start, context_id=context_id)
-        path = _shortest_path(app, target, start=start, context_id=context_id) if target else None
+        lexicon = self.config.memory.destructive_labels
+        target = resolve_goal(
+            app,
+            goal,
+            start=start,
+            context_id=context_id,
+            destructive_labels=lexicon,
+        )
+        path = (
+            _shortest_path(
+                app,
+                target,
+                start=start,
+                context_id=context_id,
+                destructive_labels=lexicon,
+            )
+            if target
+            else None
+        )
         if not target or not path:
             return {
                 "ok": False,
@@ -4362,6 +4405,49 @@ class Engine:
                 "context_id": context_id,
                 "code": "route_unknown",
             }
+        risks: list[dict[str, Any]] = []
+        route: list[dict[str, Any]] = []
+        for edge_index, edge in enumerate(path):
+            edge_risks: list[dict[str, Any]] = []
+            if not edge.steps:
+                edge_risks.append(
+                    {
+                        "code": "legacy_route",
+                        "reason": "route has no inspectable structured steps",
+                        "path": f"route[{edge_index}]",
+                    }
+                )
+            else:
+                for step_index, step in enumerate(edge.steps):
+                    edge_risks.extend(
+                        route_step_risks(
+                            step,
+                            origin_package=app.package,
+                            destructive_labels=lexicon,
+                            path=f"route[{edge_index}].steps[{step_index}]",
+                        )
+                    )
+            risks.extend(edge_risks)
+            route.append(
+                {
+                    "from": edge.from_screen,
+                    "to": edge.to_screen,
+                    "status": edge.status,
+                    "steps": [step_display(step) for step in edge.steps],
+                    "risk": "requires_review" if edge_risks else "safe_navigation",
+                    "risks": edge_risks,
+                }
+            )
+        safe = not risks
+        required_opt_in: list[str] = []
+        codes = {str(item["code"]) for item in risks}
+        if codes - {"destructive", "legacy_route"}:
+            required_opt_in.append("--allow-unsafe")
+        if "destructive" in codes:
+            required_opt_in.append("--allow-destructive")
+        arguments: dict[str, Any] = {"goal": goal}
+        if not safe:
+            arguments["plan"] = True
         return {
             "ok": True,
             "goal": goal,
@@ -4369,18 +4455,20 @@ class Engine:
             "current_screen": start,
             "target": target,
             "context_id": context_id,
-            "route": [
-                {
-                    "from": edge.from_screen,
-                    "to": edge.to_screen,
-                    "status": edge.status,
-                    "steps": [step_display(step) for step in edge.steps],
-                }
-                for edge in path
-            ],
+            "safe": safe,
+            "status": "ready" if safe else "requires_review",
+            "route": route,
+            "risks": risks,
+            "required_opt_in": required_opt_in,
             "recommended_call": {
-                "cli": f"aua goto {goal!r}",
-                "mcp": {"tool": "goto", "arguments": {"goal": goal}},
+                "cli": f"aua goto {goal!r}" + (" --plan" if not safe else ""),
+                "mcp": {"tool": "goto", "arguments": arguments},
+                "executes": safe,
+                "reason": (
+                    "A safe structured navigation route is ready to run."
+                    if safe
+                    else "Review the route risks before authorizing any disclosed side effect."
+                ),
             },
         }
 
