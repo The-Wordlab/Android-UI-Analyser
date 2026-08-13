@@ -4774,6 +4774,23 @@ class Engine:
         save_call = f"aua flow save {shlex.quote(name)} --last {requested} --save"
         if existed_before:
             save_call += " --force"
+        invalid_force_probe = {
+            "case": "force_without_save",
+            "error_code": "usage",
+            "cli": (
+                f"aua --expect-error usage flow save {shlex.quote(name)} "
+                f"--last {requested} --force"
+            ),
+            "mcp": {
+                "tool": "flow_save",
+                "arguments": {
+                    "name": name,
+                    "last": requested,
+                    "force": True,
+                    "expect_error": "usage",
+                },
+            },
+        }
         capture_blockers = recorded_step_blockers(selected)
         if capture_blockers:
             return {
@@ -4879,6 +4896,8 @@ class Engine:
             out["run_preview_call"] = f"aua flow run {shlex.quote(name)} --dry-run"
         else:
             out["save_call"] = save_call
+            if existed_before:
+                out["invalid_mode_probe"] = invalid_force_probe
         if dry_run:
             warnings.append(
                 "--dry-run remains a deprecated non-writing alias; flow save previews by default"
@@ -5362,7 +5381,11 @@ class Engine:
         resolved = session_id or getattr(self, "_session_id", None)
         state = load_session_state(self.config.cache.dir, session_id=resolved) if resolved else None
         if state is None:
-            serial = self.device.serial
+            serial = (
+                getattr(self, "_lease_serial", None)
+                or self.config.device.serial
+                or self.device.serial
+            )
             state = load_session_state(
                 self.config.cache.dir,
                 serial=serial,

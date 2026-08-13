@@ -456,6 +456,20 @@ def test_flow_save_requires_force_to_overwrite(tmp_path: Path) -> None:
     assert preview["status"] == "preview_existing"
     assert preview["required_save_mode"] == "force"
     assert preview["save_call"].endswith("dup --last 12 --save --force")
+    assert preview["invalid_mode_probe"] == {
+        "case": "force_without_save",
+        "error_code": "usage",
+        "cli": "aua --expect-error usage flow save dup --last 12 --force",
+        "mcp": {
+            "tool": "flow_save",
+            "arguments": {
+                "name": "dup",
+                "last": 12,
+                "force": True,
+                "expect_error": "usage",
+            },
+        },
+    }
     try:
         eng.flow_save("dup", save=True)
         raise AssertionError("expected UsageError")

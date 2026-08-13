@@ -106,9 +106,14 @@ def decorate_result(
     current_recorded: bool = True,
 ) -> Any:
     """Attach one actionable hint when the current call reveals an avoidable pattern."""
-    serial = None
-    with contextlib.suppress(Exception):
-        serial = engine.device.serial
+    # Host-only flow metadata calls already know their explicit/leased serial. Do not connect
+    # uiautomator2 merely to attach coaching or goal progress to an idempotent delete.
+    serial = getattr(engine, "_lease_serial", None) or getattr(
+        getattr(engine.config, "device", None), "serial", None
+    )
+    if not serial:
+        with contextlib.suppress(Exception):
+            serial = engine.device.serial
     try:
         from . import journal
 

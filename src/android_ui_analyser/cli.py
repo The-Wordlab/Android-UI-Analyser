@@ -1028,7 +1028,19 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
     # Lease discovery does not connect to uiautomator2; it is the cheap ownership decision
     # every transport must share.
     host_only = method in _HOST_ONLY_ROUTE_METHODS
-    if not host_only:
+    if host_only:
+        # Host-only flow metadata commands still belong to the calling agent's active goal
+        # session. Resolve identity and the explicit serial without claiming/connecting to the
+        # device, so two idempotent deletes are both accounted for instead of the second one
+        # becoming an anonymous journal row.
+        from . import leases as _leases
+
+        engine._lease_owner_resolved = _leases.resolve_owner(  # noqa: SLF001
+            getattr(engine, "_lease_owner", None)
+        )
+        if cfg.device.serial:
+            engine._lease_serial = cfg.device.serial  # noqa: SLF001
+    else:
         lease_serial = getattr(engine, "_lease_serial", None)
         lease_device = getattr(engine, "_lease_device", None)
         if not lease_serial and callable(lease_device):

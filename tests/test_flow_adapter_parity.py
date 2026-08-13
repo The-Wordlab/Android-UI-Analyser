@@ -10,9 +10,11 @@ from mcp.shared.memory import create_connected_server_and_client_session
 from typer.testing import CliRunner
 
 from android_ui_analyser import cli as cli_mod
+from android_ui_analyser import journal
 from android_ui_analyser.cli import app
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.mcp_server import build_server
+from android_ui_analyser.session import create_session_state
 from conftest import FakeDevice, make_config
 
 runner = CliRunner()
@@ -117,6 +119,37 @@ def test_cli_flow_delete_routes_idempotent_engine_result(monkeypatch) -> None:
     assert result.exit_code == 0
     assert json.loads(result.stdout)["status"] == "already_absent"
     assert calls == [("flow_delete", {"name": "gone"})]
+
+
+def test_two_host_only_deletes_are_both_accounted_in_the_active_session(
+    monkeypatch,
+) -> None:
+    cfg = make_config()
+    owner = "flow-review-owner"
+    state = create_session_state(
+        cfg.cache.dir,
+        goal="Delete an optional recorded flow twice",
+        serial="emulator-5554",
+        owner=owner,
+        recommended_kind="flow",
+        recommended_cli="aua flow delete optional",
+        network_backup_preexisting=False,
+        network_profile_preexisting=False,
+    )
+    monkeypatch.setenv("AUA_OWNER", owner)
+
+    first = runner.invoke(app, ["--serial", state.serial, "flow", "delete", "optional"])
+    second = runner.invoke(app, ["--serial", state.serial, "flow", "delete", "optional"])
+
+    assert first.exit_code == second.exit_code == 0
+    rows = [
+        event
+        for event in journal.read_since(cfg.cache.dir, state.serial, since_ms=state.started_ms)
+        if event.get("cmd") == "flow_delete"
+    ]
+    assert len(rows) == 2
+    assert all(event.get("owner") == owner for event in rows)
+    assert all(event.get("session_id") == state.session_id for event in rows)
 
 
 def test_mcp_flow_delete_routes_idempotent_engine_result(monkeypatch) -> None:
