@@ -263,6 +263,13 @@ def _with_phase_checkpoint(tool: types.Tool) -> types.Tool:
     schema = dict(tool.inputSchema)
     properties = dict(schema.get("properties") or {})
     properties["phase_done"] = _PHASE_DONE_PROP
+    properties["expect_error"] = {
+        "type": "string",
+        "description": (
+            "Exact machine-readable error code intentionally probed by this invocation; "
+            "session review treats it as expected only when the returned code matches."
+        ),
+    }
     schema["properties"] = properties
     return types.Tool(name=tool.name, description=tool.description, inputSchema=schema)
 
@@ -556,6 +563,19 @@ def _tool_definitions() -> list[types.Tool]:
                         "description": "Deprecated non-writing alias; preview is already default.",
                     },
                 },
+                "required": ["name"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="flow_delete",
+            description=(
+                "Idempotently delete a saved flow. Returns deleted=false and "
+                "status=already_absent when it was already gone."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
                 "required": ["name"],
                 "additionalProperties": False,
             },
@@ -1964,6 +1984,8 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 dry_run=bool(args.get("dry_run", False)),
             )
         )
+    if name == "flow_delete":
+        return _dump(engine.flow_delete(str(args["name"])))
     if name == "map_find":
         return _dump(
             engine.map_find(
@@ -2668,6 +2690,7 @@ def build_server(engine: Engine) -> Server:
 
         args_in = dict(arguments or {})
         phase_done = args_in.pop("phase_done", None)
+        expected_error_code = args_in.pop("expect_error", None)
         annotation_warnings: list[dict[str, Any]] = []
         invocation_id = uuid.uuid4().hex
         started_at = time.monotonic()
@@ -2688,6 +2711,11 @@ def build_server(engine: Engine) -> Server:
             extra: dict[str, Any] = {"invocation_id": invocation_id}
             if session_id:
                 extra["session_id"] = str(session_id)
+            if isinstance(expected_error_code, str) and expected_error_code:
+                extra["expected_error_code"] = expected_error_code
+                extra["expected_error_matched"] = (
+                    isinstance(error, dict) and error.get("code") == expected_error_code
+                )
             with contextlib.suppress(Exception):
                 journal_mod.record(
                     cache_dir=engine.config.cache.dir,

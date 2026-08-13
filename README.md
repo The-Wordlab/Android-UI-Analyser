@@ -321,7 +321,9 @@ holder and the free alternatives — that is routable, not fatal: drop `--serial
 picked for you. `--needs` gets you a capable device or a refusal, never one that silently
 cannot do the job.
 
-Leases expire on their own, so a crashed agent blocks nobody and there is nothing to clean up.
+The owner label and caller process identity travel separately, including through the warm daemon,
+so `AUA_OWNER` stays readable without becoming a 15-minute lock. A crashed agent is immediately
+treated as gone; PID reuse is rejected by the recorded process-start token.
 `--no-lease` opts out entirely for single-agent scripts.
 
 ---
@@ -453,7 +455,7 @@ aua flow save reach_checkout --last 8 --save # save only after review
 aua flow list · aua flow show <name> · aua flow delete <name>
 ```
 
-Flows live flat under `<memory.dir>/flows/<name>.yaml` (they span transit packages by design — an auth leg stays with its origin app). Step vocabulary: `launch_app`, `tap` (by `id:`, `desc:`, or `text:`), `input` (with `${PARAM}` substitution), `key`, `swipe`, `scroll_to`, `wait_for`, `wait_stable`, `assert_visible`, and `goto:` to compose map navigation. `flow save` selects only the newest same-origin/context capture segment and is preview-first; only `--save` writes. New recordings prefer a unique stable resource id, then a unique non-PII content description, then unique stable non-PII text, and refuse a step with no safe selector. It never persists typed values — inputs become required `${PARAM_n}` placeholders. A freshly recognized mapped destination is stored as `arrival_screen`; otherwise `arrival_status: unverified` is explicit. Flows are deliberate authored intent, so destructive steps run by default (`--no-allow-destructive` opts back into the guard). On divergence you get the failing step index, the remaining steps, and the current elements — fix, then `--from-step N`.
+Flows live flat under `<memory.dir>/flows/<name>.yaml` (they span transit packages by design — an auth leg stays with its origin app). Step vocabulary: `launch_app`, `tap` (by `id:`, `desc:`, or `text:`), `input` (with `${PARAM}` substitution), `key`, `swipe`, `scroll_to`, `wait_for`, `wait_stable`, `assert_visible`, and `goto:` to compose map navigation. `flow save` selects only the newest same-origin/context capture segment and is preview-first; only `--save` writes. Its result includes the authoritative path, current existence/collision status, and an exact `save_call` with `--force` when replacement is required; saving still rechecks atomically, so a preview never authorizes a race. `flow delete` is idempotent and reports `status: already_absent` when cleanup was already complete. New recordings prefer a unique stable resource id, then a unique non-PII content description, then unique stable non-PII text, and refuse a step with no safe selector. It never persists typed values — inputs become required `${PARAM_n}` placeholders. A freshly recognized mapped destination is stored as `arrival_screen`; otherwise `arrival_status: unverified` is explicit. Flows are deliberate authored intent, so destructive steps run by default (`--no-allow-destructive` opts back into the guard). On divergence you get the failing step index, the remaining steps, and the current elements — fix, then `--from-step N`.
 
 ```yaml
 # ~/.android-ui-analyser/flows/reset_account_google_login.yaml

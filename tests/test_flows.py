@@ -431,6 +431,10 @@ def test_flow_save_materializes_recent_with_placeholders(tmp_path: Path) -> None
 
     preview = eng.flow_save("my_flow")
     assert preview["ok"] and preview["saved"] is False
+    assert preview["exists"] is False
+    assert preview["collision"] is False
+    assert preview["status"] == "preview_new"
+    assert preview["required_save_mode"] == "create"
     assert not Path(preview["path"]).exists()
     out = eng.flow_save("my_flow", save=True)
     assert out["ok"] and out["steps"] == 2 and out["params_needed"] == ["PARAM_1"]
@@ -446,6 +450,12 @@ def test_flow_save_requires_force_to_overwrite(tmp_path: Path) -> None:
     res = eng.analyze(source="hierarchy")
     eng.tap(res.elements[1].id, observe=False)
     assert eng.flow_save("dup", save=True)["ok"]
+    preview = eng.flow_save("dup")
+    assert preview["exists"] is True
+    assert preview["collision"] is True
+    assert preview["status"] == "preview_existing"
+    assert preview["required_save_mode"] == "force"
+    assert preview["save_call"].endswith("dup --last 12 --save --force")
     try:
         eng.flow_save("dup", save=True)
         raise AssertionError("expected UsageError")
@@ -454,6 +464,29 @@ def test_flow_save_requires_force_to_overwrite(tmp_path: Path) -> None:
     with pytest.raises(UsageError, match="--force only applies"):
         eng.flow_save("dup", force=True)
     assert eng.flow_save("dup", save=True, force=True)["ok"]
+
+
+def test_flow_delete_is_idempotent_and_reports_the_authoritative_path(tmp_path: Path) -> None:
+    dev = ScriptedDevice([HOME], package=P, serial="emu-delete")
+    eng = _engine(tmp_path, dev)
+    res = eng.analyze(source="hierarchy")
+    eng.tap(res.elements[1].id, observe=False)
+    saved = eng.flow_save("disposable", save=True)
+
+    deleted = eng.flow_delete("disposable")
+    absent = eng.flow_delete("disposable")
+
+    assert deleted == {
+        "ok": True,
+        "action": "flow-delete",
+        "flow": "disposable",
+        "path": saved["path"],
+        "deleted": True,
+        "status": "deleted",
+    }
+    assert absent["ok"] is True
+    assert absent["deleted"] is False
+    assert absent["status"] == "already_absent"
 
 
 def test_flow_save_dry_run_previews_without_writing(tmp_path: Path) -> None:
@@ -1158,7 +1191,9 @@ def test_cli_flow_list_show_delete(tmp_path: Path) -> None:
 
     gone = runner.invoke(app, ["flow", "delete", "cli_flow"])
     assert gone.exit_code == 0 and json.loads(gone.stdout)["ok"] is True
-    assert runner.invoke(app, ["flow", "delete", "cli_flow"]).exit_code == 1
+    gone_again = runner.invoke(app, ["flow", "delete", "cli_flow"])
+    assert gone_again.exit_code == 0
+    assert json.loads(gone_again.stdout)["status"] == "already_absent"
 
 
 def test_cli_flow_run_dry_run(tmp_path: Path, monkeypatch) -> None:

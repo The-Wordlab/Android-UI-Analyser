@@ -154,6 +154,52 @@ def test_explicit_owner_without_a_process_uses_the_ttl(tmp_path, monkeypatch):
     assert entry["owner"] == "nightly-agent"
 
 
+def test_resolved_explicit_label_keeps_caller_identity_separate(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        L,
+        "_derived_owner",
+        lambda: L.LeaseOwner("derived-label", pid=4321, started="agent-start"),
+    )
+    monkeypatch.setattr(L, "_proc_started", lambda pid: "agent-start")
+    monkeypatch.setattr(L.os, "kill", lambda pid, signal: None)
+
+    owner = L.resolve_owner("friendly-label")
+    assert owner == "friendly-label"
+    assert L.owner_caller(owner) == {"pid": 4321, "started": "agent-start"}
+    assert L.acquire(tmp_path, "emulator-5554", owner=owner) is True
+
+    entry = L.read_lease(tmp_path, "emulator-5554")
+    assert entry["owner"] == "friendly-label"
+    assert entry["owner_pid"] == 4321
+    assert entry["owner_started"] == "agent-start"
+
+
+def test_same_label_cannot_steal_from_live_caller_but_takes_over_when_it_dies(
+    tmp_path, monkeypatch
+):
+    alive = {111, 222}
+    starts = {111: "first", 222: "second"}
+
+    def check_process(pid, signal):
+        if pid not in alive:
+            raise ProcessLookupError
+
+    monkeypatch.setattr(L.os, "kill", check_process)
+    monkeypatch.setattr(L, "_proc_started", lambda pid: starts.get(pid, ""))
+    first = L.LeaseOwner("shared-label", pid=111, started="first")
+    second = L.LeaseOwner("shared-label", pid=222, started="second")
+
+    assert L.acquire(tmp_path, "emulator-5554", owner=first) is True
+    assert L.acquire(tmp_path, "emulator-5554", owner=first) is True
+    assert L.acquire(tmp_path, "emulator-5554", owner=second) is False
+
+    alive.remove(111)
+    assert L.acquire(tmp_path, "emulator-5554", owner=second) is True
+    entry = L.read_lease(tmp_path, "emulator-5554")
+    assert entry["owner"] == "shared-label"
+    assert entry["owner_pid"] == 222
+
+
 def test_lease_records_what_it_is_for(tmp_path):
     """`--needs` and the app under test are provenance: which agent used it, for what."""
     L.acquire(tmp_path, "emulator-5554", owner="claude", needs=["root"], app="co.example.dev")

@@ -145,7 +145,7 @@ def _serialize(obj: Any) -> Any:
     return obj
 
 
-def _adopt_client_owner(engine: Engine, owner: str | None) -> None:
+def _adopt_client_owner(engine: Engine, owner: str | None, caller: Any = None) -> None:
     """Lease as the caller, not as this daemon.
 
     `resolve_owner` walks up to the first non-shell ancestor, so it answers a different name
@@ -158,13 +158,20 @@ def _adopt_client_owner(engine: Engine, owner: str | None) -> None:
 
     The lease belongs to whoever typed the command, so that is who the request now names.
     """
-    if not owner or owner == getattr(engine, "_lease_owner_resolved", None):
+    from . import leases
+
+    adopted_owner = leases.bind_owner_caller(owner, caller)
+    if not adopted_owner:
+        return
+    if leases.same_owner_identity(
+        adopted_owner, getattr(engine, "_lease_owner_resolved", None)
+    ):
         return
     device = getattr(engine, "_device", None)
     connected_serial = getattr(device, "serial", None)
     config = getattr(engine, "config", None)
     bound_serial = connected_serial or getattr(getattr(config, "device", None), "serial", None)
-    engine._lease_owner = owner
+    engine._lease_owner = adopted_owner
     engine._lease_serial = None
     engine._lease_owner_resolved = None
     leased_serial = engine._lease_device()  # raises when this owner may not have it
@@ -198,7 +205,7 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
     args: dict[str, Any] = request.get("args") or {}
 
     try:
-        _adopt_client_owner(engine, request.get("owner"))
+        _adopt_client_owner(engine, request.get("owner"), request.get("caller"))
         if cmd == "ping":
             return _result_ok({"pong": True, "version": _aua_version()})
 
@@ -464,6 +471,9 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
 
         elif cmd == "flow_save":
             return _result_ok(engine.flow_save(**args))
+
+        elif cmd == "flow_delete":
+            return _result_ok(engine.flow_delete(**args))
 
         elif cmd == "navigate":
             # Autonomous planner-driven navigation — returns a plain dict.
@@ -745,7 +755,17 @@ def _journal_dispatch(
 
     nested = response.get("result")
     ok = bool(response.get("ok")) and not (isinstance(nested, dict) and nested.get("ok") is False)
-    extra = {"invocation_id": request["invocation_id"]} if request.get("invocation_id") else None
+    extra = {"invocation_id": request["invocation_id"]} if request.get("invocation_id") else {}
+    expected_error_code = request.get("expected_error_code")
+    if isinstance(expected_error_code, str) and expected_error_code:
+        error_value = response.get("error")
+        actual_error_code = error_value.get("code") if isinstance(error_value, dict) else None
+        extra.update(
+            {
+                "expected_error_code": expected_error_code,
+                "expected_error_matched": actual_error_code == expected_error_code,
+            }
+        )
     journal_mod.record(
         cache_dir=engine.config.cache.dir,
         serial=serial,
@@ -764,7 +784,7 @@ def _journal_dispatch(
                 else None
             )
         ),
-        extra=extra,
+        extra=extra or None,
         owner=request.get("owner") or getattr(engine, "_lease_owner_resolved", None),
     )
 
@@ -855,6 +875,7 @@ class DaemonClient:
         timeout: float | None = None,
         owner: str | None = None,
         invocation_id: str | None = None,
+        expected_error_code: str | None = None,
     ) -> None:
         self._sock_path = sock_path
         self._timeout = 5.0 if timeout is None else timeout
@@ -862,7 +883,14 @@ class DaemonClient:
         # Resolved in THIS process; the daemon would resolve a different name. See
         # `_adopt_client_owner`.
         self._owner = owner
+        if owner:
+            from . import leases
+
+            self._caller = leases.owner_caller(owner)
+        else:
+            self._caller = None
         self._invocation_id = invocation_id
+        self._expected_error_code = expected_error_code
 
     def __enter__(self) -> DaemonClient:
         return self
@@ -883,8 +911,12 @@ class DaemonClient:
             request["journal"] = False
         if self._owner:
             request["owner"] = self._owner
+        if self._caller:
+            request["caller"] = self._caller
         if self._invocation_id:
             request["invocation_id"] = self._invocation_id
+        if self._expected_error_code:
+            request["expected_error_code"] = self._expected_error_code
         payload = json.dumps(request, ensure_ascii=False).encode() + b"\n"
 
         # A request that carries its own deadline needs a socket timeout above it. Naming the

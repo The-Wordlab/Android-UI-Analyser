@@ -14,7 +14,8 @@ from android_ui_analyser.daemon import dispatch
 from android_ui_analyser.device import Uiautomator2Device
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.errors import UsageError
-from android_ui_analyser.network import backup_path, parse_connectivity
+from android_ui_analyser.network import backup_path, parse_connectivity, restored_verified
+from android_ui_analyser.schema import NetworkState
 from conftest import FakeDevice, make_config
 
 runner = CliRunner()
@@ -90,6 +91,63 @@ def test_network_offline_is_verified_and_restore_is_reversible(tmp_path: Path) -
     assert restored.state.mobile_data_enabled is True
     assert restored.state.active_transports == ["wifi"]
     assert not saved.exists()
+
+
+def test_restore_rejects_validated_cellular_while_saved_wifi_is_missing() -> None:
+    saved = NetworkState(
+        airplane_mode=False,
+        wifi_enabled=True,
+        mobile_data_enabled=True,
+        active_network=True,
+        active_transports=["wifi"],
+        internet_validated=True,
+    )
+    cellular = saved.model_copy(update={"active_transports": ["cellular"]})
+
+    assert restored_verified(cellular, saved) is False
+    assert restored_verified(saved, saved) is True
+
+
+class _CellularBeforeWifiRestoreDevice(FakeDevice):
+    """Model Android selecting cellular briefly while saved Wi-Fi reconnects."""
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        self.restore_connectivity_reads = 0
+        self.went_offline = False
+
+    def shell(self, command: str) -> str:
+        if command == "svc data disable":
+            self.went_offline = True
+        if (
+            command == "dumpsys connectivity"
+            and self.went_offline
+            and not self._airplane
+            and self._wifi_enabled
+            and self._mobile_data_enabled
+        ):
+            self.calls.append(("shell", (command,)))
+            self.restore_connectivity_reads += 1
+            transport = "CELLULAR" if self.restore_connectivity_reads == 1 else "WIFI"
+            return (
+                "Active default network: 100\n"
+                "Current Networks:\n"
+                f"  NetworkAgentInfo{{network{{100}} nc{{[ Transports: {transport} "
+                "Capabilities: INTERNET&VALIDATED&TRUSTED ]}}\n"
+            )
+        return super().shell(command)
+
+
+def test_restore_returns_saved_wifi_after_cellular_intermediate(tmp_path: Path) -> None:
+    dev = _CellularBeforeWifiRestoreDevice(serial="fake-settling-network")
+    eng = Engine(make_config(cache={"dir": str(tmp_path)}), device=dev)
+
+    assert eng.network_offline(timeout_ms=0).verified is True
+    restored = eng.network_restore(timeout_ms=500)
+
+    assert restored.verified is True
+    assert restored.state.active_transports == ["wifi"]
+    assert dev.restore_connectivity_reads >= 2
 
 
 class _WifiOverrideDevice(FakeDevice):

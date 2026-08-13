@@ -133,6 +133,35 @@ _OFFLINE_GOAL = re.compile(
     r"|\bairplane mode\b",
     re.IGNORECASE,
 )
+_CONDITIONAL_BRANCH = re.compile(
+    r"\bif\b[^.]*?\botherwise\b[^.;]*",
+    re.IGNORECASE,
+)
+_CONDITIONAL_THEN = "__AUA_CONDITIONAL_THEN__"
+_CONDITIONAL_OTHERWISE = "__AUA_CONDITIONAL_OTHERWISE__"
+
+
+def _protect_conditional_branches(goal: str) -> str:
+    """Keep ``if … then … otherwise …`` as one checkpoint.
+
+    ``then`` normally and usefully denotes an ordered checkpoint. Inside an explicit
+    alternative it instead connects mutually exclusive branches. Splitting there turns both
+    branches into mandatory work, so mask only that token until ordinary sequencing is parsed.
+    Sentence/semicolon boundaries remain available around the conditional group.
+    """
+
+    def protect(match: re.Match[str]) -> str:
+        protected = re.sub(
+            r"\bthen\b", _CONDITIONAL_THEN, match.group(0), flags=re.IGNORECASE
+        )
+        return re.sub(
+            r";\s*(?=otherwise\b)",
+            _CONDITIONAL_OTHERWISE,
+            protected,
+            flags=re.IGNORECASE,
+        )
+
+    return _CONDITIONAL_BRANCH.sub(protect, goal)
 
 
 def goal_phases(goal: str) -> list[GoalPhase]:
@@ -144,7 +173,14 @@ def goal_phases(goal: str) -> list[GoalPhase]:
     evidence contracts owned by the agent using the app.
     """
     cleaned = " ".join(goal.strip().split())
-    segments = [part.strip(" ,") for part in _SEQUENCE_BOUNDARY.split(cleaned) if part.strip(" ,")]
+    protected = _protect_conditional_branches(cleaned)
+    segments = [
+        part.replace(_CONDITIONAL_THEN, "then")
+        .replace(_CONDITIONAL_OTHERWISE, "; ")
+        .strip(" ,")
+        for part in _SEQUENCE_BOUNDARY.split(protected)
+        if part.strip(" ,")
+    ]
     phases: list[GoalPhase] = []
     offline_added = False
     cleanup_added = False
@@ -205,16 +241,23 @@ def phase_progress(state: SessionState, *, compact: bool = False) -> dict[str, A
     current_payload = current.model_dump(mode="json") if current is not None else None
     if compact and isinstance(current_payload, dict):
         current_payload.pop("recommended_call", None)
+    terminated = state.finished_ms is not None
     payload: dict[str, Any] = {
         "session_id": state.session_id,
         "completed": completed,
         "total": len(phases),
         "done": current is None,
+        "terminated": terminated,
+        "status": (
+            "completed" if current is None else "terminated_incomplete" if terminated else "active"
+        ),
         "current": current_payload,
-        "next_call": current.recommended_call if current is not None else None,
+        # A terminated session is immutable and has no active next call. Preserve the incomplete
+        # phase as evidence of what was not done rather than inviting work against a closed owner.
+        "next_call": current.recommended_call if current is not None and not terminated else None,
         "checkpoint": (
             None
-            if current is None
+            if current is None or terminated
             else {
                 "cli": f'--phase-done {current.id}="<evidence from the current result>"',
                 "mcp": {"phase_done": {"id": current.id, "evidence": "<evidence>"}},
@@ -700,11 +743,37 @@ def review_session_events(state: SessionState, events: Sequence[dict[str, Any]])
     high_level = sum(
         counts.get(name, 0) for name in ("session_start", "reach", "goto", "flow_run", "back_until")
     )
+    expected_probes = [
+        event
+        for event in top_level
+        if isinstance((event.get("extra") or {}).get("expected_error_code"), str)
+    ]
+    expected_matches = [
+        event
+        for event in expected_probes
+        if (event.get("extra") or {}).get("expected_error_matched") is True
+    ]
     failures = sum(
         1
         for event in top_level
-        if not event.get("ok") and _base_command(event.get("cmd")) != "session_review"
+        if (
+            not event.get("ok")
+            and (event.get("extra") or {}).get("expected_error_matched") is not True
+            and _base_command(event.get("cmd")) != "session_review"
+        )
+        or (
+            bool(event.get("ok"))
+            and isinstance((event.get("extra") or {}).get("expected_error_code"), str)
+        )
     )
+    accounting = {
+        "journal_events": len(scoped),
+        "top_level_calls": len(top_level),
+        "folded_internal_events": max(0, len(scoped) - len(top_level)),
+        "expected_error_probes": len(expected_probes),
+        "expected_error_matches": len(expected_matches),
+        "unexpected_failures": failures,
+    }
     return {
         # The review command succeeded even when the run being reviewed contained recoverable
         # failures. Keeping those two meanings in one `ok` made the review journal itself as a
@@ -719,6 +788,7 @@ def review_session_events(state: SessionState, events: Sequence[dict[str, Any]])
         "calls": len(top_level),
         "engine_events": len(scoped),
         "failures": failures,
+        "accounting": accounting,
         "duration_ms": round(duration_ms, 1),
         "commands": counts,
         "high_level_navigation_ratio": (

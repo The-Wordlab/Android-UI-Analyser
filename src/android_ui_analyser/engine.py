@@ -4769,6 +4769,11 @@ class Engine:
 
         store = FlowStore(self.config.memory)
         path = store.path(name)
+        existed_before = path.is_file()
+        required_save_mode = "force" if existed_before else "create"
+        save_call = f"aua flow save {shlex.quote(name)} --last {requested} --save"
+        if existed_before:
+            save_call += " --force"
         capture_blockers = recorded_step_blockers(selected)
         if capture_blockers:
             return {
@@ -4776,6 +4781,10 @@ class Engine:
                 "action": "flow-save-preview",
                 "flow": name,
                 "path": str(path),
+                "exists": existed_before,
+                "collision": existed_before,
+                "status": "not_saveable",
+                "required_save_mode": required_save_mode,
                 "saved": False,
                 "saveable": False,
                 "steps": len(selected),
@@ -4819,9 +4828,6 @@ class Engine:
             steps=steps,
         )
         preview = render_flow_yaml(flow)
-        save_call = f"aua flow save {shlex.quote(name)} --last {requested} --save"
-        if force:
-            save_call += " --force"
         warnings.extend(check_saveable(flow))
         should_save = save and not dry_run
         if should_save:
@@ -4832,6 +4838,18 @@ class Engine:
             "action": "flow-save" if should_save else "flow-save-preview",
             "flow": name,
             "path": str(path),
+            "exists": path.is_file(),
+            "collision": existed_before,
+            "status": (
+                "overwritten"
+                if should_save and existed_before
+                else "created"
+                if should_save
+                else "preview_existing"
+                if existed_before
+                else "preview_new"
+            ),
+            "required_save_mode": required_save_mode,
             "steps": len(steps),
             "params_needed": sorted(params),
             "saved": should_save,
@@ -4868,6 +4886,24 @@ class Engine:
         if warnings:
             out["warnings"] = warnings
         return out
+
+    def flow_delete(self, name: str) -> dict[str, Any]:
+        """Idempotently delete one named flow through the shared engine boundary."""
+        from .flows import FlowStore
+
+        store = FlowStore(self.config.memory)
+        path = store.path(name)
+        deleted = store.delete(name)
+        if deleted:
+            self._flows_cache.clear()
+        return {
+            "ok": True,
+            "action": "flow-delete",
+            "flow": name,
+            "path": str(path),
+            "deleted": deleted,
+            "status": "deleted" if deleted else "already_absent",
+        }
 
     def flow_list(self) -> dict[str, Any]:
         """List flows and disclose compatibility with the attached session when known."""
@@ -5151,6 +5187,62 @@ class Engine:
         from .session import _goal_terms, _match_score
 
         goal_terms = set(_goal_terms(ui_goal))
+        # A stable mapped screen plus an exact multi-word title from the requested destination
+        # is arrival evidence, not permission to descend into a child row that happens to share
+        # one word. This mattered for a destination titled "Network & internet": the old fallback
+        # immediately proposed its nested "Internet" row after the requested screen had arrived.
+        visible_arrival = next(
+            (
+                label
+                for element in observation.elements
+                if not element.clickable
+                and (label := (element.text or element.content_desc or "").strip())
+                and len(set(_goal_terms(label)) & goal_terms) >= 2
+                and label.casefold() in ui_goal.casefold()
+            ),
+            None,
+        )
+        if observation.meta.known_screen and visible_arrival:
+            preview = re.search(
+                r"\bpreview\s+(?:(?:the|a)\s+)?(?:(?:flow)\s+)?"
+                r"(?P<name>[A-Za-z0-9_.-]+)(?:\s+--last\s+(?P<last>[0-9]+))?",
+                ui_goal,
+                flags=re.IGNORECASE,
+            )
+            if preview is not None:
+                name = preview.group("name")
+                last = int(preview.group("last") or 12)
+                return {
+                    "kind": "flow_save_preview",
+                    "cli": f"aua flow save {shlex.quote(name)} --last {last}",
+                    "mcp": {"tool": "flow_save", "arguments": {"name": name, "last": last}},
+                    "reason": (
+                        f"The current mapped screen visibly matches {visible_arrival!r}; "
+                        "continue with the requested non-writing flow preview instead of "
+                        "navigating into a weaker one-word match."
+                    ),
+                    "executes": False,
+                    "arrival": {
+                        "status": "observed",
+                        "known_screen": observation.meta.known_screen,
+                        "visible_title": visible_arrival,
+                    },
+                }
+            return {
+                "kind": "arrived",
+                "cli": "Reuse this result's observation; the requested destination is visible",
+                "mcp": {"tool": "session_progress", "arguments": {"session_id": state.session_id}},
+                "reason": (
+                    f"The current mapped screen visibly matches {visible_arrival!r}; do not "
+                    "navigate into a weaker one-word child match."
+                ),
+                "executes": False,
+                "arrival": {
+                    "status": "observed",
+                    "known_screen": observation.meta.known_screen,
+                    "visible_title": visible_arrival,
+                },
+            }
         ranked: list[tuple[int, Any]] = []
         for element in observation.elements:
             if not element.clickable or element.enabled is False:
@@ -5301,7 +5393,7 @@ class Engine:
     def session_finish(self, session_id: str | None = None) -> dict[str, Any]:
         """Restore only reversible state created after this session started, then review it."""
         from . import network, network_profiles
-        from .session import finish_session_state
+        from .session import finish_session_state, phase_progress
 
         state = self._session_state(session_id)
         cleanup: list[dict[str, Any]] = []
@@ -5359,16 +5451,26 @@ class Engine:
 
         if not errors:
             state = finish_session_state(self.config.cache.dir, state)
+        progress = phase_progress(state)
         review = self.session_review(state.session_id)
         return {
             "ok": not errors,
             "session_id": state.session_id,
-            "finished": not errors,
+            # ``finished`` means every requested checkpoint completed. ``terminated`` means the
+            # session lifecycle/cleanup ended successfully. Keeping those distinct prevents a
+            # closed session with incomplete phases from claiming both finished=true and done=false.
+            "finished": not errors and bool(progress["done"]),
+            "terminated": not errors,
+            "goal_progress": progress,
             "cleanup": cleanup,
             "errors": errors,
             "review": review,
             "hint": (
-                "session finished; only session-owned reversible state was restored"
+                (
+                    "session completed; only session-owned reversible state was restored"
+                    if progress["done"]
+                    else "session terminated and cleanup completed; unfinished goal phases remain incomplete"
+                )
                 if not errors
                 else "cleanup is incomplete; fix the reported device access and run session finish again"
             ),

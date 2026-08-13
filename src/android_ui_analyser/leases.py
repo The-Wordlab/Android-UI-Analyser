@@ -8,8 +8,9 @@ quietly wrong.
 The design keeps two properties that matter more than features:
 
 **No deadlock is possible.** Expiry is computed when a lease is *read*, not by a reaper
-process. A lease owned by a derived agent process expires as soon as that process is gone;
-explicit owners fall back to the TTL. There is no cleanup process that can itself fail.
+process. A lease owned by an agent process expires as soon as that process is gone. Friendly
+explicit labels remain labels only; the caller pid + start time travel separately so a warm
+daemon cannot accidentally keep the label alive. There is no cleanup process that can fail.
 
 **Identity has to be stable across an agent's calls, or stickiness inverts into churn.**
 Measured: a session id is *not* stable — consecutive tool calls from one agent reported sids
@@ -52,6 +53,25 @@ _LAUNCHERS = {
 }
 
 
+class LeaseOwner(str):
+    """Human-readable owner label carrying its separate process identity in-process."""
+
+    pid: int | None
+    started: str | None
+
+    def __new__(
+        cls,
+        label: str,
+        *,
+        pid: int | None = None,
+        started: str | None = None,
+    ) -> LeaseOwner:
+        value = str.__new__(cls, label)
+        value.pid = pid
+        value.started = started
+        return value
+
+
 # --------------------------------------------------------------------------- identity
 
 
@@ -90,7 +110,7 @@ def _proc_started(pid: int) -> str:
         return ""
 
 
-def derive_identity() -> str:
+def _derived_owner() -> LeaseOwner:
     """The first ancestor that outlives one command: the agent process, stable for its whole run.
 
     Falls back to this process when the walk finds nothing better, which is the right answer
@@ -105,9 +125,24 @@ def derive_identity() -> str:
             break
         name = _proc_name(parent)
         if name and not _is_transient(name):
-            return f"{name}-{parent}-{_proc_started(parent)}".strip("-")
+            started = _proc_started(parent)
+            return LeaseOwner(
+                f"{name}-{parent}-{started}".strip("-"),
+                pid=parent,
+                started=started or None,
+            )
         pid = parent
-    return f"pid-{os.getpid()}-{_proc_started(os.getpid())}".strip("-")
+    current = os.getpid()
+    started = _proc_started(current)
+    return LeaseOwner(
+        f"pid-{current}-{started}".strip("-"),
+        pid=current,
+        started=started or None,
+    )
+
+
+def derive_identity() -> str:
+    return _derived_owner()
 
 
 def _is_transient(name: str) -> bool:
@@ -116,12 +151,39 @@ def _is_transient(name: str) -> bool:
 
 def resolve_owner(explicit: str | None = None) -> str:
     """``--owner`` → ``$AUA_OWNER`` → derived. Never None: every caller is somebody."""
+    if isinstance(explicit, LeaseOwner):
+        return explicit
+    derived = _derived_owner()
     if explicit and str(explicit).strip():
-        return str(explicit).strip()
+        return LeaseOwner(
+            str(explicit).strip(), pid=derived.pid, started=derived.started
+        )
     env = (os.environ.get("AUA_OWNER") or "").strip()
     if env:
-        return env
-    return derive_identity()
+        return LeaseOwner(env, pid=derived.pid, started=derived.started)
+    return derived
+
+
+def owner_caller(owner: str) -> dict[str, Any] | None:
+    """Structured caller identity for daemon transport; never encoded into the label."""
+    process = _owner_process(owner)
+    if process is None:
+        return None
+    pid, started = process
+    return {"pid": pid, "started": started}
+
+
+def bind_owner_caller(owner: str | None, caller: Any) -> str | None:
+    """Rebuild a process-bound owner received over a daemon request."""
+    if not owner:
+        return None
+    if not isinstance(caller, dict):
+        return owner
+    pid = caller.get("pid")
+    started = caller.get("started")
+    if not isinstance(pid, int) or pid <= 1 or not isinstance(started, str) or not started:
+        return owner
+    return LeaseOwner(str(owner), pid=pid, started=started)
 
 
 # --------------------------------------------------------------------------- storage
@@ -163,6 +225,8 @@ _OWNER_RE = re.compile(r"^(?P<name>.+)-(?P<pid>\d+)-(?P<started>.+)$")
 
 
 def _owner_process(owner: str) -> tuple[int, str] | None:
+    if isinstance(owner, LeaseOwner) and owner.pid and owner.started:
+        return owner.pid, owner.started
     match = _OWNER_RE.match(owner)
     if match is None:
         return None
@@ -171,6 +235,30 @@ def _owner_process(owner: str) -> tuple[int, str] | None:
     if _proc_started(pid) != started:
         return None
     return pid, started
+
+
+def same_owner_identity(left: str | None, right: str | None) -> bool:
+    """True only for the same label and, when bound, the same live caller identity."""
+    if left is None or right is None or str(left) != str(right):
+        return False
+    left_process = _owner_process(left)
+    right_process = _owner_process(right)
+    if left_process is None and right_process is None:
+        return True
+    return left_process == right_process
+
+
+def _entry_matches_owner(entry: dict[str, Any], owner: str) -> bool:
+    if entry.get("owner") != str(owner):
+        return False
+    incoming = _owner_process(owner)
+    stored_pid = entry.get("owner_pid")
+    stored_started = entry.get("owner_started")
+    if incoming is None:
+        return stored_pid is None and stored_started is None
+    if stored_pid is None and stored_started is None:
+        return True  # Upgrade a legacy same-label lease to process-bound ownership.
+    return incoming == (stored_pid, stored_started)
 
 
 def read_lease(cache_dir: str | Path, serial: str) -> dict[str, Any] | None:
@@ -207,7 +295,7 @@ def acquire(
     path.parent.mkdir(parents=True, exist_ok=True)
     entry = {
         "serial": serial,
-        "owner": owner,
+        "owner": str(owner),
         "acquired": _now(),
         "last_activity": _now(),
         "ttl_s": int(ttl_s),
@@ -240,8 +328,8 @@ def acquire(
         entry["acquired"] = _now()
         _write(path, entry)
         confirmed = read_lease(cache_dir, serial)
-        return bool(confirmed and confirmed.get("owner") == owner)
-    if current.get("owner") == owner:
+        return bool(confirmed and _entry_matches_owner(confirmed, owner))
+    if _entry_matches_owner(current, owner):
         current["last_activity"] = _now()
         current["ttl_s"] = int(ttl_s)
         if owner_process is not None:
@@ -258,7 +346,7 @@ def acquire(
 def renew(cache_dir: str | Path, serial: str, *, owner: str, app: str | None = None) -> bool:
     """Heartbeat. Called on every command, and from inside long waits."""
     current = read_lease(cache_dir, serial)
-    if current is None or current.get("owner") != owner:
+    if current is None or not _entry_matches_owner(current, owner):
         return False
     current["last_activity"] = _now()
     if app:
@@ -270,7 +358,7 @@ def renew(cache_dir: str | Path, serial: str, *, owner: str, app: str | None = N
 def release(cache_dir: str | Path, serial: str, *, owner: str | None = None) -> bool:
     """Drop the lease. A mismatched owner is refused so one agent cannot free another's."""
     current = read_lease(cache_dir, serial)
-    if current is not None and owner is not None and current.get("owner") != owner:
+    if current is not None and owner is not None and not _entry_matches_owner(current, owner):
         return False
     with contextlib.suppress(OSError):
         _lease_path(cache_dir, serial).unlink()
@@ -297,7 +385,7 @@ def holder(cache_dir: str | Path, serial: str) -> str | None:
 
 def held_by(cache_dir: str | Path, owner: str) -> list[str]:
     """Serials this owner already holds — the basis for sticky assignment."""
-    return [str(e["serial"]) for e in list_leases(cache_dir) if e.get("owner") == owner]
+    return [str(e["serial"]) for e in list_leases(cache_dir) if _entry_matches_owner(e, owner)]
 
 
 def idle_seconds(entry: dict[str, Any]) -> float:
@@ -391,13 +479,20 @@ def choose_device(
     known = dict(candidates)
 
     def _free_report() -> str:
-        free = [s for s, caps in candidates if holder(cache_dir, s) in (None, owner)
-                and not unmet_needs(caps, needs)]
+        free = [
+            s
+            for s, caps in candidates
+            if (
+                (current := read_lease(cache_dir, s)) is None
+                or _entry_matches_owner(current, owner)
+            )
+            and not unmet_needs(caps, needs)
+        ]
         return ", ".join(free) if free else "none"
 
     if explicit:
         current = read_lease(cache_dir, explicit)
-        if current is not None and current.get("owner") != owner:
+        if current is not None and not _entry_matches_owner(current, owner):
             free = _free_report()
             # "omit --serial to auto-pick" is a dead end when nothing is free: dropping the
             # flag lands on the no-free-device branch below. Measured 2026-08-10 — an agent
@@ -426,7 +521,11 @@ def choose_device(
                 f"{explicit} does not satisfy: {', '.join(missing)}",
                 hint=f"free and matching: {_free_report()}",
             )
-        acquire(cache_dir, explicit, owner=owner, ttl_s=ttl_s, needs=needs)
+        if not acquire(cache_dir, explicit, owner=owner, ttl_s=ttl_s, needs=needs):
+            raise DeviceLeasedError(
+                f"{explicit} lease changed while it was being selected",
+                hint="Run `aua lease list`, then retry or select another free device.",
+            )
         return explicit, "explicit"
 
     # Sticky: keep an agent on the device it already knows, so its element ids, app state and

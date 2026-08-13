@@ -151,6 +151,7 @@ def test_mcp_lists_core_tools() -> None:
         "await_and_analyze",
         "flow_list",
         "flow_save",
+        "flow_delete",
     } <= set(names)
 
 
@@ -178,6 +179,13 @@ def test_mcp_flow_save_is_preview_first_with_explicit_commit() -> None:
     assert props["save"]["default"] is False
     assert "writes nothing" in props["save"]["description"]
     assert "Deprecated" in props["dry_run"]["description"]
+
+
+def test_mcp_expected_error_annotation_is_machine_readable() -> None:
+    tool = next(item for item in _tool_definitions() if item.name == "flow_save")
+
+    assert tool.inputSchema["properties"]["expect_error"]["type"] == "string"
+    assert "exact" in tool.inputSchema["properties"]["expect_error"]["description"].casefold()
 
 
 def test_mcp_initialization_teaches_goal_first_protocol() -> None:
@@ -591,6 +599,34 @@ def test_mcp_top_level_call_is_redacted_and_journaled(
     assert event["args"]["parameters"] == "<redacted>"
     assert event["extra"]["invocation_id"]
     assert event["result"]["ok"] is True
+
+
+def test_mcp_journal_marks_only_an_exact_expected_error_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from android_ui_analyser import journal
+    from android_ui_analyser.errors import UsageError
+
+    eng = _engine()
+    monkeypatch.setattr(
+        eng,
+        "flow_delete",
+        lambda _name: (_ for _ in ()).throw(UsageError("intentional probe")),
+    )
+    server = build_server(eng)
+
+    async def run() -> None:
+        async with create_connected_server_and_client_session(server) as client:
+            await client.call_tool(
+                "flow_delete",
+                {"name": "missing", "expect_error": "usage"},
+            )
+
+    anyio.run(run)
+    event = journal.read_since(eng.config.cache.dir, eng.device.serial, limit=5)[-1]
+    assert event["ok"] is False
+    assert event["extra"]["expected_error_code"] == "usage"
+    assert event["extra"]["expected_error_matched"] is True
 
 
 def test_mcp_map_audit_and_reconcile_plan_roundtrip() -> None:

@@ -430,6 +430,64 @@ def test_review_succeeds_while_reporting_run_failures_without_poisoning_itself(
     assert reviewed_again["failures"] == 1, "a prior review must not become a new run failure"
 
 
+def test_review_accounts_for_matching_expected_error_without_poisoning_run(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    engine = _engine(tmp_path, "goal-expected-error")
+    started = _start(engine, monkeypatch)
+    common = {
+        "cache_dir": engine.config.cache.dir,
+        "serial": engine.device.serial,
+        "source": "cli",
+        "owner": None,
+    }
+    journal.record(
+        **common,
+        cmd="flow_save",
+        ok=False,
+        error={"code": "usage", "message": "intentional probe"},
+        extra={"expected_error_code": "usage", "expected_error_matched": True},
+    )
+    journal.record(**common, cmd="flow_delete", ok=True, result={"ok": True})
+
+    review = engine.session_review(started["session_id"])
+
+    assert review["run_ok"] is True
+    assert review["failures"] == 0
+    assert review["accounting"] == {
+        "journal_events": 2,
+        "top_level_calls": 2,
+        "folded_internal_events": 0,
+        "expected_error_probes": 1,
+        "expected_error_matches": 1,
+        "unexpected_failures": 0,
+    }
+
+
+def test_review_fails_when_declared_expected_error_does_not_happen(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    engine = _engine(tmp_path, "goal-missing-expected-error")
+    started = _start(engine, monkeypatch)
+    journal.record(
+        cache_dir=engine.config.cache.dir,
+        serial=engine.device.serial,
+        source="cli",
+        owner=None,
+        cmd="flow_save",
+        ok=True,
+        result={"ok": True},
+        extra={"expected_error_code": "usage", "expected_error_matched": False},
+    )
+
+    review = engine.session_review(started["session_id"])
+
+    assert review["run_ok"] is False
+    assert review["failures"] == 1
+    assert review["accounting"]["expected_error_probes"] == 1
+    assert review["accounting"]["expected_error_matches"] == 0
+
+
 def test_review_marks_historical_duplicate_invocation_unknown_without_guessing_visibility(
     tmp_path: Path, monkeypatch: Any
 ) -> None:

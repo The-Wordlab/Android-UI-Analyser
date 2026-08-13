@@ -151,6 +151,8 @@ class GlobalOpts:
     answers: tuple[str, ...] = ()
     #: `--phase-done PHASE_ID="evidence"` checkpoints, applied before the next command.
     phases_done: tuple[str, ...] = ()
+    #: Machine-readable error code intentionally exercised by this one invocation.
+    expect_error: str | None = None
     until_timeout: int = 30000
     until_poll: int = 500
     #: Which of the wait-tuning flags the caller actually typed. A bound default is
@@ -245,12 +247,14 @@ def _run(ctx: typer.Context, fn: Callable[[Engine, OutputFormat], T]) -> T:
             _parse_await_terms(opts.until, require_positive=not standalone_until)
         engine = opts.engine()
         global _OBSERVATION_VIEW, _UNTIL, _ENGINE, _INVOCATION_ID, _ANNOTATION_WARNINGS
+        global _EXPECTED_ERROR_CODE
         spec = opts.observe_fields
         if spec is None:
             spec = getattr(engine.config.output, "observation_fields", None)
         _OBSERVATION_VIEW = Projection.for_observation(spec, fmt=cfg_fmt)
         _ENGINE = engine
         _INVOCATION_ID = uuid.uuid4().hex
+        _EXPECTED_ERROR_CODE = opts.expect_error
         _ANNOTATION_WARNINGS = []
         if not opts.until:
             # `--until-timeout` only bounds a `--until`, so on its own it does nothing at all.
@@ -521,6 +525,7 @@ _UNTIL: tuple[str, int, int] | None = None
 _ENGINE: Any = None
 _INVOCATION_ID: str | None = None
 _ANNOTATION_WARNINGS: list[dict[str, Any]] = []
+_EXPECTED_ERROR_CODE: str | None = None
 
 
 def _set_no_meta_observation_view(fmt: OutputFormat, enabled: bool) -> None:
@@ -924,6 +929,7 @@ def _warm(engine: Engine) -> None:
 
 # Engine method name → daemon command name (they differ only for ``input``).
 _DAEMON_CMD = {"input_text": "input"}
+_HOST_ONLY_ROUTE_METHODS = frozenset({"flow_delete"})
 
 # Methods whose STATE lives only in the daemon process. For these, an in-process fallback
 # cannot produce a correct answer — a process with no capture buffer reports "not running"
@@ -1021,13 +1027,15 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
     # boundaries, that also makes jobs/session state appear to vanish on the next invocation.
     # Lease discovery does not connect to uiautomator2; it is the cheap ownership decision
     # every transport must share.
-    lease_serial = getattr(engine, "_lease_serial", None)
-    lease_device = getattr(engine, "_lease_device", None)
-    if not lease_serial and callable(lease_device):
-        lease_serial = lease_device()
-    if lease_serial:
-        cfg.device.serial = lease_serial
-    if getattr(cfg.daemon, "enabled", False):
+    host_only = method in _HOST_ONLY_ROUTE_METHODS
+    if not host_only:
+        lease_serial = getattr(engine, "_lease_serial", None)
+        lease_device = getattr(engine, "_lease_device", None)
+        if not lease_serial and callable(lease_device):
+            lease_serial = lease_device()
+        if lease_serial:
+            cfg.device.serial = lease_serial
+    if getattr(cfg.daemon, "enabled", False) and not host_only:
         try:
             from . import daemon as daemon_mod
 
@@ -1070,10 +1078,15 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
             if ver is not False and not skew:
                 from . import leases as _leases
 
+                client_options: dict[str, Any] = {
+                    "owner": _leases.resolve_owner(getattr(engine, "_lease_owner", None)),
+                    "invocation_id": _INVOCATION_ID,
+                }
+                if _EXPECTED_ERROR_CODE:
+                    client_options["expected_error_code"] = _EXPECTED_ERROR_CODE
                 client = daemon_mod.DaemonClient(
                     daemon_mod.socket_path(cfg),
-                    owner=_leases.resolve_owner(getattr(engine, "_lease_owner", None)),
-                    invocation_id=_INVOCATION_ID,
+                    **client_options,
                 )
                 cmd = _DAEMON_CMD.get(method, method)
                 resp = client.call(cmd, **kwargs)
@@ -1101,11 +1114,13 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
     from . import journal as journal_mod
 
     t0 = time.monotonic()
-    serial = None
-    with contextlib.suppress(Exception):
-        serial = engine.device.serial
+    serial = cfg.device.serial if host_only else None
+    if not host_only:
+        with contextlib.suppress(Exception):
+            serial = engine.device.serial
     try:
-        _warm(engine)
+        if not host_only:
+            _warm(engine)
         result = getattr(engine, method)(**kwargs)
         with contextlib.suppress(Exception):
             journal_mod.record(
@@ -1119,7 +1134,17 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
                 duration_ms=(time.monotonic() - t0) * 1000.0,
                 result=result,
                 owner=getattr(engine, "_lease_owner_resolved", None),
-                extra={"invocation_id": _INVOCATION_ID} if _INVOCATION_ID else None,
+                extra={
+                    **({"invocation_id": _INVOCATION_ID} if _INVOCATION_ID else {}),
+                    **(
+                        {
+                            "expected_error_code": _EXPECTED_ERROR_CODE,
+                            "expected_error_matched": False,
+                        }
+                        if _EXPECTED_ERROR_CODE
+                        else {}
+                    ),
+                },
             )
         from .coaching import decorate_result
 
@@ -1137,7 +1162,17 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
                 duration_ms=(time.monotonic() - t0) * 1000.0,
                 error=error_value if isinstance(error_value, dict) else None,
                 owner=getattr(engine, "_lease_owner_resolved", None),
-                extra={"invocation_id": _INVOCATION_ID} if _INVOCATION_ID else None,
+                extra={
+                    **({"invocation_id": _INVOCATION_ID} if _INVOCATION_ID else {}),
+                    **(
+                        {
+                            "expected_error_code": _EXPECTED_ERROR_CODE,
+                            "expected_error_matched": err.code == _EXPECTED_ERROR_CODE,
+                        }
+                        if _EXPECTED_ERROR_CODE
+                        else {}
+                    ),
+                },
             )
         raise
 
@@ -1383,6 +1418,15 @@ def main(
             "running this next command; repeatable and adds no extra device call."
         ),
     ),
+    expect_error: str | None = typer.Option(
+        None,
+        "--expect-error",
+        metavar="CODE",
+        help=(
+            "Declare the exact machine-readable error code this invocation intentionally "
+            "probes; session review counts it as expected only when it matches."
+        ),
+    ),
     until_timeout: int = typer.Option(
         30000, "--until-timeout", metavar="MS", help="Give up on --until after this long."
     ),
@@ -1448,6 +1492,7 @@ def main(
         observe_fields=observe_fields,
         answers=tuple(answers or ()),
         phases_done=tuple(phase_done or ()),
+        expect_error=expect_error,
         until=until,
         until_timeout=until_timeout,
         until_poll=until_poll,
@@ -5706,17 +5751,10 @@ def flow_delete_cmd(
     ctx: typer.Context,
     name: str = typer.Argument(..., help="Flow name to delete."),
 ) -> None:
-    """Delete a saved flow."""
+    """Idempotently delete a saved flow (an already-absent flow is success)."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        import json
-
-        from .flows import FlowStore
-
-        deleted = FlowStore(_opts(ctx).load().memory).delete(name)
-        typer.echo(json.dumps({"ok": deleted, "action": "flow-delete", "flow": name}))
-        if not deleted:
-            raise typer.Exit(1)
+        _emit(_route(engine, "flow_delete", name=name), fmt)
 
     _run(ctx, go)
 

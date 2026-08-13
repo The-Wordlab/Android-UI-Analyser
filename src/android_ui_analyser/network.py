@@ -212,6 +212,13 @@ def restored_verified(current: NetworkState, saved: NetworkState) -> bool:
             return False
     if saved.active_network is not None and current.active_network != saved.active_network:
         return False
+    # Android can bring cellular online before a saved Wi-Fi default reconnects. A validated
+    # intermediate network is not the state we promised to restore, so require every transport
+    # observed in the restore point before returning success and exposing the settled state.
+    if saved.active_transports and not set(saved.active_transports).issubset(
+        current.active_transports
+    ):
+        return False
     return saved.internet_validated is not True or current.internet_validated is True
 
 

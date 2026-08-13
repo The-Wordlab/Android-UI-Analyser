@@ -71,6 +71,33 @@ def test_the_same_owner_twice_does_not_reclaim() -> None:
     assert engine.claims == 0
 
 
+def test_same_label_reclaims_only_when_structured_caller_changes(monkeypatch) -> None:
+    from android_ui_analyser import leases
+
+    starts = {101: "one", 202: "two"}
+    monkeypatch.setattr(leases, "_proc_started", lambda pid: starts.get(pid, ""))
+    engine = _FakeEngine()
+
+    _adopt_client_owner(engine, "friendly", {"pid": 101, "started": "one"})
+    assert engine.claims == 1
+
+    _adopt_client_owner(engine, "friendly", {"pid": 101, "started": "one"})
+    assert engine.claims == 1, "the same live caller must retain the warm lease"
+
+    _adopt_client_owner(engine, "friendly", {"pid": 202, "started": "two"})
+    assert engine.claims == 2, "a new caller behind the same label must rebind the daemon"
+
+
+def test_daemon_client_transports_caller_separately_from_label(monkeypatch) -> None:
+    from android_ui_analyser import leases
+
+    owner = leases.LeaseOwner("friendly", pid=303, started="three")
+    client = DaemonClient("/nonexistent.sock", owner=owner)
+
+    assert client._owner == "friendly"
+    assert client._caller == {"pid": 303, "started": "three"}
+
+
 def test_a_connected_daemon_refuses_to_claim_a_different_serial() -> None:
     engine = _FakeEngine(resolved="daemon-self:1")
     engine._device = type("Device", (), {"serial": "emulator-5554"})()

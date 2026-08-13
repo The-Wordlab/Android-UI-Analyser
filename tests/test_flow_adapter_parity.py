@@ -95,3 +95,52 @@ def test_mcp_flow_save_dispatches_preview_by_default_and_commit_explicitly(
     assert commit["saved"] is True and commit["action"] == "flow-save"
     assert [call["save"] for call in calls] == [False, True]
     assert all(call["dry_run"] is False and call["force"] is False for call in calls)
+
+
+def test_cli_flow_delete_routes_idempotent_engine_result(monkeypatch) -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def fake_route(_engine: Engine, command: str, **kwargs: object) -> dict[str, object]:
+        calls.append((command, kwargs))
+        return {
+            "ok": True,
+            "action": "flow-delete",
+            "flow": kwargs["name"],
+            "deleted": False,
+            "status": "already_absent",
+        }
+
+    monkeypatch.setattr(cli_mod, "_route", fake_route)
+
+    result = runner.invoke(app, ["flow", "delete", "gone"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["status"] == "already_absent"
+    assert calls == [("flow_delete", {"name": "gone"})]
+
+
+def test_mcp_flow_delete_routes_idempotent_engine_result(monkeypatch) -> None:
+    engine = _engine()
+    monkeypatch.setattr(
+        engine,
+        "flow_delete",
+        lambda name: {
+            "ok": True,
+            "action": "flow-delete",
+            "flow": name,
+            "deleted": False,
+            "status": "already_absent",
+        },
+    )
+    server = build_server(engine)
+
+    async def run() -> dict[str, object]:
+        async with create_connected_server_and_client_session(server) as client:
+            result = await client.call_tool("flow_delete", {"name": "gone"})
+            return json.loads(_first_text(result))
+
+    result = anyio.run(run)
+
+    assert result["ok"] is True
+    assert result["deleted"] is False
+    assert result["status"] == "already_absent"
