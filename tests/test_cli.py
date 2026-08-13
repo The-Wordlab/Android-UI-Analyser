@@ -362,3 +362,104 @@ def test_devices_lists_json(monkeypatch: pytest.MonkeyPatch) -> None:
     data = json.loads(result.stdout)
     assert isinstance(data, list)
     assert data[0]["serial"] == "emulator-5554"
+
+
+def test_lease_acquire_positional_serial_overrides_ambient_pin(
+    tmp_path: Path,
+    isolated_cache: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from android_ui_analyser import leases
+    from android_ui_analyser.schema import DeviceInfo
+
+    config = tmp_path / "config.yaml"
+    config.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setenv("AUA_SERIAL", "emulator-5554")
+    monkeypatch.setattr(
+        engine_mod,
+        "list_devices",
+        lambda: [
+            DeviceInfo(serial="phone-123", model="Phone", android_version="14"),
+            DeviceInfo(serial="emulator-5554", model="Emulator", android_version="14"),
+        ],
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "--config",
+            str(config),
+            "--owner",
+            "agent-a",
+            "lease",
+            "acquire",
+            "phone-123",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout)["serial"] == "phone-123"
+    assert leases.holder(isolated_cache, "phone-123") == "agent-a"
+    assert leases.holder(isolated_cache, "emulator-5554") is None
+
+
+def test_unpinned_lease_acquire_prefers_emulator_when_phone_is_listed_first(
+    tmp_path: Path,
+    isolated_cache: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from android_ui_analyser import leases
+    from android_ui_analyser.schema import DeviceInfo
+
+    config = tmp_path / "config.yaml"
+    config.write_text("{}\n", encoding="utf-8")
+    monkeypatch.delenv("AUA_SERIAL", raising=False)
+    monkeypatch.setattr(
+        engine_mod,
+        "list_devices",
+        lambda: [
+            DeviceInfo(serial="phone-123", model="Phone", android_version="14"),
+            DeviceInfo(serial="emulator-5554", model="Emulator", android_version="14"),
+        ],
+    )
+
+    result = runner.invoke(
+        app,
+        ["--config", str(config), "--owner", "agent-a", "lease", "acquire"],
+    )
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout)["serial"] == "emulator-5554"
+    assert leases.holder(isolated_cache, "emulator-5554") == "agent-a"
+    assert leases.holder(isolated_cache, "phone-123") is None
+
+
+def test_lease_acquire_without_positional_serial_preserves_aua_serial(
+    tmp_path: Path,
+    isolated_cache: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from android_ui_analyser import leases
+    from android_ui_analyser.schema import DeviceInfo
+
+    config = tmp_path / "config.yaml"
+    config.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setenv("AUA_SERIAL", "phone-123")
+    monkeypatch.setattr(
+        engine_mod,
+        "list_devices",
+        lambda: [
+            DeviceInfo(serial="phone-123", model="Phone", android_version="14"),
+            DeviceInfo(serial="emulator-5554", model="Emulator", android_version="14"),
+        ],
+    )
+
+    result = runner.invoke(
+        app,
+        ["--config", str(config), "--owner", "agent-a", "lease", "acquire"],
+    )
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout)["serial"] == "phone-123"
+    assert leases.holder(isolated_cache, "phone-123") == "agent-a"
+    assert leases.holder(isolated_cache, "emulator-5554") is None

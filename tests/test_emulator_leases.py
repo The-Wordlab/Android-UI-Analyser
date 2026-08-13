@@ -248,6 +248,42 @@ def test_an_agent_stays_on_its_device(tmp_path):
     assert why2 == "sticky"
 
 
+def test_emulator_preference_does_not_move_an_existing_sticky_phone_lease(tmp_path):
+    candidates = [
+        ("emulator-5554", {}),
+        ("phone-123", {}),
+    ]
+    assert L.acquire(tmp_path, "phone-123", owner="claude") is True
+
+    selected = L.choose_device(
+        tmp_path, owner="claude", explicit=None, candidates=candidates
+    )
+
+    assert selected == ("phone-123", "sticky")
+
+
+def test_unpinned_selection_uses_phone_when_emulator_is_busy(tmp_path):
+    candidates = [
+        ("emulator-5554", {}),
+        ("phone-123", {}),
+    ]
+    assert L.acquire(tmp_path, "emulator-5554", owner="cursor") is True
+
+    selected = L.choose_device(
+        tmp_path, owner="claude", explicit=None, candidates=candidates
+    )
+
+    assert selected == ("phone-123", "assigned")
+
+
+def test_unpinned_selection_keeps_single_physical_device_behavior(tmp_path):
+    selected = L.choose_device(
+        tmp_path, owner="claude", explicit=None, candidates=[("phone-123", {})]
+    )
+
+    assert selected == ("phone-123", "assigned")
+
+
 def test_explicit_serial_on_a_held_device_is_refused_not_redirected(tmp_path):
     """Silently moving a test pinned to a device's state would invalidate it invisibly."""
     held, _ = _choose(tmp_path, "claude")

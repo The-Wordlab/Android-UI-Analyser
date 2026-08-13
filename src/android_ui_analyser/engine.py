@@ -551,6 +551,12 @@ class Engine:
         if not infos:
             return explicit
 
+        # A fresh automation owner should not take over a USB phone merely because adb listed
+        # it before an emulator. Android's canonical emulator serials are `emulator-<port>`;
+        # keep adb order within each class, then let choose_device preserve sticky ownership,
+        # explicit pins, capability checks, and the physical-device fallback.
+        infos.sort(key=lambda d: not d.serial.startswith("emulator-"))
+
         needs = list(self._lease_needs or [])
         # Capabilities cost adb round-trips, so only probe when someone actually asked.
         candidates = [

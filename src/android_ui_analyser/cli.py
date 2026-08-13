@@ -4595,6 +4595,11 @@ def lease_cmd(
         if verb == "acquire":
             # Claiming *is* device resolution, so just resolve — same code path every command
             # takes, which keeps `acquire` from drifting from the implicit claim.
+            # The command's positional target is more specific than an ambient config/env pin.
+            # Without applying it here, `lease acquire phone-123` silently leased whichever
+            # device normal auto-selection chose unless callers also exported AUA_SERIAL.
+            if serial_arg:
+                engine.config.device.serial = serial_arg
             serial = engine._lease_device()
             _echo_json(
                 {"ok": True, "action": "lease-acquire", "serial": serial, "owner": owner}, fmt
