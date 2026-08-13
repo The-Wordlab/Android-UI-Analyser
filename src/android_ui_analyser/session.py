@@ -192,19 +192,21 @@ def goal_phases(goal: str) -> list[GoalPhase]:
     return phases
 
 
-def phase_progress(state: SessionState) -> dict[str, Any]:
-    """Return the compact public progress contract for CLI and MCP results."""
+def phase_progress(state: SessionState, *, compact: bool = False) -> dict[str, Any]:
+    """Return goal progress; ordinary results use the compact non-duplicating form."""
     phases = state.phases or goal_phases(state.goal)
     current = next((phase for phase in phases if phase.status != "completed"), None)
     completed = sum(phase.status == "completed" for phase in phases)
-    return {
+    current_payload = current.model_dump(mode="json") if current is not None else None
+    if compact and isinstance(current_payload, dict):
+        current_payload.pop("recommended_call", None)
+    payload: dict[str, Any] = {
         "session_id": state.session_id,
         "completed": completed,
         "total": len(phases),
         "done": current is None,
-        "current": current.model_dump(mode="json") if current is not None else None,
+        "current": current_payload,
         "next_call": current.recommended_call if current is not None else None,
-        "phases": [phase.model_dump(mode="json") for phase in phases],
         "checkpoint": (
             None
             if current is None
@@ -217,6 +219,15 @@ def phase_progress(state: SessionState) -> dict[str, Any]:
             }
         ),
     }
+    if compact:
+        payload["upcoming"] = [
+            {"id": phase.id, "objective": phase.objective, "kind": phase.kind}
+            for phase in phases
+            if phase.status == "pending"
+        ]
+    else:
+        payload["phases"] = [phase.model_dump(mode="json") for phase in phases]
+    return payload
 
 
 def mark_phase_complete(

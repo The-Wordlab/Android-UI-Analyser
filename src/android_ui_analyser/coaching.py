@@ -161,7 +161,12 @@ def decorate_result(
             observation=observation,
             _avoid_deeplinks=stale_deeplink,
         )
-        progress = refreshed.get("goal_progress") or phase_progress(state)
+        refreshed_progress = refreshed.get("goal_progress")
+        if isinstance(refreshed_progress, dict):
+            refreshed_state = engine._session_state(state.session_id)  # noqa: SLF001
+            progress = phase_progress(refreshed_state, compact=True)
+        else:
+            progress = phase_progress(state, compact=True)
         if isinstance(result, dict):
             result["goal_progress"] = progress
         elif hasattr(result, "goal_progress"):

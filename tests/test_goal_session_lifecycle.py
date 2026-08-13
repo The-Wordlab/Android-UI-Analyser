@@ -166,6 +166,15 @@ def test_stale_deeplink_is_not_recommended_again_for_active_phase(
     call = decorated["goal_progress"]["next_call"]
     assert call["kind"] == "manual_action"
     assert "open-and-analyze" not in call["cli"]
+    assert "phases" not in decorated["goal_progress"]
+    assert decorated["goal_progress"]["upcoming"] == [
+        {
+            "id": "phase_2",
+            "objective": "Establish and verify the requested offline network state",
+            "kind": "environment",
+        }
+    ]
+    assert "phases" in engine.session_progress()["goal_progress"]
 
 
 def _engine(tmp_path: Path, serial: str = "goal-life") -> Engine:
