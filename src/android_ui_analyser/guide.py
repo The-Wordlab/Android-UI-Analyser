@@ -326,7 +326,8 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "freshness-checks it and does not reuse that numeric id on later frames. "
         "A numeric tap id always names that exact node: AUA refuses to reinterpret a caption id "
         "as a sibling control. Use `aua target` and the acting control's id/rid when needed. "
-        "The observation is **compact by default** (`id,text,rid,clickable`, app nodes only); "
+        "The observation is **compact by default** "
+        "(`id,text,desc,rid,clickable,enabled,checked,selected`, app nodes only); "
         "widen it with `--observe-fields all` or any field list. You therefore never need the "
         "`--no-observe` + `analyze` pair to get a cheap read — that pair costs two round trips "
         "for one screen. "
@@ -335,8 +336,10 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         '`detail`. That is *not* evidence the tap missed: it cannot tell "no effect" from '
         '"not yet", so **never re-tap on it** — a second tap means a second submit. When you '
         "know what should come next, say so and the wait becomes evidence-based with your "
-        'budget instead of the settle timer: `--until "rid:introCard"`, `--until '
-        '"text:Chats"`, `--until "!text:Loading"` (with `--until-timeout MS`). The response '
+        'budget instead of the settle timer: `--until "rid:introCard"` or `--until '
+        '"text:Chats,!text:Loading"` (with `--until-timeout MS`). An action-bound `--until` '
+        "must include positive arrival evidence; an absence-only predicate belongs in a "
+        "standalone await. The response "
         "grammar ANDs comma-separated terms; escape a literal comma as "
         "`text:Hello\\, friend`. Before accepting a negated text miss, and before timing out "
         "a positive text term, AUA verifies hierarchy text with its available OCR path. The response "
@@ -484,7 +487,8 @@ BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
         "opens. Continue through the returned `next_actions` until the requested content and "
         "interactive affordance are visible. Never invent a rid that was not returned. "
         "For your action's expected result add `--until 'rid:resultCard'` or "
-        "`--until '!text:Loading'`; escape a literal comma as `text:Hello\\, friend`. For a "
+        "`--until 'text:Results,!text:Loading'`; escape a literal comma as "
+        "`text:Hello\\, friend`. For a "
         "nested journey, return in one bounded call with `aua back-until-and-analyze "
         "'<known_screen>'` (or `'rid:<destination>'`) instead of replaying frame-local Back "
         "ids. A bare value is a mapped `known_screen`; text/rid/desc evidence keeps its prefix. For an "
@@ -576,7 +580,7 @@ ORIENTATION: tuple[tuple[str, str], ...] = (
         "manual fallback: ACT, wait, and get the settled screen — one call",
     ),
     (
-        "aua input-and-analyze --rid <resourceId> \"text\" --until '!text:Loading'",
+        "aua input-and-analyze --rid <resourceId> \"text\" --until 'rid:<result>,!text:Loading'",
         "TYPE — text is positional, and --until belongs HERE, not on a later analyze",
     ),
     (

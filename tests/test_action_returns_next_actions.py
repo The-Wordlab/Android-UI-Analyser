@@ -52,6 +52,21 @@ def test_the_list_is_capped_rather_than_a_dump(tmp_path: Path) -> None:
     assert r.next_actions is not None and len(r.next_actions) <= 12
 
 
+def test_selected_state_rides_on_each_relevant_next_action(tmp_path: Path) -> None:
+    dev = FakeDevice(hierarchy_xml=APPS, package=P, serial="emu-next-selected")
+    eng = _engine(tmp_path, dev)
+    observation = eng.analyze(source="hierarchy")
+    controls = [element for element in observation.elements if element.clickable][:2]
+    assert len(controls) == 2
+    controls[0].selected = True
+    controls[1].selected = False
+
+    by_id = {row["id"]: row for row in eng._next_actions(observation) or []}
+
+    assert by_id[controls[0].id]["selected"] is True
+    assert by_id[controls[1].id]["selected"] is False
+
+
 def test_learned_cost_rides_on_the_control_it_belongs_to(tmp_path: Path) -> None:
     from test_memory import _elements
 

@@ -34,6 +34,9 @@ def _screen() -> AnalyzeResult:
             Element(id=3, type="Switch", bounds=[40, 900, 600, 980], center=[320, 940],
                     resource_id="com.example.app:id/settingsSwitch", checkable=True,
                     checked=True, clickable=True, enabled=True, window="app"),
+            Element(id=4, type="Tab", bounds=[40, 1000, 600, 1080], center=[320, 1040],
+                    resource_id="com.example.app:id/catalogTab", selected=True,
+                    clickable=True, enabled=True, window="app"),
             # System chrome: still worth dropping — that is where the cost win comes from.
             Element(id=0, type="FrameLayout", bounds=[0, 0, 1080, 74], center=[540, 37],
                     resource_id="com.android.systemui:id/status_bar", window="system"),
@@ -63,6 +66,8 @@ def test_state_is_judgeable_from_the_observation() -> None:
     switch = next(r for r in _rows(Config().output.observation_fields) if r["id"] == 3)
     assert switch.get("checked") is True, "'is that switch on' must be answerable without a screenshot"
     assert switch.get("enabled") is True, "and enabled must not be confused with absent"
+    tab = next(r for r in _rows(Config().output.observation_fields) if r["id"] == 4)
+    assert tab.get("selected") is True, "the active tab must be visible in the default view"
 
 
 def test_all_restores_the_full_dump() -> None:

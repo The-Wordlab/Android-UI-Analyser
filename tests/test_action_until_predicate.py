@@ -12,9 +12,13 @@ A caller-supplied predicate resolves that ambiguity: the budget comes from the p
 
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
 
+import pytest
+
 from android_ui_analyser.engine import Engine
+from android_ui_analyser.errors import UsageError
 from android_ui_analyser.memory import AppMemoryStore, RouteStep
 from android_ui_analyser.providers.registry import ProviderFactory
 from android_ui_analyser.schema import ActionResult, AnalyzeResult, Element, Meta, Screen, Source
@@ -138,6 +142,96 @@ def test_until_replaces_the_early_change_claim_with_the_adopted_screen(monkeypat
     assert out.action_diff_summary == {"added": 1, "removed": 1, "changed": 0}
 
 
+def test_until_never_replaces_a_valid_delta_with_a_no_baseline_false(monkeypatch) -> None:
+    early = {
+        "changed": True,
+        "node_count_before": 2,
+        "node_count_after": 3,
+        "text_added": ["Intermediate"],
+    }
+    no_baseline = {
+        "changed": False,
+        "node_count_before": None,
+        "node_count_after": 3,
+        "detail": "no pre-action snapshot — deltas unavailable",
+    }
+
+    out, _ = _run(
+        monkeypatch,
+        _tapped(change=early),
+        ("text:Destination", 30000, 500),
+        _awaited("satisfied", change=no_baseline),
+    )
+
+    assert out.change == early
+
+
+def _screen_with(label: str) -> AnalyzeResult:
+    return AnalyzeResult(
+        screen=Screen(width=1080, height=2400, package="com.example.app", source="hierarchy"),
+        elements=[
+            Element(
+                id=0,
+                type="TextView",
+                text=label,
+                bounds=(20, 200, 800, 280),
+                center=(410, 240),
+            )
+        ],
+        meta=Meta(duration_ms=1, tier_used="hierarchy", path="hierarchy"),
+    )
+
+
+def test_adopted_observation_reuses_the_actions_original_baseline(tmp_path, monkeypatch) -> None:
+    cfg = make_config(
+        memory={"enabled": False, "dir": str(tmp_path / "home")},
+        daemon={"enabled": False},
+    )
+    eng = Engine(cfg, device=FakeDevice(package="com.example.app"))
+    observations = iter([_screen_with("Intermediate"), _screen_with("Destination")])
+    monkeypatch.setattr(eng, "_analyze_post_action", lambda *_a, **_k: next(observations))
+    monkeypatch.setattr(eng, "_read_activity", lambda: "com.example.app/.MainActivity")
+    eng._pre_action_state = {
+        "count": 1,
+        "focused": None,
+        "labels": ["Before"],
+        "package": "com.example.app",
+        "activity": "com.example.app/.MainActivity",
+        "known_screen": None,
+    }
+
+    early = eng._observe(ActionResult(ok=True, action="tap"), True, settle=False)
+    adopted = eng._await_result(
+        "satisfied",
+        [{"term": "text:Destination", "present": True, "satisfied": True}],
+        time.monotonic(),
+        1,
+        ("com.example.app", ".MainActivity"),
+        ("com.example.app", ".MainActivity"),
+        True,
+        adopt_action=True,
+    )
+
+    assert early.change and early.change["text_added"] == ["Intermediate"]
+    assert adopted.change and adopted.change["changed"] is True
+    assert adopted.change["text_added"] == ["Destination"]
+    assert adopted.change["text_removed"] == ["Before"]
+
+
+def test_regex_looking_until_timeout_explains_literal_matching(monkeypatch) -> None:
+    out, _ = _run(
+        monkeypatch,
+        _tapped(),
+        ("text:^Destination.*$", 5000, 500),
+        _awaited("timeout"),
+    )
+
+    assert "looks regex-like" in (out.note or "")
+    assert "literal contains" in (out.note or "")
+    assert "aua await-and-analyze" in (out.note or "")
+    assert "--match regex" in (out.note or "")
+
+
 def test_timeout_keeps_the_caveat_and_reports_which_term_failed(monkeypatch) -> None:
     """A timeout is not a failed tap — the outcome must stay distinguishable."""
     out, _ = _run(monkeypatch, _tapped(), ("rid:introCard", 5000, 500), _awaited("timeout"))
@@ -151,6 +245,18 @@ def test_no_until_leaves_the_result_untouched(monkeypatch) -> None:
     out, calls = _run(monkeypatch, original, None, None)
     assert out is original
     assert calls == []
+
+
+def test_adopt_action_rejects_negative_only_before_reading_the_device(tmp_path) -> None:
+    dev = FakeDevice(package="com.example.app")
+    cfg = make_config(memory={"dir": str(tmp_path / "home")}, daemon={"enabled": False})
+    eng = Engine(cfg, device=dev, factory=ProviderFactory(cfg))
+
+    with pytest.raises(UsageError, match="positive arrival"):
+        eng.await_predicate("!text:Loading", adopt_action=True)
+
+    assert dev.calls == []
+    assert dev.hierarchy_calls == 0
 
 
 def test_failed_action_is_not_waited_on(monkeypatch) -> None:

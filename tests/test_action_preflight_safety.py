@@ -44,6 +44,41 @@ def test_invalid_global_until_causes_zero_device_actions(cli_device: FakeDevice)
     assert cli_device.hierarchy_calls == 0, "preflight must happen before even reading the device"
 
 
+def test_negative_only_global_until_causes_zero_device_actions(cli_device: FakeDevice) -> None:
+    result = CliRunner().invoke(
+        app,
+        ["--until", "!text:Loading", "tap-and-analyze", "--rid", "launch_demo"],
+    )
+
+    assert result.exit_code == 2
+    error = json.loads(result.stderr)["error"]
+    assert "positive arrival" in error["message"]
+    assert "standalone" in error["hint"]
+    assert cli_device.calls == []
+    assert cli_device.hierarchy_calls == 0
+
+
+def test_negative_only_standalone_predicate_remains_valid() -> None:
+    terms = _parse_await_terms("!text:Loading")
+
+    assert len(terms) == 1 and terms[0].negated is True
+
+
+def test_negative_only_global_until_is_accepted_by_standalone_wait(
+    cli_device: FakeDevice,
+) -> None:
+    result = CliRunner().invoke(
+        app,
+        ["--until", "!text:Loading", "--until-timeout", "0", "wait-and-analyze"],
+    )
+
+    assert result.exit_code == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["await_outcome"] == "satisfied"
+    mutation_calls = {"click", "long_click", "double_click", "input_text", "press", "swipe"}
+    assert not any(name in mutation_calls for name, _args in cli_device.calls)
+
+
 def test_a_literal_comma_has_an_explicit_escape() -> None:
     terms = _parse_await_terms(r"text:Hello\, explorer,!text:Loading")
 

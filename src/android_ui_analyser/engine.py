@@ -191,7 +191,7 @@ def _split_await_terms(predicate: str) -> list[str]:
     return chunks
 
 
-def _parse_await_terms(predicate: str) -> list[_AwaitTerm]:
+def _parse_await_terms(predicate: str, *, require_positive: bool = False) -> list[_AwaitTerm]:
     """``"rid:resultCard,!text:Generating"`` → two terms, ANDed.
 
     A deliberately tiny grammar rather than an expression language. What a lane needs is
@@ -233,7 +233,52 @@ def _parse_await_terms(predicate: str) -> list[_AwaitTerm]:
         terms.append(_AwaitTerm(text=piece, by=by, value=value.strip(), negated=negated))
     if not terms:
         raise UsageError("await needs at least one term", hint="e.g. `text:Done`")
+    if require_positive and not any(not term.negated for term in terms):
+        raise UsageError(
+            "an action-bound await needs at least one positive arrival term",
+            hint=(
+                "Add the text:, rid:, desc:, net:, or log: evidence that proves the action "
+                "arrived. Keep absence-only checks such as `!text:Loading` in a standalone "
+                "wait/await."
+            ),
+        )
     return terms
+
+
+def _regex_literal_hint(predicate: str) -> str | None:
+    """Explain regex-looking action predicates, which deliberately use literal matching."""
+    with contextlib.suppress(AuaError):
+        for term in _parse_await_terms(predicate):
+            if term.by not in {"text", "rid", "desc"}:
+                continue
+            value = term.value
+            if (
+                value.startswith("^")
+                or value.endswith("$")
+                or any(token in value for token in (".*", ".+", "\\d", "\\s", "\\w", "(?"))
+            ):
+                return (
+                    f"{term.text!r} looks regex-like, but action `until` terms use literal "
+                    "contains matching. Use exact text/resource-id, or run "
+                    "`aua await-and-analyze '<predicate>' --match regex` as a standalone wait."
+                )
+    return None
+
+
+def _safe_adopted_change(
+    previous: dict[str, Any] | None,
+    adopted: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Never replace a valid action delta with a false claim made without a baseline."""
+    if not isinstance(adopted, dict):
+        return adopted
+    if adopted.get("node_count_before") is not None or adopted.get("changed") is not False:
+        return adopted
+    if isinstance(previous, dict) and previous.get("node_count_before") is not None:
+        return previous
+    uncertain = dict(adopted)
+    uncertain["changed"] = None
+    return uncertain
 
 
 class _PendingOcr(NamedTuple):
@@ -482,6 +527,10 @@ class Engine:
         # read. The activity is chained across observations rather than sampled before each
         # action, so a sequence of actions gets its before/after comparison at no extra cost.
         self._pre_action_state: dict[str, Any] | None = None
+        # The first folded observation consumes `_pre_action_state`. An action-bound await then
+        # re-observes the settled destination and must compare it with that same original screen,
+        # not with an absent baseline that can falsely report `changed: false`.
+        self._action_observation_baseline: dict[str, Any] | None = None
         self._last_activity: str | None = None
         # Lease context: which agent this engine speaks for, what it needs, and what it got.
         # Set by the CLI/MCP layer before the device is first touched.
@@ -592,6 +641,7 @@ class Engine:
         self._pre_action_sig = None
         self._pre_action_tree_fp = None
         self._pre_action_state = None
+        self._action_observation_baseline = None
         self._last_mem_fp = None
         self._last_known_screen = None
         self._last_action_kind = None
@@ -2033,6 +2083,8 @@ class Engine:
                 row["rid"] = rid
             if e.checkable is not None:
                 row["checked"] = e.checked
+            if e.selected is not None:
+                row["selected"] = e.selected
             known = timings.get(e.stable_key or rid or "")
             if known is not None:
                 row["avg_ms"] = round(known.ema_ms)
@@ -4124,7 +4176,7 @@ class Engine:
         if not goal.strip():
             raise UsageError("reach needs a non-empty goal")
         if until is not None:
-            _parse_await_terms(until)  # reject invalid evidence before any action
+            _parse_await_terms(until, require_positive=True)  # preflight before any action
         observation = self.analyze(source="hierarchy", with_ocr=False)
         plan = self._goal_session_plan(goal, observation)
 
@@ -4813,6 +4865,7 @@ class Engine:
         settle: bool = True,
         record_screen: bool = False,
         hierarchy_only: bool = False,
+        adopt_action: bool = False,
     ) -> ActionResult:
         """Attach the post-action screen so callers skip a separate ``analyze`` round-trip.
 
@@ -4826,8 +4879,14 @@ class Engine:
         if observe:
             with contextlib.suppress(Exception):  # observation is a bonus; never fail the action
                 # Read before the settle consumes the pre-action bookkeeping.
-                before_state = self._pre_action_state
-                self._pre_action_state = None
+                if adopt_action:
+                    before_state = self._action_observation_baseline
+                    self._action_observation_baseline = None
+                else:
+                    before_state = self._pre_action_state
+                    self._pre_action_state = None
+                    if before_state is not None:
+                        self._action_observation_baseline = before_state
                 ready: dict[str, Any] | None = None
                 confirmed_stable = False
                 if settle:
@@ -7086,7 +7145,7 @@ class Engine:
         how a reader tells a failed load from a slow one: spinner gone but results absent is a
         failure, spinner still present is progress.
         """
-        terms = _parse_await_terms(predicate)
+        terms = _parse_await_terms(predicate, require_positive=adopt_action)
         device = self.device
         mode = MatchMode(match)
 
@@ -7353,6 +7412,7 @@ class Engine:
             # early loading shell with a later loading shell and consume the action anyway.
             record_screen=adopt_action and outcome != "timeout",
             hierarchy_only=hierarchy_only,
+            adopt_action=adopt_action,
         )
 
     def wait(
@@ -9192,6 +9252,7 @@ class Engine:
                 buf.mark(label or "action")
         # Any speculative hierarchy dump is stale the moment we touch the device.
         self._prefetch.invalidate()
+        self._action_observation_baseline = None
         # Pixel fingerprint for settle-then-observe: must be taken BEFORE the gesture.
         self._pre_action_sig = None
         if capture_pre_action:

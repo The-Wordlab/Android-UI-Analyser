@@ -17,7 +17,7 @@ from mcp.shared.memory import create_connected_server_and_client_session
 
 import android_ui_analyser.engine as engine_mod
 from android_ui_analyser.engine import Engine
-from android_ui_analyser.mcp_server import _tool_definitions, build_server
+from android_ui_analyser.mcp_server import _fold_action_until, _tool_definitions, build_server
 from android_ui_analyser.schema import ActionResult, AnalyzeResult
 from conftest import FakeDevice, make_config
 
@@ -422,6 +422,70 @@ def test_mcp_until_is_validated_before_action() -> None:
     data = anyio.run(run)
     assert data["error"]["code"] == "usage"
     assert eng.device.calls == before_calls  # type: ignore[attr-defined]
+
+
+def test_mcp_negative_only_until_is_rejected_before_action() -> None:
+    eng = _engine()
+    server = build_server(eng)
+
+    async def run() -> dict:
+        async with create_connected_server_and_client_session(server) as client:
+            before = await client.call_tool("analyze_screen", {"source": "hierarchy"})
+            button = next(
+                element
+                for element in json.loads(_first_text(before))["elements"]
+                if element["text"] == "Continue"
+            )
+            result = await client.call_tool(
+                "tap_and_analyze", {"id": button["id"], "until": "!text:Loading"}
+            )
+            return json.loads(_first_text(result))
+
+    before_calls = list(eng.device.calls)  # type: ignore[attr-defined]
+    data = anyio.run(run)
+    assert "positive arrival" in data["error"]["message"]
+    assert eng.device.calls == before_calls  # type: ignore[attr-defined]
+
+
+def test_mcp_timeout_preserves_valid_delta_and_hints_regex_literal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    eng = _engine()
+    previous = {
+        "changed": True,
+        "node_count_before": 2,
+        "node_count_after": 3,
+        "text_added": ["Intermediate"],
+    }
+
+    monkeypatch.setattr(
+        eng,
+        "await_predicate",
+        lambda *_a, **_k: ActionResult(
+            ok=False,
+            action="await",
+            await_outcome="timeout",
+            change={
+                "changed": False,
+                "node_count_before": None,
+                "node_count_after": 3,
+                "detail": "no pre-action snapshot — deltas unavailable",
+            },
+        ),
+    )
+
+    out = _fold_action_until(
+        eng,
+        "tap_and_analyze",
+        {"until": "text:^Destination.*$", "until_timeout": 5},
+        {"ok": True, "observation_present": True, "change": previous},
+    )
+
+    assert out["change"] == previous
+    assert "looks regex-like" in out["note"]
+    assert "literal contains" in out["note"]
+    assert "aua await-and-analyze" in out["note"]
+    assert "--match regex" in out["note"]
 
 
 def test_mcp_await_and_analyze_returns_term_evidence() -> None:

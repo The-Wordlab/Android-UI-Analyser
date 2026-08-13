@@ -25,7 +25,7 @@ from mcp.server.lowlevel import Server
 from . import __version__
 from .capabilities import capabilities_for_goal, capability_manifest, render_mcp_instructions
 from .config import load_config
-from .engine import Engine, _parse_await_terms
+from .engine import Engine, _parse_await_terms, _regex_literal_hint, _safe_adopted_change
 from .errors import AuaError, UsageError
 from .projection import Projection, trim_observation_payload
 from .schema import OutputFormat
@@ -85,7 +85,8 @@ _UNTIL_PROPS: dict[str, dict[str, Any]] = {
         "type": "string",
         "description": (
             "After the action, wait for comma-separated semantic terms such as "
-            "'rid:result,!text:Loading', then return that settled screen in this same call."
+            "'rid:result,!text:Loading', then return that settled screen in this same call. "
+            "At least one term must be positive arrival evidence."
         ),
     },
     "until_timeout": {
@@ -166,7 +167,7 @@ def _validate_until(name: str, args: dict[str, Any]) -> None:
     predicate = args.get("until")
     dangling = [key for key in ("until_timeout", "until_poll") if key in args]
     if predicate:
-        _parse_await_terms(str(predicate))
+        _parse_await_terms(str(predicate), require_positive=True)
         return
     if name in _POST_ACTION_WAIT_TOOLS and dangling:
         raise UsageError(
@@ -199,6 +200,7 @@ def _fold_action_until(
     )
     if not isinstance(awaited, dict):
         return payload
+    previous_change = payload.get("change")
     for key in (
         "await_outcome",
         "await_terms",
@@ -213,13 +215,19 @@ def _fold_action_until(
         "routes",
         "note",
     ):
-        payload[key] = awaited.get(key)
+        value = awaited.get(key)
+        if key == "change":
+            value = _safe_adopted_change(previous_change, value)
+        payload[key] = value
     if awaited.get("await_outcome") == "timeout":
         payload["note"] = (
             f"the action landed; `until` timed out after "
             f"{int(args.get('until_timeout', 30000))}ms. Match the exact screen label or "
             "resource-id; this is a predicate timeout, not proof that the action failed."
         )
+        regex_hint = _regex_literal_hint(str(predicate))
+        if regex_hint:
+            payload["note"] += " " + regex_hint
     elif awaited.get("await_outcome") == "satisfied":
         payload["stale_risk"] = None
     return payload

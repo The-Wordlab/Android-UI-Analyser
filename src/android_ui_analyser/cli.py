@@ -34,7 +34,13 @@ from .config import (
     load_config,
     user_config_path,
 )
-from .engine import Engine, _parse_await_terms, _parse_point
+from .engine import (
+    Engine,
+    _parse_await_terms,
+    _parse_point,
+    _regex_literal_hint,
+    _safe_adopted_change,
+)
 from .errors import (
     AuaError,
     ConfigError,
@@ -235,7 +241,8 @@ def _run(ctx: typer.Context, fn: Callable[[Engine, OutputFormat], T]) -> T:
         # `await_predicate`, which runs after the tap/input: a typo could therefore mutate the
         # device and then fail as a usage error.  A usage error must mean zero device actions.
         if opts.until:
-            _parse_await_terms(opts.until)
+            standalone_until = getattr(ctx.command, "name", None) == "wait-and-analyze"
+            _parse_await_terms(opts.until, require_positive=not standalone_until)
         engine = opts.engine()
         global _OBSERVATION_VIEW, _UNTIL, _ENGINE, _INVOCATION_ID, _ANNOTATION_WARNINGS
         spec = opts.observe_fields
@@ -593,6 +600,9 @@ def _await_timeout_note(predicate: str, timeout_ms: int, result: Any) -> str:
         f"the action landed; `--until '{predicate}'` is what ran out after {timeout_ms}ms, so this "
         "is the predicate, not the app"
     )
+    regex_hint = _regex_literal_hint(predicate)
+    if regex_hint:
+        note += ". " + regex_hint
     observation = getattr(result, "observation", None)
     elements = getattr(observation, "elements", None)
     if not elements:
@@ -646,6 +656,7 @@ def _await_until(result: Any) -> Any:
         return result
     if isinstance(awaited, dict):
         awaited = _rehydrate(awaited)
+    previous_change = getattr(result, "change", None)
     for attr in (
         "await_outcome",
         "await_terms",
@@ -663,7 +674,10 @@ def _await_until(result: Any) -> Any:
         # These all describe the adopted screen. Assign even ``None`` so guidance from the
         # action's early readback cannot survive when the evidence-based re-read has none.
         with contextlib.suppress(Exception):
-            setattr(result, attr, getattr(awaited, attr, None))
+            value = getattr(awaited, attr, None)
+            if attr == "change":
+                value = _safe_adopted_change(previous_change, value)
+            setattr(result, attr, value)
     if getattr(result, "await_outcome", None) == "timeout":
         with contextlib.suppress(Exception):
             result.note = _await_timeout_note(predicate, timeout_ms, result)
@@ -791,7 +805,7 @@ def _warn_if_redundant_analyze(engine: Engine, args: dict[str, Any] | None = Non
         "space is already in the action response). Prefer using the previous `observation` and "
         "running analyze only when you need a different view. If you are re-reading because the "
         "screen had not settled yet, do not sleep-then-analyze: re-run the action with "
-        "`--until 'text:<label>'` (or `--until '!text:Loading'`), which waits and returns the "
+        "`--until 'text:<label>,!text:Loading'`, which waits and returns the "
         "settled screen in the same call; for network-driven content use "
         "`aua wait-and-analyze --after-change`.",
         action,
@@ -1349,8 +1363,9 @@ def main(
         "--until",
         metavar="PREDICATE",
         help="After the action, wait until this holds before observing "
-        "(`rid:introCard`, `text:Chats`, `!text:Loading`). Terms use commas; escape a "
-        "literal comma as `\\,`. Sets await_outcome.",
+        "(`rid:introCard`, `text:Chats,!text:Loading`). At least one term must be positive; "
+        "standalone wait-and-analyze may use an absence-only predicate. Escape a literal "
+        "comma as `\\,`. Sets await_outcome.",
     ),
     answers: list[str] | None = typer.Option(
         None,
@@ -3208,7 +3223,7 @@ def reach_cmd(
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
         if until:
-            _parse_await_terms(until)
+            _parse_await_terms(until, require_positive=True)
         result = _route(
             engine,
             "reach",
