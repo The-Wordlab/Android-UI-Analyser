@@ -17,7 +17,9 @@ from android_ui_analyser.engine import Engine
 from android_ui_analyser.schema import AnalyzeResult, Element, Meta, Screen, Source
 from android_ui_analyser.session import (
     complete_environment_phase,
+    create_session_state,
     goal_phases,
+    load_session_state,
     mark_phase_complete,
     phase_progress,
 )
@@ -160,6 +162,62 @@ def test_cli_phase_checkpoint_advances_without_a_device_call(
     assert engine.device.calls == before_calls
 
 
+def test_fresh_cli_resolves_active_owner_before_phase_annotation(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    from android_ui_analyser import cli, leases
+
+    serial = "configured-emulator"
+    cfg = make_config(
+        cache={"dir": str(tmp_path / "cache")},
+        memory={"enabled": False, "dir": str(tmp_path / "memory")},
+        device={"serial": serial},
+        daemon={"enabled": False},
+    )
+    monkeypatch.setenv("AUA_OWNER", "fresh-phase-agent")
+    state = create_session_state(
+        cfg.cache.dir,
+        goal="Verify the first checkpoint; then verify the second checkpoint",
+        serial=serial,
+        owner=leases.resolve_owner(None),
+        recommended_kind="manual_observation",
+        recommended_cli="reuse observation",
+        network_backup_preexisting=False,
+        network_profile_preexisting=False,
+    )
+    connections: list[str | None] = []
+
+    def unexpected_connect(device_serial: str | None = None) -> FakeDevice:
+        connections.append(device_serial)
+        raise AssertionError("phase annotation must not connect to a device")
+
+    monkeypatch.setattr(engine_mod, "connect", unexpected_connect)
+    monkeypatch.setattr(cli.GlobalOpts, "load", lambda _self: cfg)
+
+    result = runner.invoke(
+        app,
+        [
+            "--serial",
+            serial,
+            "--phase-done",
+            "phase_1=first checkpoint is visible",
+            "flow",
+            "delete",
+            "already-absent",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.stdout)
+    assert payload["goal_progress"]["current"]["id"] == "phase_2"
+    assert "annotation_warnings" not in payload
+    updated = load_session_state(cfg.cache.dir, session_id=state.session_id)
+    assert updated is not None
+    assert updated.phases[0].status == "completed"
+    assert updated.phases[0].evidence == "first checkpoint is visible"
+    assert connections == []
+
+
 def test_bad_inline_phase_annotation_warns_but_does_not_cancel_the_action(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
@@ -254,6 +312,49 @@ def test_goal_session_does_not_execute_weak_incidental_one_token_control(
     assert started["recommended_call"]["kind"] == "manual_observation"
     assert started["recommended_call"]["executes"] is False
     assert "tap-and-analyze" not in started["recommended_call"]["cli"]
+
+
+def test_goal_session_ignores_generic_one_term_overlap_in_multiword_control(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    engine = _engine(tmp_path, "goal-generic-control")
+    observed = _control_observation(engine.device.serial, "Search Settings")
+    observed.elements.append(
+        Element(
+            id=42,
+            type="android.widget.TextView",
+            text="Network & internet",
+            bounds=(40, 440, 800, 560),
+            center=(420, 500),
+            clickable=True,
+            source=Source.hierarchy,
+        )
+    )
+    monkeypatch.setattr(engine, "analyze", lambda **_kwargs: observed)
+
+    started = engine.session_start(
+        "On Android Settings, perform one harmless saveable UI action"
+    )
+
+    next_call = started["goal_progress"]["next_call"]
+    assert next_call["kind"] == "manual_observation"
+    assert next_call["executes"] is False
+    assert "tap-and-analyze" not in next_call["cli"]
+
+
+def test_goal_session_keeps_specific_multi_term_manual_control_match(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    engine = _engine(tmp_path, "goal-specific-control")
+    observed = _control_observation(engine.device.serial, "Search Settings")
+    monkeypatch.setattr(engine, "analyze", lambda **_kwargs: observed)
+
+    started = engine.session_start("Search Settings")
+
+    next_call = started["goal_progress"]["next_call"]
+    assert next_call["kind"] == "manual_action"
+    assert next_call["cli"] == "aua tap-and-analyze 41"
+    assert next_call["executes"] is True
 
 
 def _engine(tmp_path: Path, serial: str = "goal-life") -> Engine:

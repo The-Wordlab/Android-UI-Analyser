@@ -227,6 +227,17 @@ def _version_callback(value: bool) -> None:
         raise typer.Exit(ExitCode.OK)
 
 
+def _resolve_owner_context_without_device(engine: Engine) -> None:
+    """Bind owner/session identity without claiming or connecting to a device."""
+    from . import leases as _leases
+
+    engine._lease_owner_resolved = _leases.resolve_owner(  # noqa: SLF001
+        getattr(engine, "_lease_owner", None)
+    )
+    if engine.config.device.serial:
+        engine._lease_serial = engine.config.device.serial  # noqa: SLF001
+
+
 # --------------------------------------------------------------------------- error wrap
 
 
@@ -272,6 +283,11 @@ def _run(ctx: typer.Context, fn: Callable[[Engine, OutputFormat], T]) -> T:
         _UNTIL = (opts.until, opts.until_timeout, opts.until_poll) if opts.until else None
         # Inline map/session annotations are opportunistic bookkeeping. A stale task id or
         # mistyped checkpoint must never suppress the UI action the caller actually requested.
+        # They run before routing, so bind the same owner/explicit-serial context that routing
+        # will use without claiming or connecting to a device. Otherwise a fresh CLI Engine
+        # looks for an anonymous active session and rejects a valid --phase-done checkpoint.
+        if opts.answers or opts.phases_done:
+            _resolve_owner_context_without_device(engine)
         for kind, apply, values in (
             ("answer", _apply_answers, opts.answers),
             ("phase_done", _apply_phases_done, opts.phases_done),
@@ -1033,13 +1049,7 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
         # session. Resolve identity and the explicit serial without claiming/connecting to the
         # device, so two idempotent deletes are both accounted for instead of the second one
         # becoming an anonymous journal row.
-        from . import leases as _leases
-
-        engine._lease_owner_resolved = _leases.resolve_owner(  # noqa: SLF001
-            getattr(engine, "_lease_owner", None)
-        )
-        if cfg.device.serial:
-            engine._lease_serial = cfg.device.serial  # noqa: SLF001
+        _resolve_owner_context_without_device(engine)
     else:
         lease_serial = getattr(engine, "_lease_serial", None)
         lease_device = getattr(engine, "_lease_device", None)

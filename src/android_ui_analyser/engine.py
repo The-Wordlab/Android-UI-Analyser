@@ -128,6 +128,11 @@ _CHANGE_TEXT_CAP = 12  # text deltas echoed back per direction; a list screen wo
 _FLAGS_VERIFY_DEADLINE_S = 2.0  # how long a flag write gets to reach the app's prefs file
 _FLAGS_ENTRY_TIMEOUT_S = 3.0  # how long a pinned entry Activity gets before the default one
 _FLAGS_FOREGROUND_TIMEOUT_S = 6.0  # how long the relaunched app gets to reach the foreground
+# Terms that describe the surrounding UI rather than a user's intended control. A single match
+# on one of these is not enough to turn a visible multi-word control into an execution proposal.
+_GENERIC_MANUAL_MATCH_TERMS = frozenset(
+    {"action", "button", "control", "item", "menu", "option", "page", "settings", "ui", "view"}
+)
 
 _PACKAGE_RE = re.compile(r'package="([^"]+)"')
 
@@ -5275,8 +5280,10 @@ class Engine:
                 value for value in (element.text, element.content_desc, resource_label) if value
             )
             # A configured destructive control is never an execution recommendation. A bare
-            # one-token control sharing only one word with a longer goal is weak evidence too;
-            # keep it visible in the observation instead of turning it into an execution call.
+            # one-token control sharing only one word with a longer goal is weak evidence too.
+            # The same applies to a multi-word control whose sole overlap is generic UI context
+            # (for example, "Search Settings" matching only "settings"). Keep it visible in the
+            # observation instead of turning it into an execution call.
             if is_destructive_step(
                 RouteStep(kind="tap", label=label),
                 self.config.memory.destructive_labels,
@@ -5287,11 +5294,15 @@ class Engine:
             matched_terms = goal_terms & control_terms
             if not matched_terms:
                 continue
+            exact_goal_match = ui_goal.casefold().strip() in semantic_label.casefold()
             weak_one_token = (
                 len(matched_terms) == 1
                 and len(goal_terms) > 1
-                and len(control_terms) == 1
-                and ui_goal.casefold().strip() not in semantic_label.casefold()
+                and (
+                    len(control_terms) == 1
+                    or matched_terms <= _GENERIC_MANUAL_MATCH_TERMS
+                )
+                and not exact_goal_match
             )
             if weak_one_token:
                 continue
