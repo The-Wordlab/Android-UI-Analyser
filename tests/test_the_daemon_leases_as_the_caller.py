@@ -22,7 +22,7 @@ from typing import Any
 import pytest
 
 from android_ui_analyser.daemon import DaemonClient, _adopt_client_owner
-from android_ui_analyser.errors import DeviceLeasedError
+from android_ui_analyser.errors import DeviceLeasedError, UsageError
 from android_ui_analyser.leases import DEFAULT_TTL_S, acquire, choose_device
 
 
@@ -69,6 +69,18 @@ def test_the_same_owner_twice_does_not_reclaim() -> None:
     _adopt_client_owner(engine, "cli-caller:2")
 
     assert engine.claims == 0
+
+
+def test_a_connected_daemon_refuses_to_claim_a_different_serial() -> None:
+    engine = _FakeEngine(resolved="daemon-self:1")
+    engine._device = type("Device", (), {"serial": "emulator-5554"})()
+    engine._lease_device = lambda: "emulator-5558"  # type: ignore[method-assign]
+
+    with pytest.raises(UsageError, match="bound to emulator-5554") as caught:
+        _adopt_client_owner(engine, "cli-caller:2")
+
+    assert caught.value.code == "daemon_device_mismatch"
+    assert engine._lease_serial is None
 
 
 def test_a_held_device_is_still_refused(tmp_path: Any) -> None:

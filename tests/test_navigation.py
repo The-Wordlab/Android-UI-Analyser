@@ -29,6 +29,7 @@ from android_ui_analyser.memory import (
     resolve_goal,
 )
 from android_ui_analyser.schema import (
+    ActionResult,
     AnalyzeResult,
     Meta,
     OutputFormat,
@@ -264,6 +265,55 @@ def test_goto_hands_off_on_wrong_screen(tmp_path: Path) -> None:
     assert out["ok"] is False and out["code"] == "wrong_screen"
     assert out["remaining_route"]  # the un-walked tail is handed back
     assert out["elements"]  # current screen given so the caller can continue
+
+
+def test_goto_waits_for_a_loading_shell_before_calling_the_route_wrong(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _build_three(tmp_path)
+    dev = ScriptedDevice([HOME], package=P, serial="emu-loading-route")
+    eng = _engine(tmp_path, dev)
+    loading = AnalyzeResult(
+        screen=Screen(width=1080, height=2400, package=P, source="hierarchy"),
+        elements=[],
+        meta=Meta(
+            duration_ms=10,
+            tier_used="hierarchy",
+            path="hierarchy",
+            known_screen="loading",
+            device_serial=dev.serial,
+        ),
+    )
+    arrived = AnalyzeResult(
+        screen=Screen(width=1080, height=2400, package=P, source="hierarchy"),
+        elements=_elements(APPS),
+        meta=Meta(
+            duration_ms=10,
+            tier_used="hierarchy",
+            path="hierarchy",
+            known_screen="apps",
+            device_serial=dev.serial,
+        ),
+    )
+
+    monkeypatch.setattr(eng, "_run_steps", lambda *_args, **_kwargs: (None, loading))
+    monkeypatch.setattr(eng, "_observation_is_loading", lambda _result: True)
+    monkeypatch.setattr(
+        eng,
+        "_await_known_screen",
+        lambda *_args, **_kwargs: ActionResult(
+            ok=True,
+            action="await",
+            observation=arrived,
+            observation_present=True,
+            await_outcome="satisfied",
+        ),
+    )
+
+    out = eng.goto("apps")
+
+    assert out["ok"] is True
+    assert out["final_screen"] == "apps"
 
 
 def test_goto_records_last_goal(tmp_path: Path) -> None:

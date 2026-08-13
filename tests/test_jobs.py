@@ -59,7 +59,12 @@ def test_background_wait_can_be_reconnected_cancelled_and_persisted() -> None:
     assert blocked.value.code == "job_busy"
 
     requested = manager.cancel(job_id)
-    assert requested["status"] == "cancel_requested"
+    assert requested["status"] == "cancelled"
+    assert requested["recent_output"]["code"] == "job_cancelled"
+    assert [event["status"] for event in requested["events"]][-2:] == [
+        "cancel_requested",
+        "cancelled",
+    ]
     terminal = manager.wait(job_id, timeout_ms=1_000)
     assert terminal["status"] == "cancelled"
     assert terminal["terminal"] is True
@@ -159,6 +164,7 @@ def test_mcp_exposes_job_lifecycle_and_guard() -> None:
     tools = {tool.name: tool for tool in _tool_definitions()}
     assert {"job_start", "job_status", "job_wait", "job_cancel", "job_list"} <= tools.keys()
     assert tools["job_wait"].inputSchema["properties"]["timeout_ms"]["maximum"] == 10_000
+    assert "recent_output" in tools["job_status"].inputSchema["properties"]
 
     server = build_server(_engine())
 

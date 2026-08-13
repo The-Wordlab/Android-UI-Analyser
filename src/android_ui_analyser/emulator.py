@@ -1197,7 +1197,7 @@ def _aua_started_records(cache_dir: str | Path) -> list[dict[str, Any]]:
     for path in _pid_dir(cache_dir).glob("*.json"):
         try:
             meta = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
+        except (OSError, json.JSONDecodeError):
             continue
         if not _is_instance_record(meta):
             continue

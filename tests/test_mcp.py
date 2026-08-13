@@ -239,6 +239,8 @@ def test_mcp_session_and_reach_dispatch_contract(monkeypatch: pytest.MonkeyPatch
                 "start_emulator": False,
                 "headed": True,
                 "avd": None,
+                "package": None,
+                "activity": None,
             },
         ),
         (

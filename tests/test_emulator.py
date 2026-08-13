@@ -16,6 +16,25 @@ from conftest import make_config
 runner = CliRunner()
 
 
+def test_started_record_scan_tolerates_parallel_cleanup(tmp_path: Path, monkeypatch) -> None:
+    from android_ui_analyser import emulator as emu
+
+    record_dir = tmp_path / "emulator"
+    record_dir.mkdir(parents=True)
+    disappearing = record_dir / "race.json"
+    disappearing.write_text("{}", encoding="utf-8")
+    original = Path.read_text
+
+    def read_text(path: Path, *args: Any, **kwargs: Any) -> str:
+        if path == disappearing:
+            raise FileNotFoundError(path)
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    assert emu._aua_started_records(tmp_path) == []
+
+
 def test_list_avds_parses_emulator_output(monkeypatch: pytest.MonkeyPatch) -> None:
     from android_ui_analyser import emulator as emu
 

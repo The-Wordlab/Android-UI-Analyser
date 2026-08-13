@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import signal
 import subprocess
 import time
@@ -792,8 +793,29 @@ class Uiautomator2Device(Device):
 
     def launch_app(self, package: str, *, activity: str | None = None) -> None:
         if activity is None:
-            self._call("app_start", package)
-            return
+            # uiautomator2 falls back to Monkey for an unresolved launcher, which prints a
+            # page of warnings into agent transcripts and obscures the actual launch result.
+            # Ask Android for the exported launcher component and start it explicitly first.
+            resolved = self.shell(
+                "cmd package query-activities --brief "
+                "-a android.intent.action.MAIN -c android.intent.category.LAUNCHER "
+                f"-p {shlex.quote(package)}"
+            )
+            components = [
+                match.group(0)
+                for line in resolved.splitlines()
+                if (match := re.search(r"[A-Za-z0-9._]+/[A-Za-z0-9._$]+", line))
+                and match.group(0).split("/", 1)[0] == package
+            ]
+            # PackageManager emits manifest/query order. Choosing the first exported launcher
+            # avoids both ResolverActivity and Monkey when a dev build has a second tools icon.
+            # Callers can still pin a different entry with --activity.
+            component = components[0] if components else None
+            if component is None:
+                self._call("app_start", package)
+                return
+            resolved_package, activity = component.split("/", 1)
+            assert resolved_package == package  # filtered above
         # `am start` prints its refusal (commonly a non-exported Activity) and exits 0, and
         # uiautomator2's app_start discards that output — so the caller learned nothing and
         # went on to drive a screen that was never opened. Run it here and read the answer.

@@ -52,6 +52,8 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "advances the goal without another round trip. Deterministic offline evidence advances "
         "automatically. The returned compact observation is the current screen: reuse it "
         "and do not follow session start with analyze. The command is recommendation-first: "
+        "when the foreground is unrelated, add `--app <package>` (alias `--package`, optional "
+        "`--activity`) and session start launches it then reuses that folded observation. "
         "risky candidates are previewed and never receive authorization from the goal text. "
         "Use `aua session review` to see avoidable calls: `ok` means the review completed, "
         "while `run_ok` and `failures` describe the run without making the review itself "
@@ -202,9 +204,11 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "but require explicit side-effect approval before replay. For a destination, prefer it "
         "over a raw "
         "deeplink whenever `suggested_gotos` lists the target: `goto` verifies each hop and "
-        "arrival instead of merely delivering an intent. Known in-app hops skip OCR and retry "
-        "it only when hierarchy cannot match "
-        "a selector or verify arrival; transit screens keep automatic OCR. `--plan` prints the "
+        "arrival instead of merely delivering an intent. Known in-app hops skip OCR. If a hop "
+        "first returns a mapped loading shell or visible progress state, goto waits briefly for "
+        "the expected mapped destination before declaring `wrong_screen`; a loading frame is "
+        "not route-divergence evidence. It retries OCR only when hierarchy cannot match a "
+        "selector or verify arrival; transit screens keep automatic OCR. `--plan` prints the "
         "annotated route, including per-step risks, without acting. Before the first route step, "
         "AUA refuses deeplinks, cross-package actions, settings/data/environment mutation, app "
         "lifecycle changes, and other non-navigation effects with a visible preview; review it "
@@ -221,7 +225,8 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
     (
         "Replay whole journeys in one call (flows)",
         "A flow is a Maestro-style YAML journey you can AUTHOR directly (no walking needed) or "
-        "record: `aua flow save <name> --last N` materializes your recent actions (typed values "
+        "record: `aua flow save <name> --last N --dry-run` previews the exact generated YAML "
+        "without writing it; remove `--dry-run` to save after review (typed values "
         "become required `${PARAM_n}` placeholders — fill them in the file). "
         "`aua flow run <name> --param K=V` drives the whole journey — launch, taps, waits, "
         "asserts, cross-app auth, even `goto:` steps — and on divergence returns the failing "
@@ -319,6 +324,8 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "from an unrecognized mapped frame. If the first Back icon is unlabeled, "
         "pass its id from the current observation once with `--back-id <fresh-id>`—AUA still "
         "freshness-checks it and does not reuse that numeric id on later frames. "
+        "A numeric tap id always names that exact node: AUA refuses to reinterpret a caption id "
+        "as a sibling control. Use `aua target` and the acting control's id/rid when needed. "
         "The observation is **compact by default** (`id,text,rid,clickable`, app nodes only); "
         "widen it with `--observe-fields all` or any field list. You therefore never need the "
         "`--no-observe` + `analyze` pair to get a cheap read — that pair costs two round trips "
@@ -335,7 +342,8 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "a positive text term, AUA verifies hierarchy text with its available OCR path. The response "
         "then carries `await_outcome`: `satisfied` / `screen-changed` / `timeout`, and "
         "`await_terms` says which term is missing. Prefer "
-        '`wait --for "<text>"` for known targets; reserve `wait --for-stable` for '
+        '`wait --for "<text>"` for known targets; wait/await observations accept `--no-meta` '
+        "with the same meaning as analyze. Reserve `wait --for-stable` for "
         "generation / loading / video.",
     ),
     (
@@ -351,8 +359,10 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "Detach only waits that may outlive one agent call",
         "For a slow read-only condition, start `aua job start await --predicate "
         "'rid:result,!text:Loading' --timeout-ms 180000`. It returns immediately with a durable "
-        "`job_id`; reconnect with `aua job status <id>`, wait at most ten seconds with `aua job "
-        "wait <id>`, or stop at the next safe device-read boundary with `aua job cancel <id>`. "
+        "`job_id`; reconnect with `aua job status <id> --recent-output`, wait at most ten seconds "
+        "with `aua job wait <id>`, or cancel and briefly await a terminal acknowledgement with "
+        "`aua job cancel <id>`. Lifecycle events persist with the job, so a reconnect explains "
+        "whether it queued, ran, acknowledged cancellation, or was interrupted. "
         "The warm daemon remains responsive, but serializes every other device operation behind "
         "the job so no tap or analysis races it. `wait-stable`, `wait-changed`, and "
         "`wait-after-change` are also supported. Jobs do not detach mutating actions.",
@@ -395,6 +405,8 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "only/first device\" and they drive each other's screens; nothing errors, the results "
         "are just wrong. So each command **claims a lease** on the device it uses and keeps "
         "you on the same one (element ids, app state and the learned map are all per-device). "
+        "Lease selection happens before transport selection, so each serial gets its own daemon "
+        "socket and a warm daemon is forbidden from claiming a different device than it drives. "
         "You need do nothing: no lease command and no owner prompt. By default AUA derives the "
         "long-lived agent process, records its PID plus start token, and keeps that agent sticky "
         "across its short-lived shell/runner commands. On the next device request, a dead owner "
@@ -426,7 +438,9 @@ BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
         "`goto`, matching saved flow, proven deeplink, or manual analyzed action in that order, "
         "and returns one exact CLI and MCP `recommended_call`. Follow that call instead of "
         "calling analyze again or inventorying commands. Ordered `goal_progress` accompanies "
-        "every result; carry its `--phase-done` / MCP `phase_done` checkpoint on your next call "
+        "every result; if the foreground is unrelated, add `--app <package>` / `--package` so "
+        "the launch and its observation are folded into bootstrap. Carry its `--phase-done` / "
+        "MCP `phase_done` checkpoint on your next call "
         'after evidence is visible, rather than spending a call on progress. Use `aua capabilities --goal "…"` only '
         "when you need another goal-specific capability, and finish reversible work with "
         "`aua session finish`.",
@@ -447,8 +461,10 @@ BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
         "only to that observation frame. On dynamic screens, prefer `--rid <resource-id>` or an "
         "element's `stable_key`; after any state change, use the action's returned observation or "
         "`aua resolve <stable_key>` instead of replaying an old numeric id. A numeric id is fine "
-        "only while its frame is still current. Long-press refuses to redirect a caption into a "
-        "sibling control subtree; name the actual acting control instead.",
+        "only while its frame is still current. Numeric taps and long-presses refuse to redirect "
+        "a caption into a sibling control subtree; name the actual acting control instead. "
+        "Inline `--answers` / `--phase-done` are bookkeeping: an invalid annotation is returned "
+        "as `annotation_warnings` and never cancels the requested device action.",
     ),
     (
         "Choose the highest-level safe navigation",
@@ -664,7 +680,8 @@ KEY_FLAGS: list[tuple[str, str]] = [
     (
         "job",
         "`job start await --predicate <terms> [--timeout-ms N] [--poll-ms N]` or start "
-        "`wait-stable|wait-changed|wait-after-change`; reconnect with `job status <id>`, make a "
+        "`wait-stable|wait-changed|wait-after-change`; reconnect with `job status <id> "
+        "--recent-output`, make a "
         "bounded `job wait <id> --timeout-ms N` call (maximum 10000), `job cancel <id>`, or "
         "`job list`. Jobs are read-only and serialize other device calls while active.",
     ),
@@ -1255,7 +1272,8 @@ def render_markdown(*, brief: bool = False) -> str:
     p.append("")
     p.append("# Replay a whole journey (authored or recorded) in ONE call:")
     p.append('aua flow run reset_account_google_login --param ACCOUNT="Engineering Team"')
-    p.append("aua flow save reach_checkout --last 8   # materialize what you just did")
+    p.append("aua flow save reach_checkout --last 8 --dry-run  # review generated YAML")
+    p.append("aua flow save reach_checkout --last 8            # save after review")
     p.append("")
     p.append("# Starter journey: open → tap → input → tap → wait → has → tap. Every action")
     p.append("# returns the post-action screen, so each id below comes from the previous call:")
@@ -1271,7 +1289,7 @@ def render_markdown(*, brief: bool = False) -> str:
     p.append("")
     p.append("# A wait longer than one agent call: start once, reconnect by id, never restart it:")
     p.append("aua job start await --predicate 'rid:answer,!text:Loading' --timeout-ms 180000")
-    p.append("aua job status <job_id>                  # or: job wait / job cancel")
+    p.append("aua job status <job_id> --recent-output # or: job wait / job cancel")
     p.append("```")
     p.append("")
     p.append("An action response carries its own state, so a follow-up `analyze` is usually")

@@ -56,6 +56,16 @@ class JobState(BaseModel):
     worker_pid: int | None = None
     result: Any = None
     error: dict[str, Any] | None = None
+    events: list[dict[str, Any]] = Field(default_factory=list)
+
+
+def _event(state: JobState, status: JobStatus, detail: str) -> None:
+    """Append a small persisted lifecycle breadcrumb for reconnecting callers."""
+    state.events.append(
+        {"at_ms": int(time.time() * 1000), "status": status, "detail": detail}
+    )
+    # Lifecycle histories are diagnostics, not an unbounded log.
+    state.events = state.events[-20:]
 
 
 def _job_dir(cache_dir: str | Path) -> Path:
@@ -191,6 +201,7 @@ class JobManager:
                 "code": "job_interrupted",
                 "message": "the worker process exited before this job completed",
             }
+            _event(state, "interrupted", "worker process exited")
             _write(self.cache_dir, state)
         return state
 
@@ -239,6 +250,7 @@ class JobManager:
                 created_ms=int(time.time() * 1000),
                 worker_pid=os.getpid(),
             )
+            _event(state, "queued", "durable wait queued")
             self._cancel = threading.Event()
             self._active_id = state.job_id
             _write(self.cache_dir, state)
@@ -256,6 +268,7 @@ class JobManager:
             state = self._load(job_id)
             state.status = "running"
             state.started_ms = int(time.time() * 1000)
+            _event(state, "running", "worker started")
             _write(self.cache_dir, state)
         self.engine._job_cancel_event = self._cancel
         try:
@@ -286,26 +299,31 @@ class JobManager:
                         "code": "job_cancelled",
                         "message": "job cancelled after its current device read completed",
                     }
+                    _event(state, "cancelled", "cancel observed at a safe device-read boundary")
                 else:
                     state.status = "succeeded"
                     state.result = _dump(result)
+                    _event(state, "succeeded", "wait completed")
         except JobCancelledError as exc:
             with self._lock:
                 state = self._load(job_id)
                 state.status = "cancelled"
                 error_value = exc.to_dict().get("error")
                 state.error = error_value if isinstance(error_value, dict) else None
+                _event(state, "cancelled", "worker acknowledged cancellation")
         except AuaError as exc:
             with self._lock:
                 state = self._load(job_id)
                 state.status = "failed"
                 error_value = exc.to_dict().get("error")
                 state.error = error_value if isinstance(error_value, dict) else None
+                _event(state, "failed", "wait failed")
         except Exception as exc:  # noqa: BLE001 - persisted structured terminal state
             with self._lock:
                 state = self._load(job_id)
                 state.status = "failed"
                 state.error = {"code": "internal_error", "message": str(exc)}
+                _event(state, "failed", "worker raised an internal error")
         finally:
             with self._lock:
                 state.finished_ms = int(time.time() * 1000)
@@ -314,8 +332,8 @@ class JobManager:
                     self._active_id = None
             self.engine._job_cancel_event = None
 
-    def status(self, job_id: str) -> dict[str, Any]:
-        return self._public(self._load(job_id))
+    def status(self, job_id: str, *, recent_output: bool = False) -> dict[str, Any]:
+        return self._public(self._load(job_id), recent_output=recent_output)
 
     def wait(self, job_id: str, *, timeout_ms: int = 5_000) -> dict[str, Any]:
         if timeout_ms < 0 or timeout_ms > 10_000:
@@ -327,20 +345,27 @@ class JobManager:
                 return self._public(state)
             time.sleep(0.05)
 
-    def cancel(self, job_id: str) -> dict[str, Any]:
+    def cancel(self, job_id: str, *, wait_ms: int = 1_000) -> dict[str, Any]:
+        if wait_ms < 0 or wait_ms > 10_000:
+            raise UsageError("job cancel wait must be between 0 and 10000 ms")
         with self._lock:
             state = self._load(job_id)
             if state.status in _TERMINAL:
-                return self._public(state)
+                return self._public(state, recent_output=True)
             if state.worker_pid != os.getpid() or self._active_id != job_id:
                 raise UsageError(
                     "this process no longer owns the running job",
                     hint="Reconnect to the original AUA daemon, or inspect it until it becomes interrupted.",
                 )
             state.status = "cancel_requested"
+            _event(state, "cancel_requested", "caller requested cancellation")
             _write(self.cache_dir, state)
             self._cancel.set()
-            return self._public(state)
+            thread = self._thread
+        # Do not hold the manager lock while the worker needs it to persist its terminal state.
+        if thread is not None and thread.is_alive() and wait_ms:
+            thread.join(timeout=wait_ms / 1000.0)
+        return self._public(self._load(job_id), recent_output=True)
 
     def shutdown(self, *, timeout_s: float = 2.0) -> None:
         """Cancel and briefly join the owned worker before its warm Engine is closed."""
@@ -371,7 +396,7 @@ class JobManager:
                 break
         return {"ok": True, "jobs": [self._public(state) for state in states]}
 
-    def _public(self, state: JobState) -> dict[str, Any]:
+    def _public(self, state: JobState, *, recent_output: bool = False) -> dict[str, Any]:
         now_ms = state.finished_ms or int(time.time() * 1000)
         started_ms = state.started_ms or state.created_ms
         elapsed_ms = max(0, now_ms - started_ms)
@@ -409,6 +434,16 @@ class JobManager:
                 ),
             }
         )
+        if not recent_output:
+            payload.pop("events", None)
+        else:
+            payload["recent_output"] = (
+                state.result
+                if state.result is not None
+                else state.error
+                if state.error is not None
+                else state.events[-5:]
+            )
         return payload
 
 

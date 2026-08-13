@@ -17,7 +17,7 @@ import sys
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, TypeVar
@@ -237,13 +237,14 @@ def _run(ctx: typer.Context, fn: Callable[[Engine, OutputFormat], T]) -> T:
         if opts.until:
             _parse_await_terms(opts.until)
         engine = opts.engine()
-        global _OBSERVATION_VIEW, _UNTIL, _ENGINE, _INVOCATION_ID
+        global _OBSERVATION_VIEW, _UNTIL, _ENGINE, _INVOCATION_ID, _ANNOTATION_WARNINGS
         spec = opts.observe_fields
         if spec is None:
             spec = getattr(engine.config.output, "observation_fields", None)
         _OBSERVATION_VIEW = Projection.for_observation(spec, fmt=cfg_fmt)
         _ENGINE = engine
         _INVOCATION_ID = uuid.uuid4().hex
+        _ANNOTATION_WARNINGS = []
         if not opts.until:
             # `--until-timeout` only bounds a `--until`, so on its own it does nothing at all.
             # A fresh agent passed `--until-timeout 3000` believing it had a "safety bound",
@@ -258,8 +259,23 @@ def _run(ctx: typer.Context, fn: Callable[[Engine, OutputFormat], T]) -> T:
                     "predicate nothing is waited for and `await_outcome` is not reported.",
                 )
         _UNTIL = (opts.until, opts.until_timeout, opts.until_poll) if opts.until else None
-        _apply_answers(engine, opts.answers)
-        _apply_phases_done(engine, opts.phases_done)
+        # Inline map/session annotations are opportunistic bookkeeping. A stale task id or
+        # mistyped checkpoint must never suppress the UI action the caller actually requested.
+        for kind, apply, values in (
+            ("answer", _apply_answers, opts.answers),
+            ("phase_done", _apply_phases_done, opts.phases_done),
+        ):
+            try:
+                apply(engine, values)
+            except AuaError as err:
+                error = err.to_dict().get("error")
+                warning = dict(error) if isinstance(error, dict) else {"message": str(err)}
+                warning["annotation"] = kind
+                _ANNOTATION_WARNINGS.append(warning)
+            except (OSError, ValueError) as err:
+                _ANNOTATION_WARNINGS.append(
+                    {"annotation": kind, "code": "annotation_failed", "message": str(err)}
+                )
         return fn(engine, cfg_fmt)
     except AuaError as err:
         emit_error(err)
@@ -497,6 +513,18 @@ _OBSERVATION_VIEW: Projection | None = None
 _UNTIL: tuple[str, int, int] | None = None
 _ENGINE: Any = None
 _INVOCATION_ID: str | None = None
+_ANNOTATION_WARNINGS: list[dict[str, Any]] = []
+
+
+def _set_no_meta_observation_view(fmt: OutputFormat, enabled: bool) -> None:
+    """Apply the familiar analyze ``--no-meta`` flag to a folded observation."""
+    if not enabled:
+        return
+    global _OBSERVATION_VIEW
+    if _OBSERVATION_VIEW is None:
+        _OBSERVATION_VIEW = Projection.parse(fmt=fmt, no_meta=True)
+    else:
+        _OBSERVATION_VIEW = replace(_OBSERVATION_VIEW, no_meta=True, _explicit=True)
 
 
 def _project_observation(result: Any, fmt: OutputFormat) -> dict[str, Any] | None:
@@ -657,6 +685,19 @@ def _emit(result: Any, fmt: OutputFormat) -> None:
         result = _rehydrate(result)
     result = _await_until(result)
     projected = _project_observation(result, fmt)
+    if _ANNOTATION_WARNINGS:
+        if projected is None:
+            import json
+
+            if isinstance(result, dict):
+                projected = dict(result)
+            elif hasattr(result, "render"):
+                with contextlib.suppress(Exception):
+                    rendered = json.loads(result.render(OutputFormat.json))
+                    if isinstance(rendered, dict):
+                        projected = rendered
+        if projected is not None:
+            projected["annotation_warnings"] = list(_ANNOTATION_WARNINGS)
     if fmt is OutputFormat.tsv:
         payload = projected if projected is not None else _action_dict(result)
         if payload is not None:
@@ -959,6 +1000,19 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
     matching :class:`AuaError` (it is the answer, so it must not be swallowed).
     """
     cfg = engine.config
+    # Resolve the process-bound lease *before* choosing a daemon socket.  A daemon is bound
+    # to one physical device, so routing an unpinned call through the unsuffixed socket and
+    # leasing only inside that daemon can make the lease registry say "emulator-5558" while
+    # the already-connected Engine is still driving emulator-5554.  Besides crossing agent
+    # boundaries, that also makes jobs/session state appear to vanish on the next invocation.
+    # Lease discovery does not connect to uiautomator2; it is the cheap ownership decision
+    # every transport must share.
+    lease_serial = getattr(engine, "_lease_serial", None)
+    lease_device = getattr(engine, "_lease_device", None)
+    if not lease_serial and callable(lease_device):
+        lease_serial = lease_device()
+    if lease_serial:
+        cfg.device.serial = lease_serial
     if getattr(cfg.daemon, "enabled", False):
         try:
             from . import daemon as daemon_mod
@@ -1766,6 +1820,11 @@ def await_cmd(
     observe: bool = typer.Option(
         False, "--observe/--no-observe", help="Also return the screen when the wait ends."
     ),
+    no_meta: bool = typer.Option(
+        False,
+        "--no-meta",
+        help="Omit meta from the returned observation (same meaning as analyze).",
+    ),
 ) -> None:
     """Wait for a *condition*, and say which of three things ended the wait.
 
@@ -1782,6 +1841,7 @@ def await_cmd(
     """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
+        _set_no_meta_observation_view(fmt, no_meta)
         result = _route(
             engine,
             "await_predicate",
@@ -2659,6 +2719,11 @@ def wait(
     absent: bool = typer.Option(
         False, "--absent", help="With --for: wait until it DISAPPEARS (loading spinners, dialogs)."
     ),
+    no_meta: bool = typer.Option(
+        False,
+        "--no-meta",
+        help="Omit meta from the returned observation (same meaning as analyze).",
+    ),
 ) -> None:
     """Wait for text to appear (or with ``--absent`` disappear), for idle, or for settle.
 
@@ -2683,6 +2748,7 @@ def wait(
     """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
+        _set_no_meta_observation_view(fmt, no_meta)
         _warn_if_wait_could_have_been_until(engine, for_)
         global _UNTIL
         if not (for_ or idle or for_stable or after_change or changed) and _UNTIL:
@@ -2907,6 +2973,17 @@ def session_start_cmd(
         ),
     ),
     avd: str | None = typer.Option(None, "--avd", help="AVD name when several are configured."),
+    package: str | None = typer.Option(
+        None,
+        "--app",
+        "--package",
+        help="Launch and observe this package before planning (aliases are equivalent).",
+    ),
+    activity: str | None = typer.Option(
+        None,
+        "--activity",
+        help="With --app/--package, pin a launcher Activity.",
+    ),
 ) -> None:
     """Observe once and return the safest exact CLI and MCP next call."""
 
@@ -2918,6 +2995,8 @@ def session_start_cmd(
             start_emulator=start_emulator,
             headed=headed,
             avd=avd,
+            package=package,
+            activity=activity,
         )
         if isinstance(result, dict) and _OBSERVATION_VIEW is not None:
             result = trim_observation_payload(result, _OBSERVATION_VIEW, fmt=fmt)
@@ -3033,11 +3112,22 @@ def job_start_cmd(
 
 
 @job_app.command("status")
-def job_status_cmd(ctx: typer.Context, job_id: str = typer.Argument(...)) -> None:
+def job_status_cmd(
+    ctx: typer.Context,
+    job_id: str = typer.Argument(...),
+    recent_output: bool = typer.Option(
+        False,
+        "--recent-output",
+        help="Include persisted lifecycle events and the latest result/error.",
+    ),
+) -> None:
     """Reconnect to a job without restarting its wait."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(_route(engine, "job_status", job_id=job_id), fmt)
+        _emit(
+            _route(engine, "job_status", job_id=job_id, recent_output=recent_output),
+            fmt,
+        )
 
     _run(ctx, go)
 
@@ -3063,11 +3153,21 @@ def job_wait_cmd(
 
 
 @job_app.command("cancel")
-def job_cancel_cmd(ctx: typer.Context, job_id: str = typer.Argument(...)) -> None:
-    """Request cancellation at the worker's next safe device-read boundary."""
+def job_cancel_cmd(
+    ctx: typer.Context,
+    job_id: str = typer.Argument(...),
+    wait_ms: int = typer.Option(
+        1_000,
+        "--wait-ms",
+        min=0,
+        max=10_000,
+        help="Briefly wait for a terminal cancellation acknowledgement.",
+    ),
+) -> None:
+    """Cancel and briefly wait for the worker's safe device-read boundary."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(_route(engine, "job_cancel", job_id=job_id), fmt)
+        _emit(_route(engine, "job_cancel", job_id=job_id, wait_ms=wait_ms), fmt)
 
     _run(ctx, go)
 
@@ -4749,11 +4849,11 @@ def _render_doctor_pretty(report: dict[str, Any]) -> str:
 # --------------------------------------------------------------------------- memory / map
 
 
-def _resolve_package(opts: GlobalOpts, app_pkg: str | None) -> str:
+def _resolve_package(engine: Engine, app_pkg: str | None) -> str:
     """Use ``--app`` if given, else detect the foreground package (needs a device)."""
     if app_pkg:
         return app_pkg
-    pkg = opts.engine().current_package()
+    pkg = engine.current_package()
     if not pkg:
         raise UsageError(
             "could not determine the foreground app",
@@ -4811,7 +4911,7 @@ def map_cmd(
 
         opts = _opts(ctx)
         store = AppMemoryStore(opts.load().memory)
-        pkg = _resolve_package(opts, app_pkg)
+        pkg = _resolve_package(engine, app_pkg)
         app_map = store.load(pkg) or AppMap(package=pkg)
         selected_context = context or _active_map_context(
             engine,
@@ -4952,7 +5052,7 @@ def remember(
 
         opts = _opts(ctx)
         store = AppMemoryStore(opts.load().memory)
-        pkg = _resolve_package(opts, app_pkg)
+        pkg = _resolve_package(engine, app_pkg)
         did: list[str] = []
         if about:
             store.set_description(pkg, about)
@@ -4992,7 +5092,7 @@ def about(
 
         opts = _opts(ctx)
         store = AppMemoryStore(opts.load().memory)
-        pkg = _resolve_package(opts, app_pkg)
+        pkg = _resolve_package(engine, app_pkg)
         app_map = store.load(pkg)
         if app_map is None:
             typer.echo(f"nothing recorded for {pkg} yet")
@@ -5049,7 +5149,7 @@ def knowledge_list(
         import json
 
         opts = _opts(ctx)
-        pkg = _resolve_package(opts, app_pkg)
+        pkg = _resolve_package(engine, app_pkg)
         app_map = AppMemoryStore(opts.load().memory).load(pkg) or AppMap(package=pkg)
         items = [
             item.model_dump(mode="json")
@@ -5073,7 +5173,7 @@ def knowledge_show(
         import json
 
         opts = _opts(ctx)
-        pkg = _resolve_package(opts, app_pkg)
+        pkg = _resolve_package(engine, app_pkg)
         app_map = AppMemoryStore(opts.load().memory).load(pkg) or AppMap(package=pkg)
         item = next((known for known in app_map.knowledge if known.id == knowledge_id), None)
         if item is None:
@@ -5104,7 +5204,7 @@ def knowledge_add(
         import json
 
         opts = _opts(ctx)
-        pkg = _resolve_package(opts, app_pkg)
+        pkg = _resolve_package(engine, app_pkg)
         allowed_kinds = {"description", "note", "recipe", "deeplink", "claim"}
         allowed_sources = {"user", "agent", "runtime", "source"}
         if kind not in allowed_kinds or source not in allowed_sources:
@@ -5137,7 +5237,7 @@ def knowledge_stale(
         import json
 
         opts = _opts(ctx)
-        pkg = _resolve_package(opts, app_pkg)
+        pkg = _resolve_package(engine, app_pkg)
         store = AppMemoryStore(opts.load().memory)
         app_map = store.load(pkg) or AppMap(package=pkg)
         item = next((known for known in app_map.knowledge if known.id == knowledge_id), None)
@@ -5181,7 +5281,7 @@ def reconcile_plan(
         import json
 
         opts = _opts(ctx)
-        pkg = _resolve_package(opts, app_pkg)
+        pkg = _resolve_package(engine, app_pkg)
         store = AppMemoryStore(opts.load().memory)
         selected_context = context or _active_map_context(
             engine,
@@ -5214,7 +5314,7 @@ def reconcile_submit(
         import json
 
         opts = _opts(ctx)
-        pkg = _resolve_package(opts, app_pkg)
+        pkg = _resolve_package(engine, app_pkg)
         try:
             parsed = ResearchReport.model_validate(_read_json_document(report))
             result = ReconciliationStore(AppMemoryStore(opts.load().memory)).submit(pkg, parsed)
@@ -5236,7 +5336,7 @@ def reconcile_status(
         import json
 
         opts = _opts(ctx)
-        pkg = _resolve_package(opts, app_pkg)
+        pkg = _resolve_package(engine, app_pkg)
         result = ReconciliationStore(AppMemoryStore(opts.load().memory)).status(pkg)
         typer.echo(json.dumps(result, indent=2, ensure_ascii=False))
 
@@ -5255,7 +5355,7 @@ def reconcile_apply(
         import json
 
         opts = _opts(ctx)
-        pkg = _resolve_package(opts, app_pkg)
+        pkg = _resolve_package(engine, app_pkg)
         store = AppMemoryStore(opts.load().memory)
         app_map = store.load(pkg) or AppMap(package=pkg)
         raw = next(
@@ -5283,7 +5383,7 @@ def reconcile_rollback(
         import json
 
         opts = _opts(ctx)
-        pkg = _resolve_package(opts, app_pkg)
+        pkg = _resolve_package(engine, app_pkg)
         try:
             event = ReconciliationStore(AppMemoryStore(opts.load().memory)).rollback(
                 pkg, rollback_id
@@ -5308,7 +5408,7 @@ def memory_show(
 
         opts = _opts(ctx)
         store = AppMemoryStore(opts.load().memory)
-        pkg = _resolve_package(opts, app_pkg)
+        pkg = _resolve_package(engine, app_pkg)
         app_map = store.load(pkg)
         if app_map is None:
             typer.echo(f"no memory recorded for {pkg} yet (run `aua analyze` while navigating)")
@@ -5338,7 +5438,7 @@ def memory_path(
     def go(engine: Engine, fmt: OutputFormat) -> None:
         opts = _opts(ctx)
         store = AppMemoryStore(opts.load().memory)
-        pkg = _resolve_package(opts, app_pkg)
+        pkg = _resolve_package(engine, app_pkg)
         typer.echo(str(store.app_dir(pkg)))
 
     _run(ctx, go)
@@ -5512,11 +5612,26 @@ def flow_save_cmd(
     name: str = typer.Argument(..., help="Name for the saved flow."),
     last: int = typer.Option(12, "--last", help="How many recent actions to materialize."),
     force: bool = typer.Option(False, "--force", help="Overwrite an existing flow."),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Preview the generated YAML without writing the flow file.",
+    ),
 ) -> None:
     """Materialize the session's recent actions into an editable flow YAML."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(_route(engine, "flow_save", name=name, last=last, force=force), fmt)
+        _emit(
+            _route(
+                engine,
+                "flow_save",
+                name=name,
+                last=last,
+                force=force,
+                dry_run=dry_run,
+            ),
+            fmt,
+        )
 
     _run(ctx, go)
 

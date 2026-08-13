@@ -574,6 +574,29 @@ class Engine:
         self._lease_owner_resolved = owner
         return serial
 
+    def _reset_owner_transient_state(self) -> None:
+        """Drop observations and transport state when a warm daemon changes caller owner.
+
+        Device caches are valid only for the owner that produced them.  Keeping them across a
+        daemon hand-off can make a fresh numeric id, session id, or prefetched hierarchy from
+        the previous owner look current to the next one even when both use the same emulator.
+        Durable map knowledge stays shared; only invocation/session-local state is cleared.
+        """
+        self._last_activity = None
+        self._pre_action_sig = None
+        self._pre_action_tree_fp = None
+        self._pre_action_state = None
+        self._last_mem_fp = None
+        self._last_known_screen = None
+        self._last_action_kind = None
+        self._last_action_site = None
+        self._last_analyze_elements = None
+        self._last_hierarchy_hash = None
+        self._last_analyze_result = None
+        self._session_id = None
+        self._prefetch.invalidate()
+        self._gate_cache = type(self._gate_cache)()
+
     def _flows_for(self, package: str | None) -> list[str]:
         """Saved journeys for *package*, as ``name(PARAM, …)``.
 
@@ -3155,6 +3178,20 @@ class Engine:
                     hint=self._assist_suggestion(assist),
                 )
             reached = res.meta.known_screen
+            if reached != edge.to_screen and self._observation_is_loading(res):
+                # An analyzed action can legitimately return the app's settled loading shell.
+                # That is evidence the tap landed, not evidence the learned route diverged.
+                # Reuse the read-only mapped-screen recognizer for one bounded arrival wait
+                # before demoting the route or asking an agent to recover manually.
+                with contextlib.suppress(UsageError):
+                    awaited = self._await_known_screen(
+                        edge.to_screen,
+                        timeout_ms=5_000,
+                        poll_ms=200,
+                    )
+                    if awaited.ok and awaited.observation is not None:
+                        res = awaited.observation
+                        reached = res.meta.known_screen
             if reached != edge.to_screen and "apple_vision" not in res.meta.providers_used:
                 # A custom-rendered destination may not be recognisable from accessibility
                 # alone. Pay for one OCR retry before declaring that the route diverged.
@@ -3573,13 +3610,20 @@ class Engine:
         )
         return out
 
-    def flow_save(self, name: str, *, last: int = 12, force: bool = False) -> dict[str, Any]:
+    def flow_save(
+        self,
+        name: str,
+        *,
+        last: int = 12,
+        force: bool = False,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
         """Materialize the session's recent recorded actions into an editable flow file.
 
         Redacted inputs/labels become required ``${PARAM_n}`` placeholders — typed
         values are never recorded, so the agent fills them in the saved YAML.
         """
-        from .flows import Flow, FlowStore, check_saveable, steps_from_recent
+        from .flows import Flow, FlowStore, check_saveable, render_flow_yaml, steps_from_recent
 
         mem = self._memory
         if mem is None:
@@ -3600,7 +3644,10 @@ class Engine:
             steps=steps,
         )
         warnings = check_saveable(flow)  # refuses outright if the flow could not run
-        path = FlowStore(self.config.memory).save(flow, force=force)
+        store = FlowStore(self.config.memory)
+        path = store.path(name)
+        if not dry_run:
+            path = store.save(flow, force=force)
         out = {
             "ok": True,
             "action": "flow-save",
@@ -3608,7 +3655,14 @@ class Engine:
             "path": str(path),
             "steps": len(steps),
             "params_needed": sorted(params),
-            "hint": "edit the YAML to fill ${PARAM_n} values / trim steps, then `aua flow run`",
+            "dry_run": dry_run,
+            "preview": render_flow_yaml(flow),
+            "preview_call": f"aua flow run {shlex.quote(name)} --dry-run",
+            "hint": (
+                "review this YAML, then re-run without --dry-run to save it"
+                if dry_run
+                else "edit the YAML / fill ${PARAM_n}, then run the exact preview_call before replay"
+            ),
         }
         if warnings:
             out["warnings"] = warnings
@@ -3663,11 +3717,14 @@ class Engine:
         start_emulator: bool = False,
         headed: bool = False,
         avd: str | None = None,
+        package: str | None = None,
+        activity: str | None = None,
     ) -> dict[str, Any]:
         """Observe once and return the safest goal-specific CLI and MCP next call.
 
-        Supplying *observation* is an internal composition seam used by ``reach``.  Adapters
-        expose only the goal: a normal bootstrap always performs exactly one analyze.
+        Supplying *observation* is an internal composition seam used by ``reach``. A caller may
+        explicitly name *package*/*activity* to launch into the intended app first; the launch's
+        folded observation is reused, so bootstrap still performs exactly one screen read.
         """
         if not goal.strip():
             raise UsageError("session start needs a non-empty goal")
@@ -3691,6 +3748,14 @@ class Engine:
                 self._lease_owner_resolved = boot_owner
                 emulator_started = True
         try:
+            if observation is None and package:
+                launched = self.app(
+                    "launch",
+                    package=package,
+                    activity=activity,
+                    observe=True,
+                )
+                observation = launched.observation
             observed = observation or self.analyze(source="hierarchy", with_ocr=False)
         except Exception:
             if emulator_started:
@@ -5545,6 +5610,16 @@ class Engine:
         # Resolve that first, then aim, so both corrections apply to the control rather than
         # to the caption sitting below it.
         el, acting = self._acting_target(named)
+        if element_id is not None and acting.get("relation") == "sibling-subtree":
+            raise UsageError(
+                f"numeric id {element_id} names a label, not the sibling control that would act",
+                hint=(
+                    "No gesture was sent. Numeric ids are exact frame bindings and are never "
+                    "retargeted to a sibling. Use the acting control's fresh id/rid from `aua "
+                    "target`, or use the visible-text selector deliberately."
+                ),
+                code="unsafe_action_target",
+            )
         # Two independent corrections to the naive `el.center`, composed on separate axes.
         # `_tap_point` aims x at a named phrase inside a single line, so two links on one line
         # are separately reachable. `_aim` moves y out of the system navigation bar, whose
@@ -6508,6 +6583,23 @@ class Engine:
             return None
         record = app.screens.get(observation.meta.known_screen)
         return record.state if record is not None else None
+
+    def _observation_is_loading(self, observation: AnalyzeResult | None) -> bool:
+        """Conservative signal that a wrong-screen verdict would be premature."""
+        if observation is None:
+            return False
+        if self._mapped_screen_state(observation) == "loading":
+            return True
+        for element in observation.elements:
+            kind = (element.type or "").casefold()
+            if kind.endswith("progressbar"):
+                return True
+            label = " ".join(
+                value for value in (element.text, element.content_desc) if value
+            ).strip()
+            if re.search(r"\b(?:loading|please wait)\b", label, re.IGNORECASE):
+                return True
+        return False
 
     @staticmethod
     def _semantic_back_selector(

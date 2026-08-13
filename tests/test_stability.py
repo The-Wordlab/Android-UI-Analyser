@@ -214,6 +214,28 @@ def test_cli_after_change_uses_the_confirmed_engine_contract(
     assert calls[0][1]["timeout_ms"] == 9000
 
 
+def test_wait_and_await_accept_analyze_no_meta(monkeypatch: pytest.MonkeyPatch) -> None:
+    dev = FakeDevice(hierarchy_xml=_XML, screenshots=[FRAME_A] * 10)
+    eng = _engine(dev)
+
+    from android_ui_analyser import cli
+
+    monkeypatch.setattr(cli.GlobalOpts, "engine", lambda self: eng)
+    wait = runner.invoke(
+        app,
+        ["wait-and-analyze", "--for", "Ready", "--observe", "--no-meta", "--timeout", "1"],
+    )
+    assert wait.exit_code != 2, wait.output
+    assert cli._OBSERVATION_VIEW is not None and cli._OBSERVATION_VIEW.no_meta
+
+    awaited = runner.invoke(
+        app,
+        ["await-and-analyze", "text:Ready", "--observe", "--no-meta", "--timeout-ms", "1"],
+    )
+    assert awaited.exit_code != 2, awaited.output
+    assert cli._OBSERVATION_VIEW is not None and cli._OBSERVATION_VIEW.no_meta
+
+
 # --------------------------------------------------------------- grid-based settle (animation masking)
 
 

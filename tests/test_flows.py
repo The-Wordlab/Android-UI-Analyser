@@ -344,6 +344,20 @@ def test_flow_save_requires_force_to_overwrite(tmp_path: Path) -> None:
     assert eng.flow_save("dup", force=True)["ok"]
 
 
+def test_flow_save_dry_run_previews_without_writing(tmp_path: Path) -> None:
+    dev = ScriptedDevice([HOME], package=P, serial="emu-save-preview")
+    eng = _engine(tmp_path, dev)
+    res = eng.analyze(source="hierarchy")
+    eng.tap(res.elements[1].id, observe=False)
+
+    out = eng.flow_save("preview_only", dry_run=True)
+
+    assert out["dry_run"] is True
+    assert "tap:" in out["preview"]
+    assert out["preview_call"].endswith("preview_only --dry-run")
+    assert not Path(out["path"]).exists()
+
+
 def test_steps_from_recent_parameterizes_redacted_labels() -> None:
     recent = [
         RouteStep(kind="tap", label="Apps"),

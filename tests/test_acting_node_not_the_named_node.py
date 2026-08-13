@@ -184,6 +184,21 @@ def test_tap_aims_at_the_control_and_says_so(tmp_path: Path) -> None:
     assert out.acting["id"] == control.id
 
 
+def test_numeric_id_never_retargets_to_a_sibling_control(tmp_path: Path) -> None:
+    """An id means the exact node in the returned frame, not a nearby inferred intent."""
+    from android_ui_analyser.errors import UsageError
+
+    eng = _engine(tmp_path, _tile())
+    observed = eng.analyze(source="hierarchy")
+    caption = next(element for element in observed.elements if element.text == "Beat Painter")
+
+    with pytest.raises(UsageError) as caught:
+        eng.tap(caption.id, observe=False)
+
+    assert caught.value.code == "unsafe_action_target"
+    assert "never retargeted" in (caught.value.hint or "")
+
+
 def test_tap_on_a_real_control_reports_that_it_acted_on_what_was_named(tmp_path: Path) -> None:
     """`acting` is reported unconditionally: "the node you named is the one that acts" is a fact
     a reader needs, and a field that appears only sometimes gets read as "nothing to see"."""

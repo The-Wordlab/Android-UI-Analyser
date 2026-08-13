@@ -153,6 +153,24 @@ def test_goal_matching_ignores_conjunctions_and_requires_whole_words() -> None:
     assert plan.observation_note.startswith("This is the current settled screen")
 
 
+def test_one_incidental_goal_word_cannot_recommend_a_risky_flow() -> None:
+    unrelated = Flow(
+        name="reset_account_google_login",
+        app=_PKG,
+        description="Reset the account while online and land on onboarding",
+        steps=[RouteStep(kind="launch-app", arg=_PKG)],
+    )
+
+    plan = plan_goal_session(
+        "Establish a cached Grammar thread online",
+        _observation(),
+        flows=[unrelated],
+    )
+
+    assert not any(candidate.kind == "flow" for candidate in plan.candidates)
+    assert plan.recommended_call.kind == "map_find"
+
+
 def test_session_start_uses_exactly_one_analyze(monkeypatch, tmp_path) -> None:
     engine = Engine(
         make_config(

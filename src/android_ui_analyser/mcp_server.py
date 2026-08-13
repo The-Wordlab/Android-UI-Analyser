@@ -307,6 +307,14 @@ def _tool_definitions() -> list[types.Tool]:
                         ),
                     },
                     "avd": {"type": "string", "description": "AVD name when several exist."},
+                    "package": {
+                        "type": "string",
+                        "description": "Launch and observe this package before planning.",
+                    },
+                    "activity": {
+                        "type": "string",
+                        "description": "Optional launcher Activity to pin with package.",
+                    },
                 },
                 "required": ["goal"],
                 "additionalProperties": False,
@@ -385,7 +393,14 @@ def _tool_definitions() -> list[types.Tool]:
             description="Reconnect to a durable wait by id without restarting it.",
             inputSchema={
                 "type": "object",
-                "properties": {"job_id": {"type": "string"}},
+                "properties": {
+                    "job_id": {"type": "string"},
+                    "recent_output": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Include lifecycle events and latest result/error.",
+                    },
+                },
                 "required": ["job_id"],
                 "additionalProperties": False,
             },
@@ -412,10 +427,18 @@ def _tool_definitions() -> list[types.Tool]:
         ),
         types.Tool(
             name="job_cancel",
-            description="Cancel a durable wait at its next safe device-read boundary.",
+            description="Cancel a durable wait and briefly await terminal acknowledgement.",
             inputSchema={
                 "type": "object",
-                "properties": {"job_id": {"type": "string"}},
+                "properties": {
+                    "job_id": {"type": "string"},
+                    "wait_ms": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 10000,
+                        "default": 1000,
+                    },
+                },
                 "required": ["job_id"],
                 "additionalProperties": False,
             },
@@ -511,6 +534,11 @@ def _tool_definitions() -> list[types.Tool]:
                     "name": {"type": "string"},
                     "last": {"type": "integer", "default": 12, "minimum": 1},
                     "force": {"type": "boolean", "default": False},
+                    "dry_run": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Preview generated YAML without writing it.",
+                    },
                 },
                 "required": ["name"],
                 "additionalProperties": False,
@@ -1821,14 +1849,20 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         operation = str(args.pop("operation", ""))
         return jobs.start(operation, args)
     if name == "job_status":
-        return jobs.status(str(args.get("job_id") or ""))
+        return jobs.status(
+            str(args.get("job_id") or ""),
+            recent_output=bool(args.get("recent_output", False)),
+        )
     if name == "job_wait":
         return jobs.wait(
             str(args.get("job_id") or ""),
             timeout_ms=int(args.get("timeout_ms", 5_000)),
         )
     if name == "job_cancel":
-        return jobs.cancel(str(args.get("job_id") or ""))
+        return jobs.cancel(
+            str(args.get("job_id") or ""),
+            wait_ms=int(args.get("wait_ms", 1_000)),
+        )
     if name == "job_list":
         return jobs.list(limit=int(args.get("limit", 20)))
     if name not in {"capabilities", "session_progress", "session_review", "configure"}:
@@ -1846,6 +1880,8 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 start_emulator=bool(args.get("start_emulator", False)),
                 headed=bool(args.get("headed", False)),
                 avd=args.get("avd"),
+                package=args.get("package"),
+                activity=args.get("activity"),
             )
         )
         if isinstance(started, dict) and started.get("emulator_started"):
@@ -1905,6 +1941,7 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 str(args["name"]),
                 last=int(args.get("last", 12)),
                 force=bool(args.get("force", False)),
+                dry_run=bool(args.get("dry_run", False)),
             )
         )
     if name == "map_find":
@@ -2605,6 +2642,7 @@ def build_server(engine: Engine) -> Server:
 
         args_in = dict(arguments or {})
         phase_done = args_in.pop("phase_done", None)
+        annotation_warnings: list[dict[str, Any]] = []
         invocation_id = uuid.uuid4().hex
         started_at = time.monotonic()
         payload: Any = None
@@ -2644,10 +2682,19 @@ def build_server(engine: Engine) -> Server:
 
         try:
             if isinstance(phase_done, dict):
-                _engine_method(engine, "session_mark_phase")(
-                    str(phase_done.get("id") or ""),
-                    str(phase_done.get("evidence") or ""),
-                )
+                try:
+                    _engine_method(engine, "session_mark_phase")(
+                        str(phase_done.get("id") or ""),
+                        str(phase_done.get("evidence") or ""),
+                    )
+                except (AuaError, OSError, ValueError) as err:
+                    if isinstance(err, AuaError):
+                        raw = err.to_dict().get("error")
+                        warning = dict(raw) if isinstance(raw, dict) else {"message": str(err)}
+                    else:
+                        warning = {"code": "annotation_failed", "message": str(err)}
+                    warning["annotation"] = "phase_done"
+                    annotation_warnings.append(warning)
             _validate_until(name, args_in)
             payload = _dispatch(engine, name, args_in)
             payload = _fold_action_until(engine, name, args_in, payload)
@@ -2670,6 +2717,8 @@ def build_server(engine: Engine) -> Server:
                     spec = getattr(engine.config.output, "observation_fields", None)
                 view = Projection.for_observation(spec, fmt=OutputFormat.json)
                 payload = trim_observation_payload(payload, view, fmt=OutputFormat.json)
+            if annotation_warnings and isinstance(payload, dict):
+                payload["annotation_warnings"] = annotation_warnings
             text = json.dumps(payload, ensure_ascii=False)
         except AuaError as err:
             error = err.to_dict().get("error")

@@ -947,7 +947,11 @@ def _flow_candidates(
             flow.arrival,
             *flow.aliases,
         )
-        if score <= 0:
+        # One incidental shared word is not intent.  In a multi-part test goal it made a
+        # destructive account-reset flow outrank the visible controls merely because both
+        # descriptions said "online".  A single-term goal still scores 25 (token + all-terms),
+        # while longer goals need several terms or an exact phrase.
+        if score < 20:
             continue
         risks = _flow_risks(
             flow,
@@ -998,7 +1002,7 @@ def _deeplink_candidates(goal: str, app: AppMap, *, target: str | None) -> list[
         score = _match_score(goal, link.uri, link.note, link.landed)
         if target and link.landed == target:
             score += 100
-        if score <= 0:
+        if score < 20:
             continue
         uri = shlex.quote(link.uri)
         call = GoalCall(

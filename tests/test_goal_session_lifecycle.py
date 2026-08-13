@@ -144,6 +144,31 @@ def test_cli_phase_checkpoint_advances_without_a_device_call(
     assert engine.device.calls == before_calls
 
 
+def test_bad_inline_phase_annotation_warns_but_does_not_cancel_the_action(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    from android_ui_analyser import cli
+
+    engine = _engine(tmp_path, "annotation-device")
+    actions: list[str] = []
+    monkeypatch.setattr(cli.GlobalOpts, "engine", lambda self: engine)
+
+    def route(_engine: Engine, method: str, **_kwargs: Any) -> dict[str, Any]:
+        actions.append(method)
+        return {"ok": True, "action": "key", "detail": "back"}
+
+    monkeypatch.setattr(cli, "_route", route)
+    result = runner.invoke(
+        app,
+        ["--phase-done", "not-a-checkpoint", "key-and-analyze", "back", "--no-observe"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert actions == ["key"]
+    payload = __import__("json").loads(result.stdout)
+    assert payload["annotation_warnings"][0]["annotation"] == "phase_done"
+
+
 def test_stale_deeplink_is_not_recommended_again_for_active_phase(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
@@ -210,6 +235,39 @@ def test_cli_headed_accepts_an_already_attached_emulator(monkeypatch: Any) -> No
 
     assert result.exit_code == 0, result.output
     assert '"session_id"' in result.stdout
+
+
+def test_session_start_app_alias_launches_and_reuses_that_observation(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    engine = _engine(tmp_path, "goal-app-context")
+    observed = _observation(engine.device.serial)
+    launches: list[tuple[str, str | None]] = []
+
+    def app_launch(_action: str, **kwargs: Any) -> Any:
+        launches.append((kwargs["package"], kwargs.get("activity")))
+        return engine_mod.ActionResult(
+            ok=True,
+            action="app-launch",
+            observation=observed,
+            observation_present=True,
+        )
+
+    monkeypatch.setattr(engine, "app", app_launch)
+    monkeypatch.setattr(
+        engine,
+        "analyze",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("duplicate analyze")),
+    )
+
+    started = engine.session_start(
+        "inspect catalog",
+        package="com.example.catalog",
+        activity=".MainActivity",
+    )
+
+    assert launches == [("com.example.catalog", ".MainActivity")]
+    assert started["package"] == "com.example.catalog"
 
 
 def test_journal_automatically_correlates_active_session_and_review_finds_waste(

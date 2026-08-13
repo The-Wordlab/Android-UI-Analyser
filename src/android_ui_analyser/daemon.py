@@ -40,7 +40,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .errors import AuaError, DaemonOutcomeUnknownError
+from .errors import AuaError, DaemonOutcomeUnknownError, UsageError
 
 if TYPE_CHECKING:
     from .config import Config
@@ -160,10 +160,28 @@ def _adopt_client_owner(engine: Engine, owner: str | None) -> None:
     """
     if not owner or owner == getattr(engine, "_lease_owner_resolved", None):
         return
+    device = getattr(engine, "_device", None)
+    connected_serial = getattr(device, "serial", None)
+    config = getattr(engine, "config", None)
+    bound_serial = connected_serial or getattr(getattr(config, "device", None), "serial", None)
     engine._lease_owner = owner
     engine._lease_serial = None
     engine._lease_owner_resolved = None
-    engine._lease_device()  # raises DeviceLeasedError when this owner may not have it
+    leased_serial = engine._lease_device()  # raises when this owner may not have it
+    if bound_serial and leased_serial and leased_serial != bound_serial:
+        # A warm Engine cannot be rebound by changing only its lease metadata: its Device
+        # object, caches, job manager and capture buffer all belong to the original serial.
+        # Refuse rather than claim one emulator and operate on another.
+        engine._lease_serial = None
+        engine._lease_owner_resolved = None
+        raise UsageError(
+            f"this daemon is bound to {bound_serial}, but owner {owner!r} leased {leased_serial}",
+            hint="Use the per-device daemon selected by the CLI, or pass --serial explicitly.",
+            code="daemon_device_mismatch",
+        )
+    reset = getattr(engine, "_reset_owner_transient_state", None)
+    if callable(reset):
+        reset()
 
 
 def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
@@ -192,7 +210,12 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
             job_args = {key: value for key, value in args.items() if key != "operation"}
             return _result_ok(jobs.start(operation, job_args))
         if cmd == "job_status":
-            return _result_ok(manager_for(engine).status(str(args.get("job_id") or "")))
+            return _result_ok(
+                manager_for(engine).status(
+                    str(args.get("job_id") or ""),
+                    recent_output=bool(args.get("recent_output", False)),
+                )
+            )
         if cmd == "job_wait":
             return _result_ok(
                 manager_for(engine).wait(
@@ -201,7 +224,12 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
                 )
             )
         if cmd == "job_cancel":
-            return _result_ok(manager_for(engine).cancel(str(args.get("job_id") or "")))
+            return _result_ok(
+                manager_for(engine).cancel(
+                    str(args.get("job_id") or ""),
+                    wait_ms=int(args.get("wait_ms", 1_000)),
+                )
+            )
         if cmd == "job_list":
             return _result_ok(manager_for(engine).list(limit=int(args.get("limit", 20))))
         if hasattr(engine, "config"):
