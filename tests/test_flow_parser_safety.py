@@ -45,6 +45,7 @@ from conftest import make_config
         "steps: [{repeat: {times: 0, steps: [{key: back}]}}]\n",
         "steps: [{retry: {max_retries: false, steps: [{key: back}]}}]\n",
         "arrival_status: mapped\nsteps: [{key: back}]\n",
+        "arrival_status: predicate_verified\nsteps: [{key: back}]\n",
         "arrival_status: unverified\narrival_screen: home\nsteps: [{key: back}]\n",
         "arrival_status: maybe\nsteps: [{key: back}]\n",
     ],
@@ -422,5 +423,5 @@ def test_runtime_and_plugin_versions_match() -> None:
     project = tomllib.loads((root / "pyproject.toml").read_text())
     plugin = json.loads((root / ".claude-plugin/plugin.json").read_text())
     marketplace = json.loads((root / ".claude-plugin/marketplace.json").read_text())
-    assert __version__ == project["project"]["version"] == plugin["version"] == "0.9.6"
+    assert __version__ == project["project"]["version"] == plugin["version"] == "0.9.7"
     assert marketplace["plugins"][0]["version"] == __version__

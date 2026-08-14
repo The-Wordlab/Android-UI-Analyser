@@ -323,9 +323,7 @@ def _run(ctx: typer.Context, fn: Callable[[Engine, OutputFormat], T]) -> T:
             standalone_until = getattr(ctx.command, "name", None) == "wait-and-analyze"
             terms = _parse_await_terms(opts.until, require_positive=False)
             if not standalone_until and not any(not term.negated for term in terms):
-                recommended_call = (
-                    f"aua await-and-analyze {shlex.quote(opts.until)} --observe"
-                )
+                recommended_call = f"aua await-and-analyze {shlex.quote(opts.until)} --observe"
                 error = RecommendedUsageError(
                     "an action-bound --until needs positive arrival evidence",
                     hint=(
@@ -447,7 +445,7 @@ def _apply_phases_done(engine: Engine, phases_done: tuple[str, ...]) -> None:
                 f"--phase-done wants PHASE_ID=evidence, got {pair!r}",
                 hint=(
                     "Use the current goal_progress.checkpoint, for example "
-                    "--phase-done phase_2=\"cached thread visible and Loading absent\"."
+                    '--phase-done phase_2="cached thread visible and Loading absent".'
                 ),
             )
         engine.session_mark_phase(
@@ -1357,9 +1355,7 @@ class UnknownCommand(AuaError):
         message = f"`aua {name}` is not a command."
         if self.meant:
             message += f" Use `aua {self.meant}`."
-        self.recommended_call = (
-            f"aua {self.meant} --help" if self.meant else "aua guide --brief"
-        )
+        self.recommended_call = f"aua {self.meant} --help" if self.meant else "aua guide --brief"
         super().__init__(message, hint=_GUIDE_POINTER)
 
     def to_dict(self) -> dict[str, object]:
@@ -3246,7 +3242,7 @@ def session_review_cmd(
     ctx: typer.Context,
     session_id: str | None = typer.Option(None, "--session-id", help="Review a prior session."),
 ) -> None:
-    """Report calls, failures, avoidable patterns, and estimated savings."""
+    """Report exact top-level/task/lifecycle calls, folded events, failures, and savings."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
         _emit(_route(engine, "session_review", session_id=session_id), fmt)
@@ -5862,16 +5858,14 @@ def flow_save_cmd(
         "--save",
         help="Write the previewed flow. Without this flag, flow save writes nothing.",
     ),
-    force: bool = typer.Option(
-        False, "--force", help="With --save, overwrite an existing flow."
-    ),
+    force: bool = typer.Option(False, "--force", help="With --save, overwrite an existing flow."),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
         help="Deprecated compatibility alias for the default non-writing preview.",
     ),
 ) -> None:
-    """Preview recent actions as flow YAML; add --save after reviewing it."""
+    """Preview scope, selector resilience, and captured arrival proof; --save writes."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
         result = _route(

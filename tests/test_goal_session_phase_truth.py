@@ -124,9 +124,9 @@ def test_arrived_title_prefers_requested_flow_preview_over_weak_child_control(
         controls=["Internet AndroidWifi"],
     )
 
-    progress = engine.session_progress(
-        started["session_id"], observation=destination
-    )["goal_progress"]
+    progress = engine.session_progress(started["session_id"], observation=destination)[
+        "goal_progress"
+    ]
 
     assert progress["next_call"] == {
         "kind": "flow_save_preview",
@@ -148,3 +148,75 @@ def test_arrived_title_prefers_requested_flow_preview_over_weak_child_control(
         },
     }
     assert "tap" not in progress["next_call"]["cli"]
+
+
+def test_origin_title_in_compound_phase_does_not_claim_destination_arrival(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path, "phase-origin-title")
+    shelf = _observation(
+        engine.device.serial,
+        screen="tool_shelf",
+        title="Tool Shelf",
+        controls=["Vocabulary"],
+    )
+
+    started = engine.session_start(
+        "From Tool Shelf, open Vocabulary's threaded recent",
+        observation=shelf,
+    )
+
+    call = started["goal_progress"]["next_call"]
+    assert call["kind"] == "manual_action"
+    assert call["mcp"] == {
+        "tool": "tap_and_analyze",
+        "arguments": {"text": "Vocabulary"},
+    }
+
+
+def test_container_title_in_compound_phase_does_not_claim_child_arrival(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path, "phase-container-title")
+    catalog = _observation(
+        engine.device.serial,
+        screen="example_catalog",
+        title="Example Catalog",
+        controls=["Saved Items"],
+    )
+
+    started = engine.session_start(
+        "In Example Catalog, open Saved Items and verify the details",
+        observation=catalog,
+    )
+
+    assert started["goal_progress"]["next_call"]["kind"] != "arrived"
+
+
+def test_single_network_observation_has_one_consistent_top_level_call(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path, "phase-network-status")
+    observed = _observation(
+        engine.device.serial,
+        screen="catalog",
+        title="Catalog",
+        controls=[],
+    )
+
+    started = engine.session_start(
+        "Record the verified current network transport",
+        observation=observed,
+    )
+
+    assert started["recommended_call"] == started["goal_progress"]["next_call"]
+    assert started["recommended_call"] == {
+        "kind": "network_status",
+        "cli": "aua network status --verify",
+        "mcp": {"tool": "network_status", "arguments": {"verify": True}},
+        "reason": (
+            "This phase records the verified current network transport before any "
+            "reversible environment change."
+        ),
+        "executes": False,
+    }

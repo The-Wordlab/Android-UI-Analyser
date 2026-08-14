@@ -393,9 +393,7 @@ def test_planner_rejects_a_stale_or_missing_mapped_arrival() -> None:
         item for item in without_map.candidates if item.id == "flow:missing_destination"
     )
     assert candidate_without_map.safe is False
-    assert {risk["code"] for risk in candidate_without_map.risks} == {
-        "arrival_screen_invalid"
-    }
+    assert {risk["code"] for risk in candidate_without_map.risks} == {"arrival_screen_invalid"}
 
 
 def test_goto_never_authorizes_nested_execution_before_an_earlier_route_step(
@@ -490,7 +488,10 @@ def test_session_start_uses_exactly_one_analyze(monkeypatch, tmp_path) -> None:
 
     assert calls == 1
     assert result["observation"]["meta"]["known_screen"] == "home"
-    assert result["recommended_call"]["kind"] == "map_find"
+    # The bootstrap observation is already the freshest available evidence. With no map,
+    # route, or unambiguous control, do not spend another call re-querying capabilities.
+    assert result["recommended_call"]["kind"] == "manual_observation"
+    assert result["recommended_call"]["mcp"] is None
     assert result["relevant_capabilities"]
     assert result["cleanup_call"] == {
         "cli": "aua --serial goal-emulator session finish",

@@ -7,6 +7,7 @@ also exposes an active-job guard so no second UI operation can race the worker.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shlex
@@ -61,9 +62,7 @@ class JobState(BaseModel):
 
 def _event(state: JobState, status: JobStatus, detail: str) -> None:
     """Append a small persisted lifecycle breadcrumb for reconnecting callers."""
-    state.events.append(
-        {"at_ms": int(time.time() * 1000), "status": status, "detail": detail}
-    )
+    state.events.append({"at_ms": int(time.time() * 1000), "status": status, "detail": detail})
     # Lifecycle histories are diagnostics, not an unbounded log.
     state.events = state.events[-20:]
 
@@ -101,6 +100,27 @@ def _pid_alive(pid: int | None) -> bool:
 
 def _dump(value: Any) -> Any:
     return value.model_dump(mode="json") if hasattr(value, "model_dump") else value
+
+
+def _complete_correlated_goal_phase(cache_dir: str | Path, job: JobState) -> None:
+    """Attach a successful wait's exact proof to its originating goal session, if any."""
+    if not job.session_id:
+        return
+    from .session import (
+        complete_current_ui_phase_from_job,
+        load_session_state,
+        phase_progress,
+    )
+
+    session = load_session_state(cache_dir, session_id=job.session_id)
+    if session is None:
+        return
+    updated = complete_current_ui_phase_from_job(cache_dir, session, job=job)
+    if updated == session or not isinstance(job.result, dict):
+        return
+    # `decorate_result` ran before the job acquired terminal provenance. Replace only its progress
+    # snapshot so `job status` immediately reflects the now-correlated structured proof.
+    job.result["goal_progress"] = phase_progress(updated, compact=True)
 
 
 def _execute(engine: Engine, operation: str, args: dict[str, Any]) -> Any:
@@ -282,15 +302,6 @@ class JobManager:
                 args=state.args,
                 current_recorded=False,
             )
-            if isinstance(result, dict):
-                from .projection import Projection, trim_observation_payload
-                from .schema import OutputFormat
-
-                view = Projection.for_observation(
-                    getattr(self.engine.config.output, "observation_fields", None),
-                    fmt=OutputFormat.json,
-                )
-                result = trim_observation_payload(result, view, fmt=OutputFormat.json)
             with self._lock:
                 state = self._load(job_id)
                 if self._cancel.is_set() or state.status == "cancel_requested":
@@ -303,6 +314,22 @@ class JobManager:
                 else:
                     state.status = "succeeded"
                     state.result = _dump(result)
+                    # Goal bookkeeping is additive and must never turn a valid wait into failure.
+                    with contextlib.suppress(Exception):
+                        _complete_correlated_goal_phase(self.cache_dir, state)
+                    if isinstance(state.result, dict):
+                        from .projection import Projection, trim_observation_payload
+                        from .schema import OutputFormat
+
+                        view = Projection.for_observation(
+                            getattr(self.engine.config.output, "observation_fields", None),
+                            fmt=OutputFormat.json,
+                        )
+                        state.result = trim_observation_payload(
+                            state.result,
+                            view,
+                            fmt=OutputFormat.json,
+                        )
                     _event(state, "succeeded", "wait completed")
         except JobCancelledError as exc:
             with self._lock:
@@ -403,7 +430,9 @@ class JobManager:
         timeout_ms = int(state.args.get("timeout_ms", 0) or 0)
         progress = None
         if timeout_ms > 0:
-            progress = min(100 if state.status in _TERMINAL else 99, int(elapsed_ms * 100 / timeout_ms))
+            progress = min(
+                100 if state.status in _TERMINAL else 99, int(elapsed_ms * 100 / timeout_ms)
+            )
         cli_status = f"aua job status {shlex.quote(state.job_id)}"
         payload = state.model_dump(mode="json", exclude={"args"})
         payload.update(

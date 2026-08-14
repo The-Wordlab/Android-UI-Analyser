@@ -42,6 +42,12 @@ def test_cli_flow_save_routes_preview_by_default_and_commit_explicitly(monkeypat
             "ok": True,
             "action": "flow-save" if saved else "flow-save-preview",
             "saved": saved,
+            "arrival_status": "predicate_verified",
+            "arrival_proof": {"status": "verified", "source": "satisfied_action_until"},
+            "selector_resilience": [
+                {"selector": "composite", "strength": "unknown", "cross_frame": False}
+            ],
+            "preview": "arrival_status: predicate_verified\n",
         }
 
     monkeypatch.setattr(cli_mod, "_route", fake_route)
@@ -49,8 +55,17 @@ def test_cli_flow_save_routes_preview_by_default_and_commit_explicitly(monkeypat
     preview = runner.invoke(app, ["flow", "save", "journey"])
     commit = runner.invoke(app, ["flow", "save", "journey", "--save"])
 
-    assert preview.exit_code == 0 and json.loads(preview.stdout)["saved"] is False
+    preview_payload = json.loads(preview.stdout)
+    assert preview.exit_code == 0 and preview_payload["saved"] is False
     assert commit.exit_code == 0 and json.loads(commit.stdout)["saved"] is True
+    assert preview_payload["arrival_status"] == "predicate_verified"
+    assert preview_payload["arrival_proof"]["source"] == "satisfied_action_until"
+    assert preview_payload["selector_resilience"][0] == {
+        "selector": "composite",
+        "strength": "unknown",
+        "cross_frame": False,
+    }
+    assert "arrival_status: predicate_verified" in preview_payload["preview"]
     assert [call["save"] for call in calls] == [False, True]
     assert all(call["dry_run"] is False and call["force"] is False for call in calls)
 
@@ -78,6 +93,12 @@ def test_mcp_flow_save_dispatches_preview_by_default_and_commit_explicitly(
             "ok": True,
             "action": "flow-save" if saved else "flow-save-preview",
             "saved": saved,
+            "arrival_status": "predicate_verified",
+            "arrival_proof": {"status": "verified", "source": "satisfied_action_until"},
+            "selector_resilience": [
+                {"selector": "composite", "strength": "unknown", "cross_frame": False}
+            ],
+            "preview": "arrival_status: predicate_verified\n",
         }
 
     monkeypatch.setattr(engine, "flow_save", fake_save)
@@ -86,15 +107,21 @@ def test_mcp_flow_save_dispatches_preview_by_default_and_commit_explicitly(
     async def run() -> list[dict[str, object]]:
         async with create_connected_server_and_client_session(server) as client:
             preview = await client.call_tool("flow_save", {"name": "journey"})
-            commit = await client.call_tool(
-                "flow_save", {"name": "journey", "save": True}
-            )
+            commit = await client.call_tool("flow_save", {"name": "journey", "save": True})
             return [json.loads(_first_text(preview)), json.loads(_first_text(commit))]
 
     preview, commit = anyio.run(run)
 
     assert preview["saved"] is False and preview["action"] == "flow-save-preview"
     assert commit["saved"] is True and commit["action"] == "flow-save"
+    assert preview["arrival_status"] == "predicate_verified"
+    assert preview["arrival_proof"]["source"] == "satisfied_action_until"
+    assert preview["selector_resilience"][0] == {
+        "selector": "composite",
+        "strength": "unknown",
+        "cross_frame": False,
+    }
+    assert "arrival_status: predicate_verified" in preview["preview"]
     assert [call["save"] for call in calls] == [False, True]
     assert all(call["dry_run"] is False and call["force"] is False for call in calls)
 

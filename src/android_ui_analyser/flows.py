@@ -23,6 +23,7 @@ Design notes
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -144,6 +145,9 @@ _BARE_KINDS = frozenset(
 )
 
 
+ArrivalStatus = Literal["mapped", "predicate_verified", "unverified"]
+
+
 class Flow(BaseModel):
     model_config = ConfigDict(extra="ignore")
     schema_version: int = FLOW_SCHEMA_VERSION
@@ -154,7 +158,7 @@ class Flow(BaseModel):
     aliases: list[str] = Field(default_factory=list)
     arrival: str | None = None
     arrival_screen: str | None = None  # mapped-screen proof, recognized during replay
-    arrival_status: Literal["mapped", "unverified"] | None = None
+    arrival_status: ArrivalStatus | None = None
     params: dict[str, str] = Field(default_factory=dict)  # "" = required, else default
     steps: list[RouteStep]
 
@@ -162,11 +166,123 @@ class Flow(BaseModel):
     def _arrival_contract(self) -> Flow:
         if self.arrival_status == "mapped" and not self.arrival_screen:
             raise ValueError("arrival_status `mapped` requires `arrival_screen`")
+        if self.arrival_status == "predicate_verified" and not self.arrival:
+            raise ValueError("arrival_status `predicate_verified` requires `arrival`")
         if self.arrival_status == "unverified" and self.arrival_screen:
             raise ValueError("arrival_status `unverified` cannot claim `arrival_screen`")
         if self.arrival_screen and self.arrival_status != "mapped":
             raise ValueError("arrival_screen requires arrival_status `mapped`")
         return self
+
+
+class SelectorResilience(BaseModel):
+    """Value-free disclosure of how well one selector survives a later replay."""
+
+    model_config = ConfigDict(extra="forbid")
+    step: str | None = None
+    selector: Literal["rid", "desc", "text", "id", "composite", "none"]
+    strength: Literal["strong", "medium", "weak", "frame_only", "unknown", "missing"]
+    localization_risk: bool
+    cross_frame: bool
+    index_sensitive: bool = False
+    reason: str
+
+
+def describe_selector_resilience(
+    *,
+    rid: str | None = None,
+    desc: str | None = None,
+    text: str | None = None,
+    element_id: int | None = None,
+    index: int | None = None,
+    step: str | None = None,
+    legacy_composite: bool = False,
+) -> SelectorResilience:
+    """Classify a selector without echoing its potentially private value.
+
+    Resource ids normally survive both frame churn and localization. Content descriptions are
+    semantic but may be translated; visible text is the most translation/copy-sensitive replay
+    selector. AUA's integer element id is intentionally valid only for the current observation,
+    so it must never be presented as a saved-flow selector.
+    """
+    positional = index is not None
+    selector: Literal["rid", "desc", "text", "id", "composite", "none"]
+    strength: Literal["strong", "medium", "weak", "frame_only", "unknown", "missing"]
+    if legacy_composite and any((rid, desc, text)):
+        selector = "composite"
+        strength = "unknown"
+        localization_risk = bool(desc or text)
+        cross_frame = False
+        reason = (
+            "legacy selector may fall back across resource id, description, and visible text; "
+            "no single replay tier or cross-frame guarantee was recorded"
+        )
+    elif rid:
+        selector = "rid"
+        strength = "strong"
+        localization_risk = False
+        cross_frame = True
+        reason = "resource id is stable across observations and independent of translated copy"
+    elif desc:
+        selector = "desc"
+        strength = "medium"
+        localization_risk = True
+        cross_frame = True
+        reason = "content description is semantic but may change with localization or copy"
+    elif text:
+        selector = "text"
+        strength = "weak"
+        localization_risk = True
+        cross_frame = True
+        reason = "visible text is replayable but sensitive to localization and copy changes"
+    elif element_id is not None:
+        selector = "id"
+        strength = "frame_only"
+        localization_risk = False
+        cross_frame = False
+        reason = "integer element id belongs only to the observation that produced it"
+    else:
+        selector = "none"
+        strength = "missing"
+        localization_risk = False
+        cross_frame = False
+        reason = "no semantic selector was captured"
+    if positional:
+        reason += "; positional index also depends on match ordering"
+    return SelectorResilience(
+        step=step,
+        selector=selector,
+        strength=strength,
+        localization_risk=localization_risk,
+        cross_frame=cross_frame,
+        index_sensitive=positional,
+        reason=reason,
+    )
+
+
+def recorded_selector_resilience(
+    steps: Sequence[RouteStep], where: str = ""
+) -> list[SelectorResilience]:
+    """Describe every recorded element selector, including nested flow blocks."""
+    out: list[SelectorResilience] = []
+    selector_kinds = {"tap", "long-press", "input", "clear", "a11y-scroll"}
+    for index, route_step in enumerate(steps, start=1):
+        at = f"{where}step {index}" if where else f"step {index}"
+        if route_step.kind in selector_kinds:
+            selected = route_step.by
+            out.append(
+                describe_selector_resilience(
+                    rid=(route_step.resource_id if selected in {None, "id", "rid"} else None),
+                    desc=(route_step.content_desc if selected in {None, "desc"} else None),
+                    text=(route_step.label if selected in {None, "text"} else None),
+                    index=route_step.index,
+                    step=at,
+                    legacy_composite=selected is None,
+                )
+            )
+        if route_step.substeps:
+            out.extend(recorded_selector_resilience(route_step.substeps, f"{at} > "))
+    return out
 
 
 # --------------------------------------------------------------------------- parsing
@@ -302,15 +418,19 @@ def _top_string(data: dict[str, Any], field: str) -> str | None:
     return value
 
 
-def _arrival_status(data: dict[str, Any]) -> Literal["mapped", "unverified"] | None:
+def _arrival_status(data: dict[str, Any]) -> ArrivalStatus | None:
     value = _top_string(data, "arrival_status")
     if value is None:
         return None
     if value == "mapped":
         return "mapped"
+    if value == "predicate_verified":
+        return "predicate_verified"
     if value == "unverified":
         return "unverified"
-    raise UsageError("flow `arrival_status:` must be `mapped` or `unverified`")
+    raise UsageError(
+        "flow `arrival_status:` must be `mapped`, `predicate_verified`, or `unverified`"
+    )
 
 
 def validate_arrival_predicate(predicate: str) -> None:

@@ -22,7 +22,14 @@ from __future__ import annotations
 
 import pytest
 
-from android_ui_analyser.memory import AppMap, RouteEdge, ScreenRecord, _find_targets
+from android_ui_analyser.memory import (
+    AppMap,
+    KeyElement,
+    RouteEdge,
+    ScreenRecord,
+    _find_targets,
+    resolve_goal,
+)
 
 _WHEN = "2026-08-10T00:00:00Z"
 
@@ -40,14 +47,14 @@ def _screen(name: str, anchors: list[str]) -> ScreenRecord:
 
 def _app() -> AppMap:
     app = AppMap(package="com.example.app")
-    app.screens["search_results"] = _screen(
-        "search_results", ["tx:no apps found", "tx:create app"]
-    )
+    app.screens["search_results"] = _screen("search_results", ["tx:no apps found", "tx:create app"])
     app.screens["signup_sheet"] = _screen(
         "signup_sheet", ["tx:create your account", "tx:continue with google"]
     )
     app.screens["unrelated"] = _screen("unrelated", ["tx:hello"])
-    app.screens["elsewhere"] = _screen("elsewhere", ["tx:hello"])  # only reachable *via* an Apps tap
+    app.screens["elsewhere"] = _screen(
+        "elsewhere", ["tx:hello"]
+    )  # only reachable *via* an Apps tap
     app.routes.append(
         RouteEdge(
             from_screen="home",
@@ -89,6 +96,28 @@ def test_what_is_on_the_screen_outranks_how_you_reach_it() -> None:
     found = _find_targets(_app(), "apps")
 
     assert found.index("search_results") < found.index("elsewhere")
+
+
+def test_incoming_route_outranks_clickable_row_that_only_opens_destination() -> None:
+    app = AppMap(package="com.example.app")
+    app.screens["catalog"] = _screen("catalog", ["id:catalog"])
+    app.screens["catalog"].key_elements = [
+        KeyElement(type="Button", label="Display preferences", clickable=True)
+    ]
+    app.screens["generic_panel"] = _screen("generic_panel", ["id:panel"])
+    app.routes.append(
+        RouteEdge(
+            from_screen="catalog",
+            to_screen="generic_panel",
+            action="tap 'Display preferences'",
+            last_seen=_WHEN,
+        )
+    )
+
+    found = _find_targets(app, "Display preferences")
+
+    assert found == ["generic_panel", "catalog"]
+    assert resolve_goal(app, "Display preferences", start="catalog") == "generic_panel"
 
 
 @pytest.mark.parametrize("query", ["", "   "])

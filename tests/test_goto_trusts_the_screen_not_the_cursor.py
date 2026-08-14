@@ -19,6 +19,9 @@ that sent us there, and the cursor is the only thing that knows the journey.
 
 from __future__ import annotations
 
+from typing import Any
+
+from android_ui_analyser import engine as engine_mod
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.memory import AppMemoryStore, RouteStep, SessionState
 from conftest import FakeDevice, make_config
@@ -71,3 +74,35 @@ def test_the_route_still_runs_when_cursor_and_screen_agree(tmp_path: object) -> 
 
     assert result["hops"][0]["action"] == "tap 'Apps'"
     assert result["hops"][0]["expected"] == "apps"
+
+
+def test_a_clickable_destination_row_cannot_prove_already_there(
+    tmp_path: object, monkeypatch: Any
+) -> None:
+    launcher = _hier(
+        _node(
+            "android.widget.TextView",
+            text="Display preferences",
+            clk=True,
+            b="[40,120][1040,230]",
+        )
+    )
+    cfg = make_config(memory={"dir": str(tmp_path / "home")}, daemon={"enabled": False})
+    store = AppMemoryStore(cfg.memory)
+    store.record_screen(package=P, elements=_elements(launcher), name_hint="catalog_home")
+    device = FakeDevice(hierarchy_xml=launcher, package=P, serial="clickable-is-not-arrival")
+    engine = Engine(cfg, device=device)
+    store.save_session(
+        "clickable-is-not-arrival",
+        SessionState(package=P, current_screen="catalog_home"),
+    )
+    # Pin the defensive contract independently of fuzzy ranking: even if a future resolver
+    # again mistakes the launcher row for current-screen identity, goto may not claim success.
+    monkeypatch.setattr(engine_mod, "resolve_goal", lambda *_args, **_kwargs: "catalog_home")
+
+    result = engine.goto("Display preferences")
+
+    assert result["ok"] is False
+    assert result["code"] == "arrival_unproven"
+    assert result["arrived"] is False
+    assert result["elements"], "return the current frame so the caller can tap the row"

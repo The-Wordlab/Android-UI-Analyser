@@ -50,7 +50,7 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "then a manual analyzed action. Explicit sequence words create durable ordered phases, "
         "so an online preparation remains before a later offline transition. Every result carries "
         "`goal_progress`; when its evidence completes the active checkpoint, add the returned "
-        "`--phase-done phase_N=\"evidence\"` to your next AUA call (MCP: `phase_done`). This "
+        '`--phase-done phase_N="evidence"` to your next AUA call (MCP: `phase_done`). This '
         "advances the goal without another round trip. Deterministic offline evidence advances "
         "automatically. The returned compact observation is the current screen: reuse it "
         "and do not follow session start with analyze. The command is recommendation-first: "
@@ -60,8 +60,13 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "Use `aua session review` to see avoidable calls: `ok` means the review completed, "
         "while `run_ok` and `failures` describe the run without making the review itself "
         "another failure (`run_ok: null` means an older duplicated invocation had no provable "
-        "caller-visible outcome). Its `accounting` separates journal events, top-level calls, "
-        "folded internal events, and failures. For an intentional negative probe, declare the "
+        "caller-visible outcome). Treat its `accounting` as authoritative instead of estimating "
+        "calls: `top_level_calls` counts caller-visible invocations and is partitioned into "
+        "`lifecycle_calls` plus `task_calls`; `journal_events` also counts "
+        "`folded_internal_events`, such as an action-bound wait. The review snapshot is computed "
+        "before its current review or finish call is journaled, so `reporting_call_included` is "
+        "false and `top_level_calls_including_reporting_call` adds that reporting call. For an "
+        "intentional negative probe, declare the "
         "exact typed code on the same call with global `--expect-error CODE` (MCP: "
         "`expect_error`); only an exact match is excluded from run failures. End with the exact "
         "`cleanup_call` returned by session start: "
@@ -233,7 +238,8 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "A flow is a Maestro-style YAML journey you can AUTHOR directly (no walking needed) or "
         "record: `aua flow save <name> --last N` is preview-first and writes nothing. It shows "
         "the selected origin/context segment, any package/context boundary or selector warning, "
-        "mapped-screen arrival proof, the authoritative path, whether it already exists, and an "
+        "value-free `selector_resilience`, arrival proof, the authoritative path, whether it "
+        "already exists, and an "
         "exact decision-complete `save_call` (including `--force` for a collision). A collision "
         "preview also returns `invalid_mode_probe` with the exact typed error code/call for "
         "intentionally checking `--force` without `--save`; do not guess it. The write still "
@@ -252,9 +258,12 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "flow for any setup you repeat (reset account, log in, reach the screen under test) — "
         "one call instead of a dozen. Recorded flows persist `context_id`, `arrival_status`, and "
         "`arrival_screen` only when the current destination is freshly recognized in the same "
-        "origin/context; replay verifies that known-screen name. Unmapped destinations are "
-        "explicitly unverified, never given a fabricated text predicate. Authored legacy "
-        "`arrival:` predicates remain supported. Give reusable flows goal-facing `aliases:`. "
+        "origin/context; replay verifies that known-screen name. An unmapped destination stays "
+        "explicitly unverified unless the immediately preceding analyzed action satisfied a "
+        "privacy-safe positive `--until` on this exact package/context/frame; only that captured "
+        "proof becomes authored `arrival:` with source `satisfied_action_until`. No label is "
+        "fabricated. Authored legacy `arrival:` predicates remain supported. Give reusable "
+        "flows goal-facing `aliases:`. "
         "Offline journeys may use `network_offline`, `network_restore`, `network_profile`, or "
         "`network_profile_restore` "
         "steps; environment-changing flows are risk-previewed before automatic selection.",
@@ -470,7 +479,12 @@ BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
         "MCP `phase_done` checkpoint on your next call "
         'after evidence is visible, rather than spending a call on progress. Use `aua capabilities --goal "…"` only '
         "when you need another goal-specific capability, and finish reversible work with "
-        "`aua session finish`.",
+        "`aua session finish`. In its review, `top_level_calls` counts caller-visible invocations and "
+        "equals `lifecycle_calls` + `task_calls`; `journal_events` additionally includes "
+        "`folded_internal_events` such as an action-bound wait. The embedded snapshot precedes "
+        "the current review/finish "
+        "call, so `reporting_call_included` is false and "
+        "`top_level_calls_including_reporting_call` adds it.",
     ),
     (
         "Attach automatically and clean up only what you started",
@@ -1303,7 +1317,9 @@ def render_markdown(*, brief: bool = False) -> str:
     p.append("# Replay a whole journey (authored or recorded) in ONE call:")
     p.append('aua flow run reset_account_google_login --param ACCOUNT="Engineering Team"')
     p.append("aua flow save reach_checkout --last 8         # preview only; writes nothing")
-    p.append("aua flow save reach_checkout --last 8 --save  # commit after reviewing proof/warnings")
+    p.append(
+        "aua flow save reach_checkout --last 8 --save  # commit after reviewing proof/warnings"
+    )
     p.append("")
     p.append("# Starter journey: open → tap → input → tap → wait → has → tap. Every action")
     p.append("# returns the post-action screen, so each id below comes from the previous call:")
@@ -1450,8 +1466,8 @@ def render_skill_markdown() -> str:
     """Compact triggered instructions; deeper guidance stays in the CLI manual."""
     return """# Android UI Analyser
 
-Use `aua` as the semantic Android UI layer. Act on returned element ids or stable selectors;
-never guess coordinates. Do not use raw `adb` for a workflow AUA already exposes.
+Use `aua` for Android UI. Act on returned ids or stable selectors, never guessed coordinates;
+do not replace an AUA workflow with raw `adb`.
 
 ## Operating loop
 
@@ -1461,40 +1477,43 @@ never guess coordinates. Do not use raw `adb` for a workflow AUA already exposes
 2. Prefer navigation in this order: verified `goto`, matching saved `flow`, proven deeplink,
    then a manual analyzed action. Preview risky routes; goal text never authorizes destructive,
    external, settings, data, payment, send, or sign-out effects.
-3. Use `tap-and-analyze`, `input-and-analyze`, `swipe-and-analyze`, and `key-and-analyze`.
-   Consume the returned `observation`, whose integer ids are fresh only for that frame. A tap id
-   is positional (`tap-and-analyze 4`; explicit `--id 4` is also accepted). On dynamic screens
-   prefer `--rid <resource-id>` or `stable_key`; use `aua resolve <stable_key>` after a transition
-   instead of replaying an old numeric id.
+3. Use analyzed actions and consume their returned `observation`; integer ids belong only to
+   that frame. On dynamic screens prefer `--rid` or `stable_key`, resolving it again after a
+   transition instead of replaying an old numeric id.
 4. Fold arrival into the action with a positive predicate, for example
    `--until 'rid:resultCard,!text:Loading'`. If it returns `settled-unmet`, reuse the fresh
    destination and its corrected predicate; never repeat the action. An absence-only check such
    as `!text:Loading` belongs in `aua await-and-analyze '!text:Loading' --observe`. For nested return
    navigation use `aua back-until-and-analyze '<known_screen>'` or positive `rid:`/`text:`/
    `desc:` evidence.
-5. Let perception stay hierarchy-first and automatic. Use filters such as `--where-rid`,
-   `--where-text`, `--clickable`, and `--region` rather than post-processing a large response.
-   Use vision deliberately only when the hierarchy is opaque; paid grounding requires `--deep`.
+5. Keep perception hierarchy-first and automatic. Filter in AUA (`--where-rid`, `--where-text`,
+   `--clickable`, `--region`); use vision only for opaque screens and `--deep` for grounding.
 6. Carry `goal_progress.checkpoint` on the next call with `--phase-done` (MCP: `phase_done`)
    instead of spending a separate progress call. Use `aua job start await ...` only for a
    read-only wait that may outlive one agent call. If `daemon_outcome_unknown` appears, never
    repeat the action; wait, then inspect one fresh screen.
-7. End with the returned cleanup call, normally `aua session finish`. It restores only
-   session-owned reversible state and stops only an emulator the session started.
+7. End with the returned cleanup call, normally `aua session finish`; it restores only
+   session-owned state. Use `review.accounting`, not estimates: `top_level_calls` counts
+   caller-visible invocations and equals `lifecycle_calls` + `task_calls`; `journal_events` also
+   counts `folded_internal_events` such as an action-bound wait. The snapshot precedes its current
+   review/finish call, so `reporting_call_included` is false and
+   `top_level_calls_including_reporting_call` adds that call.
 
-Top-level help plus safe pre-device recoveries (unknown command, missing argument, and an
-absence-only action predicate) are journaled as `cli_help` / `cli_usage_error`. When one exact
-safe recovery exists, the structured error includes `recommended_call`; follow it directly.
+Flow previews expose value-free `selector_resilience`. An unmapped arrival becomes `arrival:`
+with source `satisfied_action_until` only when the immediately preceding analyzed action
+satisfied a privacy-safe positive `--until` on the same package/context/frame; otherwise it is
+unverified.
+
+Safe pre-device usage errors are journaled as `cli_help` / `cli_usage_error`; follow an exact
+structured `recommended_call` directly.
 
 ## Device and safety rules
 
-- AUA leases a compatible device automatically. Do not ask the user to manage leases or steal
-  another agent's device. Respect a user-named physical device or emulator boundary.
+- AUA leases automatically. Never steal another agent's device; respect user-named boundaries.
 - Start an emulator only with explicit scope (`session start --start-emulator`); use `--headed`
   only when visibility is required.
-- For offline verification use `aua network offline --verify`, and let session cleanup restore
-  the previous state. For debuggable SQLite state use `aua db`, including its confirmations and
-  restore points.
+- Use `aua network offline --verify`; session cleanup restores it. Use guarded `aua db` for
+  debuggable SQLite.
 - A delivered deeplink, spinner disappearance, or unchanged short settle is not proof of the
   requested destination. Verify the final interactive affordance the user named.
 

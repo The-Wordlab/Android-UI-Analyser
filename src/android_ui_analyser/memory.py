@@ -301,6 +301,66 @@ def screen_skips_ocr(rec: ScreenRecord, *, min_hierarchy_ok: int = 3) -> bool:
     return surface in ("native", "form")
 
 
+class CaptureArrivalTerm(BaseModel):
+    """One privacy-checked UI fact from a satisfied action-bound ``--until``.
+
+    This is capture provenance, not an authored flow step.  Only the three UI selector lanes
+    whose truth can be tied to the returned hierarchy fingerprint are retained.  Network and
+    log predicates remain valid for authored flows, but cannot certify that a later
+    ``flow save`` snapshot is the same destination.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    by: Literal["text", "rid", "desc"]
+    value: str
+    negated: bool = False
+
+    @field_validator("value")
+    @classmethod
+    def _nonempty_value(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("capture arrival term value must not be empty")
+        return normalized
+
+
+class CaptureArrivalProof(BaseModel):
+    """Capture-only proof that the newest recorded action reached a specific UI frame.
+
+    Every provenance field is duplicated deliberately.  A later ``flow save`` may use the
+    predicate only when it still agrees with the selected action, current session segment, app
+    context, foreground package, and fresh hierarchy fingerprint.  Rendering a flow drops this
+    object; only its validated predicate is promoted to the authored artifact.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    source: Literal["action_until"] = "action_until"
+    terms: list[CaptureArrivalTerm]
+    fingerprint: str
+    package: str
+    origin_package: str
+    context_id: str
+    capture_segment: int
+    capture_order: int
+
+    @field_validator("terms")
+    @classmethod
+    def _positive_arrival_required(
+        cls, terms: list[CaptureArrivalTerm]
+    ) -> list[CaptureArrivalTerm]:
+        if not terms or not any(not term.negated for term in terms):
+            raise ValueError("capture arrival proof needs a positive UI term")
+        return terms
+
+    @field_validator("fingerprint", "package", "origin_package", "context_id")
+    @classmethod
+    def _nonempty_provenance(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("capture arrival provenance must not be empty")
+        return normalized
+
+
 class RouteStep(BaseModel):
     """One replayable action of a route edge or flow (the shared step model).
 
@@ -333,6 +393,10 @@ class RouteStep(BaseModel):
     context_id: str | None = None
     capture_segment: int | None = None
     capture_order: int | None = None
+    # A satisfied action-bound arrival predicate can be reused by a later ``flow save`` only
+    # while it remains bound to this exact action/frame/segment.  Like the fields above, this is
+    # session capture state and is stripped before route learning or flow rendering.
+    arrival_proof: CaptureArrivalProof | None = None
     # scroll-to: which way to swipe WHILE SEARCHING, as the CLI's --direction (default "up",
     # i.e. look further down the list). A grid that opens already scrolled past its target
     # needs "down" — searching the wrong way reads as a missing element, not a missed search.
@@ -520,9 +584,7 @@ def is_destructive_step(step: RouteStep, lexicon: Sequence[str]) -> bool:
     if resource := _resource_slug(step.resource_id):
         labels.append(resource.replace("_", " "))
     return any(
-        re.search(rf"\b{re.escape(word.lower())}\b", label)
-        for label in labels
-        for word in lexicon
+        re.search(rf"\b{re.escape(word.lower())}\b", label) for label in labels for word in lexicon
     )
 
 
@@ -585,10 +647,7 @@ def _deeplink_changes_settings(uri: str) -> bool:
     except ValueError:
         fields = [uri]
     tokens = {
-        token
-        for field in fields
-        for token in re.split(r"[^a-z0-9]+", field.casefold())
-        if token
+        token for field in fields for token in re.split(r"[^a-z0-9]+", field.casefold()) if token
     }
     return bool(tokens & _SETTINGS_URI_TOKENS)
 
@@ -760,6 +819,111 @@ def _looks_dynamic(text: str) -> bool:
     )
 
 
+def _capture_arrival_term_is_safe(term: CaptureArrivalTerm) -> bool:
+    """Whether an automatically retained arrival term is durable and privacy-safe.
+
+    The proof lives in the rolling local session journal, but it may later be promoted into an
+    authored flow.  Apply the same conservative policy as map anchors: never promote PII,
+    redaction sentinels, or obviously volatile labels/ids.  Callers can still author a more
+    specific arrival predicate explicitly when volatility is intentional.
+    """
+    value = term.value.strip()
+    return bool(
+        value
+        and len(value) <= 128
+        and value not in REDACT_TOKENS
+        and not _looks_pii(value)
+        and not _looks_dynamic(value)
+    )
+
+
+def capture_arrival_predicate(proof: CaptureArrivalProof) -> str:
+    r"""Render a capture proof into the tiny flow-arrival predicate grammar.
+
+    Commas and backslashes are the grammar's only separators and are escaped here, so a value
+    cannot smuggle an extra condition into the promoted predicate.
+    """
+
+    def render(term: CaptureArrivalTerm) -> str:
+        value = term.value.replace("\\", "\\\\").replace(",", "\\,")
+        prefix = "!" if term.negated else ""
+        return f"{prefix}{term.by}:{value}"
+
+    return ",".join(render(term) for term in proof.terms)
+
+
+class CaptureArrivalCheck(NamedTuple):
+    """Pure validation result for a capture proof considered by ``flow save``."""
+
+    proof: CaptureArrivalProof | None
+    reason: str
+
+
+def capture_arrival_for_current(
+    selected: Sequence[RouteStep],
+    *,
+    session: SessionState,
+    observation_package: str | None,
+    observation_fingerprint: str | None,
+) -> CaptureArrivalCheck:
+    """Return a captured predicate only when every binding still describes this frame.
+
+    ``flow save`` takes a fresh hierarchy snapshot before selecting a journal suffix.  This
+    helper is the single comparison point between that snapshot and a prior action-bound
+    ``--until``: the proof must be on the newest selected action, the whole suffix must be from
+    the same provenance tuple, the current session must still own that tuple, and the exact
+    hierarchy fingerprint/package must match.  A mismatch is ordinary unverified arrival, never
+    a partially trusted proof.
+    """
+    if not selected:
+        return CaptureArrivalCheck(None, "no selected action can carry arrival proof")
+    newest = selected[-1]
+    proof = newest.arrival_proof
+    if proof is None:
+        return CaptureArrivalCheck(
+            None, "newest selected action has no satisfied action-bound arrival proof"
+        )
+    action_provenance = (
+        newest.capture_segment,
+        newest.capture_order,
+        newest.origin_package,
+        newest.context_id,
+    )
+    proof_provenance = (
+        proof.capture_segment,
+        proof.capture_order,
+        proof.origin_package,
+        proof.context_id,
+    )
+    if action_provenance != proof_provenance:
+        return CaptureArrivalCheck(None, "arrival proof does not belong to the selected action")
+    segment_provenance = (
+        newest.capture_segment,
+        newest.origin_package,
+        newest.context_id,
+    )
+    if any(
+        (step.capture_segment, step.origin_package, step.context_id) != segment_provenance
+        for step in selected
+    ):
+        return CaptureArrivalCheck(None, "selected actions do not share one capture provenance")
+    if (
+        newest.capture_segment != session.capture_segment
+        or newest.origin_package != session.package
+        or newest.context_id != session.active_context_id
+    ):
+        return CaptureArrivalCheck(None, "arrival proof belongs to an older session segment")
+    if not observation_package or proof.package != observation_package:
+        return CaptureArrivalCheck(None, "arrival proof package does not match the fresh snapshot")
+    if not observation_fingerprint or proof.fingerprint != observation_fingerprint:
+        return CaptureArrivalCheck(
+            None, "arrival proof fingerprint does not match the fresh snapshot"
+        )
+    if not all(_capture_arrival_term_is_safe(term) for term in proof.terms):
+        return CaptureArrivalCheck(None, "arrival proof contains volatile or private evidence")
+    return CaptureArrivalCheck(proof, "fresh snapshot matches satisfied action-bound arrival proof")
+
+
 def _id_tail(resource_id: str | None) -> str | None:
     if not resource_id:
         return None
@@ -802,9 +966,7 @@ def redact_label(el: Element, *, redact: bool = True) -> str | None:
     return text[:60]
 
 
-def recorded_selector(
-    el: Element, *, elements: Sequence[Element] = ()
-) -> dict[str, str | None]:
+def recorded_selector(el: Element, *, elements: Sequence[Element] = ()) -> dict[str, str | None]:
     """The safest reusable selector for a newly recorded action.
 
     Resource ids are locale-independent and win when their tail is stable.  A content
@@ -847,9 +1009,7 @@ def recorded_selector(
     desc = (el.content_desc or "").strip()
     persisted_desc = desc[:60]
     desc_matches = [
-        other
-        for other in elements
-        if (other.content_desc or "").strip()[:60] == persisted_desc
+        other for other in elements if (other.content_desc or "").strip()[:60] == persisted_desc
     ]
     if (
         desc
@@ -868,7 +1028,9 @@ def recorded_selector(
     # An EditText's visible text is the value the user typed, not the field's identity.
     text = "" if _is_input(el) else (el.text or "").strip()
     persisted_text = text[:60]
-    text_matches = [other for other in elements if (other.text or "").strip()[:60] == persisted_text]
+    text_matches = [
+        other for other in elements if (other.text or "").strip()[:60] == persisted_text
+    ]
     if (
         text
         and not _is_secret_field(el)
@@ -1211,9 +1373,7 @@ _ROUTE_CONTROL_TOKENS = {
 }
 
 
-def _contextual_name_from_inbound(
-    pending: list[RouteStep], title: str | None
-) -> str | None:
+def _contextual_name_from_inbound(pending: list[RouteStep], title: str | None) -> str | None:
     """Derive context for a short title from stable, app-authored route selectors.
 
     A title such as ``Inbox`` or ``Details`` is often reused in unrelated parts of an app.
@@ -1338,7 +1498,9 @@ def _infer_state(elements: list[Element]) -> str | None:
         return "error"
     if re.search(r"\b(no .+ yet|nothing here|empty|nada que mostrar|sin resultados)\b", labels):
         return "empty"
-    if "ready" in resources or re.search(r"\b(tap to open|ready to open|listo para abrir)\b", labels):
+    if "ready" in resources or re.search(
+        r"\b(tap to open|ready to open|listo para abrir)\b", labels
+    ):
         return "ready"
     return None
 
@@ -1662,13 +1824,13 @@ class AppMemoryStore:
             "context_id": None,
             "capture_segment": None,
             "capture_order": None,
+            "arrival_proof": None,
         }
         if step.package == origin_package:
             update["package"] = None
         if step.substeps:
             update["substeps"] = [
-                AppMemoryStore._route_step(substep, origin_package)
-                for substep in step.substeps
+                AppMemoryStore._route_step(substep, origin_package) for substep in step.substeps
             ]
         return step.model_copy(update=update)
 
@@ -1686,11 +1848,7 @@ class AppMemoryStore:
         """Promote a flag set to the active observation context after flags-set/restart."""
         sess = self.load_session(serial)
         merged = (
-            {}
-            if replace
-            else dict(sess.active_flags)
-            if sess.package in (None, package)
-            else {}
+            {} if replace else dict(sess.active_flags) if sess.package in (None, package) else {}
         )
         merged.update(flags)
         context_id = context_id_for_flags(merged)
@@ -1701,9 +1859,7 @@ class AppMemoryStore:
                 if package_changed:
                     reason = f"origin app changed from {sess.package} to {package}"
                 else:
-                    reason = (
-                        f"memory context changed from {sess.active_context_id} to {context_id}"
-                    )
+                    reason = f"memory context changed from {sess.active_context_id} to {context_id}"
                 self._advance_capture_segment(sess, reason)
             sess.current_screen = None
             sess.pending = []
@@ -2041,9 +2197,7 @@ class AppMemoryStore:
             resource_name = _resource_name(elements, screen_height)
             title = title_of(elements, screen_height)
             stronger_name = resource_name or (
-                _short(title)
-                if title and _short(title) not in _GENERIC_TITLES
-                else None
+                _short(title) if title and _short(title) not in _GENERIC_TITLES else None
             )
             source_rank = {
                 "legacy": 0,
@@ -2053,9 +2207,7 @@ class AppMemoryStore:
                 "resource": 4,
                 "explicit": 5,
             }
-            stronger_source: Literal["resource", "title"] = (
-                "resource" if resource_name else "title"
-            )
+            stronger_source: Literal["resource", "title"] = "resource" if resource_name else "title"
             if (
                 stronger_name
                 and slug(stronger_name) != (rec.logical_name or rec.name)
@@ -2551,7 +2703,11 @@ class AppMemoryStore:
         next_order = max(
             sess.next_capture_order,
             max(
-                (recorded.capture_order + 1 for recorded in sess.recent if recorded.capture_order is not None),
+                (
+                    recorded.capture_order + 1
+                    for recorded in sess.recent
+                    if recorded.capture_order is not None
+                ),
                 default=0,
             ),
         )
@@ -2582,6 +2738,81 @@ class AppMemoryStore:
         else:
             sess.pending.append(step)
         self.save_session(serial, sess)
+
+    def record_action_arrival(
+        self,
+        serial: str,
+        *,
+        terms: Sequence[CaptureArrivalTerm | dict[str, object]],
+        fingerprint: str | None,
+        package: str | None,
+    ) -> CaptureArrivalProof | None:
+        """Bind satisfied UI ``--until`` evidence to the exact newest recorded action.
+
+        This method is intentionally fail-closed and non-throwing: arrival capture is a bonus
+        after an action and must never turn that already-completed action into an error.  The
+        engine should first wait for outstanding memory writers, then call this only for
+        ``await_outcome=satisfied`` with the typed terms from the predicate and the returned
+        observation's fingerprint/package.
+        """
+        if not (self.cfg.enabled and self.cfg.auto_record and fingerprint and package):
+            return None
+        try:
+            parsed_terms = [
+                term
+                if isinstance(term, CaptureArrivalTerm)
+                else CaptureArrivalTerm.model_validate(term)
+                for term in terms
+            ]
+        except Exception:  # malformed optional evidence must not fail the completed action
+            return None
+        if not parsed_terms or not all(
+            _capture_arrival_term_is_safe(term) for term in parsed_terms
+        ):
+            return None
+
+        sess = self.load_session(serial)
+        if not sess.recent:
+            return None
+        newest = sess.recent[-1]
+        if (
+            newest.capture_order is None
+            or newest.capture_segment is None
+            or not newest.origin_package
+            or not newest.context_id
+            or newest.capture_order != sess.next_capture_order - 1
+            or newest.capture_segment != sess.capture_segment
+            or newest.origin_package != sess.package
+            or newest.context_id != sess.active_context_id
+            or package != newest.origin_package
+        ):
+            return None
+        try:
+            proof = CaptureArrivalProof(
+                terms=parsed_terms,
+                fingerprint=fingerprint,
+                package=package,
+                origin_package=newest.origin_package,
+                context_id=newest.context_id,
+                capture_segment=newest.capture_segment,
+                capture_order=newest.capture_order,
+            )
+        except Exception:  # Pydantic protects the persisted journal shape
+            return None
+
+        updated = newest.model_copy(update={"arrival_proof": proof})
+        sess.recent[-1] = updated
+        # ``observe_screen`` normally consumes the pending step before this runs.  Preserve the
+        # same proof if a passive/no-record observation left it pending, without guessing by
+        # list position.
+        sess.pending = [
+            pending.model_copy(update={"arrival_proof": proof})
+            if pending.capture_order == proof.capture_order
+            else pending
+            for pending in sess.pending
+        ]
+        self.save_session(serial, sess)
+        return proof
 
     def observe_screen(
         self,
@@ -2699,14 +2930,7 @@ class AppMemoryStore:
         sess.pending_since = None
         sess.pending_overflow = False
         self.save_session(serial, sess)
-        if (
-            self.cfg.auto_research
-            and (
-                outcome.created
-                or outcome.stale
-                or route is not None
-            )
-        ):
+        if self.cfg.auto_research and (outcome.created or outcome.stale or route is not None):
             self.refresh_research_tasks(package, context_id=context_id)
         return outcome.name if outcome.was_known else None
 
@@ -2853,9 +3077,7 @@ class AppMemoryStore:
         if app is None:
             return empty
         sess = self.load_session(serial)
-        research_tasks = _research_prompts(
-            app, max_research, context_id=sess.active_context_id
-        )
+        research_tasks = _research_prompts(app, max_research, context_id=sess.active_context_id)
         deeplinks = _suggest_deeplinks(app, max_suggest) if include_navigation else []
         if not app.screens:
             # Playbook-only (e.g. freshly mined): still offer the deeplink shortcuts.
@@ -2878,7 +3100,8 @@ class AppMemoryStore:
             [
                 f"{e.action} → {e.to_screen}"
                 for e in sorted(adj.get(current or "", []), key=lambda x: x.to_screen)
-                if e.to_screen in app.screens and not app.screens[e.to_screen].stale
+                if e.to_screen in app.screens
+                and not app.screens[e.to_screen].stale
                 and route_edge_is_safe(
                     e,
                     origin_package=app.package,
@@ -2940,9 +3163,7 @@ class AppMemoryStore:
             reverse=True,
         )
         suggested = (
-            [f"goto {n}" for n in ranked[: max(0, max_suggest)]]
-            if include_navigation
-            else []
+            [f"goto {n}" for n in ranked[: max(0, max_suggest)]] if include_navigation else []
         )
         map_hint = None
         if not known_routes and not suggested and not deeplinks:
@@ -3091,16 +3312,15 @@ def ask_about_current_screen(
     return None
 
 
-def _research_prompts(
-    app: AppMap, cap: int, *, context_id: str | None = None
-) -> list[str]:
+def _research_prompts(app: AppMap, cap: int, *, context_id: str | None = None) -> list[str]:
     prompts: list[str] = []
     for task in app.research_tasks:
         if task.get("status") != "open":
             continue
-        if (
-            context_id is not None
-            and task.get("context_id") not in (None, context_id, LEGACY_CONTEXT_ID)
+        if context_id is not None and task.get("context_id") not in (
+            None,
+            context_id,
+            LEGACY_CONTEXT_ID,
         ):
             continue
         questions = task.get("questions")
@@ -3118,15 +3338,12 @@ def _research_prompts(
 def _route_rejection_reason(steps: list[RouteStep]) -> str | None:
     """Why an automatically observed edge cannot safely be replayed."""
     destination_steps = [
-        step
-        for step in steps
-        if step.kind in {"tap", "long-press", "open-link", "key", "goto"}
+        step for step in steps if step.kind in {"tap", "long-press", "open-link", "key", "goto"}
     ]
     if not destination_steps:
         return "no destination-producing action"
-    if (
-        len(destination_steps) > _MAX_SAME_PACKAGE_DESTINATION_STEPS
-        and not any(step.package for step in steps)
+    if len(destination_steps) > _MAX_SAME_PACKAGE_DESTINATION_STEPS and not any(
+        step.package for step in steps
     ):
         return "too many destination actions accumulated without a recognized screen"
     for step in destination_steps:
@@ -3147,10 +3364,9 @@ def _is_top_level_navigation_step(step: RouteStep) -> bool:
     if step.kind != "tap" or not step.resource_id:
         return False
     resource = _resource_slug(step.resource_id)
-    return (
-        resource.startswith(("bottom_bar_", "bottom_nav_", "navigation_bar_", "tab_"))
-        or resource.endswith("_tab")
-    )
+    return resource.startswith(
+        ("bottom_bar_", "bottom_nav_", "navigation_bar_", "tab_")
+    ) or resource.endswith("_tab")
 
 
 def _pending_fresh(since: str | None, *, now: datetime | None = None) -> bool:
@@ -3197,16 +3413,13 @@ def _routes_for_context(
     include_rejected: bool = False,
 ) -> list[RouteEdge]:
     def eligible(edge: RouteEdge) -> bool:
-        return (
-            (include_rejected or edge.status != "rejected")
-            and (include_provisional or edge.status == "verified")
+        return (include_rejected or edge.status != "rejected") and (
+            include_provisional or edge.status == "verified"
         )
 
     if context_id is None:
         return [edge for edge in app.routes if eligible(edge)]
-    exact = [
-        edge for edge in app.routes if edge.context_id == context_id and eligible(edge)
-    ]
+    exact = [edge for edge in app.routes if edge.context_id == context_id and eligible(edge)]
     if context_id == LEGACY_CONTEXT_ID:
         return exact
     exact_keys = {(edge.from_screen, edge.action) for edge in exact}
@@ -3247,9 +3460,7 @@ def _adjacency(
     include_provisional: bool = False,
 ) -> dict[str, list[RouteEdge]]:
     adj: dict[str, list[RouteEdge]] = {}
-    routes = _routes_for_context(
-        app, context_id, include_provisional=include_provisional
-    )
+    routes = _routes_for_context(app, context_id, include_provisional=include_provisional)
     destinations: dict[tuple[str, str, str], set[str]] = {}
     for edge in routes:
         key = (edge.from_screen, edge.action, edge.context_id)
@@ -3268,14 +3479,11 @@ def _roots(
     *,
     include_provisional: bool = False,
 ) -> list[str]:
-    routes = _routes_for_context(
-        app, context_id, include_provisional=include_provisional
-    )
+    routes = _routes_for_context(app, context_id, include_provisional=include_provisional)
     visible = {
         name
         for name, rec in app.screens.items()
-        if context_id is None
-        or rec.context_id in (context_id, LEGACY_CONTEXT_ID)
+        if context_id is None or rec.context_id in (context_id, LEGACY_CONTEXT_ID)
     }
     targets = {edge.to_screen for edge in routes}
     roots = [name for name in visible if name not in targets]
@@ -3309,9 +3517,7 @@ def _rank_score(
     return score
 
 
-def _reachable(
-    app: AppMap, start: str | None, context_id: str | None = None
-) -> set[str]:
+def _reachable(app: AppMap, start: str | None, context_id: str | None = None) -> set[str]:
     """Screens reachable from *start* via known routes (excluding *start* itself)."""
     if not start or start not in app.screens:
         return set()
@@ -3403,8 +3609,7 @@ def playbook_view(
 
     description = (
         app.description
-        if app.description
-        and exact_key("description", None, app.description) not in suppressed
+        if app.description and exact_key("description", None, app.description) not in suppressed
         else None
     )
     recipes: dict[str, Recipe] = {
@@ -3418,9 +3623,7 @@ def playbook_view(
         if exact_key("deeplink", link.uri, link.note or link.uri) not in suppressed
     }
     notes: dict[str, str] = {
-        normal(note): note
-        for note in app.notes
-        if exact_key("note", None, note) not in suppressed
+        normal(note): note for note in app.notes if exact_key("note", None, note) not in suppressed
     }
 
     for item in active:
@@ -3640,8 +3843,7 @@ def _shortest_path(
         visible = [
             name
             for name, rec in app.screens.items()
-            if context_id is None
-            or rec.context_id in (context_id, LEGACY_CONTEXT_ID)
+            if context_id is None or rec.context_id in (context_id, LEGACY_CONTEXT_ID)
         ]
         starts = roots + [name for name in visible if name not in roots]
 
@@ -3696,9 +3898,264 @@ def _format_path(path: list[RouteEdge]) -> str:
     return " ".join(parts)
 
 
-def _find_targets(
-    app: AppMap, query: str, context_id: str | None = None
-) -> list[str]:
+_ARRIVAL_NOISE = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "app",
+        "navigate",
+        "open",
+        "page",
+        "reach",
+        "screen",
+        "the",
+        "to",
+        "verify",
+    }
+)
+
+
+def _search_words(value: str) -> list[str]:
+    return [word for word in re.split(r"\W+", value.casefold()) if word]
+
+
+def _query_match(haystack: str, query: str, terms: Sequence[str]) -> int | None:
+    """Return phrase/term match quality for one search lane; lower is stronger."""
+    candidate = haystack.casefold()
+    if query and query in candidate:
+        return 0
+    if terms and all(term in candidate for term in terms):
+        return 1
+    return None
+
+
+def _arrival_value_matches(value: str, goal_terms: Sequence[str]) -> bool:
+    """Whether one identity value is specifically represented in a broader goal."""
+    value_terms = [term for term in _search_words(value) if term not in _ARRIVAL_NOISE]
+    if not value_terms or not goal_terms:
+        return False
+    value_phrase = " ".join(value_terms)
+    goal_phrase = " ".join(goal_terms)
+    if value_phrase in goal_phrase or goal_phrase in value_phrase:
+        return True
+    value_set = set(value_terms)
+    goal_set = set(goal_terms)
+    return value_set <= goal_set or goal_set <= value_set
+
+
+def arrival_destination_terms(goal: str) -> list[str]:
+    """Prefer the object of the requested navigation/assertion over origin context.
+
+    A goal such as ``open saved items in Settings`` contains two screen-like phrases. The
+    destination is ``saved items``; letting the trailing origin/container name prove arrival
+    is how a clickable launcher row was previously mistaken for an already-open destination.
+    """
+    match = re.search(
+        r"\b(?:open|reach|enter|visit|view|inspect|verify|select|choose|"
+        r"navigate(?:\s+once)?\s+to|go\s+to|return\s+to)\s+(?:the\s+)?"
+        r"(?P<destination>.+?)"
+        r"(?=\s+(?:and\s+(?:verify|preview|check|open|tap|select|then)\b|"
+        r"then\b|while\b|using\b|through\b|via\b|from\b|within\b|inside\b|in\b)|"
+        r"[;,.]|$)",
+        goal,
+        flags=re.IGNORECASE,
+    )
+    value = match.group("destination") if match is not None else goal
+    raw_terms = _search_words(value)
+    return [term for term in raw_terms if term not in _ARRIVAL_NOISE] or raw_terms
+
+
+def _target_search_lanes(
+    app: AppMap,
+    name: str,
+    context_id: str | None,
+) -> tuple[str, str, str, str, str]:
+    """Identity, passive anchors, incoming routes, controls, and fallback shape.
+
+    A clickable row named after another screen describes how to *leave* the current screen;
+    it is not current-screen identity. Keep it searchable, but rank the incoming route whose
+    destination it names ahead of that launcher row. This distinction is also what prevents a
+    fuzzy ``goto`` from resolving its destination to the screen that merely links there.
+    """
+    rec = app.screens[name]
+    identities = [
+        name,
+        rec.canonical_name or "",
+        rec.logical_name or "",
+        *rec.aliases,
+    ]
+    passive_keys = [
+        value
+        for key in rec.key_elements
+        if not key.clickable
+        for value in (key.label or "", key.resource_id or "")
+        if value
+    ]
+    controls = [
+        value
+        for key in rec.key_elements
+        if key.clickable
+        for value in (key.label or "", key.resource_id or "")
+        if value
+    ]
+    clickable_tokens = {" ".join(_search_words(value)) for value in controls if value}
+    passive_anchors: list[str] = []
+    clickable_anchors: list[str] = []
+    for anchor in rec.anchors:
+        _kind, _sep, value = anchor.partition(":")
+        normalized = " ".join(_search_words(value))
+        if normalized and normalized in clickable_tokens:
+            clickable_anchors.append(anchor)
+        else:
+            passive_anchors.append(anchor)
+    incoming = [
+        edge.action for edge in _routes_for_context(app, context_id) if edge.to_screen == name
+    ]
+    return (
+        " ".join(identities),
+        " ".join([*identities, *passive_keys, *passive_anchors]),
+        " ".join([*identities, *passive_keys, *passive_anchors, *incoming]),
+        " ".join(
+            [
+                *identities,
+                *passive_keys,
+                *passive_anchors,
+                *incoming,
+                *controls,
+                *clickable_anchors,
+            ]
+        ),
+        " ".join(
+            [
+                *identities,
+                *passive_keys,
+                *passive_anchors,
+                *incoming,
+                *controls,
+                *clickable_anchors,
+                *rec.dynamic,
+            ]
+        ),
+    )
+
+
+def _target_match_rank(
+    app: AppMap,
+    name: str,
+    query: str,
+    context_id: str | None,
+) -> int | None:
+    q = query.casefold().strip()
+    terms = _search_words(q)
+    for lane, haystack in enumerate(_target_search_lanes(app, name, context_id)):
+        quality = _query_match(haystack, q, terms)
+        if quality is not None:
+            return lane * 2 + quality
+    return None
+
+
+def target_arrival_evidence(
+    app: AppMap,
+    target: str,
+    goal: str,
+    elements: Sequence[Element],
+    *,
+    screen_height: int | None = None,
+) -> dict[str, str] | None:
+    """Return target-specific proof for an already-recognised mapped screen.
+
+    Callers must still establish that current recognition named *target*. This pure helper
+    answers the second, independent question: does that target identity actually describe the
+    requested *goal*? A fresh canonical/logical/name/alias can answer yes. So can a current,
+    non-clickable title or durable anchor. A clickable matching control never can: it normally
+    names the destination reached *after* tapping it, which was the source of false
+    ``already_there`` results.
+    """
+    rec = app.screens.get(target)
+    terms = arrival_destination_terms(goal)
+    if rec is None or not terms:
+        return None
+
+    clickable_goal_match = any(
+        _arrival_value_matches(value, terms)
+        for element in elements
+        if element.clickable is True
+        for value in (
+            (element.text or "").strip(),
+            (element.content_desc or "").strip(),
+            (_id_tail(element.resource_id) or "").replace("_", " "),
+        )
+        if value
+    )
+
+    # A learned canonical name can itself come from a prior title heuristic. When the only
+    # current goal match is clickable, do not let that persisted name launder a launcher row
+    # into identity proof; require the passive title/anchor path below instead.
+    if not rec.stale:
+        identities = [
+            rec.name,
+            rec.canonical_name or "",
+            rec.logical_name or "",
+            *rec.aliases,
+        ]
+        for identity in identities:
+            if (
+                identity
+                and not clickable_goal_match
+                and _arrival_value_matches(identity.replace("_", " "), terms)
+            ):
+                return {
+                    "source": "mapped_identity",
+                    "target": target,
+                    "value": identity,
+                }
+
+    visible = [
+        element
+        for element in elements
+        if element.clickable is not True
+        and not _is_input(element)
+        and not _system_chrome(element, screen_height)
+        and not _bottom_nav(element, screen_height)
+    ]
+    title = title_of(visible, screen_height)
+    if title and _arrival_value_matches(title, terms):
+        return {"source": "visible_title", "target": target, "value": title}
+
+    remembered = set(rec.anchors)
+    for element in visible:
+        candidates = (
+            ("id", _id_tail(element.resource_id) or ""),
+            ("cd", (element.content_desc or "").strip()),
+            ("tx", (element.text or "").strip()),
+        )
+        for kind, value in candidates:
+            anchor = f"{kind}:{value.casefold()}"
+            if (
+                value
+                and anchor in remembered
+                and _arrival_value_matches(value.replace("_", " "), terms)
+            ):
+                return {
+                    "source": "visible_anchor",
+                    "target": target,
+                    "value": anchor,
+                }
+    return None
+
+
+def screen_is_root(app: AppMap, screen: str, context_id: str | None = None) -> bool:
+    """Whether *screen* is a mapped route root in the selected capture context."""
+    rec = app.screens.get(screen)
+    if rec is None:
+        return False
+    if context_id is not None and rec.context_id not in {context_id, LEGACY_CONTEXT_ID}:
+        return False
+    return screen in _roots(app, context_id)
+
+
+def _find_targets(app: AppMap, query: str, context_id: str | None = None) -> list[str]:
     """Screens matching *query* by name, key-element label, anchor, dynamic shape, or a
     route action that leads to them (so ``--find "image"`` finds the image screen).
 
@@ -3709,53 +4166,18 @@ def _find_targets(
     screen in memory" about a map that held the route. Measured 2026-08-10: an agent shown that
     hint on a map of 135 screens and 613 routes navigated the whole task by tapping.
     """
-    q = query.lower().strip()
-    terms = [t for t in re.split(r"\W+", q) if t]
-
-    def haystacks(name: str) -> tuple[str, str, str]:
-        """What it is called, what is on it, and how you get there — in that order of weight.
-
-        A term found in the route is the weakest evidence: every route string names the screens
-        it passes through, so `--find "apps search"` otherwise ranks a chat screen reached via
-        an Apps tab above the search screen itself.
-        """
-        rec = app.screens[name]
-        on_screen = [
-            *(ke.label or "" for ke in rec.key_elements),
-            *rec.anchors,
-            *rec.dynamic,
-        ]
-        via = [e.action for e in _routes_for_context(app, context_id) if e.to_screen == name]
-        return (
-            name.lower(),
-            " ".join([name, *on_screen]).lower(),
-            " ".join([name, *on_screen, *via]).lower(),
-        )
-
-    def rank(name: str) -> int | None:
-        """Lower is better; None does not match at all."""
-        in_name, on_screen, anywhere = haystacks(name)
-        for score, hay in enumerate((in_name, on_screen, anywhere)):
-            if q and q in hay:
-                return score * 2
-            if terms and all(t in hay for t in terms):
-                return score * 2 + 1
-        return None
-
     scored: list[tuple[bool, bool, int, str]] = []
     for name, rec in app.screens.items():
         if context_id is not None and rec.context_id not in (context_id, LEGACY_CONTEXT_ID):
             continue
-        score = rank(name)
+        score = _target_match_rank(app, name, query, context_id)
         if score is not None:
             scored.append((rec.stale, rec.context_id == LEGACY_CONTEXT_ID, score, name))
     scored.sort()
     return [name for _stale, _legacy, _score, name in scored]
 
 
-def find_result(
-    app: AppMap, query: str, context_id: str | None = None
-) -> dict[str, object]:
+def find_result(app: AppMap, query: str, context_id: str | None = None) -> dict[str, object]:
     """Structured ``--find --json`` payload: matching screens + the route to each."""
     results = []
     targets = _find_targets(app, query, context_id)
@@ -3807,7 +4229,7 @@ def resolve_goal(
         return exact[0]
     now = now or datetime.now().astimezone()
 
-    def key(name: str) -> tuple[bool, bool, bool, bool, float, int]:
+    def key(name: str) -> tuple[int, bool, bool, bool, bool, float, int]:
         path = _shortest_path(
             app,
             name,
@@ -3816,16 +4238,16 @@ def resolve_goal(
             destructive_labels=destructive_labels,
         )
         reachable = (
-            bool(path)
-            or name == start
-            or (start is None and name in _roots(app, context_id))
+            bool(path) or name == start or (start is None and name in _roots(app, context_id))
         )
         score = _rank_score(
             app.screens[name], now=now, half_life_days=half_life_days, last_goal=last_goal
         )
         # A screen *named* for the goal beats one that merely contains a matching element.
         rec = app.screens[name]
+        match_rank = _target_match_rank(app, name, goal, context_id)
         return (
+            -(match_rank if match_rank is not None else 99),
             not rec.stale,
             rec.context_id != LEGACY_CONTEXT_ID,
             g in name.lower(),
@@ -3837,9 +4259,7 @@ def resolve_goal(
     return sorted(targets, key=key, reverse=True)[0]
 
 
-def _render_find(
-    app: AppMap, query: str, context_id: str | None = None
-) -> str:
+def _render_find(app: AppMap, query: str, context_id: str | None = None) -> str:
     targets = _find_targets(app, query, context_id)
     lines = [f"# find: {query}  ({app.package})"]
     if not targets:

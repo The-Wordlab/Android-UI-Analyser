@@ -152,6 +152,52 @@ def test_generated_skill_is_brief_and_progressively_reveals_the_manual() -> None
     assert "restore point" in full, "full reference content must not be discarded"
 
 
+def test_guide_defines_authoritative_call_accounting_without_inflating_calls() -> None:
+    protocol = dict(guide.SESSION_PROTOCOL)["Start from the user's goal"]
+    brief = guide.render_brief()
+    skill = guide.render_skill_markdown()
+
+    for text in (protocol, brief, skill):
+        for field in [
+            "`journal_events`",
+            "`top_level_calls`",
+            "`folded_internal_events`",
+            "`lifecycle_calls`",
+            "`task_calls`",
+            "`reporting_call_included`",
+            "`top_level_calls_including_reporting_call`",
+        ]:
+            assert field in text
+        assert "caller-visible invocations" in text
+        assert "action-bound wait" in text
+        assert "reporting_call_included` is false" in text
+
+    assert "authoritative instead of estimating" in protocol
+    assert "Use `review.accounting`, not estimates" in skill
+
+
+def test_flow_capture_proof_and_selector_resilience_are_taught_everywhere() -> None:
+    manual = guide.render_markdown()
+    skill = guide.render_skill_markdown()
+    cli_help = runner.invoke(app, ["flow", "save", "--help"])
+
+    assert cli_help.exit_code == 0
+    assert "selector resilience" in cli_help.stdout
+    for text in (manual, skill):
+        assert "selector_resilience" in text
+        assert "satisfied_action_until" in text
+        assert "privacy-safe positive `--until`" in text
+
+
+def test_session_review_help_names_exact_accounting_partitions() -> None:
+    help_result = runner.invoke(app, ["session", "review", "--help"])
+
+    assert help_result.exit_code == 0
+    normalized = " ".join(help_result.stdout.split())
+    assert "top-level/task/lifecycle calls" in normalized
+    assert "folded events" in normalized
+
+
 def test_both_committed_skill_copies_match_the_compact_generator() -> None:
     root = Path(__file__).resolve().parents[1]
     expected = guide.render_skill()

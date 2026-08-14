@@ -179,6 +179,22 @@ def test_mcp_flow_save_is_preview_first_with_explicit_commit() -> None:
     assert props["save"]["default"] is False
     assert "writes nothing" in props["save"]["description"]
     assert "Deprecated" in props["dry_run"]["description"]
+    assert "selector_resilience" in tool.description
+    assert "action-bound until" in tool.description
+
+
+def test_mcp_session_review_defines_exact_accounting_scope() -> None:
+    tool = next(item for item in _tool_definitions() if item.name == "session_review")
+
+    for field in (
+        "top_level_calls",
+        "lifecycle_calls",
+        "task_calls",
+        "journal_events",
+        "folded_internal_events",
+        "reporting_call_included",
+    ):
+        assert field in tool.description
 
 
 def test_mcp_expected_error_annotation_is_machine_readable() -> None:
@@ -195,6 +211,8 @@ def test_mcp_initialization_teaches_goal_first_protocol() -> None:
     assert "session_start(goal)" in instructions
     assert "goto" in instructions and "matching saved flow" in instructions
     assert "network_offline" in instructions and "never airplane mode" in instructions
+    assert "lifecycle_calls plus task_calls" in instructions
+    assert "folded_internal_events" in instructions
 
 
 def test_mcp_capabilities_progressively_discover_goal_features() -> None:
@@ -241,9 +259,7 @@ def test_mcp_session_and_reach_dispatch_contract(monkeypatch: pytest.MonkeyPatch
     async def run() -> list[dict[str, object]]:
         async with create_connected_server_and_client_session(server) as client:
             results = [
-                await client.call_tool(
-                    "session_start", {"goal": "open settings", "headed": True}
-                ),
+                await client.call_tool("session_start", {"goal": "open settings", "headed": True}),
                 await client.call_tool("reach", {"goal": "settings", "poll_ms": 25}),
                 await client.call_tool("session_review", {"session_id": "session-1"}),
                 await client.call_tool("session_finish", {"session_id": "session-1"}),
@@ -563,9 +579,7 @@ def test_mcp_folded_action_preserves_structured_settled_arrival_mismatch(
         "code": "arrival_mismatch",
         "original_predicate": "text:Old title,!text:Loading",
         "suggested_positive_predicates": ["rid:recentItem"],
-        "recommended_call": (
-            "aua await-and-analyze 'rid:recentItem,!text:Loading' --observe"
-        ),
+        "recommended_call": ("aua await-and-analyze 'rid:recentItem,!text:Loading' --observe"),
         "recommended_mcp_call": {
             "tool": "await_and_analyze",
             "arguments": {"predicate": "rid:recentItem,!text:Loading"},

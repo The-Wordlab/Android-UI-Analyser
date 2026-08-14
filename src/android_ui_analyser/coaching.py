@@ -158,12 +158,18 @@ def decorate_result(
 
             with contextlib.suppress(Exception):
                 observation = AnalyzeResult.model_validate(observation_payload)
-        stale_deeplink = normalized in {"open_link", "open_link_and_analyze", "open_and_analyze"} and bool(
-            data.get("stale_risk")
-        )
+        stale_deeplink = normalized in {
+            "open_link",
+            "open_link_and_analyze",
+            "open_and_analyze",
+        } and bool(data.get("stale_risk"))
+        # A background wait's observation is not phase proof until JobState has reached a
+        # successful terminal state and its session/owner/serial/predicate correlation has been
+        # checked. jobs.py performs that check and refreshes this progress snapshot afterward.
+        progress_observation = None if normalized.startswith("job:") else observation
         refreshed = engine.session_progress(
             state.session_id,
-            observation=observation,
+            observation=progress_observation,
             _avoid_deeplinks=stale_deeplink,
         )
         refreshed_progress = refreshed.get("goal_progress")
@@ -232,9 +238,7 @@ def decorate_result(
         route_values = data.get("routes")
         routes = route_values if isinstance(route_values, list) else []
         observation_data = data.get("observation") or {}
-        meta_value = (
-            observation_data.get("meta") if isinstance(observation_data, dict) else None
-        )
+        meta_value = observation_data.get("meta") if isinstance(observation_data, dict) else None
         meta: dict[str, Any] = meta_value if isinstance(meta_value, dict) else {}
         flow_values = meta.get("flows") if isinstance(meta, dict) else None
         flows = flow_values if isinstance(flow_values, list) else []

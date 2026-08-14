@@ -115,7 +115,9 @@ def test_verified_environment_phase_advances_and_evidence_checkpoints_stay_order
     tmp_path: Path, monkeypatch: Any
 ) -> None:
     engine = _engine(tmp_path, "goal-phases")
-    monkeypatch.setattr(engine, "analyze", lambda **_kwargs: _apps_observation(engine.device.serial))
+    monkeypatch.setattr(
+        engine, "analyze", lambda **_kwargs: _apps_observation(engine.device.serial)
+    )
     started = engine.session_start(
         "Verify Grammar opens offline. Compare Mathematics; restore connectivity."
     )
@@ -144,9 +146,7 @@ def test_verified_environment_phase_advances_and_evidence_checkpoints_stay_order
     refreshed = engine.session_progress(
         started["session_id"], observation=_apps_observation(engine.device.serial)
     )["goal_progress"]
-    assert refreshed["next_call"]["cli"] == (
-        "aua tap-and-analyze --text 'Grammar 1 hr. ago'"
-    )
+    assert refreshed["next_call"]["cli"] == ("aua tap-and-analyze --text 'Grammar 1 hr. ago'")
 
     with pytest.raises(ValueError, match="complete 'phase_2' first"):
         mark_phase_complete(
@@ -164,11 +164,72 @@ def test_verified_environment_phase_advances_and_evidence_checkpoints_stay_order
     assert "Mathematics" in phase_progress(state)["current"]["objective"]
 
 
+def test_engine_network_goal_runs_status_offline_then_finish_with_exact_calls(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path, "goal-network-sequence")
+    started = engine.session_start(
+        "Record the verified active network transport; make the Example Emulator verifiably "
+        "offline; restore the original connectivity on finish.",
+        observation=_observation(engine.device.serial),
+    )
+
+    assert started["recommended_call"]["kind"] == "network_status"
+    assert started["recommended_call"]["mcp"] == {
+        "tool": "network_status",
+        "arguments": {"verify": True},
+    }
+
+    status = decorate_result(
+        engine,
+        "network_status",
+        {
+            "ok": True,
+            "verified": True,
+            "state": {
+                "active_network": True,
+                "active_transports": ["wifi"],
+                "internet_validated": True,
+                "offline": False,
+            },
+        },
+    )
+    assert status["goal_progress"]["next_call"] == {
+        "kind": "network_offline",
+        "cli": "aua network offline --verify",
+        "mcp": {"tool": "network_offline", "arguments": {"verify": True}},
+        "reason": "This phase requires verified reversible network isolation.",
+        "executes": True,
+    }
+
+    offline = decorate_result(
+        engine,
+        "network_offline",
+        {"ok": True, "verified": True, "state": {"offline": True}},
+    )
+    assert offline["goal_progress"]["next_call"]["kind"] == "session_finish"
+    assert offline["goal_progress"]["next_call"]["mcp"] == {
+        "tool": "session_finish",
+        "arguments": {"session_id": started["session_id"]},
+    }
+
+    finished = engine.session_finish(started["session_id"])
+
+    assert finished["finished"] is True
+    assert finished["terminated"] is True
+    assert finished["goal_progress"]["completed"] == 3
+    assert finished["goal_progress"]["total"] == 3
+    assert finished["goal_progress"]["done"] is True
+    assert finished["goal_progress"]["next_call"] is None
+
+
 def test_cli_phase_checkpoint_advances_without_a_device_call(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
     engine = _engine(tmp_path, "goal-phase-cli")
-    monkeypatch.setattr(engine, "analyze", lambda **_kwargs: _apps_observation(engine.device.serial))
+    monkeypatch.setattr(
+        engine, "analyze", lambda **_kwargs: _apps_observation(engine.device.serial)
+    )
     started = engine.session_start("Verify Grammar. Compare Mathematics")
     before_calls = list(engine.device.calls)
 
@@ -349,9 +410,7 @@ def test_goal_session_ignores_generic_one_term_overlap_in_multiword_control(
     )
     monkeypatch.setattr(engine, "analyze", lambda **_kwargs: observed)
 
-    started = engine.session_start(
-        "On Android Settings, perform one harmless saveable UI action"
-    )
+    started = engine.session_start("On Android Settings, perform one harmless saveable UI action")
 
     next_call = started["goal_progress"]["next_call"]
     assert next_call["kind"] == "manual_observation"
@@ -389,9 +448,7 @@ def test_multiphase_recommendations_are_compact_and_planned_from_the_active_fram
     started = engine.session_start("Open Vocabulary; then open Equation")
 
     assert "phases" not in started["goal_progress"]
-    assert started["goal_progress"]["next_call"]["mcp"]["arguments"] == {
-        "text": "Open Vocabulary"
-    }
+    assert started["goal_progress"]["next_call"]["mcp"]["arguments"] == {"text": "Open Vocabulary"}
     persisted = load_session_state(tmp_path / "cache", session_id=started["session_id"])
     assert persisted is not None
     assert persisted.phases[1].recommended_call is None
@@ -403,9 +460,7 @@ def test_multiphase_recommendations_are_compact_and_planned_from_the_active_fram
     assert progressed["goal_progress"]["next_call"]["cli"] == (
         "aua tap-and-analyze --text 'Open Equation'"
     )
-    assert progressed["goal_progress"]["next_call"]["mcp"]["arguments"] == {
-        "text": "Open Equation"
-    }
+    assert progressed["goal_progress"]["next_call"]["mcp"]["arguments"] == {"text": "Open Equation"}
     reloaded = load_session_state(tmp_path / "cache", session_id=started["session_id"])
     assert reloaded is not None
     assert reloaded.phases[1].recommended_call == progressed["goal_progress"]["next_call"]
@@ -477,6 +532,63 @@ def test_session_start_app_alias_launches_and_reuses_that_observation(
 
     assert launches == [("com.example.catalog", ".MainActivity")]
     assert started["package"] == "com.example.catalog"
+
+
+def test_session_start_discards_a_launch_observation_from_the_previous_package(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    engine = _engine(tmp_path, "goal-launch-authoritative")
+    stale = _observation(engine.device.serial)
+    stale.screen.package = "com.example.previous"
+    fresh = _observation(engine.device.serial)
+    analyzes: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        engine,
+        "app",
+        lambda *_args, **_kwargs: engine_mod.ActionResult(
+            ok=True,
+            action="app-launch",
+            observation=stale,
+            observation_present=True,
+        ),
+    )
+
+    def analyze(**kwargs: Any) -> AnalyzeResult:
+        analyzes.append(kwargs)
+        return fresh
+
+    monkeypatch.setattr(engine, "analyze", analyze)
+
+    started = engine.session_start("inspect catalog", package="com.example.catalog")
+
+    assert started["package"] == "com.example.catalog"
+    assert analyzes == [{"source": "hierarchy", "with_ocr": False, "no_cache": True}]
+
+
+def test_session_start_refuses_a_persistently_mixed_launch_frame(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    engine = _engine(tmp_path, "goal-launch-mismatch")
+    stale = _observation(engine.device.serial)
+    stale.screen.package = "com.example.previous"
+    monkeypatch.setattr(
+        engine,
+        "app",
+        lambda *_args, **_kwargs: engine_mod.ActionResult(
+            ok=True,
+            action="app-launch",
+            observation=stale,
+            observation_present=True,
+        ),
+    )
+    monkeypatch.setattr(engine, "analyze", lambda **_kwargs: stale)
+
+    with pytest.raises(engine_mod.DeviceError) as raised:
+        engine.session_start("inspect catalog", package="com.example.catalog")
+
+    assert raised.value.code == "launch_observation_mismatch"
+    assert not list((tmp_path / "cache" / "sessions").glob("*.json"))
 
 
 def test_journal_automatically_correlates_active_session_and_review_finds_waste(
@@ -613,6 +725,10 @@ def test_review_accounts_for_matching_expected_error_without_poisoning_run(
         "journal_events": 2,
         "top_level_calls": 2,
         "folded_internal_events": 0,
+        "lifecycle_calls": 0,
+        "task_calls": 2,
+        "reporting_call_included": False,
+        "top_level_calls_including_reporting_call": 3,
         "expected_error_probes": 1,
         "expected_error_matches": 1,
         "unexpected_failures": 0,

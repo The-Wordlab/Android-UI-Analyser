@@ -246,6 +246,351 @@ def test_back_until_stops_on_mapped_loading_frame_before_another_back(
     assert result.steps_run and len(result.steps_run) == 1
 
 
+def test_back_until_rechecks_a_mapped_root_and_never_spends_hardware_back(
+    monkeypatch: Any,
+) -> None:
+    engine = Engine(
+        make_config(memory={"enabled": False}), device=FakeDevice(package="com.example.app")
+    )
+    back = Element(
+        id=7,
+        type="Button",
+        resource_id="com.example.app:id/navigateUp",
+        content_desc="Navigate up",
+        clickable=True,
+        enabled=True,
+        bounds=(0, 0, 100, 100),
+        center=(50, 50),
+    )
+    home_title = Element(
+        id=9,
+        type="TextView",
+        text="Home",
+        bounds=(120, 40, 500, 120),
+        center=(310, 80),
+    )
+    results = [
+        _await(
+            ok=False,
+            outcome="timeout",
+            observation=_observation(elements=[back], known_screen="detail"),
+        ),
+        _await(
+            ok=False,
+            outcome="timeout",
+            observation=_observation(elements=[home_title], known_screen="home"),
+        ),
+        _await(
+            ok=True,
+            outcome="satisfied",
+            observation=_observation(elements=[home_title], known_screen="home"),
+        ),
+    ]
+    taps: list[dict[str, Any]] = []
+    monkeypatch.setattr(engine, "await_predicate", lambda *_args, **_kwargs: results.pop(0))
+    monkeypatch.setattr(
+        engine,
+        "_mapped_screen_is_root",
+        lambda observation: bool(observation and observation.meta.known_screen == "home"),
+    )
+    monkeypatch.setattr(
+        engine,
+        "tap",
+        lambda *_args, **kwargs: taps.append(kwargs) or ActionResult(ok=True, action="tap"),
+    )
+    monkeypatch.setattr(
+        engine,
+        "key",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("mapped root must not spend hardware Back")
+        ),
+    )
+
+    result = engine.back_until("text:Home", max_steps=4, step_timeout_ms=0)
+
+    assert result.ok is True
+    assert result.stop_reason == "predicate_satisfied"
+    assert len(result.steps_run or []) == 1
+    assert len(taps) == 1
+
+
+def test_back_until_returns_mapped_root_on_persistent_predicate_miss(
+    monkeypatch: Any,
+) -> None:
+    engine = Engine(
+        make_config(memory={"enabled": False}), device=FakeDevice(package="com.example.app")
+    )
+    back = Element(
+        id=7,
+        type="Button",
+        content_desc="Navigate up",
+        clickable=True,
+        enabled=True,
+        bounds=(0, 0, 100, 100),
+        center=(50, 50),
+    )
+    results = [
+        _await(
+            ok=False,
+            outcome="timeout",
+            observation=_observation(elements=[back], known_screen="detail"),
+        ),
+        _await(ok=False, outcome="timeout", observation=_observation(known_screen="home")),
+        _await(ok=False, outcome="timeout", observation=_observation(known_screen="home")),
+    ]
+    monkeypatch.setattr(engine, "await_predicate", lambda *_args, **_kwargs: results.pop(0))
+    monkeypatch.setattr(
+        engine,
+        "_mapped_screen_is_root",
+        lambda observation: bool(observation and observation.meta.known_screen == "home"),
+    )
+    monkeypatch.setattr(
+        engine, "tap", lambda *_args, **_kwargs: ActionResult(ok=True, action="tap")
+    )
+    monkeypatch.setattr(
+        engine,
+        "key",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("mapped root must not spend hardware Back")
+        ),
+    )
+
+    result = engine.back_until("text:Expected title", max_steps=4, step_timeout_ms=0)
+
+    assert result.ok is False
+    assert result.stop_reason == "package_boundary_risk"
+    assert result.observation is not None
+    assert result.observation.meta.known_screen == "home"
+    assert len(result.steps_run or []) == 1
+
+
+def test_back_until_refreshes_a_tiny_terminal_hierarchy_once(monkeypatch: Any) -> None:
+    engine = Engine(
+        make_config(memory={"enabled": False}), device=FakeDevice(package="com.example.app")
+    )
+    back = Element(
+        id=7,
+        type="Button",
+        content_desc="Navigate up",
+        clickable=True,
+        enabled=True,
+        bounds=(0, 0, 100, 100),
+        center=(50, 50),
+    )
+    before_elements = [
+        back,
+        *[
+            Element(
+                id=index + 10,
+                type="TextView",
+                text=f"Detail row {index}",
+                bounds=(0, 100 + index * 40, 600, 130 + index * 40),
+                center=(300, 115 + index * 40),
+            )
+            for index in range(9)
+        ],
+    ]
+    tiny = _observation(
+        elements=[
+            Element(
+                id=1,
+                type="TextView",
+                text="Home",
+                bounds=(0, 0, 200, 80),
+                center=(100, 40),
+            )
+        ],
+        known_screen="home",
+    )
+    rich = _observation(
+        elements=[
+            Element(
+                id=index,
+                type="TextView" if index else "Button",
+                text="Home" if index == 1 else f"Destination control {index}",
+                clickable=index == 0,
+                bounds=(0, index * 80, 700, index * 80 + 60),
+                center=(350, index * 80 + 30),
+            )
+            for index in range(12)
+        ],
+        known_screen="home",
+    )
+    results = [
+        _await(
+            ok=False,
+            outcome="timeout",
+            observation=_observation(elements=before_elements, known_screen="detail"),
+        ),
+        _await(ok=True, outcome="satisfied", observation=tiny),
+    ]
+    analyze_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(engine, "await_predicate", lambda *_args, **_kwargs: results.pop(0))
+    monkeypatch.setattr(
+        engine, "tap", lambda *_args, **_kwargs: ActionResult(ok=True, action="tap")
+    )
+    monkeypatch.setattr(
+        engine,
+        "analyze",
+        lambda **kwargs: analyze_calls.append(kwargs) or rich,
+    )
+
+    result = engine.back_until("text:Home", max_steps=2, step_timeout_ms=0)
+
+    assert result.ok is True
+    assert result.observation is rich
+    assert len(result.observation.elements) == 12
+    assert analyze_calls == [
+        {"source": "hierarchy", "with_ocr": False, "no_cache": True, "record": False}
+    ]
+
+
+def test_back_until_refreshes_and_recognizes_a_tiny_mapped_terminal(
+    monkeypatch: Any,
+) -> None:
+    engine = Engine(
+        make_config(memory={"enabled": False}), device=FakeDevice(package="com.example.app")
+    )
+    back = Element(
+        id=7,
+        type="Button",
+        content_desc="Navigate up",
+        clickable=True,
+        enabled=True,
+        bounds=(0, 0, 100, 100),
+        center=(50, 50),
+    )
+    before = _observation(
+        elements=[
+            back,
+            *[
+                Element(
+                    id=index + 10,
+                    type="TextView",
+                    text=f"Detail {index}",
+                    bounds=(0, 100 + index * 40, 600, 130 + index * 40),
+                    center=(300, 115 + index * 40),
+                )
+                for index in range(9)
+            ],
+        ],
+        known_screen="detail",
+    )
+    tiny = _observation(
+        elements=[
+            Element(
+                id=1,
+                type="TextView",
+                text="Home",
+                bounds=(0, 0, 200, 80),
+                center=(100, 40),
+            )
+        ],
+        known_screen="home",
+    )
+    rich = _observation(
+        elements=[
+            Element(
+                id=index,
+                type="TextView",
+                text=f"Home control {index}",
+                bounds=(0, index * 60, 600, index * 60 + 50),
+                center=(300, index * 60 + 25),
+            )
+            for index in range(12)
+        ],
+        known_screen=None,
+    )
+    results = [
+        _await(ok=False, outcome="timeout", observation=before),
+        _await(ok=True, outcome="satisfied", observation=tiny),
+    ]
+    monkeypatch.setattr(engine, "_await_known_screen", lambda *_args, **_kwargs: results.pop(0))
+    monkeypatch.setattr(
+        engine, "tap", lambda *_args, **_kwargs: ActionResult(ok=True, action="tap")
+    )
+    monkeypatch.setattr(engine, "analyze", lambda **_kwargs: rich)
+    monkeypatch.setattr(engine, "_recognize_screen_read_only", lambda _observation: "home")
+
+    result = engine.back_until("home", max_steps=2, step_timeout_ms=0)
+
+    assert result.ok is True
+    assert result.observation is rich
+    assert result.observation.meta.known_screen == "home"
+
+
+def test_back_until_refuses_success_when_terminal_evidence_disappears(
+    monkeypatch: Any,
+) -> None:
+    engine = Engine(
+        make_config(memory={"enabled": False}), device=FakeDevice(package="com.example.app")
+    )
+    back = Element(
+        id=7,
+        type="Button",
+        content_desc="Navigate up",
+        clickable=True,
+        enabled=True,
+        bounds=(0, 0, 100, 100),
+        center=(50, 50),
+    )
+    before = _observation(
+        elements=[
+            back,
+            *[
+                Element(
+                    id=i + 10,
+                    type="TextView",
+                    text=str(i),
+                    bounds=(0, 100 + i * 40, 600, 130 + i * 40),
+                    center=(300, 115 + i * 40),
+                )
+                for i in range(9)
+            ],
+        ],
+        known_screen="detail",
+    )
+    tiny = _observation(
+        elements=[
+            Element(
+                id=1,
+                type="TextView",
+                text="Home",
+                bounds=(0, 0, 200, 80),
+                center=(100, 40),
+            )
+        ]
+    )
+    rich_wrong = _observation(
+        elements=[
+            Element(
+                id=i,
+                type="TextView",
+                text=f"Catalog control {i}",
+                bounds=(0, i * 60, 600, i * 60 + 50),
+                center=(300, i * 60 + 25),
+            )
+            for i in range(12)
+        ]
+    )
+    results = [
+        _await(ok=False, outcome="timeout", observation=before),
+        _await(ok=True, outcome="satisfied", observation=tiny),
+    ]
+    monkeypatch.setattr(engine, "await_predicate", lambda *_args, **_kwargs: results.pop(0))
+    monkeypatch.setattr(
+        engine, "tap", lambda *_args, **_kwargs: ActionResult(ok=True, action="tap")
+    )
+    monkeypatch.setattr(engine, "analyze", lambda **_kwargs: rich_wrong)
+
+    result = engine.back_until("text:Home", max_steps=2, step_timeout_ms=0)
+
+    assert result.ok is False
+    assert result.stop_reason == "terminal_evidence_unmet"
+    assert result.observation is rich_wrong
+    assert "no longer satisfies" in result.detail
+
+
 def test_back_until_re_resolves_toolbar_back_on_each_fresh_frame(monkeypatch: Any) -> None:
     engine = Engine(
         make_config(memory={"enabled": False}), device=FakeDevice(package="com.example.app")

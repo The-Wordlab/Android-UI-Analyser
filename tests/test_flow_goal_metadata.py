@@ -97,6 +97,29 @@ steps:
     assert plan.selected_candidate == "flow:cached_item"
 
 
+def test_predicate_verified_status_round_trips_while_legacy_predicates_still_load() -> None:
+    verified = parse_flow_yaml(
+        """
+name: verified_predicate
+arrival: rid:detailPanel,!text:Loading
+arrival_status: predicate_verified
+steps:
+  - tap: {id: openDetails, by: id}
+"""
+    )
+    legacy = parse_flow_yaml(
+        """
+name: legacy_predicate
+arrival: rid:detailPanel
+steps:
+  - tap: {id: openDetails}
+"""
+    )
+
+    assert parse_flow_yaml(render_flow_yaml(verified)).arrival_status == "predicate_verified"
+    assert legacy.arrival_status is None
+
+
 def test_network_flow_steps_are_risk_previewed_and_execute_when_explicit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -305,9 +328,7 @@ def test_goal_planning_uses_runnable_storage_names_and_isolates_bad_files(
         device=FakeDevice(serial="flow-storage-name", package="com.example.catalog"),
     )
 
-    plan = engine._goal_session_plan(
-        "Friendly cached title", _observation("flow-storage-name")
-    )
+    plan = engine._goal_session_plan("Friendly cached title", _observation("flow-storage-name"))
 
     candidate = next(item for item in plan.candidates if item.kind == "flow")
     assert candidate.id == "flow:open_cached"
@@ -317,7 +338,9 @@ def test_goal_planning_uses_runnable_storage_names_and_isolates_bad_files(
 def test_long_lived_flow_hints_refresh_after_external_delete(tmp_path: Path) -> None:
     cfg = make_config(memory={"dir": str(tmp_path / "memory")})
     store = FlowStore(cfg.memory)
-    store.save(Flow(name="temporary", app="com.example.catalog", steps=[RouteStep(kind="key", arg="back")]))
+    store.save(
+        Flow(name="temporary", app="com.example.catalog", steps=[RouteStep(kind="key", arg="back")])
+    )
     engine = Engine(
         cfg,
         device=FakeDevice(serial="flow-cache-refresh", package="com.example.catalog"),

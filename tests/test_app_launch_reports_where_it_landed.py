@@ -10,7 +10,12 @@ screen in; this pins that launch does too, and that `--no-observe` still opts ou
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
+import pytest
+
+from android_ui_analyser.errors import DeviceError
+from android_ui_analyser.schema import ActionResult
 from conftest import FakeDevice
 from test_memory import APPS, P, _engine
 
@@ -64,3 +69,59 @@ def test_detail_stays_the_launched_component_and_timing_is_structured(tmp_path: 
     assert "stale_risk" not in (r.detail or ""), "caveats must not be appended to detail"
     if r.settle is not None:
         assert isinstance(r.settle, dict) and "ms" in r.settle, "settle is structured, not prose"
+
+
+def test_launch_replaces_a_previous_package_hierarchy_with_one_authoritative_read(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    dev = FakeDevice(hierarchy_xml=APPS, package=P, serial="emu-launch-authoritative")
+    eng = _engine(tmp_path, dev)
+    fresh = eng.analyze(source="hierarchy", with_ocr=False)
+    stale = fresh.model_copy(deep=True)
+    stale.screen.package = "com.example.previous"
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        eng,
+        "_observe",
+        lambda *_args, **_kwargs: ActionResult(
+            ok=True,
+            action="app-launch",
+            observation=stale,
+            observation_present=True,
+        ),
+    )
+    monkeypatch.setattr(
+        eng,
+        "analyze",
+        lambda **kwargs: calls.append(kwargs) or fresh,
+    )
+
+    result = eng.app("launch", package=P)
+
+    assert result.observation is fresh
+    assert calls == [{"source": "hierarchy", "with_ocr": False, "no_cache": True}]
+
+
+def test_launch_refuses_a_persistently_mixed_package_hierarchy(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    dev = FakeDevice(hierarchy_xml=APPS, package=P, serial="emu-launch-mismatch")
+    eng = _engine(tmp_path, dev)
+    stale = eng.analyze(source="hierarchy", with_ocr=False).model_copy(deep=True)
+    stale.screen.package = "com.example.previous"
+    monkeypatch.setattr(
+        eng,
+        "_observe",
+        lambda *_args, **_kwargs: ActionResult(
+            ok=True,
+            action="app-launch",
+            observation=stale,
+            observation_present=True,
+        ),
+    )
+    monkeypatch.setattr(eng, "analyze", lambda **_kwargs: stale)
+
+    with pytest.raises(DeviceError) as raised:
+        eng.app("launch", package=P)
+
+    assert raised.value.code == "launch_observation_mismatch"

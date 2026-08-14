@@ -339,8 +339,10 @@ def _tool_definitions() -> list[types.Tool]:
         types.Tool(
             name="session_review",
             description=(
-                "Review this AUA session's top-level calls, elapsed time, failures, redundant "
-                "patterns, recommendation use, and estimated savings."
+                "Review exact caller-visible top_level_calls (lifecycle_calls + task_calls), "
+                "journal_events including folded_internal_events, elapsed time, failures, "
+                "redundant patterns, and savings. reporting_call_included=false means the "
+                "embedded snapshot precedes this review/finish invocation."
             ),
             inputSchema={
                 "type": "object",
@@ -545,7 +547,9 @@ def _tool_definitions() -> list[types.Tool]:
             name="flow_save",
             description=(
                 "Preview recent recorded actions as an editable reusable flow without writing. "
-                "Set save=true only after reviewing scope, selectors, and arrival proof."
+                "Review scope, value-free selector_resilience, and arrival proof. An unmapped "
+                "arrival is captured only from a positive action-bound until satisfied on the "
+                "same frame; otherwise it remains unverified. Set save=true only after review."
             ),
             inputSchema={
                 "type": "object",

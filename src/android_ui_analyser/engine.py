@@ -50,6 +50,7 @@ from .memory import (
     RouteStep,
     _id_tail,
     _shortest_path,
+    arrival_destination_terms,
     context_view,
     is_destructive_step,
     matches_any,
@@ -57,8 +58,10 @@ from .memory import (
     recorded_selector,
     resolve_goal,
     route_step_risks,
+    screen_is_root,
     screen_skips_ocr,
     step_display,
+    target_arrival_evidence,
 )
 from .providers.base import DetBox, OcrProvider, Point, ScreenAnalysisResult, ScreenImage, TextBox
 from .providers.registry import ProviderFactory, registered_names, run_chain
@@ -1315,6 +1318,11 @@ class Engine:
                 and xml_hash == self._last_hierarchy_hash
                 and self._last_analyze_result is not None
                 and not no_cache
+                # A warm daemon can move between apps whose accessibility dump happens to
+                # hash the same during a transition. Reusing the previous payload in that case
+                # creates an impossible observation: the new hierarchy under the old package.
+                # Package identity is part of a screen observation, not optional metadata.
+                and package == self._last_analyze_result.screen.package
                 # Identical accessibility XML does not imply identical pixels (canvas,
                 # charts, video, custom rendering). Current OCR must reach the caller.
                 and not hierarchy_observation.ocr_provider
@@ -2978,12 +2986,16 @@ class Engine:
                     raise UsageError("goto step needs a mapped screen goal")
                 mem = self._memory
                 mapped_app = mem.load(flow_app) if mem is not None and flow_app else None
-                if mapped_app is None or resolve_goal(
-                    mapped_app,
-                    step.arg,
-                    context_id=context_id,
-                    destructive_labels=self.config.memory.destructive_labels,
-                ) is None:
+                if (
+                    mapped_app is None
+                    or resolve_goal(
+                        mapped_app,
+                        step.arg,
+                        context_id=context_id,
+                        destructive_labels=self.config.memory.destructive_labels,
+                    )
+                    is None
+                ):
                     raise UsageError(
                         f"goto target {step.arg!r} is not mapped for {flow_app or 'this flow'}",
                         hint="record/map the destination before composing it into a flow",
@@ -3137,15 +3149,11 @@ class Engine:
                     *row.get("substeps", []),
                     *((row.get("resolved_flow") or {}).get("steps") or []),
                 ]
-                row["destructive"] = any(risk.get("code") == "destructive" for risk in risks) or any(
-                    bool(nested.get("destructive")) for nested in nested_rows
-                )
+                row["destructive"] = any(
+                    risk.get("code") == "destructive" for risk in risks
+                ) or any(bool(nested.get("destructive")) for nested in nested_rows)
                 row["effects"] = sorted(
-                    {
-                        str(risk.get("code"))
-                        for risk in risks
-                        if risk.get("code") is not None
-                    }
+                    {str(risk.get("code")) for risk in risks if risk.get("code") is not None}
                     | {
                         str(effect)
                         for nested in nested_rows
@@ -3166,11 +3174,7 @@ class Engine:
             "steps": resolved_steps,
             "risks": all_risks,
             "effects": sorted(
-                {
-                    str(risk.get("code"))
-                    for risk in all_risks
-                    if risk.get("code") is not None
-                }
+                {str(risk.get("code")) for risk in all_risks if risk.get("code") is not None}
             ),
             "flow_graph": graph,
         }
@@ -3189,10 +3193,7 @@ class Engine:
         record = app.screens.get(flow.arrival_screen) if app is not None else None
         context_ok = bool(
             record is not None
-            and (
-                context_id is None
-                or record.context_id in {context_id, LEGACY_CONTEXT_ID}
-            )
+            and (context_id is None or record.context_id in {context_id, LEGACY_CONTEXT_ID})
         )
         if record is None or record.stale or not context_ok:
             raise UsageError(
@@ -3598,7 +3599,7 @@ class Engine:
         self, target: str, res: AnalyzeResult, *, allow_destructive: bool
     ) -> tuple[bool, AnalyzeResult]:
         """On a diverged goto, let the planner try to reach *target*. Verified by
-        ``known_screen`` (deterministic), not the planner's own verdict."""
+        target-specific mapped identity plus fresh screen evidence, not the planner verdict."""
         objective = (
             f"Reach the app screen named '{target}'. If a dialog, permission prompt, or "
             "popup is blocking the screen, dismiss it (Allow, Not now, Skip, Close, "
@@ -3607,7 +3608,20 @@ class Engine:
         _, res = self._drive_with_planner(
             objective, res=res, max_steps=_ASSIST_MAX_STEPS, allow_destructive=allow_destructive
         )
-        return res.meta.known_screen == target, res
+        memory = self._memory
+        app = memory.load(res.screen.package) if memory is not None and res.screen.package else None
+        proof = (
+            target_arrival_evidence(
+                app,
+                target,
+                target,
+                res.elements,
+                screen_height=res.screen.height,
+            )
+            if app is not None and res.meta.known_screen == target
+            else None
+        )
+        return proof is not None, res
 
     def _assist_suggestion(self, assist: bool) -> str | None:
         """Handoff hint: suggest --assist when it wasn't used; note it was tried if it was."""
@@ -3716,8 +3730,37 @@ class Engine:
                 "known_screens": list(context_view(app, sess.active_context_id).screens),
                 "hint": "no known screen matches; explore with `aua analyze`",
             }
+
+        def arrival_proof(observation: AnalyzeResult) -> dict[str, str] | None:
+            if observation.meta.known_screen != target:
+                return None
+            return target_arrival_evidence(
+                app,
+                target,
+                goal,
+                observation.elements,
+                screen_height=observation.screen.height,
+            )
+
         mem.set_last_goal(serial, goal)  # remember intent for ranking even if we divert
         if current == target and not transit_resume:  # mid-transit we are NOT on target
+            proof = arrival_proof(res)
+            if proof is None:
+                return {
+                    "ok": False,
+                    "code": "arrival_unproven",
+                    "goal": goal,
+                    "target": target,
+                    "arrived": False,
+                    "package": package,
+                    "current_screen": current,
+                    "elements": [element.compact() for element in res.elements],
+                    "hint": (
+                        "The map cursor names this screen, but the requested destination is "
+                        "not proven by its mapped identity or a fresh non-clickable title/anchor. "
+                        "A matching clickable row is navigation evidence, not arrival."
+                    ),
+                }
             return {
                 "ok": True,
                 "goal": goal,
@@ -3727,6 +3770,7 @@ class Engine:
                 "package": package,
                 "route": [],
                 "hops": [],
+                "arrival_proof": proof,
             }
         path = _shortest_path(
             app,
@@ -3925,6 +3969,25 @@ class Engine:
         attempted_route_ids = set(_attempted_route_ids or ())
 
         def arrived_result(*, early: bool = False) -> dict[str, Any]:
+            proof = arrival_proof(res)
+            if proof is None:
+                return {
+                    "ok": False,
+                    "code": "arrival_unproven",
+                    "goal": goal,
+                    "target": target,
+                    "arrived": False,
+                    "package": package,
+                    "final_screen": res.meta.known_screen,
+                    "hops": hops,
+                    "route": route,
+                    "elements": [element.compact() for element in res.elements],
+                    "hint": (
+                        "Recognition named the target, but this frame does not prove the "
+                        "goal-specific destination. Inspect the returned observation instead "
+                        "of treating a clickable destination label as arrival."
+                    ),
+                }
             out: dict[str, Any] = {
                 "ok": True,
                 "goal": goal,
@@ -3935,6 +3998,7 @@ class Engine:
                 "hops": hops,
                 "route": route,
                 "elements": [e.compact() for e in res.elements],
+                "arrival_proof": proof,
             }
             if early:
                 out["early_arrival"] = True
@@ -4112,11 +4176,13 @@ class Engine:
                     hint=self._assist_suggestion(assist),
                 )
         arrived = res.meta.known_screen == target
+        if arrived:
+            return arrived_result()
         return {
-            "ok": arrived,
+            "ok": False,
             "goal": goal,
             "target": target,
-            "arrived": arrived,
+            "arrived": False,
             "package": package,
             "final_screen": res.meta.known_screen,
             "hops": hops,
@@ -4238,8 +4304,7 @@ class Engine:
             if step.kind == "flow" and step.arg:
                 node = flow_plan.flow_graph.get(self._flow_ref_key(step.arg, directory))
                 return bool(
-                    node
-                    and any(step_is_destructive(child, node.directory) for child in node.steps)
+                    node and any(step_is_destructive(child, node.directory) for child in node.steps)
                 )
             return False
 
@@ -4619,10 +4684,12 @@ class Engine:
             Flow,
             FlowStore,
             check_saveable,
+            recorded_selector_resilience,
             recorded_step_blockers,
             render_flow_yaml,
             steps_from_recent,
         )
+        from .memory import capture_arrival_for_current, capture_arrival_predicate
 
         mem = self._memory
         if mem is None:
@@ -4729,8 +4796,7 @@ class Engine:
         if segment_id is not None:
             expected_provenance = (segment_id, origin, context_id)
             if any(
-                (step.capture_segment, step.origin_package, step.context_id)
-                != expected_provenance
+                (step.capture_segment, step.origin_package, step.context_id) != expected_provenance
                 for step in selected
             ):
                 raise UsageError(
@@ -4741,6 +4807,17 @@ class Engine:
                     ),
                 )
 
+        captured_arrival = capture_arrival_for_current(
+            selected,
+            session=sess,
+            observation_package=current.screen.package,
+            observation_fingerprint=current.meta.fingerprint,
+        )
+        captured_predicate = (
+            capture_arrival_predicate(captured_arrival.proof)
+            if captured_arrival.proof is not None
+            else None
+        )
         arrival_screen: str | None = None
         arrival_reason: str
         if current.screen.package != origin:
@@ -4771,6 +4848,26 @@ class Engine:
                 )
         else:
             arrival_reason = "current destination is not a mapped known_screen"
+        if arrival_screen is None and captured_predicate is not None:
+            arrival_reason = captured_arrival.reason
+
+        def arrival_payload() -> dict[str, Any]:
+            payload: dict[str, Any] = {
+                "status": "verified" if arrival_screen or captured_predicate else "unverified",
+                "screen": arrival_screen,
+                "reason": arrival_reason,
+            }
+            if captured_predicate is not None and arrival_screen is None:
+                payload.update(
+                    predicate=captured_predicate,
+                    source="satisfied_action_until",
+                    fingerprint=current.meta.fingerprint,
+                )
+            return payload
+
+        selector_resilience = [
+            item.model_dump(mode="json") for item in recorded_selector_resilience(selected)
+        ]
 
         store = FlowStore(self.config.memory)
         path = store.path(name)
@@ -4783,8 +4880,7 @@ class Engine:
             "case": "force_without_save",
             "error_code": "usage",
             "cli": (
-                f"aua --expect-error usage flow save {shlex.quote(name)} "
-                f"--last {requested} --force"
+                f"aua --expect-error usage flow save {shlex.quote(name)} --last {requested} --force"
             ),
             "mcp": {
                 "tool": "flow_save",
@@ -4821,11 +4917,8 @@ class Engine:
                 "capture_warnings": capture_blockers,
                 # One-release response alias for callers that handled selector refusals.
                 "selector_warnings": capture_blockers,
-                "arrival_proof": {
-                    "status": "verified" if arrival_screen else "unverified",
-                    "screen": arrival_screen,
-                    "reason": arrival_reason,
-                },
+                "arrival_proof": arrival_payload(),
+                "selector_resilience": selector_resilience,
                 "hint": (
                     "Nothing was written. Re-record with fully captured replay arguments and "
                     "a unique stable, privacy-safe selector, or author the step explicitly in YAML."
@@ -4845,7 +4938,14 @@ class Engine:
             context_id=context_id,
             description=f"Recorded from the last {len(steps)} session actions",
             arrival_screen=arrival_screen,
-            arrival_status="mapped" if arrival_screen else "unverified",
+            arrival=(captured_predicate if arrival_screen is None else None),
+            arrival_status=(
+                "mapped"
+                if arrival_screen
+                else "predicate_verified"
+                if captured_predicate
+                else "unverified"
+            ),
             params=params,
             steps=steps,
         )
@@ -4885,11 +4985,9 @@ class Engine:
                 "capture_segment": segment_id,
                 "boundary_omitted": boundary_omitted,
             },
-            "arrival_proof": {
-                "status": "verified" if arrival_screen else "unverified",
-                "screen": arrival_screen,
-                "reason": arrival_reason,
-            },
+            "arrival_proof": arrival_payload(),
+            "arrival_status": flow.arrival_status or "unverified",
+            "selector_resilience": selector_resilience,
             "preview": preview,
             "hint": (
                 "saved; edit/fill ${PARAM_n}, then preview replay with the run_preview_call"
@@ -5084,6 +5182,31 @@ class Engine:
                 )
                 observation = launched.observation
             observed = observation or self.analyze(source="hierarchy", with_ocr=False)
+            if package and observed.screen.package != package:
+                # A launch readback must never combine the requested package with a hierarchy
+                # captured from the app we just left. Discard every speculative/cached seam and
+                # take one authoritative hierarchy-only sample. If Android still reports a
+                # different package, stop before creating a goal plan from impossible state.
+                self._prefetch.invalidate()
+                self._last_hierarchy_hash = None
+                self._last_analyze_result = None
+                observed = self.analyze(
+                    source="hierarchy",
+                    with_ocr=False,
+                    no_cache=True,
+                )
+                if observed.screen.package != package:
+                    raise DeviceError(
+                        (
+                            f"launch foreground was {package}, but the authoritative hierarchy "
+                            f"belongs to {observed.screen.package or 'an unknown package'}"
+                        ),
+                        code="launch_observation_mismatch",
+                        hint=(
+                            "The window may still be attaching. Re-run session start once the "
+                            "requested app is settled; AUA did not create a plan from this frame."
+                        ),
+                    )
         except Exception:
             if emulator_started:
                 from . import emulator as emulator_mod
@@ -5098,7 +5221,7 @@ class Engine:
             raise
         plan = self._goal_session_plan(goal, observed)
         from . import network, network_profiles
-        from .session import create_session_state
+        from .session import complete_current_ui_phase_from_observation, create_session_state
 
         serial = observed.meta.device_serial or self.device.serial
         session_owner = getattr(self, "_lease_owner_resolved", None)
@@ -5114,6 +5237,11 @@ class Engine:
                 self.config.cache.dir, serial
             ).is_file(),
             emulator_started=emulator_started,
+        )
+        state = complete_current_ui_phase_from_observation(
+            self.config.cache.dir,
+            state,
+            observation=observed,
         )
         self._session_id = state.session_id
         # Recommend only the active checkpoint from this frame. Future phases must be planned
@@ -5167,11 +5295,35 @@ class Engine:
             emulator_started=emulator_started,
             goal_progress=progress,
         )
-        if len(state.phases) > 1 and isinstance(phase_call, dict):
-            # A multi-phase goal's first ordered checkpoint is the actual next action. The
-            # whole-goal planner remains useful for candidate evidence, but must not jump over
-            # an online preparation phase merely because a later sentence says "offline".
+        # Session bootstrap embeds an AnalyzeResult rather than an ActionResult, so it does not
+        # otherwise carry the latter's `next_actions`. Derive them from this same fresh frame:
+        # manual handoff can now choose a stable selector without a redundant analyze/capability
+        # call, and every numeric id is guaranteed to belong to the observation just returned.
+        next_actions = self._next_actions(observed)
+        if next_actions:
+            out["next_actions"] = next_actions
+        if isinstance(phase_call, dict):
+            # The active typed checkpoint is the actual next action for both single- and
+            # multi-phase goals. The whole-goal planner remains useful for candidate evidence,
+            # but must never contradict a deterministic phase such as verified network status.
             out["recommended_call"] = phase_call
+        elif progress.get("done") is True:
+            # Structured proof on the bootstrap frame can complete a single UI goal before
+            # any action is needed. Never leave the whole-goal planner's stale navigation call
+            # at the top level; the only remaining lifecycle action is the existing cleanup.
+            out["recommended_call"] = {
+                "kind": "session_finish",
+                "cli": f"aua --serial {state.serial} session finish",
+                "mcp": {
+                    "tool": "session_finish",
+                    "arguments": {"session_id": state.session_id},
+                },
+                "reason": (
+                    "The bootstrap observation already proves the goal. Finish the session "
+                    "once to release its lifecycle and collect the review."
+                ),
+                "executes": True,
+            }
         return out
 
     def _phase_recommended_call(
@@ -5188,6 +5340,17 @@ class Engine:
             for constraint in getattr(phase, "constraints", [])
         )
         if phase.kind == "environment":
+            if getattr(phase, "satisfaction", None) == "verified_network_status":
+                return {
+                    "kind": "network_status",
+                    "cli": "aua network status --verify",
+                    "mcp": {"tool": "network_status", "arguments": {"verify": True}},
+                    "reason": (
+                        "This phase records the verified current network transport before "
+                        "any reversible environment change."
+                    ),
+                    "executes": False,
+                }
             return {
                 "kind": "network_offline",
                 "cli": "aua network offline --verify",
@@ -5228,15 +5391,11 @@ class Engine:
         # UI checkpoint planner from recommending network isolation again after it completed.
         ui_goal = re.sub(r"\boffline\b|\bairplane mode\b", " ", phase.objective, flags=re.I)
         ui_goal = " ".join(ui_goal.split()) or phase.objective
-        plan = self._goal_session_plan(ui_goal, observation)
-        if plan.recommended_call.kind not in {"network_offline", "map_find"} and not (
-            avoid_deeplinks and plan.recommended_call.kind.startswith("deeplink")
-        ):
-            return plan.recommended_call.model_dump(mode="json")
-
         from .session import _goal_terms, _match_score
 
         goal_terms = set(_goal_terms(ui_goal))
+        destination_terms = set(arrival_destination_terms(ui_goal))
+
         # A stable mapped screen plus an exact multi-word title from the requested destination
         # is arrival evidence, not permission to descend into a child row that happens to share
         # one word. This mattered for a destination titled "Network & internet": the old fallback
@@ -5247,7 +5406,7 @@ class Engine:
                 for element in observation.elements
                 if not element.clickable
                 and (label := (element.text or element.content_desc or "").strip())
-                and len(set(_goal_terms(label)) & goal_terms) >= 2
+                and len(set(_goal_terms(label)) & destination_terms) >= 2
                 and label.casefold() in ui_goal.casefold()
             ),
             None,
@@ -5276,12 +5435,17 @@ class Engine:
                         "status": "observed",
                         "known_screen": observation.meta.known_screen,
                         "visible_title": visible_arrival,
+                        **(
+                            {"fingerprint": observation.meta.fingerprint}
+                            if observation.meta.fingerprint
+                            else {}
+                        ),
                     },
                 }
             return {
                 "kind": "arrived",
-                "cli": "Reuse this result's observation; the requested destination is visible",
-                "mcp": {"tool": "session_progress", "arguments": {"session_id": state.session_id}},
+                "cli": "No call: reuse this result's observation; the destination is visible",
+                "mcp": None,
                 "reason": (
                     f"The current mapped screen visibly matches {visible_arrival!r}; do not "
                     "navigate into a weaker one-word child match."
@@ -5291,8 +5455,22 @@ class Engine:
                     "status": "observed",
                     "known_screen": observation.meta.known_screen,
                     "visible_title": visible_arrival,
+                    **(
+                        {"fingerprint": observation.meta.fingerprint}
+                        if observation.meta.fingerprint
+                        else {}
+                    ),
                 },
             }
+
+        # Only after current-frame evidence has been considered may an older remembered route,
+        # flow, or shortcut become the next call. This prevents a dubious child route from
+        # outranking stronger visible evidence on the exact frame the caller already has.
+        plan = self._goal_session_plan(ui_goal, observation)
+        if plan.recommended_call.kind not in {"network_offline", "map_find"} and not (
+            avoid_deeplinks and plan.recommended_call.kind.startswith("deeplink")
+        ):
+            return plan.recommended_call.model_dump(mode="json")
         ranked: list[tuple[int, Any]] = []
         for element in observation.elements:
             if not element.clickable or element.enabled is False:
@@ -5321,14 +5499,20 @@ class Engine:
             if not matched_terms:
                 continue
             exact_goal_match = ui_goal.casefold().strip() in semantic_label.casefold()
+            explicit_control_request = bool(
+                re.search(
+                    rf"\b(?:open|tap|select|choose|launch|enter|view|inspect)\s+"
+                    rf"(?:the\s+)?{re.escape(semantic_label)}\b",
+                    ui_goal,
+                    flags=re.IGNORECASE,
+                )
+            )
             weak_one_token = (
                 len(matched_terms) == 1
                 and len(goal_terms) > 1
-                and (
-                    len(control_terms) == 1
-                    or matched_terms <= _GENERIC_MANUAL_MATCH_TERMS
-                )
+                and (len(control_terms) == 1 or matched_terms <= _GENERIC_MANUAL_MATCH_TERMS)
                 and not exact_goal_match
+                and not explicit_control_request
             )
             if weak_one_token:
                 continue
@@ -5345,14 +5529,13 @@ class Engine:
                 else:
                     cli = f"aua tap-and-analyze {element.id}"
                     mcp_arguments = {"id": element.id}
-            elif element.content_desc and len(
-                match_selector(observation.elements, desc=element.content_desc)
-            ) == 1:
+            elif (
+                element.content_desc
+                and len(match_selector(observation.elements, desc=element.content_desc)) == 1
+            ):
                 cli = f"aua tap-and-analyze --desc {shlex.quote(element.content_desc)}"
                 mcp_arguments = {"desc": element.content_desc}
-            elif element.text and len(
-                match_selector(observation.elements, text=element.text)
-            ) == 1:
+            elif element.text and len(match_selector(observation.elements, text=element.text)) == 1:
                 cli = f"aua tap-and-analyze --text {shlex.quote(element.text)}"
                 mcp_arguments = {"text": element.text}
             else:
@@ -5370,11 +5553,12 @@ class Engine:
             }
         return {
             "kind": "manual_observation",
-            "cli": "Reuse this result's observation and act on its next_actions; do not analyze again",
-            "mcp": {"tool": "capabilities", "arguments": {"goal": ui_goal}},
+            "cli": "No call: inspect this result's next_actions and choose deliberately",
+            "mcp": None,
             "reason": (
                 "No verified route, matching flow, or unambiguous goal-labelled control is "
-                "available on this frame."
+                "available on this frame. The result already includes the reusable observation "
+                "and its available next_actions; another capabilities/analyze call would add no evidence."
             ),
             "executes": False,
         }
@@ -5409,9 +5593,23 @@ class Engine:
         _avoid_deeplinks: bool = False,
     ) -> dict[str, Any]:
         """Return and, when possible, refresh the current phase's one exact next call."""
-        from .session import phase_progress, update_phase_recommendation
+        from .session import (
+            complete_current_ui_phase_from_observation,
+            phase_progress,
+            update_phase_recommendation,
+        )
 
         state = self._session_state(session_id)
+        if state.finished_ms is not None:
+            # A terminated session is immutable. Do not run the route planner or manufacture a
+            # nested recommendation that phase_progress will then have to hide.
+            return {"ok": True, "goal_progress": phase_progress(state)}
+        if observation is not None:
+            state = complete_current_ui_phase_from_observation(
+                self.config.cache.dir,
+                state,
+                observation=observation,
+            )
         current = next((phase for phase in state.phases if phase.status != "completed"), None)
         if current is not None:
             call = self._phase_recommended_call(
@@ -5621,14 +5819,24 @@ class Engine:
 
         navigation: dict[str, Any]
         if candidate.kind == "arrived":
+            proof = candidate.evidence.get("arrival_proof")
             navigation = {
-                "ok": True,
-                "arrived": True,
-                "already_there": True,
+                "ok": isinstance(proof, dict),
+                "arrived": isinstance(proof, dict),
+                "already_there": isinstance(proof, dict),
                 "target": candidate.target,
                 "final_screen": observation.meta.known_screen,
                 "elements": [element.compact() for element in observation.elements],
+                "arrival_proof": proof,
             }
+            if not isinstance(proof, dict):
+                navigation.update(
+                    code="arrival_unproven",
+                    hint=(
+                        "A mapped cursor alone is not arrival proof; inspect this observation "
+                        "for a non-clickable destination title/anchor."
+                    ),
+                )
         elif candidate.kind == "goto":
             navigation = self.goto(
                 goal,
@@ -5757,9 +5965,7 @@ class Engine:
             # selected action to belong to the finalized current segment.
             session = mem.load_session(serial)
             retained_orders = sorted(
-                step.capture_order
-                for step in session.recent
-                if step.capture_order is not None
+                step.capture_order for step in session.recent if step.capture_order is not None
             )
             if (
                 capture_before is not None
@@ -8022,6 +8228,65 @@ class Engine:
                 hierarchy_only=True,
             )
 
+        def refresh_weak_terminal(
+            result: ActionResult,
+            before_observation: AnalyzeResult | None,
+        ) -> ActionResult:
+            """Replace a half-attached success frame with one authoritative hierarchy read."""
+            if not result.ok or not self._back_terminal_frame_is_weak(
+                before_observation, result.observation
+            ):
+                return result
+            try:
+                fresh = self.analyze(
+                    source="hierarchy",
+                    with_ocr=False,
+                    no_cache=True,
+                    record=False,
+                )
+            except Exception:  # noqa: BLE001 - the already-proven result remains valid evidence
+                return result
+            if known_screen_target:
+                actual = self._recognize_screen_read_only(fresh)
+                fresh.meta.known_screen = actual
+                still_satisfied = bool(
+                    actual and actual.casefold() == known_screen_target.casefold()
+                )
+                refreshed_terms = [
+                    {
+                        "term": f"screen:{known_screen_target}",
+                        "present": still_satisfied,
+                        "satisfied": still_satisfied,
+                    }
+                ]
+            else:
+                refreshed_terms = self._await_terms_on_observation(
+                    terms,
+                    [{} for _term in terms],
+                    fresh,
+                    mode=MatchMode.contains,
+                    ignore_case=True,
+                )
+                still_satisfied = all(row["satisfied"] for row in refreshed_terms)
+            if still_satisfied:
+                result.observation = fresh
+                result.observation_present = True
+                result.await_terms = refreshed_terms
+                return result
+            # The tiny frame's positive evidence disappeared on the authoritative reread.
+            # Returning the original ok=True would certify a transient title that is no longer
+            # present, exactly the false-success this refresh exists to prevent.
+            result.ok = False
+            result.detail = (
+                "authoritative terminal reread no longer satisfies the destination evidence"
+            )
+            result.observation = fresh
+            result.observation_present = True
+            result.await_terms = refreshed_terms
+            result.await_outcome = "settled-unmet"
+            result.verified = False
+            return result
+
         current = wait_destination(0)
         origin_package = str(
             current.observation.screen.package if current.observation is not None else ""
@@ -8029,6 +8294,16 @@ class Engine:
         if not origin_package:
             origin_package = str((device.current_app() or {}).get("package") or "")
         if current.ok:
+            current = refresh_weak_terminal(current, None)
+            if not current.ok:
+                return self._back_until_result(
+                    current,
+                    ok=False,
+                    reason="terminal_evidence_unmet",
+                    detail=current.detail or "terminal destination evidence disappeared",
+                    steps_run=[],
+                    started_at=started_at,
+                )
             current.action = "back-until"
             current.detail = "destination already satisfied; steps=0"
             current.stop_reason = "already_satisfied"
@@ -8038,6 +8313,7 @@ class Engine:
 
         steps_run: list[dict[str, Any]] = []
         for steps in range(1, max_steps + 1):
+            before_observation = current.observation
             before = self._back_observation_identity(current.observation)
             requested_id: int | None = None
             explicit_id_invalid = False
@@ -8073,6 +8349,61 @@ class Engine:
                     ok=False,
                     reason="no_back_affordance",
                     detail="the explicit Back id is not a fresh enabled app-owned control",
+                    steps_run=steps_run,
+                    started_at=started_at,
+                )
+            if selected is None and self._mapped_screen_is_root(current.observation):
+                # Never spend a hardware Back from a mapped route root on the strength of a
+                # transient predicate miss. Recheck the exact destination once on a fresh frame;
+                # if it remains unmet, return the in-package boundary instead of crossing it.
+                rechecked = wait_destination(0)
+                package = self._back_observed_package(rechecked, device)
+                if origin_package and package and package != origin_package:
+                    return self._back_until_result(
+                        rechecked,
+                        ok=False,
+                        reason="package_changed",
+                        detail=f"foreground left {origin_package} for {package}",
+                        steps_run=steps_run,
+                        started_at=started_at,
+                    )
+                if rechecked.ok:
+                    rechecked = refresh_weak_terminal(rechecked, before_observation)
+                    if not rechecked.ok:
+                        return self._back_until_result(
+                            rechecked,
+                            ok=False,
+                            reason="terminal_evidence_unmet",
+                            detail=(
+                                rechecked.detail or "terminal destination evidence disappeared"
+                            ),
+                            steps_run=steps_run,
+                            started_at=started_at,
+                        )
+                    return self._back_until_result(
+                        rechecked,
+                        ok=True,
+                        reason=("already_satisfied" if not steps_run else "predicate_satisfied"),
+                        detail=(
+                            "destination already satisfied; steps=0"
+                            if not steps_run
+                            else f"satisfied after {len(steps_run)} back-navigation step(s)"
+                        ),
+                        steps_run=steps_run,
+                        started_at=started_at,
+                    )
+                root_still_visible = self._mapped_screen_is_root(rechecked.observation)
+                return self._back_until_result(
+                    rechecked,
+                    ok=False,
+                    reason="package_boundary_risk" if root_still_visible else "screen_unstable",
+                    detail=(
+                        "destination evidence is still unmet on a mapped route root; stopped "
+                        "before hardware Back could leave the app"
+                        if root_still_visible
+                        else "the mapped root changed during its safety recheck; stopped before "
+                        "hardware Back could act on an unchecked frame"
+                    ),
                     steps_run=steps_run,
                     started_at=started_at,
                 )
@@ -8178,6 +8509,16 @@ class Engine:
                 )
             after = self._back_observation_identity(current.observation)
             if current.ok:
+                current = refresh_weak_terminal(current, before_observation)
+                if not current.ok:
+                    return self._back_until_result(
+                        current,
+                        ok=False,
+                        reason="terminal_evidence_unmet",
+                        detail=current.detail or "terminal destination evidence disappeared",
+                        steps_run=steps_run,
+                        started_at=started_at,
+                    )
                 return self._back_until_result(
                     current,
                     ok=True,
@@ -8238,6 +8579,20 @@ class Engine:
             started_at=started_at,
         )
 
+    def _recognize_screen_read_only(self, observation: AnalyzeResult) -> str | None:
+        """Recognize one hierarchy frame without recording or mutating app memory."""
+        package = observation.screen.package or ""
+        memory = self._memory
+        if memory is None or not package or memory.load(package) is None:
+            return None
+        return memory.recognize_screen(
+            self.device.serial,
+            package=package,
+            elements=observation.elements,
+            activity=observation.screen.activity,
+            screen_height=observation.screen.height,
+        )
+
     def _await_known_screen(self, target: str, *, timeout_ms: int, poll_ms: int) -> ActionResult:
         """Observe hierarchy frames until memory recognizes *target*, within one Back step."""
         started_at = time.monotonic()
@@ -8259,13 +8614,7 @@ class Engine:
                     ),
                 )
             resolved_target = target
-            actual = memory.recognize_screen(
-                self.device.serial,
-                package=package,
-                elements=observation.elements,
-                activity=observation.screen.activity,
-                screen_height=observation.screen.height,
-            )
+            actual = self._recognize_screen_read_only(observation)
             # `record=False` intentionally leaves map metadata blank. Surface the result of
             # this read-only anchor recognition so the caller can reuse the final frame and so
             # the next Back is allowed only from a stable mapped intermediate screen.
@@ -8306,6 +8655,53 @@ class Engine:
             return None
         record = app.screens.get(observation.meta.known_screen)
         return record.state if record is not None else None
+
+    def _mapped_screen_is_root(self, observation: AnalyzeResult | None) -> bool:
+        """Whether this exact frame is a recognized in-app route root.
+
+        Hardware Back from a mapped root can leave the package. The route map gives us a
+        conservative boundary without guessing from toolbar geometry; absent or incomplete
+        memory returns False and preserves the existing bounded hardware behavior.
+        """
+        if observation is None or not observation.meta.known_screen:
+            return False
+        package = observation.screen.package or ""
+        memory = self._memory
+        app = memory.load(package) if memory is not None and package else None
+        if memory is None or app is None:
+            return False
+        context_id: str | None = None
+        with contextlib.suppress(Exception):
+            session = memory.load_session(observation.meta.device_serial or self.device.serial)
+            if session.package == package:
+                context_id = session.active_context_id
+        return screen_is_root(app, observation.meta.known_screen, context_id)
+
+    @staticmethod
+    def _back_terminal_frame_is_weak(
+        before: AnalyzeResult | None,
+        after: AnalyzeResult | None,
+    ) -> bool:
+        """Detect a half-attached terminal hierarchy without penalising truly sparse screens."""
+        if after is None:
+            return True
+        before_count = len(before.elements) if before is not None else 0
+        after_count = len(after.elements)
+        if before_count >= 8 and after_count * 3 < before_count:
+            return True
+        if after_count == 0:
+            return False
+        usable = any(
+            element.window in {None, "app"}
+            and (
+                element.clickable is True
+                or bool((element.text or "").strip())
+                or bool((element.content_desc or "").strip())
+                or bool((element.resource_id or "").strip())
+            )
+            for element in after.elements
+        )
+        return not usable
 
     def _observation_is_loading(self, observation: AnalyzeResult | None) -> bool:
         """Conservative signal that a wrong-screen verdict would be premature."""
@@ -8848,11 +9244,7 @@ class Engine:
                     ("desc", element.content_desc or ""),
                 ):
                     label = _label(value)
-                    if (
-                        not label
-                        or label.isdigit()
-                        or (new_only and label in before_labels)
-                    ):
+                    if not label or label.isdigit() or (new_only and label in before_labels):
                         continue
                     add(prefix, label)
                     if len(suggestions) >= limit:
@@ -9097,6 +9489,7 @@ class Engine:
                         observe,
                         adopt_action,
                         hierarchy_only=hierarchy_only,
+                        capture_terms=terms,
                     )
                 # A negated accessibility miss is not proof of visual absence. Verify with OCR,
                 # but at most every two seconds while a canvas/loading label remains visible.
@@ -9114,6 +9507,7 @@ class Engine:
                             observe,
                             adopt_action,
                             hierarchy_only=hierarchy_only,
+                            capture_terms=terms,
                         )
                     results = rich
             if detect_arrival_mismatch:
@@ -9137,6 +9531,7 @@ class Engine:
                             observe,
                             adopt_action,
                             hierarchy_only=hierarchy_only,
+                            capture_terms=terms,
                         )
                     unmet_positive = [
                         row["term"]
@@ -9171,12 +9566,9 @@ class Engine:
                                 for term, row in zip(terms, destination_terms, strict=True)
                                 if term.negated and row["satisfied"]
                             ]
-                            corrected = ",".join(
-                                [*suggestions[:1], *satisfied_negatives]
-                            )
+                            corrected = ",".join([*suggestions[:1], *satisfied_negatives])
                             recommended_call = (
-                                "aua await-and-analyze "
-                                f"{shlex.quote(corrected)} --observe"
+                                f"aua await-and-analyze {shlex.quote(corrected)} --observe"
                                 if corrected
                                 else None
                             )
@@ -9209,6 +9601,7 @@ class Engine:
                                 adopt_action,
                                 hierarchy_only=hierarchy_only,
                                 arrival_mismatch=mismatch,
+                                capture_terms=terms,
                             )
                     else:
                         stable_destination_identity = None
@@ -9225,6 +9618,7 @@ class Engine:
                     observe,
                     adopt_action,
                     hierarchy_only=hierarchy_only,
+                    capture_terms=terms,
                 )
             if time.monotonic() >= deadline:
                 rich = evaluate_rich()
@@ -9239,6 +9633,7 @@ class Engine:
                         observe,
                         adopt_action,
                         hierarchy_only=hierarchy_only,
+                        capture_terms=terms,
                     )
                 return self._await_result(
                     "timeout",
@@ -9250,6 +9645,7 @@ class Engine:
                     observe,
                     adopt_action,
                     hierarchy_only=hierarchy_only,
+                    capture_terms=terms,
                 )
             self._job_sleep(max(0.01, poll_ms / 1000.0))
             results = evaluate()
@@ -9267,6 +9663,7 @@ class Engine:
         *,
         hierarchy_only: bool = False,
         arrival_mismatch: dict[str, Any] | None = None,
+        capture_terms: list[_AwaitTerm] | None = None,
     ) -> ActionResult:
         elapsed = int((time.monotonic() - started_at) * 1000)
         unmet = [t["term"] for t in terms if not t["satisfied"]]
@@ -9300,6 +9697,28 @@ class Engine:
             hierarchy_only=hierarchy_only,
             adopt_action=adopt_action,
         )
+        if (
+            adopt_action
+            and outcome == "satisfied"
+            and observed.observation is not None
+            and capture_terms
+        ):
+            memory = self._memory
+            if memory is not None and self._join_memory_writers(timeout_s=5.0):
+                with contextlib.suppress(Exception):
+                    memory.record_action_arrival(
+                        self.device.serial,
+                        terms=[
+                            {
+                                "by": term.by,
+                                "value": term.value,
+                                "negated": term.negated,
+                            }
+                            for term in capture_terms
+                        ],
+                        fingerprint=observed.observation.meta.fingerprint,
+                        package=observed.observation.screen.package,
+                    )
         if arrival_mismatch is not None:
             call = arrival_mismatch.get("recommended_call")
             observed.note = (
@@ -10818,15 +11237,66 @@ class Engine:
                         else "Check the package name, and that the device is unlocked."
                     ),
                 )
+            # `_acting()` starts a speculative hierarchy dump as soon as the launch command
+            # returns. Foreground verification happens afterwards, so that speculative slot
+            # may describe the app we just left or a half-attached transition window. Never
+            # let the authoritative launch readback consume it, and never reuse the previous
+            # app's unchanged-screen payload across this lifecycle boundary.
+            self._prefetch.invalidate()
+            self._last_hierarchy_hash = None
+            self._last_analyze_result = None
             # `launch` is the first action of nearly every journey, and it used to answer with a
             # bare ok/detail: no fresh ids, and no statement of what the launch actually produced.
             # Callers then spent a separate `analyze` to learn where they had landed, and had
             # nothing structured to show for the step. `_await_foreground` above already proves the
             # package reached the foreground, so this adds the *screen* to that proof — the same
             # act-and-observe contract every other action honours.
-            return self._observe(
+            launched = self._observe(
                 ActionResult(ok=True, action="app-launch", detail=detail), observe, with_image
             )
+            if (
+                observe
+                and launched.observation is not None
+                and not launched.observation.screen.package
+            ):
+                # A hierarchy provider may be unable to attribute nodes to a package. The
+                # foreground check immediately above is authoritative for that missing field,
+                # so bind the otherwise useful landing observation to the verified package.
+                launched.observation.screen.package = package
+            elif (
+                observe
+                and launched.observation is not None
+                and launched.observation.screen.package != package
+            ):
+                # Foreground verification and hierarchy capture are separate Android reads. A
+                # transition race can satisfy the former while the latter still belongs to the
+                # app we left. One authoritative no-cache read may heal that race; a persistent
+                # mismatch is a typed failure, never a successful mixed-package observation.
+                self._prefetch.invalidate()
+                self._last_hierarchy_hash = None
+                self._last_analyze_result = None
+                fresh = self.analyze(
+                    source="hierarchy",
+                    with_ocr=False,
+                    no_cache=True,
+                )
+                if fresh.screen.package and fresh.screen.package != package:
+                    raise DeviceError(
+                        (
+                            f"launch foreground was {package}, but the authoritative hierarchy "
+                            f"belongs to {fresh.screen.package or 'an unknown package'}"
+                        ),
+                        code="launch_observation_mismatch",
+                        hint=(
+                            "The launched window has not attached consistently. Wait for it to "
+                            "settle, then inspect one fresh hierarchy before acting."
+                        ),
+                    )
+                if not fresh.screen.package:
+                    fresh.screen.package = package
+                launched.observation = fresh
+                launched.observation_present = True
+            return launched
         if a in ("kill", "force-stop"):
             if not package:
                 raise UsageError("app kill needs a package name")

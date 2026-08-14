@@ -17,7 +17,7 @@ import uuid
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -32,9 +32,13 @@ from .memory import (
     resolve_goal,
     route_step_risks,
     step_display,
+    target_arrival_evidence,
 )
 from .schema import AnalyzeResult
 from .selectors import is_back_resource_id
+
+if TYPE_CHECKING:
+    from .jobs import JobState
 
 
 class GoalCall(BaseModel):
@@ -87,6 +91,53 @@ class GoalSessionPlan(BaseModel):
     relevant_capabilities: list[dict[str, Any]] = Field(default_factory=list)
 
 
+PhaseIntent: TypeAlias = Literal[
+    "ui_verification",
+    "alternative",
+    "network_observation",
+    "offline_transition",
+    "cleanup_finalizer",
+]
+PhaseSatisfaction: TypeAlias = Literal[
+    "relevant_evidence",
+    "verified_network_status",
+    "verified_offline",
+    "session_cleanup",
+]
+RequirementExpected: TypeAlias = Literal[
+    "present",
+    "absent",
+    "enabled",
+    "disabled",
+    "checked",
+    "unchecked",
+    "selected",
+    "unselected",
+]
+
+
+class PhaseRequirement(BaseModel):
+    """One explicit observable state whose polarity must survive evidence summarization."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    subject: str
+    terms: list[str] = Field(default_factory=list)
+    expected: RequirementExpected
+
+
+class ObservationProvenance(BaseModel):
+    """Identity of the exact settled frame used as automatic phase evidence."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    fingerprint: str
+    source: Literal["hierarchy", "vision", "mixed"]
+    via: str | None = None
+    device_serial: str
+    package: str
+
+
 class GoalPhase(BaseModel):
     """One durable, ordered checkpoint in an end-to-end verification goal."""
 
@@ -101,14 +152,13 @@ class GoalPhase(BaseModel):
     recommended_call: dict[str, Any] | None = None
     # These fields are additive so sessions persisted before semantic phase compilation still
     # validate. New sessions record what a phase means and what kind of proof can satisfy it.
-    intent: (
-        Literal["ui_verification", "alternative", "offline_transition", "cleanup_finalizer"] | None
-    ) = None
+    intent: PhaseIntent | None = None
     source_span: tuple[int, int] | None = None
     branches: list[GoalBranch] = Field(default_factory=list)
-    satisfaction: Literal["relevant_evidence", "verified_offline", "session_cleanup"] | None = None
+    satisfaction: PhaseSatisfaction | None = None
     terminal: bool = False
     proof: PhaseProof | None = None
+    requirements: list[PhaseRequirement] = Field(default_factory=list)
     # A policy such as "never use a deeplink" constrains a checkpoint but is not separately
     # completable work. Keep it typed instead of compiling an impossible verify phase.
     constraints: list[str] = Field(default_factory=list)
@@ -129,11 +179,22 @@ class PhaseProof(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    source: Literal["manual_evidence", "verified_event", "session_cleanup"]
+    source: Literal[
+        "manual_evidence",
+        "verified_event",
+        "session_cleanup",
+        "observation",
+        "job_result",
+    ]
     matched_terms: list[str] = Field(default_factory=list)
+    satisfied_requirements: list[PhaseRequirement] = Field(default_factory=list)
     branch_id: str | None = None
     command: str | None = None
     verified: bool | None = None
+    observation: ObservationProvenance | None = None
+    job_id: str | None = None
+    job_operation: str | None = None
+    predicate_terms: list[str] = Field(default_factory=list)
 
 
 class SessionState(BaseModel):
@@ -166,7 +227,9 @@ _RETURN_SEQUENCE = re.compile(
 )
 _RESTORE_GOAL = re.compile(
     r"\b(?:restore|restoring|re-enable|reconnect)\b.{0,48}"
-    r"\b(?:network|connectivity|wi-?fi|internet)\b",
+    r"\b(?:network(?:ing)?|connectivity|connections?|wi-?fi|internet)\b"
+    r"|\breturn\b\s+(?:(?:the|its)\s+)?"
+    r"(?:network(?:ing)?|connectivity|connections?|internet)\b",
     re.IGNORECASE,
 )
 _FINISH_CLEANUP_GOAL = re.compile(
@@ -174,12 +237,21 @@ _FINISH_CLEANUP_GOAL = re.compile(
     re.IGNORECASE,
 )
 _CONNECTIVITY_RESTORED_GOAL = re.compile(
-    r"\b(?:network|connectivity|wi-?fi|internet)\b.{0,24}"
+    r"\b(?:network(?:ing)?|connectivity|connections?|wi-?fi|internet)\b.{0,24}"
     r"\b(?:restored|re-enabled|reconnected|online)\b",
     re.IGNORECASE,
 )
+_NETWORK_STATUS_GOAL = re.compile(
+    r"\b(?:record|capture|observe|report|read)\b.{0,48}?\b"
+    r"(?:(?:active|current|default|initial|verified)\s+)*"
+    r"(?:(?:network|connections?|internet)\s+(?:status|state|transport)"
+    r"|connectivity(?:\s+(?:status|state))?|transport)\b",
+    re.IGNORECASE,
+)
 _OFFLINE_GOAL = re.compile(
-    r"\b(?:(?:go|switch|enter|work|test|verify)\s+)?(?:fully\s+)?offline\b"
+    r"\b(?:make|take|put|set|ensure)\b.{0,32}?\b"
+    r"(?:emulator|device|phone|tablet)\b.{0,24}?\boffline\b"
+    r"|\b(?:(?:go|switch|enter|work|test|verify)\s+)?(?:fully\s+)?offline\b"
     r"(?:\s+(?:mode|state))?"
     r"|\b(?:(?:enter|enable|switch\s+to|turn\s+on)\s+)?airplane mode\b",
     re.IGNORECASE,
@@ -352,25 +424,73 @@ def _only_words(text: str, allowed: frozenset[str]) -> bool:
 
 _OFFLINE_METHOD_WORDS = frozenset(
     {
+        "a",
         "and",
+        "an",
         "aua",
         "by",
         "command",
+        "confirm",
+        "confirmed",
+        "device",
+        "emulator",
+        "ensure",
+        "establish",
         "its",
+        "make",
         "method",
+        "mode",
         "network",
         "operation",
+        "phone",
+        "provably",
+        "put",
+        "requested",
         "reversible",
         "safe",
         "safely",
+        "set",
+        "state",
+        "tablet",
+        "take",
         "the",
         "through",
         "tool",
         "use",
         "using",
         "verified",
+        "verifiably",
         "via",
         "with",
+    }
+)
+_NETWORK_STATUS_METHOD_WORDS = frozenset(
+    {
+        "a",
+        "active",
+        "and",
+        "an",
+        "capture",
+        "connection",
+        "connections",
+        "connectivity",
+        "current",
+        "default",
+        "device",
+        "emulator",
+        "initial",
+        "internet",
+        "its",
+        "network",
+        "observe",
+        "read",
+        "record",
+        "report",
+        "state",
+        "status",
+        "the",
+        "transport",
+        "verified",
     }
 )
 _CLEANUP_FINALIZER_WORDS = frozenset(
@@ -378,9 +498,12 @@ _CLEANUP_FINALIZER_WORDS = frozenset(
         "after",
         "already",
         "and",
+        "as",
         "aua",
         "before",
         "call",
+        "check",
+        "checked",
         "clean",
         "cleanup",
         "command",
@@ -390,6 +513,7 @@ _CLEANUP_FINALIZER_WORDS = frozenset(
         "connectivity",
         "end",
         "ending",
+        "ends",
         "emulator",
         "enable",
         "enabled",
@@ -399,25 +523,38 @@ _CLEANUP_FINALIZER_WORDS = frozenset(
         "finish",
         "finished",
         "finishing",
+        "goal",
         "internet",
+        "its",
         "network",
+        "networking",
+        "of",
+        "on",
+        "once",
         "original",
+        "part",
         "re",
         "reconnect",
         "reconnected",
+        "return",
         "restore",
         "restored",
         "restoring",
         "run",
         "running",
         "session",
+        "starting",
         "state",
+        "task",
         "the",
         "then",
+        "to",
         "up",
         "use",
         "verify",
         "verified",
+        "when",
+        "while",
         "wi",
     }
 )
@@ -427,8 +564,134 @@ def _is_offline_method_modifier(text: str) -> bool:
     return not text or _only_words(text, _OFFLINE_METHOD_WORDS)
 
 
+def _is_network_status_modifier(text: str) -> bool:
+    return not text or _only_words(text, _NETWORK_STATUS_METHOD_WORDS)
+
+
 def _is_cleanup_finalizer(text: str) -> bool:
     return not text or _only_words(text, _CLEANUP_FINALIZER_WORDS)
+
+
+_ABSENCE_PREFIX = re.compile(
+    r"\b(?:without|no)\s+(?P<subject>[^.;,]+?)"
+    r"(?=\s+\b(?:and|but|while|then|plus)\b|$)",
+    re.IGNORECASE,
+)
+_ABSENCE_SUFFIX = re.compile(
+    r"(?:^|[;,]|\b(?:and|but|while|then|plus)\b)\s*"
+    r"(?P<subject>[A-Za-z0-9](?:(?!\b(?:and|but|while|then|plus)\b)[^.;,]){0,56}?)\s+"
+    r"(?:(?:is|are|was|were|remains?)\s+)?"
+    r"(?:absent|missing|not\s+(?:present|visible|shown))\b",
+    re.IGNORECASE,
+)
+_PRESENCE_SUFFIX = re.compile(
+    r"(?:^|[;,]|\b(?:and|but|while|then|plus)\b)\s*"
+    r"(?P<subject>[A-Za-z0-9](?:(?!\b(?:and|but|while|then|plus|without)\b)[^.;,]){0,96}?)\s+"
+    r"(?:(?:is|are|was|were|becomes?|remains?)\s+)?"
+    r"(?:visible|shown|present|displayed|readable|open|opened|opens)\b",
+    re.IGNORECASE,
+)
+_VERIFY_OBJECT = re.compile(
+    r"\b(?:verify|confirm|check|inspect|observe)\s+(?P<subject>[^.;,]+?)"
+    r"(?=\s+\b(?:and|but|plus|with|without|while|then|offline)\b|[.;,]|$)",
+    re.IGNORECASE,
+)
+_NAMED_STATE = r"enabled|disabled|checked|unchecked|selected|unselected"
+_STATE_PREFIX = re.compile(
+    rf"\b(?P<state>{_NAMED_STATE})\s+(?P<subject>[^.;,]+?)"
+    r"(?=\s+\b(?:and|but|while|then|plus|offline)\b|$)",
+    re.IGNORECASE,
+)
+_STATE_SUFFIX = re.compile(
+    r"(?:^|[;,]|\b(?:and|but|while|then|plus)\b)\s*"
+    r"(?P<subject>[A-Za-z0-9](?:(?!\b(?:and|but|while|then|plus)\b)[^.;,]){0,56}?)\s+"
+    rf"(?:(?:is|are|was|were|remains?)\s+)?(?P<state>{_NAMED_STATE})\b",
+    re.IGNORECASE,
+)
+_ASSERTION_SUBJECT_STOP_WORDS = frozenset(
+    {
+        "a",
+        "an",
+        "are",
+        "be",
+        "being",
+        "behind",
+        "check",
+        "confirm",
+        "condition",
+        "checked",
+        "ensure",
+        "disabled",
+        "enabled",
+        "inspect",
+        "is",
+        "longer",
+        "open",
+        "opened",
+        "opens",
+        "present",
+        "readable",
+        "remaining",
+        "shown",
+        "state",
+        "still",
+        "selected",
+        "the",
+        "unchecked",
+        "unselected",
+        "verify",
+        "visible",
+        "was",
+        "were",
+    }
+)
+
+
+def _phase_requirement(
+    subject: str,
+    expected: RequirementExpected,
+) -> PhaseRequirement | None:
+    terms = sorted(_proof_terms(subject) - _ASSERTION_SUBJECT_STOP_WORDS)
+    if not terms:
+        return None
+    return PhaseRequirement(
+        subject=" ".join(subject.strip().split())[:120],
+        terms=terms,
+        expected=expected,
+    )
+
+
+def _phase_requirements(objective: str) -> list[PhaseRequirement]:
+    """Compile explicit observable assertions into one conjunctive proof contract."""
+    requirements: list[PhaseRequirement] = []
+    for pattern in (_ABSENCE_PREFIX, _ABSENCE_SUFFIX):
+        for match in pattern.finditer(objective):
+            requirement = _phase_requirement(match.group("subject"), "absent")
+            if requirement is not None:
+                requirements.append(requirement)
+    for pattern in (_STATE_PREFIX, _STATE_SUFFIX):
+        for match in pattern.finditer(objective):
+            requirement = _phase_requirement(
+                match.group("subject"),
+                cast(RequirementExpected, match.group("state").casefold()),
+            )
+            if requirement is not None:
+                requirements.append(requirement)
+    # Preserve the long-standing ordering of explicit negative/state assertions in output.
+    # Positive requirements are additive and primarily serve automatic observation/job proof.
+    for pattern in (_PRESENCE_SUFFIX, _VERIFY_OBJECT):
+        for match in pattern.finditer(objective):
+            requirement = _phase_requirement(match.group("subject"), "present")
+            if requirement is not None:
+                requirements.append(requirement)
+    unique: list[PhaseRequirement] = []
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    for requirement in requirements:
+        key = (requirement.expected, tuple(requirement.terms))
+        if key not in seen:
+            unique.append(requirement)
+            seen.add(key)
+    return unique
 
 
 def _phase(
@@ -436,12 +699,24 @@ def _phase(
     *,
     objective: str,
     kind: Literal["environment", "verify", "cleanup"],
-    intent: Literal["ui_verification", "alternative", "offline_transition", "cleanup_finalizer"],
+    intent: PhaseIntent,
     source_span: tuple[int, int],
-    satisfaction: Literal["relevant_evidence", "verified_offline", "session_cleanup"],
+    satisfaction: PhaseSatisfaction,
     branches: list[GoalBranch] | None = None,
     terminal: bool = False,
 ) -> None:
+    # A clause may legitimately carry two different intents (for example, enter a verified
+    # offline state *and* inspect cached UI). Only an identical semantic draft is a duplicate;
+    # source-span equality alone is not enough to discard real work.
+    normalized = " ".join(objective.casefold().split())
+    if any(
+        phase.intent == intent
+        and phase.satisfaction == satisfaction
+        and phase.source_span == source_span
+        and " ".join(phase.objective.casefold().split()) == normalized
+        for phase in phases
+    ):
+        return
     phases.append(
         GoalPhase(
             id=f"phase_{len(phases) + 1}",
@@ -452,6 +727,7 @@ def _phase(
             branches=branches or [],
             satisfaction=satisfaction,
             terminal=terminal,
+            requirements=(_phase_requirements(objective) if intent == "ui_verification" else []),
         )
     )
 
@@ -511,12 +787,25 @@ def goal_phases(goal: str) -> list[GoalPhase]:
                 cleanup_end = following.end
                 advance = 2
             cleanup_span = cleanup_span or (clause.start, cleanup_end)
-            if _is_cleanup_finalizer(segment):
+            objective = _RESTORE_GOAL.sub("", objective)
+            objective = _FINISH_CLEANUP_GOAL.sub("", objective)
+            objective = _CONNECTIVITY_RESTORED_GOAL.sub("", objective).strip(" ,;.")
+            if _is_cleanup_finalizer(objective):
                 objective = ""
-            else:
-                objective = _RESTORE_GOAL.sub("", objective)
-                objective = _FINISH_CLEANUP_GOAL.sub("", objective)
-                objective = _CONNECTIVITY_RESTORED_GOAL.sub("", objective).strip(" ,;.")
+        network_status_here = _NETWORK_STATUS_GOAL.search(objective)
+        if network_status_here is not None:
+            _phase(
+                phases,
+                objective="Record the verified current network status",
+                kind="environment",
+                intent="network_observation",
+                source_span=(clause.start, clause.end),
+                satisfaction="verified_network_status",
+            )
+            objective = _NETWORK_STATUS_GOAL.sub("", objective, count=1).strip(" ,;.")
+            objective = re.sub(r"^(?:and|then)\s+", "", objective, flags=re.IGNORECASE)
+            if _is_network_status_modifier(objective):
+                objective = ""
         offline_here = bool(_OFFLINE_GOAL.search(objective))
         offline_phase: GoalPhase | None = None
         if offline_here and not offline_added:
@@ -532,23 +821,24 @@ def goal_phases(goal: str) -> list[GoalPhase]:
             offline_added = True
         if offline_here:
             transition = _OFFLINE_GOAL.search(objective)
-            prefix = transition.group(0).casefold() if transition is not None else ""
-            if (
-                transition is not None
-                and transition.start() == 0
-                and (
-                    prefix.startswith(("go ", "switch ", "enter ", "enable ", "turn ", "airplane "))
-                    or prefix.startswith(("offline", "fully offline"))
-                )
-            ):
-                objective = _OFFLINE_GOAL.sub("", objective, count=1).strip(" ,;.")
-                objective = re.sub(r"^(?:and|before)\s+", "", objective, flags=re.IGNORECASE)
-                if _is_offline_method_modifier(objective):
+            if transition is not None:
+                original_objective = objective
+                residual = _OFFLINE_GOAL.sub("", objective, count=1).strip(" ,;.")
+                residual = re.sub(r"^(?:and|before)\s+", "", residual, flags=re.IGNORECASE)
+                if _is_offline_method_modifier(residual):
                     objective = ""
                     if following is not None and _is_offline_method_modifier(following.text):
                         advance = 2
                         if offline_phase is not None:
                             offline_phase.source_span = (clause.start, following.end)
+                elif transition.start() == 0:
+                    objective = residual
+                else:
+                    # Here "offline" qualifies app behavior rather than leading a transition
+                    # instruction ("Verify Example content opens offline"). Keep that context in
+                    # the human proof contract while using the stripped residual only to decide
+                    # whether independently observable UI work exists.
+                    objective = original_objective
         if objective and objective.casefold() not in {"and", "before finishing"}:
             _phase(
                 phases,
@@ -582,15 +872,36 @@ def goal_phases(goal: str) -> list[GoalPhase]:
     return phases
 
 
+def _blocking_phase(phase: GoalPhase) -> dict[str, Any]:
+    satisfaction = _phase_satisfaction(phase)
+    required = {
+        "verified_network_status": "a verified network_status result",
+        "verified_offline": "a verified network_offline result",
+        "session_cleanup": "successful session cleanup",
+        "relevant_evidence": "phase-specific observable evidence",
+    }[satisfaction]
+    if satisfaction == "relevant_evidence" and phase.requirements:
+        assertions = ", ".join(
+            f"{'/'.join(requirement.terms)}={requirement.expected}"
+            for requirement in phase.requirements
+        )
+        required = f"phase-specific observable evidence including {assertions}"
+    return {
+        "id": phase.id,
+        "objective": phase.objective,
+        "required_evidence": required,
+    }
+
+
 def phase_progress(state: SessionState, *, compact: bool = False) -> dict[str, Any]:
     """Return goal progress; ordinary results use the compact non-duplicating form."""
     phases = state.phases or goal_phases(state.goal)
     current = next((phase for phase in phases if phase.status != "completed"), None)
     completed = sum(phase.status == "completed" for phase in phases)
-    current_payload = current.model_dump(mode="json") if current is not None else None
-    if compact and isinstance(current_payload, dict):
-        current_payload.pop("recommended_call", None)
     terminated = state.finished_ms is not None
+    current_payload = current.model_dump(mode="json") if current is not None else None
+    if (compact or terminated) and isinstance(current_payload, dict):
+        current_payload.pop("recommended_call", None)
     manual_checkpoint = (
         current is not None
         and not terminated
@@ -632,6 +943,10 @@ def phase_progress(state: SessionState, *, compact: bool = False) -> dict[str, A
         ]
     else:
         payload["phases"] = [phase.model_dump(mode="json") for phase in phases]
+    if terminated:
+        payload["blocking_phases"] = [
+            _blocking_phase(phase) for phase in phases if phase.status != "completed"
+        ]
     return payload
 
 
@@ -742,9 +1057,119 @@ def _proof_terms(text: str) -> set[str]:
     return terms
 
 
+_GENERIC_ASSERTION_TERMS = frozenset(
+    {
+        "affordance",
+        "button",
+        "checkbox",
+        "control",
+        "field",
+        "interaction",
+        "item",
+        "option",
+        "switch",
+        "toggle",
+    }
+)
+
+_REQUIREMENT_ASSERTIONS: dict[RequirementExpected, str] = {
+    "present": r"(?:visible|shown|present|displayed|readable|open|opened|available)",
+    "absent": r"(?:absent|missing|gone)",
+    "enabled": r"(?:enabled|available|interactive|usable)",
+    "disabled": r"(?:disabled|unavailable|inactive)",
+    "checked": r"checked",
+    "unchecked": r"unchecked",
+    "selected": r"selected",
+    "unselected": r"unselected",
+}
+_ASSERTION_NEGATION = r"(?:not|never)\s+(?:(?:actually|currently|presently|still|yet)\s+){0,2}"
+
+
+def _evidence_explicitly_negates_requirement(
+    requirement: PhaseRequirement,
+    evidence: str,
+) -> bool:
+    """Reject a literal assertion when the evidence applies explicit opposite polarity.
+
+    Lexical manual proof intentionally remains permissive: a caller does not need to repeat
+    every positive assertion word-for-word. It must never, however, turn ``not visible`` or
+    ``not enabled`` into proof merely because the positive token and subject both occur.
+    """
+    specific = [term for term in requirement.terms if term not in _GENERIC_ASSERTION_TERMS]
+    anchors = specific or requirement.terms
+    assertion = _REQUIREMENT_ASSERTIONS[requirement.expected]
+    negated = rf"\b{_ASSERTION_NEGATION}{assertion}\b"
+    matches = [
+        re.search(
+            rf"{negated}[^.;]{{0,48}}?{_assertion_term_pattern(term)}",
+            evidence,
+            re.IGNORECASE,
+        )
+        or re.search(
+            rf"{_assertion_term_pattern(term)}[^.;]{{0,48}}?{negated}",
+            evidence,
+            re.IGNORECASE,
+        )
+        for term in anchors
+    ]
+    return bool(matches) and all(matches)
+
+
+def _assertion_term_pattern(term: str) -> str:
+    return rf"\b{re.escape(term)}(?:s|es)?\b"
+
+
+def _evidence_matches_requirement(requirement: PhaseRequirement, evidence: str) -> bool:
+    if _evidence_explicitly_negates_requirement(requirement, evidence):
+        return False
+    specific = [term for term in requirement.terms if term not in _GENERIC_ASSERTION_TERMS]
+    anchors = specific or requirement.terms
+    expected = requirement.expected
+    if expected == "present":
+        before = (
+            r"\b(?:visible|shown|present|displayed|readable|open|opened|available)\b"
+            r"[^.;]{0,48}?{target}"
+        )
+        after = (
+            r"{target}[^.;]{0,48}?\b(?:visible|shown|present|displayed|readable|"
+            r"open|opened|available)\b"
+        )
+    elif expected == "absent":
+        before = r"\b(?:no|without)\b[^.;]{0,48}?{target}"
+        after = (
+            r"{target}[^.;]{0,48}?\b(?:absent|missing|gone|"
+            r"not\s+(?:present|visible|shown))\b"
+        )
+    else:
+        state = {
+            "enabled": r"(?:enabled|available|interactive|usable)",
+            "disabled": r"(?:disabled|unavailable|inactive)",
+            "checked": "checked",
+            "unchecked": "unchecked",
+            "selected": "selected",
+            "unselected": "unselected",
+        }[expected]
+        before = rf"\b{state}\b[^.;]{{0,48}}?{{target}}"
+        after = rf"{{target}}[^.;]{{0,48}}?\b{state}\b"
+    matches = [
+        re.search(
+            before.replace("{target}", _assertion_term_pattern(term)),
+            evidence,
+            re.IGNORECASE,
+        )
+        or re.search(
+            after.replace("{target}", _assertion_term_pattern(term)),
+            evidence,
+            re.IGNORECASE,
+        )
+        for term in anchors
+    ]
+    return bool(matches) and all(matches)
+
+
 def _phase_satisfaction(
     phase: GoalPhase,
-) -> Literal["relevant_evidence", "verified_offline", "session_cleanup"]:
+) -> PhaseSatisfaction:
     if phase.satisfaction is not None:
         return phase.satisfaction
     if phase.kind == "environment":
@@ -759,10 +1184,68 @@ def _required_proof_matches(phase: GoalPhase) -> int:
     return 2 if phase.intent == "alternative" or len(objective_terms) >= 5 else 1
 
 
+_PRESENT_CONDITION_EVIDENCE = re.compile(
+    r"\b(?:present|available|existing|exists?|existed|found)\b",
+    re.IGNORECASE,
+)
+_MISSING_CONDITION_EVIDENCE = re.compile(
+    r"\b(?:missing|absent|unavailable)\b"
+    r"|\b(?:not\s+found|(?:did|does)\s+not\s+exist|no\s+longer\s+exists?|none\s+existed)\b",
+    re.IGNORECASE,
+)
+
+
+def _has_unnegated_condition_evidence(pattern: re.Pattern[str], evidence: str) -> bool:
+    for match in pattern.finditer(evidence):
+        # Some missing-state assertions (for example ``not found``) include their negation in
+        # the match itself. For a bare marker, reject an immediately governing ``not``/``never``.
+        prefix = evidence[max(0, match.start() - 32) : match.start()]
+        if not re.search(rf"\b{_ASSERTION_NEGATION}$", prefix, re.IGNORECASE):
+            return True
+    return False
+
+
+def _alternative_condition_is_substantiated(condition: str, evidence: str) -> bool:
+    if condition == "present":
+        return _has_unnegated_condition_evidence(_PRESENT_CONDITION_EVIDENCE, evidence)
+    if condition == "missing":
+        return _has_unnegated_condition_evidence(_MISSING_CONDITION_EVIDENCE, evidence)
+    # Generic ``if … otherwise …`` branches do not have a portable state vocabulary. Their
+    # unique branch-specific lexical score remains the substantiation contract.
+    return True
+
+
 def _manual_phase_proof(phase: GoalPhase, evidence: str) -> PhaseProof:
     if phase.intent != "alternative" and _UNFINISHED_EVIDENCE.search(evidence):
         raise ValueError(
             f"evidence explicitly says {phase.id!r} remains unfinished; do not advance it"
+        )
+    all_requirements = phase.requirements or _phase_requirements(phase.objective)
+    requirements = (
+        []
+        if phase.intent == "alternative"
+        else [requirement for requirement in all_requirements if requirement.expected != "present"]
+    )
+    missing = [
+        requirement
+        for requirement in requirements
+        if not _evidence_matches_requirement(requirement, evidence)
+    ]
+    # Manual proof keeps its established lexical treatment of positive UI facts, but an
+    # explicit denial of a required positive fact is never valid evidence for that fact.
+    missing.extend(
+        requirement
+        for requirement in all_requirements
+        if requirement.expected == "present"
+        and _evidence_explicitly_negates_requirement(requirement, evidence)
+    )
+    if missing:
+        expected = ", ".join(
+            f"{'/'.join(requirement.terms)}={requirement.expected}" for requirement in missing
+        )
+        raise ValueError(
+            f"evidence does not substantiate {phase.id!r}; explicitly confirm the named "
+            f"state with matching polarity: {expected}"
         )
     objective_terms = _proof_terms(phase.objective)
     evidence_terms = _proof_terms(evidence)
@@ -778,17 +1261,290 @@ def _manual_phase_proof(phase: GoalPhase, evidence: str) -> PhaseProof:
     branch_id: str | None = None
     if phase.branches:
         scored = [
-            (len(_proof_terms(branch.objective) & evidence_terms), branch.id)
+            (
+                len(_proof_terms(branch.objective) & evidence_terms),
+                branch.id,
+                _alternative_condition_is_substantiated(branch.condition, evidence),
+            )
             for branch in phase.branches
         ]
-        best_score = max(score for score, _branch_id in scored)
-        winners = [candidate for score, candidate in scored if score == best_score and score > 0]
+        eligible = [(score, candidate) for score, candidate, proven in scored if proven]
+        best_score = max((score for score, _candidate in eligible), default=0)
+        winners = [candidate for score, candidate in eligible if score == best_score and score > 0]
         if len(winners) == 1:
             branch_id = winners[0]
+        else:
+            raise ValueError(
+                f"evidence does not substantiate one exact alternative branch for {phase.id!r}; "
+                "explicitly confirm which branch condition was observed"
+            )
     return PhaseProof(
         source="manual_evidence",
         matched_terms=matched,
         branch_id=branch_id,
+    )
+
+
+def _requirement_key(requirement: PhaseRequirement) -> tuple[str, tuple[str, ...]]:
+    return requirement.expected, tuple(requirement.terms)
+
+
+def _requirement_anchors(requirement: PhaseRequirement) -> set[str]:
+    specific = {term for term in requirement.terms if term not in _GENERIC_ASSERTION_TERMS}
+    return specific or set(requirement.terms)
+
+
+def _label_terms(value: str) -> set[str]:
+    # Resource IDs commonly use camelCase/snake_case while the goal uses words. Normalize those
+    # spellings before applying the same lexical canonicalization used by manual proof.
+    value = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", value).replace("_", " ")
+    return _proof_terms(value)
+
+
+def _element_terms(observation: AnalyzeResult) -> list[tuple[Any, set[str]]]:
+    rows: list[tuple[Any, set[str]]] = []
+    for element in observation.elements:
+        values = [
+            value for value in (element.text, element.content_desc, element.resource_id) if value
+        ]
+        rows.append((element, _label_terms(" ".join(values))))
+    return rows
+
+
+def _observation_satisfies_requirement(
+    requirement: PhaseRequirement,
+    elements: list[tuple[Any, set[str]]],
+) -> bool:
+    anchors = _requirement_anchors(requirement)
+    if not anchors:
+        return False
+    if requirement.expected == "absent":
+        # Absence is deliberately stricter than presence: any visible subject anchor keeps the
+        # negative assertion unproven. This avoids declaring a multi-word loading indicator gone
+        # merely because one descriptive word was omitted by accessibility.
+        return not any(anchors & terms for _element, terms in elements)
+    candidates = [element for element, terms in elements if anchors <= terms]
+    if requirement.expected == "present":
+        return bool(candidates)
+    if requirement.expected == "enabled":
+        return any(element.enabled is True for element in candidates)
+    if requirement.expected == "disabled":
+        return any(element.enabled is False for element in candidates)
+    if requirement.expected == "checked":
+        return any(element.checked is True for element in candidates)
+    if requirement.expected == "unchecked":
+        return any(element.checkable is True and element.checked is False for element in candidates)
+    if requirement.expected == "selected":
+        return any(element.selected is True for element in candidates)
+    if requirement.expected == "unselected":
+        return any(element.selected is False for element in candidates)
+    return False
+
+
+def _observation_provenance(
+    state: SessionState,
+    observation: AnalyzeResult,
+) -> ObservationProvenance | None:
+    fingerprint = (observation.meta.fingerprint or "").strip()
+    serial = (observation.meta.device_serial or "").strip()
+    package = (observation.screen.package or "").strip()
+    source_value = getattr(observation.screen.source, "value", observation.screen.source)
+    source = str(source_value)
+    if (
+        not fingerprint
+        or observation.meta.stale_risk is not None
+        or serial != state.serial
+        or not package
+        or source not in {"hierarchy", "vision", "mixed"}
+    ):
+        return None
+    via_value = observation.meta.via or getattr(
+        observation.meta.path, "value", observation.meta.path
+    )
+    return ObservationProvenance(
+        fingerprint=fingerprint,
+        source=cast(Literal["hierarchy", "vision", "mixed"], source),
+        via=str(via_value) if via_value else None,
+        device_serial=serial,
+        package=package,
+    )
+
+
+def _observation_phase_proof(
+    state: SessionState,
+    phase: GoalPhase,
+    observation: AnalyzeResult,
+    *,
+    source: Literal["observation", "job_result"],
+) -> PhaseProof | None:
+    """Return proof only when one exact frame satisfies the whole typed UI contract."""
+    positive_anchors = {
+        term
+        for requirement in phase.requirements
+        if requirement.expected == "present"
+        for term in _requirement_anchors(requirement)
+    }
+    if (
+        state.finished_ms is not None
+        or _phase_satisfaction(phase) != "relevant_evidence"
+        or phase.intent == "alternative"
+        or not phase.requirements
+        # A one-word coincidence is discovery evidence, not enough to close a goal checkpoint.
+        or len(positive_anchors) < 2
+    ):
+        return None
+    provenance = _observation_provenance(state, observation)
+    if provenance is None:
+        return None
+    elements = _element_terms(observation)
+    if not all(
+        _observation_satisfies_requirement(requirement, elements)
+        for requirement in phase.requirements
+    ):
+        return None
+    matched = sorted(
+        {term for requirement in phase.requirements for term in _requirement_anchors(requirement)}
+    )
+    return PhaseProof(
+        source=source,
+        matched_terms=matched,
+        satisfied_requirements=[
+            requirement.model_copy(deep=True) for requirement in phase.requirements
+        ],
+        command="analyze" if source == "observation" else "job_result",
+        verified=True,
+        observation=provenance,
+    )
+
+
+def _automatic_evidence(proof: PhaseProof) -> str:
+    facts = ", ".join(
+        f"{requirement.subject}={requirement.expected}"
+        for requirement in proof.satisfied_requirements
+    )
+    frame = proof.observation.fingerprint[:12] if proof.observation is not None else "unknown"
+    if proof.source == "job_result":
+        return f"Correlated job {proof.job_id} verified frame {frame}: {facts}"
+    return f"Current observation frame {frame} verified: {facts}"
+
+
+def complete_current_ui_phase_from_observation(
+    cache_dir: str | Path,
+    state: SessionState,
+    *,
+    observation: AnalyzeResult,
+) -> SessionState:
+    """Advance the current UI phase only from its exact, fingerprinted frame contract.
+
+    A plain goal-term overlap is intentionally insufficient. Automatic completion requires a
+    compiled positive assertion plus every explicit negative/control-state assertion on the same
+    non-stale observation from this session's device.
+    """
+    phases = state.phases or goal_phases(state.goal)
+    current = next((phase for phase in phases if phase.status != "completed"), None)
+    if current is None:
+        return state
+    proof = _observation_phase_proof(state, current, observation, source="observation")
+    if proof is None:
+        return state
+    return mark_phase_complete(
+        cache_dir,
+        state,
+        phase_id=current.id,
+        evidence=_automatic_evidence(proof),
+        _proof=proof,
+    )
+
+
+def _await_term_row(value: Any) -> tuple[bool, set[str]] | None:
+    if not isinstance(value, dict) or value.get("satisfied") is not True:
+        return None
+    raw = str(value.get("term") or "").strip()
+    negated = raw.startswith("!")
+    candidate = raw[1:] if negated else raw
+    field, separator, selector = candidate.partition(":")
+    if not separator or field.casefold() not in {"text", "rid", "desc"}:
+        return None
+    present = value.get("present")
+    if present is not (not negated):
+        return None
+    terms = _label_terms(selector.replace(r"\,", ",").replace(r"\!", "!"))
+    return negated, terms
+
+
+def _job_predicate_satisfies_requirements(
+    requirements: Sequence[PhaseRequirement],
+    result: dict[str, Any],
+) -> list[str] | None:
+    values = result.get("await_terms")
+    if not isinstance(values, list) or not values:
+        return None
+    parsed: list[tuple[str, bool, set[str]]] = []
+    for value in values:
+        row = _await_term_row(value)
+        if row is None:
+            return None
+        negated, terms = row
+        parsed.append((str(value["term"]), negated, terms))
+    for requirement in requirements:
+        anchors = _requirement_anchors(requirement)
+        expected_negated = requirement.expected == "absent"
+        if not any(
+            negated == expected_negated and anchors <= terms for _term, negated, terms in parsed
+        ):
+            return None
+    return [term for term, _negated, _terms in parsed]
+
+
+def complete_current_ui_phase_from_job(
+    cache_dir: str | Path,
+    state: SessionState,
+    *,
+    job: JobState,
+) -> SessionState:
+    """Advance from a successful wait only when job, session, predicate, and frame correlate."""
+    if (
+        state.finished_ms is not None
+        or job.status != "succeeded"
+        or job.operation != "await"
+        or job.session_id != state.session_id
+        or job.serial != state.serial
+        or job.owner != state.owner
+        or not isinstance(job.result, dict)
+        or job.result.get("ok") is not True
+        or job.result.get("await_outcome") != "satisfied"
+        or not str(job.args.get("predicate") or "").strip()
+    ):
+        return state
+    phases = state.phases or goal_phases(state.goal)
+    current = next((phase for phase in phases if phase.status != "completed"), None)
+    if current is None:
+        return state
+    raw_observation = job.result.get("observation")
+    if not isinstance(raw_observation, dict):
+        return state
+    try:
+        observation = AnalyzeResult.model_validate(raw_observation)
+    except (TypeError, ValueError):
+        return state
+    proof = _observation_phase_proof(state, current, observation, source="job_result")
+    if proof is None:
+        return state
+    predicate_terms = _job_predicate_satisfies_requirements(
+        current.requirements,
+        job.result,
+    )
+    if predicate_terms is None:
+        return state
+    proof.job_id = job.job_id
+    proof.job_operation = job.operation
+    proof.predicate_terms = predicate_terms
+    return mark_phase_complete(
+        cache_dir,
+        state,
+        phase_id=current.id,
+        evidence=_automatic_evidence(proof),
+        _proof=proof,
     )
 
 
@@ -800,16 +1556,22 @@ def _completion_proof(
     satisfaction = _phase_satisfaction(phase)
     if structured is None:
         if satisfaction != "relevant_evidence":
-            required = (
-                "a verified network_offline result"
-                if satisfaction == "verified_offline"
-                else "successful session cleanup"
-            )
+            required = {
+                "verified_network_status": "a verified network_status result",
+                "verified_offline": "a verified network_offline result",
+                "session_cleanup": "successful session cleanup",
+            }[satisfaction]
             raise ValueError(
                 f"{phase.id!r} requires {required}; manual evidence cannot complete it"
             )
         return _manual_phase_proof(phase, evidence)
 
+    valid_network_status = (
+        satisfaction == "verified_network_status"
+        and structured.source == "verified_event"
+        and structured.command == "network_status"
+        and structured.verified is True
+    )
     valid_offline = (
         satisfaction == "verified_offline"
         and structured.source == "verified_event"
@@ -822,7 +1584,34 @@ def _completion_proof(
         and structured.command == "session_finish"
         and structured.verified is True
     )
-    if not (valid_offline or valid_cleanup):
+    required_keys = {_requirement_key(requirement) for requirement in phase.requirements}
+    proven_keys = {
+        _requirement_key(requirement) for requirement in structured.satisfied_requirements
+    }
+    positive_terms = {
+        term
+        for requirement in phase.requirements
+        if requirement.expected == "present"
+        for term in _requirement_anchors(requirement)
+    }
+    valid_ui_observation = (
+        satisfaction == "relevant_evidence"
+        and structured.source in {"observation", "job_result"}
+        and structured.verified is True
+        and structured.observation is not None
+        and bool(required_keys)
+        and len(positive_terms) >= 2
+        and required_keys <= proven_keys
+        and (
+            structured.source != "job_result"
+            or (
+                bool(structured.job_id)
+                and structured.job_operation == "await"
+                and bool(structured.predicate_terms)
+            )
+        )
+    )
+    if not (valid_network_status or valid_offline or valid_cleanup or valid_ui_observation):
         raise ValueError(f"structured proof does not satisfy {phase.id!r}")
     return structured
 
@@ -836,6 +1625,8 @@ def mark_phase_complete(
     _proof: PhaseProof | None = None,
 ) -> SessionState:
     """Complete only the current phase, preserving ordered goal semantics."""
+    if state.finished_ms is not None:
+        raise ValueError("cannot complete a goal phase after the session has finished")
     evidence = " ".join(evidence.strip().split())
     if not evidence:
         raise ValueError("phase evidence must not be empty")
@@ -870,6 +1661,8 @@ def update_phase_recommendation(
     call: dict[str, Any],
 ) -> SessionState:
     """Persist a fresh-screen next call for one incomplete phase."""
+    if state.finished_ms is not None:
+        return state
     phases = [phase.model_copy(deep=True) for phase in (state.phases or goal_phases(state.goal))]
     phase = next((item for item in phases if item.id == phase_id), None)
     if phase is None or phase.status == "completed":
@@ -892,22 +1685,56 @@ def complete_environment_phase(
     current = next((phase for phase in phases if phase.status != "completed"), None)
     if current is None:
         return state
-    if current.kind == "environment" and command == "network_offline":
-        network_value = result.get("state")
-        network_state: dict[str, Any] = network_value if isinstance(network_value, dict) else {}
-        if result.get("ok") and result.get("verified") and network_state.get("offline") is True:
-            return mark_phase_complete(
-                cache_dir,
-                state,
-                phase_id=current.id,
-                evidence="AUA verified no active default network and offline=true",
-                _proof=PhaseProof(
-                    source="verified_event",
-                    matched_terms=["offline"],
-                    command="network_offline",
-                    verified=True,
-                ),
-            )
+    satisfaction = _phase_satisfaction(current)
+    network_value = result.get("state")
+    network_state: dict[str, Any] = network_value if isinstance(network_value, dict) else {}
+    if (
+        satisfaction == "verified_network_status"
+        and command == "network_status"
+        and result.get("ok")
+        and result.get("verified") is True
+        and network_state.get("active_network") is not None
+    ):
+        transports_value = network_state.get("active_transports")
+        transports = transports_value if isinstance(transports_value, list) else []
+        transport_text = ",".join(str(value) for value in transports) or "none"
+        return mark_phase_complete(
+            cache_dir,
+            state,
+            phase_id=current.id,
+            evidence=(
+                "AUA verified current network status: "
+                f"active_network={network_state.get('active_network')}, "
+                f"active_transports={transport_text}, "
+                f"internet_validated={network_state.get('internet_validated')}, "
+                f"offline={network_state.get('offline')}"
+            ),
+            _proof=PhaseProof(
+                source="verified_event",
+                matched_terms=["network", "status", "transport"],
+                command="network_status",
+                verified=True,
+            ),
+        )
+    if (
+        satisfaction == "verified_offline"
+        and command == "network_offline"
+        and result.get("ok")
+        and result.get("verified")
+        and network_state.get("offline") is True
+    ):
+        return mark_phase_complete(
+            cache_dir,
+            state,
+            phase_id=current.id,
+            evidence="AUA verified no active default network and offline=true",
+            _proof=PhaseProof(
+                source="verified_event",
+                matched_terms=["offline"],
+                command="network_offline",
+                verified=True,
+            ),
+        )
     return state
 
 
@@ -1014,6 +1841,10 @@ def finish_session_state(cache_dir: str | Path, state: SessionState) -> SessionS
                 command="session_finish",
                 verified=True,
             )
+        if phase.status != "completed":
+            # A terminated session is immutable. Preserve the missing checkpoint and its proof
+            # contract, but never persist an action invitation against a closed owner.
+            phase.recommended_call = None
     finished = state.model_copy(update={"finished_ms": now_ms, "phases": phases})
     _write_state(cache_dir, finished)
     pointer = _active_path(cache_dir, state.serial, state.owner)
@@ -1330,10 +2161,21 @@ def review_session_events(state: SessionState, events: Sequence[dict[str, Any]])
             and isinstance((event.get("extra") or {}).get("expected_error_code"), str)
         )
     )
+    lifecycle_calls = sum(
+        1 for event in top_level if _base_command(event.get("cmd")).startswith("session_")
+    )
     accounting = {
         "journal_events": len(scoped),
         "top_level_calls": len(top_level),
         "folded_internal_events": max(0, len(scoped) - len(top_level)),
+        "lifecycle_calls": lifecycle_calls,
+        "task_calls": len(top_level) - lifecycle_calls,
+        # Reviews returned by ``session review`` and ``session finish`` are computed before
+        # the reporting invocation itself is appended to the journal. Make that boundary
+        # explicit so evaluators do not mistake journal events for caller-visible calls or
+        # silently under-count the call that carried this report.
+        "reporting_call_included": False,
+        "top_level_calls_including_reporting_call": len(top_level) + 1,
         "expected_error_probes": len(expected_probes),
         "expected_error_matches": len(expected_matches),
         "unexpected_failures": failures,
@@ -1568,6 +2410,18 @@ def _goto_candidate(
         return None
     quoted = shlex.quote(goal)
     if current_screen == target:
+        proof = target_arrival_evidence(
+            app,
+            target,
+            goal,
+            observation.elements,
+            screen_height=observation.screen.height,
+        )
+        if proof is None:
+            # The current mapped screen may contain a clickable row named after the destination.
+            # That makes the destination discoverable, but it is not proof that the current
+            # frame has arrived there. Let another route/flow/manual option win.
+            return None
         call = GoalCall(
             kind="arrived",
             cli=f"aua reach {quoted}",
@@ -1582,7 +2436,7 @@ def _goto_candidate(
             score=10_000,
             safe=True,
             status="already_there",
-            evidence={"known_screen": observation.meta.known_screen},
+            evidence={"known_screen": observation.meta.known_screen, "arrival_proof": proof},
             call=call,
         )
     path = _shortest_path(
@@ -1739,7 +2593,7 @@ def _deeplink_candidates(goal: str, app: AppMap, *, target: str | None) -> list[
         call = GoalCall(
             kind="deeplink_preview",
             cli=f"aua open-and-analyze {uri}",
-            mcp={"tool": "open_link", "arguments": {"uri": link.uri, "observe": True}},
+            mcp={"tool": "open_link_and_analyze", "arguments": {"uri": link.uri}},
             reason=(
                 "This shortcut was probed before, but intent delivery still does not prove arrival."
                 if link.probed
