@@ -390,7 +390,7 @@ def test_mcp_observed_actions_are_named_and_force_analysis() -> None:
             button = next(
                 e for e in json.loads(_first_text(before))["elements"] if e["text"] == "Continue"
             )
-            tapped = await client.call_tool("tap_and_analyze", {"id": button["id"]})
+            tapped = await client.call_tool("tap_and_analyze", {"rid": "continue_btn"})
             old = await client.call_tool("tap", {"id": button["id"]})
             return (
                 json.loads(_first_text(tapped)),
@@ -401,6 +401,13 @@ def test_mcp_observed_actions_are_named_and_force_analysis() -> None:
     tapped, old, schema = anyio.run(run)
     assert tapped["observation_present"] is True
     assert tapped["observation"]["elements"]
+    assert {"rid", "text", "desc", "index", "first"} <= set(schema["properties"])
+    assert {tuple(branch["required"]) for branch in schema["oneOf"]} == {
+        ("id",),
+        ("rid",),
+        ("text",),
+        ("desc",),
+    }
     assert "observe" not in schema["properties"], "the renamed tool cannot contradict its name"
     assert old["error"]["code"] == "usage"
     assert "tap_and_analyze" in old["error"]["message"]
@@ -546,6 +553,48 @@ def test_mcp_timeout_preserves_valid_delta_and_hints_regex_literal(
     assert "literal contains" in out["note"]
     assert "aua await-and-analyze" in out["note"]
     assert "--match regex" in out["note"]
+
+
+def test_mcp_folded_action_preserves_structured_settled_arrival_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    eng = _engine()
+    mismatch = {
+        "code": "arrival_mismatch",
+        "original_predicate": "text:Old title,!text:Loading",
+        "suggested_positive_predicates": ["rid:recentItem"],
+        "recommended_call": (
+            "aua await-and-analyze 'rid:recentItem,!text:Loading' --observe"
+        ),
+        "recommended_mcp_call": {
+            "tool": "await_and_analyze",
+            "arguments": {"predicate": "rid:recentItem,!text:Loading"},
+        },
+        "action_repeated": False,
+    }
+    monkeypatch.setattr(
+        eng,
+        "await_predicate",
+        lambda *_args, **_kwargs: ActionResult(
+            ok=False,
+            action="await",
+            await_outcome="settled-unmet",
+            arrival_mismatch=mismatch,
+            note="The action ran once; reuse this destination and do not repeat it.",
+        ),
+    )
+
+    out = _fold_action_until(
+        eng,
+        "tap_and_analyze",
+        {"until": "text:Old title,!text:Loading"},
+        {"ok": True, "action": "tap", "observation_present": True},
+    )
+
+    assert out["action"] == "tap"
+    assert out["await_outcome"] == "settled-unmet"
+    assert out["arrival_mismatch"] == mismatch
+    assert "do not repeat" in out["note"]
 
 
 def test_mcp_await_and_analyze_returns_term_evidence() -> None:

@@ -425,9 +425,11 @@ class ActionResult(BaseModel):
     # the click on an inner Box and renders the title outside it — so "I acted on what you
     # named" and "I acted on its sibling" must not look the same in output.
     acting: dict[str, Any] | None = None
-    # `await`: which of three things ended the wait — satisfied | screen-changed | timeout. A
-    # bare `ok` cannot carry three states, and "is that a hang or a slow backend?" is exactly
-    # the question a coordinator could not answer from the old output.
+    # `await`: which terminal condition ended the wait.  In addition to satisfied /
+    # screen-changed / timeout, an action-bound wait can return settled-unmet when the action
+    # demonstrably reached a different, stable destination but the caller's positive arrival
+    # term names something that is not there.  Standalone waits deliberately retain their
+    # package/activity-only three-outcome semantics.
     # What actually changed, rather than a claim that the action dispatched: activity before and
     # after, node-count delta, focus movement, text added/removed. Deliberately carries no
     # confidence score — a number invites trusting a figure over evidence, and "a command
@@ -438,6 +440,9 @@ class ActionResult(BaseModel):
     # Per-term results, reported satisfied or not: *which* term is missing is how a reader
     # tells a failed load from a slow one.
     await_terms: list[dict[str, Any]] | None = None
+    # Structured correction for ``await_outcome=settled-unmet``.  Keeping this separate from
+    # prose lets adapters and agents offer a corrected predicate without parsing ``detail``.
+    arrival_mismatch: dict[str, Any] | None = None
     elapsed_ms: int | None = None
     # Bounded multi-step actions expose why they stopped and a compact semantic hop trace.
     stop_reason: str | None = None

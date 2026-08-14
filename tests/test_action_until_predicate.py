@@ -7,7 +7,7 @@ agent could not tell "no effect" from "not yet", so it stopped trusting the obse
 hand-rolled ``wait`` + ``analyze`` after every action.
 
 A caller-supplied predicate resolves that ambiguity: the budget comes from the predicate and
-``await_outcome`` names which of three things ended the wait.
+``await_outcome`` names what ended the wait, including a stable wrong-arrival correction.
 """
 
 from __future__ import annotations
@@ -114,6 +114,37 @@ def test_until_adopts_guidance_from_the_awaited_screen(monkeypatch) -> None:
     assert out.known_screen == "home"
     assert out.next_actions == [{"id": 8, "label": "Continue"}]
     assert out.routes == ["tap Continue -> details"]
+
+
+def test_until_preserves_structured_settled_arrival_mismatch(monkeypatch) -> None:
+    mismatch = {
+        "code": "arrival_mismatch",
+        "original_predicate": "text:Old title,!text:Loading",
+        "suggested_positive_predicates": ["rid:recentItem"],
+        "recommended_call": (
+            "aua await-and-analyze 'rid:recentItem,!text:Loading' --observe"
+        ),
+        "recommended_mcp_call": {
+            "tool": "await_and_analyze",
+            "arguments": {"predicate": "rid:recentItem,!text:Loading"},
+        },
+        "action_repeated": False,
+    }
+    out, _ = _run(
+        monkeypatch,
+        _tapped(),
+        ("text:Old title,!text:Loading", 30_000, 500),
+        _awaited(
+            "settled-unmet",
+            arrival_mismatch=mismatch,
+            note="The action ran once; reuse this destination and do not repeat it.",
+        ),
+    )
+
+    assert out.action == "tap"
+    assert out.await_outcome == "settled-unmet"
+    assert out.arrival_mismatch == mismatch
+    assert "do not repeat" in (out.note or "")
 
 
 def test_until_replaces_the_early_change_claim_with_the_adopted_screen(monkeypatch) -> None:

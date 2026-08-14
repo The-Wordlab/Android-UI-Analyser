@@ -129,7 +129,24 @@ def test_verified_environment_phase_advances_and_evidence_checkpoints_stay_order
     )
     progress = phase_progress(state)
     assert progress["current"]["objective"] == "Verify Grammar opens offline"
-    assert progress["next_call"]["cli"] == "aua tap-and-analyze 36"
+    assert progress["next_call"] is None
+    handoff = engine.session_progress(started["session_id"])["goal_progress"]["next_call"]
+    assert handoff == {
+        "kind": "refresh_observation",
+        "cli": f"aua --serial {engine.device.serial} analyze --source hierarchy",
+        "mcp": {"tool": "analyze_screen", "arguments": {"source": "hierarchy"}},
+        "reason": (
+            "The active UI phase began after a non-UI transition. Read one fresh hierarchy "
+            "frame; its goal_progress will contain the exact next action."
+        ),
+        "executes": False,
+    }
+    refreshed = engine.session_progress(
+        started["session_id"], observation=_apps_observation(engine.device.serial)
+    )["goal_progress"]
+    assert refreshed["next_call"]["cli"] == (
+        "aua tap-and-analyze --text 'Grammar 1 hr. ago'"
+    )
 
     with pytest.raises(ValueError, match="complete 'phase_2' first"):
         mark_phase_complete(
@@ -353,8 +370,45 @@ def test_goal_session_keeps_specific_multi_term_manual_control_match(
 
     next_call = started["goal_progress"]["next_call"]
     assert next_call["kind"] == "manual_action"
-    assert next_call["cli"] == "aua tap-and-analyze 41"
+    assert next_call["cli"] == "aua tap-and-analyze --text 'Search Settings'"
+    assert next_call["mcp"] == {
+        "tool": "tap_and_analyze",
+        "arguments": {"text": "Search Settings"},
+    }
     assert next_call["executes"] is True
+
+
+def test_multiphase_recommendations_are_compact_and_planned_from_the_active_frame(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    engine = _engine(tmp_path, "goal-lazy-phase-planning")
+    vocabulary = _control_observation(engine.device.serial, "Open Vocabulary")
+    equation = _control_observation(engine.device.serial, "Open Equation")
+    monkeypatch.setattr(engine, "analyze", lambda **_kwargs: vocabulary)
+
+    started = engine.session_start("Open Vocabulary; then open Equation")
+
+    assert "phases" not in started["goal_progress"]
+    assert started["goal_progress"]["next_call"]["mcp"]["arguments"] == {
+        "text": "Open Vocabulary"
+    }
+    persisted = load_session_state(tmp_path / "cache", session_id=started["session_id"])
+    assert persisted is not None
+    assert persisted.phases[1].recommended_call is None
+
+    engine.session_mark_phase("phase_1", "Open Vocabulary control opened")
+    progressed = engine.session_progress(observation=equation)
+
+    assert progressed["goal_progress"]["current"]["id"] == "phase_2"
+    assert progressed["goal_progress"]["next_call"]["cli"] == (
+        "aua tap-and-analyze --text 'Open Equation'"
+    )
+    assert progressed["goal_progress"]["next_call"]["mcp"]["arguments"] == {
+        "text": "Open Equation"
+    }
+    reloaded = load_session_state(tmp_path / "cache", session_id=started["session_id"])
+    assert reloaded is not None
+    assert reloaded.phases[1].recommended_call == progressed["goal_progress"]["next_call"]
 
 
 def _engine(tmp_path: Path, serial: str = "goal-life") -> Engine:

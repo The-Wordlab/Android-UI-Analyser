@@ -74,7 +74,8 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     Capability(
         "action_until",
-        "Act, wait for semantic evidence, and consume the settled observation in one call.",
+        "Act once and consume semantic arrival evidence; a stable wrong destination returns "
+        "settled-unmet with corrected predicates instead of spending the whole timeout.",
         ("tap", "type", "input", "loading", "wait", "result", "interactive", "open"),
         40,
         "aua tap-and-analyze --rid <rid> --until 'rid:<destination>'",

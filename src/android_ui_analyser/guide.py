@@ -4,11 +4,13 @@
 how to drive the tool: what it is, the recommended session protocol, how perception
 self-routes, how memory works, the output schema, exit codes, and the key flags.
 
-This module is the **single source of truth**. The same content renders to:
-- ``aua guide``            → markdown manual (``--brief`` for the short form, ``--json`` structured)
-- ``aua guide --emit-skill`` → ``.claude/skills/android-ui-analyser/SKILL.md`` (frontmatter + this manual)
+This module is the **single source of truth**. It renders three progressive layers:
+- ``aua guide``              → the complete markdown manual
+- ``aua guide --brief``      → a useful session-oriented field guide
+- ``aua guide --emit-skill`` → a compact generated SKILL.md that points to both deeper layers
 
-Because the skill body *is* the rendered guide, the two can never drift (AC15).
+The generated skill is intentionally small enough to load on every Android task; detailed
+reference material stays discoverable through the CLI instead of consuming agent context.
 """
 
 from __future__ import annotations
@@ -361,7 +363,10 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "grammar ANDs comma-separated terms; escape a literal comma as "
         "`text:Hello\\, friend`. Before accepting a negated text miss, and before timing out "
         "a positive text term, AUA verifies hierarchy text with its available OCR path. The response "
-        "then carries `await_outcome`: `satisfied` / `screen-changed` / `timeout`, and "
+        "then carries `await_outcome`: `satisfied` / `screen-changed` / `timeout`. An "
+        "action-bound wait can instead return `settled-unmet` when two stable, non-loading "
+        "destination frames prove the positive predicate names the wrong screen; its "
+        "`arrival_mismatch` gives stable replacement predicates without repeating the action. "
         "`await_terms` says which term is missing. Prefer "
         '`wait --for "<text>"` for known targets; wait/await observations accept `--no-meta` '
         "with the same meaning as analyze. Reserve `wait --for-stable` for "
@@ -451,7 +456,7 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
 
 # ``guide --brief`` is what a fresh agent can afford to read in the middle of a task. Keep this
 # as a deliberately small decision loop rather than reprinting the full operating manual's every
-# feature and exception. The generated skill still receives the complete manual below.
+# feature and exception. The generated skill is smaller again and links here progressively.
 BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
     (
         "Start from the user's goal",
@@ -1441,6 +1446,68 @@ def render_brief() -> str:
     return render_markdown(brief=True)
 
 
+def render_skill_markdown() -> str:
+    """Compact triggered instructions; deeper guidance stays in the CLI manual."""
+    return """# Android UI Analyser
+
+Use `aua` as the semantic Android UI layer. Act on returned element ids or stable selectors;
+never guess coordinates. Do not use raw `adb` for a workflow AUA already exposes.
+
+## Operating loop
+
+1. Start goal-oriented work with `aua session start --goal "<what must be verified>"`. Add
+   `--app <package>` when the foreground app is unrelated. Reuse its observation and follow its
+   exact `recommended_call`; do not inventory commands or immediately call `analyze` again.
+2. Prefer navigation in this order: verified `goto`, matching saved `flow`, proven deeplink,
+   then a manual analyzed action. Preview risky routes; goal text never authorizes destructive,
+   external, settings, data, payment, send, or sign-out effects.
+3. Use `tap-and-analyze`, `input-and-analyze`, `swipe-and-analyze`, and `key-and-analyze`.
+   Consume the returned `observation`, whose integer ids are fresh only for that frame. A tap id
+   is positional (`tap-and-analyze 4`; explicit `--id 4` is also accepted). On dynamic screens
+   prefer `--rid <resource-id>` or `stable_key`; use `aua resolve <stable_key>` after a transition
+   instead of replaying an old numeric id.
+4. Fold arrival into the action with a positive predicate, for example
+   `--until 'rid:resultCard,!text:Loading'`. If it returns `settled-unmet`, reuse the fresh
+   destination and its corrected predicate; never repeat the action. An absence-only check such
+   as `!text:Loading` belongs in `aua await-and-analyze '!text:Loading' --observe`. For nested return
+   navigation use `aua back-until-and-analyze '<known_screen>'` or positive `rid:`/`text:`/
+   `desc:` evidence.
+5. Let perception stay hierarchy-first and automatic. Use filters such as `--where-rid`,
+   `--where-text`, `--clickable`, and `--region` rather than post-processing a large response.
+   Use vision deliberately only when the hierarchy is opaque; paid grounding requires `--deep`.
+6. Carry `goal_progress.checkpoint` on the next call with `--phase-done` (MCP: `phase_done`)
+   instead of spending a separate progress call. Use `aua job start await ...` only for a
+   read-only wait that may outlive one agent call. If `daemon_outcome_unknown` appears, never
+   repeat the action; wait, then inspect one fresh screen.
+7. End with the returned cleanup call, normally `aua session finish`. It restores only
+   session-owned reversible state and stops only an emulator the session started.
+
+Top-level help plus safe pre-device recoveries (unknown command, missing argument, and an
+absence-only action predicate) are journaled as `cli_help` / `cli_usage_error`. When one exact
+safe recovery exists, the structured error includes `recommended_call`; follow it directly.
+
+## Device and safety rules
+
+- AUA leases a compatible device automatically. Do not ask the user to manage leases or steal
+  another agent's device. Respect a user-named physical device or emulator boundary.
+- Start an emulator only with explicit scope (`session start --start-emulator`); use `--headed`
+  only when visibility is required.
+- For offline verification use `aua network offline --verify`, and let session cleanup restore
+  the previous state. For debuggable SQLite state use `aua db`, including its confirmations and
+  restore points.
+- A delivered deeplink, spinner disappearance, or unchanged short settle is not proof of the
+  requested destination. Verify the final interactive affordance the user named.
+
+## Load more only when needed
+
+- Run `aua guide --brief` for the selector, wait, navigation, map, flow, lease, and recovery
+  field guide.
+- Run `aua capabilities --goal "<goal>"` for structured discovery without reading the manual.
+- Run `aua guide` for the complete command/flag tables, databases, proxy/mock, capture, maps,
+  flow authoring, troubleshooting, schema, and exit-code reference.
+"""
+
+
 def render_json() -> dict[str, object]:
     """Structured form of the manual for programmatic consumers."""
     from .capabilities import capability_manifest
@@ -1537,7 +1604,7 @@ def render_json() -> dict[str, object]:
 
 
 def render_skill() -> str:
-    """The SKILL.md content: YAML frontmatter + the canonical manual body (no drift)."""
+    """The compact generated SKILL.md; deeper manual layers remain available via ``aua``."""
     front = [
         "---",
         f"name: {SKILL_NAME}",
@@ -1559,7 +1626,7 @@ def render_skill() -> str:
         "<!-- Generated by `aua guide --emit-skill`. Edit guide.py (the single source), not this file. -->"
     )
     front.append("")
-    return "\n".join(front) + render_markdown(brief=False)
+    return "\n".join(front) + render_skill_markdown()
 
 
 def emit_skill(path: str | Path | None = None) -> Path:

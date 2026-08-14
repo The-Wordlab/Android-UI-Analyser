@@ -116,6 +116,7 @@ def summarize_result(result: Any) -> Any:
             "cleanup",
             "await_outcome",
             "await_terms",
+            "arrival_mismatch",
             "elapsed_ms",
             "stop_reason",
             "steps_run",

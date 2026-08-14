@@ -812,6 +812,16 @@ class Uiautomator2Device(Device):
             # Callers can still pin a different entry with --activity.
             component = components[0] if components else None
             if component is None:
+                installed = self.shell(f"pm path {shlex.quote(package)}")
+                if not any(line.strip().startswith("package:") for line in installed.splitlines()):
+                    raise DeviceError(
+                        f"package {package!r} is not installed",
+                        hint=(
+                            "`--app` needs an Android package id, not the app's display name. "
+                            "Omit --app to reuse the current screen, or run `aua app current` "
+                            "to read the foreground package."
+                        ),
+                    )
                 self._call("app_start", package)
                 return
             resolved_package, activity = component.split("/", 1)

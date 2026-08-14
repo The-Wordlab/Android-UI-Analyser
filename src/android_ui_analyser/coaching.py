@@ -135,9 +135,9 @@ def decorate_result(
         )
     ]
     normalized = _base_command(cmd)
-    # Goal progress is durable across short-lived CLI processes. Environment checkpoints can
-    # advance from deterministic tool evidence; UI checkpoints advance only when the agent
-    # explicitly acknowledges evidence on its next call via --phase-done / phase_done.
+    # Goal progress is durable across short-lived CLI processes. Environment checkpoints advance
+    # only from structured, verified tool events; UI checkpoints advance only when the agent's
+    # --phase-done / phase_done evidence passes the active phase's relevance contract.
     try:
         from .session import complete_environment_phase, phase_progress
 

@@ -204,6 +204,7 @@ def _fold_action_until(
     for key in (
         "await_outcome",
         "await_terms",
+        "arrival_mismatch",
         "elapsed_ms",
         "observation",
         "observation_present",
@@ -679,15 +680,24 @@ def _tool_definitions() -> list[types.Tool]:
         ),
         types.Tool(
             name="tap",
-            description="Tap the element with the given id (from the last analyze).",
+            description=(
+                "Tap by a fresh observation id or by one stable rid/text/desc selector. "
+                "Prefer a stable selector when one is available."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "id": {"type": "integer"},
+                    **_SELECTOR_PROPS,
                     "observe": _OBSERVE_PROP,
                     "with_image": _WITH_IMAGE_PROP,
                 },
-                "required": ["id"],
+                "oneOf": [
+                    {"required": ["id"]},
+                    {"required": ["rid"]},
+                    {"required": ["text"]},
+                    {"required": ["desc"]},
+                ],
                 "additionalProperties": False,
             },
         ),
@@ -2036,9 +2046,11 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
             )
         )
     if name == "tap":
+        element_id = args.get("id")
         return _dump(
             engine.tap(
-                int(args["id"]),
+                int(element_id) if element_id is not None else None,
+                selector=_selector_from_args(args),
                 observe=args.get("observe", True),
                 with_image=img,
             )

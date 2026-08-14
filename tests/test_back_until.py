@@ -737,6 +737,66 @@ def test_cli_back_until_returns_final_observation(monkeypatch: Any) -> None:
     assert payload["observation"]["meta"]["known_screen"] == "destination"
 
 
+def test_cli_back_until_deprecated_max_back_alias_maps_to_max_steps(
+    monkeypatch: Any,
+) -> None:
+    device = FakeDevice(serial="back-cli-max-back")
+    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: device)
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        Engine,
+        "back_until",
+        lambda self, predicate, **kwargs: (
+            calls.append({"predicate": predicate, **kwargs})
+            or ActionResult(ok=True, action="back-until")
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "--serial",
+            device.serial,
+            "back-until-and-analyze",
+            "text:Home",
+            "--max-back",
+            "3",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "--max-back is deprecated; use --max-steps" in result.stderr
+    assert calls[0]["max_steps"] == 3
+
+
+def test_cli_back_until_max_back_help_and_conflict_are_explicit(monkeypatch: Any) -> None:
+    help_result = runner.invoke(app, ["back-until-and-analyze", "--help"])
+    assert help_result.exit_code == 0
+    assert "--max-back" in help_result.stdout
+    normalized_help = " ".join(help_result.stdout.split())
+    assert "Deprecated alias for" in normalized_help
+    assert normalized_help.count("--max-steps") >= 2
+
+    device = FakeDevice(serial="back-cli-max-conflict")
+    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: device)
+    conflict = runner.invoke(
+        app,
+        [
+            "--serial",
+            device.serial,
+            "back-until-and-analyze",
+            "text:Home",
+            "--max-steps",
+            "2",
+            "--max-back",
+            "3",
+        ],
+    )
+    assert conflict.exit_code == 2
+    assert "pass only one" in conflict.stderr
+    assert "--max-steps N" in conflict.stderr
+
+
 def test_cli_back_until_rejects_global_until_and_multiple_back_selectors(
     monkeypatch: Any,
 ) -> None:

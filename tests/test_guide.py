@@ -136,8 +136,28 @@ def test_emit_skill_matches_render_skill_no_drift(tmp_path: Path) -> None:
     assert written == out and out.is_file()
     text = out.read_text()
     assert text == guide.render_skill()
-    # The skill BODY is exactly the rendered guide manual — single source, no drift.
-    assert guide.render_markdown(brief=False) in text
+    assert guide.render_skill_markdown() in text
+    assert guide.render_markdown(brief=False) not in text
+
+
+def test_generated_skill_is_brief_and_progressively_reveals_the_manual() -> None:
+    skill = guide.render_skill()
+    full = guide.render_markdown(brief=False)
+
+    assert len(skill.encode("utf-8")) < 5 * 1024
+    assert len(full.encode("utf-8")) > 50 * 1024
+    assert "aua guide --brief" in skill
+    assert "Run `aua guide`" in skill
+    assert "aua capabilities --goal" in skill
+    assert "restore point" in full, "full reference content must not be discarded"
+
+
+def test_both_committed_skill_copies_match_the_compact_generator() -> None:
+    root = Path(__file__).resolve().parents[1]
+    expected = guide.render_skill()
+
+    assert (root / ".claude/skills/android-ui-analyser/SKILL.md").read_text() == expected
+    assert (root / "skills/android-ui-analyser/SKILL.md").read_text() == expected
 
 
 def test_skill_frontmatter_has_name_and_trigger_description() -> None:

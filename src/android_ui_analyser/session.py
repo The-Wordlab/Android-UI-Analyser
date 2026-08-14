@@ -15,6 +15,7 @@ import shlex
 import time
 import uuid
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -98,6 +99,41 @@ class GoalPhase(BaseModel):
     completed_ms: int | None = None
     evidence: str | None = None
     recommended_call: dict[str, Any] | None = None
+    # These fields are additive so sessions persisted before semantic phase compilation still
+    # validate. New sessions record what a phase means and what kind of proof can satisfy it.
+    intent: (
+        Literal["ui_verification", "alternative", "offline_transition", "cleanup_finalizer"] | None
+    ) = None
+    source_span: tuple[int, int] | None = None
+    branches: list[GoalBranch] = Field(default_factory=list)
+    satisfaction: Literal["relevant_evidence", "verified_offline", "session_cleanup"] | None = None
+    terminal: bool = False
+    proof: PhaseProof | None = None
+    # A policy such as "never use a deeplink" constrains a checkpoint but is not separately
+    # completable work. Keep it typed instead of compiling an impossible verify phase.
+    constraints: list[str] = Field(default_factory=list)
+
+
+class GoalBranch(BaseModel):
+    """One mutually exclusive way to satisfy an alternative checkpoint."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    condition: str
+    objective: str
+
+
+class PhaseProof(BaseModel):
+    """Structured provenance for the evidence that completed a phase."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: Literal["manual_evidence", "verified_event", "session_cleanup"]
+    matched_terms: list[str] = Field(default_factory=list)
+    branch_id: str | None = None
+    command: str | None = None
+    verified: bool | None = None
 
 
 class SessionState(BaseModel):
@@ -124,21 +160,56 @@ _SEQUENCE_BOUNDARY = re.compile(
     r"\s*(?:[.;]\s+|\bthen\b|\bafter that\b|\bnext\b|\bfinally\b|\bcompare\b)",
     re.IGNORECASE,
 )
+_RETURN_SEQUENCE = re.compile(
+    r",\s+(?=(?:then\s+)?(?:open|verify|inspect|select|tap|check|confirm)\b)",
+    re.IGNORECASE,
+)
 _RESTORE_GOAL = re.compile(
-    r"\b(?:restore|re-enable|reconnect)\b.{0,48}\b(?:network|connectivity|wi-?fi|internet)\b",
+    r"\b(?:restore|restoring|re-enable|reconnect)\b.{0,48}"
+    r"\b(?:network|connectivity|wi-?fi|internet)\b",
+    re.IGNORECASE,
+)
+_FINISH_CLEANUP_GOAL = re.compile(
+    r"\b(?:finish|complete|finali[sz]e|end)\b.{0,36}\b(?:session\s+)?cleanup\b",
+    re.IGNORECASE,
+)
+_CONNECTIVITY_RESTORED_GOAL = re.compile(
+    r"\b(?:network|connectivity|wi-?fi|internet)\b.{0,24}"
+    r"\b(?:restored|re-enabled|reconnected|online)\b",
     re.IGNORECASE,
 )
 _OFFLINE_GOAL = re.compile(
-    r"\b(?:(?:go|switch|work|test|verify)\s+)?(?:fully\s+)?offline\b(?:\s+(?:mode|state))?"
-    r"|\bairplane mode\b",
+    r"\b(?:(?:go|switch|enter|work|test|verify)\s+)?(?:fully\s+)?offline\b"
+    r"(?:\s+(?:mode|state))?"
+    r"|\b(?:(?:enter|enable|switch\s+to|turn\s+on)\s+)?airplane mode\b",
     re.IGNORECASE,
 )
 _CONDITIONAL_BRANCH = re.compile(
     r"\bif\b[^.]*?\botherwise\b[^.;]*",
     re.IGNORECASE,
 )
-_CONDITIONAL_THEN = "__AUA_CONDITIONAL_THEN__"
-_CONDITIONAL_OTHERWISE = "__AUA_CONDITIONAL_OTHERWISE__"
+_CONDITIONAL_MASK = "\ue000"
+_PRESENT_BRANCH = re.compile(
+    r"\bif\s+(?:(?:it|they|one|threads?|items?|fixtures?)\s+)?"
+    r"(?:(?:is|are)\s+)?(?:already\s+)?(?:present|available|existing|found|exists)\b",
+    re.IGNORECASE,
+)
+_MISSING_BRANCH = re.compile(
+    r"\b(?:only\s+)?if\s+(?:(?:it|they|one|threads?|items?|fixtures?)\s+)?"
+    r"(?:(?:is|are)\s+)?(?:missing|absent|unavailable|not\s+found)\b",
+    re.IGNORECASE,
+)
+_CONSTRAINT_GOAL = re.compile(
+    r"^(?:never|do\s+not|don't|must\s+not|avoid|without)\b",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class _GoalClause:
+    text: str
+    start: int
+    end: int
 
 
 def _protect_conditional_branches(goal: str) -> str:
@@ -150,18 +221,239 @@ def _protect_conditional_branches(goal: str) -> str:
     Sentence/semicolon boundaries remain available around the conditional group.
     """
 
-    def protect(match: re.Match[str]) -> str:
-        protected = re.sub(
-            r"\bthen\b", _CONDITIONAL_THEN, match.group(0), flags=re.IGNORECASE
+    protected = list(goal)
+    for match in _CONDITIONAL_BRANCH.finditer(goal):
+        branch = match.group(0)
+        for token in re.finditer(r"\bthen\b", branch, flags=re.IGNORECASE):
+            start = match.start() + token.start()
+            protected[start : start + len(token.group(0))] = _CONDITIONAL_MASK * len(token.group(0))
+        for token in re.finditer(r";(?=\s*otherwise\b)", branch, flags=re.IGNORECASE):
+            protected[match.start() + token.start()] = _CONDITIONAL_MASK
+    return "".join(protected)
+
+
+def _goal_clauses(goal: str) -> list[_GoalClause]:
+    """Split explicit sequencing while retaining source ownership for every checkpoint."""
+    protected = _protect_conditional_branches(goal)
+    boundaries = list(_SEQUENCE_BOUNDARY.finditer(protected))
+    clauses: list[_GoalClause] = []
+    start = 0
+    for boundary in [*boundaries, None]:
+        end = boundary.start() if boundary is not None else len(goal)
+        clause_start = start
+        clause_end = end
+        while clause_start < clause_end and (
+            goal[clause_start].isspace() or goal[clause_start] == ","
+        ):
+            clause_start += 1
+        while clause_end > clause_start and (
+            goal[clause_end - 1].isspace() or goal[clause_end - 1] in ",;."
+        ):
+            clause_end -= 1
+        if clause_start < clause_end:
+            clauses.append(
+                _GoalClause(
+                    text=goal[clause_start:clause_end],
+                    start=clause_start,
+                    end=clause_end,
+                )
+            )
+        if boundary is not None:
+            start = boundary.end()
+    expanded: list[_GoalClause] = []
+    for clause in clauses:
+        # A bounded return followed by another imperative is two observable checkpoints even
+        # when written as one sentence. Do not split generic introductory commas ("From X,
+        # open Y"): only a clause explicitly beginning with return/navigation owns this shape.
+        split = (
+            _RETURN_SEQUENCE.search(clause.text)
+            if re.match(r"^(?:return|navigate|go\s+back)\b", clause.text, flags=re.IGNORECASE)
+            else None
         )
-        return re.sub(
-            r";\s*(?=otherwise\b)",
-            _CONDITIONAL_OTHERWISE,
-            protected,
-            flags=re.IGNORECASE,
+        if split is None:
+            expanded.append(clause)
+            continue
+        left_end = clause.start + split.start()
+        right_start = clause.start + split.end()
+        expanded.extend(
+            [
+                _GoalClause(clause.text[: split.start()].rstrip(), clause.start, left_end),
+                _GoalClause(clause.text[split.end() :].lstrip(), right_start, clause.end),
+            ]
+        )
+    return expanded
+
+
+def _branch_condition(text: str) -> Literal["present", "missing"] | None:
+    if _PRESENT_BRANCH.search(text):
+        return "present"
+    if _MISSING_BRANCH.search(text):
+        return "missing"
+    return None
+
+
+def _alternative_branches(
+    clause: _GoalClause, following: _GoalClause | None
+) -> tuple[list[GoalBranch], _GoalClause] | None:
+    """Compile explicit alternatives without making every branch mandatory."""
+    first_condition = _branch_condition(clause.text)
+    second_condition = _branch_condition(following.text) if following is not None else None
+    if first_condition == "present" and second_condition == "missing" and following is not None:
+        combined = _GoalClause(
+            text=f"{clause.text}; {following.text}",
+            start=clause.start,
+            end=following.end,
+        )
+        return (
+            [
+                GoalBranch(
+                    id="branch_present",
+                    condition="present",
+                    objective=clause.text,
+                ),
+                GoalBranch(
+                    id="branch_missing",
+                    condition="missing",
+                    objective=following.text,
+                ),
+            ],
+            combined,
         )
 
-    return _CONDITIONAL_BRANCH.sub(protect, goal)
+    if re.search(r"\botherwise\b", clause.text, flags=re.IGNORECASE):
+        first, second = re.split(r"\botherwise\b", clause.text, maxsplit=1, flags=re.IGNORECASE)
+        if first.strip(" ,;") and second.strip(" ,;"):
+            return (
+                [
+                    GoalBranch(
+                        id="branch_condition",
+                        condition="condition_met",
+                        objective=first.strip(" ,;"),
+                    ),
+                    GoalBranch(
+                        id="branch_otherwise",
+                        condition="otherwise",
+                        objective=second.strip(" ,;"),
+                    ),
+                ],
+                clause,
+            )
+    return None
+
+
+def _only_words(text: str, allowed: frozenset[str]) -> bool:
+    words = {
+        word.casefold()
+        for word in re.findall(r"[^\W_]+", text)
+        if word.casefold() != "s" and not word.isdigit()
+    }
+    return bool(words) and words <= allowed
+
+
+_OFFLINE_METHOD_WORDS = frozenset(
+    {
+        "and",
+        "aua",
+        "by",
+        "command",
+        "its",
+        "method",
+        "network",
+        "operation",
+        "reversible",
+        "safe",
+        "safely",
+        "the",
+        "through",
+        "tool",
+        "use",
+        "using",
+        "verified",
+        "via",
+        "with",
+    }
+)
+_CLEANUP_FINALIZER_WORDS = frozenset(
+    {
+        "after",
+        "already",
+        "and",
+        "aua",
+        "before",
+        "call",
+        "clean",
+        "cleanup",
+        "command",
+        "complete",
+        "completed",
+        "completion",
+        "connectivity",
+        "end",
+        "ending",
+        "emulator",
+        "enable",
+        "enabled",
+        "fi",
+        "finalise",
+        "finalize",
+        "finish",
+        "finished",
+        "finishing",
+        "internet",
+        "network",
+        "original",
+        "re",
+        "reconnect",
+        "reconnected",
+        "restore",
+        "restored",
+        "restoring",
+        "run",
+        "running",
+        "session",
+        "state",
+        "the",
+        "then",
+        "up",
+        "use",
+        "verify",
+        "verified",
+        "wi",
+    }
+)
+
+
+def _is_offline_method_modifier(text: str) -> bool:
+    return not text or _only_words(text, _OFFLINE_METHOD_WORDS)
+
+
+def _is_cleanup_finalizer(text: str) -> bool:
+    return not text or _only_words(text, _CLEANUP_FINALIZER_WORDS)
+
+
+def _phase(
+    phases: list[GoalPhase],
+    *,
+    objective: str,
+    kind: Literal["environment", "verify", "cleanup"],
+    intent: Literal["ui_verification", "alternative", "offline_transition", "cleanup_finalizer"],
+    source_span: tuple[int, int],
+    satisfaction: Literal["relevant_evidence", "verified_offline", "session_cleanup"],
+    branches: list[GoalBranch] | None = None,
+    terminal: bool = False,
+) -> None:
+    phases.append(
+        GoalPhase(
+            id=f"phase_{len(phases) + 1}",
+            objective=objective,
+            kind=kind,
+            intent=intent,
+            source_span=source_span,
+            branches=branches or [],
+            satisfaction=satisfaction,
+            terminal=terminal,
+        )
+    )
 
 
 def goal_phases(goal: str) -> list[GoalPhase]:
@@ -173,29 +465,70 @@ def goal_phases(goal: str) -> list[GoalPhase]:
     evidence contracts owned by the agent using the app.
     """
     cleaned = " ".join(goal.strip().split())
-    protected = _protect_conditional_branches(cleaned)
-    segments = [
-        part.replace(_CONDITIONAL_THEN, "then")
-        .replace(_CONDITIONAL_OTHERWISE, "; ")
-        .strip(" ,")
-        for part in _SEQUENCE_BOUNDARY.split(protected)
-        if part.strip(" ,")
-    ]
+    clauses = _goal_clauses(cleaned)
     phases: list[GoalPhase] = []
     offline_added = False
-    cleanup_added = False
-    for segment in segments or [cleaned]:
-        cleanup_here = bool(_RESTORE_GOAL.search(segment))
-        objective = _RESTORE_GOAL.sub("", segment).strip(" ,;.")
-        offline_here = bool(_OFFLINE_GOAL.search(objective))
-        if offline_here and not offline_added:
-            phases.append(
-                GoalPhase(
-                    id=f"phase_{len(phases) + 1}",
-                    objective="Establish and verify the requested offline network state",
-                    kind="environment",
-                )
+    cleanup_span: tuple[int, int] | None = None
+    index = 0
+    clauses = clauses or [_GoalClause(cleaned, 0, len(cleaned))]
+    while index < len(clauses):
+        clause = clauses[index]
+        following = clauses[index + 1] if index + 1 < len(clauses) else None
+        alternative = _alternative_branches(clause, following)
+        if alternative is not None:
+            branches, combined = alternative
+            _phase(
+                phases,
+                objective=combined.text,
+                kind="verify",
+                intent="alternative",
+                source_span=(combined.start, combined.end),
+                satisfaction="relevant_evidence",
+                branches=branches,
             )
+            index += 2 if following is not None and combined.end == following.end else 1
+            continue
+
+        segment = clause.text
+        advance = 1
+        if _CONSTRAINT_GOAL.search(segment):
+            if phases:
+                phases[-1].constraints.append(segment)
+                if phases[-1].source_span is not None:
+                    phases[-1].source_span = (phases[-1].source_span[0], clause.end)
+            index += 1
+            continue
+
+        cleanup_here = bool(
+            _RESTORE_GOAL.search(segment)
+            or _FINISH_CLEANUP_GOAL.search(segment)
+            or _CONNECTIVITY_RESTORED_GOAL.search(segment)
+        )
+        objective = segment
+        if cleanup_here:
+            cleanup_end = clause.end
+            if following is not None and _is_cleanup_finalizer(following.text):
+                cleanup_end = following.end
+                advance = 2
+            cleanup_span = cleanup_span or (clause.start, cleanup_end)
+            if _is_cleanup_finalizer(segment):
+                objective = ""
+            else:
+                objective = _RESTORE_GOAL.sub("", objective)
+                objective = _FINISH_CLEANUP_GOAL.sub("", objective)
+                objective = _CONNECTIVITY_RESTORED_GOAL.sub("", objective).strip(" ,;.")
+        offline_here = bool(_OFFLINE_GOAL.search(objective))
+        offline_phase: GoalPhase | None = None
+        if offline_here and not offline_added:
+            _phase(
+                phases,
+                objective="Establish and verify the requested offline network state",
+                kind="environment",
+                intent="offline_transition",
+                source_span=(clause.start, clause.end),
+                satisfaction="verified_offline",
+            )
+            offline_phase = phases[-1]
             offline_added = True
         if offline_here:
             transition = _OFFLINE_GOAL.search(objective)
@@ -204,31 +537,47 @@ def goal_phases(goal: str) -> list[GoalPhase]:
                 transition is not None
                 and transition.start() == 0
                 and (
-                    prefix.startswith(("go ", "switch ", "airplane "))
+                    prefix.startswith(("go ", "switch ", "enter ", "enable ", "turn ", "airplane "))
                     or prefix.startswith(("offline", "fully offline"))
                 )
             ):
                 objective = _OFFLINE_GOAL.sub("", objective, count=1).strip(" ,;.")
                 objective = re.sub(r"^(?:and|before)\s+", "", objective, flags=re.IGNORECASE)
+                if _is_offline_method_modifier(objective):
+                    objective = ""
+                    if following is not None and _is_offline_method_modifier(following.text):
+                        advance = 2
+                        if offline_phase is not None:
+                            offline_phase.source_span = (clause.start, following.end)
         if objective and objective.casefold() not in {"and", "before finishing"}:
-            phases.append(
-                GoalPhase(
-                    id=f"phase_{len(phases) + 1}",
-                    objective=objective,
-                    kind="verify",
-                )
+            _phase(
+                phases,
+                objective=objective,
+                kind="verify",
+                intent="ui_verification",
+                source_span=(clause.start, clause.end),
+                satisfaction="relevant_evidence",
             )
-        if cleanup_here and not cleanup_added:
-            phases.append(
-                GoalPhase(
-                    id=f"phase_{len(phases) + 1}",
-                    objective="Restore the session-owned network state",
-                    kind="cleanup",
-                )
-            )
-            cleanup_added = True
+        index += advance
+    if cleanup_span is not None:
+        _phase(
+            phases,
+            objective="Restore the session-owned network state",
+            kind="cleanup",
+            intent="cleanup_finalizer",
+            source_span=cleanup_span,
+            satisfaction="session_cleanup",
+            terminal=True,
+        )
     if not phases:
-        phases.append(GoalPhase(id="phase_1", objective=cleaned, kind="verify"))
+        _phase(
+            phases,
+            objective=cleaned,
+            kind="verify",
+            intent="ui_verification",
+            source_span=(0, len(cleaned)),
+            satisfaction="relevant_evidence",
+        )
     phases[0].status = "active"
     return phases
 
@@ -242,6 +591,11 @@ def phase_progress(state: SessionState, *, compact: bool = False) -> dict[str, A
     if compact and isinstance(current_payload, dict):
         current_payload.pop("recommended_call", None)
     terminated = state.finished_ms is not None
+    manual_checkpoint = (
+        current is not None
+        and not terminated
+        and _phase_satisfaction(current) == "relevant_evidence"
+    )
     payload: dict[str, Any] = {
         "session_id": state.session_id,
         "completed": completed,
@@ -257,12 +611,15 @@ def phase_progress(state: SessionState, *, compact: bool = False) -> dict[str, A
         "next_call": current.recommended_call if current is not None and not terminated else None,
         "checkpoint": (
             None
-            if current is None or terminated
+            if not manual_checkpoint or current is None
             else {
                 "cli": f'--phase-done {current.id}="<evidence from the current result>"',
                 "mcp": {"phase_done": {"id": current.id, "evidence": "<evidence>"}},
+                "proof_required": True,
+                "minimum_relevant_terms": _required_proof_matches(current),
                 "note": (
-                    "Acknowledge this phase on the next AUA call; it adds no extra round trip."
+                    "Acknowledge this phase on the next AUA call only with phase-specific "
+                    "observable facts from the current result; unrelated evidence is rejected."
                 ),
             }
         ),
@@ -278,12 +635,205 @@ def phase_progress(state: SessionState, *, compact: bool = False) -> dict[str, A
     return payload
 
 
+_PROOF_STOP_WORDS = frozenset(
+    {
+        "a",
+        "after",
+        "an",
+        "and",
+        "app",
+        "as",
+        "at",
+        "before",
+        "by",
+        "check",
+        "checked",
+        "confirm",
+        "confirmed",
+        "displayed",
+        "done",
+        "ensure",
+        "finally",
+        "for",
+        "from",
+        "if",
+        "in",
+        "inspect",
+        "into",
+        "item",
+        "next",
+        "of",
+        "on",
+        "only",
+        "open",
+        "opened",
+        "opens",
+        "or",
+        "otherwise",
+        "result",
+        "screen",
+        "shown",
+        "success",
+        "successful",
+        "successfully",
+        "the",
+        "then",
+        "through",
+        "to",
+        "tool",
+        "ui",
+        "user",
+        "verified",
+        "verify",
+        "visible",
+        "was",
+        "were",
+        "with",
+        "works",
+        "working",
+    }
+)
+_PROOF_CANONICAL = {
+    "absent": "missing",
+    "availability": "present",
+    "available": "present",
+    "cache": "cache",
+    "cached": "cache",
+    "create": "create",
+    "created": "create",
+    "creates": "create",
+    "creating": "create",
+    "creation": "create",
+    "existing": "present",
+    "exists": "present",
+    "fixtures": "fixture",
+    "missing": "missing",
+    "navigate": "navigation",
+    "navigated": "navigation",
+    "navigation": "navigation",
+    "recent": "recent",
+    "recents": "recent",
+    "return": "return",
+    "returned": "return",
+    "returning": "return",
+    "reuse": "reuse",
+    "reused": "reuse",
+    "threads": "thread",
+    "unavailable": "missing",
+}
+
+_UNFINISHED_EVIDENCE = re.compile(
+    r"\b(?:still\s+(?:needs?|requires?)|remains?\s+(?:to\s+be\s+)?|not\s+yet|"
+    r"pending|unverified|incomplete|failed\s+to|did\s+not|does\s+not|has\s+not|have\s+not)"
+    r"\b.{0,48}\b(?:verify|verified|verification|open|opened|complete|completed|done|check|checked)\b",
+    re.IGNORECASE,
+)
+
+
+def _proof_terms(text: str) -> set[str]:
+    terms: set[str] = set()
+    for raw in re.findall(r"[^\W_]+", text.casefold()):
+        if len(raw) < 3 or raw in _PROOF_STOP_WORDS:
+            continue
+        term = _PROOF_CANONICAL.get(raw, raw)
+        if term.endswith("s") and len(term) > 4 and not term.endswith("ss"):
+            term = term[:-1]
+        terms.add(term)
+    return terms
+
+
+def _phase_satisfaction(
+    phase: GoalPhase,
+) -> Literal["relevant_evidence", "verified_offline", "session_cleanup"]:
+    if phase.satisfaction is not None:
+        return phase.satisfaction
+    if phase.kind == "environment":
+        return "verified_offline"
+    if phase.kind == "cleanup":
+        return "session_cleanup"
+    return "relevant_evidence"
+
+
+def _required_proof_matches(phase: GoalPhase) -> int:
+    objective_terms = _proof_terms(phase.objective)
+    return 2 if phase.intent == "alternative" or len(objective_terms) >= 5 else 1
+
+
+def _manual_phase_proof(phase: GoalPhase, evidence: str) -> PhaseProof:
+    if phase.intent != "alternative" and _UNFINISHED_EVIDENCE.search(evidence):
+        raise ValueError(
+            f"evidence explicitly says {phase.id!r} remains unfinished; do not advance it"
+        )
+    objective_terms = _proof_terms(phase.objective)
+    evidence_terms = _proof_terms(evidence)
+    matched = sorted(objective_terms & evidence_terms)
+    required = _required_proof_matches(phase)
+    if len(matched) < required:
+        examples = ", ".join(sorted(objective_terms)[:5]) or "the observable checkpoint"
+        raise ValueError(
+            f"evidence does not substantiate {phase.id!r}; include at least {required} distinct "
+            f"phase-specific observable fact(s) related to: {examples}"
+        )
+
+    branch_id: str | None = None
+    if phase.branches:
+        scored = [
+            (len(_proof_terms(branch.objective) & evidence_terms), branch.id)
+            for branch in phase.branches
+        ]
+        best_score = max(score for score, _branch_id in scored)
+        winners = [candidate for score, candidate in scored if score == best_score and score > 0]
+        if len(winners) == 1:
+            branch_id = winners[0]
+    return PhaseProof(
+        source="manual_evidence",
+        matched_terms=matched,
+        branch_id=branch_id,
+    )
+
+
+def _completion_proof(
+    phase: GoalPhase,
+    evidence: str,
+    structured: PhaseProof | None,
+) -> PhaseProof:
+    satisfaction = _phase_satisfaction(phase)
+    if structured is None:
+        if satisfaction != "relevant_evidence":
+            required = (
+                "a verified network_offline result"
+                if satisfaction == "verified_offline"
+                else "successful session cleanup"
+            )
+            raise ValueError(
+                f"{phase.id!r} requires {required}; manual evidence cannot complete it"
+            )
+        return _manual_phase_proof(phase, evidence)
+
+    valid_offline = (
+        satisfaction == "verified_offline"
+        and structured.source == "verified_event"
+        and structured.command == "network_offline"
+        and structured.verified is True
+    )
+    valid_cleanup = (
+        satisfaction == "session_cleanup"
+        and structured.source == "session_cleanup"
+        and structured.command == "session_finish"
+        and structured.verified is True
+    )
+    if not (valid_offline or valid_cleanup):
+        raise ValueError(f"structured proof does not satisfy {phase.id!r}")
+    return structured
+
+
 def mark_phase_complete(
     cache_dir: str | Path,
     state: SessionState,
     *,
     phase_id: str,
     evidence: str,
+    _proof: PhaseProof | None = None,
 ) -> SessionState:
     """Complete only the current phase, preserving ordered goal semantics."""
     evidence = " ".join(evidence.strip().split())
@@ -300,9 +850,11 @@ def mark_phase_complete(
         raise ValueError(
             f"{phase_id!r} is not the current goal phase; complete {current.id!r} first"
         )
+    proof = _completion_proof(current, evidence, _proof)
     current.status = "completed"
     current.completed_ms = int(time.time() * 1000)
     current.evidence = evidence[:600]
+    current.proof = proof
     if current_index + 1 < len(phases):
         phases[current_index + 1].status = "active"
     updated = state.model_copy(update={"phases": phases})
@@ -349,6 +901,12 @@ def complete_environment_phase(
                 state,
                 phase_id=current.id,
                 evidence="AUA verified no active default network and offline=true",
+                _proof=PhaseProof(
+                    source="verified_event",
+                    matched_terms=["offline"],
+                    command="network_offline",
+                    verified=True,
+                ),
             )
     return state
 
@@ -450,6 +1008,12 @@ def finish_session_state(cache_dir: str | Path, state: SessionState) -> SessionS
             phase.status = "completed"
             phase.completed_ms = now_ms
             phase.evidence = "session finish restored session-owned reversible state"
+            phase.proof = PhaseProof(
+                source="session_cleanup",
+                matched_terms=["restore", "network"],
+                command="session_finish",
+                verified=True,
+            )
     finished = state.model_copy(update={"finished_ms": now_ms, "phases": phases})
     _write_state(cache_dir, finished)
     pointer = _active_path(cache_dir, state.serial, state.owner)

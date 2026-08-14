@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import shlex
 import shutil
 import sys
 import time
@@ -238,6 +239,69 @@ def _resolve_owner_context_without_device(engine: Engine) -> None:
         engine._lease_serial = engine.config.device.serial  # noqa: SLF001
 
 
+class RecommendedUsageError(UsageError):
+    """A safe preflight refusal with one exact non-mutating recovery call."""
+
+    def __init__(self, message: str, *, recommended_call: str, hint: str | None = None) -> None:
+        super().__init__(message, hint=hint)
+        self.recommended_call = recommended_call
+
+    def to_dict(self) -> dict[str, object]:
+        out = super().to_dict()
+        error = out.get("error")
+        if isinstance(error, dict):
+            error["recommended_call"] = self.recommended_call
+        return out
+
+
+def _journal_cli_recovery(
+    ctx: click.Context,
+    *,
+    event: str,
+    ok: bool,
+    error: AuaError | None = None,
+    recommended_call: str | None = None,
+) -> None:
+    """Best-effort host-side journal row for help and pre-device CLI recovery.
+
+    Raw argv is deliberately excluded: a parse failure can leave a secret in an untyped
+    positional. Only the command path, typed error, and safe recommended call are retained.
+    This never resolves a lease or connects to Android.
+    """
+    with contextlib.suppress(Exception):
+        from . import journal as journal_mod
+        from . import leases
+
+        opts = ctx.obj if isinstance(ctx.obj, GlobalOpts) else None
+        cfg = opts.load() if opts is not None else load_config()
+        owner = leases.resolve_owner(opts.owner if opts is not None else None)
+        command_path = str(getattr(ctx, "command_path", None) or "aua")
+        error_value = error.to_dict().get("error") if error is not None else None
+        result: dict[str, Any] = {
+            "ok": ok,
+            "action": "cli-recovery",
+            "event": event,
+        }
+        exact_call = recommended_call or getattr(error, "recommended_call", None)
+        if exact_call:
+            result["recommended_call"] = exact_call
+        journal_mod.record(
+            cache_dir=cfg.cache.dir,
+            serial=(opts.serial if opts is not None else None) or cfg.device.serial,
+            source="cli",
+            cmd=f"cli_{event}",
+            args={"command": command_path},
+            ok=ok,
+            result=result,
+            error=error_value if isinstance(error_value, dict) else None,
+            extra={
+                "invocation_id": globals().get("_INVOCATION_ID") or uuid.uuid4().hex,
+                "cli_event": event,
+            },
+            owner=owner,
+        )
+
+
 # --------------------------------------------------------------------------- error wrap
 
 
@@ -248,6 +312,8 @@ def _run(ctx: typer.Context, fn: Callable[[Engine, OutputFormat], T]) -> T:
     """
     opts = _opts(ctx)
     try:
+        global _INVOCATION_ID
+        _INVOCATION_ID = uuid.uuid4().hex
         cfg_fmt = opts.fmt()
         # A global --until is logically part of the action, so validate it before constructing
         # the engine or applying any side effect.  Previously the parser lived only inside
@@ -255,16 +321,35 @@ def _run(ctx: typer.Context, fn: Callable[[Engine, OutputFormat], T]) -> T:
         # device and then fail as a usage error.  A usage error must mean zero device actions.
         if opts.until:
             standalone_until = getattr(ctx.command, "name", None) == "wait-and-analyze"
-            _parse_await_terms(opts.until, require_positive=not standalone_until)
+            terms = _parse_await_terms(opts.until, require_positive=False)
+            if not standalone_until and not any(not term.negated for term in terms):
+                recommended_call = (
+                    f"aua await-and-analyze {shlex.quote(opts.until)} --observe"
+                )
+                error = RecommendedUsageError(
+                    "an action-bound --until needs positive arrival evidence",
+                    hint=(
+                        "Use the exact standalone recovery call below for an absence-only "
+                        "check, or add a positive text:/rid:/desc: term to the action."
+                    ),
+                    recommended_call=recommended_call,
+                )
+                _journal_cli_recovery(
+                    ctx,
+                    event="usage_error",
+                    ok=False,
+                    error=error,
+                    recommended_call=recommended_call,
+                )
+                raise error
         engine = opts.engine()
-        global _OBSERVATION_VIEW, _UNTIL, _ENGINE, _INVOCATION_ID, _ANNOTATION_WARNINGS
+        global _OBSERVATION_VIEW, _UNTIL, _ENGINE, _ANNOTATION_WARNINGS
         global _EXPECTED_ERROR_CODE
         spec = opts.observe_fields
         if spec is None:
             spec = getattr(engine.config.output, "observation_fields", None)
         _OBSERVATION_VIEW = Projection.for_observation(spec, fmt=cfg_fmt)
         _ENGINE = engine
-        _INVOCATION_ID = uuid.uuid4().hex
         _EXPECTED_ERROR_CODE = opts.expect_error
         _ANNOTATION_WARNINGS = []
         if not opts.until:
@@ -295,8 +380,12 @@ def _run(ctx: typer.Context, fn: Callable[[Engine, OutputFormat], T]) -> T:
             try:
                 apply(engine, values)
             except AuaError as err:
-                error = err.to_dict().get("error")
-                warning = dict(error) if isinstance(error, dict) else {"message": str(err)}
+                annotation_error = err.to_dict().get("error")
+                warning = (
+                    dict(annotation_error)
+                    if isinstance(annotation_error, dict)
+                    else {"message": str(err)}
+                )
                 warning["annotation"] = kind
                 _ANNOTATION_WARNINGS.append(warning)
             except (OSError, ValueError) as err:
@@ -649,8 +738,9 @@ def _await_until(result: Any) -> Any:
     stopped trusting the observation and hand-rolled ``wait`` + ``analyze`` after every tap.
 
     A caller-supplied predicate is what resolves the ambiguity, so the budget comes from the
-    predicate rather than the settle default, and ``await_outcome`` says which of three things
-    ended the wait: ``satisfied`` / ``screen-changed`` / ``timeout``.
+    predicate rather than the settle default. ``await_outcome`` says whether it was satisfied,
+    the activity changed, the budget timed out, or an action reached a stable non-loading screen
+    that does not contain the requested positive term (``settled-unmet``).
     """
     if _UNTIL is None or _ENGINE is None:
         return result
@@ -681,6 +771,7 @@ def _await_until(result: Any) -> Any:
     for attr in (
         "await_outcome",
         "await_terms",
+        "arrival_mismatch",
         "elapsed_ms",
         "observation",
         "observation_present",
@@ -1266,6 +1357,9 @@ class UnknownCommand(AuaError):
         message = f"`aua {name}` is not a command."
         if self.meant:
             message += f" Use `aua {self.meant}`."
+        self.recommended_call = (
+            f"aua {self.meant} --help" if self.meant else "aua guide --brief"
+        )
         super().__init__(message, hint=_GUIDE_POINTER)
 
     def to_dict(self) -> dict[str, object]:
@@ -1276,6 +1370,7 @@ class UnknownCommand(AuaError):
         if isinstance(err, dict):
             if self.meant:
                 err["did_you_mean"] = self.meant
+            err["recommended_call"] = self.recommended_call
             err["how_to_drive"] = [f"{cmd}  # {why}" for cmd, why in ORIENTATION]
         return out
 
@@ -1310,6 +1405,12 @@ class GuidingGroup(TyperGroup):
         ]
         body = "\n".join([*head, rendered.rstrip("\n")])
         click.echo(paginate(body, _page_arg(), more="aua --help --page {page}"))
+        _journal_cli_recovery(
+            ctx,
+            event="help",
+            ok=True,
+            recommended_call="aua guide --brief",
+        )
 
     def resolve_command(
         self, ctx: click.Context, args: list[str]
@@ -1321,6 +1422,13 @@ class GuidingGroup(TyperGroup):
             if not name or name in self.commands:
                 raise
             err = UnknownCommand(name)
+            _journal_cli_recovery(
+                ctx,
+                event="usage_error",
+                ok=False,
+                error=err,
+                recommended_call=err.recommended_call,
+            )
             emit_error(err)
             raise typer.Exit(int(err.exit_code)) from None
 
@@ -1344,10 +1452,19 @@ class GuidingGroup(TyperGroup):
             # is one level down, and naming the wrong one would put a broken example in the
             # hint — the exact failure this is here to stop.
             path = getattr(exc.ctx, "command_path", None) or ctx.info_name
-            err = UsageError(
+            recommended_call = f"{path} {choices.split('|')[0].strip()}"
+            err = RecommendedUsageError(
                 f"`{path} {metavar}` needs a value",
                 hint=f"One of: {choices}. Pass it as the first argument, e.g. "
-                f"`{path} {choices.split('|')[0].strip()}`.",
+                f"`{recommended_call}`.",
+                recommended_call=recommended_call,
+            )
+            _journal_cli_recovery(
+                exc.ctx or ctx,
+                event="usage_error",
+                ok=False,
+                error=err,
+                recommended_call=recommended_call,
             )
             emit_error(err)
             raise typer.Exit(int(err.exit_code)) from None
@@ -1807,6 +1924,12 @@ def tap(
     ident: str | None = typer.Argument(
         None, metavar="[ID]", help="Element id from the last analyze (or the selector value)."
     ),
+    id_opt: int | None = typer.Option(
+        None,
+        "--id",
+        min=0,
+        help="Element id from the last analyze; accepted as an explicit alias for positional ID.",
+    ),
     by: str | None = _SEL_BY,
     rid: str | None = _SEL_RID,
     text: str | None = _SEL_TEXT,
@@ -1834,7 +1957,7 @@ def tap(
 ) -> None:
     """Tap an element — by id from the last analyze, or by a one-shot selector.
 
-    `aua tap-and-analyze 9` · `aua tap-and-analyze --rid notificationsButton` · `aua tap-and-analyze --text "Create an app"` ·
+    `aua tap-and-analyze 9` (or `--id 9`) · `aua tap-and-analyze --rid notificationsButton` · `aua tap-and-analyze --text "Create an app"` ·
     `aua tap-and-analyze --by id homeTabBROWSE`. A selector resolves on the live screen in this one
     call; matching nothing exits 6 and matching several exits 7 with the candidates — it
     never silently taps nothing.
@@ -1845,8 +1968,16 @@ def tap(
     """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
+        effective_ident = ident
+        if id_opt is not None:
+            if ident is not None or rid or text or desc or by:
+                raise UsageError(
+                    "--id is one complete target; do not combine it with another selector",
+                    hint="Use either `tap-and-analyze --id 4` or one --rid/--text/--desc target.",
+                )
+            effective_ident = str(id_opt)
         if point is not None:
-            if ident or rid or text or desc:
+            if effective_ident or rid or text or desc:
                 raise UsageError(
                     "--point taps a coordinate, so it cannot be combined with a selector",
                     hint="drop the selector, or drop --point and address the element",
@@ -1869,13 +2000,19 @@ def tap(
             )
             return
         selector = _selector(
-            ident=ident, by=by, rid=rid, text=text, desc=desc, index=index, first=first
+            ident=effective_ident,
+            by=by,
+            rid=rid,
+            text=text,
+            desc=desc,
+            index=index,
+            first=first,
         )
         _emit(
             _route(
                 engine,
                 "tap",
-                element_id=_require_target("tap", ident, selector),
+                element_id=_require_target("tap", effective_ident, selector),
                 selector=selector,
                 observe=observe,
                 with_image=_annotate_arg(with_image),
@@ -1908,7 +2045,7 @@ def await_cmd(
         help="Omit meta from the returned observation (same meaning as analyze).",
     ),
 ) -> None:
-    """Wait for a *condition*, and say which of three things ended the wait.
+    """Wait for a condition, distinguishing success, navigation, and timeout.
 
     `await_outcome` is `satisfied`, `screen-changed` (the foreground activity moved while
     waiting — the surface is gone, so more waiting cannot help) or `timeout`. That distinction
@@ -2580,6 +2717,13 @@ def back_until_cmd(
         max=12,
         help="Maximum semantic Back/navigation-up steps before returning unmet evidence.",
     ),
+    max_back: int | None = typer.Option(
+        None,
+        "--max-back",
+        min=1,
+        max=12,
+        help="Deprecated alias for --max-steps; use --max-steps in new calls.",
+    ),
     step_timeout_ms: int = typer.Option(
         1_200,
         "--step-timeout",
@@ -2617,6 +2761,16 @@ def back_until_cmd(
     """Return from nested screens, stopping on a mapped screen or semantic evidence."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
+        effective_max_steps = max_steps
+        if max_back is not None:
+            source = getattr(ctx.get_parameter_source("max_steps"), "name", None)
+            if source == "COMMANDLINE":
+                raise UsageError(
+                    "pass only one of --max-steps or deprecated --max-back",
+                    hint="Use `--max-steps N`; it is the canonical spelling.",
+                )
+            typer.echo("warning: --max-back is deprecated; use --max-steps.", err=True)
+            effective_max_steps = max_back
         if _UNTIL is not None:
             raise UsageError(
                 "back-until owns its destination predicate; do not combine it with global --until",
@@ -2635,7 +2789,7 @@ def back_until_cmd(
             predicate=predicate,
             back_id=back_id,
             back_selector=selector or None,
-            max_steps=max_steps,
+            max_steps=effective_max_steps,
             step_timeout_ms=step_timeout_ms,
             poll_ms=poll_ms,
         )

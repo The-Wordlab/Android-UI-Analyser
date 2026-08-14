@@ -5116,24 +5116,31 @@ class Engine:
             emulator_started=emulator_started,
         )
         self._session_id = state.session_id
-        # Seed every UI checkpoint from the one bootstrap observation. Later analyzed actions
-        # refresh only the active phase's call, so progression never needs a discovery-only
-        # round trip.
-        for phase in state.phases:
-            call = self._phase_recommended_call(state, phase, observed)
+        # Recommend only the active checkpoint from this frame. Future phases must be planned
+        # lazily from the observation that activates them; projecting a launcher frame onto every
+        # later checkpoint produced stale and sometimes misleading calls.
+        active_phase = next(
+            (phase for phase in state.phases if phase.status != "completed"),
+            None,
+        )
+        if active_phase is not None:
+            call = self._phase_recommended_call(state, active_phase, observed)
             if call is not None:
                 from .session import update_phase_recommendation
 
                 state = update_phase_recommendation(
                     self.config.cache.dir,
                     state,
-                    phase_id=phase.id,
+                    phase_id=active_phase.id,
                     call=call,
                 )
         out = plan.model_dump(mode="json")
         from .session import phase_progress
 
-        progress = phase_progress(state)
+        # Bootstrap is a routing response, not a second copy of the persisted session document.
+        # Keep the current checkpoint and terse upcoming list; `session progress` exposes the full
+        # durable phase record on explicit reconnect/debug requests.
+        progress = phase_progress(state, compact=True)
         phase_call = progress.get("next_call")
         out.update(
             session_id=state.session_id,
@@ -5176,6 +5183,10 @@ class Engine:
         avoid_deeplinks: bool = False,
     ) -> dict[str, Any] | None:
         """Return one safe exact call for a phase, using only the supplied fresh frame."""
+        avoid_deeplinks = avoid_deeplinks or any(
+            re.search(r"\bdeep[ -]?links?\b", constraint, flags=re.IGNORECASE)
+            for constraint in getattr(phase, "constraints", [])
+        )
         if phase.kind == "environment":
             return {
                 "kind": "network_offline",
@@ -5196,7 +5207,22 @@ class Engine:
                 "executes": True,
             }
         if observation is None:
-            return phase.recommended_call
+            if phase.recommended_call is not None:
+                return phase.recommended_call
+            # Deterministic host/device transitions (notably verified network isolation) do not
+            # carry an Android hierarchy. Once one activates a UI checkpoint, return the one
+            # read-only call that will both observe that frame and lazily plan the phase. A null
+            # next_call strands a fresh agent; replaying the pre-transition frame risks stale ids.
+            return {
+                "kind": "refresh_observation",
+                "cli": f"aua --serial {state.serial} analyze --source hierarchy",
+                "mcp": {"tool": "analyze_screen", "arguments": {"source": "hierarchy"}},
+                "reason": (
+                    "The active UI phase began after a non-UI transition. Read one fresh "
+                    "hierarchy frame; its goal_progress will contain the exact next action."
+                ),
+                "executes": False,
+            }
 
         # Offline is already its own deterministic phase. Removing that word here prevents the
         # UI checkpoint planner from recommending network isolation again after it completed.
@@ -5310,15 +5336,32 @@ class Engine:
             ranked.append((score, element))
         if ranked:
             _score, element = max(ranked, key=lambda item: (item[0], -item[1].id))
+            mcp_arguments: dict[str, Any]
             if element.resource_id:
                 rid = element.resource_id.rsplit("/", 1)[-1]
-                cli = f"aua tap-and-analyze --rid {shlex.quote(rid)}"
+                if len(match_selector(observation.elements, rid=rid)) == 1:
+                    cli = f"aua tap-and-analyze --rid {shlex.quote(rid)}"
+                    mcp_arguments = {"rid": rid}
+                else:
+                    cli = f"aua tap-and-analyze {element.id}"
+                    mcp_arguments = {"id": element.id}
+            elif element.content_desc and len(
+                match_selector(observation.elements, desc=element.content_desc)
+            ) == 1:
+                cli = f"aua tap-and-analyze --desc {shlex.quote(element.content_desc)}"
+                mcp_arguments = {"desc": element.content_desc}
+            elif element.text and len(
+                match_selector(observation.elements, text=element.text)
+            ) == 1:
+                cli = f"aua tap-and-analyze --text {shlex.quote(element.text)}"
+                mcp_arguments = {"text": element.text}
             else:
                 cli = f"aua tap-and-analyze {element.id}"
+                mcp_arguments = {"id": element.id}
             return {
                 "kind": "manual_action",
                 "cli": cli,
-                "mcp": {"tool": "tap_and_analyze", "arguments": {"id": element.id}},
+                "mcp": {"tool": "tap_and_analyze", "arguments": mcp_arguments},
                 "reason": (
                     f"The current frame has one goal-relevant enabled control: "
                     f"{(element.text or element.content_desc or element.resource_id or element.id)!r}."
@@ -6515,6 +6558,18 @@ class Engine:
                     # package/activity there — and appending a marker to it corrupts the thing a
                     # caller parses. The caveat text, not a bare flag, so the reason travels too.
                     result.stale_risk = caveat
+                launch_next_actions_unstable = bool(
+                    result.action == "app-launch"
+                    and (
+                        ready is None
+                        or ready.get("timeout")
+                        or not ready.get("changed")
+                        # hierarchy-fast proves departure from the old tree with one sample. It
+                        # is enough for an observation, but not for advertising numeric ids that
+                        # may disappear before the next command reaches them.
+                        or ready.get("via") not in {"pixels", "hierarchy"}
+                    )
+                )
                 if ready and ready.get("ms") is not None and ready.get("via") != "unchanged":
                     # Surface settle cost so agents/tests can see why a tap took >50 ms — in its own
                     # field. This used to be appended to `detail` as a "settle=295ms via=pixels"
@@ -6534,13 +6589,21 @@ class Engine:
                         settle["semantic_confirmation"] = ready["semantic_confirmation"]
                     result.settle = settle
                 result.observation_present = True
-                result.next_actions = self._next_actions(obs)
+                result.next_actions = (
+                    None if launch_next_actions_unstable else self._next_actions(obs)
+                )
                 nav = list(obs.meta.known_routes or []) + list(obs.meta.suggested_gotos or [])
                 result.routes = nav or None
                 result.known_screen = obs.meta.known_screen
                 result.stable_elements = self._stable_elements(obs.elements)
                 result.action_diff_summary = self._compact_action_diff(obs.meta.element_diff)
-                if ready and ready.get("timeout") and self._change_has_semantic_effect(change):
+                if launch_next_actions_unstable:
+                    result.note = (
+                        "The app is foreground, but its launch screen has not produced a stable "
+                        "readback yet, so numeric next actions are withheld. Run `aua analyze` "
+                        "once before acting on an id."
+                    )
+                elif ready and ready.get("timeout") and self._change_has_semantic_effect(change):
                     result.note = (
                         "Fresh hierarchy confirms the action changed the screen. Use this "
                         "observation; if an exact destination is still absent, run one exact "
@@ -8610,6 +8673,205 @@ class Engine:
         with contextlib.suppress(Exception):  # playbook is a bonus; never fail the action
             mem.remember_deeplink(pkg, uri, probed=True)
 
+    @staticmethod
+    def _await_terms_on_observation(
+        terms: list[_AwaitTerm],
+        previous: list[dict[str, Any]],
+        observation: AnalyzeResult,
+        *,
+        mode: MatchMode,
+        ignore_case: bool,
+    ) -> list[dict[str, Any]]:
+        """Evaluate UI terms against one exact hierarchy frame.
+
+        The ordinary poll uses ``Device.find_text`` because it is the cheapest possible check.
+        Arrival-mismatch detection also needs to prove that the *stable frame* it inspected still
+        misses the predicate.  Reusing results from an earlier selector RPC would combine two
+        moments and could call a destination wrong while it was still rendering.
+
+        Off-screen ``net:``/``log:`` terms retain their already evaluated value.  In practice the
+        early mismatch path is intentionally disabled when a positive off-screen term is present,
+        but retaining those rows keeps this helper total and the output order unchanged.
+        """
+
+        def matches(candidate: str, wanted: str) -> bool:
+            hay = candidate.casefold() if ignore_case else candidate
+            needle = wanted.casefold() if ignore_case else wanted
+            if mode is MatchMode.exact:
+                return hay == needle
+            if mode is MatchMode.regex:
+                flags = re.IGNORECASE if ignore_case else 0
+                return re.search(wanted, candidate, flags) is not None
+            return needle in hay
+
+        refreshed: list[dict[str, Any]] = []
+        for index, term in enumerate(terms):
+            if term.by not in {"text", "rid", "desc"}:
+                refreshed.append(dict(previous[index]))
+                continue
+            present = False
+            for element in observation.elements:
+                if term.by == "rid":
+                    full = element.resource_id or ""
+                    values = [full, _id_tail(full) or ""] if full else []
+                elif term.by == "desc":
+                    values = [element.content_desc or ""]
+                else:
+                    values = [element.text or "", element.content_desc or ""]
+                if any(value and matches(value, term.value) for value in values):
+                    present = True
+                    break
+            refreshed.append(
+                {
+                    "term": term.text,
+                    "present": present,
+                    "satisfied": (not present) if term.negated else present,
+                }
+            )
+        return refreshed
+
+    @staticmethod
+    def _await_observation_identity(observation: AnalyzeResult) -> str | None:
+        """Stable UI shape used only to confirm an action destination across fresh frames."""
+        anchors = tuple(
+            (
+                _id_tail(element.resource_id) or "",
+                element.content_desc or "",
+                element.text or "",
+                element.bounds,
+            )
+            for element in app_elements(observation.elements)
+            if element.resource_id or element.content_desc or element.text
+        )
+        if not anchors:
+            return None
+        return hashlib.sha256(
+            repr((observation.screen.package or "", anchors)).encode()
+        ).hexdigest()[:16]
+
+    @staticmethod
+    def _await_destination_changed(
+        observation: AnalyzeResult, baseline: dict[str, Any] | None
+    ) -> bool:
+        """Whether a hierarchy frame is semantically different from the pre-action screen."""
+        if baseline is None:
+            return False
+        before_identity = str(baseline.get("arrival_identity") or "")
+        after_identity = Engine._await_observation_identity(observation) or ""
+        if before_identity and after_identity:
+            return before_identity != after_identity
+        before_package = str(baseline.get("package") or "")
+        after_package = str(observation.screen.package or "")
+        if before_package and after_package and before_package != after_package:
+            return True
+        before_known = str(baseline.get("known_screen") or "")
+        after_known = str(observation.meta.known_screen or "")
+        if before_known and after_known and before_known != after_known:
+            return True
+        before_labels = {str(value) for value in baseline.get("labels") or [] if value}
+        after_labels = {
+            _label(value)
+            for element in app_elements(observation.elements)
+            for value in (element.text, element.content_desc)
+            if value and _label(value)
+        }
+        if before_labels != after_labels:
+            return True
+        before_rids = {str(value) for value in baseline.get("rids") or [] if value}
+        after_rids = {
+            rid
+            for element in app_elements(observation.elements)
+            if (rid := _id_tail(element.resource_id))
+        }
+        if before_rids and before_rids != after_rids:
+            return True
+        return int(baseline.get("count") or 0) != len(observation.elements)
+
+    @staticmethod
+    def _arrival_predicate_suggestions(
+        observation: AnalyzeResult,
+        baseline: dict[str, Any] | None,
+        *,
+        limit: int = 3,
+    ) -> list[str]:
+        """Stable positive predicates visible only after (or at least on) the destination.
+
+        Resource ids are preferred because they survive copy changes and do not echo user content.
+        Text/description is a fallback for apps that expose no ids.  Numeric frame ids are never
+        suggested: they are observation-local and are exactly what this recovery is meant to make
+        unnecessary.
+        """
+
+        def escaped(value: str) -> str:
+            return value.replace("\\", "\\\\").replace(",", "\\,")
+
+        before_rids = {str(value) for value in (baseline or {}).get("rids") or [] if value}
+        before_labels = {str(value) for value in (baseline or {}).get("labels") or [] if value}
+        elements = app_elements(observation.elements)
+        # Actionable controls first, then the remaining anchors in visual order.
+        ordered = sorted(
+            elements,
+            key=lambda element: (
+                0 if element.enabled and (element.clickable or element.checkable) else 1,
+                element.bounds[1],
+                element.bounds[0],
+            ),
+        )
+        suggestions: list[str] = []
+        seen: set[str] = set()
+
+        def add(prefix: str, value: str) -> None:
+            value = _label(value)
+            if not value or len(value) > 120:
+                return
+            predicate = f"{prefix}:{escaped(value)}"
+            key = predicate.casefold()
+            if key not in seen:
+                seen.add(key)
+                suggestions.append(predicate)
+
+        # Prefer anchors introduced by the action, then fall back to any destination anchor.
+        for new_only in (True, False):
+            for element in ordered:
+                rid = _id_tail(element.resource_id)
+                if not rid or (new_only and rid in before_rids):
+                    continue
+                add("rid", rid)
+                if len(suggestions) >= limit:
+                    return suggestions
+        for new_only in (True, False):
+            for element in ordered:
+                if element.password:
+                    continue
+                for prefix, value in (
+                    ("text", element.text or ""),
+                    ("desc", element.content_desc or ""),
+                ):
+                    label = _label(value)
+                    if (
+                        not label
+                        or label.isdigit()
+                        or (new_only and label in before_labels)
+                    ):
+                        continue
+                    add(prefix, label)
+                    if len(suggestions) >= limit:
+                        return suggestions
+        return suggestions
+
+    def _sample_action_destination(self) -> AnalyzeResult | None:
+        """One fresh, hierarchy-only frame for action-arrival mismatch detection."""
+        try:
+            return self.analyze(
+                source="hierarchy",
+                with_ocr=False,
+                no_cache=True,
+                record=False,
+            )
+        except Exception as exc:  # noqa: BLE001 - a missed optimization must not fail the wait
+            logger.debug("action arrival sample unavailable: %s", exc)
+            return None
+
     def await_predicate(
         self,
         predicate: str,
@@ -8623,7 +8885,7 @@ class Engine:
         rich_ui: bool = True,
         hierarchy_only: bool = False,
     ) -> ActionResult:
-        """Wait until *predicate* holds, and say **which** of three things ended the wait.
+        """Wait until *predicate* holds, and say exactly what ended the wait.
 
         Observed: image-editing round trips run 2-4 minutes each; one lane watched a GET hang 48
         seconds before cancelling, another a 3-minute stall that resolved on retry. With nothing
@@ -8637,6 +8899,10 @@ class Engine:
           predicate is still unmet. Returns immediately instead of burning the budget: the
           surface being waited on is gone, so more waiting cannot help. This is the outcome that
           separates "we got kicked out / an error dialog took over" from "still working".
+        * ``settled-unmet`` — action-bound waits only: the action reached a stable, non-loading,
+          semantically different destination in the same activity, but the caller's positive UI
+          arrival term is not on it. This returns a structured ``arrival_mismatch`` rather than
+          spending a long budget on a predicate that describes the screen left behind.
         * ``timeout`` — budget spent, predicate unmet, still on the same screen.
 
         **Not** network idle, which is what was originally asked for. This app is never network
@@ -8644,9 +8910,11 @@ class Engine:
         chat surfaces stream — so idleness would be a flaky proxy for "this is ready". A predicate
         says what is actually wanted.
 
-        ``screen-changed`` is keyed on the resumed activity/package and deliberately not on the
-        element tree: a streaming surface rewrites its tree constantly, so a tree-change trigger
-        would abort every legitimate wait on exactly the screens this exists for.
+        Standalone ``screen-changed`` remains keyed on the resumed activity/package and
+        deliberately not on the element tree: a streaming surface rewrites its tree constantly,
+        so a tree-change trigger would abort every legitimate wait on exactly the screens this
+        exists for. The stable-tree check is reachable only when ``adopt_action`` says one action
+        has already run, and requires two equal fresh destination frames.
 
         Per-term results are always returned, satisfied or not, because *which* term is missing is
         how a reader tells a failed load from a slow one: spinner gone but results absent is a
@@ -8655,6 +8923,18 @@ class Engine:
         terms = _parse_await_terms(predicate, require_positive=adopt_action)
         device = self.device
         mode = MatchMode(match)
+        action_baseline = deepcopy(self._action_observation_baseline) if adopt_action else None
+        positive_terms = [term for term in terms if not term.negated]
+        detect_arrival_mismatch = bool(
+            adopt_action
+            and action_baseline is not None
+            and positive_terms
+            # A stable UI cannot prove that an asynchronous network/log event will never arrive.
+            # Preserve those waits rather than turning a quiet screen into a false mismatch.
+            and all(term.by in {"text", "rid", "desc"} for term in positive_terms)
+        )
+        stable_destination_identity: str | None = None
+        stable_destination_checks = 0
 
         def snapshot() -> tuple[str, str]:
             try:
@@ -8836,6 +9116,103 @@ class Engine:
                             hierarchy_only=hierarchy_only,
                         )
                     results = rich
+            if detect_arrival_mismatch:
+                destination = self._sample_action_destination()
+                if destination is not None:
+                    destination_terms = self._await_terms_on_observation(
+                        terms,
+                        results,
+                        destination,
+                        mode=mode,
+                        ignore_case=ignore_case,
+                    )
+                    if all(term["satisfied"] for term in destination_terms):
+                        return self._await_result(
+                            "satisfied",
+                            destination_terms,
+                            started_at,
+                            checks,
+                            origin,
+                            origin,
+                            observe,
+                            adopt_action,
+                            hierarchy_only=hierarchy_only,
+                        )
+                    unmet_positive = [
+                        row["term"]
+                        for term, row in zip(terms, destination_terms, strict=True)
+                        if not term.negated and not row["satisfied"]
+                    ]
+                    negative_unmet = any(
+                        term.negated and not row["satisfied"]
+                        for term, row in zip(terms, destination_terms, strict=True)
+                    )
+                    identity = self._await_observation_identity(destination)
+                    candidate = bool(
+                        unmet_positive
+                        and not negative_unmet
+                        and identity
+                        and not self._observation_is_loading(destination)
+                        and self._await_destination_changed(destination, action_baseline)
+                    )
+                    if candidate:
+                        if identity == stable_destination_identity:
+                            stable_destination_checks += 1
+                        else:
+                            stable_destination_identity = identity
+                            stable_destination_checks = 1
+                        if stable_destination_checks >= 2:
+                            suggestions = self._arrival_predicate_suggestions(
+                                destination,
+                                action_baseline,
+                            )
+                            satisfied_negatives = [
+                                term.text
+                                for term, row in zip(terms, destination_terms, strict=True)
+                                if term.negated and row["satisfied"]
+                            ]
+                            corrected = ",".join(
+                                [*suggestions[:1], *satisfied_negatives]
+                            )
+                            recommended_call = (
+                                "aua await-and-analyze "
+                                f"{shlex.quote(corrected)} --observe"
+                                if corrected
+                                else None
+                            )
+                            mismatch: dict[str, Any] = {
+                                "code": "arrival_mismatch",
+                                "original_predicate": predicate,
+                                "unmet_positive_terms": unmet_positive,
+                                "suggested_positive_predicates": suggestions,
+                                "stable_checks": stable_destination_checks,
+                                "screen_changed": True,
+                                "loading": False,
+                                "action_repeated": False,
+                            }
+                            if destination.meta.known_screen:
+                                mismatch["known_screen"] = destination.meta.known_screen
+                            if recommended_call:
+                                mismatch["recommended_call"] = recommended_call
+                                mismatch["recommended_mcp_call"] = {
+                                    "tool": "await_and_analyze",
+                                    "arguments": {"predicate": corrected},
+                                }
+                            return self._await_result(
+                                "settled-unmet",
+                                destination_terms,
+                                started_at,
+                                checks,
+                                origin,
+                                origin,
+                                observe,
+                                adopt_action,
+                                hierarchy_only=hierarchy_only,
+                                arrival_mismatch=mismatch,
+                            )
+                    else:
+                        stable_destination_identity = None
+                        stable_destination_checks = 0
             now = origin if hierarchy_only else snapshot()
             if now != origin and any(now):
                 return self._await_result(
@@ -8889,6 +9266,7 @@ class Engine:
         adopt_action: bool = False,
         *,
         hierarchy_only: bool = False,
+        arrival_mismatch: dict[str, Any] | None = None,
     ) -> ActionResult:
         elapsed = int((time.monotonic() - started_at) * 1000)
         unmet = [t["term"] for t in terms if not t["satisfied"]]
@@ -8905,13 +9283,14 @@ class Engine:
             # rather than parsing prose. `ok` alone cannot carry three states.
             await_outcome=outcome,
             await_terms=terms,
+            arrival_mismatch=arrival_mismatch,
             elapsed_ms=elapsed,
         )
         # A standalone await is read-only. A global action ``--until`` is different: its final
         # evidence replaces the action's early loading-shell readback, so it must run the normal
         # recording path and consume the still-pending action into this destination. The CLI
         # opts into this explicitly; MCP/standalone waits retain their passive behaviour.
-        return self._observe(
+        observed = self._observe(
             result,
             observe,
             settle=False,
@@ -8921,6 +9300,16 @@ class Engine:
             hierarchy_only=hierarchy_only,
             adopt_action=adopt_action,
         )
+        if arrival_mismatch is not None:
+            call = arrival_mismatch.get("recommended_call")
+            observed.note = (
+                "The action ran once and reached this stable destination, but its arrival "
+                "predicate names content that is not here. Reuse this fresh observation and do "
+                "not repeat the action."
+            )
+            if call:
+                observed.note += f" If explicit validation is needed, use `{call}`."
+        return observed
 
     def wait(
         self,
@@ -10875,6 +11264,7 @@ class Engine:
         if cached is None:
             return None
         labels: list[str] = []
+        rids: list[str] = []
         focused: int | None = None
         for e in cached.elements:
             if e.focused and focused is None:
@@ -10882,10 +11272,15 @@ class Engine:
             label = (e.text or e.content_desc or "").strip()
             if label:
                 labels.append(_label(label))
+            rid = _id_tail(e.resource_id)
+            if rid:
+                rids.append(rid)
         return {
             "count": len(cached.elements),
             "focused": focused,
             "labels": labels,
+            "rids": rids,
+            "arrival_identity": self._await_observation_identity(cached),
             "package": cached.screen.package,
             "activity": self._last_activity or self._read_activity(),
             "known_screen": (

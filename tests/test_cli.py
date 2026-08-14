@@ -257,6 +257,19 @@ def test_tap_records_click_and_emits_action(patched_device: FakeDevice) -> None:
     assert any(call[0] == "click" for call in patched_device.calls)
 
 
+def test_tap_accepts_explicit_id_flag_for_cli_mcp_symmetry(
+    patched_device: FakeDevice,
+) -> None:
+    seed = runner.invoke(app, ["analyze", "--source", "hierarchy"])
+    assert seed.exit_code == 0, seed.stderr
+
+    result = runner.invoke(app, ["tap-and-analyze", "--id", "1"])
+
+    assert result.exit_code == 0, result.stderr
+    assert json.loads(result.stdout)["id"] == 1
+    assert any(call[0] == "click" for call in patched_device.calls)
+
+
 def test_click_is_alias_of_tap(patched_device: FakeDevice) -> None:
     runner.invoke(app, ["analyze", "--source", "hierarchy"])
     result = runner.invoke(app, ["click-and-analyze", "1"])
