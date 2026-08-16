@@ -131,6 +131,10 @@ _CHANGE_TEXT_CAP = 12  # text deltas echoed back per direction; a list screen wo
 _FLAGS_VERIFY_DEADLINE_S = 2.0  # how long a flag write gets to reach the app's prefs file
 _FLAGS_ENTRY_TIMEOUT_S = 3.0  # how long a pinned entry Activity gets before the default one
 _FLAGS_FOREGROUND_TIMEOUT_S = 6.0  # how long the relaunched app gets to reach the foreground
+# Foreground ownership can lead accessibility-window attachment briefly on a cold launch. Retry
+# only while the requested package demonstrably remains foreground, and never beyond this budget.
+_LAUNCH_HIERARCHY_SETTLE_S = 2.0
+_LAUNCH_HIERARCHY_POLL_S = 0.05
 # Terms that describe the surrounding UI rather than a user's intended control. A single match
 # on one of these is not enough to turn a visible multi-word control into an execution proposal.
 _GENERIC_MANUAL_MATCH_TERMS = frozenset(
@@ -5141,6 +5145,7 @@ class Engine:
         observation: AnalyzeResult | None = None,
         start_emulator: bool = False,
         headed: bool = False,
+        audio: bool = False,
         avd: str | None = None,
         package: str | None = None,
         activity: str | None = None,
@@ -5164,6 +5169,7 @@ class Engine:
                 boot = emulator_mod.start(
                     avd,
                     headless=not headed,
+                    audio=audio,
                     cache_dir=self.config.cache.dir,
                     owner=boot_owner,
                 )
@@ -6931,6 +6937,121 @@ class Engine:
                 return False
             time.sleep(0.1)
 
+    def _await_launch_hierarchy(self, package: str) -> AnalyzeResult:
+        """Return a hierarchy attributed to a launch whose foreground is already proven.
+
+        Android can report the new Activity as focused before its accessibility window replaces a
+        short-lived SystemUI tree. That is a read race, not evidence that the launch failed. Retry
+        fresh hierarchy-only samples while the requested package remains foreground; if ownership
+        changes or the bounded attachment window expires, refuse the mixed-package observation.
+        """
+        deadline = time.monotonic() + _LAUNCH_HIERARCHY_SETTLE_S
+        last_package = ""
+        while True:
+            # `_observe()` has already cached its first readback. Once package attribution says
+            # that tree belongs to another window, neither its on-disk ids nor its in-process
+            # differential baseline may survive into a retry (or a typed failure).
+            self._invalidate_launch_observation()
+            try:
+                fresh = self.analyze(
+                    source="hierarchy",
+                    with_ocr=False,
+                    no_cache=True,
+                    record=False,
+                )
+            except Exception:
+                self._invalidate_launch_observation()
+                raise
+            last_package = fresh.screen.package or ""
+            if not last_package:
+                try:
+                    foreground = str((self.device.current_app() or {}).get("package") or "")
+                except Exception:  # noqa: BLE001 — absence of ownership proof must fail closed
+                    foreground = ""
+                if foreground != package:
+                    self._invalidate_launch_observation()
+                    raise DeviceError(
+                        (
+                            f"{package} reached the foreground, but ownership changed to "
+                            f"{foreground or 'an unknown package'} while the hierarchy had no "
+                            "package attribution"
+                        ),
+                        code="launch_observation_mismatch",
+                        hint=(
+                            "Inspect one fresh hierarchy before acting; AUA did not attribute an "
+                            "unowned hierarchy to the launched app."
+                        ),
+                    )
+                fresh.screen.package = package
+                self._write_cache(fresh)
+                return fresh
+            if last_package == package:
+                # `no_cache=True` prevents a retry sample from becoming authoritative merely by
+                # being read. Persist only the sample whose ownership this method accepted.
+                self._write_cache(fresh)
+                return fresh
+
+            try:
+                foreground = str((self.device.current_app() or {}).get("package") or "")
+            except Exception:  # noqa: BLE001 — absence of ownership proof must fail closed
+                foreground = ""
+            if foreground != package:
+                self._invalidate_launch_observation()
+                raise DeviceError(
+                    (
+                        f"{package} reached the foreground, but ownership changed to "
+                        f"{foreground or 'an unknown package'} while the hierarchy belonged to "
+                        f"{last_package}"
+                    ),
+                    code="launch_observation_mismatch",
+                    hint=(
+                        "Inspect one fresh hierarchy before acting; AUA did not return a mixed-"
+                        "package launch observation."
+                    ),
+                )
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self._invalidate_launch_observation()
+                raise DeviceError(
+                    (
+                        f"launch foreground was {package}, but the hierarchy still belonged to "
+                        f"{last_package} after the attachment wait"
+                    ),
+                    code="launch_observation_mismatch",
+                    hint=(
+                        "The launched window did not attach consistently. Inspect one fresh "
+                        "hierarchy before acting."
+                    ),
+                )
+            time.sleep(min(_LAUNCH_HIERARCHY_POLL_S, remaining))
+
+    def _invalidate_launch_observation(self) -> None:
+        """Drop every cache layer that could still describe a rejected launch tree."""
+        self._invalidate_cache()
+        self._prefetch.invalidate()
+        self._last_analyze_elements = None
+        self._last_hierarchy_hash = None
+        self._last_analyze_result = None
+
+    def _adopt_recovered_launch_observation(
+        self, launched: ActionResult, fresh: AnalyzeResult
+    ) -> None:
+        """Replace all fields derived from a transient launch readback with *fresh*."""
+        launched.observation = fresh
+        launched.observation_present = True
+        launched.stable_elements = self._stable_elements(fresh.elements)
+        launched.next_actions = self._next_actions(fresh)
+        nav = list(fresh.meta.known_routes or []) + list(fresh.meta.suggested_gotos or [])
+        launched.routes = nav or None
+        launched.known_screen = fresh.meta.known_screen
+        launched.action_diff_summary = self._compact_action_diff(fresh.meta.element_diff)
+        # The original before/after comparison was computed against the rejected tree. A fresh
+        # hierarchy alone cannot reconstruct it, so absence is more truthful than mixed evidence.
+        launched.change = None
+        launched.stale_risk = fresh.meta.stale_risk
+        launched.note = "No separate analyze needed; state is in observation."
+
     def _await_post_action_ready(
         self,
         *,
@@ -7624,6 +7745,184 @@ class Engine:
             observe,
             with_image,
         )
+
+    def mic_inject(
+        self,
+        wav_path: str | Path,
+        element_id: int | None = None,
+        *,
+        selector: dict[str, Any] | None = None,
+        pre_roll_ms: int = 250,
+        post_roll_ms: int = 250,
+        observe: bool = True,
+        with_image: bool | str | None = None,
+        _action: str = "mic-inject",
+        _source: str | None = None,
+    ) -> ActionResult:
+        """Inject PCM WAV audio, optionally holding one UI control for the whole stream.
+
+        Endpoint discovery, WAV validation, and the optional gRPC import all happen before
+        touch-down. Once held, MODE_UNSPECIFIED injection blocks under emulator backpressure;
+        touch-up therefore naturally follows the final consumed sample plus post-roll.
+        """
+
+        if pre_roll_ms < 0 or post_roll_ms < 0:
+            raise UsageError(
+                "microphone pre-roll and post-roll must be zero or greater",
+                code="mic_roll_invalid",
+            )
+        from . import mic as mic_mod
+
+        prepared = mic_mod.prepare_injection(self.device.serial, wav_path)
+        has_hold = element_id is not None or selector is not None
+        el: Element | None = None
+        acting: dict[str, Any] | None = None
+        target: list[int] | None = None
+        if has_hold:
+            named = self._target(element_id, selector, verb="long-press")
+            el, acting = self._acting_target(named, verb="long-press")
+            cx, cy = self._aim(el)
+            target = [cx, cy]
+        # Claim the affected-build one-attempt guard before touch-down. Burning an attempt if
+        # touch-down subsequently fails is conservative; allowing another stream can crash the
+        # emulator process on 36.4.10.
+        prepared = mic_mod.claim_injection_attempt(prepared)
+
+        # Settle timing still needs to know which public action ran, but microphone samples
+        # (like typed values) must not silently become a replayable navigation route.
+        self._step(_action, el)
+        mark = _action if el is None else _action_mark("mic", el)
+        held = False
+        down_attempted = False
+        action_error: BaseException | None = None
+        delivery_uncertain: mic_mod.MicDeliveryUncertainError | None = None
+        delivery_release_failed: mic_mod.MicDeliveredReleaseError | None = None
+        injection_completed = False
+        try:
+            with self._acting(mark):
+                try:
+                    if target is not None:
+                        # A transport can deliver DOWN and then lose its response.  Mark the
+                        # attempt first so cleanup conservatively sends the harmless matching
+                        # UP even when touch_down itself raises.
+                        down_attempted = True
+                        self.device.touch_down(*target)
+                        held = True
+                        if pre_roll_ms:
+                            time.sleep(pre_roll_ms / 1000.0)
+                    try:
+                        mic_mod.inject_prepared(prepared)
+                        injection_completed = True
+                    except mic_mod.MicDeliveryUncertainError as exc:
+                        # INTERNAL can arrive after every sample was delivered. Finish the
+                        # gesture and observe exactly once, but retain a non-zero structured
+                        # outcome so a caller never mistakes the close for clean success.
+                        delivery_uncertain = exc
+                    if held and post_roll_ms:
+                        time.sleep(post_roll_ms / 1000.0)
+                except BaseException as exc:
+                    if delivery_uncertain is not None:
+                        delivery_uncertain.note_followup_failure("post_roll", exc)
+                    else:
+                        action_error = exc
+                        raise
+                finally:
+                    if down_attempted and target is not None:
+                        try:
+                            self.device.touch_up(*target)
+                        except BaseException as exc:
+                            if delivery_uncertain is not None:
+                                delivery_uncertain.note_followup_failure("touch_release", exc)
+                                logger.warning(
+                                    "touch-up also failed after ambiguous microphone delivery"
+                                )
+                            elif injection_completed and action_error is None:
+                                delivery_release_failed = (
+                                    mic_mod.MicDeliveredReleaseError().note_followup_failure(
+                                        "touch_release", exc
+                                    )
+                                )
+                                logger.warning(
+                                    "touch-up failed after microphone audio was delivered"
+                                )
+                            elif action_error is None:
+                                raise
+                            else:
+                                # Preserve the injection error, which normally explains an
+                                # emulator loss more directly than the consequent release error.
+                                logger.warning(
+                                    "touch-up also failed after microphone injection failed"
+                                )
+        except BaseException as exc:
+            terminal_mic_error = delivery_uncertain or delivery_release_failed
+            if terminal_mic_error is None:
+                raise
+            terminal_mic_error.note_followup_failure("action_cleanup", exc)
+
+        wav = prepared.wav
+        channel_label = "mono" if wav.channels == 1 else "stereo"
+        detail = (
+            f"injected {wav.duration_s:.3f}s PCM {wav.sample_format} {channel_label} "
+            f"at {wav.sample_rate} Hz"
+        )
+        if _source:
+            detail = f"{_source}; {detail}"
+        if target is not None:
+            detail += f" while held ({pre_roll_ms}ms pre-roll, {post_roll_ms}ms post-roll)"
+        action_result = ActionResult(
+            ok=delivery_uncertain is None and delivery_release_failed is None,
+            action=_action,
+            id=el.id if el is not None else None,
+            target=target,
+            detail=detail,
+            acting=acting,
+        )
+        terminal_mic_error = delivery_uncertain or delivery_release_failed
+        if terminal_mic_error is not None:
+            try:
+                # A late transport/gesture failure is the one outcome where a fresh screen is
+                # mandatory: without it, `--no-observe` would leave callers with no safe way
+                # to decide whether the already-sent samples took effect.
+                result = self._observe(action_result, True, with_image)
+                result_payload = result.model_dump(mode="json")
+            except BaseException as exc:
+                raise terminal_mic_error.note_followup_failure("observation", exc) from exc
+            raise terminal_mic_error.with_result(result_payload)
+        return self._observe(action_result, observe, with_image)
+
+    def mic_speak(
+        self,
+        text: str,
+        element_id: int | None = None,
+        *,
+        selector: dict[str, Any] | None = None,
+        voice: str | None = None,
+        rate: int | None = None,
+        pre_roll_ms: int = 250,
+        post_roll_ms: int = 250,
+        observe: bool = True,
+        with_image: bool | str | None = None,
+    ) -> ActionResult:
+        """Synthesize *text* with macOS ``say`` and inject the resulting temporary WAV."""
+
+        import tempfile
+
+        from . import mic as mic_mod
+
+        with tempfile.TemporaryDirectory(prefix="aua-mic-") as temp_dir:
+            wav_path = Path(temp_dir) / "speech.wav"
+            mic_mod.synthesize_speech(text, wav_path, voice=voice, rate=rate)
+            return self.mic_inject(
+                wav_path,
+                element_id,
+                selector=selector,
+                pre_roll_ms=pre_roll_ms,
+                post_roll_ms=post_roll_ms,
+                observe=observe,
+                with_image=with_image,
+                _action="mic-speak",
+                _source="generated with macOS say",
+            )
 
     def double_tap(
         self,
@@ -11262,7 +11561,26 @@ class Engine:
                 # A hierarchy provider may be unable to attribute nodes to a package. The
                 # foreground check immediately above is authoritative for that missing field,
                 # so bind the otherwise useful landing observation to the verified package.
+                try:
+                    foreground = str((self.device.current_app() or {}).get("package") or "")
+                except Exception:  # noqa: BLE001 — absence of ownership proof must fail closed
+                    foreground = ""
+                if foreground != package:
+                    self._invalidate_launch_observation()
+                    raise DeviceError(
+                        (
+                            f"{package} reached the foreground, but ownership changed to "
+                            f"{foreground or 'an unknown package'} while the hierarchy had no "
+                            "package attribution"
+                        ),
+                        code="launch_observation_mismatch",
+                        hint=(
+                            "Inspect one fresh hierarchy before acting; AUA did not attribute an "
+                            "unowned hierarchy to the launched app."
+                        ),
+                    )
                 launched.observation.screen.package = package
+                self._write_cache(launched.observation)
             elif (
                 observe
                 and launched.observation is not None
@@ -11270,32 +11588,11 @@ class Engine:
             ):
                 # Foreground verification and hierarchy capture are separate Android reads. A
                 # transition race can satisfy the former while the latter still belongs to the
-                # app we left. One authoritative no-cache read may heal that race; a persistent
-                # mismatch is a typed failure, never a successful mixed-package observation.
-                self._prefetch.invalidate()
-                self._last_hierarchy_hash = None
-                self._last_analyze_result = None
-                fresh = self.analyze(
-                    source="hierarchy",
-                    with_ocr=False,
-                    no_cache=True,
-                )
-                if fresh.screen.package and fresh.screen.package != package:
-                    raise DeviceError(
-                        (
-                            f"launch foreground was {package}, but the authoritative hierarchy "
-                            f"belongs to {fresh.screen.package or 'an unknown package'}"
-                        ),
-                        code="launch_observation_mismatch",
-                        hint=(
-                            "The launched window has not attached consistently. Wait for it to "
-                            "settle, then inspect one fresh hierarchy before acting."
-                        ),
-                    )
-                if not fresh.screen.package:
-                    fresh.screen.package = package
-                launched.observation = fresh
-                launched.observation_present = True
+                # app we left or to a short-lived SystemUI attachment frame. Fresh hierarchy-only
+                # reads may heal that race, but only while foreground ownership remains proven and
+                # only inside a small bound; a persistent mismatch stays a typed failure.
+                fresh = self._await_launch_hierarchy(package)
+                self._adopt_recovered_launch_observation(launched, fresh)
             return launched
         if a in ("kill", "force-stop"):
             if not package:

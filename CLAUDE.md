@@ -33,7 +33,7 @@ Requirements: **Python 3.11+**, **`adb` on PATH** (Android SDK platform-tools), 
 
 ## If you're DEVELOPING the tool
 
-- Dev install: `uv pip install -e ".[dev,apple,rapidocr]"` (or `pip`)
+- Dev install: `uv pip install -e ".[dev,apple,rapidocr,audio]"` (or `pip`)
 - Tests:       `.venv/bin/pytest` (or `uv run pytest`)
 - Lint/types:  `.venv/bin/ruff check .` · `.venv/bin/mypy`
 - **This is a public, app-agnostic repository.** Never commit private knowledge from a tested

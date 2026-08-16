@@ -32,6 +32,13 @@ logger = logging.getLogger("android_ui_analyser.device")
 # more records nothing. The platform also stops at this limit on its own.
 _SCREENRECORD_MAX_S = 180
 
+# ``pm clear`` waits for app-data deletion, but Android may still be destroying a removed task.
+# Keep the launch side of ``launch --clear`` behind that lifecycle boundary. Android's activity
+# destroy timeout is 10 seconds; the small margin keeps a slow emulator from racing the timeout.
+_APP_CLEAR_SETTLE_TIMEOUT_S = 12.0
+_APP_CLEAR_SETTLE_POLL_S = 0.05
+_ACTIVITY_DUMP_SENTINEL = "ACTIVITY MANAGER ACTIVITIES"
+
 _RECONNECT_WARN_WINDOW_S = 30.0
 _last_reconnect_warn: dict[str, float] = {}
 
@@ -70,6 +77,34 @@ def _foreground_from_window_dump(output: str) -> dict[str, str] | None:
     return None
 
 
+def _activity_dump_mentions_package(output: str, package: str) -> bool:
+    """Whether an activity/task dump still contains the exact Android package token."""
+    return (
+        re.search(
+            rf"(?<![A-Za-z0-9_.]){re.escape(package)}(?![A-Za-z0-9_.])",
+            output,
+        )
+        is not None
+    )
+
+
+def _is_recognizable_activity_dump(output: str) -> bool:
+    """Reject empty/error shell output before treating package absence as evidence."""
+    return any(line.startswith(_ACTIVITY_DUMP_SENTINEL) for line in output.splitlines())
+
+
+def _app_clear_unsettled(package: str, reason: str) -> DeviceError:
+    """A post-wipe verification failure whose recovery must not repeat the wipe."""
+    return DeviceError(
+        f"cleared app data for {package}, but {reason}",
+        code="app_clear_unsettled",
+        hint=(
+            "The wipe already happened; do not run --clear again. Wait for Android to settle, "
+            f"then run `aua app launch {package}` without --clear."
+        ),
+    )
+
+
 class Device(ABC):
     """The device surface the rest of the tool depends on."""
 
@@ -101,6 +136,14 @@ class Device(ABC):
 
     @abstractmethod
     def long_click(self, x: int, y: int, duration_ms: int = 600) -> None: ...
+
+    @abstractmethod
+    def touch_down(self, x: int, y: int) -> None:
+        """Begin a touch that remains held until :meth:`touch_up`."""
+
+    @abstractmethod
+    def touch_up(self, x: int, y: int) -> None:
+        """Release a touch begun with :meth:`touch_down`."""
 
     @abstractmethod
     def send_text(self, text: str, *, clear: bool = True) -> None: ...
@@ -584,6 +627,24 @@ class Uiautomator2Device(Device):
     def long_click(self, x: int, y: int, duration_ms: int = 600) -> None:
         self._call("long_click", x, y, duration_ms / 1000.0)
 
+    def touch_down(self, x: int, y: int) -> None:
+        try:
+            self._d.touch.down(x, y)
+        except Exception as exc:
+            raise DeviceError(
+                "device touch-down failed",
+                hint="Check the device is still attached (`aua devices`).",
+            ) from exc
+
+    def touch_up(self, x: int, y: int) -> None:
+        try:
+            self._d.touch.up(x, y)
+        except Exception as exc:
+            raise DeviceError(
+                "device touch-up failed; the hold may not have been released cleanly",
+                hint="Check the device is still attached before sending another action.",
+            ) from exc
+
     def focused_text(self) -> str | None:
         """Read back the focused field's value, so `input` can check its own effect."""
         try:
@@ -853,6 +914,60 @@ class Uiautomator2Device(Device):
     def clear_app(self, package: str) -> None:
         # u2 wraps `pm clear` — resets to a fresh-install state (Maestro clearState).
         self._call("app_clear", package)
+        # ``pm clear``'s data observer can complete while ActivityTaskManager is still destroying
+        # a removed task. If that task had a visible Activity from another package, Android defers
+        # its ``remove task`` process kill until that Activity reports destroyed. Launching the
+        # cleared package in that window lets the deferred cleanup kill the brand-new process.
+        # The old package remains in ``dumpsys activity activities`` until that callback has run,
+        # so absence is the causal barrier; a sleep or blind relaunch would only hide the race.
+        deadline = time.monotonic() + _APP_CLEAR_SETTLE_TIMEOUT_S
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise _app_clear_unsettled(package, "its removed task did not settle")
+            try:
+                proc = subprocess.run(  # noqa: S603
+                    [
+                        "adb",
+                        "-s",
+                        self.serial,
+                        "shell",
+                        "dumpsys",
+                        "activity",
+                        "activities",
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=remaining,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise _app_clear_unsettled(
+                    package,
+                    "the bounded activity-task read timed out before proving quiescence",
+                ) from exc
+            except (FileNotFoundError, OSError) as exc:
+                raise _app_clear_unsettled(
+                    package,
+                    f"the activity-task read could not run ({exc})",
+                ) from exc
+            activities = proc.stdout
+            if proc.returncode != 0:
+                raise _app_clear_unsettled(
+                    package,
+                    f"the activity-task read failed with exit status {proc.returncode}",
+                )
+            if not _is_recognizable_activity_dump(activities):
+                raise _app_clear_unsettled(
+                    package,
+                    "the activity-task read returned no recognizable successful dump",
+                )
+            if not _activity_dump_mentions_package(activities, package):
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise _app_clear_unsettled(package, "its removed task did not settle")
+            time.sleep(min(_APP_CLEAR_SETTLE_POLL_S, remaining))
 
     def grant_permissions(self, package: str) -> None:
         # Best-effort grant of all declared dangerous permissions (camera/mic/…).

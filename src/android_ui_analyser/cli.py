@@ -1071,6 +1071,43 @@ def _daemon_error(err: dict[str, Any]) -> AuaError:
         "selector_ambiguous": SelectorAmbiguousError,
         "expectation_failed": ExpectationFailed,
     }
+    if code in {"mic_delivery_uncertain", "mic_delivered_release_failed"}:
+        from .mic import MicDeliveredReleaseError, MicDeliveryUncertainError
+
+        result = err.get("result")
+        raw_followups = err.get("followup_errors")
+        followups = (
+            [dict(item) for item in raw_followups if isinstance(item, dict)]
+            if isinstance(raw_followups, list)
+            else None
+        )
+        error_type = (
+            MicDeliveredReleaseError
+            if code == "mic_delivered_release_failed"
+            else MicDeliveryUncertainError
+        )
+        return error_type(
+            message,
+            hint=hint,
+            result=result if isinstance(result, dict) else None,
+            followup_errors=followups,
+        )
+    device_error_codes = {
+        "app_clear_unsettled",
+        "launch_observation_mismatch",
+        "mic_endpoint_missing",
+        "mic_repeat_unsafe",
+        "mic_guard_unavailable",
+        "mic_injection_precondition",
+        "mic_injection_rejected",
+        "mic_endpoint_auth_failed",
+        "mic_injection_timeout",
+        "mic_emulator_unavailable",
+        "mic_injection_failed",
+        "mic_speech_failed",
+    }
+    if code in device_error_codes:
+        return DeviceError(message, hint=hint, code=code)
     if code in mapping:
         return mapping[code](message, hint=hint)
     if code.startswith("provider"):
@@ -3204,6 +3241,14 @@ def session_start_cmd(
             "show its window instead of using headless mode."
         ),
     ),
+    audio: bool = typer.Option(
+        False,
+        "--audio/--no-audio",
+        help=(
+            "When --start-emulator boots one, keep host audio enabled so microphone "
+            "injection is available."
+        ),
+    ),
     avd: str | None = typer.Option(None, "--avd", help="AVD name when several are configured."),
     package: str | None = typer.Option(
         None,
@@ -3226,6 +3271,7 @@ def session_start_cmd(
             goal=goal,
             start_emulator=start_emulator,
             headed=headed,
+            audio=audio,
             avd=avd,
             package=package,
             activity=activity,
@@ -4508,6 +4554,181 @@ def media_add_cmd(
 ) -> None:
     def go(engine: Engine, fmt: OutputFormat) -> None:
         _emit(engine.media_add(path, remote_dir=remote_dir), fmt)
+
+    _run(ctx, go)
+
+
+mic_app = typer.Typer(
+    help="Inject PCM audio into an Android Emulator microphone.",
+    no_args_is_help=True,
+)
+app.add_typer(mic_app, name="mic")
+
+
+def _mic_hold_target(
+    *,
+    ident: str | None,
+    by: str | None,
+    rid: str | None,
+    text: str | None,
+    desc: str | None,
+    index: int | None,
+    first: bool,
+) -> tuple[int | None, dict[str, Any] | None]:
+    """Build one optional hold target with the same ambiguity rules as MCP."""
+
+    direct_selectors = [value for value in (rid, text, desc) if value is not None]
+    if len(direct_selectors) > 1 or (direct_selectors and (ident is not None or by is not None)):
+        raise UsageError(
+            "microphone hold accepts only one id/rid/text/desc target",
+            hint="Pass one fresh id or one stable selector; omit all four to inject without holding.",
+        )
+    selector = _selector(
+        ident=ident,
+        by=by,
+        rid=rid,
+        text=text,
+        desc=desc,
+        index=index,
+        first=first,
+    )
+    if selector is None and (index is not None or first):
+        raise UsageError(
+            "--index/--first needs a microphone hold selector",
+            hint="Pass one of --rid/--text/--desc (or --by), or remove the modifier.",
+        )
+    return _element_id(ident, selector), selector
+
+
+@mic_app.command("inject", cls=AnalyzeCommand)
+def mic_inject_cmd(
+    ctx: typer.Context,
+    path: str = typer.Argument(..., metavar="PCM-WAV", help="Host PCM WAV file to inject."),
+    ident: str | None = typer.Argument(
+        None,
+        metavar="[HOLD-ID]",
+        help="Optional element id to hold while audio is injected (or a --by selector value).",
+    ),
+    by: str | None = _SEL_BY,
+    rid: str | None = _SEL_RID,
+    text: str | None = _SEL_TEXT,
+    desc: str | None = _SEL_DESC,
+    index: int | None = _SEL_INDEX,
+    first: bool = _SEL_FIRST,
+    pre_roll_ms: int = typer.Option(
+        250, "--pre-roll-ms", min=0, help="Hold this long before injecting audio."
+    ),
+    post_roll_ms: int = typer.Option(
+        250, "--post-roll-ms", min=0, help="Keep holding this long after audio drains."
+    ),
+    observe: bool = typer.Option(
+        True, "--observe/--no-observe", help="Also return the post-action screen."
+    ),
+    with_image: str | None = typer.Option(
+        None,
+        "--with-image",
+        metavar="[PATH]",
+        help="Also save the post-action screenshot; bare flag uses a timestamped path.",
+        show_default=False,
+    ),
+) -> None:
+    """Inject U8/S16 PCM WAV audio; optionally hold an id or selector during playback."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        element_id, selector = _mic_hold_target(
+            ident=ident,
+            by=by,
+            rid=rid,
+            text=text,
+            desc=desc,
+            index=index,
+            first=first,
+        )
+        # Resolve in the caller's cwd before daemon routing; a warm daemon can have a different
+        # cwd and must never reinterpret a relative path as a different audio file.
+        from .mic import inspect_pcm_wav
+
+        resolved_path = str(inspect_pcm_wav(path).path)
+        _emit(
+            _route(
+                engine,
+                "mic_inject",
+                wav_path=resolved_path,
+                element_id=element_id,
+                selector=selector,
+                pre_roll_ms=pre_roll_ms,
+                post_roll_ms=post_roll_ms,
+                observe=observe,
+                with_image=_annotate_arg(with_image),
+            ),
+            fmt,
+        )
+
+    _run(ctx, go)
+
+
+@mic_app.command("speak", cls=AnalyzeCommand)
+def mic_speak_cmd(
+    ctx: typer.Context,
+    speech: str = typer.Argument(..., metavar="TEXT", help="Text for macOS say to synthesize."),
+    ident: str | None = typer.Argument(
+        None,
+        metavar="[HOLD-ID]",
+        help="Optional element id to hold while speech is injected (or a --by selector value).",
+    ),
+    by: str | None = _SEL_BY,
+    rid: str | None = _SEL_RID,
+    text: str | None = _SEL_TEXT,
+    desc: str | None = _SEL_DESC,
+    index: int | None = _SEL_INDEX,
+    first: bool = _SEL_FIRST,
+    voice: str | None = typer.Option(None, "--voice", help="Installed macOS say voice name."),
+    rate: int | None = typer.Option(None, "--rate", min=1, help="Speech rate in words per minute."),
+    pre_roll_ms: int = typer.Option(
+        250, "--pre-roll-ms", min=0, help="Hold this long before injecting speech."
+    ),
+    post_roll_ms: int = typer.Option(
+        250, "--post-roll-ms", min=0, help="Keep holding this long after speech drains."
+    ),
+    observe: bool = typer.Option(
+        True, "--observe/--no-observe", help="Also return the post-action screen."
+    ),
+    with_image: str | None = typer.Option(
+        None,
+        "--with-image",
+        metavar="[PATH]",
+        help="Also save the post-action screenshot; bare flag uses a timestamped path.",
+        show_default=False,
+    ),
+) -> None:
+    """Synthesize speech with macOS say, then inject it through the emulator microphone."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        element_id, selector = _mic_hold_target(
+            ident=ident,
+            by=by,
+            rid=rid,
+            text=text,
+            desc=desc,
+            index=index,
+            first=first,
+        )
+        _emit(
+            _route(
+                engine,
+                "mic_speak",
+                text=speech,
+                element_id=element_id,
+                selector=selector,
+                voice=voice,
+                rate=rate,
+                pre_roll_ms=pre_roll_ms,
+                post_roll_ms=post_roll_ms,
+                observe=observe,
+                with_image=_annotate_arg(with_image),
+            ),
+            fmt,
+        )
 
     _run(ctx, go)
 

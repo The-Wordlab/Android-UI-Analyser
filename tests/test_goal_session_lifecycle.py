@@ -1082,12 +1082,14 @@ def test_explicit_session_emulator_start_is_owned_and_finished(
         "inspect the current theme",
         start_emulator=True,
         headed=True,
+        audio=True,
         avd="Small_Phone",
     )
     finished = engine.session_finish(started["session_id"])
 
     assert started["emulator_started"] is True
     assert starts[0]["headless"] is False
+    assert starts[0]["audio"] is True
     assert stops[0]["serial"] == "emulator-5590"
     assert finished["ok"] is True
 

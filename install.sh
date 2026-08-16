@@ -17,9 +17,11 @@ cd "$REPO_DIR"
 # Core hierarchy analysis needs NO extras (uiautomator2 is a base dependency). OCR powers the
 # vision fallback on Compose/Flutter/WebView/canvas screens the accessibility tree can't see.
 case "$(uname -s)" in
-  Darwin) OCR_PKGS=(pyobjc-framework-Vision pyobjc-framework-Quartz rapidocr-onnxruntime onnxruntime); EXTRA="apple,rapidocr" ;;
-  *)      OCR_PKGS=(rapidocr-onnxruntime onnxruntime);                                                 EXTRA="rapidocr" ;;
+  Darwin) OCR_PKGS=(pyobjc-framework-Vision pyobjc-framework-Quartz rapidocr-onnxruntime onnxruntime); EXTRA="apple,rapidocr,audio" ;;
+  *)      OCR_PKGS=(rapidocr-onnxruntime onnxruntime);                                                 EXTRA="rapidocr,audio" ;;
 esac
+AUDIO_PKGS=(grpcio)
+FEATURE_PKGS=("${OCR_PKGS[@]}" "${AUDIO_PKGS[@]}")
 
 export PATH="$HOME/.local/bin:$PATH"   # where uv/pipx drop console scripts
 AUA=""
@@ -27,7 +29,7 @@ AUA=""
 install_global() {
   if command -v uv >/dev/null 2>&1; then
     echo "==> Installing the 'aua' CLI globally with uv tool..."
-    local with=(); local p; for p in "${OCR_PKGS[@]}"; do with+=(--with "$p"); done
+    local with=(); local p; for p in "${FEATURE_PKGS[@]}"; do with+=(--with "$p"); done
     # --reinstall: --force alone reuses uv's cached wheel when the version string has not
     # changed, so editing the source and re-running installed the OLD code silently.
     # --editable: the console script then imports straight from this clone, so `git pull`
@@ -41,8 +43,8 @@ install_global() {
   if command -v pipx >/dev/null 2>&1; then
     echo "==> Installing the 'aua' CLI globally with pipx..."
     if pipx install --force --editable "$REPO_DIR"; then
-      pipx inject android-ui-analyser "${OCR_PKGS[@]}" >/dev/null 2>&1 \
-        || echo "    (OCR engine not added — core CLI still works; add it later for the vision fallback)"
+      pipx inject android-ui-analyser "${FEATURE_PKGS[@]}" >/dev/null 2>&1 \
+        || echo "    (optional OCR/audio dependencies not added — core CLI still works)"
       pipx ensurepath >/dev/null 2>&1 || true
       AUA="aua"; return 0
     fi

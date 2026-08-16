@@ -14,7 +14,8 @@ from typing import Any
 
 import pytest
 
-from android_ui_analyser.errors import DeviceError
+from android_ui_analyser.cli import _daemon_error
+from android_ui_analyser.errors import DeviceError, ExitCode
 from android_ui_analyser.schema import ActionResult
 from conftest import FakeDevice
 from test_memory import APPS, P, _engine
@@ -99,7 +100,89 @@ def test_launch_replaces_a_previous_package_hierarchy_with_one_authoritative_rea
     result = eng.app("launch", package=P)
 
     assert result.observation is fresh
-    assert calls == [{"source": "hierarchy", "with_ocr": False, "no_cache": True}]
+    assert calls == [{"source": "hierarchy", "with_ocr": False, "no_cache": True, "record": False}]
+
+
+def test_launch_retries_a_transient_systemui_hierarchy_while_app_stays_foreground(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    dev = FakeDevice(hierarchy_xml=APPS, package=P, serial="emu-launch-attaching")
+    eng = _engine(tmp_path, dev)
+    target = eng.analyze(source="hierarchy", with_ocr=False)
+    target.meta.known_screen = "target-login"
+    target.meta.known_routes = ["target-route"]
+    target.meta.suggested_gotos = ["target-goto"]
+    target.meta.element_diff = {
+        "added": ["target"],
+        "removed": [],
+        "changed": [],
+        "prev_count": 0,
+        "curr_count": len(target.elements),
+    }
+    systemui = target.model_copy(deep=True)
+    systemui.screen.package = "com.android.systemui"
+    systemui.meta.known_screen = "systemui-shade"
+    systemui.meta.known_routes = ["systemui-route"]
+    systemui.meta.suggested_gotos = ["systemui-goto"]
+    systemui.meta.stale_risk = "systemui tree may be stale"
+    for element in systemui.elements:
+        element.id += 10_000
+    samples = iter((systemui, target))
+    stale = systemui.model_copy(deep=True)
+    calls: list[dict[str, Any]] = []
+
+    def observe_stale(*_args: Any, **_kwargs: Any) -> ActionResult:
+        # Reproduce production `_observe`: the transient hierarchy became the authoritative id
+        # cache before launch package validation rejected it.
+        eng._write_cache(stale)
+        return ActionResult(
+            ok=True,
+            action="app-launch",
+            observation=stale,
+            observation_present=True,
+            stable_elements=eng._stable_elements(stale.elements),
+            next_actions=[{"id": stale.elements[0].id, "label": "System UI"}],
+            routes=["systemui-route", "systemui-goto"],
+            known_screen="systemui-shade",
+            action_diff_summary={"added": 99, "removed": 0, "changed": 0},
+            change={"activity": {"after": "SystemUI"}},
+            note="systemui note",
+            stale_risk="systemui stale risk",
+        )
+
+    monkeypatch.setattr(eng, "_observe", observe_stale)
+    monkeypatch.setattr(
+        eng,
+        "analyze",
+        lambda **kwargs: calls.append(kwargs) or next(samples),
+    )
+    monkeypatch.setattr("android_ui_analyser.engine.time.sleep", lambda _seconds: None)
+
+    result = eng.app("launch", package=P)
+
+    assert result.observation is target
+    cached = eng._read_cache()
+    assert cached is not None
+    assert cached.model_dump() == result.observation.model_dump()
+    assert [element.id for element in cached.elements] == [
+        element.id for element in result.observation.elements
+    ]
+    assert result.stable_elements == eng._stable_elements(target.elements)
+    assert result.next_actions == eng._next_actions(target)
+    assert result.routes == ["target-route", "target-goto"]
+    assert result.known_screen == "target-login"
+    assert result.action_diff_summary == eng._compact_action_diff(target.meta.element_diff)
+    assert result.change is None
+    assert result.stale_risk is None
+    assert result.note == "No separate analyze needed; state is in observation."
+    systemui_ids = {element.id for element in stale.elements}
+    assert not systemui_ids.intersection(item["id"] for item in result.stable_elements or [])
+    assert "systemui-route" not in (result.routes or [])
+    assert result.known_screen != "systemui-shade"
+    assert calls == [
+        {"source": "hierarchy", "with_ocr": False, "no_cache": True, "record": False},
+        {"source": "hierarchy", "with_ocr": False, "no_cache": True, "record": False},
+    ]
 
 
 def test_launch_refuses_a_persistently_mixed_package_hierarchy(
@@ -109,6 +192,53 @@ def test_launch_refuses_a_persistently_mixed_package_hierarchy(
     eng = _engine(tmp_path, dev)
     stale = eng.analyze(source="hierarchy", with_ocr=False).model_copy(deep=True)
     stale.screen.package = "com.example.previous"
+
+    def observe_stale(*_args: Any, **_kwargs: Any) -> ActionResult:
+        eng._write_cache(stale)
+        return ActionResult(
+            ok=True,
+            action="app-launch",
+            observation=stale,
+            observation_present=True,
+        )
+
+    monkeypatch.setattr(eng, "_observe", observe_stale)
+    analyzes: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        eng,
+        "analyze",
+        lambda **kwargs: analyzes.append(kwargs) or stale,
+    )
+    clock = [10.0]
+
+    def tick() -> float:
+        current = clock[0]
+        clock[0] += 0.03
+        return current
+
+    monkeypatch.setattr("android_ui_analyser.engine.time.monotonic", tick)
+    monkeypatch.setattr("android_ui_analyser.engine.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("android_ui_analyser.engine._LAUNCH_HIERARCHY_SETTLE_S", 0.05)
+
+    with pytest.raises(DeviceError) as raised:
+        eng.app("launch", package=P)
+
+    assert raised.value.code == "launch_observation_mismatch"
+    assert len(analyzes) == 2
+    assert eng._read_cache() is None
+    assert eng._last_analyze_elements is None
+    assert eng._last_analyze_result is None
+
+
+def test_launch_does_not_retry_mismatch_after_foreground_ownership_changes(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    dev = FakeDevice(hierarchy_xml=APPS, package=P, serial="emu-launch-left")
+    eng = _engine(tmp_path, dev)
+    stale = eng.analyze(source="hierarchy", with_ocr=False).model_copy(deep=True)
+    stale.screen.package = "com.android.systemui"
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(eng, "_await_foreground", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
         eng,
         "_observe",
@@ -119,9 +249,72 @@ def test_launch_refuses_a_persistently_mixed_package_hierarchy(
             observation_present=True,
         ),
     )
-    monkeypatch.setattr(eng, "analyze", lambda **_kwargs: stale)
+    monkeypatch.setattr(
+        eng,
+        "analyze",
+        lambda **kwargs: calls.append(kwargs) or stale,
+    )
+    monkeypatch.setattr(
+        dev,
+        "current_app",
+        lambda: {"package": "com.example.other", "activity": ".OtherActivity"},
+    )
 
     with pytest.raises(DeviceError) as raised:
         eng.app("launch", package=P)
 
     assert raised.value.code == "launch_observation_mismatch"
+    assert "ownership changed" in raised.value.message
+    assert len(calls) == 1
+
+
+def test_launch_does_not_attribute_an_empty_recovery_after_ownership_changes(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    dev = FakeDevice(hierarchy_xml=APPS, package=P, serial="emu-launch-empty-left")
+    eng = _engine(tmp_path, dev)
+    stale = eng.analyze(source="hierarchy", with_ocr=False).model_copy(deep=True)
+    stale.screen.package = "com.android.systemui"
+    anonymous = stale.model_copy(deep=True)
+    anonymous.screen.package = None
+    monkeypatch.setattr(eng, "_await_foreground", lambda *_args, **_kwargs: True)
+
+    def observe_stale(*_args: Any, **_kwargs: Any) -> ActionResult:
+        eng._write_cache(stale)
+        return ActionResult(
+            ok=True,
+            action="app-launch",
+            observation=stale,
+            observation_present=True,
+        )
+
+    monkeypatch.setattr(eng, "_observe", observe_stale)
+    monkeypatch.setattr(eng, "analyze", lambda **_kwargs: anonymous)
+    monkeypatch.setattr(
+        dev,
+        "current_app",
+        lambda: {"package": "com.example.other", "activity": ".OtherActivity"},
+    )
+
+    with pytest.raises(DeviceError) as raised:
+        eng.app("launch", package=P)
+
+    assert raised.value.code == "launch_observation_mismatch"
+    assert "no package attribution" in raised.value.message
+    assert eng._read_cache() is None
+    assert eng._last_analyze_elements is None
+    assert eng._last_analyze_result is None
+
+
+def test_daemon_reconstructs_launch_observation_mismatch_as_device_error() -> None:
+    rebuilt = _daemon_error(
+        {
+            "code": "launch_observation_mismatch",
+            "message": "launch hierarchy belonged to SystemUI",
+            "hint": "inspect one fresh hierarchy",
+        }
+    )
+
+    assert isinstance(rebuilt, DeviceError)
+    assert rebuilt.code == "launch_observation_mismatch"
+    assert rebuilt.exit_code == ExitCode.DEVICE

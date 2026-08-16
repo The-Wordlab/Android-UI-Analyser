@@ -47,13 +47,13 @@ Base install (macOS / Apple Silicon, recommended extras — Python 3.11+ per [Re
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-uv pip install -e ".[dev,apple,rapidocr]"
+uv pip install -e ".[dev,apple,rapidocr,audio]"
 ```
 
 Or without uv:
 
 ```bash
-pip install -e ".[dev,apple,rapidocr]"
+pip install -e ".[dev,apple,rapidocr,audio]"
 ```
 
 Global install (no extras):
@@ -122,6 +122,7 @@ cd ~ && command -v aua && aua --version
 | `paddle` | `paddleocr`, `paddlepaddle` | PP-OCRv5; highest accuracy, slower |
 | `tesseract` | `pytesseract` | Requires system `tesseract` binary |
 | `easyocr` | `easyocr` | Optional OCR engine |
+| `audio` | `grpcio` | Authenticated PCM injection into an Android Emulator microphone |
 | `yolo` | `ultralytics`, `torch` | UI element detection with user-supplied weights |
 | `omniparser` | `ultralytics`, `torch`, `huggingface-hub` | OmniParser detection — **AGPL-3.0, opt-in** |
 | `proxy` | `mitmproxy` | Headless HTTPS mock / record / replay (`aua proxy`, `aua mock`) |
@@ -165,6 +166,48 @@ aua emulator stop --mine
 ```
 
 You can still create AVDs by hand (`sdkmanager` / `avdmanager` / Android Studio). Prefer SDK `cmdline-tools/latest` under `$ANDROID_HOME` over stale Homebrew copies. On Mac, headless defaults to **host GPU** so fans stay quiet; override with `--gpu swiftshader` only for CI without a display.
+
+### Emulator microphone input
+
+`aua` can feed deterministic host audio into an app's microphone through the Android
+Emulator's authenticated control API. This is emulator-only (not a USB phone), needs the
+`audio` extra, and the AVD must be started with audio enabled:
+
+```bash
+aua emulator start --headless --audio
+# Equivalent goal bootstrap when AUA should boot only if no device is attached:
+aua session start --goal "verify voice input" --start-emulator --audio
+
+aua mic inject sample.wav
+aua mic inject sample.wav --rid hold_to_talk       # hold through pre/audio/post roll
+aua mic inject sample.wav 7 --pre-roll-ms 300 --post-roll-ms 500
+
+# macOS convenience: /usr/bin/say creates a temporary 44.1 kHz S16 mono WAV
+aua mic speak "Testing one two" --voice Samantha --rate 175 --rid hold_to_talk
+```
+
+Input must be an uncompressed RIFF/WAVE file: unsigned 8-bit or little-endian signed 16-bit
+PCM, mono or stereo, at 48 kHz or less, and no longer than five minutes. The default delivery
+mode is server-backpressured, so the optional control stays held until the emulator consumes
+the final sample, followed by the post-roll. Each command then returns the post-action
+observation with fresh ids.
+
+AUA discovers the endpoint by matching the selected `emulator-<port>` serial to the emulator's
+`pid_*.ini` runtime record and sends its bearer token only as gRPC metadata; the token is never
+printed. `mic speak` has a focused unsupported-host error off macOS; generate a compatible WAV
+with another TTS tool and use `mic inject` there. `mic_delivery_uncertain` means the emulator
+returned `INTERNAL` after accepting packets: samples may already have arrived, so inspect
+`error.result.observation` and do not repeat the voice action. A timeout or unclassified RPC
+close can also happen after partial delivery; its hint likewise requires inspecting the UI
+before any new attempt. `mic_delivered_release_failed` means all audio arrived but the held
+control did not release cleanly—do not repeat it; inspect the attached observation and verify
+the control state. If injection reports
+`mic_emulator_unavailable`, run `aua devices`, then restart only that emulator with `--audio`
+if it is offline or absent; never blindly retry either outcome. Android Emulator 36.4.10 has a
+known repeat-stream crash, so AUA atomically permits only one injection attempt per emulator
+boot on that build—even across workers with separate AUA cache directories. A second attempt
+returns `mic_repeat_unsafe`; restart only that emulator and make the next attempt the sole
+injection for the new boot.
 
 ### Option B — Physical device
 
@@ -906,6 +949,7 @@ user data; query only the rows needed and handle backups accordingly.
 
 Tools include (non-exhaustive): `analyze_screen`, `tap_and_analyze`,
 `double_tap_and_analyze`, `long_press_and_analyze`, `input_and_analyze`,
+`mic_inject_and_analyze`, `mic_speak_and_analyze`,
 `clear_and_analyze`, `swipe_and_analyze`, `scroll_and_analyze`,
 `scroll_to_and_analyze`, `key_and_analyze`, `wait_and_analyze`,
 `wait_stable_and_analyze`, `wait_changed_and_analyze`, `has`,
@@ -1182,7 +1226,7 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 |---|---|
 | `aua doctor` | Check environment plus separate Claude/Codex installed-skill freshness |
 | `aua capabilities [--goal "…"]` | Discover the canonical CLI/MCP capability catalogue |
-| `aua session start --goal "…"` | Observe once, rank safe routes/flows, and return one exact next CLI + MCP call |
+| `aua session start --goal "…"` | Observe once, rank safe routes/flows, and return one exact next CLI + MCP call (`--start-emulator --audio` enables mic injection on a newly booted AVD) |
 | `aua session review\|finish` | Quantify avoidable calls; restore only session-owned reversible state |
 | `aua reach "<goal>" [--until …]` | Use verified goto then a matching safe flow, with semantic arrival proof |
 | `aua devices` | List attached devices/emulators |
@@ -1212,13 +1256,15 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 | `aua network profile list\|apply\|status\|restore` | Reversible Wi-Fi, cellular, slow, and lossy conditions |
 | `aua media add PATH` | Push media into the gallery |
 | `aua record start\|stop PATH` | Screen recording |
+| `aua mic inject PCM-WAV [HOLD-ID]` | Inject emulator microphone PCM; optional `--rid`/`--text`/`--desc` hold with pre/post roll |
+| `aua mic speak "TEXT" [HOLD-ID]` | macOS `say` → temporary PCM WAV → the same emulator injection/hold path |
 | `aua clock set --ms <unix-ms>` | Set device clock (emulator / rooted) |
 | `aua screenshot [path]` | Save a raw screenshot (`--region` / `--scale`) |
 | `aua inspect <id>` | Dump full details for one element |
 | `aua app launch\|stop\|kill\|clear\|grant` | App control (`launch --clear` = clearState) |
 | `aua db list\|schema\|query` | Structured private SQLite inspection for debuggable apps |
 | `aua db execute\|backup\|backups\|restore` | Confirmed, backed-up data mutation and rollback |
-| `aua emulator list\|status\|start\|stop` | Boot/stop AVDs (`--headless`, `--parallel`, `--gpu`, `--mine`/`--owner`) |
+| `aua emulator list\|status\|start\|stop` | Boot/stop AVDs (`--headless`, `--audio`, `--parallel`, `--gpu`, `--mine`/`--owner`) |
 | `aua emulator recommend-proxy\|ensure-proxy` | Suggest/create a small rootable Google APIs AVD |
 | `aua flags set\|apply` | Feature-flag writes with verify/restart |
 | `aua proxy start\|stop` / `aua mock …` | HTTPS mitm record/map/replay (`[proxy]` extra) |
@@ -1254,6 +1300,13 @@ All action commands (`tap`, `long-press`, `input`, `clear`, `swipe`, `scroll-to`
 | `multiple devices attached` | Pass `--serial <id>` (get the id from `aua devices`). |
 | First command is slow / times out | `uiautomator2` is pushing its helper agent on first connect — retry once it settles, then use `aua daemon start` to keep the connection warm. |
 | `uiautomator2 is not installed` | Reinstall the package — `uiautomator2` is a base dependency, not an extra. |
+| `mic_grpc_unavailable` | Install the optional transport: `pip install 'android-ui-analyser[audio]'`. |
+| `mic_audio_disabled` | Restart only the selected emulator with `aua emulator start --audio`; AUA refuses AVDs launched with `-no-audio`. |
+| `mic_repeat_unsafe` | Emulator 36.4.10 already had its one safe stream attempt this boot. Do not retry; restart only that emulator with audio enabled. |
+| `mic_delivery_uncertain` | Samples may already have arrived despite the emulator's `INTERNAL` close. Inspect `error.result.observation`; do not repeat the voice action. |
+| `mic_delivered_release_failed` | Audio arrived, but hold release failed. Do not repeat it; inspect the attached observation and control state. |
+| `mic_injection_timeout` / `mic_injection_failed` | Samples may already have arrived. Do not retry blindly; inspect the current UI first. |
+| `mic_emulator_unavailable` / emulator goes offline during injection | Do not blindly retry. Check `aua devices`; restart only that emulator with audio enabled if it exited. |
 | `analyze` returns few/no elements | The hierarchy is empty (Compose/Flutter/WebView/canvas). Force vision: `aua --format compact analyze --source vision --annotate`. |
 | Typing does nothing / is slow on Android 14+ | `aua input-and-analyze` prefers accessibility `set_text`, then clipboard paste (restores clipboard), then IME keys. Focus the field first. |
 | Headless emulator pegs CPU / fans | Old default was SwiftShader (CPU). Current Mac/Windows headless uses `-gpu host`. Stop orphans with `aua emulator stop --mine`. Headless also auto-stops after `--idle-stop` (default 900s) with no aua activity. |

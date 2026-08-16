@@ -59,11 +59,23 @@ def _truncate(val: Any, limit: int = _MAX_STR) -> Any:
     return val
 
 
-def redact_args(args: dict[str, Any] | None) -> dict[str, Any]:
+def redact_args(args: dict[str, Any] | None, *, cmd: str | None = None) -> dict[str, Any]:
     out: dict[str, Any] = {}
+    mic_speech_keys: frozenset[str] = frozenset()
+    mic_path_keys: frozenset[str] = frozenset()
+    if cmd == "mic_speak":
+        mic_speech_keys = frozenset({"text"})
+    elif cmd == "mic_speak_and_analyze":
+        mic_speech_keys = frozenset({"speech"})
+    if cmd in {"mic_inject", "mic_inject_and_analyze"}:
+        mic_path_keys = frozenset({"path", "wav_path"})
     for k, v in (args or {}).items():
         lk = str(k).lower()
-        if lk == "sql" and isinstance(v, str):
+        if lk in mic_speech_keys and isinstance(v, str):
+            out[k] = f"<redacted speech: {len(v)} chars>"
+        elif lk in mic_path_keys and isinstance(v, (str, Path)):
+            out[k] = "<redacted audio path>"
+        elif lk == "sql" and isinstance(v, str):
             out[k] = f"<redacted SQL: {len(v)} chars>"
         elif (
             lk in ("params", "parameters")
@@ -160,6 +172,29 @@ def summarize_result(result: Any) -> Any:
     return _truncate(result, 200)
 
 
+def summarize_error(
+    error: dict[str, Any],
+    *,
+    cmd: str | None = None,
+    args: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Bound nested action observations carried by structured error results."""
+
+    safe = dict(error)
+    if cmd in {"mic_inject", "mic_inject_and_analyze"}:
+        for key in ("path", "wav_path"):
+            raw_path = (args or {}).get(key)
+            if not isinstance(raw_path, (str, Path)):
+                continue
+            for field in ("message", "hint"):
+                value = safe.get(field)
+                if isinstance(value, str):
+                    safe[field] = value.replace(str(raw_path), "<redacted audio path>")
+    if "result" in safe:
+        safe["result"] = summarize_result(safe["result"])
+    return _truncate(safe, 300)
+
+
 def record(
     *,
     cache_dir: str | Path,
@@ -188,7 +223,7 @@ def record(
             "ts_ms": int(time.time() * 1000),
             "source": source,
             "cmd": cmd,
-            "args": redact_args(args),
+            "args": redact_args(args, cmd=cmd),
             "ok": ok,
             "serial": serial,
             "pid": os.getpid(),
@@ -211,7 +246,7 @@ def record(
         if duration_ms is not None:
             event["duration_ms"] = round(float(duration_ms), 1)
         if error:
-            event["error"] = _truncate(error, 300)
+            event["error"] = summarize_error(error, cmd=cmd, args=args)
         if result is not None:
             event["result"] = summarize_result(result)
         if correlation:

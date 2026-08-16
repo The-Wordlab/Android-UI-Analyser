@@ -275,6 +275,7 @@ def test_mcp_session_and_reach_dispatch_contract(monkeypatch: pytest.MonkeyPatch
                 "goal": "open settings",
                 "start_emulator": False,
                 "headed": True,
+                "audio": False,
                 "avd": None,
                 "package": None,
                 "activity": None,

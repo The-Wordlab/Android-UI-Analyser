@@ -16,7 +16,7 @@ Errors::
 
 Supported commands
 ------------------
-ping, analyze, ask_screen, has, inspect, screenshot, tap, long_press, input, clear,
+ping, analyze, ask_screen, has, inspect, screenshot, tap, long_press, mic_inject, mic_speak, input, clear,
 swipe, scroll_to, key, open_link, wait, wait_stable, wait_after_change, memory_update, goto,
 flow_run, flow_save, navigate, orient, list_devices, app, logcat,
 job_start, job_status, job_wait, job_cancel, job_list,
@@ -163,9 +163,7 @@ def _adopt_client_owner(engine: Engine, owner: str | None, caller: Any = None) -
     adopted_owner = leases.bind_owner_caller(owner, caller)
     if not adopted_owner:
         return
-    if leases.same_owner_identity(
-        adopted_owner, getattr(engine, "_lease_owner_resolved", None)
-    ):
+    if leases.same_owner_identity(adopted_owner, getattr(engine, "_lease_owner_resolved", None)):
         return
     device = getattr(engine, "_device", None)
     connected_serial = getattr(device, "serial", None)
@@ -283,6 +281,14 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
 
         elif cmd == "long_press":
             result = engine.long_press(**args)
+            return _result_ok(result.model_dump(mode="json"))
+
+        elif cmd == "mic_inject":
+            result = engine.mic_inject(**args)
+            return _result_ok(result.model_dump(mode="json"))
+
+        elif cmd == "mic_speak":
+            result = engine.mic_speak(**args)
             return _result_ok(result.model_dump(mode="json"))
 
         elif cmd == "tap_point":
@@ -600,7 +606,7 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
                 "unknown_command",
                 f"unknown command: {cmd!r}",
                 hint="Valid commands: ping, analyze, has, inspect, screenshot, "
-                "tap, long_press, double_tap, input, clear, swipe, scroll, scroll_to, expect, key, "
+                "tap, long_press, mic_inject, mic_speak, double_tap, input, clear, swipe, scroll, scroll_to, expect, key, "
                 "hide_keyboard, paste, copy_text, erase, clipboard_set, clipboard_get, "
                 "location_set, orientation_set, orientation_get, airplane_set, airplane_toggle, "
                 "network_status, network_offline, network_restore, "
@@ -854,8 +860,31 @@ _LONG_POLL_COMMANDS = frozenset(
         "navigate",
         "reach",
         "session_finish",
+        "mic_inject",
+        "mic_speak",
     }
 )
+
+
+def _mic_request_timeout(cmd: str, args: dict[str, Any]) -> float:
+    """Bound a daemon wait above every allowed audio/synthesis/hold phase."""
+
+    from . import mic as mic_mod
+
+    roll_s = 0.0
+    for key in ("pre_roll_ms", "post_roll_ms"):
+        value = args.get(key, 250)
+        if isinstance(value, (int, float)):
+            roll_s += max(0.0, float(value) / 1000.0)
+    # Observation and the gRPC duration-derived deadline need headroom beyond the media itself.
+    buffer_s = 60.0
+    if cmd == "mic_speak":
+        return mic_mod.SPEECH_SYNTHESIS_TIMEOUT_S + mic_mod.MAX_WAV_DURATION_S + roll_s + buffer_s
+    path = args.get("wav_path")
+    if isinstance(path, (str, Path)):
+        with contextlib.suppress(Exception):
+            return mic_mod.inspect_pcm_wav(path).duration_s + roll_s + buffer_s
+    return 60.0 + roll_s
 
 
 class DaemonClient:
@@ -929,6 +958,11 @@ class DaemonClient:
         ms = args.get("timeout_ms")
         if isinstance(ms, (int, float)) and ms > 0:
             timeout = max(timeout, ms / 1000.0 + 5.0)
+        elif cmd in {"mic_inject", "mic_speak"}:
+            # Never let the caller's socket expire while a hold/stream may still be active.
+            # inject derives from the already caller-validated WAV; speak budgets the bounded
+            # synthesizer plus the maximum accepted generated WAV.
+            timeout = max(timeout, _mic_request_timeout(cmd, args))
         elif cmd in _LONG_POLL_COMMANDS:
             timeout = max(timeout, 60.0)
         elif self._uses_default_timeout and cmd != "ping":
