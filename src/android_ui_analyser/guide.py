@@ -24,17 +24,14 @@ from .projection import FIELD_ALIASES, TSV_DEFAULT_FIELDS
 # auto-activate the skill on Android-UI tasks — keep it stable across regenerations.
 SKILL_NAME = "android-ui-analyser"
 SKILL_DESCRIPTION = (
-    "Plan, drive, inspect, and verify an Android app's UI on a device/emulator with the `aua` "
-    "(android-ui-analyser) CLI. Returns the screen as a list of elements with stable integer "
-    "IDs + bounding boxes, then acts BY ID — tap/input/swipe/key — so you never guess pixel "
-    'coordinates. Use whenever the task involves an Android device/emulator: "test the '
-    'Android app", "what\'s on screen", "tap/type/swipe the X", "is the named text visible", "drive '
-    'the emulator", automating or debugging an Android UI flow, checking a screen after a '
-    "change, testing offline/network or emulator microphone/voice-input behavior, or "
-    "inspecting/seeding a debuggable app's "
-    "SQLite database. Start goal-oriented work with `aua session start --goal`; hierarchy-first "
-    "(tens of ms); falls back to OCR/detection/grounding vision on "
-    "Compose/Flutter/WebView/canvas/game screens the accessibility tree can't see."
+    "Drive, inspect, and verify Android app UIs on a device/emulator with the `aua` CLI. It "
+    "returns stable element IDs and bounds, then acts by ID instead of guessed pixels. Use for "
+    "Android device/emulator tasks: inspect a screen, act on a control, automate "
+    "or debug a UI flow, verify a change, test offline/network or emulator microphone/voice "
+    "input, or inspect/seed a debuggable app's SQLite database. Start goal-oriented work with "
+    "`aua session start --goal`. AUA is hierarchy-first and falls back to OCR, detection, or "
+    "grounding vision for Compose/Flutter/WebView/canvas/game screens the accessibility tree "
+    "cannot describe."
 )
 
 DEFAULT_SKILL_PATH = Path(".claude/skills/android-ui-analyser/SKILL.md")
@@ -744,17 +741,20 @@ KEY_FLAGS: list[tuple[str, str]] = [
     ),
     (
         "mic",
-        "`mic inject PCM-WAV [HOLD-ID]` or `--rid/--text/--desc <control>`; the optional "
-        "control stays down for `--pre-roll-ms` + server-backpressured audio + "
-        "`--post-roll-ms`, then the command returns the post-action observation. Input is "
+        "`mic inject PCM-WAV [CONTROL-ID]` or `--rid/--text/--desc <control>`; "
+        "`--control-mode hold` (default) keeps it down for pre/audio/post, while `toggle` "
+        "uses one tap to start and one to stop. Toggle requires an enabled, clickable, "
+        "initially-off control. The command returns the post-action observation. Input is "
         "uncompressed PCM WAV: U8/S16, mono/stereo, <=48 kHz, <=5 minutes. On macOS, `mic speak TEXT "
-        "[--voice NAME] [--rate WPM]` uses `/usr/bin/say` and the same injection/hold path. "
+        "[--voice NAME] [--rate WPM]` uses `/usr/bin/say` and the same control path. "
         "Needs the `[audio]` extra and an emulator started with `--audio`; physical devices "
         "do not expose this API. `mic_delivery_uncertain` means samples may already have been "
         "delivered: inspect `error.result.observation` and never retry the voice action. If "
         "`mic_emulator_unavailable` occurs, inspect `aua devices` first. Emulator 36.4.10 "
         "permits one AUA injection attempt per boot; `mic_repeat_unsafe` requires a restart. "
-        "`mic_delivered_release_failed` means audio arrived; do not repeat it.",
+        "`mic_delivered_release_failed` means audio arrived but control cleanup failed. "
+        "`mic_toggle_start_uncertain` / `mic_toggle_stop_uncertain` mean recording may be "
+        "active: protect privacy, inspect the forced observation, and never tap/retry blindly.",
     ),
     (
         "has",
@@ -813,7 +813,8 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "`location set LAT,LON`, `orientation set|get`, `airplane on|off|toggle`, "
         "`network status [--verify]|offline --verify|restore`, `network profile "
         "list|apply|status|restore` (all modes are saved, verified, and reversible), "
-        "`media add PATH`, `mic inject PCM-WAV [HOLD-ID]`, `mic speak TEXT [HOLD-ID]`, "
+        "`media add PATH`, `mic inject PCM-WAV [CONTROL-ID] [--control-mode hold|toggle]`, "
+        "`mic speak TEXT [CONTROL-ID]`, "
         "`record start|stop PATH`, `clock set --ms <unix-ms>` / "
         "`clock restore` (time travel invalidates auth — always restore)",
     ),
@@ -1299,17 +1300,29 @@ def render_markdown(*, brief: bool = False) -> str:
         "aua emulator start --headless --audio\n"
         "aua mic inject sample.wav\n"
         "aua mic inject sample.wav --rid hold_to_talk --pre-roll-ms 300 --post-roll-ms 500\n"
+        "aua mic inject sample.wav --rid record_button --control-mode toggle\n"
         'aua mic speak "Testing one two" --voice Samantha --rate 175 --rid hold_to_talk\n'
         "```\n"
         "WAV input is uncompressed unsigned 8-bit or little-endian signed 16-bit PCM, mono or "
         "stereo, at 48 kHz or less, up to five minutes. `mic speak` is macOS-only; elsewhere synthesize a compatible "
-        "WAV and use `mic inject`. The stream uses emulator backpressure and waits for its close "
-        "response before releasing the optional hold. An `INTERNAL` close becomes "
+        "WAV and use `mic inject`. The stream uses emulator backpressure and waits for its close. "
+        "A target defaults to push-to-talk `hold` (DOWN/pre/audio/post/UP). `--control-mode "
+        "toggle` uses exactly one non-retrying tap to START and one to STOP at the same point; "
+        "it requires an enabled, clickable, initially-off control. When the app does not expose "
+        "checked/selected state, the caller must establish that initial-off precondition. AUA "
+        "refuses audio or STOP if the foreground package no longer owns the screen. Toggle is "
+        "best-effort unless the app exposes an active-state/STOP selector: use short media and "
+        "require the control to remain actively recording through post-roll, because an app that "
+        "auto-stops early could interpret AUA's final tap as a new START. An "
+        "`INTERNAL` close becomes "
         "`mic_delivery_uncertain` with the post-action screen in `error.result.observation`: "
         "samples may already have arrived, so never repeat the voice action. Timeouts and "
         "unclassified RPC closes can also follow partial delivery, so inspect the UI before a "
-        "new attempt. `mic_delivered_release_failed` means audio arrived but hold release "
-        "failed; do not repeat it. If "
+        "new attempt. `mic_delivered_release_failed` means audio arrived but target-control "
+        "cleanup failed; do not repeat it. `mic_toggle_start_uncertain` sends no audio and no "
+        "blind STOP, while `mic_toggle_stop_uncertain` means START was confirmed but STOP is "
+        "unknown; recording may be active in either case, so protect privacy, inspect the forced "
+        "observation, and never tap/retry blindly. If "
         "`mic_emulator_unavailable` reports that the emulator exited or went offline, inspect "
         "`aua devices` and restart only that emulator with `--audio` when necessary. Android "
         "Emulator 36.4.10 is limited to one injection attempt per boot across all AUA workers; "
@@ -1558,22 +1571,20 @@ do not replace an AUA workflow with raw `adb`.
 ## Operating loop
 
 1. Start goal-oriented work with `aua session start --goal "<what must be verified>"`. Add
-   `--app <package>` when the foreground app is unrelated. Reuse its observation and follow its
-   exact `recommended_call`; do not inventory commands or immediately call `analyze` again.
+   `--app <package>` for an unrelated foreground app. Reuse its observation and follow its
+   exact `recommended_call`; do not immediately re-analyze.
 2. Prefer navigation in this order: verified `goto`, matching saved `flow`, proven deeplink,
    then a manual analyzed action. Preview risky routes; goal text never authorizes destructive,
    external, settings, data, payment, send, or sign-out effects.
 3. Use analyzed actions and consume their returned `observation`; integer ids belong only to
    that frame. On dynamic screens prefer `--rid` or `stable_key`, resolving it again after a
    transition instead of replaying an old numeric id.
-4. Fold arrival into the action with a positive predicate, for example
-   `--until 'rid:resultCard,!text:Loading'`. If it returns `settled-unmet`, reuse the fresh
-   destination and its corrected predicate; never repeat the action. An absence-only check such
-   as `!text:Loading` belongs in `aua await-and-analyze '!text:Loading' --observe`. For nested return
-   navigation use `aua back-until-and-analyze '<known_screen>'` or positive `rid:`/`text:`/
-   `desc:` evidence.
-5. Keep perception hierarchy-first and automatic. Filter in AUA (`--where-rid`, `--where-text`,
-   `--clickable`, `--region`); use vision only for opaque screens and `--deep` for grounding.
+4. Fold arrival into the action with a positive predicate such as
+   `--until 'rid:resultCard,!text:Loading'`. On `settled-unmet`, use its fresh destination and
+   corrected predicate; never repeat the action. Use `await-and-analyze` for absence-only checks
+   and `back-until-and-analyze` for nested return navigation.
+5. Keep perception hierarchy-first. Filter in AUA (`--where-rid`, `--where-text`, `--clickable`,
+   `--region`); use vision for opaque screens and `--deep` for grounding.
 6. Carry `goal_progress.checkpoint` on the next call with `--phase-done` (MCP: `phase_done`)
    instead of spending a separate progress call. Use `aua job start await ...` only for a
    read-only wait that may outlive one agent call. If `daemon_outcome_unknown` appears, never
@@ -1585,20 +1596,20 @@ do not replace an AUA workflow with raw `adb`.
    review/finish call, so `reporting_call_included` is false and
    `top_level_calls_including_reporting_call` adds that call.
 
-Flow previews expose value-free `selector_resilience`. An unmapped arrival becomes `arrival:`
-with source `satisfied_action_until` only when the immediately preceding analyzed action
-satisfied a privacy-safe positive `--until` on the same package/context/frame; otherwise it is
-unverified.
-
-Safe pre-device usage errors are journaled as `cli_help` / `cli_usage_error`; follow an exact
-structured `recommended_call` directly.
+Flow previews expose value-free `selector_resilience`. Trust an unmapped arrival only when its
+source is `satisfied_action_until` from the preceding action's privacy-safe positive `--until`
+on the same package/context/frame.
 
 ## Device and safety rules
 
 - AUA leases automatically. Never steal another agent's device; respect user-named boundaries.
-- Start an emulator only with explicit scope (`session start --start-emulator`). For voice,
-  boot with `--audio`, use `mic inject`/`mic speak`, and inspect uncertain delivery instead of
-  replaying it.
+- Start an emulator only with explicit scope (`session start --start-emulator`); use `--headed`
+  only when visibility is required. For voice input boot with `--audio`; use `mic inject` or
+  macOS `mic speak`. Controls default to hold; `--control-mode toggle` requires an initially-off
+  target that remains recording through post-roll, using one START/STOP tap each. Toggle is
+  best-effort without an observable active-state/STOP selector, so use short media. Never repeat
+  late-delivery or uncertain-toggle errors; protect nearby speech and inspect their observation.
+  On emulator 36.4.10, `mic_repeat_unsafe` requires a restart.
 - Use `aua network offline --verify`; session cleanup restores it. Use guarded `aua db` for
   debuggable SQLite.
 - A delivered deeplink, spinner disappearance, or unchanged short settle is not proof of the

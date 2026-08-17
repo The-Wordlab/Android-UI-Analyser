@@ -136,14 +136,25 @@ CAPABILITIES: tuple[Capability, ...] = (
     Capability(
         "microphone",
         "Inject a PCM WAV or macOS-generated speech into an emulator microphone, optionally "
-        "holding a push-to-talk control for the whole stream.",
-        ("audio", "microphone", "mic", "voice", "speech", "speak", "push to talk"),
+        "holding push-to-talk or toggling a tap-to-start control on and off.",
+        (
+            "audio",
+            "microphone",
+            "mic",
+            "voice",
+            "speech",
+            "speak",
+            "push to talk",
+            "tap to talk",
+            "toggle recording",
+        ),
         58,
-        "aua mic inject <audio.wav> [HOLD-ID]",
+        "aua mic inject <audio.wav> [CONTROL-ID] [--control-mode hold|toggle]",
         "mic_inject_and_analyze",
         risk=(
             "emulator-only; needs audio-enabled AVD + [audio] extra; emulator 36.4.10 allows "
-            "one injection attempt per boot"
+            "one injection attempt per boot; toggle is best-effort and assumes the same control "
+            "stays actively recording until AUA's STOP tap"
         ),
     ),
     Capability(
@@ -238,7 +249,8 @@ def render_mcp_instructions() -> str:
         "job_start for a long read-only wait; reconnect with job_status, bound a poll with "
         "job_wait, or stop it with job_cancel. Do not issue another device tool while it runs. Use "
         "mic_inject_and_analyze for a PCM WAV, or mic_speak_and_analyze on macOS; either may "
-        "hold one id/rid/text/desc target across pre-roll, playback, and post-roll. "
+        "use one id/rid/text/desc target: control_mode=hold (default) keeps it down, while "
+        "control_mode=toggle taps once before and once after audio. "
         "session_review to find avoidable calls (`ok` is review success; `run_ok` is run health, "
         "and null means an older duplicated invocation has no provable caller-visible outcome). "
         "Its top_level_calls are caller-visible and split into lifecycle_calls plus task_calls; "

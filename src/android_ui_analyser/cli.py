@@ -1071,8 +1071,18 @@ def _daemon_error(err: dict[str, Any]) -> AuaError:
         "selector_ambiguous": SelectorAmbiguousError,
         "expectation_failed": ExpectationFailed,
     }
-    if code in {"mic_delivery_uncertain", "mic_delivered_release_failed"}:
-        from .mic import MicDeliveredReleaseError, MicDeliveryUncertainError
+    if code in {
+        "mic_delivery_uncertain",
+        "mic_delivered_release_failed",
+        "mic_toggle_start_uncertain",
+        "mic_toggle_stop_uncertain",
+    }:
+        from .mic import (
+            MicDeliveredReleaseError,
+            MicDeliveryUncertainError,
+            MicToggleStartUncertainError,
+            MicToggleStopUncertainError,
+        )
 
         result = err.get("result")
         raw_followups = err.get("followup_errors")
@@ -1081,11 +1091,12 @@ def _daemon_error(err: dict[str, Any]) -> AuaError:
             if isinstance(raw_followups, list)
             else None
         )
-        error_type = (
-            MicDeliveredReleaseError
-            if code == "mic_delivered_release_failed"
-            else MicDeliveryUncertainError
-        )
+        error_type = {
+            "mic_delivery_uncertain": MicDeliveryUncertainError,
+            "mic_delivered_release_failed": MicDeliveredReleaseError,
+            "mic_toggle_start_uncertain": MicToggleStartUncertainError,
+            "mic_toggle_stop_uncertain": MicToggleStopUncertainError,
+        }[code]
         return error_type(
             message,
             hint=hint,
@@ -1105,6 +1116,10 @@ def _daemon_error(err: dict[str, Any]) -> AuaError:
         "mic_emulator_unavailable",
         "mic_injection_failed",
         "mic_speech_failed",
+        "mic_toggle_owner_unknown",
+        "mic_toggle_owner_changed",
+        "tap_delivery_uncertain",
+        "single_tap_unsupported",
     }
     if code in device_error_codes:
         return DeviceError(message, hint=hint, code=code)
@@ -4601,7 +4616,7 @@ mic_app = typer.Typer(
 app.add_typer(mic_app, name="mic")
 
 
-def _mic_hold_target(
+def _mic_control_target(
     *,
     ident: str | None,
     by: str | None,
@@ -4611,13 +4626,13 @@ def _mic_hold_target(
     index: int | None,
     first: bool,
 ) -> tuple[int | None, dict[str, Any] | None]:
-    """Build one optional hold target with the same ambiguity rules as MCP."""
+    """Build one optional control target with the same ambiguity rules as MCP."""
 
     direct_selectors = [value for value in (rid, text, desc) if value is not None]
     if len(direct_selectors) > 1 or (direct_selectors and (ident is not None or by is not None)):
         raise UsageError(
-            "microphone hold accepts only one id/rid/text/desc target",
-            hint="Pass one fresh id or one stable selector; omit all four to inject without holding.",
+            "microphone control accepts only one id/rid/text/desc target",
+            hint="Pass one fresh id or one stable selector; omit all four for audio-only input.",
         )
     selector = _selector(
         ident=ident,
@@ -4630,7 +4645,7 @@ def _mic_hold_target(
     )
     if selector is None and (index is not None or first):
         raise UsageError(
-            "--index/--first needs a microphone hold selector",
+            "--index/--first needs a microphone control selector",
             hint="Pass one of --rid/--text/--desc (or --by), or remove the modifier.",
         )
     return _element_id(ident, selector), selector
@@ -4642,8 +4657,8 @@ def mic_inject_cmd(
     path: str = typer.Argument(..., metavar="PCM-WAV", help="Host PCM WAV file to inject."),
     ident: str | None = typer.Argument(
         None,
-        metavar="[HOLD-ID]",
-        help="Optional element id to hold while audio is injected (or a --by selector value).",
+        metavar="[CONTROL-ID]",
+        help="Optional hold/toggle control id (or a --by selector value).",
     ),
     by: str | None = _SEL_BY,
     rid: str | None = _SEL_RID,
@@ -4651,11 +4666,17 @@ def mic_inject_cmd(
     desc: str | None = _SEL_DESC,
     index: int | None = _SEL_INDEX,
     first: bool = _SEL_FIRST,
+    control_mode: str = typer.Option(
+        "hold",
+        "--control-mode",
+        metavar="hold|toggle",
+        help="Target behavior: push-to-talk hold (default), or one tap to start and one to stop.",
+    ),
     pre_roll_ms: int = typer.Option(
-        250, "--pre-roll-ms", min=0, help="Hold this long before injecting audio."
+        250, "--pre-roll-ms", min=0, help="Wait this long after control start before audio."
     ),
     post_roll_ms: int = typer.Option(
-        250, "--post-roll-ms", min=0, help="Keep holding this long after audio drains."
+        250, "--post-roll-ms", min=0, help="Wait this long after audio drains before control stop."
     ),
     observe: bool = typer.Option(
         True, "--observe/--no-observe", help="Also return the post-action screen."
@@ -4668,10 +4689,10 @@ def mic_inject_cmd(
         show_default=False,
     ),
 ) -> None:
-    """Inject U8/S16 PCM WAV audio; optionally hold an id or selector during playback."""
+    """Inject U8/S16 PCM WAV audio with an optional hold or toggle control."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        element_id, selector = _mic_hold_target(
+        element_id, selector = _mic_control_target(
             ident=ident,
             by=by,
             rid=rid,
@@ -4682,8 +4703,11 @@ def mic_inject_cmd(
         )
         # Resolve in the caller's cwd before daemon routing; a warm daemon can have a different
         # cwd and must never reinterpret a relative path as a different audio file.
-        from .mic import inspect_pcm_wav
+        from .mic import inspect_pcm_wav, validate_control_mode
 
+        normalized_mode = validate_control_mode(
+            control_mode, has_target=element_id is not None or selector is not None
+        )
         resolved_path = str(inspect_pcm_wav(path).path)
         _emit(
             _route(
@@ -4692,6 +4716,7 @@ def mic_inject_cmd(
                 wav_path=resolved_path,
                 element_id=element_id,
                 selector=selector,
+                control_mode=normalized_mode,
                 pre_roll_ms=pre_roll_ms,
                 post_roll_ms=post_roll_ms,
                 observe=observe,
@@ -4709,8 +4734,8 @@ def mic_speak_cmd(
     speech: str = typer.Argument(..., metavar="TEXT", help="Text for macOS say to synthesize."),
     ident: str | None = typer.Argument(
         None,
-        metavar="[HOLD-ID]",
-        help="Optional element id to hold while speech is injected (or a --by selector value).",
+        metavar="[CONTROL-ID]",
+        help="Optional hold/toggle control id (or a --by selector value).",
     ),
     by: str | None = _SEL_BY,
     rid: str | None = _SEL_RID,
@@ -4718,13 +4743,19 @@ def mic_speak_cmd(
     desc: str | None = _SEL_DESC,
     index: int | None = _SEL_INDEX,
     first: bool = _SEL_FIRST,
+    control_mode: str = typer.Option(
+        "hold",
+        "--control-mode",
+        metavar="hold|toggle",
+        help="Target behavior: push-to-talk hold (default), or one tap to start and one to stop.",
+    ),
     voice: str | None = typer.Option(None, "--voice", help="Installed macOS say voice name."),
     rate: int | None = typer.Option(None, "--rate", min=1, help="Speech rate in words per minute."),
     pre_roll_ms: int = typer.Option(
-        250, "--pre-roll-ms", min=0, help="Hold this long before injecting speech."
+        250, "--pre-roll-ms", min=0, help="Wait this long after control start before speech."
     ),
     post_roll_ms: int = typer.Option(
-        250, "--post-roll-ms", min=0, help="Keep holding this long after speech drains."
+        250, "--post-roll-ms", min=0, help="Wait this long after speech drains before control stop."
     ),
     observe: bool = typer.Option(
         True, "--observe/--no-observe", help="Also return the post-action screen."
@@ -4737,10 +4768,10 @@ def mic_speak_cmd(
         show_default=False,
     ),
 ) -> None:
-    """Synthesize speech with macOS say, then inject it through the emulator microphone."""
+    """Synthesize speech, then inject it with an optional hold or toggle control."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        element_id, selector = _mic_hold_target(
+        element_id, selector = _mic_control_target(
             ident=ident,
             by=by,
             rid=rid,
@@ -4749,6 +4780,11 @@ def mic_speak_cmd(
             index=index,
             first=first,
         )
+        from .mic import validate_control_mode
+
+        normalized_mode = validate_control_mode(
+            control_mode, has_target=element_id is not None or selector is not None
+        )
         _emit(
             _route(
                 engine,
@@ -4756,6 +4792,7 @@ def mic_speak_cmd(
                 text=speech,
                 element_id=element_id,
                 selector=selector,
+                control_mode=normalized_mode,
                 voice=voice,
                 rate=rate,
                 pre_roll_ms=pre_roll_ms,

@@ -182,7 +182,8 @@ aua emulator start --headless --audio
 aua session start --goal "verify voice input" --start-emulator --audio
 
 aua mic inject sample.wav
-aua mic inject sample.wav --rid hold_to_talk       # hold through pre/audio/post roll
+aua mic inject sample.wav --rid hold_to_talk       # DOWN → audio → UP (default hold)
+aua mic inject sample.wav --rid record_button --control-mode toggle  # tap start, then tap stop
 aua mic inject sample.wav 7 --pre-roll-ms 300 --post-roll-ms 500
 
 # macOS convenience: /usr/bin/say creates a temporary 44.1 kHz S16 mono WAV
@@ -191,9 +192,15 @@ aua mic speak "Testing one two" --voice Samantha --rate 175 --rid hold_to_talk
 
 Input must be an uncompressed RIFF/WAVE file: unsigned 8-bit or little-endian signed 16-bit
 PCM, mono or stereo, at 48 kHz or less, and no longer than five minutes. The default delivery
-mode is server-backpressured, so the optional control stays held until the emulator consumes
-the final sample, followed by the post-roll. Each command then returns the post-action
-observation with fresh ids.
+mode is server-backpressured. With a target, `--control-mode hold` remains the default:
+DOWN → pre-roll → audio → post-roll → UP. `--control-mode toggle` instead sends one
+non-retrying tap to start, waits/injects, then sends one non-retrying tap to the exact same
+point to stop. Toggle mode requires a target that is enabled, clickable, and initially off;
+when its active state is not exposed as `checked`/`selected`, the caller must establish that
+precondition. Toggle mode is best-effort unless the app exposes an active-state/STOP selector:
+use short media and require the control to remain actively recording through post-roll. If the
+app auto-stops early (timeout, max duration, or recognition completion), the same final tap could
+start a new recording instead. Each command then returns the post-action observation with fresh ids.
 
 AUA discovers the endpoint by matching the selected `emulator-<port>` serial to the emulator's
 `pid_*.ini` runtime record and sends its bearer token only as gRPC metadata; the token is never
@@ -202,9 +209,15 @@ with another TTS tool and use `mic inject` there. `mic_delivery_uncertain` means
 returned `INTERNAL` after accepting packets: samples may already have arrived, so inspect
 `error.result.observation` and do not repeat the voice action. A timeout or unclassified RPC
 close can also happen after partial delivery; its hint likewise requires inspecting the UI
-before any new attempt. `mic_delivered_release_failed` means all audio arrived but the held
-control did not release cleanly—do not repeat it; inspect the attached observation and verify
-the control state. If injection reports
+before any new attempt. `mic_delivered_release_failed` means all audio arrived but the target
+control gesture did not finish cleanly—do not repeat it; inspect the attached observation and
+verify the control state. `mic_toggle_start_uncertain` means the one START tap may have landed:
+AUA sends no audio and no blind compensating tap, because recording may be active.
+`mic_toggle_stop_uncertain` means START was confirmed but STOP could not be sent or confirmed
+safely. In either toggle uncertainty, protect nearby speech, inspect the forced observation,
+and never tap or repeat audio blindly. AUA rechecks that the same foreground package owns the
+screen before audio and STOP; if ownership changes it refuses to inject or tap stale coordinates.
+If injection reports
 `mic_emulator_unavailable`, run `aua devices`, then restart only that emulator with `--audio`
 if it is offline or absent; never blindly retry either outcome. Android Emulator 36.4.10 has a
 known repeat-stream crash, so AUA atomically permits only one injection attempt per emulator
@@ -1369,8 +1382,8 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 | `aua network profile list\|apply\|status\|restore` | Reversible Wi-Fi, cellular, slow, and lossy conditions |
 | `aua media add PATH` | Push media into the gallery |
 | `aua record start\|stop PATH` | Screen recording |
-| `aua mic inject PCM-WAV [HOLD-ID]` | Inject emulator microphone PCM; optional `--rid`/`--text`/`--desc` hold with pre/post roll |
-| `aua mic speak "TEXT" [HOLD-ID]` | macOS `say` → temporary PCM WAV → the same emulator injection/hold path |
+| `aua mic inject PCM-WAV [CONTROL-ID]` | Inject emulator PCM; optional selector plus `--control-mode hold\|toggle` |
+| `aua mic speak "TEXT" [CONTROL-ID]` | macOS `say` → temporary PCM WAV → the same hold/toggle path |
 | `aua clock set --ms <unix-ms>` | Set device clock (emulator / rooted) |
 | `aua screenshot [path]` | Save a raw screenshot (`--region` / `--scale`) |
 | `aua inspect <id>` | Dump full details for one element |
@@ -1418,7 +1431,9 @@ All action commands (`tap`, `long-press`, `input`, `clear`, `swipe`, `scroll-to`
 | `mic_audio_disabled` | Restart only the selected emulator with `aua emulator start --audio`; AUA refuses AVDs launched with `-no-audio`. |
 | `mic_repeat_unsafe` | Emulator 36.4.10 already had its one safe stream attempt this boot. Do not retry; restart only that emulator with audio enabled. |
 | `mic_delivery_uncertain` | Samples may already have arrived despite the emulator's `INTERNAL` close. Inspect `error.result.observation`; do not repeat the voice action. |
-| `mic_delivered_release_failed` | Audio arrived, but hold release failed. Do not repeat it; inspect the attached observation and control state. |
+| `mic_delivered_release_failed` | Audio arrived, but target-control cleanup failed. Do not repeat it; inspect the attached observation and control state. |
+| `mic_toggle_start_uncertain` | START may have landed; no audio or blind STOP was sent. Recording may be active—protect privacy and inspect the forced observation. |
+| `mic_toggle_stop_uncertain` | START was confirmed but STOP is unconfirmed/unsafe. Do not retry blindly; inspect the forced observation and control state. |
 | `mic_injection_timeout` / `mic_injection_failed` | Samples may already have arrived. Do not retry blindly; inspect the current UI first. |
 | `mic_emulator_unavailable` / emulator goes offline during injection | Do not blindly retry. Check `aua devices`; restart only that emulator with audio enabled if it exited. |
 | `analyze` returns few/no elements | The hierarchy is empty (Compose/Flutter/WebView/canvas). Force vision: `aua --format compact analyze --source vision --annotate`. |
