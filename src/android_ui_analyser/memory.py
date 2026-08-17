@@ -4157,11 +4157,11 @@ def arrival_destination_terms(goal: str) -> list[str]:
     is how a clickable launcher row was previously mistaken for an already-open destination.
     """
     match = re.search(
-        r"\b(?:open|reach|enter|visit|view|inspect|verify|select|choose|"
+        r"\b(?:open|tap|press|click|reach|enter|visit|view|inspect|verify|select|choose|"
         r"navigate(?:\s+once)?\s+to|go\s+to|return\s+to)\s+(?:the\s+)?"
         r"(?P<destination>.+?)"
         r"(?=\s+(?:and\s+(?:verify|preview|check|open|tap|select|then)\b|"
-        r"then\b|while\b|using\b|through\b|via\b|from\b|within\b|inside\b|in\b)|"
+        r"then\b|while\b|using\b|through\b|via\b|from\b|among\b|within\b|inside\b|in\b)|"
         r"[;,.]|$)",
         goal,
         flags=re.IGNORECASE,

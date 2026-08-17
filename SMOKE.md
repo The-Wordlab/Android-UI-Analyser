@@ -98,6 +98,13 @@ aua app launch com.android.settings
 aua --format pretty analyze
 ```
 
+To bring your own build instead, install and open it in one call (re-running is cheap — the push
+is skipped when that version is already there):
+
+```bash
+aua install path/to/app-debug.apk --launch
+```
+
 Confirm elements appear with meaningful `text` or `content_desc` values and `clickable: true` on interactive items.
 
 ---
@@ -130,10 +137,11 @@ aua --format compact analyze
 
 # Identify an ID for a tappable element (e.g. "Network & internet" in Settings)
 # Suppose it is ID 3:
-aua tap 3
+aua tap-and-analyze 3
 ```
 
-Expected: the element is tapped; the screen navigates. Confirm with another `aua analyze`.
+Expected: the element is tapped and the response includes the screen it reached; no separate
+`aua analyze` is needed.
 
 ---
 
@@ -144,7 +152,7 @@ Navigate to a screen with a text input (e.g. the search bar in Settings):
 ```bash
 aua --format compact analyze
 # Identify the search input element ID, e.g. ID 1
-aua input 1 "wifi"
+aua input-and-analyze 1 "wifi"
 ```
 
 Expected: the text field is focused and "wifi" is typed.
@@ -152,7 +160,7 @@ Expected: the text field is focused and "wifi" is typed.
 Add `--submit` to send the IME action (Enter / Search):
 
 ```bash
-aua input 1 "wifi" --submit
+aua input-and-analyze 1 "wifi" --submit
 ```
 
 ---
@@ -218,13 +226,13 @@ aua analyze --query "the Settings search bar" --deep
 
 ```bash
 # Start fresh on the launcher
-aua key home
+aua key-and-analyze home
 
 # Get elements
 aua --format compact analyze
 
 # Open Settings by tapping its icon (find the ID from analyze output)
-aua tap <settings-icon-id>
+aua tap-and-analyze <settings-icon-id>
 
 # Confirm navigation
 aua has "Search settings"
@@ -241,7 +249,7 @@ aua --format compact analyze
 - [ ] `aua devices` lists the emulator
 - [ ] `aua analyze` on the launcher returns hierarchy elements in < 150 ms warm
 - [ ] `aua has "<present text>"` exits 0; `aua has "<absent text>"` exits 1
-- [ ] `aua tap <id>` navigates the screen
-- [ ] `aua input <id> "text"` types into a field
+- [ ] `aua tap-and-analyze <id>` navigates and returns the resulting screen
+- [ ] `aua input-and-analyze <id> "text"` types and returns the resulting screen
 - [ ] `aua analyze --source vision --annotate` runs on a Compose/Flutter/WebView screen; annotated PNG is written
 - [ ] (Optional) `aua analyze --query "..."` resolves via grounding when configured

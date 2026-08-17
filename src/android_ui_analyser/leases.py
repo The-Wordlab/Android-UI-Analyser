@@ -30,6 +30,7 @@ import os
 import re
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -573,3 +574,58 @@ def choose_device(
             f"listed holder is a dead run: `aua lease release <serial> --force`."
         ),
     )
+
+
+def wait_for_device(
+    cache_dir: str | Path,
+    *,
+    owner: str,
+    explicit: str | None,
+    candidates: Callable[[], list[tuple[str, dict[str, Any]]]],
+    needs: list[str] | None = None,
+    ttl_s: int = DEFAULT_TTL_S,
+    wait_s: float = 0,
+    poll_s: float = 0.25,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> tuple[str, str, int]:
+    """Choose a device, optionally waiting without redirecting explicit intent.
+
+    The candidate supplier is re-run on every poll so newly attached targets and process-death
+    lease release are observed.  This helper never releases or rewrites another owner's lease;
+    it is only a bounded retry around :func:`choose_device`.
+    """
+
+    from .errors import DeviceLeasedError
+
+    timeout = max(0.0, float(wait_s))
+    started = monotonic()
+    deadline = started + timeout
+    last_error: DeviceLeasedError | None = None
+    while True:
+        try:
+            serial, why = choose_device(
+                cache_dir,
+                owner=owner,
+                explicit=explicit,
+                candidates=candidates(),
+                needs=needs,
+                ttl_s=ttl_s,
+            )
+            return serial, why, int(max(0.0, monotonic() - started) * 1000)
+        except DeviceLeasedError as exc:
+            last_error = exc
+        now = monotonic()
+        if timeout <= 0 or now >= deadline:
+            assert last_error is not None
+            waited_ms = int(max(0.0, now - started) * 1000)
+            target = f" --serial {explicit}" if explicit else ""
+            raise DeviceLeasedError(
+                f"{last_error.message} after waiting {waited_ms}ms",
+                hint=(
+                    f"{last_error.hint or ''} Retry the bounded wait with "
+                    f"`aua{target} session start --goal <goal> --wait-for-lease "
+                    f"{max(1, int(timeout))}`."
+                ).strip(),
+            ) from last_error
+        sleep(min(max(0.01, poll_s), max(0.0, deadline - now)))

@@ -11,7 +11,10 @@ from experiments.functiongemma.curriculum import (
     DEFAULT_SPLIT_SIZES,
     write_dataset,
 )
+from experiments.functiongemma.live_context_curriculum import write_v6_dataset
 from experiments.functiongemma.production_curriculum import write_v4_dataset
+from experiments.functiongemma.recovery_curriculum import write_v5_dataset
+from experiments.functiongemma.semantic_context_curriculum import write_v7_dataset
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "runs" / "functiongemma" / "data"
@@ -31,9 +34,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--test-size", type=int, default=DEFAULT_SPLIT_SIZES["test"])
     parser.add_argument(
         "--curriculum-version",
-        choices=("v3", "v4"),
+        choices=("v3", "v4", "v5", "v6", "v7"),
         default="v3",
-        help="Keep the frozen v3 default or explicitly add the production-shaped v4 corpus.",
+        help=(
+            "Keep frozen v3, add production-shaped v4, add recovery-focused v5, "
+            "add exact-serializer permutation-complete v6 rows, or add broad "
+            "exact-runtime semantic v7 rows."
+        ),
     )
     return parser
 
@@ -45,11 +52,16 @@ def main(argv: list[str] | None = None) -> int:
         "valid": args.valid_size,
         "test": args.test_size,
     }
-    manifest = (
-        write_v4_dataset(args.output_dir, sizes, seed=args.seed)
-        if args.curriculum_version == "v4"
-        else write_dataset(args.output_dir, sizes, seed=args.seed)
-    )
+    if args.curriculum_version == "v7":
+        manifest = write_v7_dataset(args.output_dir, sizes, seed=args.seed)
+    elif args.curriculum_version == "v6":
+        manifest = write_v6_dataset(args.output_dir, sizes, seed=args.seed)
+    elif args.curriculum_version == "v5":
+        manifest = write_v5_dataset(args.output_dir, sizes, seed=args.seed)
+    elif args.curriculum_version == "v4":
+        manifest = write_v4_dataset(args.output_dir, sizes, seed=args.seed)
+    else:
+        manifest = write_dataset(args.output_dir, sizes, seed=args.seed)
     print(
         json.dumps(
             {

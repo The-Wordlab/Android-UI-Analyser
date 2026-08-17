@@ -102,6 +102,21 @@ _OBSERVE_PROP: dict[str, Any] = {
     "default": True,
     "description": "Also return the post-action screen analysis.",
 }
+_RELATION_SELECTOR_PROP: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "rid": {"type": "string"},
+        "text": {"type": "string"},
+        "desc": {"type": "string"},
+        "index": {"type": "integer", "minimum": 0},
+    },
+    "oneOf": [
+        {"required": ["rid"]},
+        {"required": ["text"]},
+        {"required": ["desc"]},
+    ],
+    "additionalProperties": False,
+}
 _UNTIL_PROPS: dict[str, dict[str, Any]] = {
     "until": {
         "type": "string",
@@ -169,7 +184,16 @@ _ANALYZED_TOOL_NAMES: dict[str, str] = {
 _ANALYZED_TOOL_BASES = {public: base for base, public in _ANALYZED_TOOL_NAMES.items()}
 _POST_ACTION_WAIT_TOOLS = frozenset({*_ANALYZED_TOOL_BASES, "app_launch_and_analyze"})
 _OBSERVATION_TOOL_NAMES = frozenset(
-    {*_POST_ACTION_WAIT_TOOLS, "await_and_analyze", "back_until_and_analyze", "session_start"}
+    {
+        *_POST_ACTION_WAIT_TOOLS,
+        "await_and_analyze",
+        "back_until_and_analyze",
+        "session_start",
+        # `install_app` folds in a screen only when asked to launch. Trimming is a no-op on the
+        # responses that carry none, and leaving it out is how MCP and the CLI drifted before:
+        # MCP returned every field of every element while the CLI trimmed.
+        "install_app",
+    }
 )
 _PHASE_DONE_PROP = {
     "type": "object",
@@ -343,6 +367,29 @@ def _tool_definitions() -> list[types.Tool]:
                 "type": "object",
                 "properties": {
                     "goal": {"type": "string", "description": "The end-to-end test goal."},
+                    "contract_yaml": {
+                        "type": "string",
+                        "description": (
+                            "Authored version-1 YAML checkpoints; only fresh assertion proof "
+                            "can complete them."
+                        ),
+                    },
+                    "artifacts_dir": {
+                        "type": "string",
+                        "description": "Absolute directory for the cross-command evidence bundle.",
+                    },
+                    "evidence": {
+                        "type": "string",
+                        "enum": ["none", "failures", "all"],
+                        "default": "failures",
+                    },
+                    "junit": {"type": "boolean", "default": False},
+                    "wait_for_lease_s": {
+                        "type": "number",
+                        "minimum": 0,
+                        "default": 0,
+                        "description": "Bounded device-lease wait in seconds; never steals.",
+                    },
                     "start_emulator": {
                         "type": "boolean",
                         "default": False,
@@ -412,7 +459,38 @@ def _tool_definitions() -> list[types.Tool]:
             ),
             inputSchema={
                 "type": "object",
-                "properties": {"session_id": {"type": "string"}},
+                "properties": {
+                    "session_id": {"type": "string"},
+                    "allow_incomplete": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "Explicitly terminate despite incomplete authored checkpoints."
+                        ),
+                    },
+                },
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="session_candidate_flow",
+            description=(
+                "Preview a contract-proven action path. Replay/save require an explicit reset "
+                "flow; saving occurs only after both reset and candidate replay pass."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "session_id": {"type": "string"},
+                    "reset_flow": {
+                        "type": "string",
+                        "description": "Saved flow name or absolute YAML path for deterministic reset.",
+                    },
+                    "replay": {"type": "boolean", "default": False},
+                    "save": {"type": "boolean", "default": False},
+                },
+                "required": ["name"],
                 "additionalProperties": False,
             },
         ),
@@ -688,6 +766,11 @@ def _tool_definitions() -> list[types.Tool]:
                 "properties": {
                     "source": {"type": "string", "enum": source_enum, "default": "auto"},
                     "with_ocr": {"type": "boolean"},
+                    "no_cache": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Force a fresh capture instead of reusing cached hierarchy data.",
+                    },
                     "query": {
                         "type": "string",
                         "description": "Return the single best-matching element.",
@@ -1261,7 +1344,14 @@ def _tool_definitions() -> list[types.Tool]:
                     "selected": {"type": "boolean"},
                     "focused": {"type": "boolean"},
                     "count": {"type": "integer", "minimum": 0},
-                    "index": {"type": "integer"},
+                    "within": _RELATION_SELECTOR_PROP,
+                    "same_parent_as": _RELATION_SELECTOR_PROP,
+                    "contains_all": {
+                        "type": "array",
+                        "items": _RELATION_SELECTOR_PROP,
+                        "minItems": 1,
+                    },
+                    "index": {"type": "integer", "minimum": 0},
                     "first": {"type": "boolean", "default": False},
                     "timeout_ms": {"type": "integer", "default": 0},
                     "poll_ms": {"type": "integer", "default": 250},
@@ -1841,6 +1931,53 @@ def _tool_definitions() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="install_app",
+            description="Install an app bundle (.apk) on the device instead of shelling out to "
+            "`adb install`. Idempotent: an app already there at the bundle's version is left "
+            "alone. With launch=true it also opens the app and returns the resulting screen in "
+            "`observation` — use its fresh ids and do not call analyze_screen next.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "bundle": {
+                        "type": "string",
+                        "description": "Host path to the .apk to install.",
+                    },
+                    "package": {
+                        "type": "string",
+                        "description": "Optional assertion: fail if the bundle declares another "
+                        "package id.",
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["if-needed", "reinstall", "fresh"],
+                        "default": "if-needed",
+                        "description": "Differs only when the app is already installed. "
+                        "if-needed: skip unless the version differs. reinstall: push anyway, "
+                        "keeping app data. fresh: uninstall first (wipes data; the only mode that "
+                        "survives a signing-key change).",
+                    },
+                    "confirmed": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Required when mode=fresh because it wipes app data.",
+                    },
+                    "grant_permissions": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Pre-grant runtime permissions. Off by default: it skips "
+                        "the permission dialog a scenario may be there to verify.",
+                    },
+                    "launch": {"type": "boolean", "default": False},
+                    "activity": {"type": "string"},
+                    "timeout_ms": {"type": "integer", "default": 300000, "minimum": 1000},
+                    "with_image": _WITH_IMAGE_PROP,
+                },
+                "required": ["bundle"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
             name="database_list",
             description="List a debuggable package's private SQLite databases and WAL/SHM sizes.",
             inputSchema={
@@ -2042,7 +2179,13 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         )
     if name == "job_list":
         return jobs.list(limit=int(args.get("limit", 20)))
-    if name not in {"capabilities", "session_progress", "session_review", "configure"}:
+    if name not in {
+        "capabilities",
+        "session_progress",
+        "session_review",
+        "session_candidate_flow",
+        "configure",
+    }:
         reject_if_active(engine, name)
 
     img = _with_image(engine, args)
@@ -2051,15 +2194,21 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         goal = args.get("goal")
         return {"capabilities": capabilities_for_goal(str(goal)) if goal else capability_manifest()}
     if name == "session_start":
+        start_kwargs: dict[str, Any] = {
+            "start_emulator": bool(args.get("start_emulator", False)),
+            "headed": bool(args.get("headed", False)),
+            "audio": bool(args.get("audio", False)),
+            "avd": args.get("avd"),
+            "package": args.get("package"),
+            "activity": args.get("activity"),
+        }
+        for key in ("contract_yaml", "artifacts_dir", "evidence", "junit", "wait_for_lease_s"):
+            if key in args:
+                start_kwargs[key] = args[key]
         started = _dump(
             _engine_method(engine, "session_start")(
                 str(args["goal"]),
-                start_emulator=bool(args.get("start_emulator", False)),
-                headed=bool(args.get("headed", False)),
-                audio=bool(args.get("audio", False)),
-                avd=args.get("avd"),
-                package=args.get("package"),
-                activity=args.get("activity"),
+                **start_kwargs,
             )
         )
         if isinstance(started, dict) and started.get("emulator_started"):
@@ -2075,9 +2224,10 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
     if name == "session_progress":
         return _dump(_engine_method(engine, "session_progress")(session_id=args.get("session_id")))
     if name == "session_finish":
-        finished = _dump(
-            _engine_method(engine, "session_finish")(session_id=args.get("session_id"))
-        )
+        finish_kwargs: dict[str, Any] = {"session_id": args.get("session_id")}
+        if "allow_incomplete" in args:
+            finish_kwargs["allow_incomplete"] = bool(args["allow_incomplete"])
+        finished = _dump(_engine_method(engine, "session_finish")(**finish_kwargs))
         if isinstance(finished, dict):
             for item in finished.get("cleanup") or []:
                 if not isinstance(item, dict) or item.get("action") != "owned_emulator_stop":
@@ -2089,6 +2239,16 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                     if isinstance(serial, str):
                         _mcp_started_serials().discard(serial)
         return finished
+    if name == "session_candidate_flow":
+        return _dump(
+            _engine_method(engine, "session_candidate_flow")(
+                str(args["name"]),
+                session_id=args.get("session_id"),
+                reset_flow=args.get("reset_flow"),
+                replay=bool(args.get("replay", False)),
+                save=bool(args.get("save", False)),
+            )
+        )
     if name == "orient":
         return _dump(engine.orient())
     if name == "reach":
@@ -2163,6 +2323,7 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         result = engine.analyze(
             source=args.get("source", "auto"),
             with_ocr=args.get("with_ocr"),
+            no_cache=bool(args.get("no_cache", False)),
             query=args.get("query"),
             with_image=args.get("with_image", False),
         )
@@ -2445,6 +2606,9 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 selected=args.get("selected"),
                 focused=args.get("focused"),
                 count=args.get("count"),
+                within=args.get("within"),
+                same_parent_as=args.get("same_parent_as"),
+                contains_all=args.get("contains_all"),
                 index=args.get("index"),
                 first=args.get("first", False),
                 timeout_ms=int(args.get("timeout_ms", args.get("timeout", 0))),
@@ -2729,6 +2893,22 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 with_image=img,
             )
         )
+    if name == "install_app":
+        launch = bool(args.get("launch", False))
+        return _dump(
+            engine.install_app(
+                args["bundle"],
+                package=args.get("package"),
+                mode=str(args.get("mode", "if-needed")),
+                confirmed=bool(args.get("confirmed", False)),
+                grant_permissions=bool(args.get("grant_permissions", False)),
+                launch=launch,
+                activity=args.get("activity"),
+                observe=launch,
+                with_image=img,
+                timeout_ms=int(args.get("timeout_ms", 300000)),
+            )
+        )
     if name == "database_list":
         return engine.database_list(args["package"])
     if name == "database_schema":
@@ -2941,6 +3121,8 @@ def build_server(engine: Engine) -> Server:
                 payload,
                 args=args_in,
                 current_recorded=False,
+                invocation_id=invocation_id,
+                duration_ms=(time.monotonic() - started_at) * 1000.0,
             )
             # Trim the folded observation the same way the CLI does. Applied here, at the one
             # boundary every tool returns through, rather than at ~40 `_dump` sites — and via the

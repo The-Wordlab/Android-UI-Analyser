@@ -18,7 +18,7 @@ Supported commands
 ------------------
 ping, analyze, ask_screen, has, inspect, screenshot, tap, long_press, mic_inject, mic_speak, input, clear,
 swipe, scroll_to, key, open_link, wait, wait_stable, wait_after_change, memory_update, goto,
-flow_run, flow_save, navigate, orient, list_devices, app, logcat,
+flow_run, flow_save, navigate, orient, list_devices, app, install_app, logcat,
 job_start, job_status, job_wait, job_cancel, job_list,
 logcat_mark, suite_run, database_list, database_schema, database_query,
 database_execute, database_backup, database_backups, database_restore
@@ -375,6 +375,9 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
         elif cmd == "session_finish":
             return _result_ok(engine.session_finish(**args))
 
+        elif cmd == "session_candidate_flow":
+            return _result_ok(engine.session_candidate_flow(**args))
+
         elif cmd == "reach":
             return _result_ok(engine.reach(**args))
 
@@ -622,6 +625,10 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
             result = engine.app(**args)
             return _result_ok(result.model_dump(mode="json"))
 
+        elif cmd == "install_app":
+            result = engine.install_app(**args)
+            return _result_ok(result.model_dump(mode="json"))
+
         elif cmd == "database_list":
             return _result_ok(engine.database_list(**args))
 
@@ -735,6 +742,7 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
                 "wait_changed, wait_after_change, "
                 "job_start, job_status, job_wait, job_cancel, job_list, "
                 "memory_update, goto, flow_run, flow_save, navigate, orient, list_devices, app, "
+                "install_app, "
                 "database_list, database_schema, database_query, database_execute, "
                 "database_backup, database_backups, database_restore, "
                 "logcat, logcat_mark, suite_run, dev_show, dev_anim, dev_crashes, dev_profile, "
@@ -918,6 +926,8 @@ def _decorate_requested_response(
     engine: Engine,
     request: dict[str, Any],
     response: dict[str, Any],
+    *,
+    duration_ms: float | None = None,
 ) -> dict[str, Any]:
     """Attach response-local coaching in the warm process when the CLI requests it.
 
@@ -933,12 +943,19 @@ def _decorate_requested_response(
     try:
         from .coaching import decorate_result
 
+        decorate_kwargs: dict[str, Any] = {
+            "args": request.get("args") if isinstance(request.get("args"), dict) else None,
+            "current_recorded": False,
+        }
+        if request.get("invocation_id"):
+            decorate_kwargs["invocation_id"] = str(request["invocation_id"])
+        if duration_ms is not None:
+            decorate_kwargs["duration_ms"] = duration_ms
         result = decorate_result(
             engine,
             cmd,
             response.get("result"),
-            args=request.get("args") if isinstance(request.get("args"), dict) else None,
-            current_recorded=False,
+            **decorate_kwargs,
         )
     except Exception:  # pragma: no cover - coaching is optional; caller retains its fallback
         logger.exception("daemon response decoration failed for cmd=%r", cmd)
@@ -979,13 +996,19 @@ def _handle_connection(
                     request = {"cmd": "?", "args": {}}
                 else:
                     response = dispatch(engine, request)
-                response = _decorate_requested_response(engine, request, response)
+                duration_ms = (time.monotonic() - t0) * 1000.0
+                response = _decorate_requested_response(
+                    engine,
+                    request,
+                    response,
+                    duration_ms=duration_ms,
+                )
                 with contextlib.suppress(Exception):
                     _journal_dispatch(
                         engine,
                         request if isinstance(request, dict) else {},
                         response,
-                        duration_ms=(time.monotonic() - t0) * 1000.0,
+                        duration_ms=duration_ms,
                     )
 
                 resp_bytes = json.dumps(response, ensure_ascii=False).encode() + b"\n"
@@ -1012,8 +1035,14 @@ _LONG_POLL_COMMANDS = frozenset(
         "navigate",
         "reach",
         "session_finish",
+        "session_candidate_flow",
         "mic_inject",
         "mic_speak",
+        # `install_app` normally carries its own `timeout_ms`, which sizes the socket exactly. This
+        # is the floor for a caller that omits it: pushing an APK to a cold emulator routinely
+        # outlasts the 5s default, and a socket that expires mid-install answers
+        # `daemon_outcome_unknown` for an install that was in fact still running.
+        "install_app",
     }
 )
 

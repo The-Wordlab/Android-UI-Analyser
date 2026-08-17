@@ -74,7 +74,8 @@ interface-agnostic **engine library** shared by both.
 
 Typical loop:
 1. `aua analyze` → JSON list of elements with IDs + boxes.
-2. Agent decides an action → `aua tap 4` / `aua input 2 "hello"` / `aua swipe up`.
+2. Agent decides an action → `aua tap-and-analyze 4` /
+   `aua input-and-analyze 2 "hello"` / `aua swipe-and-analyze up`.
 3. Repeat. `analyze` result is cached until a state-changing action invalidates it.
 
 ---
@@ -116,20 +117,27 @@ Global options (apply to all commands; override config):
     hierarchy|vision|auto` forces the path.
   - `--timeout <ms>` poll until present or timeout (`0` = single instant check, default)
 
-### Actions (all take element IDs from the last `analyze`; coordinates computed by the tool)
-- `aua tap <id>` (alias: `click`)
-- `aua long-press <id> [--ms 600]`
-- `aua input <id> "<text>"` (focuses element, types; `--submit` to send IME action)
-- `aua clear <id>`
-- `aua swipe <up|down|left|right> [--from <id>] [--percent 50]` or `aua swipe --coords x1 y1 x2 y2`
-- `aua scroll-to "<text|resource-id>"` (scroll container until element appears or limit)
-- `aua key <back|home|enter|recents|KEYCODE_*>`
-- `aua wait --for "<text|resource-id>" [--timeout 5000]` / `aua wait --idle` / `aua wait --for-stable [--interval 200] [--settle 600] [--timeout 30000]`
+### Actions (all return the resulting screen; IDs come from the last `analyze`)
+- `aua tap-and-analyze <id>` (alias: `click-and-analyze`)
+- `aua long-press-and-analyze <id> [--ms 600]`
+- `aua input-and-analyze <id> "<text>"` (focuses element, types; `--submit` sends IME action)
+- `aua clear-and-analyze <id>`
+- `aua swipe-and-analyze <up|down|left|right> [--from <id>] [--percent 50]` or
+  `aua swipe-and-analyze --coords x1 y1 x2 y2`
+- `aua scroll-to-and-analyze "<text|resource-id>"` (scroll until element appears or limit)
+- `aua key-and-analyze <back|home|enter|recents|KEYCODE_*>`
+- `aua wait-and-analyze --for "<text|resource-id>" [--timeout 5000]` /
+  `aua wait-and-analyze --idle` /
+  `aua wait-and-analyze --for-stable [--interval 200] [--settle 600] [--timeout 30000]`
   - `--for-stable` polls cheap screenshots and returns once the screen stops changing for `--settle` ms (a perceptual-hash "screen settled" check — no OCR, no hierarchy parse; works on opaque screens). Ideal for waiting on image generation / loading. Pairs with the daemon for tight, low-cost polling.
 
 ### Device & session
 - `aua devices` → list attached devices (serial, model, android version, state)
 - `aua app <foreground|launch <pkg>|stop <pkg>|current>`
+- `aua install <app.apk> [--launch] [--reinstall|--fresh --yes]` → put a build on the device
+  without a hand-rolled `adb install`; idempotent when that version is already installed.
+  `aua emulator start --apk <app.apk> --launch` and `aua session start --apk <app.apk>` fold
+  boot + install + launch + observe into a single call.
 - `aua daemon <start|stop|status>` (§10)
 
 ### Private app databases (debuggable builds)
@@ -167,15 +175,15 @@ Global options (apply to all commands; override config):
 - `aua goto "<goal>" [--plan] [--max-steps N] [--allow-destructive]` → the navigation autopilot: resolve the (fuzzy) goal against the map, walk the shortest route from the current screen, and **replay each edge's recorded steps** (resource-id selector first, then label), verifying `known_screen` per hop. Cross-app auth legs (edges through `memory.transit_packages`) replay end-to-end with package-aware perception; steps matching `memory.destructive_labels` are refused without `--allow-destructive`. On divergence it exits `1` with the failing step, the remaining steps, and the current elements; a re-run **resumes**, even stranded mid-auth. `--plan` prints the annotated route (steps / replayable / legacy / destructive) without acting.
 - `aua flow run [<name>|--file PATH|--yaml BODY] [--param K=V]… [--dry-run] [--from-step N] [--no-allow-destructive] [--assist] [--artifacts-dir DIR --evidence none|failures|all --junit]` / `aua flow save <name> [--last N] [--save] [--force]` / `aua flow list|show|delete` → **flows**: Maestro-style YAML journeys under `<memory.dir>/flows/`, authored directly or materialized from the newest homogeneous origin/context suffix of the session's recent actions. Save is preview-first and writes only with `--save`; the preview discloses scope/boundaries, selector safety, and mapped-screen arrival proof. New recordings select a unique stable resource id, then unique non-PII content description, then unique stable non-PII text; unsafe selectorless captures are refused. Typed values become required `${PARAM_n}` placeholders and are never persisted. A freshly recognized terminal screen is stored as typed `arrival_screen` proof and verified through known-screen recognition on replay; unmapped destinations remain explicitly unverified, while legacy `arrival:` predicates remain compatible. `flow run` replays the whole journey (launch, taps, input with `${PARAM}` substitution, key/swipe/scroll, waits, shared `expect`-style rich assertions including exact count/state, explicit horizontal/vertical order assertions, named screenshots, `goto:` steps, transit-package legs) through the same executor as `goto`, returning assertion detail and a resumable step index on divergence. Artifact mode emits a canonical unresolved `flow.yaml`, structured result/manifest, Markdown report, selected screenshot/observation evidence, supported-platform failure diagnostics, per-step evidence IDs/timings, and optional JUnit without overwriting a prior run. CLI, daemon, and MCP use the same engine path and source contract. Flows are deliberate authored intent → destructive steps allowed by default.
 - `aua navigate "<goal>" [--until TEXT] [--max-steps N] [--allow-destructive] [--save-flow NAME]` → **opt-in autonomous navigation** (§7.3 planner; requires `planner.enabled`). A fast LLM drives to a natural-language goal with no prior map, recording the path into memory so a later `aua goto` replays it deterministically (the self-improvement flywheel); `--save-flow` also materializes it as a flow. `goto`/`flow run` gain `--assist` to invoke the same planner for one-call divergence recovery.
-- `aua explore mine <repo> --app <pkg>` / `aua explore plan [--app <pkg>]` → **app indexing**. `mine` harvests deeplink shortcuts from the app's source (AndroidManifest intent-filters + `navDeepLink`/`uriPattern` literals for custom schemes; test/build sources skipped) into the playbook so the agent can `aua open` them. `plan` returns a prioritized crawl worklist (probe unprobed deeplinks, fill templated ones, expand dead-end screens) whose results auto-record — the agent runs it and re-runs until it converges (the "have the agent index the app" loop).
-- `aua open <uri>` → open a deeplink (jump to a screen / trigger an app action); remembered in the playbook and marked probed.
+- `aua explore mine <repo> --app <pkg>` / `aua explore plan [--app <pkg>]` → **app indexing**. `mine` harvests deeplink shortcuts from the app's source (AndroidManifest intent-filters + `navDeepLink`/`uriPattern` literals for custom schemes; test/build sources skipped) into the playbook so the agent can `aua open-and-analyze` them. `plan` returns a prioritized crawl worklist (probe unprobed deeplinks, fill templated ones, expand dead-end screens) whose results auto-record — the agent runs it and re-runs until it converges (the "have the agent index the app" loop).
+- `aua open-and-analyze <uri>` → open a deeplink and return the resulting screen; remembered in the playbook and marked probed.
 - `aua about [--app <pkg>]` → print the app playbook (description, recipes, deeplinks, notes); `aua remember --about/--note/--recipe/--deeplink` teaches it.
 - `aua knowledge list|show|add|stale` → provenance-bearing feedback and source/runtime facts, scoped by package/version/context.
 - `aua reconcile plan|submit|status|apply|rollback` → external-agent research contract and transactional correction with snapshots and rollback.
 - `aua memory show|path|update|forget [--app <pkg>] [--screen <name>]` → inspect / locate / force-record (or rename) the current screen / clear. Recording is automatic by default (§6b).
 
 ### Agent guide (self-documentation)
-- `aua guide` (aliases `skill`, `agent`) → print the **agent operating manual** to stdout (markdown; `--json` for structured, `--brief` for short). It tells an agent everything needed to use the tool: what it is; the recommended **session protocol** — (1) `aua daemon start` for speed, (2) `aua map` to load the app's known layout before navigating, (3) drive with `analyze`/`has`/`tap`/`input`/`swipe` acting on element **IDs**, (4) use `wait --for-stable`/`--for` instead of fixed sleeps, (5) `aua daemon stop` when done; how perception **self-routes** (the §6a escalation ladder — hierarchy→vision automatically; paid grounding only with `--deep`); how **memory** works (auto-recorded, read via `aua map`, `meta.known_screen`); the output schema; exit codes; and key global flags. This is the **single source of truth** that also generates `.claude/skills/android-ui-analyser/SKILL.md` (`aua guide --emit-skill [path]`), and the `aua --help` epilog points the agent to it.
+- `aua guide` (aliases `skill`, `agent`) → print the **agent operating manual** to stdout (markdown; `--json` for structured, `--brief` for short). It tells an agent everything needed to use the tool: what it is; the recommended **session protocol** — (1) `aua daemon start` for speed, (2) `aua map` to load the app's known layout before navigating, (3) drive with `analyze`/`has` and the `*-and-analyze` action commands acting on element **IDs**, (4) use `wait-and-analyze --for-stable`/`--for` instead of fixed sleeps, (5) `aua daemon stop` when done; how perception **self-routes** (the §6a escalation ladder — hierarchy→vision automatically; paid grounding only with `--deep`); how **memory** works (auto-recorded, read via `aua map`, `meta.known_screen`); the output schema; exit codes; and key global flags. This is the **single source of truth** that also generates `.claude/skills/android-ui-analyser/SKILL.md` (`aua guide --emit-skill [path]`), and the `aua --help` epilog points the agent to it.
 
 ### MCP
 - `aua mcp` → run the MCP server over stdio, exposing the same tools (§11)
@@ -731,7 +739,8 @@ the engine — no perception logic of its own.
 
 ### 13.2 Device smoke test (documented for the human; runs when a device/emulator is attached)
 - `SMOKE.md` describes: start an emulator, `aua doctor`, `aua devices`, `aua analyze`
-  on the launcher and on a sample app, `aua tap <id>`, `aua input <id> "text"`,
+  on the launcher and on a sample app, `aua tap-and-analyze <id>`,
+  `aua input-and-analyze <id> "text"`,
   `aua has "<text visible on screen>"` (and a string that isn't, to confirm exit 1),
   `aua analyze --source vision --annotate` on a Compose/Flutter/WebView/game screen,
   and (optional) `analyze --query` with a configured local or commercial grounding model.

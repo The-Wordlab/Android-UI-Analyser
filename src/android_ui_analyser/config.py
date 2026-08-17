@@ -61,7 +61,13 @@ class PerfCfg(BaseModel):
     async_memory: bool = True  # record screens/edges off the analyze critical path
     skip_unchanged_memory: bool = True  # skip map write when tree fingerprint unchanged
     reuse_capture_frames: bool = True  # share capture JPEGs with --with-image / settle
-    capture_adb_screencap: bool = True  # capture loop prefers adb exec-out screencap
+    # Off by default: `adb exec-out screencap -p` makes the *device* encode a full-res PNG,
+    # which costs more than u2's JPEG capture even after the host re-encodes it to PNG.
+    # Measured end-to-end (ScreenImage out): emulator 720x1280 u2 35ms vs adb 79ms; physical
+    # 1440x3120 u2 210ms vs adb 471ms — u2 ~2.2x faster on both. OCR recall over four Settings
+    # screens was identical (51/73 recovered either way), so the lossless PNG buys no accuracy.
+    # Turn on only when a capture frame must be pixel-exact (lossless diffing, colour checks).
+    capture_adb_screencap: bool = False  # capture loop uses adb exec-out screencap
     differential: bool = True  # meta.element_diff vs previous analyze (token-cheap)
     skip_unchanged_analyze: bool = True  # reuse last result when hierarchy XML hash matches
     auto_daemon: bool = True  # CLI auto-starts the warm daemon when enabled but down
@@ -659,7 +665,7 @@ perf:
   async_memory: true          # record map off the analyze critical path
   skip_unchanged_memory: true # skip map write when tree fingerprint unchanged
   reuse_capture_frames: true  # share capture JPEGs with --with-image / settle
-  capture_adb_screencap: true # capture loop prefers adb exec-out screencap
+  capture_adb_screencap: false # capture via adb screencap (lossless PNG, ~2.2x slower)
   differential: true          # meta.element_diff vs previous analyze
   skip_unchanged_analyze: true  # skip re-parse when hierarchy XML hash matches
   auto_daemon: true           # CLI auto-starts daemon when enabled but down

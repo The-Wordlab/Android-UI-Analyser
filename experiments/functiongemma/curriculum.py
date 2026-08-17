@@ -172,13 +172,36 @@ SELECT_CANDIDATE_TOOL: dict[str, Any] = {
 PUBLIC_AUA_ARGUMENTS: dict[str, frozenset[str]] = {
     "capabilities": frozenset({"goal", "phase_done", "expect_error"}),
     "session_start": frozenset(
-        {"goal", "start_emulator", "headed", "audio", "avd", "package", "activity"}
+        {
+            "goal",
+            "contract_yaml",
+            "artifacts_dir",
+            "evidence",
+            "junit",
+            "wait_for_lease_s",
+            "start_emulator",
+            "headed",
+            "audio",
+            "avd",
+            "package",
+            "activity",
+        }
     ),
     "session_progress": frozenset({"session_id", "phase_done", "expect_error"}),
     "session_review": frozenset({"session_id", "phase_done", "expect_error"}),
-    "session_finish": frozenset({"session_id", "phase_done", "expect_error"}),
+    "session_finish": frozenset(
+        {"session_id", "allow_incomplete", "phase_done", "expect_error"}
+    ),
     "analyze_screen": frozenset(
-        {"source", "with_ocr", "query", "with_image", "phase_done", "expect_error"}
+        {
+            "source",
+            "with_ocr",
+            "query",
+            "with_image",
+            "no_cache",
+            "phase_done",
+            "expect_error",
+        }
     ),
     "has": frozenset(
         {"text", "match", "ignore_case", "ocr_fallback", "by", "phase_done", "expect_error"}

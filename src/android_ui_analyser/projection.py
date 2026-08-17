@@ -54,6 +54,7 @@ FIELD_ALIASES: dict[str, str] = {
     "confidence": "confidence",
     "window": "window",
     "stable_key": "stable_key",
+    "parent": "parent",
 }
 
 # Aliases that render the shortened form of their underlying key.

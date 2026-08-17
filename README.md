@@ -439,6 +439,35 @@ Run `aua doctor` until `adb` and `devices` show OK. A fresh CLI task starts with
 `aua session start --goal "<what must be verified>"`; MCP clients receive the same goal-first
 protocol during initialization.
 
+For deterministic acceptance proof, attach an authored assertion contract and a portable
+cross-command artifact directory:
+
+```bash
+aua session start --goal "sort the fixture and restore it" \
+  --app dev.aua.fixture \
+  --contract evals/agent_loop/contracts/classic-sort.yaml \
+  --artifacts-dir artifacts/classic-sort --evidence all --junit \
+  --wait-for-lease 30
+```
+
+Contract checkpoints reuse the flow assertion grammar (`assert`, `assert_order`, `within`,
+`same_parent_as`, `contains_all`) and can only pass from one fresh fingerprinted observation;
+`--phase-done` cannot complete them. `session finish` refuses to terminate while a contract is
+incomplete unless `--allow-incomplete` is explicit. Every analyzed response includes a typed
+`observation_contract` saying whether its frame is reusable or another analyze is required.
+The bundle keeps redacted `calls.jsonl`, `manifest.json`, linked observation/screenshot evidence,
+`report.md`, `result.json`, optional `junit.xml`, the canonical contract, and the candidate flow.
+
+After every checkpoint passes, `aua session candidate-flow NAME` previews only the actions
+recorded after the session watermark. Promotion requires deterministic reset and replay:
+
+```bash
+aua session candidate-flow classic-price --replay --save \
+  --reset-flow evals/agent_loop/flows/reset-fixture.yaml
+```
+
+The reset and candidate must both pass; an existing saved flow is never overwritten.
+
 ### Keeping the skill current
 
 The SKILL.md and Codex `agents/openai.yaml` are **generated** from the same source as `aua guide`,
@@ -515,7 +544,7 @@ aua flow save reach_checkout --last 8 --save # save only after review
 aua flow list · aua flow show <name> · aua flow delete <name>
 ```
 
-Flows live flat under `<memory.dir>/flows/<name>.yaml` (they span transit packages by design — an auth leg stays with its origin app). Step vocabulary: `launch_app`, `tap` (by `id:`, `desc:`, or `text:`), `input` (with `${PARAM}` substitution), `key`, `swipe`, `scroll_to`, `wait_for`, `wait_stable`, `assert_visible`, rich `assert` predicates, explicit-axis `assert_order`, named `screenshot` checkpoints, and `goto:` to compose map navigation. `assert` shares the `expect` predicates (`exists`, `absent`, `count`, `text_is`, `text_contains`, `checked`, `enabled`, `selected`, `focused`); `assert_order` requires `axis: horizontal|vertical` plus two or more selectors so grid order is never guessed. `flow save` selects only the newest same-origin/context capture segment and is preview-first; only `--save` writes. Its result includes the authoritative path, current existence/collision status, and an exact `save_call` with `--force` when replacement is required. Collision previews also include `invalid_mode_probe`, the exact typed error code and CLI/MCP call for deliberately checking `--force` without `--save`; agents never need to guess. Saving still rechecks atomically, so a preview never authorizes a race. `flow delete` is idempotent and reports `status: already_absent` when cleanup was already complete. New recordings prefer a unique stable resource id, then a unique non-PII content description, then unique stable non-PII text, and refuse a step with no safe selector. The preview's value-free `selector_resilience` explains whether each selector is strong across frames and whether localization or positional ordering can break replay. It never persists typed values — inputs become required `${PARAM_n}` placeholders. A freshly recognized mapped destination is stored as `arrival_screen`. An unmapped destination remains explicit `arrival_status: unverified` unless the immediately preceding analyzed action satisfied a privacy-safe positive `--until` predicate on this exact package/context/frame; only then is that predicate promoted to authored `arrival:` proof with source `satisfied_action_until`. Flows are deliberate authored intent, so destructive steps run by default (`--no-allow-destructive` opts back into the guard). On divergence you get the failing step index, assertion detail, the remaining steps, and the current elements — fix, then `--from-step N`.
+Flows live flat under `<memory.dir>/flows/<name>.yaml` (they span transit packages by design — an auth leg stays with its origin app). Step vocabulary: `launch_app`, `tap` (by `id:`, `desc:`, or `text:`), `input` (with `${PARAM}` substitution), `key`, `swipe`, `scroll_to`, `wait_for`, `wait_stable`, `assert_visible`, rich `assert` predicates, explicit-axis `assert_order`, named `screenshot` checkpoints, and `goto:` to compose map navigation. `assert` shares the `expect` predicates (`exists`, `absent`, `count`, `text_is`, `text_contains`, `checked`, `enabled`, `selected`, `focused`) and adds canonical-tree relationships (`within`, `same_parent_as`, `contains_all`). `assert_order` accepts `axis: horizontal|vertical|reading`; `reading` follows the adapter's normalized structural traversal rather than guessed geometry. Parentless vision elements fail structural assertions explicitly instead of receiving inferred parentage. The same relationships are available from `expect-and-analyze`, suites, and MCP; `analyze --fields parent` exposes the evidence. `flow save` selects only the newest same-origin/context capture segment and is preview-first; only `--save` writes. Its result includes the authoritative path, current existence/collision status, and an exact `save_call` with `--force` when replacement is required. Collision previews also include `invalid_mode_probe`, the exact typed error code and CLI/MCP call for deliberately checking `--force` without `--save`; agents never need to guess. Saving still rechecks atomically, so a preview never authorizes a race. `flow delete` is idempotent and reports `status: already_absent` when cleanup was already complete. New recordings prefer a unique stable resource id, then a unique non-PII content description, then unique stable non-PII text, and refuse a step with no safe selector. The preview's value-free `selector_resilience` explains whether each selector is strong across frames and whether localization or positional ordering can break replay. It never persists typed values — inputs become required `${PARAM_n}` placeholders. A freshly recognized mapped destination is stored as `arrival_screen`. An unmapped destination remains explicit `arrival_status: unverified` unless the immediately preceding analyzed action satisfied a privacy-safe positive `--until` predicate on this exact package/context/frame; only then is that predicate promoted to authored `arrival:` proof with source `satisfied_action_until`. Flows are deliberate authored intent, so destructive steps run by default (`--no-allow-destructive` opts back into the guard). On divergence you get the failing step index, assertion detail, the remaining steps, and the current elements — fix, then `--from-step N`.
 
 `--artifacts-dir DIR` writes a portable run bundle (`flow.yaml`, `result.json`, `manifest.json`, `report.md`, named screenshots, and observations). `--evidence failures` captures the failed frame and platform diagnostics by default; `all` captures every completed leaf step; `none` keeps only explicit `screenshot:` checkpoints. Add `--junit` for `junit.xml`. Reusing a non-empty directory creates a unique run subdirectory instead of overwriting evidence. CLI and MCP both accept exactly one source: a saved `name`, `file`, or inline `yaml` (`--yaml` on the CLI).
 
@@ -1098,7 +1127,7 @@ Tools include (non-exhaustive): `analyze_screen`, `tap_and_analyze`,
 `expect`, `screenshot`, `inspect`, `goto`, `flow_run`, `navigate`, `policy_status`, `list_devices`,
 `emulator_list` / `emulator_status` / `emulator_start` / `emulator_stop` (stop before exit —
 MCP also auto-stops emulators it started when the server process ends), `open_link_and_analyze`,
-`app`, `resolve`, clipboard/paste/copy/erase,
+`app`, `install_app`, `resolve`, clipboard/paste/copy/erase,
 location/orientation/airplane/network/network-profile/media/record/clock,
 `capture_*`, `dev_profile`, `a11y_scroll_and_analyze`, `flags_apply_and_analyze`,
 `database_list` / `database_schema` / `database_query` / `database_execute` /
@@ -1162,7 +1191,8 @@ aua --format compact analyze --fields id,rid --nonempty   # same views, JSON out
 
 - `--fields` names: `id`, `type`, `text`, `rid` (short tail) / `resource_id` (full selector),
   `desc` / `content_desc`, `bounds`, `center`, `clickable`, `enabled`, `focused`, `checkable`,
-  `checked`, `selected`, `scrollable`, `long_clickable`, `password`, `source`, `confidence`.
+  `checked`, `selected`, `scrollable`, `long_clickable`, `password`, `parent`, `source`,
+  `confidence`.
   A wrong name exits **2** and lists the valid ones — before touching the device.
 - `--format tsv` implies `--nonempty --no-system` (drops rows with no text/id/desc, and
   status-bar chrome). `--all` opts out. JSON formats filter **nothing** unless you ask.
@@ -1368,8 +1398,9 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 |---|---|
 | `aua doctor` | Check environment plus separate Claude/Codex installed-skill freshness |
 | `aua capabilities [--goal "…"]` | Discover the canonical CLI/MCP capability catalogue |
-| `aua session start --goal "…"` | Observe once, rank safe routes/flows, and return one exact next CLI + MCP call (`--start-emulator --audio` enables mic injection on a newly booted AVD) |
-| `aua session review\|finish` | Quantify avoidable calls; restore only session-owned reversible state |
+| `aua session start --goal "…"` | Observe once and return one exact next call; optionally add `--contract`, `--artifacts-dir`, `--wait-for-lease` |
+| `aua session review\|finish` | Quantify calls; strict contracts keep finish active until proven (`--allow-incomplete` is explicit) |
+| `aua session candidate-flow NAME` | Preview a proven action window; reset + replay before `--save` |
 | `aua reach "<goal>" [--until …]` | Use verified goto then a matching safe flow, with semantic arrival proof |
 | `aua devices` | List attached devices/emulators |
 | `aua analyze` | Capture the screen → element list with IDs (the core command) |
@@ -1404,9 +1435,10 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 | `aua screenshot [path]` | Save a raw screenshot (`--region` / `--scale`) |
 | `aua inspect <id>` | Dump full details for one element |
 | `aua app launch\|stop\|kill\|clear\|grant` | App control (`launch --clear` = clearState) |
+| `aua install <app.apk> [--launch]` | Install a build (skips the push when that version is already there); `--reinstall` keeps data, `--fresh --yes` wipes it |
 | `aua db list\|schema\|query` | Structured private SQLite inspection for debuggable apps |
 | `aua db execute\|backup\|backups\|restore` | Confirmed, backed-up data mutation and rollback |
-| `aua emulator list\|status\|start\|stop` | Boot/stop AVDs (`--headless`, `--audio`, `--parallel`, `--gpu`, `--mine`/`--owner`) |
+| `aua emulator list\|status\|start\|stop` | Boot/stop AVDs (`--headless`, `--audio`, `--parallel`, `--gpu`, `--mine`/`--owner`); `start --apk <app.apk> --launch` boots, installs, and opens in one call |
 | `aua emulator recommend-proxy\|ensure-proxy` | Suggest/create a small rootable Google APIs AVD |
 | `aua flags set\|apply` | Feature-flag writes with verify/restart |
 | `aua proxy start\|stop` / `aua mock …` | HTTPS mitm record/map/replay (`[proxy]` extra) |

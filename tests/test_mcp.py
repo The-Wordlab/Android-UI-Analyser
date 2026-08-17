@@ -122,6 +122,7 @@ def test_mcp_lists_core_tools() -> None:
         "clock_set",
         "app",
         "app_launch_and_analyze",
+        "install_app",
         "database_list",
         "database_schema",
         "database_query",
@@ -171,6 +172,44 @@ def test_mcp_accepts_intuitive_session_and_network_verification_options() -> Non
 
     assert tools["session_start"].inputSchema["properties"]["headed"]["default"] is False
     assert tools["network_status"].inputSchema["properties"]["verify"]["default"] is True
+    assert tools["analyze_screen"].inputSchema["properties"]["no_cache"] == {
+        "type": "boolean",
+        "default": False,
+        "description": "Force a fresh capture instead of reusing cached hierarchy data.",
+    }
+
+
+def test_mcp_analyze_screen_forwards_uncached_refresh() -> None:
+    engine = _engine()
+    original = engine.analyze
+    calls: list[dict[str, object]] = []
+
+    def analyze(**kwargs: object) -> AnalyzeResult:
+        calls.append(kwargs)
+        return original(**kwargs)
+
+    engine.analyze = analyze  # type: ignore[method-assign]
+    server = build_server(engine)
+
+    async def run() -> None:
+        async with create_connected_server_and_client_session(server) as client:
+            result = await client.call_tool(
+                "analyze_screen",
+                {"source": "hierarchy", "no_cache": True},
+            )
+            assert json.loads(_first_text(result))["elements"]
+
+    anyio.run(run)
+
+    assert calls == [
+        {
+            "source": "hierarchy",
+            "with_ocr": None,
+            "no_cache": True,
+            "query": None,
+            "with_image": False,
+        }
+    ]
 
 
 def test_mcp_flow_save_is_preview_first_with_explicit_commit() -> None:

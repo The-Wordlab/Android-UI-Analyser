@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from .assertions import normalize_selector
 from .atomic import atomic_create_text, atomic_write_text
 from .errors import UsageError
 from .memory import REDACT_TOKENS, RouteStep, _safe
@@ -633,6 +634,26 @@ def _parse_step(item: Any, index: int) -> RouteStep:
         for field in ("exists", "absent", "checked", "enabled", "selected", "focused", "first"):
             if field in v:
                 predicates[field] = _strict_bool(v.pop(field), field=f"assert {field}", index=index)
+        for field in ("within", "same_parent_as"):
+            if field in v:
+                try:
+                    predicates[field] = normalize_selector(v.pop(field), field=f"assert {field}")
+                except UsageError as exc:
+                    raise _step_error(index, str(exc)) from exc
+        if "contains_all" in v:
+            raw_contains = v.pop("contains_all")
+            if not isinstance(raw_contains, list) or not raw_contains:
+                raise _step_error(index, "assert contains_all must be a non-empty selector list")
+            try:
+                predicates["contains_all"] = [
+                    normalize_selector(
+                        selector,
+                        field=f"assert contains_all[{selector_index}]",
+                    )
+                    for selector_index, selector in enumerate(raw_contains)
+                ]
+            except UsageError as exc:
+                raise _step_error(index, str(exc)) from exc
         if "count" in v:
             predicates["count"] = _strict_int(
                 v.pop("count"), field="assert count", index=index, minimum=0
@@ -653,6 +674,9 @@ def _parse_step(item: Any, index: int) -> RouteStep:
             "enabled",
             "selected",
             "focused",
+            "within",
+            "same_parent_as",
+            "contains_all",
         }
         if count == 0 and state_predicates.intersection(predicates):
             raise _step_error(index, "assert `count: 0` cannot check state on a missing element")
@@ -660,13 +684,21 @@ def _parse_step(item: Any, index: int) -> RouteStep:
             raise _step_error(index, "assert `count: 0` conflicts with `exists: true`")
         if isinstance(count, int) and count > 0 and predicates.get("absent"):
             raise _step_error(index, "assert positive `count:` conflicts with `absent: true`")
+        if predicates.get("absent") and {
+            "within",
+            "same_parent_as",
+            "contains_all",
+        }.intersection(predicates):
+            raise _step_error(index, "assert `absent:` conflicts with structural predicates")
         kw["assertion"] = predicates or {"exists": True}
         if (nth := v.pop("index", None)) is not None:
             kw["index"] = _strict_int(nth, field="assert index", index=index, minimum=0)
     elif kind == "assert-order":
         axis = v.pop("axis", None)
-        if axis not in ("horizontal", "vertical"):
-            raise _step_error(index, "assert_order `axis:` must be horizontal or vertical")
+        if axis not in ("horizontal", "vertical", "reading"):
+            raise _step_error(
+                index, "assert_order `axis:` must be horizontal, vertical, or reading"
+            )
         raw_selectors = v.pop("selectors", None)
         if not isinstance(raw_selectors, list) or len(raw_selectors) < 2:
             raise _step_error(index, "assert_order needs at least two `selectors:`")

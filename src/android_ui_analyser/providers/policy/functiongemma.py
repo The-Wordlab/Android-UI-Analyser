@@ -42,6 +42,32 @@ class SelectionProtocolError(ValueError):
     """Raised internally when model output is not one canonical offered-ID call."""
 
 
+def _prompt_candidate_counts(prompt_schema: Mapping[str, Any]) -> tuple[int, ...]:
+    """Return authenticated cardinalities while retaining the frozen v3 schema."""
+
+    if (
+        prompt_schema.get("name") != PROMPT_SCHEMA_NAME
+        or prompt_schema.get("candidate_ids") != PROMPT_CANDIDATE_IDS
+    ):
+        raise ValueError("FunctionGemma manifest prompt_schema is incompatible")
+    legacy = prompt_schema.get("candidate_count")
+    authored = prompt_schema.get("candidate_counts")
+    if legacy is not None and authored is not None:
+        raise ValueError("FunctionGemma prompt_schema cannot declare two cardinality formats")
+    values: Any = (legacy,) if legacy is not None else authored
+    if not isinstance(values, (list, tuple)) or not values:
+        raise ValueError("FunctionGemma prompt_schema lacks candidate cardinalities")
+    if any(
+        not isinstance(value, int) or isinstance(value, bool) or value not in range(2, 5)
+        for value in values
+    ):
+        raise ValueError("FunctionGemma candidate cardinalities must be integers from 2 to 4")
+    counts = tuple(sorted(set(values)))
+    if len(counts) != len(values):
+        raise ValueError("FunctionGemma candidate cardinalities must be unique")
+    return counts
+
+
 def _file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -176,12 +202,12 @@ def _bundled_manifest(directory: Path) -> dict[str, Any]:
     ):
         raise ValueError("bundled FunctionGemma manifest lacks base_model or adapter provenance")
     prompt_schema = value.get("prompt_schema")
-    if not isinstance(prompt_schema, Mapping) or (
-        prompt_schema.get("name") != PROMPT_SCHEMA_NAME
-        or prompt_schema.get("candidate_count") != PROMPT_CANDIDATE_COUNT
-        or prompt_schema.get("candidate_ids") != PROMPT_CANDIDATE_IDS
-    ):
+    if not isinstance(prompt_schema, Mapping):
         raise ValueError("bundled FunctionGemma manifest prompt_schema is incompatible")
+    try:
+        _prompt_candidate_counts(prompt_schema)
+    except ValueError as exc:
+        raise ValueError("bundled FunctionGemma manifest prompt_schema is incompatible") from exc
     rollout = value.get("rollout")
     if not isinstance(rollout, Mapping) or rollout.get("max_mode") not in ROLLOUT_MODES:
         raise ValueError("bundled FunctionGemma manifest rollout.max_mode is invalid")
@@ -227,12 +253,13 @@ def _explicit_rollout_capability(settings: Mapping[str, Any]) -> dict[str, Any]:
             not isinstance(rollout, Mapping)
             or rollout.get("max_mode") not in ROLLOUT_MODES
             or not isinstance(prompt_schema, Mapping)
-            or prompt_schema.get("name") != PROMPT_SCHEMA_NAME
-            or prompt_schema.get("candidate_count") != PROMPT_CANDIDATE_COUNT
-            or prompt_schema.get("candidate_ids") != PROMPT_CANDIDATE_IDS
             or not isinstance(base_model, Mapping)
             or not isinstance(adapter_value, Mapping)
         ):
+            return {**base, "reason": "explicit rollout manifest capability is incomplete"}
+        try:
+            _prompt_candidate_counts(prompt_schema)
+        except ValueError:
             return {**base, "reason": "explicit rollout manifest capability is incomplete"}
         manifest_model_hash = _manifest_sha256(base_model.get("sha256"), "base_model.sha256")
         manifest_adapter_hash = _manifest_sha256(adapter_value.get("sha256"), "adapter.sha256")
@@ -537,11 +564,31 @@ class FunctionGemmaPolicySelector(PolicyProvider):
             raise ValueError("max_tokens must be an integer from 1 to 64")
         return value
 
-    @staticmethod
-    def supports_candidate_count(count: int) -> bool:
-        """The frozen adapter was trained only on four-candidate choice sets."""
+    def _supported_candidate_counts(self) -> tuple[int, ...]:
+        """Return counts authenticated by the selected adapter manifest."""
 
-        return count == PROMPT_CANDIDATE_COUNT
+        if _uses_bundled_adapter(self.settings):
+            manifest = _bundled_manifest(
+                _absolute_directory(bundled_adapter_path(), "bundled adapter_path")
+            )
+            return _prompt_candidate_counts(manifest["prompt_schema"])
+        capability = _explicit_rollout_capability(self.settings)
+        manifest = capability.get("manifest")
+        if capability.get("authenticated") and isinstance(manifest, Mapping):
+            prompt_schema = manifest.get("prompt_schema")
+            if isinstance(prompt_schema, Mapping):
+                return _prompt_candidate_counts(prompt_schema)
+        # Unauthenticated historical adapters remain compatible only with the
+        # frozen exact-four shadow surface. Advisory is separately rejected.
+        return (PROMPT_CANDIDATE_COUNT,)
+
+    def supports_candidate_count(self, count: int) -> bool:
+        """Return whether the authenticated adapter learned this cardinality."""
+
+        try:
+            return count in self._supported_candidate_counts()
+        except Exception:
+            return False
 
     def rollout_capability(self) -> dict[str, Any]:
         """Return the provenance-bound maximum mode without loading model artifacts."""
@@ -686,7 +733,7 @@ class FunctionGemmaPolicySelector(PolicyProvider):
             "available": available,
             "reason": reason,
             "loaded": self._model is not None,
-            "supported_candidate_counts": [PROMPT_CANDIDATE_COUNT],
+            "supported_candidate_counts": list(self._supported_candidate_counts()),
             "rollout": rollout,
             "last_error": self.last_error,
             "runtime": {"ready": runtime.ok, "reason": runtime.reason},
@@ -750,9 +797,10 @@ class FunctionGemmaPolicySelector(PolicyProvider):
             self.last_error = "provider received candidates that did not pass the policy guard"
             return None
         guarded_ids = {candidate.candidate_id for candidate in guarded}
-        if not self.supports_candidate_count(len(guarded)) or guarded_ids != {0, 1, 2, 3}:
+        expected_ids = set(range(len(guarded)))
+        if not self.supports_candidate_count(len(guarded)) or guarded_ids != expected_ids:
             self.last_error = (
-                "the frozen FunctionGemma adapter requires exactly four candidate IDs 0,1,2,3"
+                "the FunctionGemma adapter does not support this dense candidate cardinality"
             )
             return None
 

@@ -1,7 +1,11 @@
 # FunctionGemma candidate-selection experiment
 
-This host-only experiment tests whether a small FunctionGemma model can choose the next action
-in an AUA workflow without being allowed to author or execute Android commands.
+This experiment tests whether a small FunctionGemma model can choose the next action in an AUA
+workflow without being allowed to author or execute Android commands. Training and primary gates are
+host-only; separately identified advisory audits may observe suggestions on an AUA-owned emulator.
+
+For the chronological evidence, failed hypotheses, exact v6 handoff, and next-step decision record,
+read [EXPERIMENT_LOG.md](EXPERIMENT_LOG.md).
 
 ## Safety boundary
 
@@ -66,6 +70,11 @@ The launcher reads `RUNPOD_API_KEY` and `HF_TOKEN` from the process environment 
 environment; the Hugging Face token is sent to the worker only over encrypted SSH stdin and is not
 stored in Pod environment metadata, command arguments, or artifacts.
 
+RunPod official images inject account SSH keys when the container starts. The launcher therefore
+generates a unique ephemeral key, snapshots the account's fingerprint inventory, registers that
+public key before Pod creation, and still supplies the same key through `SSH_PUBLIC_KEY` as a
+defense-in-depth override. The private key remains only in a mode-restricted temporary directory.
+
 Explicitly authorize one billable L40S benchmark:
 
 ```bash
@@ -77,7 +86,7 @@ price at `$1.25/hour`, cap the 90-minute hard-TTL ceiling at `$2.00`, and use no
 The actual hourly price is checked immediately after creation; an over-limit Pod is terminated before
 training.
 
-Cost containment does not depend on the launcher remaining alive:
+Pod cost containment does not depend on the launcher remaining alive:
 
 - Pod creation includes RunPod's server-side absolute `--terminate-after` deadline.
 - The local launcher secret-scans the downloaded tarball in memory before any artifact file or
@@ -87,21 +96,32 @@ Cost containment does not depend on the launcher remaining alive:
 - Those signals received during artifact export or cleanup are deferred until DELETE and the audits
   finish, so a repeated termination signal cannot skip the exact-ID deletion path.
 - It then lists Pods and requires zero active resources matching the exact ID or unique run name.
+- Only after Pod deletion is attempted, it removes the exact temporary account-key fingerprint and
+  requires the final fingerprint inventory to equal the pre-run baseline. A lost add/remove response
+  is recovered from the authoritative inventory instead of blindly repeating or abandoning cleanup.
 - It snapshots `GET /networkvolumes` before creation and after Pod deletion, proving that no new
   persistent network volume appeared; the create request itself sets volume size zero and supplies no
   network-volume ID.
 - A lost create response is recovered by that unique name. An unverified cleanup is always the
-  primary reported failure, even after an earlier worker failure, while the server-side deadline
-  remains armed.
+  primary reported failure—including temporary account-key cleanup—even after an earlier worker
+  failure, while the server-side Pod deadline remains armed.
+
+An uncatchable local `SIGKILL` or machine power loss cannot run account-key removal. Before adding
+the key, the launcher atomically records its exact fingerprint and the baseline inventory in
+`launcher-metadata.json`, so recovery can remove only that fingerprint; the server-side Pod deadline
+still bounds spend independently.
 
 Each run writes under `runs/functiongemma/runpod/<unique-run-id>/`:
 
 - `artifacts.tar.gz` and its SHA256 in `launcher-metadata.json`
 - safely extracted adapter, worker metadata, frozen manifest/validation report, and training config
 - exact base revision, reviewed source overrides, GPU/package details, timing, price, and cleanup audit
+- the temporary SSH-key fingerprint, baseline/after inventories, lost-response recovery, and exact
+  fingerprint-removal audit (never the private key)
 
-The uploaded source contains the pinned Git archive plus only `train.py` and `runpod_worker.py` from
-the reviewed worktree. It cannot include ignored `.env`, `runs/`, model caches, or device journals.
+The uploaded source contains the pinned Git archive plus an explicit allowlist of reviewed
+FunctionGemma worktree overrides recorded in launcher metadata. It cannot include ignored `.env`,
+`runs/`, model caches, or device journals.
 
 An optional v4-shaped **throughput-only** benchmark must pin its distinct manifest explicitly:
 
@@ -116,6 +136,23 @@ That command still starts from the base model and must not be reported as the hi
 run. The historical v4 was a continuation from the exact validation-selected v3 adapter. A true cloud
 continuation requires an authenticated parent-adapter upload and `resume` provenance, which this
 benchmark launcher deliberately does not guess or substitute with the distribution bundle.
+
+The completed v6 quality cycle used the following shape with a three-hour server ceiling; its actual
+Pod was deleted after about 87 minutes and training itself took about 27 minutes:
+
+```bash
+.venv/bin/python experiments/functiongemma/runpod_benchmark.py --execute \
+  --mode full \
+  --curriculum-version v6 \
+  --config experiments/functiongemma/train-lora-v6.yaml \
+  --expected-manifest-sha256 d3900c58a698810aa1eb378a6fb51b7b4a997f351b2173b455a046c63ad98364 \
+  --ttl-minutes 180 \
+  --wait-minutes 160 \
+  --max-total-usd 3.50
+```
+
+The long ceiling is a failure bound, not intended runtime. Exact-ID deletion, zero-volume audit, and
+temporary-key removal completed successfully after artifact transfer.
 
 ## Reproduce the pipeline
 
@@ -194,6 +231,19 @@ matrix of candidate orders and dense-ID permutations:
 ```
 
 This command exits nonzero when any production-shaped gate fails and still writes the full report.
+
+Before loading any model, gate AUA's trusted candidate compiler itself. This curriculum-independent,
+host-only corpus contains 128 fictional actionable cases and 16 mandatory abstentions across
+resource-id, text, description, title-plus-summary, overlapping-target, and compound-goal shapes:
+
+```bash
+.venv/bin/python -m experiments.functiongemma.aua_candidate_benchmark \
+  --output runs/functiongemma/aua-candidate-benchmark.json
+```
+
+The report separates requested-target extraction, exact oracle-call inclusion, deterministic
+recommendation accuracy, and safe abstention. A model score is not meaningful unless the oracle
+action was first present in the guarded candidate set.
 
 ## Failure-driven iterations
 
@@ -288,15 +338,62 @@ The checked-in reproduction path is [production_curriculum.py](production_curric
 [run_production_smoke.py](run_production_smoke.py), and [run_closed_loop.py](run_closed_loop.py).
 No ignored adapter, dataset, or report is linked as a repository artifact.
 
-This is a promising bounded candidate selector, but it is **not an execution authority**: the frozen
+## Failure-driven v5 and v6 runs (not promoted)
+
+V5 added recovery-focused examples and a longer fresh-base run. Its held-out report still contained
+one unauthorized and five redundant selections, so it was rejected before promotion. V6 then added
+exact packaged `policy_messages()`/`policy_tools()` serialization, full 24-by-24 semantic
+permutations for live-shaped groups, rank-32 LoRA, and fail-closed checkpoint selection over all 16
+saved checkpoints. The CUDA run used an L40S and completed 8,192 microbatch iterations in 1,613.197
+seconds. Its selected final adapter SHA256 is
+`5c1b426dd35b9fe3f2cc07c31316d402dce707da4b313e1deea563cc2aa57072`.
+
+The selected 8,192-step checkpoint was the only checkpoint to satisfy every validation safety gate:
+
+| V6 evaluation | Result |
+| --- | ---: |
+| Validation | 9,108/9,116 (99.9122%); critical 100%; unauthorized 0; redundant 0; permutation groups 8/8 |
+| Untouched combined test | 9,116/9,116; critical 100%; unauthorized 0; redundant 0; permutation groups 8/8 |
+| Production serializer smoke | 96/96 |
+| New live-context smoke | 384/384 |
+| Fictional closed loop | 4/4 clean |
+
+Those host-only gates were necessary but still not sufficient. A subsequent advisory-only AUA test
+used an AUA-owned API-36 `Medium_Phone` emulator on the public Android Settings home screen. Four
+real clickable rows were offered while the requested destination varied across those same four rows.
+FunctionGemma selected the requested row in only 1/4 cases; AUA's deterministic recommendation was
+correct in 2/4. No suggestion was executed. A warm four-session policy batch took 10.7 seconds versus
+9.26 seconds with policy off, so this sample showed both lower accuracy and modest overhead.
+
+V6 is therefore **not bundled or promoted**. The failure demonstrates remaining context shift between
+the synthetic serializer corpus and actual AUA compiler output, especially real control text that
+combines titles with summaries and objectives containing several overlapping destination names. The
+next iteration must use privacy-scrubbed contexts captured at the exact production compiler boundary,
+split by screen/scenario family, and retain an independent live-emulator gate. It must not learn
+private app names, maps, routes, UI copy, screenshots, journals, or user data.
+
+A subsequent source audit found that the entire compound phase objective—including the list of
+visible alternatives—was used to rank every row. AUA now extracts only the requested navigation
+object for deterministic ranking, policy filtering, and the model-facing goal. The identical
+four-target Settings audit then improved from 2/4 to 4/4 with policy off. The new 208-case trusted
+action-compiler benchmark covers 128 policy taps, 64 deterministic stale/loading/progress/scroll
+recoveries, and 16 disabled-target abstentions. It passes target extraction, oracle-action
+inclusion, deterministic action/recovery, and safe abstention at 100%. Recovery stays AUA-owned:
+stale frames refresh uncached, loading waits for evidence, and one confirmed scroll advances only
+one page while returning the analyzed frame. Policy audit responses also expose value-free stage counts and whether
+AUA's own recommended call was actually offered, so selector accuracy can no longer hide candidate
+recall. Session bootstrap additionally replaces an explicitly unstable folded launch frame with one
+bounded authoritative hierarchy read before planning.
+
+This remains an experimental bounded candidate selector, not an execution authority: the frozen
 v3 and preserved v1 static gates each exposed one unauthorized and one redundant choice. AUA packages
 it only for the optional deterministic-guarded **shadow** path. The advisory interface exists for
 development, but bundled v3's authenticated manifest caps rollout at shadow, so advisory fails
 closed as `unsupported_mode` before inference. The model is not an autonomous AUA agent, never
 executes a candidate, and is withheld for two/three candidates because bundled v3 training and
-evaluation froze exactly four-way sets. The failed v4 continuation is evidence that production
-choice accuracy alone is insufficient; advisory must wait for an independent recovery-safe
-iteration. No result here is a claim of production speed.
+evaluation froze exactly four-way sets. The failed v4 continuation and v6 live-emulator regression
+show that production-smoke accuracy alone is insufficient; advisory must wait for recovery-safe and
+live-context-safe evidence. No result here is a claim of production speed.
 
 Generated datasets, run metadata, reports, and intermediate checkpoints live under the intentionally
 ignored `runs/functiongemma/` tree. Checked-in evidence is the immutable
@@ -309,4 +406,6 @@ ignored `runs/functiongemma/` tree. Checked-in evidence is the immutable
 pins the matrix and gates without pretending its fixture model is the trained adapter.
 
 All generation, training, static evaluation, closed-loop simulation, and production-serializer smoke
-described here are host-only. No physical Android device, emulator, ADB command, or app data is used.
+described here are host-only. The separately identified v6 advisory audit used only an AUA-owned
+emulator and public Android Settings UI; its suggestions were observed but never executed. No private
+app data was used as learning material or committed evidence.

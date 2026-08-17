@@ -126,6 +126,12 @@ def test_safety_rates_use_only_cases_that_expose_each_risk() -> None:
     assert metrics["unauthorized_selections"] == 1
     assert metrics["unauthorized_rate_when_exposed"] == 1.0
     assert metrics["cases_exposing_redundant_candidate"] == 1
+    assert metrics["by_family"]["navigation"] == {
+        "cases": 2,
+        "accuracy": 0.5,
+        "unauthorized_selections": 1,
+        "redundant_selections": 0,
+    }
 
 
 def test_adapter_provenance_rejects_wrong_base_model(tmp_path: Path) -> None:
@@ -148,3 +154,37 @@ def test_adapter_provenance_rejects_wrong_base_model(tmp_path: Path) -> None:
     assert provenance is not None
     assert provenance["weights_bytes"] == len(b"weights")
     assert len(provenance["weights_sha256"]) == 64
+
+
+def test_permutation_group_requires_every_declared_variant_to_be_correct() -> None:
+    rows = []
+    predictions = []
+    for variant in range(4):
+        row = _row()
+        row["metadata"].update(
+            {
+                "case_id": f"permutation-{variant}",
+                "group_id": "semantic-state-1",
+                "variant": variant,
+                "permutation_group": True,
+                "permutations_total": 4,
+            }
+        )
+        rows.append(row)
+        predicted = 1 if variant < 3 else 0
+        predictions.append(
+            _parse_prediction(
+                row,
+                f"<start_function_call>call:select_candidate{{candidate_id:{predicted}}}",
+                _Tokenizer(),
+            )
+        )
+
+    metrics = _metrics(rows, predictions)
+    permutation = metrics["permutation_groups"]
+
+    assert metrics["candidate_accuracy"] == 0.75
+    assert permutation["declared_groups"] == 1
+    assert permutation["well_formed_groups"] == 1
+    assert permutation["row_accuracy"] == 0.75
+    assert permutation["group_accuracy"] == 0.0

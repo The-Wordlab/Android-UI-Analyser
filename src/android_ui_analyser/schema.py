@@ -203,6 +203,19 @@ class Screen(BaseModel):
     source: ScreenSource
 
 
+class ObservationContract(BaseModel):
+    """Machine-readable guidance for safely reusing one caller-visible frame."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    fingerprint: str | None = None
+    evidence_id: str | None = None
+    produced_by: str
+    reusable: bool
+    analyze_needed: bool
+    reason: str
+
+
 class Meta(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -243,6 +256,7 @@ class Meta(BaseModel):
     annotated_image: str | None = None
     raw_image: str | None = None  # unannotated screenshot saved on request (--with-image)
     device_serial: str | None = None
+    observation_contract: ObservationContract | None = None
     # Optional token-cheap delta vs the previous analyze (perf.differential).
     element_diff: dict[str, Any] | None = None
     # Host-side incremental a11y: True when hierarchy XML matched the previous analyze.
@@ -396,7 +410,14 @@ class ActionResult(BaseModel):
     note: str | None = None
     # Structured one-call efficiency recommendation (CLI and MCP share the same ids/text).
     advice: list[dict[str, str]] | None = None
+    # What an install actually did to the target, as data rather than prose: {"package": ...,
+    # "installed": bool, "pushed": bool, "reason": "already-present"|"missing"|…, "version_name":
+    # …, "bundle_version_name": …}. `pushed` is the field that matters to a caller deciding
+    # whether app state survived — an idempotent skip preserves data, a push may not — and a
+    # sentence in `detail` cannot be branched on.
+    app_install: dict[str, Any] | None = None
     goal_progress: dict[str, Any] | None = None
+    observation_contract: ObservationContract | None = None
     # Why the folded observation may not show the action's effect — e.g. the post-action screen was
     # byte-identical to the pre-action one. Carries the reason, not a bare flag, so a reader can
     # judge it. Absent when the observation is trustworthy, so its presence is the signal.

@@ -121,9 +121,12 @@ class Device(ABC):
     def screenshot(self) -> ScreenImage: ...
 
     def screencap_png(self) -> ScreenImage:
-        """Raw PNG via ``adb exec-out screencap -p`` when available; else :meth:`screenshot`.
+        """Lossless PNG via ``adb exec-out screencap -p`` when available; else :meth:`screenshot`.
 
-        Capture loops prefer this path — it skips the u2 Java instrumentation round-trip.
+        This is the *pixel-exact* path, not the fast one: it makes the device encode a
+        full-resolution PNG, which measures ~2.2x slower than :meth:`screenshot` on both an
+        emulator and a physical device. Callers should prefer :meth:`screenshot` unless they
+        genuinely need lossless pixels (see ``perf.capture_adb_screencap``).
         """
         return self.screenshot()
 
@@ -593,7 +596,10 @@ class Uiautomator2Device(Device):
         return ScreenImage.from_pil(img)
 
     def screencap_png(self) -> ScreenImage:
-        """Prefer ``adb exec-out screencap -p``; fall back to u2 on any failure."""
+        """Lossless PNG via ``adb exec-out screencap -p``; fall back to u2 on any failure.
+
+        Slower than :meth:`screenshot` (device-side PNG encode) — see the base-class note.
+        """
         try:
             proc = subprocess.run(  # noqa: S603
                 ["adb", "-s", self.serial, "exec-out", "screencap", "-p"],

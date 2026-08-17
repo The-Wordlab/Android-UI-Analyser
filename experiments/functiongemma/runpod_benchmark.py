@@ -4,12 +4,14 @@
 Dry-run is the default. Spending requires ``--execute``. A server-side hard
 termination deadline is set when the Pod is created; the launcher additionally
 terminates the exact Pod in ``finally`` and audits that neither its ID nor its
-unique name remains active.
+unique name remains active. A per-run account SSH key is registered before Pod
+creation, removed after Pod deletion, and audited against the original inventory.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import gzip
 import hashlib
@@ -44,6 +46,9 @@ DEFAULT_MODEL_REVISION = "bb327a9ad61044e1496a2bee2365a6b6a6684c72"
 DEFAULT_MLX_PACKAGE = "mlx[cuda12]==0.32.0"
 V3_MANIFEST_SHA256 = "d96d69e7f25df0b10272d6e20027eea3f609a34a741ce50d60d75b7f983df60b"
 V4_MANIFEST_SHA256 = "3a271e8ff153b9179997edbb9822962b383348405bc77b15259dc3a733b6a9b7"
+V5_MANIFEST_SHA256 = "e57e47b90f29774cee6199319f7bde5c109b8fcb0135d0221b9c94ce8b9d871d"
+V6_MANIFEST_SHA256 = "d3900c58a698810aa1eb378a6fb51b7b4a997f351b2173b455a046c63ad98364"
+V7_MANIFEST_SHA256 = "d1917820fe8657cd9c15bbee1738e0f5f637fd6f104b1bbf7fbe7f5416279404"
 SAFE_VALUE = re.compile(r"^[A-Za-z0-9._/@:+\-]+$")
 MLX_PACKAGE = re.compile(r"^mlx\[cuda(?:12|13)\]==[0-9]+\.[0-9]+\.[0-9]+$")
 SECRET_KEYS = ("RUNPOD_API_KEY", "HF_TOKEN")
@@ -332,11 +337,22 @@ def _config(args: argparse.Namespace, now: datetime) -> Config:
     output = args.output_dir or REPO_ROOT / "runs" / "functiongemma" / "runpod" / run_id
     expected = args.expected_manifest_sha256
     if expected is None:
-        expected = V4_MANIFEST_SHA256 if args.curriculum_version == "v4" else V3_MANIFEST_SHA256
-    config_path = args.config or (
-        "experiments/functiongemma/train-lora-v4.yaml"
-        if args.curriculum_version == "v4"
-        else "experiments/functiongemma/train-lora.yaml"
+        expected = {
+            "v3": V3_MANIFEST_SHA256,
+            "v4": V4_MANIFEST_SHA256,
+            "v5": V5_MANIFEST_SHA256,
+            "v6": V6_MANIFEST_SHA256,
+            "v7": V7_MANIFEST_SHA256,
+        }[args.curriculum_version]
+    config_path = (
+        args.config
+        or {
+            "v3": "experiments/functiongemma/train-lora.yaml",
+            "v4": "experiments/functiongemma/train-lora-v4.yaml",
+            "v5": "experiments/functiongemma/train-lora-v5.yaml",
+            "v6": "experiments/functiongemma/train-lora-v6.yaml",
+            "v7": "experiments/functiongemma/train-lora-v7-seed61.yaml",
+        }[args.curriculum_version]
     )
     if expected is not None and not re.fullmatch(r"[0-9a-f]{64}", expected):
         raise LaunchError("--expected-manifest-sha256 must be 64 lowercase hex characters")
@@ -443,10 +459,32 @@ def _remote_command(config: Config, source_archive_sha256: str) -> str:
     return "; ".join(script)
 
 
+REVIEWED_SOURCE_OVERRIDES = (
+    "experiments/functiongemma/curriculum.py",
+    "experiments/functiongemma/evaluate.py",
+    "experiments/functiongemma/generate_dataset.py",
+    "experiments/functiongemma/live_context_curriculum.py",
+    "experiments/functiongemma/recovery_curriculum.py",
+    "experiments/functiongemma/run_live_context_smoke.py",
+    "experiments/functiongemma/run_production_smoke.py",
+    "experiments/functiongemma/run_semantic_context_smoke.py",
+    "experiments/functiongemma/semantic_context_curriculum.py",
+    "experiments/functiongemma/select_checkpoint.py",
+    "experiments/functiongemma/train.py",
+    "experiments/functiongemma/train-lora-v5.yaml",
+    "experiments/functiongemma/train-lora-v6.yaml",
+    "experiments/functiongemma/train-lora-v7-seed61.yaml",
+    "experiments/functiongemma/train-lora-v7-seed67.yaml",
+    "experiments/functiongemma/train-lora-v7-seed71.yaml",
+    "experiments/functiongemma/runpod_worker.py",
+    "src/android_ui_analyser/providers/policy/functiongemma.py",
+)
+
+
 def _source_archive(
     config: Config, runner: CommandRunner, child_env: Mapping[str, str] | None = None
 ) -> tuple[bytes, list[str]]:
-    """Archive the pinned Git tree plus the two reviewed RunPod runner overrides.
+    """Archive the pinned Git tree plus the reviewed FunctionGemma overrides.
 
     This avoids requiring the new launcher commit to be published before its first
     use while still excluding ignored/untracked files such as .env, runs, models,
@@ -459,10 +497,7 @@ def _source_archive(
     )
     if archived.returncode != 0:
         raise LaunchError("could not archive the pinned Git revision")
-    overrides = [
-        "experiments/functiongemma/train.py",
-        "experiments/functiongemma/runpod_worker.py",
-    ]
+    overrides = list(REVIEWED_SOURCE_OVERRIDES)
     override_set = set(overrides)
     output = io.BytesIO()
     with (
@@ -520,6 +555,193 @@ def _parse_json(payload: bytes, description: str) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise LaunchError(f"{description} did not return one JSON object")
     return parsed
+
+
+def _ssh_public_key_fingerprint(public_key: str) -> str:
+    parts = public_key.split()
+    if len(parts) < 2 or not parts[0].startswith("ssh-"):
+        raise LaunchError("generated ephemeral SSH public key has an invalid format")
+    encoded = parts[1]
+    try:
+        blob = base64.b64decode(encoded + "=" * (-len(encoded) % 4), validate=True)
+    except (ValueError, UnicodeEncodeError):
+        raise LaunchError("generated ephemeral SSH public key has invalid base64") from None
+    digest = base64.b64encode(hashlib.sha256(blob).digest()).decode("ascii").rstrip("=")
+    return f"SHA256:{digest}"
+
+
+def _parse_ssh_key_inventory(payload: bytes) -> tuple[str, ...]:
+    parsed = _parse_json(payload, "runpodctl ssh list-keys")
+    keys = parsed.get("keys")
+    if keys is None:
+        # The current Go CLI serializes its nil []SSHKey as JSON null when an
+        # account has no configured keys.
+        keys = []
+    if not isinstance(keys, list):
+        raise LaunchError("runpodctl ssh list-keys response omitted its keys array")
+    fingerprints: list[str] = []
+    for key in keys:
+        fingerprint = key.get("fingerprint") if isinstance(key, dict) else None
+        if not isinstance(fingerprint, str) or not re.fullmatch(
+            r"SHA256:[A-Za-z0-9+/]{43}", fingerprint
+        ):
+            raise LaunchError("RunPod SSH-key inventory contained an invalid fingerprint")
+        fingerprints.append(fingerprint)
+    return tuple(sorted(fingerprints))
+
+
+def _ssh_key_inventory(
+    runner: CommandRunner,
+    process_env: Mapping[str, str],
+    secrets: Secrets,
+) -> tuple[str, ...]:
+    result = runner(
+        ["runpodctl", "--output", "json", "ssh", "list-keys"],
+        env=process_env,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise LaunchError(
+            "RunPod SSH-key inventory failed: " + _redact(result.stderr, secrets).strip()
+        )
+    return _parse_ssh_key_inventory(result.stdout)
+
+
+def _register_ephemeral_ssh_key(
+    runner: CommandRunner,
+    process_env: Mapping[str, str],
+    secrets: Secrets,
+    *,
+    public_key_path: Path,
+    fingerprint: str,
+    baseline: tuple[str, ...],
+) -> dict[str, Any]:
+    if fingerprint in baseline:
+        raise LaunchError("generated ephemeral SSH key already existed in the baseline inventory")
+    add_error: str | None = None
+    try:
+        added = runner(
+            [
+                "runpodctl",
+                "--output",
+                "json",
+                "ssh",
+                "add-key",
+                "--key-file",
+                str(public_key_path),
+            ],
+            env=process_env,
+            timeout=30,
+        )
+        if added.returncode != 0:
+            raise LaunchError(
+                "temporary RunPod SSH-key add failed: " + _redact(added.stderr, secrets).strip()
+            )
+        if _parse_json(added.stdout, "runpodctl ssh add-key").get("added") is not True:
+            raise LaunchError("runpodctl ssh add-key did not acknowledge the key")
+    except Exception as exc:
+        add_error = f"{type(exc).__name__}: {_redact(str(exc), secrets)}"
+
+    after = _ssh_key_inventory(runner, process_env, secrets)
+    expected = tuple(sorted((*baseline, fingerprint)))
+    if after != expected:
+        detail = f"; add attempt reported {add_error}" if add_error else ""
+        raise LaunchError(
+            "temporary RunPod SSH-key registration did not converge to the exact expected "
+            f"fingerprint inventory{detail}"
+        )
+    return {
+        "verified_present": True,
+        "after_fingerprints": list(after),
+        "recovered_after_add_error": add_error is not None,
+        "add_error": add_error,
+    }
+
+
+def _remove_ephemeral_ssh_key(
+    runner: CommandRunner,
+    process_env: Mapping[str, str],
+    secrets: Secrets,
+    *,
+    fingerprint: str,
+    baseline: tuple[str, ...],
+    sleep: Callable[[float], None] = time.sleep,
+    attempts: int = 3,
+) -> dict[str, Any]:
+    errors: list[str] = []
+    remove_attempts = 0
+    inventory_checks = 0
+    after: tuple[str, ...] | None = None
+    for attempt in range(attempts):
+        try:
+            inventory_checks += 1
+            current = _ssh_key_inventory(runner, process_env, secrets)
+            after = current
+            if current == baseline:
+                return {
+                    "verified_baseline_restored": True,
+                    "after_fingerprints": list(current),
+                    "remove_attempts": remove_attempts,
+                    "inventory_checks": inventory_checks,
+                    "errors": errors,
+                }
+            if fingerprint in current:
+                remove_attempts += 1
+                try:
+                    removed = runner(
+                        [
+                            "runpodctl",
+                            "--output",
+                            "json",
+                            "ssh",
+                            "remove-key",
+                            "--fingerprint",
+                            fingerprint,
+                        ],
+                        env=process_env,
+                        timeout=30,
+                    )
+                    if removed.returncode != 0:
+                        errors.append(
+                            "remove command failed: " + _redact(removed.stderr, secrets).strip()
+                        )
+                    elif (
+                        _parse_json(removed.stdout, "runpodctl ssh remove-key").get("removed")
+                        is not True
+                    ):
+                        errors.append("remove command did not acknowledge the fingerprint")
+                except BaseException as exc:
+                    errors.append(
+                        f"remove command raised {type(exc).__name__}: {_redact(str(exc), secrets)}"
+                    )
+            else:
+                errors.append(
+                    "temporary fingerprint is absent but account inventory differs from baseline"
+                )
+
+            inventory_checks += 1
+            after = _ssh_key_inventory(runner, process_env, secrets)
+            if after == baseline:
+                return {
+                    "verified_baseline_restored": True,
+                    "after_fingerprints": list(after),
+                    "remove_attempts": remove_attempts,
+                    "inventory_checks": inventory_checks,
+                    "errors": errors,
+                }
+        except BaseException as exc:
+            errors.append(
+                f"inventory check raised {type(exc).__name__}: {_redact(str(exc), secrets)}"
+            )
+        if attempt + 1 < attempts:
+            sleep(min(2**attempt, 4))
+    return {
+        "verified_baseline_restored": False,
+        "after_fingerprints": list(after) if after is not None else None,
+        "remove_attempts": remove_attempts,
+        "inventory_checks": inventory_checks,
+        "errors": errors,
+    }
 
 
 def _price(pod: Mapping[str, Any]) -> float:
@@ -702,17 +924,27 @@ def _local_preflight(config: Config, runner: CommandRunner, child_env: Mapping[s
     if "--terminate-after" not in help_text or "--wait" not in help_text:
         raise LaunchError("installed runpodctl lacks required hard-TTL/readiness flags")
 
-    checks = [
-        ["git", "cat-file", "-e", f"{config.revision}:{config.config_path}"],
-    ]
+    ssh_help_checks = (
+        (["runpodctl", "ssh", "list-keys", "--help"], ()),
+        (["runpodctl", "ssh", "add-key", "--help"], ("--key-file",)),
+        (["runpodctl", "ssh", "remove-key", "--help"], ("--fingerprint",)),
+    )
+    for command, required_flags in ssh_help_checks:
+        result = runner(command, env=child_env, timeout=30)
+        help_text = result.stdout.decode("utf-8", errors="replace")
+        if result.returncode != 0 or any(flag not in help_text for flag in required_flags):
+            raise LaunchError(
+                f"installed runpodctl lacks required SSH-key command: {' '.join(command[1:3])}"
+            )
+
+    checks = [["git", "cat-file", "-e", f"{config.revision}^{{commit}}"]]
+    if config.config_path not in REVIEWED_SOURCE_OVERRIDES:
+        checks.append(["git", "cat-file", "-e", f"{config.revision}:{config.config_path}"])
     for command in checks:
         result = runner(command, env=child_env, timeout=30)
         if result.returncode != 0:
             raise LaunchError(f"local preflight failed: {command[0]} {command[1]}")
-    for relative in (
-        "experiments/functiongemma/train.py",
-        "experiments/functiongemma/runpod_worker.py",
-    ):
+    for relative in REVIEWED_SOURCE_OVERRIDES:
         if not (REPO_ROOT / relative).is_file():
             raise LaunchError(f"reviewed source override is missing: {relative}")
 
@@ -743,7 +975,7 @@ def execute(
     source_archive_path.write_bytes(source_archive)
     metadata_path = config.output_dir / "launcher-metadata.json"
     metadata: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "run_id": config.run_id,
         "status": "running",
         "started_at": _utc_now().isoformat(),
@@ -773,6 +1005,18 @@ def execute(
             "verified_no_new_network_volume": None,
             "error": None,
         },
+        "ssh_key": {
+            "fingerprint": None,
+            "baseline_fingerprints": None,
+            "registration": {
+                "attempted": False,
+                "verified_present": False,
+                "after_fingerprints": None,
+                "recovered_after_add_error": False,
+                "add_error": None,
+            },
+            "cleanup": None,
+        },
         "cleanup": None,
         "error": None,
     }
@@ -781,24 +1025,61 @@ def execute(
     primary_error: BaseException | None = None
     ssh_endpoint: tuple[str, int] | None = None
     archive_payload: bytes | None = None
+    key_baseline: tuple[str, ...] | None = None
+    key_registration_attempted = False
 
     with tempfile.TemporaryDirectory(prefix="aua-runpod-") as temporary:
         temporary_path = Path(temporary)
         private_key = temporary_path / "id_ed25519"
         known_hosts = temporary_path / "known_hosts"
         key_result = runner(
-            ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(private_key)],
+            [
+                "ssh-keygen",
+                "-q",
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-C",
+                f"aua-{config.run_id}",
+                "-f",
+                str(private_key),
+            ],
             env=child_env,
             timeout=30,
         )
         if key_result.returncode != 0:
             raise LaunchError("could not generate an ephemeral SSH key")
-        public_key = private_key.with_suffix(".pub").read_text(encoding="utf-8").strip()
+        public_key_path = private_key.with_suffix(".pub")
+        public_key = public_key_path.read_text(encoding="utf-8").strip()
+        key_fingerprint = _ssh_public_key_fingerprint(public_key)
+        metadata["ssh_key"]["fingerprint"] = key_fingerprint
+        _atomic_json(metadata_path, metadata)
         process_env = dict(child_env)
         process_env["RUNPOD_API_KEY"] = secrets.runpod_api_key
 
         try:
             with _signal_cleanup():
+                key_baseline = _ssh_key_inventory(runner, process_env, secrets)
+                metadata["ssh_key"]["baseline_fingerprints"] = list(key_baseline)
+                if key_fingerprint in key_baseline:
+                    raise LaunchError(
+                        "generated ephemeral SSH key already existed in the baseline inventory"
+                    )
+                key_registration_attempted = True
+                metadata["ssh_key"]["registration"]["attempted"] = True
+                _atomic_json(metadata_path, metadata)
+                registration = _register_ephemeral_ssh_key(
+                    runner,
+                    process_env,
+                    secrets,
+                    public_key_path=public_key_path,
+                    fingerprint=key_fingerprint,
+                    baseline=key_baseline,
+                )
+                metadata["ssh_key"]["registration"].update(registration)
+                _atomic_json(metadata_path, metadata)
+
                 created = runner(
                     _create_command(config, public_key),
                     env=process_env,
@@ -888,7 +1169,8 @@ def execute(
         finally:
             # Export is best-effort, but exact-ID deletion is structurally
             # unavoidable: it lives in the nested finally and termination
-            # signals are deferred until both deletion and inventory audits end.
+            # signals are deferred until Pod deletion, account-key removal, and
+            # both resource inventory audits end.
             with _defer_cleanup_signals() as deferred_signals:
                 try:
                     try:
@@ -958,17 +1240,44 @@ def execute(
                         if primary_error is None:
                             primary_error = exc
                     metadata["cleanup"] = cleanup
-                    if not cleanup["verified_no_active_pod"]:
-                        cleanup_message = (
-                            "CLEANUP UNVERIFIED: could not verify that the RunPod Pod was "
-                            "terminated; hard TTL remains set"
-                        )
-                        if primary_error is not None:
-                            cleanup_message += (
-                                f"; earlier error was {type(primary_error).__name__}: "
-                                f"{_redact(str(primary_error), secrets)}"
+
+                    if key_registration_attempted and key_baseline is not None:
+                        try:
+                            key_cleanup = _remove_ephemeral_ssh_key(
+                                runner,
+                                process_env,
+                                secrets,
+                                fingerprint=key_fingerprint,
+                                baseline=key_baseline,
+                                sleep=sleep,
                             )
-                        primary_error = CleanupUnverifiedError(cleanup_message)
+                            key_cleanup["required"] = True
+                        except BaseException as exc:
+                            key_cleanup = {
+                                "required": True,
+                                "verified_baseline_restored": False,
+                                "after_fingerprints": None,
+                                "remove_attempts": 0,
+                                "inventory_checks": 0,
+                                "errors": [
+                                    "unexpected SSH-key cleanup error: "
+                                    f"{type(exc).__name__}: {_redact(str(exc), secrets)}"
+                                ],
+                            }
+                            if primary_error is None:
+                                primary_error = exc
+                    else:
+                        key_cleanup = {
+                            "required": False,
+                            "verified_baseline_restored": True,
+                            "after_fingerprints": (
+                                list(key_baseline) if key_baseline is not None else None
+                            ),
+                            "remove_attempts": 0,
+                            "inventory_checks": 0,
+                            "errors": [],
+                        }
+                    metadata["ssh_key"]["cleanup"] = key_cleanup
 
                     try:
                         after_volume_ids = _network_volume_ids(client.list_network_volumes())
@@ -993,6 +1302,26 @@ def execute(
                         )
                         if primary_error is None:
                             primary_error = exc
+
+                    cleanup_issues: list[str] = []
+                    if not cleanup["verified_no_active_pod"]:
+                        cleanup_issues.append(
+                            "could not verify that the RunPod Pod was terminated; "
+                            "hard TTL remains set"
+                        )
+                    if not key_cleanup["verified_baseline_restored"]:
+                        cleanup_issues.append(
+                            "could not verify removal of the temporary RunPod account SSH key "
+                            "or restoration of the exact baseline fingerprint inventory"
+                        )
+                    if cleanup_issues:
+                        cleanup_message = "CLEANUP UNVERIFIED: " + "; ".join(cleanup_issues)
+                        if primary_error is not None:
+                            cleanup_message += (
+                                f"; earlier error was {type(primary_error).__name__}: "
+                                f"{_redact(str(primary_error), secrets)}"
+                            )
+                        primary_error = CleanupUnverifiedError(cleanup_message)
 
             if deferred_signals:
                 metadata["cleanup"]["deferred_signals"] = [
@@ -1027,7 +1356,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--image", default=DEFAULT_IMAGE)
     parser.add_argument("--revision", default=None)
     parser.add_argument("--mode", choices=("smoke", "benchmark", "full"), default="benchmark")
-    parser.add_argument("--curriculum-version", choices=("v3", "v4"), default="v3")
+    parser.add_argument(
+        "--curriculum-version",
+        choices=("v3", "v4", "v5", "v6", "v7"),
+        default="v3",
+    )
     parser.add_argument("--config")
     parser.add_argument("--model-id", default=DEFAULT_MODEL)
     parser.add_argument("--model-revision", default=DEFAULT_MODEL_REVISION)

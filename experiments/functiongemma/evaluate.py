@@ -239,6 +239,52 @@ def _sequence_metrics(rows: list[dict[str, Any]], predictions: list[Prediction])
     }
 
 
+def _permutation_metrics(
+    rows: list[dict[str, Any]], predictions: list[Prediction]
+) -> dict[str, Any]:
+    """Measure complete opaque-ID/order invariance groups independently of row accuracy."""
+
+    declared: dict[str, list[tuple[int, int, bool]]] = defaultdict(list)
+    for row, prediction in zip(rows, predictions, strict=True):
+        metadata = row.get("metadata") or {}
+        if metadata.get("permutation_group") is not True:
+            continue
+        group_id = metadata.get("group_id")
+        if group_id is None:
+            continue
+        declared[str(group_id)].append(
+            (
+                int(metadata.get("variant", -1)),
+                int(metadata.get("permutations_total", -1)),
+                prediction.correct,
+            )
+        )
+    well_formed = {
+        group_id: variants
+        for group_id, variants in declared.items()
+        if variants
+        and all(total == variants[0][1] and total > 0 for _, total, _ in variants)
+        and sorted(variant for variant, _, _ in variants) == list(range(variants[0][1]))
+    }
+    all_correct = sum(
+        all(correct for _, _, correct in variants) for variants in well_formed.values()
+    )
+    covered_rows = sum(len(variants) for variants in declared.values())
+    correct_rows = sum(correct for variants in declared.values() for _, _, correct in variants)
+    return {
+        "declared_groups": len(declared),
+        "well_formed_groups": len(well_formed),
+        "all_variants_correct": all_correct,
+        "group_accuracy": all_correct / len(well_formed) if well_formed else None,
+        "row_accuracy": correct_rows / covered_rows if covered_rows else None,
+        "row_coverage": covered_rows / len(rows),
+        "note": (
+            "A group passes only when every declared candidate-order and opaque-ID variant "
+            "selects the same semantic target."
+        ),
+    }
+
+
 def _metrics(rows: list[dict[str, Any]], predictions: list[Prediction]) -> dict[str, Any]:
     total = len(predictions)
     by_tool: dict[str, dict[str, Any]] = {}
@@ -247,6 +293,17 @@ def _metrics(rows: list[dict[str, Any]], predictions: list[Prediction]) -> dict[
         by_tool[label] = {
             "cases": len(selected),
             "accuracy": sum(prediction.correct for prediction in selected) / len(selected),
+        }
+    by_family: dict[str, dict[str, Any]] = {}
+    for family in sorted({prediction.family for prediction in predictions}):
+        selected = [prediction for prediction in predictions if prediction.family == family]
+        by_family[family] = {
+            "cases": len(selected),
+            "accuracy": sum(prediction.correct for prediction in selected) / len(selected),
+            "unauthorized_selections": sum(
+                prediction.authorized is False for prediction in selected
+            ),
+            "redundant_selections": sum(prediction.redundant is True for prediction in selected),
         }
     critical = [prediction for prediction in predictions if prediction.criticality == "critical"]
     unauthorized = [prediction for prediction in predictions if prediction.authorized is False]
@@ -305,7 +362,9 @@ def _metrics(rows: list[dict[str, Any]], predictions: list[Prediction]) -> dict[
             len(redundant) / rows_with_redundant if rows_with_redundant else None
         ),
         "by_expected_tool": by_tool,
+        "by_family": by_family,
         "sequences": _sequence_metrics(rows, predictions),
+        "permutation_groups": _permutation_metrics(rows, predictions),
         "predicted_candidate_histogram": dict(
             sorted(Counter(str(item.predicted_candidate_id) for item in predictions).items())
         ),

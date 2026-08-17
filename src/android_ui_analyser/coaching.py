@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import uuid
 from typing import Any
 
 from .selectors import is_back_resource_id
@@ -41,6 +42,135 @@ def _payload(result: Any) -> dict[str, Any] | None:
             value = result.model_dump(mode="json")
             return value if isinstance(value, dict) else None
     return None
+
+
+def _observation_payload(data: dict[str, Any]) -> dict[str, Any] | None:
+    nested = data.get("observation")
+    if isinstance(nested, dict):
+        return nested
+    if isinstance(data.get("screen"), dict) and isinstance(data.get("elements"), list):
+        return data
+    return None
+
+
+def _attach_observation_contract(result: Any, contract: dict[str, Any]) -> None:
+    if isinstance(result, dict):
+        if isinstance(result.get("screen"), dict) and isinstance(result.get("meta"), dict):
+            result["meta"]["observation_contract"] = contract
+        else:
+            result["observation_contract"] = contract
+        return
+    if hasattr(result, "screen") and hasattr(result, "meta"):
+        with contextlib.suppress(Exception):
+            from .schema import ObservationContract
+
+            result.meta.observation_contract = ObservationContract.model_validate(contract)
+        return
+    if hasattr(result, "observation_contract"):
+        with contextlib.suppress(Exception):
+            from .schema import ObservationContract
+
+            result.observation_contract = ObservationContract.model_validate(contract)
+
+
+def _record_session_artifact(
+    engine: Any,
+    cmd: str,
+    result: Any,
+    *,
+    invocation_id: str | None,
+    duration_ms: float | None,
+    args: dict[str, Any] | None,
+) -> None:
+    """Attach reuse metadata and append to an active session bundle, best effort."""
+
+    data = _payload(result) or {}
+    observation = _observation_payload(data)
+    if observation is None and "action" not in data and not data.get("artifacts_dir"):
+        return
+    state = None
+    with contextlib.suppress(Exception):
+        state = engine._session_state()  # noqa: SLF001 - shared lifecycle boundary
+
+    contract: dict[str, Any] | None = None
+    if observation is not None:
+        from .session_artifacts import observation_evidence_id
+
+        raw_meta = observation.get("meta")
+        meta: dict[str, Any] = raw_meta if isinstance(raw_meta, dict) else {}
+        stale = data.get("stale_risk") or meta.get("stale_risk")
+        fingerprint = meta.get("fingerprint")
+        contract = {
+            "fingerprint": str(fingerprint) if fingerprint else None,
+            "evidence_id": (
+                observation_evidence_id(state.session_id, observation) if state is not None else None
+            ),
+            "produced_by": cmd,
+            "reusable": stale is None,
+            "analyze_needed": stale is not None,
+            "reason": str(stale or "fresh settled observation"),
+        }
+        _attach_observation_contract(result, contract)
+    elif "action" in data:
+        contract = {
+            "fingerprint": None,
+            "evidence_id": None,
+            "produced_by": cmd,
+            "reusable": False,
+            "analyze_needed": True,
+            "reason": "this result did not contain an observation",
+        }
+        _attach_observation_contract(result, contract)
+
+    artifact_dir = getattr(state, "artifact_dir", None) if state is not None else None
+    if not artifact_dir:
+        return
+    from pathlib import Path
+
+    from .session_artifacts import SessionArtifactStore
+
+    store = SessionArtifactStore(artifact_dir)
+
+    def screenshot(path: Path) -> str:
+        image = engine.platform.capture_screenshot(engine.device)
+        image.save(str(path))
+        return str(path)
+
+    stored = store.record(
+        command=cmd,
+        result=result,
+        invocation_id=invocation_id or uuid.uuid4().hex,
+        duration_ms=duration_ms,
+        args=args,
+        screenshot=screenshot,
+        diagnostics=(
+            lambda: engine.platform.diagnostic_logs(engine.device, lines=400)
+            if engine.platform.supports("device.logs")
+            else None
+        ),
+    )
+    if stored is not None:
+        _attach_observation_contract(result, stored)
+
+    if cmd == "session_finish" and data.get("terminated") is True:
+        raw_progress = data.get("goal_progress")
+        progress: dict[str, Any] = raw_progress if isinstance(raw_progress, dict) else {}
+        raw_checkpoints = progress.get("phases")
+        checkpoints = (
+            [item for item in raw_checkpoints if isinstance(item, dict)]
+            if isinstance(raw_checkpoints, list)
+            else []
+        )
+        candidate = data.get("candidate_flow")
+        candidate_yaml = candidate.get("yaml") if isinstance(candidate, dict) else None
+        finalized = store.finalize(
+            data,
+            verdict="passed" if data.get("ok") and data.get("finished") else "failed",
+            checkpoints=checkpoints,
+            candidate_yaml=candidate_yaml if isinstance(candidate_yaml, str) else None,
+        )
+        if isinstance(result, dict):
+            result.update(finalized)
 
 
 def _is_back_event(event: dict[str, Any]) -> bool:
@@ -105,6 +235,8 @@ def decorate_result(
     *,
     args: dict[str, Any] | None = None,
     current_recorded: bool = True,
+    invocation_id: str | None = None,
+    duration_ms: float | None = None,
 ) -> Any:
     """Attach one actionable hint when the current call reveals an avoidable pattern."""
     # Host-only flow metadata calls already know their explicit/leased serial. Do not connect
@@ -204,6 +336,15 @@ def decorate_result(
             result.meta.goal_progress = progress
     except Exception:  # pragma: no cover - session coaching must never break a tool call
         pass
+    with contextlib.suppress(Exception):
+        _record_session_artifact(
+            engine,
+            normalized,
+            result,
+            invocation_id=invocation_id,
+            duration_ms=duration_ms,
+            args=args,
+        )
     if not current_recorded:
         events.append(
             {

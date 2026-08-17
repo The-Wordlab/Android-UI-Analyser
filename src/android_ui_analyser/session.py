@@ -27,6 +27,7 @@ from .flows import Flow
 from .memory import (
     AppMap,
     RouteEdge,
+    RouteStep,
     _shortest_path,
     is_destructive_step,
     resolve_goal,
@@ -36,6 +37,11 @@ from .memory import (
 )
 from .schema import AnalyzeResult
 from .selectors import is_back_resource_id
+from .session_contracts import (
+    SessionContract,
+    parse_session_contract_yaml,
+    render_session_contract_yaml,
+)
 
 if TYPE_CHECKING:
     from .jobs import JobState
@@ -97,12 +103,15 @@ PhaseIntent: TypeAlias = Literal[
     "network_observation",
     "offline_transition",
     "cleanup_finalizer",
+    "contract_checkpoint",
+    "contract_cleanup",
 ]
 PhaseSatisfaction: TypeAlias = Literal[
     "relevant_evidence",
     "verified_network_status",
     "verified_offline",
     "session_cleanup",
+    "fresh_assertions",
 ]
 RequirementExpected: TypeAlias = Literal[
     "present",
@@ -162,6 +171,11 @@ class GoalPhase(BaseModel):
     # A policy such as "never use a deeplink" constrains a checkpoint but is not separately
     # completable work. Keep it typed instead of compiling an impossible verify phase.
     constraints: list[str] = Field(default_factory=list)
+    # Authored contracts keep their exact flow assertions on the phase. Natural-language phases
+    # preserve the legacy proof policy through these defaults.
+    assertions: list[RouteStep] = Field(default_factory=list)
+    proof_mode: Literal["manual_or_structured", "fresh_assertions"] = "manual_or_structured"
+    manual_completion_allowed: bool = True
 
 
 class GoalBranch(BaseModel):
@@ -185,6 +199,7 @@ class PhaseProof(BaseModel):
         "session_cleanup",
         "observation",
         "job_result",
+        "contract_assertions",
     ]
     matched_terms: list[str] = Field(default_factory=list)
     satisfied_requirements: list[PhaseRequirement] = Field(default_factory=list)
@@ -195,6 +210,12 @@ class PhaseProof(BaseModel):
     job_id: str | None = None
     job_operation: str | None = None
     predicate_terms: list[str] = Field(default_factory=list)
+    # Contract proof is one atomic assertion-set verdict against one fresh observation. The
+    # evidence id links the phase to the session bundle; capture_order anchors candidate-flow
+    # insertion to the action that produced that frame.
+    evidence_id: str | None = None
+    assertions_verified: int = Field(default=0, ge=0)
+    capture_order: int | None = Field(default=None, ge=0)
 
 
 class SessionState(BaseModel):
@@ -214,6 +235,19 @@ class SessionState(BaseModel):
     network_profile_preexisting: bool = False
     emulator_started: bool = False
     phases: list[GoalPhase] = Field(default_factory=list)
+    contract: SessionContract | None = None
+    contract_yaml: str | None = None
+    artifact_dir: str | None = None
+    evidence: Literal["none", "failures", "all"] = "failures"
+    junit: bool = False
+    # The navigation journal is rolling, so candidate capture starts from an absolute action
+    # watermark inside the segment active when the session began.
+    capture_package: str | None = None
+    capture_context_id: str | None = None
+    capture_segment: int | None = Field(default=None, ge=0)
+    capture_start_order: int | None = Field(default=None, ge=0)
+    # Prevent two ordered authored checkpoints from being completed by one unchanged frame.
+    last_contract_fingerprint: str | None = None
     finished_ms: int | None = None
 
 
@@ -872,6 +906,46 @@ def goal_phases(goal: str) -> list[GoalPhase]:
     return phases
 
 
+def contract_phases(contract: SessionContract) -> list[GoalPhase]:
+    """Compile an authored contract into ordered phases with non-manual proof policy."""
+
+    phases = [
+        GoalPhase(
+            id=checkpoint.id,
+            objective=checkpoint.description,
+            kind="verify",
+            intent="contract_checkpoint",
+            satisfaction="fresh_assertions",
+            assertions=[step.model_copy(deep=True) for step in checkpoint.assertions],
+            proof_mode=checkpoint.proof_mode,
+            manual_completion_allowed=checkpoint.manual_completion_allowed,
+        )
+        for checkpoint in contract.checkpoints
+    ]
+    if contract.cleanup is not None:
+        used_ids = {phase.id for phase in phases}
+        cleanup_id = "cleanup"
+        suffix = 2
+        while cleanup_id in used_ids:
+            cleanup_id = f"cleanup_{suffix}"
+            suffix += 1
+        phases.append(
+            GoalPhase(
+                id=cleanup_id,
+                objective=contract.cleanup.description,
+                kind="cleanup",
+                intent="contract_cleanup",
+                satisfaction="fresh_assertions",
+                terminal=True,
+                assertions=[step.model_copy(deep=True) for step in contract.cleanup.assertions],
+                proof_mode=contract.cleanup.proof_mode,
+                manual_completion_allowed=contract.cleanup.manual_completion_allowed,
+            )
+        )
+    phases[0].status = "active"
+    return phases
+
+
 def _blocking_phase(phase: GoalPhase) -> dict[str, Any]:
     satisfaction = _phase_satisfaction(phase)
     required = {
@@ -879,6 +953,7 @@ def _blocking_phase(phase: GoalPhase) -> dict[str, Any]:
         "verified_offline": "a verified network_offline result",
         "session_cleanup": "successful session cleanup",
         "relevant_evidence": "phase-specific observable evidence",
+        "fresh_assertions": "all authored assertions passing on one fresh observation",
     }[satisfaction]
     if satisfaction == "relevant_evidence" and phase.requirements:
         assertions = ", ".join(
@@ -893,9 +968,17 @@ def _blocking_phase(phase: GoalPhase) -> dict[str, Any]:
     }
 
 
+def _session_phases(state: SessionState) -> list[GoalPhase]:
+    if state.phases:
+        return state.phases
+    if state.contract is not None:
+        return contract_phases(state.contract)
+    return goal_phases(state.goal)
+
+
 def phase_progress(state: SessionState, *, compact: bool = False) -> dict[str, Any]:
     """Return goal progress; ordinary results use the compact non-duplicating form."""
-    phases = state.phases or goal_phases(state.goal)
+    phases = _session_phases(state)
     current = next((phase for phase in phases if phase.status != "completed"), None)
     completed = sum(phase.status == "completed" for phase in phases)
     terminated = state.finished_ms is not None
@@ -906,6 +989,7 @@ def phase_progress(state: SessionState, *, compact: bool = False) -> dict[str, A
         current is not None
         and not terminated
         and _phase_satisfaction(current) == "relevant_evidence"
+        and current.manual_completion_allowed
     )
     payload: dict[str, Any] = {
         "session_id": state.session_id,
@@ -1440,7 +1524,7 @@ def complete_current_ui_phase_from_observation(
     compiled positive assertion plus every explicit negative/control-state assertion on the same
     non-stale observation from this session's device.
     """
-    phases = state.phases or goal_phases(state.goal)
+    phases = _session_phases(state)
     current = next((phase for phase in phases if phase.status != "completed"), None)
     if current is None:
         return state
@@ -1516,7 +1600,7 @@ def complete_current_ui_phase_from_job(
         or not str(job.args.get("predicate") or "").strip()
     ):
         return state
-    phases = state.phases or goal_phases(state.goal)
+    phases = _session_phases(state)
     current = next((phase for phase in phases if phase.status != "completed"), None)
     if current is None:
         return state
@@ -1555,11 +1639,13 @@ def _completion_proof(
 ) -> PhaseProof:
     satisfaction = _phase_satisfaction(phase)
     if structured is None:
-        if satisfaction != "relevant_evidence":
+        if satisfaction != "relevant_evidence" or not phase.manual_completion_allowed:
             required = {
                 "verified_network_status": "a verified network_status result",
                 "verified_offline": "a verified network_offline result",
                 "session_cleanup": "successful session cleanup",
+                "fresh_assertions": "all authored assertions passing on one fresh observation",
+                "relevant_evidence": "structured non-manual evidence",
             }[satisfaction]
             raise ValueError(
                 f"{phase.id!r} requires {required}; manual evidence cannot complete it"
@@ -1583,6 +1669,19 @@ def _completion_proof(
         and structured.source == "session_cleanup"
         and structured.command == "session_finish"
         and structured.verified is True
+    )
+    valid_contract_assertions = (
+        satisfaction == "fresh_assertions"
+        and phase.proof_mode == "fresh_assertions"
+        and phase.manual_completion_allowed is False
+        and structured.source == "contract_assertions"
+        and structured.command == "contract_assertions"
+        and structured.verified is True
+        and structured.observation is not None
+        and bool((structured.observation.fingerprint or "").strip())
+        and bool((structured.evidence_id or "").strip())
+        and bool(phase.assertions)
+        and structured.assertions_verified == len(phase.assertions)
     )
     required_keys = {_requirement_key(requirement) for requirement in phase.requirements}
     proven_keys = {
@@ -1611,7 +1710,13 @@ def _completion_proof(
             )
         )
     )
-    if not (valid_network_status or valid_offline or valid_cleanup or valid_ui_observation):
+    if not (
+        valid_network_status
+        or valid_offline
+        or valid_cleanup
+        or valid_ui_observation
+        or valid_contract_assertions
+    ):
         raise ValueError(f"structured proof does not satisfy {phase.id!r}")
     return structured
 
@@ -1630,7 +1735,7 @@ def mark_phase_complete(
     evidence = " ".join(evidence.strip().split())
     if not evidence:
         raise ValueError("phase evidence must not be empty")
-    phases = [phase.model_copy(deep=True) for phase in (state.phases or goal_phases(state.goal))]
+    phases = [phase.model_copy(deep=True) for phase in _session_phases(state)]
     current_index = next(
         (index for index, phase in enumerate(phases) if phase.status != "completed"), None
     )
@@ -1642,13 +1747,29 @@ def mark_phase_complete(
             f"{phase_id!r} is not the current goal phase; complete {current.id!r} first"
         )
     proof = _completion_proof(current, evidence, _proof)
+    contract_fingerprint: str | None = None
+    if proof.source == "contract_assertions":
+        assert proof.observation is not None  # established by `_completion_proof`
+        if proof.observation.device_serial != state.serial:
+            raise ValueError("contract proof belongs to a different session device")
+        evidence_prefix = f"session-{state.session_id}:observation:"
+        if not str(proof.evidence_id).startswith(evidence_prefix):
+            raise ValueError("contract proof evidence belongs to a different session")
+        contract_fingerprint = proof.observation.fingerprint
+        if contract_fingerprint == state.last_contract_fingerprint:
+            raise ValueError(
+                "an unchanged observation cannot complete two ordered contract checkpoints"
+            )
     current.status = "completed"
     current.completed_ms = int(time.time() * 1000)
     current.evidence = evidence[:600]
     current.proof = proof
     if current_index + 1 < len(phases):
         phases[current_index + 1].status = "active"
-    updated = state.model_copy(update={"phases": phases})
+    update: dict[str, Any] = {"phases": phases}
+    if contract_fingerprint is not None:
+        update["last_contract_fingerprint"] = contract_fingerprint
+    updated = state.model_copy(update=update)
     _write_state(cache_dir, updated)
     return updated
 
@@ -1663,7 +1784,7 @@ def update_phase_recommendation(
     """Persist a fresh-screen next call for one incomplete phase."""
     if state.finished_ms is not None:
         return state
-    phases = [phase.model_copy(deep=True) for phase in (state.phases or goal_phases(state.goal))]
+    phases = [phase.model_copy(deep=True) for phase in _session_phases(state)]
     phase = next((item for item in phases if item.id == phase_id), None)
     if phase is None or phase.status == "completed":
         return state
@@ -1681,7 +1802,7 @@ def complete_environment_phase(
     result: dict[str, Any],
 ) -> SessionState:
     """Advance deterministic offline/cleanup phases from verified tool evidence."""
-    phases = state.phases or goal_phases(state.goal)
+    phases = _session_phases(state)
     current = next((phase for phase in phases if phase.status != "completed"), None)
     if current is None:
         return state
@@ -1763,6 +1884,23 @@ def _write_state(cache_dir: str | Path, state: SessionState) -> None:
         atomic_write_text(_active_path(cache_dir, state.serial, state.owner), state.session_id)
 
 
+def update_session_state(
+    cache_dir: str | Path,
+    state: SessionState,
+    **changes: Any,
+) -> SessionState:
+    """Revalidate and persist additive lifecycle metadata without changing session identity."""
+
+    for field in ("session_id", "serial", "owner", "started_ms"):
+        if field in changes and changes[field] != getattr(state, field):
+            raise ValueError(f"session identity field {field!r} cannot be changed")
+    payload = state.model_dump(mode="python")
+    payload.update(changes)
+    updated = SessionState.model_validate(payload)
+    _write_state(cache_dir, updated)
+    return updated
+
+
 def create_session_state(
     cache_dir: str | Path,
     *,
@@ -1774,7 +1912,24 @@ def create_session_state(
     network_backup_preexisting: bool,
     network_profile_preexisting: bool,
     emulator_started: bool = False,
+    contract: SessionContract | None = None,
+    contract_yaml: str | None = None,
+    artifact_dir: str | None = None,
+    evidence: Literal["none", "failures", "all"] = "failures",
+    junit: bool = False,
+    capture_package: str | None = None,
+    capture_context_id: str | None = None,
+    capture_segment: int | None = None,
+    capture_start_order: int | None = None,
 ) -> SessionState:
+    if contract_yaml is not None:
+        parsed_contract = parse_session_contract_yaml(contract_yaml)
+        if contract is not None and parsed_contract != contract:
+            raise ValueError("contract and contract_yaml describe different proof contracts")
+        contract = parsed_contract
+    canonical_contract_yaml = (
+        render_session_contract_yaml(contract) if contract is not None else None
+    )
     state = SessionState(
         session_id=uuid.uuid4().hex,
         goal=goal,
@@ -1787,7 +1942,16 @@ def create_session_state(
         network_backup_preexisting=network_backup_preexisting,
         network_profile_preexisting=network_profile_preexisting,
         emulator_started=emulator_started,
-        phases=goal_phases(goal),
+        phases=contract_phases(contract) if contract is not None else goal_phases(goal),
+        contract=contract.model_copy(deep=True) if contract is not None else None,
+        contract_yaml=canonical_contract_yaml,
+        artifact_dir=artifact_dir,
+        evidence=evidence,
+        junit=junit,
+        capture_package=capture_package,
+        capture_context_id=capture_context_id,
+        capture_segment=capture_segment,
+        capture_start_order=capture_start_order,
     )
     _write_state(cache_dir, state)
     return state
@@ -1828,10 +1992,14 @@ def active_session_metadata(
 
 
 def finish_session_state(cache_dir: str | Path, state: SessionState) -> SessionState:
-    phases = [phase.model_copy(deep=True) for phase in (state.phases or goal_phases(state.goal))]
+    phases = [phase.model_copy(deep=True) for phase in _session_phases(state)]
     now_ms = int(time.time() * 1000)
     for phase in phases:
-        if phase.kind == "cleanup" and phase.status != "completed":
+        if (
+            phase.kind == "cleanup"
+            and phase.status != "completed"
+            and _phase_satisfaction(phase) == "session_cleanup"
+        ):
             phase.status = "completed"
             phase.completed_ms = now_ms
             phase.evidence = "session finish restored session-owned reversible state"

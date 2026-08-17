@@ -169,7 +169,12 @@ def _write_bundled_manifest(
     return manifest
 
 
-def _explicit_advisory_settings(model: Path, adapter: Path) -> dict[str, Any]:
+def _explicit_advisory_settings(
+    model: Path,
+    adapter: Path,
+    *,
+    candidate_counts: tuple[int, ...] | None = None,
+) -> dict[str, Any]:
     model_hash = functiongemma_mod._tree_sha256(model)
     config_path = adapter / "adapter_config.json"
     weights_path = adapter / "adapters.safetensors"
@@ -180,7 +185,11 @@ def _explicit_advisory_settings(model: Path, adapter: Path) -> dict[str, Any]:
         "prompt_schema": {
             "name": functiongemma_mod.PROMPT_SCHEMA_NAME,
             "candidate_ids": functiongemma_mod.PROMPT_CANDIDATE_IDS,
-            "candidate_count": functiongemma_mod.PROMPT_CANDIDATE_COUNT,
+            **(
+                {"candidate_counts": list(candidate_counts)}
+                if candidate_counts is not None
+                else {"candidate_count": functiongemma_mod.PROMPT_CANDIDATE_COUNT}
+            ),
         },
         "base_model": {"sha256": model_hash},
         "adapter": {
@@ -648,7 +657,7 @@ def test_bundled_manifest_verifies_adapter_config_hash_and_lora_metadata(
 def test_bundled_manifest_rejects_incompatible_prompt_schema(tmp_path: Path, monkeypatch) -> None:
     model, adapter = _artifacts(tmp_path)
     manifest = _write_bundled_manifest(model, adapter)
-    manifest["prompt_schema"]["candidate_count"] = 3
+    manifest["prompt_schema"]["candidate_count"] = 5
     (adapter / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     monkeypatch.setattr(functiongemma_mod, "bundled_adapter_path", lambda: adapter)
 
@@ -818,7 +827,7 @@ def test_functiongemma_rejects_non_dense_ids_before_model_load() -> None:
         is None
     )
     assert selector.last_error == (
-        "the frozen FunctionGemma adapter requires exactly four candidate IDs 0,1,2,3"
+        "the FunctionGemma adapter does not support this dense candidate cardinality"
     )
     assert loads == []
 
@@ -834,8 +843,34 @@ def test_functiongemma_rejects_candidate_counts_absent_from_training(count: int)
     )
 
     assert selector.select(_context(*(_candidate(index) for index in range(count)))) is None
-    assert "exactly four" in str(selector.last_error)
+    assert "does not support" in str(selector.last_error)
     assert loads == []
+
+
+@pytest.mark.parametrize("count", [2, 3, 4])
+def test_authenticated_adapter_supports_learned_variable_cardinality(
+    tmp_path: Path,
+    count: int,
+) -> None:
+    model, adapter = _artifacts(tmp_path)
+    settings = _explicit_advisory_settings(
+        model,
+        adapter,
+        candidate_counts=(2, 3, 4),
+    )
+    tokenizer = _Tokenizer()
+    selector = FunctionGemmaPolicySelector(
+        settings,
+        model_loader=lambda *args, **kwargs: (object(), tokenizer),
+        generator=lambda *args, **kwargs: (
+            "<start_function_call>call:select_candidate{candidate_id:1}"
+        ),
+        sampler_factory=lambda **kwargs: kwargs,
+    )
+
+    assert selector.supports_candidate_count(count) is True
+    assert selector.select(_context(*(_candidate(index) for index in range(count)))) == 1
+    assert selector.status()["supported_candidate_counts"] == [2, 3, 4]
 
 
 @pytest.mark.parametrize("count", [2, 3])

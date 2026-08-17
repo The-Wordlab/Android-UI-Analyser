@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
+from .assertions import Selector, normalize_selector
 from .errors import UsageError
 
 if TYPE_CHECKING:
@@ -34,6 +35,10 @@ class SuiteCheck:
     absent: bool | None = None
     match: str | None = None
     count: int | None = None
+    index: int | None = None
+    within: Selector | None = None
+    same_parent_as: Selector | None = None
+    contains_all: list[Selector] = field(default_factory=list)
     # wait_for
     wait_for: str | None = None
     timeout_ms: int | None = None
@@ -146,6 +151,38 @@ def _parse_check(item: Any, *, index: int, source: str) -> SuiteCheck:
             isinstance(count, bool) or not isinstance(count, int) or count < 0
         ):
             raise UsageError(f"check[{index}].expect count must be a non-negative integer")
+        raw_index = body.get("index")
+        if raw_index is not None and (
+            isinstance(raw_index, bool) or not isinstance(raw_index, int) or raw_index < 0
+        ):
+            raise UsageError(f"check[{index}].expect index must be a non-negative integer")
+        within = (
+            normalize_selector(body["within"], field=f"check[{index}].expect within")
+            if "within" in body
+            else None
+        )
+        same_parent_as = (
+            normalize_selector(
+                body["same_parent_as"],
+                field=f"check[{index}].expect same_parent_as",
+            )
+            if "same_parent_as" in body
+            else None
+        )
+        raw_contains = body.get("contains_all")
+        if raw_contains is not None and (
+            not isinstance(raw_contains, list) or not raw_contains
+        ):
+            raise UsageError(
+                f"check[{index}].expect contains_all must be a non-empty selector list"
+            )
+        contains_all = [
+            normalize_selector(
+                selector,
+                field=f"check[{index}].expect contains_all[{selector_index}]",
+            )
+            for selector_index, selector in enumerate(raw_contains or ())
+        ]
         exists = body.get("exists")
         absent = body.get("absent")
         if exists is not None:
@@ -162,6 +199,10 @@ def _parse_check(item: Any, *, index: int, source: str) -> SuiteCheck:
             absent=absent,
             match=str(body["match"]) if body.get("match") is not None else None,
             count=count,
+            index=raw_index,
+            within=within,
+            same_parent_as=same_parent_as,
+            contains_all=contains_all,
             timeout_ms=int(body["timeout_ms"]) if body.get("timeout_ms") is not None else None,
         )
     raise UsageError(
@@ -200,6 +241,14 @@ def run_check(engine: Engine, check: SuiteCheck) -> tuple[bool, str]:
         kwargs["timeout_ms"] = check.timeout_ms
     if check.count is not None:
         kwargs["count"] = check.count
+    if check.index is not None:
+        kwargs["index"] = check.index
+    if check.within is not None:
+        kwargs["within"] = check.within
+    if check.same_parent_as is not None:
+        kwargs["same_parent_as"] = check.same_parent_as
+    if check.contains_all:
+        kwargs["contains_all"] = check.contains_all
     # Optional match:contains on a text selector → also require text_contains.
     if (
         check.match

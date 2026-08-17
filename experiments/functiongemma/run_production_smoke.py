@@ -10,6 +10,7 @@ select an offered opaque ID.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import itertools
 import json
 import sys
@@ -152,12 +153,25 @@ def build_selector(
     assert model_loader is not None
     assert sampler_factory is not None
     recorder = RecordingGenerator(generator)
+    settings: dict[str, Any] = {
+        "model_path": str(model_path),
+        "adapter_path": adapter_path,
+        "max_tokens": 24,
+    }
+    if adapter_path is not None:
+        manifest_path = Path(adapter_path) / "manifest.json"
+        if manifest_path.is_file():
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            base_model = manifest.get("base_model") if isinstance(manifest, dict) else None
+            adapter_value = manifest.get("adapter") if isinstance(manifest, dict) else None
+            if isinstance(base_model, dict) and isinstance(adapter_value, dict):
+                settings.update(
+                    manifest_sha256=hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+                    model_sha256=base_model.get("sha256"),
+                    adapter_sha256=adapter_value.get("sha256"),
+                )
     selector = FunctionGemmaPolicySelector(
-        {
-            "model_path": str(model_path),
-            "adapter_path": adapter_path,
-            "max_tokens": 24,
-        },
+        settings,
         model_loader=model_loader,
         generator=recorder,
         sampler_factory=sampler_factory,

@@ -175,6 +175,20 @@ def test_shadow_selects_from_opaque_current_candidates_without_exposing_a_call(
         "candidate_count": 2,
         "eligible_candidate_ids": result["policy"]["eligible_candidate_ids"],
         "selected_candidate_id": result["policy"]["selected_candidate_id"],
+        "compiler": {
+            "schema_version": 1,
+            "target_term_count": 2,
+            "stages": {
+                "elements": 2,
+                "enabled_clickable": 2,
+                "safe_control": 2,
+                "stable_selector": 2,
+                "non_destructive": 2,
+                "target_matched": 2,
+                "offered": 2,
+            },
+            "recommended_call_offered": True,
+        },
     }
     assert "recommended_call" not in result["policy"]
     assert "policy_suggestion" not in result
@@ -274,6 +288,20 @@ def test_compiler_withholds_destructive_secret_dynamic_ambiguous_and_mutating_co
 
     assert result["policy"]["status"] == "deterministic"
     assert result["policy"]["candidate_count"] == 1
+    assert result["policy"]["compiler"] == {
+        "schema_version": 1,
+        "target_term_count": 1,
+        "stages": {
+            "elements": 8,
+            "enabled_clickable": 8,
+            "safe_control": 6,
+            "stable_selector": 2,
+            "non_destructive": 1,
+            "target_matched": 1,
+            "offered": 1,
+        },
+        "recommended_call_offered": True,
+    }
     assert "policy_suggestion" not in result
     assert selector.availability_calls == 0
     assert selector.select_calls == 0
@@ -328,6 +356,146 @@ def test_zero_and_one_candidate_paths_do_not_touch_the_model(tmp_path: Path) -> 
     assert one_factory.build_calls == 0
 
 
+def test_compound_goal_alternatives_do_not_contaminate_requested_target(
+    tmp_path: Path,
+) -> None:
+    selector = _Selector()
+    engine, factory = _engine(tmp_path, "advisory", selector)
+    observation = _observation(
+        engine.device.serial,
+        [
+            _element(1, "Grammar tools Language lessons", rid="com.example.catalog:id/grammar"),
+            _element(
+                2,
+                "Mathematics Manage applications and notices",
+                rid="com.example.catalog:id/mathematics",
+            ),
+            _element(
+                3,
+                "History archive Review saved lessons",
+                rid="com.example.catalog:id/historyArchive",
+            ),
+            _element(
+                4,
+                "Physics laboratory Connected experiments",
+                rid="com.example.catalog:id/physics",
+            ),
+        ],
+    )
+
+    result = engine.session_start(
+        (
+            "Open History archive from these Example destinations: Grammar tools, "
+            "Mathematics, History archive, Physics laboratory."
+        ),
+        observation=observation,
+    )
+
+    assert result["policy"]["status"] == "deterministic"
+    assert result["policy"]["candidate_count"] == 1
+    assert result["policy"]["model_used"] is False
+    assert "policy_suggestion" not in result
+    assert result["recommended_call"]["mcp"] == {
+        "tool": "tap_and_analyze",
+        "arguments": {"rid": "historyArchive"},
+    }
+    assert factory.build_calls == 0
+    assert selector.availability_calls == selector.select_calls == 0
+    state = engine._session_state(result["session_id"])  # noqa: SLF001
+    phase = next(item for item in state.phases if item.status != "completed")
+    candidates = engine._policy_tap_candidates(state, phase, observation)  # noqa: SLF001
+    assert [candidate.call for candidate in candidates] == [
+        {"tool": "tap_and_analyze", "arguments": {"rid": "historyArchive"}}
+    ]
+
+
+def test_ambiguous_target_candidates_receive_only_the_requested_target_goal(
+    tmp_path: Path,
+) -> None:
+    selector = _Selector(
+        lambda context: next(
+            candidate.candidate_id
+            for candidate in context.candidates
+            if "History archive" in candidate.purpose
+        )
+    )
+    engine, _factory = _engine(tmp_path, "shadow", selector)
+    observation = _observation(
+        engine.device.serial,
+        [
+            _element(1, "History archive", rid="com.example.catalog:id/historyArchive"),
+            _element(2, "History lessons", rid="com.example.catalog:id/historyLessons"),
+            _element(3, "Grammar tools", rid="com.example.catalog:id/grammar"),
+            _element(4, "Physics laboratory", rid="com.example.catalog:id/physics"),
+        ],
+    )
+
+    result = engine.session_start(
+        (
+            "Open History from these Example destinations: History archive, "
+            "History lessons, Grammar tools, Physics laboratory."
+        ),
+        observation=observation,
+    )
+
+    assert result["policy"]["status"] == "selected"
+    assert result["policy"]["candidate_count"] == 2
+    assert selector.contexts[0].goal == "history"
+    assert {
+        candidate.call["arguments"]["rid"] for candidate in selector.contexts[0].candidates
+    } == {
+        "historyArchive",
+        "historyLessons",
+    }
+
+
+def test_ambiguous_target_preserves_only_safe_candidate_backed_qualifiers(
+    tmp_path: Path,
+) -> None:
+    selector = _Selector(lambda context: context.candidates[0].candidate_id)
+    engine, _factory = _engine(tmp_path, "shadow", selector)
+    observation = _observation(
+        engine.device.serial,
+        [
+            _element(
+                1,
+                "History archive Saved records",
+                rid="com.example.catalog:id/historyArchive",
+            ),
+            _element(
+                2,
+                "History lessons Study plans",
+                rid="com.example.catalog:id/historyLessons",
+            ),
+            _element(
+                3,
+                "History reports Activity summaries",
+                rid="com.example.catalog:id/historyReports",
+            ),
+            _element(
+                4,
+                "History settings Display options",
+                rid="com.example.catalog:id/historySettings",
+            ),
+        ],
+    )
+
+    result = engine.session_start(
+        (
+            "Open History using the row whose summary mentions saved records while ignoring "
+            "private-code-847291."
+        ),
+        observation=observation,
+    )
+
+    assert result["policy"]["status"] == "selected"
+    assert result["policy"]["candidate_count"] == 4
+    assert selector.contexts[0].goal == (
+        "Requested destination: history. Matching evidence: saved records."
+    )
+    assert "847291" not in selector.contexts[0].goal
+
+
 def test_unfingerprinted_or_stale_observation_fails_closed_without_model_use(
     tmp_path: Path,
 ) -> None:
@@ -339,10 +507,142 @@ def test_unfingerprinted_or_stale_observation_fails_closed_without_model_use(
 
     result = engine.session_start("Open Grammar or Mathematics", observation=stale)
 
-    assert result["policy"]["status"] == "skipped_unbound_observation"
+    assert result["recommended_call"]["kind"] == "refresh_observation"
+    assert result["recommended_call"]["mcp"] == {
+        "tool": "analyze_screen",
+        "arguments": {"source": "hierarchy", "no_cache": True},
+    }
+    assert result["policy"]["status"] == "skipped_deterministic"
     assert "policy_suggestion" not in result
     assert factory.build_calls == 0
     assert selector.availability_calls == selector.select_calls == 0
+
+
+def _recovery_call(
+    engine: Engine,
+    observation: AnalyzeResult,
+    *,
+    goal: str = "Open Example archive",
+) -> dict[str, Any]:
+    return engine._phase_recommended_call(  # noqa: SLF001 - trusted compiler seam under test
+        SimpleNamespace(session_id="recovery-session", serial=engine.device.serial),
+        SimpleNamespace(
+            id="phase-recovery",
+            objective=goal,
+            kind="verify",
+            constraints=[],
+            recommended_call=None,
+        ),
+        observation,
+    )
+
+
+def test_named_loading_recommends_one_bounded_negative_await(tmp_path: Path) -> None:
+    engine, _factory = _engine(tmp_path, "off", None)
+    observation = _observation(
+        engine.device.serial,
+        [
+            _element(1, "Example archive", rid="com.example.catalog:id/exampleArchive"),
+            Element(
+                id=2,
+                type="android.widget.TextView",
+                text="Loading Example records",
+                bounds=(20, 400, 900, 460),
+                center=(460, 430),
+                source=Source.hierarchy,
+            ),
+        ],
+    )
+
+    call = _recovery_call(engine, observation)
+
+    assert call["kind"] == "await_loading"
+    assert call["mcp"] == {
+        "tool": "await_and_analyze",
+        "arguments": {
+            "predicate": "!text:Loading",
+            "timeout_ms": 15000,
+            "poll_ms": 200,
+            "ignore_case": True,
+        },
+    }
+    assert "--observe" in call["cli"]
+
+
+def test_unlabelled_progress_recommends_one_changed_frame_wait(tmp_path: Path) -> None:
+    engine, _factory = _engine(tmp_path, "off", None)
+    observation = _observation(
+        engine.device.serial,
+        [
+            _element(1, "Example archive", rid="com.example.catalog:id/exampleArchive"),
+            Element(
+                id=2,
+                type="android.widget.ProgressBar",
+                bounds=(20, 400, 900, 460),
+                center=(460, 430),
+                source=Source.hierarchy,
+            ),
+        ],
+    )
+
+    call = _recovery_call(engine, observation)
+
+    assert call["kind"] == "wait_for_change"
+    assert call["mcp"] == {
+        "tool": "wait_changed_and_analyze",
+        "arguments": {"timeout_ms": 15000, "interval_ms": 150},
+    }
+    assert "--changed" in call["cli"] and "--observe" in call["cli"]
+
+
+def test_missing_target_on_app_scrollable_recommends_one_folded_scroll(tmp_path: Path) -> None:
+    engine, _factory = _engine(tmp_path, "off", None)
+    observation = _observation(
+        engine.device.serial,
+        [
+            Element(
+                id=1,
+                type="androidx.recyclerview.widget.RecyclerView",
+                bounds=(0, 100, 1080, 2200),
+                center=(540, 1150),
+                scrollable=True,
+                window="app",
+                source=Source.hierarchy,
+            )
+        ],
+    )
+
+    call = _recovery_call(engine, observation)
+
+    assert call["kind"] == "scroll_action"
+    assert call["mcp"] == {
+        "tool": "scroll_and_analyze",
+        "arguments": {"direction": "up", "percent": 70},
+    }
+    assert "scroll-and-analyze up" in call["cli"]
+
+
+def test_system_scrollable_does_not_authorize_an_app_scroll(tmp_path: Path) -> None:
+    engine, _factory = _engine(tmp_path, "off", None)
+    observation = _observation(
+        engine.device.serial,
+        [
+            Element(
+                id=1,
+                type="android.widget.ScrollView",
+                bounds=(0, 100, 1080, 2200),
+                center=(540, 1150),
+                scrollable=True,
+                window="system",
+                source=Source.hierarchy,
+            )
+        ],
+    )
+
+    call = _recovery_call(engine, observation)
+
+    assert call["kind"] == "manual_observation"
+    assert call["executes"] is False
 
 
 def test_session_progress_evaluates_the_new_fresh_frame_after_bootstrap_skip(

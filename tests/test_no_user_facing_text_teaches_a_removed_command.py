@@ -10,8 +10,9 @@ Two later fixes hit the same trap while fixing it: an error added to correct `--
 `aua input` in its example, and the redundant-analyze warning pointed at `aua wait`. Hence a test
 rather than another round of grep.
 
-Scope is `src/` — the strings the tool emits or renders. Test docstrings are not user-facing, and
-`test_removed_short_aliases.py` has to name the dead commands to assert they are dead.
+Scope includes `src/` plus the public repository manuals and generated skills. Test docstrings are
+not user-facing, and `test_removed_short_aliases.py` has to name the dead commands to assert they
+are dead.
 """
 
 from __future__ import annotations
@@ -22,6 +23,18 @@ from pathlib import Path
 from android_ui_analyser.cli import _REMOVED_ACTION_ALIASES
 
 _SRC = Path(__file__).resolve().parent.parent / "src" / "android_ui_analyser"
+_REPO = Path(__file__).resolve().parent.parent
+_DOC_EXCLUDES = {
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "runs",
+}
 
 # `aua`, any global flags, then a bare removed name not already followed by `-and-analyze`
 # (or any other suffix, so `scroll-to` is not read as a stale `scroll`).
@@ -39,6 +52,20 @@ def test_no_source_string_names_a_removed_command() -> None:
             for match in _SPOKEN.finditer(line):
                 offences.append(f"{path.relative_to(_SRC)}:{lineno}: {match.group(0)}")
     assert not offences, "these teach a name that exits 2:\n" + "\n".join(offences)
+
+
+def test_no_public_document_names_a_removed_command() -> None:
+    paths = [
+        path
+        for path in sorted(_REPO.rglob("*.md"))
+        if not any(part in _DOC_EXCLUDES for part in path.relative_to(_REPO).parts)
+    ]
+    offences: list[str] = []
+    for path in paths:
+        for lineno, line in enumerate(path.read_text().splitlines(), 1):
+            for match in _SPOKEN.finditer(line):
+                offences.append(f"{path.relative_to(_REPO)}:{lineno}: {match.group(0)}")
+    assert not offences, "public docs teach a name that exits 2:\n" + "\n".join(offences)
 
 
 def test_the_replacement_each_removed_name_names_actually_exists() -> None:

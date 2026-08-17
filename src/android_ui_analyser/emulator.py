@@ -1217,6 +1217,29 @@ def _aua_started_records(cache_dir: str | Path) -> list[dict[str, Any]]:
     return out
 
 
+def discards_writes(serial: str, *, cache_dir: str | Path | None = None) -> bool:
+    """Was *serial* booted ``-read-only``, so on-disk changes land in a throwaway overlay?
+
+    A ``-read-only`` emulator accepts an install, prints ``Success``, and loses the app when it
+    stops — the failure mode `aua emulator start --parallel` documents. Anything that writes to
+    the device image (installing a build above all) has to ask first, because "reported success,
+    changed nothing" is the one outcome a caller cannot detect afterwards.
+
+    Answers ``False`` when AUA has no record of booting *serial*: an emulator someone else
+    started, or a physical device, is not knowably read-only, and refusing on a guess would block
+    the ordinary case.
+    """
+
+    if cache_dir is None:
+        return False
+    for meta in _aua_started_records(cache_dir):
+        if str(meta.get("serial") or "") != serial:
+            continue
+        if meta.get("read_only") or meta.get("parallel"):
+            return True
+    return False
+
+
 STOP_LOG_NAME = "stops.log"
 
 

@@ -20,7 +20,7 @@ ios = "my_aua_ios:IOSPlatform"
 from android_ui_analyser.platforms import NormalizedTree, PlatformAdapter
 
 class IOSPlatform(PlatformAdapter):
-    capabilities = frozenset({"ui.tree", "ui.input", "ui.screenshot"})
+    capabilities = frozenset({"ui.tree", "ui.input", "ui.screenshot", "app.install"})
 
     def connect(self, target_id=None): ...
     def list_targets(self): ...

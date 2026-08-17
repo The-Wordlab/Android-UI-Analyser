@@ -534,6 +534,50 @@ def test_session_start_app_alias_launches_and_reuses_that_observation(
     assert started["package"] == "com.example.catalog"
 
 
+def test_session_start_refreshes_an_explicitly_unstable_launch_readback(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    engine = _engine(tmp_path, "goal-app-unstable")
+    weak = _observation(engine.device.serial)
+    fresh = _control_observation(engine.device.serial, "History archive")
+    fresh.elements[0].resource_id = "com.example.catalog:id/historyArchive"
+    refreshes: list[str] = []
+
+    monkeypatch.setattr(
+        engine,
+        "app",
+        lambda *_args, **_kwargs: engine_mod.ActionResult(
+            ok=True,
+            action="app-launch",
+            observation=weak,
+            observation_present=True,
+            next_actions=None,
+            note=(
+                "The app is foreground, but its launch screen has not produced a stable "
+                "readback yet, so numeric next actions are withheld. Run `aua analyze` once "
+                "before acting on an id."
+            ),
+        ),
+    )
+
+    def refresh(package: str) -> AnalyzeResult:
+        refreshes.append(package)
+        return fresh
+
+    monkeypatch.setattr(engine, "_await_launch_hierarchy", refresh)
+
+    started = engine.session_start(
+        "Open History archive",
+        package="com.example.catalog",
+    )
+
+    assert refreshes == ["com.example.catalog"]
+    assert started["recommended_call"]["mcp"] == {
+        "tool": "tap_and_analyze",
+        "arguments": {"rid": "historyArchive"},
+    }
+
+
 def test_session_start_discards_a_launch_observation_from_the_previous_package(
     monkeypatch: Any, tmp_path: Path
 ) -> None:

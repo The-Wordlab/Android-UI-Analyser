@@ -93,11 +93,13 @@ spread it into another core module. The detailed plugin contract is in
 
 ```bash
 aua --format compact analyze   # → elements[] each with integer id + bounds
-aua tap <id>                   # act by id (alias: click)
-aua input <id> "text"          # focus + type (--submit fires the IME action)
-aua swipe up · aua key back    # directional swipe / hardware key
+aua tap-and-analyze <id>       # act by id and receive the resulting screen
+aua input-and-analyze <id> "text"  # focus + type + resulting screen (--submit sends IME)
+aua swipe-and-analyze up · aua key-and-analyze back
 aua has "<text>"               # exit 0 if present, 1 if not — cheap branch check
-aua wait --for "<text>"        # wait on state, don't sleep
+aua wait-and-analyze --for "<text>"  # wait on state and return the satisfied screen
+aua install <app.apk> --launch # put a build on the device and open it (no `adb install`)
+aua emulator start --apk <app.apk> --launch  # boot + install + launch in one call
 aua db list <pkg>              # discover private SQLite databases (debuggable builds)
 aua db query <pkg> <db> "SELECT …"   # coherent host-side snapshot → JSON rows
 aua db execute <pkg> <db> "UPDATE …" --yes  # backup + validate + replace + relaunch

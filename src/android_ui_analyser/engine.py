@@ -24,9 +24,16 @@ from concurrent.futures import TimeoutError as FuturesTimeout
 from copy import deepcopy
 from dataclasses import replace as dataclass_replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 from . import routing
+from .assertions import (
+    Selector,
+    apply_structural_filters,
+    check_contains_all,
+    evaluate_order,
+    normalize_selector,
+)
 from .config import Config
 from .device import Device, connect, list_devices
 from .errors import (
@@ -66,7 +73,7 @@ from .memory import (
     step_display,
     target_arrival_evidence,
 )
-from .platforms import PlatformAdapter, PlatformFactory
+from .platforms import AppBundle, InstalledApp, PlatformAdapter, PlatformFactory
 from .providers.base import DetBox, OcrProvider, Point, ScreenAnalysisResult, ScreenImage, TextBox
 from .providers.registry import ProviderFactory, registered_names, run_chain
 from .schema import (
@@ -381,6 +388,32 @@ def _label(text: str) -> str:
     return text.replace("\n", " ").strip()
 
 
+def _install_versions_differ(installed: InstalledApp, bundle: AppBundle) -> bool:
+    """Should ``install --if-needed`` re-push, given what the target already has?
+
+    Compared as strings on purpose: a versionName is not a number (``"1.0-rc2+abc"`` is normal),
+    and an ordering invented here would decide "newer" wrong on the first build that used a
+    suffix. Only *difference* is knowable, and difference is the whole question — the caller
+    asked for this bundle, not for a newer one.
+
+    Fails **open** (returns ``True``) when the target reports no version at all: an unanswerable
+    "is this the same build?" must not resolve to "yes, skip it", or a run silently verifies the
+    previous build.
+    """
+
+    for target, source in (
+        (installed.version_code, bundle.version_code),
+        (installed.version_name, bundle.version_name),
+    ):
+        if source is None:
+            continue
+        if target is None:
+            return True
+        if str(target).strip() != str(source).strip():
+            return True
+    return False
+
+
 def _action_mark(verb: str, el: Element) -> str:
     """Compact capture timeline label — verb + best human/id token."""
     label = el.text or el.content_desc or _id_tail(el.resource_id) or el.id
@@ -592,6 +625,8 @@ class Engine:
         self._lease_needs: list[str] | None = None
         self._lease_serial: str | None = None
         self._lease_owner_resolved: str | None = None
+        self._lease_wait_s: float = 0.0
+        self._lease_waited_ms: int = 0
         from .perf import GateCache, HierarchyPrefetch, SettleProfiles
 
         self._prefetch = HierarchyPrefetch()
@@ -686,36 +721,50 @@ class Engine:
 
         from . import leases
 
+        needs = list(self._lease_needs or [])
+
+        def candidates() -> list[tuple[str, dict[str, Any]]]:
+            infos = [device for device in self._list_targets() if device.state == "device"]
+            # Preserve each platform's preference (Android, for example, favours a disposable
+            # emulator over a USB phone) without teaching the engine platform-specific identities.
+            infos.sort(key=self.platform.target_preference)
+            return [
+                (
+                    info.serial,
+                    self.platform.probe_target_capabilities(info.serial) if needs else {},
+                )
+                for info in infos
+                if info.serial
+            ]
+
         try:
-            infos = [d for d in self._list_targets() if d.state == "device"]
+            initial = candidates()
         except Exception:
             return explicit  # cannot enumerate; let connect() produce the real error
-        if not infos:
+        if not initial and not self._lease_wait_s:
             return explicit
-
-        # Preserve each platform's preference (Android, for example, favours a disposable
-        # emulator over a USB phone) without teaching the engine platform-specific identities.
-        infos.sort(key=self.platform.target_preference)
-
-        needs = list(self._lease_needs or [])
-        # Capabilities cost adb round-trips, so only probe when someone actually asked.
-        candidates = [
-            (
-                d.serial,
-                self.platform.probe_target_capabilities(d.serial) if needs else {},
-            )
-            for d in infos
-            if d.serial
-        ]
         owner = leases.resolve_owner(self._lease_owner)
-        serial, _why = leases.choose_device(
-            cfg.cache.dir,
-            owner=owner,
-            explicit=explicit,
-            candidates=candidates,
-            needs=needs,
-            ttl_s=int(getattr(cfg.lease, "ttl_s", leases.DEFAULT_TTL_S)),
-        )
+        if self._lease_wait_s:
+            serial, _why, waited_ms = leases.wait_for_device(
+                cfg.cache.dir,
+                owner=owner,
+                explicit=explicit,
+                candidates=candidates,
+                needs=needs,
+                ttl_s=int(getattr(cfg.lease, "ttl_s", leases.DEFAULT_TTL_S)),
+                wait_s=self._lease_wait_s,
+            )
+            self._lease_waited_ms = waited_ms
+        else:
+            serial, _why = leases.choose_device(
+                cfg.cache.dir,
+                owner=owner,
+                explicit=explicit,
+                candidates=initial,
+                needs=needs,
+                ttl_s=int(getattr(cfg.lease, "ttl_s", leases.DEFAULT_TTL_S)),
+            )
+            self._lease_waited_ms = 0
         self._lease_serial = serial
         self._lease_owner_resolved = owner
         return serial
@@ -2537,6 +2586,9 @@ class Engine:
             selected=predicates.pop("selected", None),
             focused=predicates.pop("focused", None),
             count=count,
+            within=predicates.pop("within", None),
+            same_parent_as=predicates.pop("same_parent_as", None),
+            contains_all=predicates.pop("contains_all", None),
             index=step.index,
             first=first,
             timeout_ms=step.timeout_ms or 0,
@@ -2549,7 +2601,7 @@ class Engine:
         assertion = step.assertion
         axis = assertion.get("axis")
         selectors = assertion.get("selectors")
-        if axis not in {"horizontal", "vertical"} or not isinstance(selectors, list):
+        if axis not in {"horizontal", "vertical", "reading"} or not isinstance(selectors, list):
             return False, "invalid assert_order payload"
         deadline = time.monotonic() + max(0, step.timeout_ms or 0) / 1000.0
         while True:
@@ -2559,33 +2611,10 @@ class Engine:
                 self.device.window_size(),
                 ignored_app_ids=self.config.memory.ignore_packages,
             ).elements
-            located: list[Element] = []
-            detail: str | None = None
-            for position, raw in enumerate(selectors):
-                if not isinstance(raw, dict):
-                    detail = f"selector[{position}] is not a mapping"
-                    break
-                selector = {key: raw.get(key) for key in ("rid", "text", "desc")}
-                matches = match_selector(elements, **selector)
-                index = raw.get("index")
-                if index is None and len(matches) != 1:
-                    detail = (
-                        f"selector[{position}] matched {len(matches)} elements; "
-                        "add index to disambiguate"
-                    )
-                    break
-                if not isinstance(index, int):
-                    index = 0
-                if not 0 <= index < len(matches):
-                    detail = f"selector[{position}] index {index} has {len(matches)} matches"
-                    break
-                located.append(matches[index])
-            if detail is None:
-                coordinate = 0 if axis == "horizontal" else 1
-                values = [element.center[coordinate] for element in located]
-                if all(left < right for left, right in zip(values, values[1:], strict=False)):
-                    return True, f"pass order axis={axis} centers={values}"
-                detail = f"expected strictly increasing {axis} centers, got {values}"
+            order = evaluate_order(elements, axis=axis, selectors=selectors)
+            if order.ok:
+                return True, order.detail
+            detail = order.detail
             if time.monotonic() >= deadline:
                 return False, detail
             self._job_sleep(0.25)
@@ -5384,21 +5413,58 @@ class Engine:
         goal: str,
         *,
         observation: AnalyzeResult | None = None,
+        contract_file: str | None = None,
+        contract_yaml: str | None = None,
+        artifacts_dir: str | None = None,
+        evidence: str = "failures",
+        junit: bool = False,
+        wait_for_lease_s: float = 0,
         start_emulator: bool = False,
         headed: bool = False,
         audio: bool = False,
         avd: str | None = None,
         package: str | None = None,
         activity: str | None = None,
+        apk: str | None = None,
+        reinstall: bool = False,
+        fresh: bool = False,
+        confirmed: bool = False,
     ) -> dict[str, Any]:
         """Observe once and return the safest goal-specific CLI and MCP next call.
 
         Supplying *observation* is an internal composition seam used by ``reach``. A caller may
         explicitly name *package*/*activity* to launch into the intended app first; the launch's
         folded observation is reused, so bootstrap still performs exactly one screen read.
+
+        *apk* makes this the single bootstrap call: boot an emulator if asked, put the build on it
+        (skipping the push when that version is already there), launch it, observe, and plan. The
+        bundle also names the package, so *package* is optional when *apk* is given.
         """
         if not goal.strip():
             raise UsageError("session start needs a non-empty goal")
+        from .session_artifacts import validate_session_evidence_mode
+        from .session_contracts import load_session_contract, render_session_contract_yaml
+
+        contract = (
+            load_session_contract(file=contract_file, yaml=contract_yaml)
+            if contract_file is not None or contract_yaml is not None
+            else None
+        )
+        canonical_contract_yaml = render_session_contract_yaml(contract) if contract else None
+        try:
+            evidence = validate_session_evidence_mode(evidence)
+        except ValueError as exc:
+            raise UsageError(str(exc)) from exc
+        if junit and not artifacts_dir:
+            raise UsageError("--junit needs --artifacts-dir")
+        if not artifacts_dir and evidence != "failures":
+            raise UsageError("--evidence needs --artifacts-dir")
+        if wait_for_lease_s < 0:
+            raise UsageError("--wait-for-lease must not be negative")
+        if wait_for_lease_s and observation is not None:
+            raise UsageError("wait_for_lease_s cannot be combined with an injected observation")
+        self._lease_wait_s = float(wait_for_lease_s)
+        self._lease_waited_ms = 0
         emulator_started = False
         if observation is None and start_emulator and self._device is None:
             online = [device for device in self.list_devices() if device.state == "device"]
@@ -5419,7 +5485,25 @@ class Engine:
                 self._lease_serial = serial
                 self._lease_owner_resolved = boot_owner
                 emulator_started = True
+        installed_bundle: dict[str, Any] | None = None
         try:
+            if observation is None and apk:
+                # Install before the launch, not after: `--app` names the package to open, and a
+                # bootstrap that launched first would either open the previous build or fail on a
+                # device that has never had this app. Folding it in here is what lets one
+                # `session start` cover boot, install, launch, observe, and plan.
+                bundled = self.install_app(
+                    apk,
+                    package=package,
+                    mode="fresh" if fresh else "reinstall" if reinstall else "if-needed",
+                    confirmed=confirmed,
+                    launch=False,
+                    observe=False,
+                )
+                installed_bundle = bundled.app_install
+                if package is None and installed_bundle:
+                    # The bundle names the app, so `--apk` alone is enough to know what to open.
+                    package = str(installed_bundle.get("package") or "") or None
             if observation is None and package:
                 launched = self.app(
                     "launch",
@@ -5428,6 +5512,19 @@ class Engine:
                     observe=True,
                 )
                 observation = launched.observation
+                # ``app launch`` deliberately withholds ``next_actions`` when its folded
+                # hierarchy came from a one-sample/timeout/unchanged settle path.  Reusing that
+                # explicitly unstable frame here makes the goal planner answer
+                # ``manual_observation`` even though the immediately following hierarchy is
+                # actionable.  Session bootstrap owns the launch, so pay for that one bounded
+                # authoritative read now instead of handing every agent a redundant analyze.
+                if (
+                    observation is not None
+                    and launched.next_actions is None
+                    and isinstance(launched.note, str)
+                    and "has not produced a stable readback yet" in launched.note
+                ):
+                    observation = self._await_launch_hierarchy(package)
             observed = observation or self.analyze(source="hierarchy", with_ocr=False)
             if package and observed.screen.package != package:
                 # A launch readback must never combine the requested package with a hierarchy
@@ -5466,12 +5563,26 @@ class Engine:
                     )
                 self.close()
             raise
+        finally:
+            self._lease_wait_s = 0.0
         plan = self._goal_session_plan(goal, observed)
         from . import network, network_profiles
         from .session import complete_current_ui_phase_from_observation, create_session_state
 
         serial = observed.meta.device_serial or self.device.serial
         session_owner = getattr(self, "_lease_owner_resolved", None)
+        capture_package = observed.screen.package
+        capture_context_id: str | None = None
+        capture_segment: int | None = None
+        capture_start_order: int | None = None
+        mem = self._memory
+        if mem is not None:
+            self._join_memory_writers(timeout_s=5.0)
+            with contextlib.suppress(Exception):
+                cursor = mem.load_session(serial)
+                capture_context_id = cursor.active_context_id
+                capture_segment = cursor.capture_segment
+                capture_start_order = cursor.next_capture_order
         state = create_session_state(
             self.config.cache.dir,
             goal=goal,
@@ -5484,12 +5595,45 @@ class Engine:
                 self.config.cache.dir, serial
             ).is_file(),
             emulator_started=emulator_started,
+            contract=contract,
+            contract_yaml=canonical_contract_yaml,
+            artifact_dir=None,
+            evidence=cast(Literal["none", "failures", "all"], evidence),
+            junit=junit,
+            capture_package=capture_package,
+            capture_context_id=capture_context_id,
+            capture_segment=capture_segment,
+            capture_start_order=capture_start_order,
         )
-        state = complete_current_ui_phase_from_observation(
-            self.config.cache.dir,
-            state,
-            observation=observed,
-        )
+        if artifacts_dir:
+            from .session import update_session_state
+            from .session_artifacts import SessionArtifactStore
+
+            artifact_store = SessionArtifactStore.create(
+                artifacts_dir,
+                session_id=state.session_id,
+                goal=goal,
+                evidence=evidence,
+                junit=junit,
+                contract_yaml=canonical_contract_yaml,
+            )
+            state = update_session_state(
+                self.config.cache.dir,
+                state,
+                artifact_dir=str(artifact_store.root.resolve()),
+            )
+        contract_verdict: dict[str, Any] | None = None
+        if contract is not None:
+            state, contract_verdict = self._complete_contract_phase_from_observation(
+                state,
+                observed,
+            )
+        else:
+            state = complete_current_ui_phase_from_observation(
+                self.config.cache.dir,
+                state,
+                observation=observed,
+            )
         self._session_id = state.session_id
         # Recommend only the active checkpoint from this frame. Future phases must be planned
         # lazily from the observation that activates them; projecting a launcher frame onto every
@@ -5540,6 +5684,8 @@ class Engine:
                 ),
             },
             emulator_started=emulator_started,
+            lease_waited_ms=self._lease_waited_ms,
+            artifacts_dir=state.artifact_dir,
             goal_progress=progress,
         )
         # Session bootstrap embeds an AnalyzeResult rather than an ActionResult, so it does not
@@ -5549,6 +5695,12 @@ class Engine:
         next_actions = self._next_actions(observed)
         if next_actions:
             out["next_actions"] = next_actions
+        if installed_bundle is not None:
+            # Whether bootstrap pushed a build or reused the one already there decides whether app
+            # data survived, so it belongs in the session's own record rather than only in the log.
+            out["app_install"] = installed_bundle
+        if contract_verdict is not None:
+            out["contract_verdict"] = contract_verdict
         if isinstance(phase_call, dict):
             # The active typed checkpoint is the actual next action for both single- and
             # multi-phase goals. The whole-goal planner remains useful for candidate evidence,
@@ -5638,6 +5790,8 @@ class Engine:
         state: Any,
         phase: Any,
         observation: AnalyzeResult,
+        *,
+        diagnostics: dict[str, Any] | None = None,
     ) -> list[Any]:
         """Compile guard-owned exact calls from one fresh frame.
 
@@ -5651,22 +5805,40 @@ class Engine:
 
         fingerprint = observation.meta.fingerprint
         package = observation.screen.package
-        goal_terms = set(_goal_terms(phase.objective))
+        # A compound goal may enumerate the visible alternatives after naming the requested
+        # destination (``Open History from these choices: Grammar, History, Physics``).  Those
+        # alternatives are context, not evidence that every row is goal-relevant.  Reuse the
+        # same destination-object extraction as arrival proof so candidate recall and model
+        # selection are both conditioned on the requested target only.
+        policy_goal = " ".join(arrival_destination_terms(phase.objective)) or phase.objective
+        goal_terms = set(_goal_terms(policy_goal))
         ranked: list[tuple[int, str, Any]] = []
         max_candidates = max(1, int(getattr(self.config.policy, "max_candidates", 4)))
+        stage_counts = {
+            "elements": len(observation.elements),
+            "enabled_clickable": 0,
+            "safe_control": 0,
+            "stable_selector": 0,
+            "non_destructive": 0,
+            "target_matched": 0,
+            "offered": 0,
+        }
 
         for element in observation.elements:
             if not element.clickable or element.enabled is False:
                 continue
+            stage_counts["enabled_clickable"] += 1
             if element.checkable or element.selected is True or element.window not in {None, "app"}:
                 continue
             element_type = element.type.casefold()
             if "edittext" in element_type or "textfield" in element_type or "input" in element_type:
                 continue
+            stage_counts["safe_control"] += 1
 
             selector_value = self._policy_selector_arguments(element, observation.elements)
             if selector_value is None:
                 continue
+            stage_counts["stable_selector"] += 1
             arguments, safe_label = selector_value
 
             rid_label = re.sub(
@@ -5684,12 +5856,14 @@ class Engine:
                 self.config.memory.destructive_labels,
             ):
                 continue
+            stage_counts["non_destructive"] += 1
 
             semantic_label = " ".join(value for value in (safe_label, rid_label) if value)
             matched_terms = goal_terms & set(_goal_terms(semantic_label))
             if not matched_terms or matched_terms <= _GENERIC_MANUAL_MATCH_TERMS:
                 continue
-            score = _match_score(phase.objective, semantic_label)
+            stage_counts["target_matched"] += 1
+            score = _match_score(policy_goal, semantic_label)
             call = {"tool": "tap_and_analyze", "arguments": arguments}
             material = json.dumps(
                 {
@@ -5736,7 +5910,79 @@ class Engine:
             selected,
             key=lambda row: hashlib.sha256(f"policy-order\0{row[1]}".encode()).hexdigest(),
         )
-        return [dataclass_replace(row[2], candidate_id=ids[row[1]]) for row in ordered]
+        candidates = [dataclass_replace(row[2], candidate_id=ids[row[1]]) for row in ordered]
+        stage_counts["offered"] = len(candidates)
+        if diagnostics is not None:
+            diagnostics.update(
+                {
+                    "schema_version": 1,
+                    "target_term_count": len(goal_terms),
+                    "stages": stage_counts,
+                }
+            )
+        return candidates
+
+    @staticmethod
+    def _policy_selection_goal(objective: str, candidates: Sequence[Any]) -> str:
+        """Keep safe disambiguating evidence without reintroducing alternative-list bias.
+
+        Candidate filtering intentionally uses only the requested destination.  The selector can
+        still need a qualifier when several safe rows share that destination (for example four
+        ``History`` rows with different summaries).  Preserve only objective terms that also
+        occur in privacy-screened candidate prose, after removing explicit alternative lists.
+        User text, typed values, and unrelated private vocabulary therefore cannot enter the
+        local-model prompt through this seam.
+        """
+
+        target_terms = arrival_destination_terms(objective)
+        target_goal = " ".join(target_terms) or objective
+        cleaned = re.sub(
+            r"\s+(?:from|among)\s+(?:the\s+)?(?:these\s+)?(?:visible\s+)?"
+            r"(?:[A-Za-z]+\s+)?(?:destinations|choices)\s*:\s*.*$",
+            "",
+            objective,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"\s+(?:rather\s+than|choices\s+are|the\s+alternatives\s+are|"
+            r"available\s+destinations\s+are)\b.*$",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        from .session import _goal_terms
+
+        candidate_terms: set[str] = set()
+        for candidate in candidates:
+            candidate_terms.update(_goal_terms(str(getattr(candidate, "purpose", ""))))
+        generic = {
+            "action",
+            "call",
+            "control",
+            "current",
+            "exact",
+            "folded",
+            "frame",
+            "observation",
+            "observe",
+            "post",
+            "result",
+            "returns",
+            "tap",
+        }
+        target_set = set(target_terms)
+        qualifiers: list[str] = []
+        for term in _goal_terms(cleaned):
+            if (
+                term in candidate_terms
+                and term not in target_set
+                and term not in generic
+                and term not in qualifiers
+            ):
+                qualifiers.append(term)
+        if not qualifiers:
+            return target_goal
+        return f"Requested destination: {target_goal}. Matching evidence: {' '.join(qualifiers)}."
 
     @staticmethod
     def _policy_suggestion(candidate: Any) -> dict[str, Any]:
@@ -5853,9 +6099,24 @@ class Engine:
         try:
             from .policy import PolicyContext, evaluate_policy, guard_candidates
 
-            candidates = self._policy_tap_candidates(state, phase, observation)
+            compiler_audit: dict[str, Any] = {}
+            candidates = self._policy_tap_candidates(
+                state,
+                phase,
+                observation,
+                diagnostics=compiler_audit,
+            )
+            deterministic_mcp = (
+                recommended_call.get("mcp") if isinstance(recommended_call, dict) else None
+            )
+            compiler_audit["recommended_call_offered"] = (
+                any(candidate.trusted_call() == deterministic_mcp for candidate in candidates)
+                if isinstance(deterministic_mcp, dict)
+                else None
+            )
+            policy_goal = self._policy_selection_goal(phase.objective, candidates)
             context = PolicyContext(
-                goal=phase.objective,
+                goal=policy_goal,
                 phase=phase.id,
                 session_id=state.session_id,
                 candidates=tuple(candidates),
@@ -5895,6 +6156,7 @@ class Engine:
                 max_candidates=max_candidates,
             )
             audit = decision.as_json()
+            audit["compiler"] = compiler_audit
             # Exact calls belong only in the separate advisory field, never in shadow/audit.
             audit.pop("recommended_call", None)
             selected = decision.selected_candidate
@@ -5961,7 +6223,7 @@ class Engine:
                 "reason": "This phase requires verified reversible network isolation.",
                 "executes": True,
             }
-        if phase.kind == "cleanup":
+        if phase.kind == "cleanup" and getattr(phase, "satisfaction", None) != "fresh_assertions":
             return {
                 "kind": "session_finish",
                 "cli": f"aua --serial {state.serial} session finish",
@@ -5990,6 +6252,80 @@ class Engine:
                 "executes": False,
             }
 
+        # Never turn an explicitly caveated post-action frame into another mutation.  A stale
+        # hierarchy can still contain perfectly plausible controls from the screen we just left;
+        # the only safe next step is one authoritative read that produces a new fingerprint.
+        if observation.meta.stale_risk:
+            return {
+                "kind": "refresh_observation",
+                "cli": f"aua --serial {state.serial} analyze --source hierarchy --no-cache",
+                "mcp": {
+                    "tool": "analyze_screen",
+                    "arguments": {"source": "hierarchy", "no_cache": True},
+                },
+                "reason": (
+                    "This frame is explicitly marked stale-risk and cannot authorize another "
+                    "action. Read one uncached hierarchy frame before replanning."
+                ),
+                "executes": False,
+            }
+
+        # Loading is not a navigation failure.  When the hierarchy names the loading marker,
+        # wait for that evidence to disappear; otherwise wait for one tree change.  Both calls
+        # return the resulting analyzed frame and are bounded, so the agent does not busy-loop or
+        # guess at a control while content is attaching.
+        if self._observation_is_loading(observation):
+            loading_predicate: str | None = None
+            for element in observation.elements:
+                label = " ".join(
+                    value for value in (element.text, element.content_desc) if value
+                ).strip()
+                if re.search(r"\bloading\b", label, re.IGNORECASE):
+                    loading_predicate = "!text:Loading"
+                    break
+                if re.search(r"\bplease wait\b", label, re.IGNORECASE):
+                    loading_predicate = "!text:Please wait"
+                    break
+            if loading_predicate is not None:
+                return {
+                    "kind": "await_loading",
+                    "cli": (
+                        f"aua --serial {state.serial} await-and-analyze "
+                        f"{shlex.quote(loading_predicate)} --timeout-ms 15000 --poll-ms 200 "
+                        "--ignore-case --observe"
+                    ),
+                    "mcp": {
+                        "tool": "await_and_analyze",
+                        "arguments": {
+                            "predicate": loading_predicate,
+                            "timeout_ms": 15000,
+                            "poll_ms": 200,
+                            "ignore_case": True,
+                        },
+                    },
+                    "reason": (
+                        "The current hierarchy explicitly reports loading. Wait once for that "
+                        "marker to disappear and reuse the returned analyzed frame."
+                    ),
+                    "executes": False,
+                }
+            return {
+                "kind": "wait_for_change",
+                "cli": (
+                    f"aua --serial {state.serial} wait-and-analyze --changed "
+                    "--timeout-ms 15000 --interval 150 --observe"
+                ),
+                "mcp": {
+                    "tool": "wait_changed_and_analyze",
+                    "arguments": {"timeout_ms": 15000, "interval_ms": 150},
+                },
+                "reason": (
+                    "The current frame contains an unlabeled loading/progress state. Wait once "
+                    "for the hierarchy to change and reuse the returned analyzed frame."
+                ),
+                "executes": False,
+            }
+
         # Offline is already its own deterministic phase. Removing that word here prevents the
         # UI checkpoint planner from recommending network isolation again after it completed.
         ui_goal = re.sub(r"\boffline\b|\bairplane mode\b", " ", phase.objective, flags=re.I)
@@ -5997,7 +6333,9 @@ class Engine:
         from .session import _goal_terms, _match_score
 
         goal_terms = set(_goal_terms(ui_goal))
-        destination_terms = set(arrival_destination_terms(ui_goal))
+        destination_term_list = arrival_destination_terms(ui_goal)
+        destination_terms = set(destination_term_list)
+        target_goal = " ".join(destination_term_list) or ui_goal
 
         # A stable mapped screen plus an exact multi-word title from the requested destination
         # is arrival evidence, not permission to descend into a child row that happens to share
@@ -6098,10 +6436,14 @@ class Engine:
                 continue
             semantic_label = element.text or element.content_desc or resource_label
             control_terms = set(_goal_terms(semantic_label))
-            matched_terms = goal_terms & control_terms
+            # Alternative labels mentioned later in a compound goal must not compete with the
+            # object of its navigation verb.  Use the requested destination for current-frame
+            # matching and ranking, just as the optional policy compiler does.
+            target_terms = destination_terms or goal_terms
+            matched_terms = target_terms & control_terms
             if not matched_terms:
                 continue
-            exact_goal_match = ui_goal.casefold().strip() in semantic_label.casefold()
+            exact_goal_match = target_goal.casefold().strip() in semantic_label.casefold()
             explicit_control_request = bool(
                 re.search(
                     rf"\b(?:open|tap|select|choose|launch|enter|view|inspect)\s+"
@@ -6112,14 +6454,14 @@ class Engine:
             )
             weak_one_token = (
                 len(matched_terms) == 1
-                and len(goal_terms) > 1
+                and len(target_terms) > 1
                 and (len(control_terms) == 1 or matched_terms <= _GENERIC_MANUAL_MATCH_TERMS)
                 and not exact_goal_match
                 and not explicit_control_request
             )
             if weak_one_token:
                 continue
-            score = _match_score(ui_goal, label)
+            score = _match_score(target_goal, label)
             ranked.append((score, element))
         if ranked:
             _score, element = max(ranked, key=lambda item: (item[0], -item[1].id))
@@ -6151,6 +6493,31 @@ class Engine:
                 "reason": (
                     f"The current frame has one goal-relevant enabled control: "
                     f"{(element.text or element.content_desc or element.resource_id or element.id)!r}."
+                ),
+                "executes": True,
+            }
+
+        # A target may simply be below the fold.  An app-owned accessibility node that explicitly
+        # reports scrollable=true is stronger evidence than another analyze, but it does not prove
+        # which hidden row exists.  Move exactly one page and let the folded observation replan.
+        if any(
+            element.scrollable is True
+            and element.enabled is not False
+            and element.window in {None, "app"}
+            for element in observation.elements
+        ):
+            return {
+                "kind": "scroll_action",
+                "cli": (
+                    f"aua --serial {state.serial} scroll-and-analyze up --pages 1 --percent 70"
+                ),
+                "mcp": {
+                    "tool": "scroll_and_analyze",
+                    "arguments": {"direction": "up", "percent": 70},
+                },
+                "reason": (
+                    "No goal-labelled control is visible, but the app exposes a scrollable "
+                    "container. Scroll one page and replan from the returned analyzed frame."
                 ),
                 "executes": True,
             }
@@ -6188,6 +6555,115 @@ class Engine:
             raise UsageError(str(exc)) from exc
         return {"ok": True, "goal_progress": phase_progress(state)}
 
+    def _complete_contract_phase_from_observation(
+        self,
+        state: Any,
+        observation: AnalyzeResult,
+    ) -> tuple[Any, dict[str, Any] | None]:
+        """Prove at most one authored checkpoint from one exact settled frame."""
+
+        if state.contract is None:
+            return state, None
+        current = next((phase for phase in state.phases if phase.status != "completed"), None)
+        if current is None:
+            return state, None
+        if observation.meta.stale_risk:
+            return state, {
+                "checkpoint_id": current.id,
+                "ok": False,
+                "code": "stale_observation",
+                "detail": observation.meta.stale_risk,
+            }
+        fingerprint = observation.meta.fingerprint
+        if not fingerprint:
+            return state, {
+                "checkpoint_id": current.id,
+                "ok": False,
+                "code": "missing_fingerprint",
+                "detail": "contract proof requires a fingerprinted settled observation",
+            }
+
+        from .assertions import evaluate_assertion_step
+
+        results: list[dict[str, Any]] = []
+        for index, assertion in enumerate(current.assertions):
+            verdict = evaluate_assertion_step(assertion, observation.elements)
+            results.append(
+                {
+                    "index": index,
+                    "kind": assertion.kind,
+                    "ok": verdict.ok,
+                    "detail": verdict.detail,
+                }
+            )
+        diagnostics = {
+            "checkpoint_id": current.id,
+            "ok": bool(results) and all(item["ok"] for item in results),
+            "assertions": results,
+            "fingerprint": fingerprint,
+        }
+        if not diagnostics["ok"]:
+            diagnostics["code"] = "contract_assertions_failed"
+            return state, diagnostics
+
+        capture_order: int | None = None
+        mem = self._memory
+        if mem is not None:
+            self._join_memory_writers(timeout_s=5.0)
+            with contextlib.suppress(Exception):
+                cursor = mem.load_session(state.serial)
+                matching = [
+                    step.capture_order
+                    for step in cursor.recent
+                    if step.capture_order is not None
+                    and (
+                        state.capture_segment is None
+                        or step.capture_segment == state.capture_segment
+                    )
+                    and (
+                        state.capture_start_order is None
+                        or step.capture_order >= state.capture_start_order
+                    )
+                ]
+                capture_order = max(matching) if matching else None
+
+        from .session import ObservationProvenance, PhaseProof, mark_phase_complete
+        from .session_artifacts import observation_evidence_id
+
+        evidence_id = observation_evidence_id(
+            state.session_id,
+            observation.model_dump(mode="json"),
+        )
+        proof = PhaseProof(
+            source="contract_assertions",
+            command="contract_assertions",
+            verified=True,
+            observation=ObservationProvenance(
+                fingerprint=fingerprint,
+                source=observation.screen.source.value,
+                via=observation.meta.via,
+                device_serial=observation.meta.device_serial or state.serial,
+                package=observation.screen.package or "unknown",
+            ),
+            evidence_id=evidence_id,
+            assertions_verified=len(results),
+            capture_order=capture_order,
+        )
+        try:
+            updated = mark_phase_complete(
+                self.config.cache.dir,
+                state,
+                phase_id=current.id,
+                evidence=f"all {len(results)} authored assertions passed on {fingerprint}",
+                _proof=proof,
+            )
+        except ValueError as exc:
+            diagnostics.update(ok=False, code="contract_proof_rejected", detail=str(exc))
+            return state, diagnostics
+        diagnostics["evidence_id"] = evidence_id
+        diagnostics["capture_order"] = capture_order
+        return updated, diagnostics
+
     def session_progress(
         self,
         session_id: str | None = None,
@@ -6207,12 +6683,19 @@ class Engine:
             # A terminated session is immutable. Do not run the route planner or manufacture a
             # nested recommendation that phase_progress will then have to hide.
             return {"ok": True, "goal_progress": phase_progress(state)}
+        contract_verdict: dict[str, Any] | None = None
         if observation is not None:
-            state = complete_current_ui_phase_from_observation(
-                self.config.cache.dir,
-                state,
-                observation=observation,
-            )
+            if state.contract is not None:
+                state, contract_verdict = self._complete_contract_phase_from_observation(
+                    state,
+                    observation,
+                )
+            else:
+                state = complete_current_ui_phase_from_observation(
+                    self.config.cache.dir,
+                    state,
+                    observation=observation,
+                )
         current = next((phase for phase in state.phases if phase.status != "completed"), None)
         call: dict[str, Any] | None = None
         if current is not None:
@@ -6230,6 +6713,8 @@ class Engine:
                     call=call,
                 )
         out: dict[str, Any] = {"ok": True, "goal_progress": phase_progress(state)}
+        if contract_verdict is not None:
+            out["contract_verdict"] = contract_verdict
         if current is not None:
             out.update(
                 self._session_policy_output(
@@ -6279,12 +6764,191 @@ class Engine:
         )
         return review_session_events(state, events)
 
-    def session_finish(self, session_id: str | None = None) -> dict[str, Any]:
+    def _session_candidate(self, state: Any, *, name: str) -> Any:
+        """Build one unverified candidate from this contract's correlated action window."""
+
+        if state.contract is None:
+            raise UsageError("candidate flows require an authored session contract")
+        incomplete = [phase.id for phase in state.phases if phase.status != "completed"]
+        if incomplete:
+            raise UsageError(
+                "candidate flow requires every contract checkpoint to be complete",
+                hint="incomplete: " + ", ".join(incomplete),
+            )
+        if (
+            state.capture_package is None
+            or state.capture_segment is None
+            or state.capture_start_order is None
+        ):
+            raise UsageError(
+                "session capture provenance is incomplete; candidate cannot be trusted"
+            )
+        mem = self._memory
+        if mem is None:
+            raise UsageError("memory is disabled; the session action path was not recorded")
+        self._join_memory_writers(timeout_s=5.0)
+        cursor = mem.load_session(state.serial)
+        if cursor.capture_segment != state.capture_segment:
+            raise UsageError(
+                "the session crossed an app/context capture boundary",
+                hint="repeat the journey in one package/context segment before promotion",
+            )
+        checkpoints = [
+            {
+                "id": phase.id,
+                "capture_order": phase.proof.capture_order if phase.proof else None,
+                "assertions": phase.assertions,
+            }
+            for phase in state.phases
+        ]
+        from .candidate_flows import build_candidate_flow
+
+        return build_candidate_flow(
+            name=name,
+            app=state.capture_package,
+            context_id=state.capture_context_id,
+            recent=cursor.recent,
+            start_capture_order=state.capture_start_order,
+            capture_segment=state.capture_segment,
+            checkpoints=checkpoints,
+        )
+
+    def session_candidate_flow(
+        self,
+        name: str,
+        *,
+        session_id: str | None = None,
+        reset_flow: str | None = None,
+        replay: bool = False,
+        save: bool = False,
+    ) -> dict[str, Any]:
+        """Preview, replay, and only then promote a verified session action path."""
+
+        if not name.strip():
+            raise UsageError("candidate flow needs a non-empty name")
+        if save:
+            replay = True
+        if replay and not reset_flow:
+            raise UsageError(
+                "candidate replay needs an explicit reset flow",
+                hint="Pass --reset-flow NAME; AUA will not guess or mutate setup state.",
+            )
+        state = self._session_state(session_id)
+        candidate = self._session_candidate(state, name=name)
+        out: dict[str, Any] = {
+            "ok": True,
+            "name": candidate.flow.name,
+            "yaml": candidate.yaml,
+            "source_steps": candidate.source_steps,
+            "checkpoint_ids": list(candidate.checkpoint_ids),
+            "replayed": False,
+            "saved": False,
+        }
+        if state.artifact_dir:
+            from .atomic import atomic_write_text
+
+            candidate_path = Path(state.artifact_dir) / "candidate-flow.yaml"
+            atomic_write_text(candidate_path, candidate.yaml)
+            out["artifact"] = str(candidate_path)
+        if not replay:
+            return out
+
+        assert reset_flow is not None  # replay validation above requires it
+        reset_path = Path(reset_flow).expanduser()
+        reset = (
+            self.flow_run(file=str(reset_path.resolve()))
+            if reset_path.is_file()
+            else self.flow_run(name=reset_flow)
+        )
+        out["reset"] = reset
+        if reset.get("ok") is not True:
+            out.update(ok=False, code="candidate_reset_failed")
+            return out
+        replayed = self.flow_run(yaml=candidate.yaml)
+        out["replay"] = replayed
+        out["replayed"] = replayed.get("ok") is True
+        if replayed.get("ok") is not True:
+            out.update(ok=False, code="candidate_replay_failed")
+            return out
+        if save:
+            from .flows import FlowStore
+
+            path = FlowStore(self.config.memory).save(candidate.flow, force=False)
+            out["saved"] = True
+            out["path"] = str(path)
+        return out
+
+    def session_finish(
+        self,
+        session_id: str | None = None,
+        *,
+        allow_incomplete: bool = False,
+    ) -> dict[str, Any]:
         """Restore only reversible state created after this session started, then review it."""
         from . import network, network_profiles
         from .session import finish_session_state, phase_progress
 
         state = self._session_state(session_id)
+        contract_verdict: dict[str, Any] | None = None
+        contract_observation: AnalyzeResult | None = None
+        if state.contract is not None and any(
+            phase.status != "completed" for phase in state.phases
+        ):
+            fresh = self.analyze(source="hierarchy", with_ocr=False, no_cache=True)
+            contract_observation = fresh
+            state, contract_verdict = self._complete_contract_phase_from_observation(state, fresh)
+            incomplete = [
+                {
+                    "id": phase.id,
+                    "objective": phase.objective,
+                    "status": phase.status,
+                }
+                for phase in state.phases
+                if phase.status != "completed"
+            ]
+            if incomplete and not allow_incomplete:
+                progress = phase_progress(state)
+                return {
+                    "ok": False,
+                    "code": "contract_incomplete",
+                    "session_id": state.session_id,
+                    "finished": False,
+                    "terminated": False,
+                    "verdict": "incomplete",
+                    "missing_checkpoints": incomplete,
+                    "contract_verdict": contract_verdict,
+                    "observation": fresh.model_dump(mode="json"),
+                    "goal_progress": progress,
+                    "next_call": progress.get("next_call"),
+                    "cleanup": [],
+                    "errors": [],
+                    "hint": (
+                        "The authored contract is still active. Satisfy the current checkpoint "
+                        "and retry session finish, or explicitly pass --allow-incomplete."
+                    ),
+                }
+        candidate_payload: dict[str, Any] | None = None
+        if state.contract is not None and all(
+            phase.status == "completed" for phase in state.phases
+        ):
+            try:
+                candidate = self._session_candidate(
+                    state,
+                    name=f"session-{state.session_id[:8]}",
+                )
+                candidate_payload = {
+                    "name": candidate.flow.name,
+                    "yaml": candidate.yaml,
+                    "source_steps": candidate.source_steps,
+                    "checkpoint_ids": list(candidate.checkpoint_ids),
+                    "verified": False,
+                    "hint": "Replay with an explicit reset flow before saving.",
+                }
+            except UsageError as exc:
+                candidate_payload = {
+                    "verified": False,
+                    "error": exc.to_dict().get("error"),
+                }
         cleanup: list[dict[str, Any]] = []
         errors: list[dict[str, str]] = []
 
@@ -6342,7 +7006,7 @@ class Engine:
             state = finish_session_state(self.config.cache.dir, state)
         progress = phase_progress(state)
         review = self.session_review(state.session_id)
-        return {
+        result = {
             "ok": not errors,
             "session_id": state.session_id,
             # ``finished`` means every requested checkpoint completed. ``terminated`` means the
@@ -6364,6 +7028,15 @@ class Engine:
                 else "cleanup is incomplete; fix the reported device access and run session finish again"
             ),
         }
+        if contract_verdict is not None:
+            result["contract_verdict"] = contract_verdict
+        if contract_observation is not None:
+            result["observation"] = contract_observation.model_dump(mode="json")
+        if candidate_payload is not None:
+            result["candidate_flow"] = candidate_payload
+        if state.artifact_dir:
+            result["artifacts_dir"] = state.artifact_dir
+        return result
 
     def reach(
         self,
@@ -7122,7 +7795,7 @@ class Engine:
 
     def screenshot(self, path: str | None = None, *, annotate: bool = False) -> ActionResult:
         device = self.device
-        img = device.screenshot()
+        img = self.platform.capture_screenshot(device)
         if annotate:
             cached = self._read_cache()
             elements = cached.elements if cached else []
@@ -7439,9 +8112,7 @@ class Engine:
                 left = change.get("app_left_foreground") if isinstance(change, dict) else None
                 if left:
                     dialog = (
-                        " A system crash dialog is on screen."
-                        if left.get("crash_dialog")
-                        else ""
+                        " A system crash dialog is on screen." if left.get("crash_dialog") else ""
                     )
                     result.note = (
                         f"WARNING: {left['from']} left the foreground — {left['to']} is in front "
@@ -11101,6 +11772,9 @@ class Engine:
         index: int | None,
         first: bool,
         count: int | None = None,
+        within: Selector | None = None,
+        same_parent_as: Selector | None = None,
+        contains_all: Sequence[Selector] = (),
     ) -> tuple[bool, str]:
         """One evaluation pass: ``(ok, detail)``. One hierarchy dump, no screenshots."""
         xml = self.platform.dump_tree(self.device)
@@ -11112,6 +11786,15 @@ class Engine:
         ).elements
         label = selector_label(selector)
         matches = match_selector(elements, **selector)
+        structural = apply_structural_filters(
+            elements,
+            matches,
+            within=within,
+            same_parent_as=same_parent_as,
+        )
+        if not structural.ok:
+            return False, detail_tokens("fail", sought=label) + " | " + str(structural.detail)
+        matches = list(structural.matches)
         if count is not None and len(matches) != count:
             detail = detail_tokens(
                 "fail",
@@ -11150,14 +11833,29 @@ class Engine:
                 detail += " | nearest: " + " | ".join(element_digest(el) for el in near)
             return False, detail
         state_only = [k for k in predicates if k not in ("exists", "absent")]
-        if len(matches) > 1 and state_only and index is None and not first:
+        structural_only = bool(within or same_parent_as or contains_all)
+        if len(matches) > 1 and (state_only or structural_only) and index is None and not first:
             raise SelectorAmbiguousError(
                 f"{label} matches {len(matches)} elements — "
                 "disambiguate with --index <n> or --first before asserting on its state",
                 hint="candidates: "
                 + " | ".join(element_digest(el) for el in matches[:_MAX_CANDIDATES]),
             )
-        el = matches[index] if index is not None and index < len(matches) else matches[0]
+        if index is not None and index >= len(matches):
+            return False, detail_tokens(
+                "fail",
+                sought=label,
+                predicate="index",
+                expected=index,
+                actual=f"{len(matches)} matches",
+            )
+        el = matches[index] if index is not None else matches[0]
+        if contains_all:
+            contains_ok, contains_detail = check_contains_all(elements, el, contains_all)
+            if not contains_ok:
+                return False, detail_tokens(
+                    "fail", sought=label, id=el.id
+                ) + " | " + contains_detail
         failures = self._check_predicates(el, self._node_state(xml, el), predicates)
         if failures:
             return False, detail_tokens("fail", sought=label, id=el.id) + " | " + "; ".join(
@@ -11183,6 +11881,9 @@ class Engine:
         selected: bool | None = None,
         focused: bool | None = None,
         count: int | None = None,
+        within: dict[str, Any] | None = None,
+        same_parent_as: dict[str, Any] | None = None,
+        contains_all: Sequence[dict[str, Any]] | None = None,
         index: int | None = None,
         first: bool = False,
         timeout_ms: int = 0,
@@ -11206,11 +11907,39 @@ class Engine:
             raise UsageError("--exists and --absent are mutually exclusive")
         if count is not None and count < 0:
             raise UsageError("--count must not be negative")
+        if index is not None and index < 0:
+            raise UsageError("--index must not be negative")
+        if absent and any(value is not None for value in (within, same_parent_as, contains_all)):
+            raise UsageError("--absent cannot be combined with structural predicates")
         if count == 0 and any(
             value is not None
-            for value in (text_is, text_contains, checked, enabled, selected, focused)
+            for value in (
+                text_is,
+                text_contains,
+                checked,
+                enabled,
+                selected,
+                focused,
+                within,
+                same_parent_as,
+                contains_all,
+            )
         ):
-            raise UsageError("--count 0 cannot be combined with element state predicates")
+            raise UsageError("--count 0 cannot be combined with element state/structure predicates")
+        normalized_within = (
+            normalize_selector(within, field="within") if within is not None else None
+        )
+        normalized_same_parent = (
+            normalize_selector(same_parent_as, field="same_parent_as")
+            if same_parent_as is not None
+            else None
+        )
+        normalized_contains = tuple(
+            normalize_selector(value, field=f"contains_all[{position}]")
+            for position, value in enumerate(contains_all or ())
+        )
+        if contains_all is not None and not normalized_contains:
+            raise UsageError("contains_all must not be empty")
         predicates: dict[str, Any] = {}
         if absent:
             predicates["absent"] = True
@@ -11229,7 +11958,14 @@ class Engine:
         deadline = time.monotonic() + max(0, timeout_ms) / 1000.0
         while True:
             ok, detail = self._expect_once(
-                selector, predicates, index=index, first=first, count=count
+                selector,
+                predicates,
+                index=index,
+                first=first,
+                count=count,
+                within=normalized_within,
+                same_parent_as=normalized_same_parent,
+                contains_all=normalized_contains,
             )
             if ok or time.monotonic() >= deadline:
                 return self._observe(
@@ -12386,9 +13122,9 @@ class Engine:
                         "That Activity may not be exported (`am start` denies it) — retry "
                         "without --activity."
                         if activity
+                        # A wrong pin is silent otherwise: the caller never asked for this
+                        # Activity, so "retry without --activity" would be misleading advice.
                         else (
-                            # A wrong pin is silent otherwise: the caller never asked for this
-                            # Activity, so "retry without --activity" would be misleading advice.
                             "The remembered launch Activity may be wrong or unexported — re-pin "
                             "with `aua remember --launch-activity <Activity>`."
                             if entry
@@ -12521,6 +13257,191 @@ class Engine:
         raise UsageError(
             f"unknown app action '{action}'",
             hint="foreground|launch|stop|kill|clear|grant|current",
+        )
+
+    # ----------------------------------------------------------------- app bundle installs
+
+    #: Install modes, narrowest first. ``if-needed`` is the default because the common case is a
+    #: run that just wants the build present, and re-pushing an APK that is already there costs
+    #: tens of seconds on an emulator for no change in state.
+    INSTALL_MODES = ("if-needed", "reinstall", "fresh")
+
+    def install_app(
+        self,
+        bundle: str,
+        *,
+        package: str | None = None,
+        mode: str = "if-needed",
+        confirmed: bool = False,
+        grant_permissions: bool = False,
+        launch: bool = False,
+        activity: str | None = None,
+        observe: bool = True,
+        with_image: bool | str | None = None,
+        # Milliseconds, not seconds, because the daemon sizes a request's socket budget from a
+        # `timeout_ms` argument. An install that outran a 60s socket would come back as
+        # `daemon_outcome_unknown` — the one error agents are told never to retry.
+        timeout_ms: int = 300_000,
+    ) -> ActionResult:
+        """Put an app bundle on the target, optionally launching it, in one call.
+
+        The three modes differ only in what they do when the app is *already* installed:
+        ``if-needed`` leaves it alone unless the bundle's version differs, ``reinstall`` always
+        pushes but keeps app data, and ``fresh`` uninstalls first — the only mode that survives a
+        signing-key change, and the only one that destroys data, which is why it needs
+        *confirmed*.
+
+        ``launch=True`` folds :meth:`app` in afterwards so a caller gets bundle → installed →
+        foreground → screen from a single request. That fold is the point: an install whose
+        result has to be followed by a launch and then an analyze is three round-trips to learn
+        one thing, and each extra call is another chance for the caller to skip the readback.
+        """
+
+        if mode not in self.INSTALL_MODES:
+            raise UsageError(
+                f"unknown install mode '{mode}'",
+                hint=f"one of: {'|'.join(self.INSTALL_MODES)}",
+            )
+        platform = self.platform
+        if not platform.supports("app.install"):
+            raise DeviceError(
+                f"platform '{platform.name}' cannot install app bundles",
+                code="unsupported_capability",
+            )
+        path = Path(bundle).expanduser()
+        info = platform.inspect_app_bundle(path)
+        app_id = package or info.app_id
+        if package and package != info.app_id:
+            # A mismatch means the caller is about to install one app and then drive another;
+            # every later selector would fail against a screen that is not the one named.
+            raise UsageError(
+                f"{path.name} declares package '{info.app_id}', not '{package}'",
+                hint="Drop --package, or pass the bundle that really contains it.",
+            )
+        device = self.device
+        before = platform.installed_app(device, app_id)
+        pushed = False
+        removed = False
+        reason: str
+        if not before.installed:
+            reason = "missing"
+            pushed = True
+        elif mode == "fresh":
+            reason = "fresh-requested"
+            pushed = True
+            removed = True
+        elif mode == "reinstall":
+            reason = "reinstall-requested"
+            pushed = True
+        elif _install_versions_differ(before, info):
+            # `if-needed` still pushes on a version change: "the build under test is present" is
+            # the request, and a stale build that merely shares a package id does not satisfy it.
+            reason = "version-differs"
+            pushed = True
+        else:
+            reason = "already-present"
+        if removed and not confirmed:
+            raise UsageError(
+                f"install --fresh removes {app_id} and ALL its data (feature flags, login "
+                "session, local config) — pass --yes to confirm",
+                hint=f"Or keep the data: `aua app install {path} --reinstall`.",
+            )
+        started = time.perf_counter()
+        if pushed:
+            mem = self._memory
+            if mem is not None and not self._join_memory_writers(timeout_s=5.0):
+                raise UsageError("memory provenance is still being finalized")
+            with self._acting():
+                if removed:
+                    platform.uninstall_app(device, app_id)
+                platform.install_app_bundle(
+                    device,
+                    path,
+                    replace=not removed,
+                    grant_permissions=grant_permissions,
+                    timeout_s=max(1.0, timeout_ms / 1000.0),
+                )
+            if mem is not None:
+                with self._mem_lock:
+                    # A new build is a new set of screens: element ids, copy, and routes learned
+                    # from the previous one are no longer evidence about this one.
+                    if removed:
+                        mem.clear_context(device.serial, app_id)
+                    else:
+                        mem.mark_capture_boundary(
+                            device.serial,
+                            app_id,
+                            f"app bundle installed for {app_id}",
+                        )
+            # Everything below describes the binary we just replaced. `_version_for` memoises a
+            # versionName per package for memory provenance, and the analyze caches hold the
+            # previous build's tree; leaving either in place makes the next read report the old
+            # app's state under the new app's name.
+            self._version_cache.pop(app_id, None)
+            self._prefetch.invalidate()
+            self._last_hierarchy_hash = None
+            self._last_analyze_result = None
+            after = platform.installed_app(device, app_id)
+            if not after.installed:
+                # adb can report a successful install for a package the manager never registered.
+                raise DeviceError(
+                    f"{path.name} installed without error but {app_id} is not on {device.serial}",
+                    code="install_unverified",
+                    hint="Check the bundle's package id and the device's remaining storage.",
+                )
+        else:
+            after = before
+        if grant_permissions and not pushed:
+            # `-g` only applies to the install itself, so an idempotent skip would silently drop
+            # the caller's permission request.
+            device.grant_permissions(app_id)
+        detail_info: dict[str, Any] = {
+            "package": app_id,
+            "installed": True,
+            "pushed": pushed,
+            "uninstalled_first": removed,
+            "reason": reason,
+            "mode": mode,
+            "bundle": str(path),
+            "bundle_version_name": info.version_name,
+            "bundle_version_code": info.version_code,
+            "version_name": after.version_name,
+            "version_code": after.version_code,
+            "duration_ms": max(0, int((time.perf_counter() - started) * 1000)),
+        }
+        summary = f"{app_id} {info.version_name or '?'}"
+        summary += f" ({'installed' if pushed else 'already present — skipped'})"
+        transient = platform.install_persistence_warning(device) if pushed else None
+        if transient:
+            detail_info["persists"] = False
+            detail_info["persistence_note"] = transient
+        if launch:
+            launched = self.app(
+                "launch",
+                package=app_id,
+                activity=activity,
+                clear_state=False,
+                confirmed=confirmed,
+                observe=observe,
+                with_image=with_image,
+            )
+            # `app restart` sets the precedent: a composed command returns the inner action's
+            # result rather than renaming it, so a caller that branches on `action` still sees
+            # the launch it is about to drive. What the install did travels in `app_install`.
+            launched.app_install = detail_info
+            launched.detail = f"{summary}; launched {launched.detail}"
+            if transient:
+                launched.note = f"{transient} {launched.note}" if launched.note else transient
+            return launched
+        # No observation: an install does not change what is on screen, so folding a hierarchy
+        # dump in here would bill the caller for a read that tells them nothing. `app clear` and
+        # `app stop` answer the same way.
+        return ActionResult(
+            ok=True,
+            action="app-install",
+            detail=summary,
+            app_install=detail_info,
+            note=transient,
         )
 
     # ----------------------------------------------------------------- app databases
@@ -13094,6 +14015,10 @@ class Engine:
             if not self._capture.running:
                 self._capture.start()
             return self._capture.status()
+        # Default is the u2 path: it is ~2.2x faster than `adb exec-out screencap -p` (the
+        # device encodes JPEG instead of a full-res PNG) and every frame is re-encoded to JPEG
+        # on write anyway, so the lossless capture buys nothing here. The opt-in flag stays for
+        # callers that need pixel-exact frames.
         shot = device.screenshot
         if self.config.perf.capture_adb_screencap:
             shot = getattr(device, "screencap_png", device.screenshot)

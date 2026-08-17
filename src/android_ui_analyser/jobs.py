@@ -301,6 +301,7 @@ class JobManager:
                 result,
                 args=state.args,
                 current_recorded=False,
+                invocation_id=state.job_id,
             )
             with self._lock:
                 state = self._load(job_id)

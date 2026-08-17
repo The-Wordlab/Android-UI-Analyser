@@ -10,6 +10,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
 from ..device import Device
@@ -18,6 +19,7 @@ from ..schema import DeviceInfo, Element
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..config import Config
+    from ..providers.base import ScreenImage
 
 
 @dataclass(frozen=True)
@@ -26,6 +28,29 @@ class NormalizedTree:
 
     elements: list[Element]
     app_id: str | None = None
+
+
+@dataclass(frozen=True)
+class AppBundle:
+    """Identity read out of an installable app bundle on the host, before any device call.
+
+    ``app_id`` is the platform's package/bundle identifier.  The engine needs it *before*
+    connecting so an "install only if needed" request can be answered without pushing bytes.
+    """
+
+    app_id: str
+    version_name: str | None = None
+    version_code: str | None = None
+
+
+@dataclass(frozen=True)
+class InstalledApp:
+    """What a target reports about one already-installed app."""
+
+    app_id: str
+    installed: bool
+    version_name: str | None = None
+    version_code: str | None = None
 
 
 class PlatformAdapter(ABC):
@@ -112,5 +137,77 @@ class PlatformAdapter(ABC):
 
         raise DeviceError(
             f"platform '{self.name}' does not support diagnostic logs",
+            code="unsupported_capability",
+        )
+
+    # -- app bundle delivery (capability ``app.install``) -----------------
+    #
+    # "Get the build under test onto the target" is the first step of every run, and it was the
+    # one step AUA could not do — callers dropped to a raw platform tool for it. These three
+    # methods are the platform-neutral contract for it: inspect a bundle on the host, ask the
+    # target what it already has, and push the bundle. Splitting them is what makes the
+    # idempotent path possible; a single fused `install` would have to push bytes to find out
+    # whether it needed to.
+
+    def inspect_app_bundle(self, bundle: Path) -> AppBundle:
+        """Read an installable bundle's app id and version on the host, without a target."""
+
+        raise DeviceError(
+            f"platform '{self.name}' does not support app bundle installs",
+            code="unsupported_capability",
+        )
+
+    def installed_app(self, runtime: Device, app_id: str) -> InstalledApp:
+        """Report whether *app_id* is installed on the target, and at which version."""
+
+        raise DeviceError(
+            f"platform '{self.name}' does not support app bundle installs",
+            code="unsupported_capability",
+        )
+
+    def install_app_bundle(
+        self,
+        runtime: Device,
+        bundle: Path,
+        *,
+        replace: bool = True,
+        grant_permissions: bool = False,
+        timeout_s: float = 300.0,
+    ) -> None:
+        """Install *bundle* onto the target, raising a typed error if it does not land."""
+
+        raise DeviceError(
+            f"platform '{self.name}' does not support app bundle installs",
+            code="unsupported_capability",
+        )
+
+    def uninstall_app(self, runtime: Device, app_id: str) -> None:
+        """Remove *app_id* and its data. An app that is already absent is not an error."""
+
+        raise DeviceError(
+            f"platform '{self.name}' does not support app bundle installs",
+            code="unsupported_capability",
+        )
+
+    def install_persistence_warning(self, runtime: Device) -> str | None:
+        """Why an install on this target may not outlive the session, or ``None`` if it will.
+
+        A disposable target can accept an install, confirm it, and lose it on restart. That is a
+        legitimate way to run — so this reports rather than refuses — but it has to be *reported*,
+        because the caller cannot tell it apart from a durable install until much later.
+        """
+
+        return None
+
+    def capture_screenshot(self, runtime: Device) -> ScreenImage:
+        """Capture the current UI frame through the selected platform runtime.
+
+        Evidence writers use this capability instead of reaching through the generic engine to
+        an Android-backed ``Device``.  Adapters that do not advertise ``ui.screenshot`` fail
+        explicitly so unsupported evidence never falls back to Android tooling.
+        """
+
+        raise DeviceError(
+            f"platform '{self.name}' does not support screenshots",
             code="unsupported_capability",
         )

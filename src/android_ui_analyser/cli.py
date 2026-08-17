@@ -28,6 +28,7 @@ import typer
 from typer.core import TyperCommand, TyperGroup
 
 from . import __version__
+from .assertions import parse_selector_expression
 from .config import (
     Config,
     default_config_yaml,
@@ -1298,7 +1299,13 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
                     from .coaching import decorate_result
 
                     # Compatibility fallback for an older daemon that ignored the request flag.
-                    return decorate_result(engine, cmd, resp.get("result"))
+                    return decorate_result(
+                        engine,
+                        cmd,
+                        resp.get("result"),
+                        args=kwargs,
+                        invocation_id=_INVOCATION_ID,
+                    )
                 raise _daemon_error(resp.get("error", {}))
         except AuaError:
             raise
@@ -1353,7 +1360,14 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
             )
         from .coaching import decorate_result
 
-        return decorate_result(engine, _DAEMON_CMD.get(method, method), result)
+        return decorate_result(
+            engine,
+            _DAEMON_CMD.get(method, method),
+            result,
+            args=kwargs,
+            invocation_id=_INVOCATION_ID,
+            duration_ms=(time.monotonic() - t0) * 1000.0,
+        )
     except AuaError as err:
         with contextlib.suppress(Exception):
             error_value = err.to_dict().get("error")
@@ -2718,8 +2732,24 @@ def expect(
     selected: bool | None = typer.Option(
         None, "--selected/--unselected", help="Selected state (tabs)."
     ),
+    focused: bool | None = typer.Option(None, "--focused/--unfocused", help="Focus state."),
     count: int | None = typer.Option(
         None, "--count", min=0, help="Exactly this many elements must match."
+    ),
+    within: str | None = typer.Option(
+        None,
+        "--within",
+        help="Keep matches descended from this selector, e.g. 'rid:card'.",
+    ),
+    same_parent_as: str | None = typer.Option(
+        None,
+        "--same-parent-as",
+        help="Require the same canonical parent as this selector.",
+    ),
+    contains: list[str] | None = typer.Option(
+        None,
+        "--contains",
+        help="Require a matching descendant; repeat for contains_all.",
     ),
     index: int | None = _SEL_INDEX,
     first: bool = _SEL_FIRST,
@@ -2755,7 +2785,21 @@ def expect(
             checked=checked,
             enabled=enabled,
             selected=selected,
+            focused=focused,
             count=count,
+            within=(
+                parse_selector_expression(within, field="--within") if within else None
+            ),
+            same_parent_as=(
+                parse_selector_expression(same_parent_as, field="--same-parent-as")
+                if same_parent_as
+                else None
+            ),
+            contains_all=[
+                parse_selector_expression(value, field="--contains")
+                for value in (contains or ())
+            ]
+            or None,
             index=index,
             first=first,
             timeout_ms=timeout,
@@ -3295,6 +3339,36 @@ app.add_typer(session_app, name="session")
 def session_start_cmd(
     ctx: typer.Context,
     goal: str = typer.Option(..., "--goal", help="The end-to-end Android verification goal."),
+    contract: Path | None = typer.Option(
+        None,
+        "--contract",
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help="Authored YAML checkpoints that only fresh UI assertions can complete.",
+    ),
+    contract_yaml: str | None = typer.Option(
+        None,
+        "--contract-yaml",
+        help="Inline authored checkpoint YAML (MCP-equivalent input).",
+    ),
+    artifacts_dir: Path | None = typer.Option(
+        None,
+        "--artifacts-dir",
+        help="Portable cross-command session evidence bundle directory.",
+    ),
+    evidence: str = typer.Option(
+        "failures",
+        "--evidence",
+        help="Observation/screenshot capture: none|failures|all (needs --artifacts-dir).",
+    ),
+    junit: bool = typer.Option(False, "--junit", help="Write JUnit XML in the artifact bundle."),
+    wait_for_lease: float = typer.Option(
+        0,
+        "--wait-for-lease",
+        min=0,
+        help="Wait up to this many seconds for the requested/eligible device; never steal.",
+    ),
     start_emulator: bool = typer.Option(
         False,
         "--start-emulator",
@@ -3328,20 +3402,54 @@ def session_start_cmd(
         "--activity",
         help="With --app/--package, pin a launcher Activity.",
     ),
+    apk: str | None = typer.Option(
+        None,
+        "--apk",
+        help="Install this .apk before launching (skipped when that version is already there). "
+        "The bundle names the package, so --app is optional with it.",
+    ),
+    reinstall: bool = typer.Option(
+        False, "--reinstall", help="With --apk, push the bundle even if that version is present."
+    ),
+    fresh: bool = typer.Option(
+        False,
+        "--fresh",
+        help="With --apk, uninstall any existing copy first (wipes app data). Needs --yes.",
+    ),
+    yes: bool = typer.Option(False, "--yes", help="Required for --fresh."),
 ) -> None:
-    """Observe once and return the safest exact CLI and MCP next call."""
+    """Observe once and return the safest exact CLI and MCP next call.
+
+    ``--start-emulator --apk <path>`` makes this the entire bootstrap in one call: boot an AVD,
+    install the build, launch it, observe, and return the goal plan.
+    """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
+        if (reinstall or fresh) and not apk:
+            raise UsageError(
+                "--reinstall/--fresh only apply to --apk",
+                hint="Add `--apk <path>`, or drop the flag.",
+            )
         result = _route(
             engine,
             "session_start",
             goal=goal,
+            contract_file=str(contract.resolve()) if contract is not None else None,
+            contract_yaml=contract_yaml,
+            artifacts_dir=str(artifacts_dir.expanduser().resolve()) if artifacts_dir else None,
+            evidence=evidence,
+            junit=junit,
+            wait_for_lease_s=wait_for_lease,
             start_emulator=start_emulator,
             headed=headed,
             audio=audio,
             avd=avd,
             package=package,
             activity=activity,
+            apk=apk,
+            reinstall=reinstall,
+            fresh=fresh,
+            confirmed=yes,
         )
         if isinstance(result, dict) and _OBSERVATION_VIEW is not None:
             result = trim_observation_payload(result, _OBSERVATION_VIEW, fmt=fmt)
@@ -3380,13 +3488,64 @@ def session_progress_cmd(
 def session_finish_cmd(
     ctx: typer.Context,
     session_id: str | None = typer.Option(None, "--session-id", help="Finish a prior session."),
+    allow_incomplete: bool = typer.Option(
+        False,
+        "--allow-incomplete",
+        help="Explicitly terminate even though authored checkpoints are incomplete.",
+    ),
 ) -> None:
     """Restore only session-owned reversible state and return the final review."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        result = _route(engine, "session_finish", session_id=session_id)
+        result = _route(
+            engine,
+            "session_finish",
+            session_id=session_id,
+            allow_incomplete=allow_incomplete,
+        )
         _emit(result, fmt)
         if isinstance(result, dict) and not result.get("ok", False):
+            raise typer.Exit(1)
+
+    _run(ctx, go)
+
+
+@session_app.command("candidate-flow")
+def session_candidate_flow_cmd(
+    ctx: typer.Context,
+    name: str = typer.Argument(..., help="Name for the candidate and eventual saved flow."),
+    session_id: str | None = typer.Option(None, "--session-id"),
+    reset_flow: str | None = typer.Option(
+        None,
+        "--reset-flow",
+        help="Saved flow name or YAML file that deterministically restores state before replay.",
+    ),
+    replay: bool = typer.Option(False, "--replay", help="Reset and replay the candidate."),
+    save: bool = typer.Option(
+        False,
+        "--save",
+        help="Reset, replay successfully, then save without overwriting an existing flow.",
+    ),
+) -> None:
+    """Preview a proven session path; replay with explicit reset before promotion."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        reset_value = reset_flow
+        if reset_flow:
+            reset_path = Path(reset_flow).expanduser()
+            if reset_path.is_file():
+                reset_value = str(reset_path.resolve())
+        result = _route(
+            engine,
+            "session_candidate_flow",
+            name=name,
+            session_id=session_id,
+            reset_flow=reset_value,
+            replay=replay,
+            save=save,
+        )
+        _emit(result, fmt)
+        if isinstance(result, dict) and result.get("ok") is False:
             raise typer.Exit(1)
 
     _run(ctx, go)
@@ -3835,33 +3994,106 @@ def emulator_start_cmd(
         help="Owner tag for parallel cleanup (default: $AUA_OWNER, or auto id with --parallel). "
         "Then `AUA_OWNER=… aua emulator stop --mine` only kills yours.",
     ),
+    apk: str | None = typer.Option(
+        None,
+        "--apk",
+        help="Also install this .apk on the emulator once it boots (see `aua install`). "
+        "Skipped when the same version is already there.",
+    ),
+    launch: bool = typer.Option(
+        False,
+        "--launch",
+        help="With --apk, also open the app and return the screen it landed on — boot, install, "
+        "launch, and observe in one call.",
+    ),
+    reinstall: bool = typer.Option(
+        False, "--reinstall", help="With --apk, push the bundle even if that version is present."
+    ),
+    fresh: bool = typer.Option(
+        False,
+        "--fresh",
+        help="With --apk, uninstall any existing copy first (wipes app data). Needs --yes.",
+    ),
+    yes: bool = typer.Option(False, "--yes", help="Required for --fresh."),
 ) -> None:
-    """Boot an AVD and wait until adb sees it (headless by default)."""
+    """Boot an AVD and wait until adb sees it (headless by default).
+
+    With ``--apk … --launch`` this is the whole bootstrap in one call: boot, install the build if
+    it is not already there, open it, and return the first screen with usable element ids.
+    """
     from . import emulator as emulator_mod
 
     opts = _opts(ctx)
     cfg = opts.load()
-    try:
-        _emulator_emit(
-            emulator_mod.start(
-                avd,
-                headless=headless,
-                animations=animations,
-                audio=audio,
-                wait_s=float(wait),
-                cache_dir=cfg.cache.dir,
-                gpu=gpu,
-                idle_timeout_s=float(idle_stop) if headless else 0.0,
-                parallel=parallel,
-                port=port,
-                read_only=read_only,
-                owner=owner,
-            ),
-            ctx,
+    if (launch or reinstall or fresh) and not apk:
+        err = UsageError(
+            "--launch/--reinstall/--fresh only apply to --apk",
+            hint="Add `--apk <path>`, or drop the flag.",
         )
+        emit_error(err)
+        raise typer.Exit(int(err.exit_code))
+    try:
+        booted = emulator_mod.start(
+            avd,
+            headless=headless,
+            animations=animations,
+            audio=audio,
+            wait_s=float(wait),
+            cache_dir=cfg.cache.dir,
+            gpu=gpu,
+            idle_timeout_s=float(idle_stop) if headless else 0.0,
+            parallel=parallel,
+            port=port,
+            read_only=read_only,
+            owner=owner,
+        )
+        if apk:
+            booted["install"] = _install_on_booted_emulator(
+                ctx,
+                serial=str(booted["serial"]),
+                bundle=apk,
+                launch=launch,
+                reinstall=reinstall,
+                fresh=fresh,
+                confirmed=yes,
+            )
+        _emulator_emit(booted, ctx)
     except AuaError as err:
         emit_error(err)
         raise typer.Exit(int(err.exit_code)) from err
+
+
+def _install_on_booted_emulator(
+    ctx: typer.Context,
+    *,
+    serial: str,
+    bundle: str,
+    launch: bool,
+    reinstall: bool,
+    fresh: bool,
+    confirmed: bool,
+) -> dict[str, Any]:
+    """Install (and optionally launch) a bundle on the emulator this command just booted.
+
+    A second ``GlobalOpts`` pinned to the new serial rather than the ambient one: the boot may
+    have allocated a console port nobody has named yet, and an Engine that reconnected by
+    "the only attached device" would pick a different emulator on any host running two.
+    """
+
+    opts = _opts(ctx)
+    pinned = replace(opts, serial=serial, _cfg=None)
+    engine = pinned.engine()
+    result = engine.install_app(
+        bundle,
+        mode="fresh" if fresh else "reinstall" if reinstall else "if-needed",
+        confirmed=confirmed,
+        launch=launch,
+        observe=launch,
+    )
+    payload = result.model_dump(mode="json", exclude_none=True)
+    if _OBSERVATION_VIEW is not None:
+        payload = trim_observation_payload(payload, _OBSERVATION_VIEW, fmt=pinned.fmt())
+    return payload
 
 
 @emulator_app.command("stop")
@@ -3926,6 +4158,97 @@ def emulator_stop_cmd(
     except AuaError as err:
         emit_error(err)
         raise typer.Exit(int(err.exit_code)) from err
+
+
+_INSTALL_MODE_HELP = (
+    "Only when the app is ALREADY installed do these differ. Default: leave it alone unless the "
+    "bundle's version differs. --reinstall: push anyway, keeping app data. --fresh: uninstall "
+    "first (wipes data; the only mode that survives a signing-key change) — needs --yes."
+)
+
+
+@app.command(name="install")
+def install_cmd(
+    ctx: typer.Context,
+    bundle: str = typer.Argument(
+        ...,
+        metavar="APK",
+        help="Path to the .apk to install (e.g. app/build/outputs/apk/debug/app-debug.apk).",
+    ),
+    launch: bool = typer.Option(
+        False,
+        "--launch",
+        help="Open the app afterwards and return the screen it landed on — install, launch, and "
+        "observe in one call instead of three.",
+    ),
+    reinstall: bool = typer.Option(False, "--reinstall", help=f"Reinstall mode. {_INSTALL_MODE_HELP}"),
+    fresh: bool = typer.Option(False, "--fresh", help="Uninstall first, then install. Needs --yes."),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        help="Required for --fresh: confirms removing the installed app and ALL its data "
+        "(feature-flag overrides, login session, local config).",
+    ),
+    grant: bool = typer.Option(
+        False,
+        "--grant",
+        help="Auto-grant declared runtime permissions. Off by default — pre-granting silently "
+        "skips the permission dialog a scenario may be there to verify.",
+    ),
+    package: str | None = typer.Option(
+        None,
+        "--package",
+        help="Assert the bundle's package id; the install fails if the APK declares another.",
+    ),
+    activity: str | None = typer.Option(
+        None, "--activity", help="With --launch, pin the entry Activity on multi-launcher builds."
+    ),
+    observe: bool = typer.Option(
+        True, "--observe/--no-observe", help="With --launch, fold in the resulting screen."
+    ),
+    install_timeout: int = typer.Option(
+        300, "--install-timeout", help="Seconds to allow the install itself; a cold emulator is slow."
+    ),
+) -> None:
+    """Put a build on the device — replaces a hand-rolled `adb install`.
+
+    Idempotent by default: an app already installed at the bundle's version is left alone, so a
+    repeated run costs one package query instead of a multi-second push. Version is compared, not
+    assumed — a rebuilt bundle with *any* different version installs, including an older one, so
+    pointing this at a previous build deliberately downgrades rather than refusing.
+
+    It also reports two things raw adb does not: it fails if the package manager never registered
+    the package (adb can print Success anyway), and it says so when the target is a ``-read-only``
+    emulator, where the install is real but disappears when the AVD stops.
+
+    With ``--launch`` the whole bootstrap is one call. ``aua emulator start --apk`` goes further
+    and boots the AVD too.
+    """
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        if fresh and reinstall:
+            raise UsageError(
+                "pass --reinstall or --fresh, not both",
+                hint="--reinstall keeps app data; --fresh wipes it.",
+            )
+        _emit(
+            _route(
+                engine,
+                "install_app",
+                bundle=bundle,
+                package=package,
+                mode="fresh" if fresh else "reinstall" if reinstall else "if-needed",
+                confirmed=yes,
+                grant_permissions=grant,
+                launch=launch,
+                activity=activity,
+                observe=observe,
+                timeout_ms=int(install_timeout) * 1000,
+            ),
+            fmt,
+        )
+
+    _run(ctx, go)
 
 
 @app.command(name="app")

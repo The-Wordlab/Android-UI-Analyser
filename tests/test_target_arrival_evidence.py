@@ -9,6 +9,7 @@ from android_ui_analyser.memory import (
     AppMap,
     RouteEdge,
     ScreenRecord,
+    arrival_destination_terms,
     screen_is_root,
     target_arrival_evidence,
 )
@@ -169,6 +170,19 @@ def test_unknown_target_and_empty_goal_have_no_arrival_evidence() -> None:
 
     assert target_arrival_evidence(app, "missing", "Catalog", []) is None
     assert target_arrival_evidence(app, "catalog", "   ", []) is None
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Tap History archive from these choices: Grammar, History archive, Physics",
+        "Press History archive among the visible destinations",
+        "Click History archive and verify the result count",
+        "Choose History archive among Grammar, History archive, and Physics",
+    ],
+)
+def test_action_verbs_extract_only_the_requested_destination(goal: str) -> None:
+    assert arrival_destination_terms(goal) == ["history", "archive"]
 
 
 def test_screen_is_root_respects_routes_and_capture_context() -> None:

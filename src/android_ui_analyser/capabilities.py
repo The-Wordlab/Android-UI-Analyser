@@ -208,6 +208,15 @@ CAPABILITIES: tuple[Capability, ...] = (
         "list_devices",
         cleanup="stop only an emulator this session started",
     ),
+    Capability(
+        "install",
+        "Put a build on the device and open it, skipping the push when that version is present.",
+        ("install", "apk", "build", "sideload", "bundle", "reinstall"),
+        76,
+        "aua install <app.apk> --launch",
+        "install_app",
+        risk="replaces the installed build; --fresh also removes its data",
+    ),
 )
 
 

@@ -55,6 +55,16 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "when the foreground is unrelated, add `--app <package>` (alias `--package`, optional "
         "`--activity`) and session start launches it then reuses that folded observation. "
         "risky candidates are previewed and never receive authorization from the goal text. "
+        "For deterministic acceptance proof, add `--contract <yaml>` and optionally "
+        "`--artifacts-dir <dir> --evidence all --junit`. Authored checkpoints reuse flow "
+        "assertions, require one fresh fingerprinted frame, and reject `--phase-done`. Every "
+        "analyzed response carries `observation_contract` with `reusable` and "
+        "`analyze_needed`. A contracted `session finish` stays active and returns "
+        "`contract_incomplete` until all checkpoints, including UI cleanup, pass; only explicit "
+        "`--allow-incomplete` bypasses that proof. Use `--wait-for-lease <seconds>` for bounded "
+        "contention without switching or stealing the requested device. Once complete, "
+        "`session candidate-flow NAME` previews the exact post-watermark action window; "
+        "`--save` first requires an explicit `--reset-flow` and a successful replay. "
         "Use `aua session review` to see avoidable calls: `ok` means the review completed, "
         "while `run_ok` and `failures` describe the run without making the review itself "
         "another failure (`run_ok: null` means an older duplicated invocation had no provable "
@@ -255,7 +265,9 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "otherwise unique stable non-PII text. A capture with no safe selector is refused with "
         "edit/re-record guidance. "
         "`aua flow run <name> --param K=V` drives the whole journey — launch, taps, waits, "
-        "rich `assert` count/text/state checks, explicit-axis `assert_order`, named `screenshot` "
+        "rich `assert` count/text/state/structure checks (`within`, `same_parent_as`, "
+        "`contains_all`), explicit-axis `assert_order` including normalized `reading` order, "
+        "named `screenshot` "
         "checkpoints, cross-app auth, even `goto:` steps — and on divergence returns the failing "
         "step index + remaining steps; fix and resume with `--from-step N`. Flows live under "
         "`<memory.dir>/flows/*.yaml` (`aua flow list|show|delete`); delete is idempotent and "
@@ -688,6 +700,9 @@ COMMAND_SYNONYMS: dict[str, str] = {
     "check": "has",
     "back": "key-and-analyze",
     "home": "key-and-analyze",
+    "sideload": "install",
+    "apk": "install",
+    "adb-install": "install",
 }
 
 
@@ -713,7 +728,7 @@ KEY_FLAGS: list[tuple[str, str]] = [
     (
         "analyze — views (use these instead of post-processing JSON)",
         "`--fields <csv>` (`id,text,rid,desc,bounds,center,type,clickable,enabled,focused,"
-        "checkable,checked,selected,scrollable,long_clickable,password,resource_id,source,"
+        "checkable,checked,selected,scrollable,long_clickable,password,resource_id,parent,source,"
         "confidence`), `--nonempty`, `--no-system`, `--no-ime`, `--no-wrappers`, `--all`, "
         "`--where-text <substr>`, "
         "`--where-rid <substr>`, `--clickable`, `--region x1,y1,x2,y2`, `--limit N`, "
@@ -803,6 +818,18 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "`launch <pkg> [--activity .Entry] [--clear --yes]`, `stop|kill|clear|grant`. "
         "`clear` / `launch --clear` wipe ALL app data (typically flags + login) — **requires "
         "`--yes` / `--yes-wipe-flags`**; re-apply flags afterwards",
+    ),
+    (
+        "install",
+        "`<app.apk> [--launch] [--reinstall | --fresh --yes] [--grant] [--package <pkg>]`. "
+        "Never shell out to `adb install`. Idempotent: an app already present at the bundle's "
+        "version is skipped, so re-running is one package query instead of a multi-second push; "
+        "the bundle names its own package. `--launch` returns the landing screen, so install + "
+        "open + observe is one call. `--reinstall` pushes anyway and keeps app data; `--fresh` "
+        "uninstalls first — the only mode that survives a signing-key change "
+        "(`INSTALL_FAILED_UPDATE_INCOMPATIBLE`) and the only one that wipes data. "
+        "`aua emulator start --apk <app.apk> --launch` and `aua session start --apk <app.apk>` "
+        "fold boot + install + launch into that same single call",
     ),
     (
         "db",
@@ -971,6 +998,14 @@ AGENT_BEST_PRACTICES_PERCEPTION: list[tuple[str, str, str]] = [
         "Use `aua db list|schema|query|execute|backup|restore`",
         "AUA targets the leased device/package, snapshots sidecars coherently, returns JSON, "
         "and makes every confirmed mutation recoverable.",
+    ),
+    (
+        "`adb -s <serial> install -r <apk>` to get the build on the device",
+        "`aua install <apk> --launch` (or `aua emulator start --apk <apk> --launch`)",
+        "It targets the leased device, skips the push when that version is already installed, "
+        "verifies the package manager actually registered it (adb can print Success when it did "
+        "not), says so when the target is a `-read-only` emulator that discards the install, and "
+        "returns the launched screen — so boot/install/launch/observe is one call, not four.",
     ),
     (
         "`analyze` after every `tap`/`input` (or always `--no-observe` then re-analyze)",
@@ -1586,7 +1621,8 @@ do not replace an AUA workflow with raw `adb`.
 
 1. Start goal-oriented work with `aua session start --goal "<what must be verified>"`. Add
    `--app <package>` for an unrelated foreground app. Reuse its observation and follow its
-   exact `recommended_call`; do not immediately re-analyze.
+   exact `recommended_call`; do not immediately re-analyze. `--contract` requires fresh
+   proof and strict finish. `--artifacts-dir` records evidence; `--wait-for-lease` waits safely.
 2. Prefer navigation in this order: verified `goto`, matching saved `flow`, proven deeplink,
    then a manual analyzed action. Preview risky routes; goal text never authorizes destructive,
    external, settings, data, payment, send, or sign-out effects.
@@ -1609,6 +1645,8 @@ do not replace an AUA workflow with raw `adb`.
    counts `folded_internal_events` such as an action-bound wait. The snapshot precedes its current
    review/finish call, so `reporting_call_included` is false and
    `top_level_calls_including_reporting_call` adds that call.
+8. After a contract passes, `session candidate-flow NAME --save` requires explicit
+   `--reset-flow` and passing reset/replay.
 
 Flow previews expose value-free `selector_resilience`. Trust an unmapped arrival only when its
 source is `satisfied_action_until` from the preceding action's privacy-safe positive `--until`

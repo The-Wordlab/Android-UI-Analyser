@@ -5,13 +5,16 @@ from __future__ import annotations
 import re
 from collections import Counter
 from collections.abc import Sequence
+from pathlib import Path
 
 from .. import hierarchy
 from ..device import Device, connect, list_devices
 from ..memory import matches_any
+from ..providers.base import ScreenImage
 from ..schema import DeviceInfo, Element
 from ..scroll_geom import _iter_nodes, _node_box
-from .base import NormalizedTree, PlatformAdapter
+from . import android_apk
+from .base import AppBundle, InstalledApp, NormalizedTree, PlatformAdapter
 from .registry import register_platform
 
 _PACKAGE_RE = re.compile(r'package="([^"]+)"')
@@ -38,6 +41,7 @@ class AndroidPlatform(PlatformAdapter):
     capabilities = frozenset(
         {
             "app.files",
+            "app.install",
             "app.lifecycle",
             "device.logs",
             "device.network",
@@ -75,6 +79,64 @@ class AndroidPlatform(PlatformAdapter):
     def diagnostic_logs(self, runtime: Device, *, lines: int = 400) -> str:
         raw = runtime.logcat(dump=True)
         return "\n".join(raw.splitlines()[-max(1, lines) :])
+
+    def capture_screenshot(self, runtime: Device) -> ScreenImage:
+        return runtime.screenshot()
+
+    def inspect_app_bundle(self, bundle: Path) -> AppBundle:
+        info = android_apk.inspect_bundle(bundle)
+        return AppBundle(
+            app_id=info.package,
+            version_name=info.version_name,
+            version_code=info.version_code,
+        )
+
+    def installed_app(self, runtime: Device, app_id: str) -> InstalledApp:
+        state = android_apk.installed_app(runtime.serial, app_id)
+        return InstalledApp(
+            app_id=state.package,
+            installed=state.installed,
+            version_name=state.version_name,
+            version_code=state.version_code,
+        )
+
+    def install_app_bundle(
+        self,
+        runtime: Device,
+        bundle: Path,
+        *,
+        replace: bool = True,
+        grant_permissions: bool = False,
+        timeout_s: float = 300.0,
+    ) -> None:
+        self.prepare_host()
+        android_apk.install_bundle(
+            runtime.serial,
+            bundle,
+            reinstall=replace,
+            grant_permissions=grant_permissions,
+            timeout_s=timeout_s,
+        )
+
+    def uninstall_app(self, runtime: Device, app_id: str) -> None:
+        self.prepare_host()
+        android_apk.uninstall(runtime.serial, app_id)
+
+    def install_persistence_warning(self, runtime: Device) -> str | None:
+        # A `-read-only` emulator (what `--parallel` implies) puts disk writes in an overlay it
+        # throws away on stop. The install genuinely works for the life of this instance, so
+        # refusing would break the ordinary parallel-agent run — but saying nothing is worse: a
+        # caller who boots read-only, installs, and expects the build to still be there next
+        # session gets `Success` now and "not installed" later, with nothing explaining the gap.
+        from ..emulator import discards_writes
+
+        if not discards_writes(runtime.serial, cache_dir=self.config.cache.dir):
+            return None
+        return (
+            f"{runtime.serial} was booted -read-only (--parallel implies it), so this install "
+            "lives only until the emulator stops. Boot with `--parallel --no-read-only` if the "
+            "build must survive a restart."
+        )
 
     def element_state(self, raw_tree: str, element: Element) -> dict[str, object]:
         state = super().element_state(raw_tree, element)
