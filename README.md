@@ -863,6 +863,13 @@ so later agents and contributors can reproduce or improve the adapter without de
 
 ---
 
+## Adding a platform adapter
+
+Android is the only built-in platform today, but the engine selects it through a platform
+strategy. `device.platform`, `--platform`, or `AUA_PLATFORM` can select an installed adapter;
+third-party packages register adapters through the `aua.platforms` Python entry-point group.
+See [Platform adapters](docs/platform-plugins.md) for the contract and a minimal plugin skeleton.
+
 ## Adding a provider
 
 Three steps, zero changes to `engine.py` or `cli.py`:

@@ -66,6 +66,7 @@ from .memory import (
     step_display,
     target_arrival_evidence,
 )
+from .platforms import PlatformAdapter, PlatformFactory
 from .providers.base import DetBox, OcrProvider, Point, ScreenAnalysisResult, ScreenImage, TextBox
 from .providers.registry import ProviderFactory, registered_names, run_chain
 from .schema import (
@@ -114,6 +115,11 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 logger = logging.getLogger("android_ui_analyser.engine")
 
+# Keep the historical module-level monkeypatch seams working for downstream tests and
+# integrations while production construction moves behind PlatformAdapter.
+_DEFAULT_ANDROID_CONNECT = connect
+_DEFAULT_ANDROID_LIST_DEVICES = list_devices
+
 # A run of text one line tall measures roughly two to three average character widths
 # in height; a wrapped paragraph measures many. Used to decide whether aiming at a
 # phrase inside an element can only move horizontally.
@@ -144,8 +150,6 @@ _LAUNCH_HIERARCHY_POLL_S = 0.05
 _GENERIC_MANUAL_MATCH_TERMS = frozenset(
     {"action", "button", "control", "item", "menu", "option", "page", "settings", "ui", "view"}
 )
-
-_PACKAGE_RE = re.compile(r'package="([^"]+)"')
 
 _AWAIT_PREFIXES = {
     "text": "text",
@@ -408,13 +412,9 @@ def _package_from_xml(xml: str, ignore: Sequence[str] = ("com.android.systemui",
     chrome and IMEs overlay every app, so an open keyboard must never win the vote.
     Falls back to the overall majority when every node is ignorable.
     """
-    pkgs = _PACKAGE_RE.findall(xml)
-    if not pkgs:
-        return None
-    counts = Counter(p for p in pkgs if p and not matches_any(p, ignore))
-    if not counts:
-        counts = Counter(pkgs)
-    return counts.most_common(1)[0][0]
+    from .platforms.android import package_from_tree
+
+    return package_from_tree(xml, ignore)
 
 
 def _parse_legacy_steps(action: str) -> list[RouteStep] | None:
@@ -558,9 +558,12 @@ class Engine:
         *,
         device: Device | None = None,
         factory: ProviderFactory | None = None,
+        platform: PlatformAdapter | None = None,
     ) -> None:
         self.config = config
         self._device = device
+        self._platform = platform
+        self._platform_factory = PlatformFactory(config)
         self.factory = factory or ProviderFactory(config)
         self._mem: AppMemoryStore | None = None
         self._version_cache: dict[str, str | None] = {}
@@ -625,10 +628,30 @@ class Engine:
     # ----------------------------------------------------------------- device
 
     @property
+    def platform(self) -> PlatformAdapter:
+        """The selected platform strategy, created only when first needed."""
+
+        if self._platform is None:
+            self._platform = self._platform_factory.create()
+        return self._platform
+
+    def _connect_target(self, target_id: str | None) -> Device:
+        # AUA historically exposed ``engine.connect`` as an informal injection seam. Preserve
+        # it during this migration so existing embedders do not have to move atomically.
+        if self.platform.name == "android" and connect is not _DEFAULT_ANDROID_CONNECT:
+            return connect(target_id)
+        return self.platform.connect(target_id)
+
+    def _list_targets(self) -> list[DeviceInfo]:
+        if self.platform.name == "android" and list_devices is not _DEFAULT_ANDROID_LIST_DEVICES:
+            return list_devices()
+        return self.platform.list_targets()
+
+    @property
     def device(self) -> Device:
         """Lazily connect; doctor/devices/config work without ever touching this."""
         if self._device is None:
-            self._device = connect(self._lease_device())
+            self._device = self._connect_target(self._lease_device())
             self._claim_memory_session()
         return self._device
 
@@ -665,24 +688,22 @@ class Engine:
         from . import leases
 
         try:
-            infos = [d for d in list_devices() if d.state == "device"]
+            infos = [d for d in self._list_targets() if d.state == "device"]
         except Exception:
             return explicit  # cannot enumerate; let connect() produce the real error
         if not infos:
             return explicit
 
-        # A fresh automation owner should not take over a USB phone merely because adb listed
-        # it before an emulator. Android's canonical emulator serials are `emulator-<port>`;
-        # keep adb order within each class, then let choose_device preserve sticky ownership,
-        # explicit pins, capability checks, and the physical-device fallback.
-        infos.sort(key=lambda d: not d.serial.startswith("emulator-"))
+        # Preserve each platform's preference (Android, for example, favours a disposable
+        # emulator over a USB phone) without teaching the engine platform-specific identities.
+        infos.sort(key=self.platform.target_preference)
 
         needs = list(self._lease_needs or [])
         # Capabilities cost adb round-trips, so only probe when someone actually asked.
         candidates = [
             (
                 d.serial,
-                leases.probe_capabilities(cfg.cache.dir, d.serial) if needs else {},
+                self.platform.probe_target_capabilities(d.serial) if needs else {},
             )
             for d in infos
             if d.serial
@@ -793,7 +814,7 @@ class Engine:
             leases.renew(self.config.cache.dir, serial, owner=owner)
 
     def list_devices(self) -> list[DeviceInfo]:
-        return list_devices()
+        return self._list_targets()
 
     # ----------------------------------------------------------------- capture
 
@@ -806,8 +827,6 @@ class Engine:
     def _capture_hierarchy(
         self, device: Device, w: int, h: int
     ) -> tuple[list[Element], str | None, str]:
-        from . import hierarchy
-
         perf = self.config.perf
         if perf.prefetch:
             slot = self._prefetch.take()
@@ -816,10 +835,14 @@ class Engine:
                 return slot.elements, slot.package, xml_hash
 
         compressed = bool(self.config.device.compressed_hierarchy)
-        xml = device.dump_hierarchy(compressed=compressed)
-        xml_hash = hashlib.sha1(xml.encode()).hexdigest()
-        pkg = _package_from_xml(xml, self.config.memory.ignore_packages)
-        return hierarchy.parse_hierarchy(xml, (w, h)), pkg, xml_hash
+        raw_tree = self.platform.dump_tree(device, compact=compressed)
+        tree_hash = hashlib.sha1(raw_tree.encode()).hexdigest()
+        normalized = self.platform.normalize_tree(
+            raw_tree,
+            (w, h),
+            ignored_app_ids=self.config.memory.ignore_packages,
+        )
+        return normalized.elements, normalized.app_id, tree_hash
 
     def _kick_hierarchy_prefetch(self) -> None:
         """Speculatively dump+parse the hierarchy for the next analyze."""
@@ -827,9 +850,8 @@ class Engine:
             return
         if self._device is None:
             return
-        from . import hierarchy
-
         device = self._device
+        platform = self.platform
         compressed = bool(self.config.device.compressed_hierarchy)
         try:
             w, h = device.window_size()
@@ -837,11 +859,15 @@ class Engine:
             return
 
         def dump() -> str:
-            return device.dump_hierarchy(compressed=compressed)
+            return platform.dump_tree(device, compact=compressed)
 
-        def parse(xml: str) -> tuple[list[Element], str | None]:
-            pkg = _package_from_xml(xml, self.config.memory.ignore_packages)
-            return hierarchy.parse_hierarchy(xml, (w, h)), pkg
+        def parse(raw_tree: str) -> tuple[list[Element], str | None]:
+            normalized = platform.normalize_tree(
+                raw_tree,
+                (w, h),
+                ignored_app_ids=self.config.memory.ignore_packages,
+            )
+            return normalized.elements, normalized.app_id
 
         self._prefetch.kick(dump, parse)
 
@@ -1392,8 +1418,9 @@ class Engine:
                 if wv_cfg.enabled:
                     from . import webview as webview_mod
 
-                    xml_dump = device.dump_hierarchy(
-                        compressed=bool(self.config.device.compressed_hierarchy)
+                    xml_dump = self.platform.dump_tree(
+                        device,
+                        compact=bool(self.config.device.compressed_hierarchy),
                     )
                     if webview_mod.should_try_webview(hierarchy_elements, xml_dump):
                         shell = None
@@ -2407,9 +2434,13 @@ class Engine:
         if pkg:
             return pkg
         try:
-            return _package_from_xml(
-                self.device.dump_hierarchy(), self.config.memory.ignore_packages
-            )
+            device, w, h = self._context()
+            raw_tree = self.platform.dump_tree(device)
+            return self.platform.normalize_tree(
+                raw_tree,
+                (w, h),
+                ignored_app_ids=self.config.memory.ignore_packages,
+            ).app_id
         except Exception:  # pragma: no cover
             return None
 
@@ -7438,7 +7469,6 @@ class Engine:
         Runs pixel settle and hierarchy double-sample in one loop so a Compose
         transition that updates the tree early can return before pixels fully idle.
         """
-        from . import hierarchy as hierarchy_mod
         from . import imaging
 
         device = self.device
@@ -7506,12 +7536,13 @@ class Engine:
                 next_hier_at = now + 0.06
                 with contextlib.suppress(Exception):
                     dump_started = time.monotonic()
-                    xml = device.dump_hierarchy(
-                        compressed=bool(self.config.device.compressed_hierarchy)
+                    xml = self.platform.dump_tree(
+                        device,
+                        compact=bool(self.config.device.compressed_hierarchy),
                     )
                     dump_ms = (time.monotonic() - dump_started) * 1000.0
                     w, h = device.window_size()
-                    els = hierarchy_mod.parse_hierarchy(xml, (w, h))
+                    els = self.platform.normalize_tree(xml, (w, h)).elements
                     parts: list[str] = []
                     for e in els:
                         if getattr(e, "window", None) == "system":
@@ -8660,7 +8691,7 @@ class Engine:
     # ------------------------------------------------------------- scroll internals
 
     def _dump(self) -> str:
-        return self.device.dump_hierarchy()
+        return self.platform.dump_tree(self.device)
 
     def _scroll_box(
         self, *, from_id: int | None = None, selector: dict[str, Any] | None = None, xml: str = ""
@@ -9825,7 +9856,7 @@ class Engine:
         ):
             return True
         with contextlib.suppress(Exception):
-            xml = device.dump_hierarchy()
+            xml = self.platform.dump_tree(device)
             if "Open with" in xml or ("Just once" in xml and "Always" in xml):
                 return True
         return False
@@ -10637,7 +10668,7 @@ class Engine:
         device = self.device
         compressed = bool(self.config.device.compressed_hierarchy)
         try:
-            xml = device.dump_hierarchy(compressed=compressed)
+            xml = self.platform.dump_tree(device, compact=compressed)
         except Exception:  # pragma: no cover
             return None
         return hashlib.sha1(xml.encode()).hexdigest()

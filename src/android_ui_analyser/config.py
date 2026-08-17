@@ -36,10 +36,20 @@ _SECRET_KEYS = {"api_key", "key", "token", "secret", "password"}
 
 class DeviceCfg(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    # Strategy name registered in ``aua.platforms``. Android remains the only built-in.
+    platform: str = "android"
     serial: str | None = None  # null = auto-detect
     backend: str = "uiautomator2"  # uiautomator2 | accessibility (future)
     # Drop non-visible nodes in dump_hierarchy — smaller XML on deep trees.
     compressed_hierarchy: bool = True
+
+    @field_validator("platform")
+    @classmethod
+    def _normalise_platform(cls, value: str) -> str:
+        name = value.strip().lower()
+        if not name:
+            raise ValueError("must not be empty")
+        return name
 
 
 class PerfCfg(BaseModel):
@@ -499,6 +509,7 @@ def _coerce_scalar(value: str) -> Any:
 
 
 _ENV_ALIASES: dict[str, tuple[str, ...]] = {
+    "AUA_PLATFORM": ("device", "platform"),
     "AUA_SERIAL": ("device", "serial"),
     "AUA_FORMAT": ("output", "format"),
     "AUA_ANNOTATE": ("output", "annotate"),

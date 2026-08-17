@@ -56,7 +56,38 @@ Requirements: **Python 3.11+**, **`adb` on PATH** (Android SDK platform-tools), 
   bundled — it needs the `aua` binary on PATH.
 - Adding a perception provider: subclass in `providers/`, register with the decorator in
   `providers/registry.py`, add a `models.<name>` config block — no edits to `engine.py`/`cli.py`.
+- Adding any device-facing feature: follow the platform boundary below. A new Android/ADB feature
+  is incomplete until it has a platform-neutral contract and is reached through the selected
+  adapter.
 - Design rationale: `docs/ARCHITECTURE.md`. Full product spec: `PRD.md`.
+
+### Platform boundary — mandatory for new features
+
+`PlatformAdapter` is the gateway between AUA's reusable agent layer (`analyze`, actions, `goto`,
+history, maps, flows) and native automation tooling. Android is the only built-in adapter today and
+remains the default, but new work must preserve the ability to plug in iOS, web, or another runtime.
+
+- Do **not** add direct `adb`, `adbutils`, `uiautomator2`, emulator-console, `dumpsys`, `logcat`,
+  `run-as`, or other platform SDK/tool calls to `engine.py`, CLI, MCP, daemon, or generic services.
+- First define a platform-neutral method on `PlatformAdapter`, or a focused capability protocol
+  owned and returned by it. The adapter may delegate to platform-owned runtime/services rather than
+  accumulating every implementation in one file.
+- Put the Android implementation in `platforms/android.py` or an Android-only module reachable only
+  through `AndroidPlatform`, and add the corresponding name to its `capabilities` set.
+- Core layers call the selected adapter and use its capability contract. Never add new
+  `if platform == "android"` branches there, bypass `PlatformFactory`, or silently fall back to ADB
+  when another platform is selected. The explicitly marked legacy monkeypatch shim is migration
+  debt and must not be extended.
+- Unsupported optional features return a clear unsupported-capability error. Android-only commands
+  still use this contract; being Android-only today is not an exception to the boundary.
+- CLI and MCP must share the same engine implementation and error behavior.
+- Every new platform operation needs a fake-adapter test proving the core has no Android dependency,
+  plus an Android adapter regression test.
+
+Existing direct ADB calls predate this boundary and are migration debt, not patterns to copy. If new
+work touches such a call, move the touched operation behind the adapter when practical and never
+spread it into another core module. The detailed plugin contract is in
+`docs/platform-plugins.md`; repository-wide coding-agent instructions are also in `AGENTS.md`.
 
 ## How the tool works (quick reference)
 

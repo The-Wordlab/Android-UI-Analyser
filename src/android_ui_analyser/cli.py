@@ -138,6 +138,7 @@ def _annotate_arg(value: str | None) -> bool | str | None:
 class GlobalOpts:
     """Global options parsed by the root callback and stashed on ``ctx.obj``."""
 
+    platform: str | None = None
     serial: str | None = None
     config: str | None = None
     format: str | None = None
@@ -168,8 +169,13 @@ class GlobalOpts:
     def cli_overrides(self) -> dict[str, Any]:
         """Translate the global flags into a config-override tree (None = unset)."""
         overrides: dict[str, Any] = {}
+        device: dict[str, Any] = {}
+        if self.platform is not None:
+            device["platform"] = self.platform
         if self.serial is not None:
-            overrides["device"] = {"serial": self.serial}
+            device["serial"] = self.serial
+        if device:
+            overrides["device"] = device
         if self.format is not None or self.with_image:
             out: dict[str, Any] = {}
             if self.format is not None:
@@ -1583,6 +1589,11 @@ def capabilities_cmd(
 @app.callback()
 def main(
     ctx: typer.Context,
+    platform: str | None = typer.Option(
+        None,
+        "--platform",
+        help="Platform strategy (default: android; installed plugins may add others).",
+    ),
     serial: str | None = typer.Option(
         None, "--serial", help="Target device serial (default: only/first)."
     ),
@@ -1704,6 +1715,7 @@ def main(
         emit_error(err)
         raise typer.Exit(int(err.exit_code))
     ctx.obj = GlobalOpts(
+        platform=platform,
         serial=serial,
         config=config,
         format=format,
@@ -6989,6 +7001,7 @@ def mcp(ctx: typer.Context) -> None:
 # missing value-taking global makes `_first_subcommand` land on the option's *value*, so
 # `aua --owner X analyze --fields id,text` rewrote `--fields` for a command that has one.
 _STATIC_GLOBAL_OPTS: dict[str, bool] = {  # name -> takes a value
+    "--platform": True,
     "--serial": True,
     "--config": True,
     "--format": True,
