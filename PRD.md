@@ -64,7 +64,8 @@ interface-agnostic **engine library** shared by both.
   agent or an external harness orchestrates tests).
 - Not iOS (Android-only; architecture must not preclude a later iOS backend).
 - Not a fork of Maestro/mobile-mcp/droidrun (we depend on `uiautomator2`, not fork).
-- No bundled model weights (providers download or call out; document how).
+- No bundled base or full-model weights. A small reviewed adapter may be bundled with its
+  license, provenance manifest, and an explicit external-base setup contract.
 
 ## 4. Primary users & workflow
 
@@ -418,10 +419,12 @@ verbatim. `memory.redact` (default on) controls this.
 
 ## 7. Provider system (pluggable models + fallbacks)
 
-Three provider kinds, each an abstract base class in `providers/base.py`, each
-resolved through an **ordered fallback chain** by `providers/registry.py`. The chain
-runner tries providers in order; on exception, timeout, or empty result it logs (to
-stderr) and advances to the next; if all fail it raises a `ProviderError` (exit 4).
+Five provider kinds, each behind an abstract base class in `providers/base.py` and
+resolved by `providers/registry.py`. Perception and planner chains try providers in
+order; on exception, timeout, or empty result they advance to the next. The policy
+boundary is narrower: deterministic code constructs and guards complete calls before
+the configured selector sees an independent privacy-screened projection and returns one
+opaque ID; AUA retains the authoritative call map.
 
 ### 7.1 Interfaces
 - `OcrProvider.recognize(image) -> list[TextBox{text, bounds, confidence}]`
@@ -431,6 +434,9 @@ stderr) and advances to the next; if all fail it raises a `ProviderError` (exit 
 - `PlannerProvider.decide(objective, elements, image?) -> PlannerDecision{action, target_id?, text?, arg?}`
   — an LLM navigator that picks the next action (or `done`/`give-up`) from a compact
   element list (image attached only on weakly-labelled screens).
+- `PolicyProvider.select(context) -> int|null` — choose one offered opaque candidate ID.
+  The exact calls remain on the trusted side; a policy cannot author arguments, grant
+  authorization, execute a call, or relax deterministic guards.
 
 Each provider declares `name`, `is_available() -> (bool, reason)` (checks deps,
 platform, keys, endpoint), and reads its settings from the resolved config.
@@ -469,6 +475,30 @@ platform, keys, endpoint), and reads its settings from the resolved config.
   destructive guard, and it is bounded by a per-recovery step cap. Never on the escalation
   ladder and never invoked on the happy path — gated by `planner.enabled` **and** an
   explicit per-call opt-in (`--assist`, or the `aua navigate` command).
+
+**Guarded policy** (optional; `policy.enabled: false`, `mode: off` by default)
+- `functiongemma` — local Apple-silicon MLX selector for AUA-authored tap candidates in an
+  active verification phase. AUA ships the modified ~15.2 MB LoRA adapter under the included
+  Gemma terms; the pinned ~543 MiB MLX base remains external and is never downloaded
+  automatically. `shadow` returns audit metadata only; `advisory` may return a separate exact
+  `policy_suggestion`, but never replaces or executes the deterministic recommendation. Bundled
+  v3's authenticated manifest caps rollout at shadow, so advisory fails closed as
+  `unsupported_mode` before inference.
+- Guarding happens before and after inference. Zero candidates fail closed, one bypasses the
+  model, and the frozen v3 adapter runs only on exactly four candidates; two/three are an
+  unsupported cardinality. Its synthetic v3 static gate remains **FAIL** (one unauthorized and
+  one redundant raw selection). A 96-case host-only engine-shaped production-serializer smoke also
+  failed at 60/96 semantic accuracy (62.5%) with 37.5-point target-ID and 54.17-point target-position
+  gaps, despite 100% protocol/offered-ID/provider agreement.
+- A failure-driven v4 continuation fixed the untouched smoke (96/96), reached 2,767/2,768 validation
+  (99.9639%, including 719/720 production-shaped cases), perfect held-out production choices at cardinalities
+  2/3/4 (64/64, 144/144, 512/512), and a 4/4 clean closed loop. It was still rejected: the
+  independent combined test was 2,764/2,768 (99.8555%) with 99.6875% critical accuracy, 100%
+  parsing, zero redundant selections, and four unauthorized early `session_finish` choices in
+  `sequence_recover_unknown` instead of
+  `analyze_screen`. V4 remains ignored/not bundled, v3 remains shadow-only, and the next iteration
+  requires independent recovery-focused training data and evaluation. Unguarded/autonomous
+  execution remains out of scope.
 
 ### 7.3 Adding a provider
 Document (in README) the contract: subclass the relevant base, register via an entry
@@ -546,6 +576,11 @@ grounding:
 planner:
   enabled: false                       # opt-in LLM navigator (--assist / `aua navigate`)
   chain: [gemini_flash]
+policy:
+  enabled: false                       # off by default; never autonomous execution
+  mode: off                            # off | shadow | advisory
+  chain: [functiongemma]
+  max_candidates: 4
 models:
   yolo:        { weights: "~/models/ui-yolo.pt", device: mps, conf: 0.25 }
   omniparser:  { device: mps, accept_agpl: false }   # must be true to actually run
@@ -556,6 +591,10 @@ models:
   anthropic:   { model: "claude-opus-4-8", api_key_env: ANTHROPIC_API_KEY }
   gemini:      { model: "gemini-2.5-pro", api_key_env: GEMINI_API_KEY }
   gemini_flash:{ model: "gemini-2.5-flash-lite", api_key_env: GEMINI_API_KEY }
+  functiongemma:
+    model_path: null                   # absolute path to pinned external MLX base
+    adapter_path: null                 # null / bundled = packaged LoRA
+    max_tokens: 24
 daemon:
   enabled: true
   socket: "~/.cache/android-ui-analyser/daemon.sock"
@@ -684,6 +723,11 @@ the engine — no perception logic of its own.
   schema, and exit codes; `--json` / `--brief` work; `aua --help` references `aua guide`;
   and the generated `.claude/skills/android-ui-analyser/SKILL.md` is produced from the
   same source (no drift).
+- **AC16** The optional policy is off by default and imports/loads no model on that path.
+  Device-less tests prove candidate privacy and safety filtering, zero/one/four cardinality
+  behavior, fail-closed parsing and stale-frame revalidation, separate shadow/advisory output,
+  CLI/MCP `policy_status` parity, bundled-adapter provenance, and that the deterministic
+  recommendation is never replaced or executed by the model.
 
 ### 13.2 Device smoke test (documented for the human; runs when a device/emulator is attached)
 - `SMOKE.md` describes: start an emulator, `aua doctor`, `aua devices`, `aua analyze`
@@ -700,7 +744,9 @@ the engine — no perception logic of its own.
   errors before failing; clear exit codes.
 - **Security/privacy:** secrets only via env; local daemon socket only (no default TCP);
   never log secret values; OmniParser detection must require explicit `accept_agpl:
-  true` before running and must be pinned to a non-vulnerable version range.
+  true` before running and must be pinned to a non-vulnerable version range. Policy prompts
+  contain only privacy-screened metadata and opaque IDs, never typed values, raw hierarchy,
+  session/device identifiers, or trusted call values outside the explicit safe projection.
 - **Logging:** structured logs to stderr, JSON results to stdout (so piping is clean).
 - **Docs:** `README.md` (install, quickstart, CLAUDE.md snippet for Claude Code,
   provider matrix with license flags), `SMOKE.md`, inline docstrings.
@@ -725,6 +771,7 @@ android-ui-analyser/
 │   ├── config.py           # pydantic config models, loading, precedence, profiles
 │   ├── schema.py           # Element/Screen/AnalyzeResult pydantic models (source of truth)
 │   ├── engine.py           # analyze pipeline orchestration; action dispatch; cache
+│   ├── policy.py           # dependency-free candidate guard + opaque-ID selection contract
 │   ├── device.py           # uiautomator2 wrapper: warm connect, screenshot, input, reconnect
 │   ├── hierarchy.py        # XML -> elements (bounds parse, filtering, ID assignment)
 │   ├── gate.py             # quality-gate heuristics (configurable)
@@ -732,6 +779,7 @@ android-ui-analyser/
 │   ├── annotate.py         # Set-of-Marks overlay image (Pillow)
 │   ├── daemon.py           # unix-socket daemon + client transport
 │   ├── mcp_server.py       # optional MCP wrapper over the engine
+│   ├── resources/functiongemma/ # small separately licensed LoRA + manifest/notices
 │   ├── errors.py           # typed errors + structured stderr emitter + exit codes
 │   ├── memory.py           # persistent per-app map: record/recognize/drift + MAP.md & index.json
 │   └── providers/
@@ -788,7 +836,10 @@ Do all of these in a single run; later items depend on earlier ones:
 - All §13.1 acceptance criteria pass; `ruff` and `mypy` are clean.
 - `aua` installs and runs; `aua doctor` works with no device and leaks no secrets.
 - Default config is commercially-licensable (no AGPL/research components active);
-  opting into OmniParser requires `accept_agpl: true`.
+  opting into OmniParser requires `accept_agpl: true`; FunctionGemma inference remains off.
+- The MIT project license has an explicit carve-out for the packaged FunctionGemma Model
+  Derivative, whose directory carries the Gemma agreement, prohibited-use policy, notices,
+  modification statement, and frozen provenance. The base model is not bundled or auto-fetched.
 - A developer can: add an API key via env + select a commercial grounding model in
   config and have `analyze --query` use it; swap OCR engines by editing one config
   line; run with or without the daemon.
@@ -814,6 +865,13 @@ Do all of these in a single run; later items depend on earlier ones:
 - **Licensing:** OmniParser `icon_detect` is AGPL-3.0 → gated behind `accept_agpl`;
   default detection is user-weights YOLO. Research-only models (Holo 3B/72B,
   Holo2-30B, UI-TARS-72B, Ferret-UI Lite) are out of scope for defaults.
+- **FunctionGemma derivative:** the bundled adapter is subject to the Gemma Terms and prohibited-use
+  policy rather than the repository's MIT license. Keep its notices and manifest with every
+  distribution. The compatible pinned MLX base remains an explicit user download. Frozen v3's
+  strict static and engine-shaped smoke gates are not green, so bundled v3 is shadow-only;
+  the first recovery-focused v4 cycle also failed its independent combined safety test and remains
+  ignored. Advisory stays disabled until an independently evaluated recovery-focused iteration
+  passes without unauthorized selections.
 - **Security:** OmniParser pre-2.0.1 carries CVE-2025-55322 → pin a safe version;
   daemon is unix-socket only.
 - **Latency variance:** uiautomator2 idle-waits can spike on animated screens; expose

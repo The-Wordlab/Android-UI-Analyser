@@ -1,6 +1,6 @@
 """Provider Strategy interfaces + shared value objects (PRD §7.1).
 
-Four provider *kinds*, each an abstract base class (a Strategy):
+Five provider *kinds*, each an abstract base class (a Strategy):
 
     OcrProvider.recognize(image)            -> list[TextBox]
     DetectionProvider.detect(image)         -> list[DetBox]
@@ -8,6 +8,7 @@ Four provider *kinds*, each an abstract base class (a Strategy):
     GroundingProvider.parse(image)          -> list[DetBox] | None   (optional)
     GroundingProvider.ask(image, question, elements) -> ScreenAnalysisResult | None
     PlannerProvider.decide(objective, els)  -> PlannerDecision | None
+    PolicyProvider.select(context)          -> candidate id | None
 
 The engine depends ONLY on these interfaces and on the factory (registry.py). It never
 imports a concrete provider. Adding a model = implement a strategy + register it +
@@ -29,6 +30,8 @@ from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import numpy as np
     from PIL import Image as PILImage
+
+    from ..policy import PolicyContext
 
 
 Bounds = tuple[int, int, int, int]  # (x1, y1, x2, y2)
@@ -284,6 +287,31 @@ class PlannerProvider(Provider):
         current screen; *image* is attached only when the screen is weakly labelled.
         Returns ``None`` when the provider cannot decide (the chain then advances / the
         caller hands off) — like the other strategies, this must never raise.
+        """
+        raise NotImplementedError
+
+
+class PolicyProvider(Provider):
+    """Select one opaque ID from deterministic, already-guarded exact calls."""
+
+    kind: ClassVar[str] = "policy"
+
+    def supports_candidate_count(self, count: int) -> bool:
+        """Whether this provider accepts the guarded candidate cardinality."""
+
+        return count > 0
+
+    def supports_mode(self, mode: str) -> bool:
+        """Whether provider provenance permits shadow/advisory rollout."""
+
+        return mode in {"shadow", "advisory"}
+
+    @abstractmethod
+    def select(self, context: PolicyContext) -> int | None:
+        """Return one supplied candidate ID, or ``None`` on any failure.
+
+        The provider never executes or rewrites a call.  The policy core validates
+        the returned ID against its trusted candidate map before exposing it.
         """
         raise NotImplementedError
 

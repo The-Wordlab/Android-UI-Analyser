@@ -180,6 +180,16 @@ class PlannerCfg(_ChainCfg):
     chain: list[str] = Field(default_factory=lambda: ["gemini_flash"])
 
 
+class PolicyCfg(_ChainCfg):
+    """Optional guarded next-call selection; never executes model output."""
+
+    enabled: bool = False
+    chain: list[str] = Field(default_factory=lambda: ["functiongemma"])
+    mode: Literal["off", "shadow", "advisory"] = "off"
+    # The adapter was trained and evaluated on exactly four-way choice sets.
+    max_candidates: int = Field(default=4, ge=1, le=4)
+
+
 class TimeoutsCfg(BaseModel):
     model_config = ConfigDict(extra="forbid")
     vision_ms: int = 8000  # OCR chain (fast)
@@ -329,6 +339,17 @@ def _default_models() -> dict[str, dict[str, Any]]:
             "api_key_env": "GEMINI_API_KEY",
             "base_url": "https://generativelanguage.googleapis.com/v1beta",
         },
+        # Optional local-only policy selector. The base model must be an existing absolute
+        # directory. A null adapter uses AUA's small bundled LoRA; an explicit adapter must be
+        # an existing absolute directory. The provider never resolves or downloads a repo ID.
+        "functiongemma": {
+            "model_path": None,
+            "adapter_path": None,
+            "max_tokens": 24,
+            "model_sha256": None,
+            "adapter_sha256": None,
+            "manifest_sha256": None,
+        },
     }
 
 
@@ -369,6 +390,7 @@ class Config(BaseModel):
     detection: DetectionCfg = Field(default_factory=DetectionCfg)
     grounding: GroundingCfg = Field(default_factory=GroundingCfg)
     planner: PlannerCfg = Field(default_factory=PlannerCfg)
+    policy: PolicyCfg = Field(default_factory=PolicyCfg)
     timeouts: TimeoutsCfg = Field(default_factory=TimeoutsCfg)
     models: dict[str, dict[str, Any]] = Field(default_factory=_default_models)
     daemon: DaemonCfg = Field(default_factory=DaemonCfg)
@@ -516,8 +538,13 @@ def env_overrides(env: dict[str, str]) -> dict[str, Any]:
             path = tuple(p for p in parts if p)
         else:
             continue
-        if "," in raw_val:
-            value: Any = [_coerce_scalar(p) for p in raw_val.split(",")]
+        if path[-1] in {"chain", "destructive_labels"}:
+            # These settings are lists even when they contain one value. Treating a one-item
+            # value as a scalar breaks detached-daemon transport for both the default policy
+            # chain and a caller's narrow destructive-action safety lexicon.
+            value: Any = [_coerce_scalar(p) for p in raw_val.split(",") if p.strip()]
+        elif "," in raw_val:
+            value = [_coerce_scalar(p) for p in raw_val.split(",")]
         else:
             value = _coerce_scalar(raw_val)
         _set_path(out, path, value)
@@ -651,6 +678,12 @@ planner:
   enabled: false                      # opt-in LLM navigator; also needs --assist / `aua navigate`
   chain: [gemini_flash]
 
+policy:
+  enabled: false                      # optional local next-call advice; never autonomous execution
+  mode: "off"                         # off | shadow (metrics only) | advisory (returns exact call)
+  chain: [functiongemma]
+  max_candidates: 4                  # guard-approved candidates visible to the model
+
 models:
   yolo:         { weights: null, device: mps, conf: 0.25 }   # set weights to enable YOLO
   omniparser:   { device: mps, accept_agpl: false }          # MUST be true to run (AGPL-3.0!)
@@ -663,6 +696,9 @@ models:
   anthropic:    { model: claude-opus-4-8, api_key_env: ANTHROPIC_API_KEY }
   gemini:       { model: gemini-2.5-flash, api_key_env: GEMINI_API_KEY }
   gemini_flash: { model: gemini-2.5-flash-lite, api_key_env: GEMINI_API_KEY }
+  # Base model is local/external. null (or "bundled") uses AUA's small packaged LoRA adapter.
+  functiongemma: { model_path: null, adapter_path: null, max_tokens: 24,
+                   model_sha256: null, adapter_sha256: null, manifest_sha256: null }
 
 daemon:
   enabled: true

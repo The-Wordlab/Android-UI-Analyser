@@ -1,0 +1,36 @@
+# Reproducible validation-selected run for the 12,288-example v3 curriculum.
+# The first full epoch showed its lowest rounded validation loss at iteration 1,408;
+# stopping there avoids the rise observed at the 1,536-iteration endpoint.
+model: mlx-community/functiongemma-270m-it-bf16
+train: true
+test: false
+fine_tune_type: lora
+optimizer: adamw
+optimizer_config:
+  adamw:
+    weight_decay: 0.01
+
+data: runs/functiongemma/data
+adapter_path: runs/functiongemma/adapters/lora-r16
+seed: 42
+num_layers: -1
+batch_size: 8
+grad_accumulation_steps: 4
+iters: 1408
+# A 5e-5 LoRA step destabilizes this 270M BF16 conversion after the first
+# accumulated update.  The smoke gate established 1e-6 as stable before the
+# reproducible run: validation loss fell from 3.960 to 1.849 in three updates.
+learning_rate: 1.0e-6
+steps_per_report: 10
+steps_per_eval: 128
+save_every: 256
+val_batches: 64
+max_seq_length: 1024
+mask_prompt: true
+grad_checkpoint: false
+report_to: null
+
+lora_parameters:
+  rank: 16
+  scale: 32.0
+  dropout: 0.05

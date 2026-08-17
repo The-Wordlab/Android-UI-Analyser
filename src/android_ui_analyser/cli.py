@@ -1117,6 +1117,17 @@ def _replace_skewed_daemon(daemon_mod: Any, cfg: Any, ver: str) -> bool:
     return False
 
 
+def _replace_policy_mismatched_daemon(daemon_mod: Any, cfg: Any, expected: str) -> bool:
+    """Restart stale policy state only when doing so cannot discard a live capture."""
+    if _capture_session_live(daemon_mod, cfg):
+        return False
+    with contextlib.suppress(Exception):
+        daemon_mod.stop(cfg)
+        daemon_mod.start(cfg, serial=cfg.device.serial)
+        return daemon_mod.running_policy_fingerprint(cfg) == expected
+    return False
+
+
 def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
     """Run an engine call through the daemon when one is live, else in-process.
 
@@ -1186,6 +1197,23 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
                     ver,
                     daemon_mod._aua_version(),
                 )
+            expected_policy: str | None = None
+            if ver is not False and not skew:
+                expected_policy = daemon_mod.policy_config_fingerprint(cfg)
+                live_policy = daemon_mod.running_policy_fingerprint(cfg)
+                # ``False`` is an unresponsive/busy ping; the expected fingerprint is also
+                # carried on the real request, so the daemon revalidates after it dequeues it.
+                # ``None`` is a responsive pre-fingerprint daemon and is therefore stale.
+                mismatch = live_policy is not False and live_policy != expected_policy
+                if mismatch and _replace_policy_mismatched_daemon(daemon_mod, cfg, expected_policy):
+                    ver = daemon_mod.running_version(cfg)
+                    mismatch = False
+                if mismatch:
+                    raise UsageError(
+                        "the running daemon uses a different local policy configuration",
+                        hint="Restart it: `aua daemon stop && aua daemon start`.",
+                        code="policy_config_mismatch",
+                    )
             if ver is not False and not skew:
                 from . import leases as _leases
 
@@ -1195,6 +1223,11 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
                 }
                 if _EXPECTED_ERROR_CODE:
                     client_options["expected_error_code"] = _EXPECTED_ERROR_CODE
+                client_options["policy_fingerprint"] = expected_policy
+                # The warm daemon owns the long-lived Engine/provider cache. Ask it to attach
+                # goal progress and optional policy output before journaling/serialization so a
+                # short-lived CLI process never reloads the local model for the same response.
+                client_options["decorate_response"] = True
                 client = daemon_mod.DaemonClient(
                     daemon_mod.socket_path(cfg),
                     **client_options,
@@ -1202,8 +1235,11 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
                 cmd = _DAEMON_CMD.get(method, method)
                 resp = client.call(cmd, **kwargs)
                 if resp.get("ok"):
+                    if resp.get("response_decorated") is True:
+                        return resp.get("result")
                     from .coaching import decorate_result
 
+                    # Compatibility fallback for an older daemon that ignored the request flag.
                     return decorate_result(engine, cmd, resp.get("result"))
                 raise _daemon_error(resp.get("error", {}))
         except AuaError:
@@ -4773,6 +4809,27 @@ def config_path(ctx: typer.Context) -> None:
     typer.echo(str(project) if project is not None else str(user_config_path()))
 
 
+# --------------------------------------------------------------------------- policy
+
+
+policy_app = typer.Typer(
+    name="policy", help="Inspect the optional guarded local policy.", no_args_is_help=True
+)
+app.add_typer(policy_app, name="policy")
+
+
+@policy_app.command("status")
+def policy_status_cmd(ctx: typer.Context) -> None:
+    """Report local config, dependency, artifact, hash, and warm-daemon readiness."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        from .daemon import policy_runtime_status
+
+        _echo_json(policy_runtime_status(engine.config), fmt)
+
+    _run(ctx, go)
+
+
 # --------------------------------------------------------------------------- doctor
 
 
@@ -6646,7 +6703,7 @@ def mcp(ctx: typer.Context) -> None:
     """Run the MCP server over stdio (exposes the engine as MCP tools, §11)."""
     from . import mcp_server
 
-    mcp_server.run_stdio()
+    mcp_server.run_stdio(_opts(ctx).load())
 
 
 # ------------------------------------------------------------------- entry point

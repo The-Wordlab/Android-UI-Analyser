@@ -1130,6 +1130,13 @@ def render_markdown(*, brief: bool = False) -> str:
             + ". Paid grounding (T4) is **never** entered automatically — pass `--deep`."
         )
         p.append("")
+        p.append("## Optional local policy")
+        p.append(
+            "Off by default; v4 failed, so bundled v3 stays shadow-only and rejects `advisory`. "
+            "`policy_suggestion` remains unexecuted and never replaces deterministic `recommended_call`. "
+            "Four choices are required (0/1 bypass; 2/3 withhold). `aua policy status` is host-only."
+        )
+        p.append("")
         p.append("## Exit codes")
         p.append(", ".join(f"`{c}` {d}" for c, d in EXIT_CODES))
         p.append("")
@@ -1455,6 +1462,39 @@ def render_markdown(*, brief: bool = False) -> str:
         "and maps boxes back to original screen coordinates. Route replay settles on the next "
         "step's known selector when possible instead of a full pixel `wait_stable`."
     )
+    p.append("")
+    p.append("## Optional guarded FunctionGemma policy (off by default)")
+    p.append(
+        "This policy is a non-executing side channel for active goal verification, not a planner "
+        "or Android agent. Deterministic AUA code authors complete current-frame stable-selector "
+        "tap calls, removes unsafe/unauthorized/destructive/stale/ambiguous/redundant choices, and "
+        "gives the model only privacy-screened metadata plus opaque IDs. `shadow` exposes audit "
+        "metadata without a call. `advisory` may expose a separate `policy_suggestion`, but never "
+        "changes or executes `recommended_call`. Zero/one candidates bypass the model; the frozen "
+        "v3 adapter runs only for exactly four, while two/three fail closed as unsupported. The "
+        "advisory interface exists for evaluation, but bundled v3's authenticated manifest makes "
+        "the rollout shadow-only and rejects advisory before inference."
+    )
+    p.append(
+        "Install the Apple-silicon runtime with `.[functiongemma]`, manually obtain the pinned "
+        "external MLX base, then set `policy.enabled: true`, `policy.mode: shadow`, and "
+        "`models.functiongemma.model_path` to its absolute directory. AUA bundles only the "
+        "separately licensed ~15.2 MB LoRA adapter; it does not bundle or automatically download "
+        "the ~543 MiB base. Run `aua policy status` for host-only dependency, artifact/hash, and "
+        "daemon readiness without loading the model or touching Android. The v3 synthetic strict "
+        "static gate is FAIL (one unauthorized and one redundant raw selection), so keep the "
+        "deterministic guard and do not treat the policy as autonomous or speed evidence. See the "
+        "README and `experiments/functiongemma/` for setup, licensing, reproduction, and evaluation. "
+        "A host-only 96-case engine-shaped production-serializer smoke failed at 60/96 semantic "
+        "choices (62.5%) with 37.5-point target-ID and 54.17-point target-position gaps, despite "
+        "100% parsing/offered-ID/provider agreement. A failure-driven v4 reached 2,767/2,768 "
+        "validation (99.9639%; 719/720 production-shaped), fixed that smoke (96/96), passed held-out "
+        "cardinalities 2/3/4 (64/64, 144/144, 512/512), and completed 4/4 closed loops. It still "
+        "failed the independent combined test at 2,764/2,768 (99.8555%; critical 99.6875%; parse "
+        "100%; redundant zero): four unauthorized `sequence_recover_unknown` choices used "
+        "`session_finish` instead of `analyze_screen`. V4 remains ignored/unbundled, v3 stays "
+        "shadow-only, and the next iteration needs independent recovery-focused data and evaluation."
+    )
     return "\n".join(p) + "\n"
 
 
@@ -1516,6 +1556,9 @@ structured `recommended_call` directly.
   debuggable SQLite.
 - A delivered deeplink, spinner disappearance, or unchanged short settle is not proof of the
   requested destination. Verify the final interactive affordance the user named.
+- Optional policy is off; failed v4 leaves bundled v3 shadow-only. Never act on
+  `policy_suggestion` or replace
+  `recommended_call`; FunctionGemma needs four choices (0/1 bypass; 2/3 withhold).
 
 ## Load more only when needed
 
@@ -1547,6 +1590,15 @@ def render_json() -> dict[str, object]:
             "meta.known_routes/suggested_gotos/map_hint/research_tasks on revisit "
             '(ranked by recent navigation); `aua goto "<goal>"` drives a remembered route; '
             "durable skeleton only; values/secrets redacted."
+        ),
+        "policy": (
+            "Bundled FunctionGemma v3 is shadow-only and rejects advisory before inference. "
+            "Failure-driven v4 reached 2,767/2,768 validation (99.9639%) and 96/96 production smoke, but "
+            "failed the independent combined test at 2,764/2,768 with four unauthorized early "
+            "session_finish-over-analyze_screen choices, so it remains "
+            "ignored/unbundled. A policy_suggestion is never executed or substituted for "
+            "recommended_call. V3 runs only for exactly four guard-approved opaque candidates; "
+            "zero/one bypass and two/three withhold."
         ),
         "schema_fields": {
             "top": ["schema_version", "screen", "elements", "meta"],

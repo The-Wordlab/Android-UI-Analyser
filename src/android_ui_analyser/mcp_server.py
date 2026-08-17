@@ -24,7 +24,7 @@ from mcp.server.lowlevel import Server
 
 from . import __version__
 from .capabilities import capabilities_for_goal, capability_manifest, render_mcp_instructions
-from .config import load_config
+from .config import Config, load_config
 from .engine import Engine, _parse_await_terms, _regex_literal_hint, _safe_adopted_change
 from .errors import AuaError, UsageError
 from .projection import Projection, trim_observation_payload
@@ -299,6 +299,15 @@ def _tool_definitions() -> list[types.Tool]:
                 },
                 "additionalProperties": False,
             },
+        ),
+        types.Tool(
+            name="policy_status",
+            description=(
+                "Host-only readiness for the optional guarded local policy: effective config, "
+                "dependency and artifact/hash checks, and warm-daemon compatibility. Never "
+                "loads a model or touches an Android device."
+            ),
+            inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
         ),
         types.Tool(
             name="session_start",
@@ -1892,6 +1901,10 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
             hint="The renamed tool already returns the analyzed resulting screen; use its "
             "`observation` and do not call `analyze_screen` afterward.",
         )
+    if name == "policy_status":
+        from .daemon import policy_runtime_status
+
+        return policy_runtime_status(engine.config)
     from .jobs import manager_for, reject_if_active
 
     jobs = manager_for(engine)
@@ -2808,12 +2821,17 @@ def build_server(engine: Engine) -> Server:
     return server
 
 
-def build_default_engine() -> Engine:
-    """Build an :class:`Engine` from the standard layered config (device connects lazily)."""
-    return Engine(load_config())
+def build_default_engine(config: Config | None = None) -> Engine:
+    """Build an :class:`Engine` from an effective config (device connects lazily).
+
+    ``aua mcp`` has already resolved global ``--config``/``--profile``/CLI overrides.  Accepting
+    that object here keeps the stdio server on the same effective configuration instead of
+    silently doing a second, context-free discovery pass.
+    """
+    return Engine(config if config is not None else load_config())
 
 
-def run_stdio() -> None:
+def run_stdio(config: Config | None = None) -> None:
     """Run the MCP server over stdio — the entry point used by ``aua mcp``."""
     import atexit
     import contextlib
@@ -2821,7 +2839,7 @@ def run_stdio() -> None:
     import anyio
     from mcp.server.stdio import stdio_server
 
-    engine = build_default_engine()
+    engine = build_default_engine(config)
     server = build_server(engine)
     # If the MCP client disconnects without emulator_stop, tear down what we started.
     atexit.register(cleanup_mcp_emulators, engine.config.cache.dir)

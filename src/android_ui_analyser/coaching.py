@@ -21,6 +21,7 @@ _MANUAL_ACTIONS = frozenset(
         "key",
     }
 )
+_ENGINE_PROGRESS_COMMANDS = frozenset({"session_start", "session_progress", "session_finish"})
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -139,45 +140,62 @@ def decorate_result(
     # only from structured, verified tool events; UI checkpoints advance only when the agent's
     # --phase-done / phase_done evidence passes the active phase's relevance contract.
     try:
-        from .session import complete_environment_phase, phase_progress
-
-        state = engine._session_state()  # noqa: SLF001 - shared Engine/session contract
         data = _payload(result) or {}
-        state = complete_environment_phase(
-            engine.config.cache.dir,
-            state,
-            command=normalized,
-            result=data,
-        )
-        observation_payload: Any = data.get("observation")
-        if observation_payload is None and "screen" in data and "elements" in data:
-            observation_payload = data
-        observation = None
-        if isinstance(observation_payload, dict):
-            from .schema import AnalyzeResult
-
-            with contextlib.suppress(Exception):
-                observation = AnalyzeResult.model_validate(observation_payload)
-        stale_deeplink = normalized in {
-            "open_link",
-            "open_link_and_analyze",
-            "open_and_analyze",
-        } and bool(data.get("stale_risk"))
-        # A background wait's observation is not phase proof until JobState has reached a
-        # successful terminal state and its session/owner/serial/predicate correlation has been
-        # checked. jobs.py performs that check and refreshes this progress snapshot afterward.
-        progress_observation = None if normalized.startswith("job:") else observation
-        refreshed = engine.session_progress(
-            state.session_id,
-            observation=progress_observation,
-            _avoid_deeplinks=stale_deeplink,
-        )
-        refreshed_progress = refreshed.get("goal_progress")
-        if isinstance(refreshed_progress, dict):
-            refreshed_state = engine._session_state(state.session_id)  # noqa: SLF001
-            progress = phase_progress(refreshed_state, compact=True)
+        existing_progress = data.get("goal_progress")
+        if normalized in _ENGINE_PROGRESS_COMMANDS and isinstance(existing_progress, dict):
+            # These Engine methods already performed the complete session/policy refresh. Reusing
+            # their answer avoids a second local-model generation in MCP, in-process CLI, and the
+            # warm daemon response decorator while preserving the established nested envelope.
+            progress = dict(existing_progress)
+            for key in ("policy", "policy_suggestion"):
+                if key in data:
+                    progress[key] = data[key]
         else:
-            progress = phase_progress(state, compact=True)
+            from .session import complete_environment_phase, phase_progress
+
+            state = engine._session_state()  # noqa: SLF001 - shared Engine/session contract
+            state = complete_environment_phase(
+                engine.config.cache.dir,
+                state,
+                command=normalized,
+                result=data,
+            )
+            observation_payload: Any = data.get("observation")
+            if observation_payload is None and "screen" in data and "elements" in data:
+                observation_payload = data
+            observation = None
+            if isinstance(observation_payload, dict):
+                from .schema import AnalyzeResult
+
+                with contextlib.suppress(Exception):
+                    observation = AnalyzeResult.model_validate(observation_payload)
+            stale_deeplink = normalized in {
+                "open_link",
+                "open_link_and_analyze",
+                "open_and_analyze",
+            } and bool(data.get("stale_risk"))
+            # A background wait's observation is not phase proof until JobState has reached a
+            # successful terminal state and its session/owner/serial/predicate correlation has
+            # been checked. jobs.py performs that check and refreshes this snapshot afterward.
+            progress_observation = None if normalized.startswith("job:") else observation
+            refreshed = engine.session_progress(
+                state.session_id,
+                observation=progress_observation,
+                _avoid_deeplinks=stale_deeplink,
+            )
+            refreshed_progress = refreshed.get("goal_progress")
+            if isinstance(refreshed_progress, dict):
+                refreshed_state = engine._session_state(state.session_id)  # noqa: SLF001
+                progress = phase_progress(refreshed_state, compact=True)
+                # Policy is an optional response-local side channel. Preserve it inside the
+                # existing goal_progress envelope on ordinary action results; otherwise only
+                # explicit session_progress calls would expose the advisory and the hot path
+                # would silently discard the model's work.
+                for key in ("policy", "policy_suggestion"):
+                    if key in refreshed:
+                        progress[key] = refreshed[key]
+            else:
+                progress = phase_progress(state, compact=True)
         if isinstance(result, dict):
             result["goal_progress"] = progress
         elif hasattr(result, "goal_progress"):

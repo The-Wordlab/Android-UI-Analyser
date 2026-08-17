@@ -22,6 +22,8 @@ Optional, only for specific features:
 - **`tesseract`** system binary — only if you enable the `tesseract` OCR extra.
 - A **GPU** (CUDA / Apple Metal) — speeds up the `yolo`/`omniparser` detectors and local grounding, but everything also runs on CPU.
 - **API keys** (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY`) — only if you opt into a commercial grounding provider (off by default).
+- **Apple silicon + a separately downloaded MLX FunctionGemma base** — only if you opt into
+  the local guarded next-call policy. The base is not bundled or downloaded by AUA.
 
 ### Installing `adb` (platform-tools)
 
@@ -124,10 +126,11 @@ cd ~ && command -v aua && aua --version
 | `easyocr` | `easyocr` | Optional OCR engine |
 | `yolo` | `ultralytics`, `torch` | UI element detection with user-supplied weights |
 | `omniparser` | `ultralytics`, `torch`, `huggingface-hub` | OmniParser detection — **AGPL-3.0, opt-in** |
+| `functiongemma` | `mlx-lm` | Apple-silicon-only local policy runtime; base model stays external |
 | `proxy` | `mitmproxy` | Headless HTTPS mock / record / replay (`aua proxy`, `aua mock`) |
 | `lxml` | `lxml` | Faster XML parse for huge hierarchy dumps |
 | `dev` | pytest, ruff, mypy, respx | Development and test tooling |
-| `all` | All of the above | Full install |
+| `all` | Perception, proxy, and XML extras | Excludes platform-specific `functiongemma`; add it explicitly |
 
 Heavy deps are **lazy-imported** — a missing optional extra never breaks the core CLI.
 
@@ -693,7 +696,114 @@ The fast LLM behind `--assist` and `aua navigate` (see [Optional: LLM assist](#o
 |---|---|---|---|
 | `gemini_flash` | Commercial | `gemini_flash` | Default; Gemini Flash Lite, key via `GEMINI_API_KEY`. Swap the `planner.chain` for any provider you prefer. |
 
-**Default config is commercially licensable.** No AGPL or research-only component is active out of the box. OmniParser requires explicit `accept_agpl: true`; grounding and the planner are off until you enable them.
+### Guarded next-call policy (opt-in, `policy.enabled: false` and `mode: off` by default)
+
+| Provider | Extra | Platform | License | Notes |
+|---|---|---|---|---|
+| `functiongemma` | `functiongemma` | Apple silicon | Gemma Terms (adapter); MLX runtime under its own licenses | Bundled ~15.2 MB LoRA + external pinned MLX base; v3 rollout is shadow-only |
+
+The repository's code, docs, and training tools remain MIT-licensed. The modified FunctionGemma
+adapter under `src/android_ui_analyser/resources/functiongemma/` is a separate model derivative
+distributed under the included Gemma terms, prohibited-use policy, and notices.
+
+**Default config remains commercially licensable and model-free at runtime.** No AGPL provider,
+remote model, planner, or policy model is active out of the box. OmniParser requires explicit
+`accept_agpl: true`; grounding, the planner, and the policy are off until enabled.
+
+---
+
+## Optional: guarded local FunctionGemma policy (off by default)
+
+This is a deliberately narrow side channel for an active goal session, not another Android agent.
+AUA deterministically constructs complete, current-frame, stable-selector tap calls, removes unsafe,
+unauthorized, destructive, stale, ambiguous, and redundant choices, and gives the model only
+an independently built, privacy-screened projection of candidate metadata keyed by opaque integer
+IDs. AUA retains the authoritative call map. FunctionGemma cannot author arguments, grant
+authorization, execute a call, or waive cleanup. Its output never replaces AUA's deterministic
+`recommended_call`:
+
+- `shadow` records only policy audit metadata; it exposes no model-selected call.
+- `advisory` is an interface for a future provenance-approved adapter; any returned
+  `policy_suggestion` would still be separate and unexecuted. Bundled v3's authenticated manifest
+  caps rollout at shadow, so an advisory request returns `unsupported_mode` without model inference.
+- Zero eligible candidates produce no suggestion. One is selected deterministically without loading
+  the model. The frozen v3 adapter is invoked only for **exactly four** eligible candidates; two or
+  three report `unsupported_cardinality` and fail closed.
+
+The checked-in adapter is 15,215,272 bytes. The compatible base is approximately 543 MiB and is
+**not** in this repository, wheel, or an automatic download path. Review and accept the
+[Gemma Terms](https://ai.google.dev/gemma/terms), then manually obtain the pinned external MLX
+conversion and revision recorded in the bundled manifest:
+
+```bash
+uv pip install -e ".[functiongemma]"
+hf download mlx-community/functiongemma-270m-it-bf16 \
+  --revision bb327a9ad61044e1496a2bee2365a6b6a6684c72 \
+  --local-dir /absolute/path/to/functiongemma-270m-it-bf16
+```
+
+The provider verifies the manifest's seven required base files and their aggregate digest
+`76aabb2800b6b9e6da9160028dfb233bbfa723d8c33e21623022ca87a8fa9fd5`; unrelated snapshot files
+do not affect that identity. Configure an absolute local base path and opt in first with shadow:
+
+```yaml
+policy:
+  enabled: true
+  mode: shadow                    # off | shadow | advisory
+  chain: [functiongemma]
+  max_candidates: 4
+
+models:
+  functiongemma:
+    model_path: /absolute/path/to/functiongemma-270m-it-bf16
+    adapter_path: bundled         # null also selects AUA's packaged LoRA
+    max_tokens: 24
+```
+
+Check config, dependency, artifact hashes, and daemon compatibility without touching Android or
+loading the model:
+
+```bash
+aua --config .android-ui-analyser.yaml policy status
+```
+
+The frozen v3 synthetic held-out run scored 2,045/2,048 (99.8535%) with 100% parse success, but its
+strict static gate is **FAIL** because the raw model made one unauthorized and one redundant
+selection. A fictional six-step closed-loop scenario passed four opaque-ID permutations, but that
+did not establish performance on the narrower production tap-only surface.
+
+A later host-only, engine-shaped smoke used the real production serializer across all 24 candidate
+orders and four dense-ID permutations. It **failed**: 60/96 semantic selections were correct (62.5%),
+despite 100% protocol parse, offered-ID, and provider/parser agreement. Accuracy varied by 37.5
+percentage points across target IDs and 54.17 points across target positions. The bundled v3 rollout
+is therefore **shadow-only**. A failure-driven v4 continuation was trained and evaluated; it did not
+meet the independent safety gate described below. This release makes no latency claim.
+
+### Failure-driven v4 continuation (not promoted)
+
+V4 learned the production serializer well: validation reached 2,767/2,768 (99.9639%), including
+719/720 production-shaped validation cases; the untouched v3 smoke improved from 60/96 to 96/96;
+held-out production choices passed at cardinalities two (64/64), three (144/144), and four
+(512/512); and the fictional closed loop completed 4/4 cleanly.
+
+It still **failed** the independent combined test: 2,764/2,768 correct (99.8555%), 99.6875%
+critical accuracy, and 100% parse success, with zero redundant but four unauthorized selections.
+All four were `sequence_recover_unknown`: the model ended the session early with `session_finish`
+instead of observing the uncertain outcome with `analyze_screen`. V4 is therefore ignored and not
+bundled; v3 remains shadow-only. The next iteration needs independent recovery-focused data and an
+evaluation gate that keeps this failure family isolated.
+
+Reproduction source is checked in as the
+[v4 production curriculum](experiments/functiongemma/production_curriculum.py),
+[training configuration](experiments/functiongemma/train-lora-v4.yaml),
+[static evaluator](experiments/functiongemma/evaluate.py),
+[production smoke](experiments/functiongemma/run_production_smoke.py), and
+[closed-loop runner](experiments/functiongemma/run_closed_loop.py). Generated datasets, adapters,
+and detailed reports remain ignored and are not linked as repository artifacts.
+
+The complete fictional-data generator, validator, MLX LoRA runner, static evaluator, and deterministic
+closed-loop simulator are checked in under [`experiments/functiongemma/`](experiments/functiongemma/)
+so later agents and contributors can reproduce or improve the adapter without device data.
 
 ---
 
@@ -706,6 +816,9 @@ Three steps, zero changes to `engine.py` or `cli.py`:
    - `DetectionProvider` — implement `detect(image) -> list[Box]`
    - `GroundingProvider` — implement `locate(image, instruction) -> Point|Box`; optionally
      implement `ask(image, question, elements) -> ScreenAnalysisResult` for `aua ask`
+   - `PolicyProvider` — implement `select(context) -> int|None`; the context contains only
+     privacy-screened projections of guard-approved candidates keyed by opaque IDs, and the
+     provider never executes the authoritative call
 
 2. **Register** with the decorator from `providers/registry.py`:
    ```python
@@ -909,7 +1022,7 @@ Tools include (non-exhaustive): `analyze_screen`, `tap_and_analyze`,
 `clear_and_analyze`, `swipe_and_analyze`, `scroll_and_analyze`,
 `scroll_to_and_analyze`, `key_and_analyze`, `wait_and_analyze`,
 `wait_stable_and_analyze`, `wait_changed_and_analyze`, `has`,
-`expect`, `screenshot`, `inspect`, `goto`, `flow_run`, `navigate`, `list_devices`,
+`expect`, `screenshot`, `inspect`, `goto`, `flow_run`, `navigate`, `policy_status`, `list_devices`,
 `emulator_list` / `emulator_status` / `emulator_start` / `emulator_stop` (stop before exit —
 MCP also auto-stops emulators it started when the server process ends), `open_link_and_analyze`,
 `app`, `resolve`, clipboard/paste/copy/erase,
@@ -1230,6 +1343,7 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 | `aua goto "<goal>"` | Drive the remembered route to a known screen — taps + verifies each hop (`--plan` previews, `--max-steps N`) |
 | `aua flow run\|save\|list\|…` | Maestro-style YAML journeys with goal aliases, arrival predicates, and reversible network steps |
 | `aua navigate "<goal>"` | Opt-in planner drive (needs `planner.enabled`) |
+| `aua policy status` | Host-only readiness for optional guarded FunctionGemma advice |
 | `aua memory show\|path\|update\|forget` | Manage the per-app learned layout (`memory.backend: sqlite` optional) |
 | `aua knowledge list\|show\|add\|stale` | Manage scoped, provenance-bearing learned facts |
 | `aua reconcile plan\|submit\|status\|apply\|rollback` | Research and transactionally correct a map |

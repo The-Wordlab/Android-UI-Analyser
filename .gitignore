@@ -19,6 +19,15 @@ htmlcov/
 *.png
 !tests/**/*.png
 runs/
+# Local policy/perception weights and generated checkpoints stay out of Git. The
+# one reviewed 15 MB FunctionGemma LoRA below is the narrow exception; base weights
+# and every other model format remain ignored.
+*.safetensors
+!src/android_ui_analyser/resources/functiongemma/adapters.safetensors
+*.gguf
+*.ckpt
+*.pth
+*.pt
 
 # Local, machine-specific config (may opt into AGPL / enable paid providers).
 # Kept out of version control so the shipped defaults stay license-clean.

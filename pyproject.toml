@@ -4,11 +4,11 @@ build-backend = "hatchling.build"
 
 [project]
 name = "android-ui-analyser"
-version = "0.9.7"
+version = "0.10.0"
 description = "Fast, configurable CLI that gives an AI agent structured 'what's on screen and where' for Android UI testing — hierarchy-first, with pluggable vision/OCR/grounding fallbacks."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = { file = "LICENSE" }
 authors = [{ name = "Eiliya" }]
 maintainers = [{ name = "Eiliya" }]
 keywords = ["android", "ui-testing", "uiautomator2", "set-of-marks", "accessibility", "ocr", "agent"]
@@ -44,6 +44,8 @@ easyocr = ["easyocr>=1.7"]
 # --- Detection ---
 yolo = ["ultralytics>=8.2", "torch>=2.2"]
 omniparser = ["ultralytics>=8.2", "torch>=2.2", "huggingface-hub>=0.23"]
+# --- Optional local next-call policy (external base; small adapter bundled) ---
+functiongemma = ["mlx-lm==0.31.3; sys_platform == 'darwin' and platform_machine == 'arm64'"]
 # --- Dev / test ---
 dev = [
     "pytest>=8.0",

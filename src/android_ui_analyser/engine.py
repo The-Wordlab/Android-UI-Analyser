@@ -22,8 +22,9 @@ from collections.abc import Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
 from copy import deepcopy
+from dataclasses import replace as dataclass_replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from . import routing
 from .config import Config
@@ -56,6 +57,7 @@ from .memory import (
     matches_any,
     playbook_view,
     recorded_selector,
+    redact_label,
     resolve_goal,
     route_step_risks,
     screen_is_root,
@@ -107,6 +109,7 @@ from .selectors import (
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .flags import PrefsRead
+    from .policy import PolicyMode, PolicySelector
 
 logger = logging.getLogger("android_ui_analyser.engine")
 
@@ -5324,7 +5327,363 @@ class Engine:
                 ),
                 "executes": True,
             }
+        if active_phase is not None:
+            out.update(
+                self._session_policy_output(
+                    state,
+                    active_phase,
+                    observed,
+                    recommended_call=out.get("recommended_call"),
+                )
+            )
         return out
+
+    def _session_policy_mode(self) -> PolicyMode:
+        """Resolve the opt-in selector mode without making policy a base dependency."""
+        section = getattr(self.config, "policy", None)
+        if section is None or not bool(getattr(section, "enabled", False)):
+            return "off"
+        mode = str(getattr(section, "mode", "off") or "off").strip().casefold()
+        return cast("PolicyMode", mode) if mode in {"off", "shadow", "advisory"} else "off"
+
+    @staticmethod
+    def _policy_selector_arguments(
+        element: Element,
+        elements: Sequence[Element],
+    ) -> tuple[dict[str, str], str] | None:
+        """Return one reusable, privacy-filtered selector and its safe display label."""
+        selector = recorded_selector(element, elements=elements)
+        by = selector.get("by")
+        redacted = redact_label(element)
+        if redacted == "<redacted>":
+            return None
+        # A stable id can make the *action* reusable even when its adjacent copy is volatile.
+        # For policy selection we additionally need safe semantic evidence, so withhold the
+        # whole candidate when the durable-selector filter refused non-empty copy/description.
+        if by == "id" and (
+            (bool((element.text or "").strip()) and not selector.get("label"))
+            or (bool((element.content_desc or "").strip()) and not selector.get("content_desc"))
+        ):
+            return None
+        if by == "id" and selector.get("resource_id"):
+            value = str(selector["resource_id"])
+            args = {"rid": value}
+        elif by == "desc" and selector.get("content_desc"):
+            value = str(selector["content_desc"])
+            args = {"desc": value}
+        elif by == "text" and selector.get("label"):
+            value = str(selector["label"])
+            args = {"text": value}
+        else:
+            return None
+
+        # `recorded_selector` already refuses secrets, PII, typed values, dynamic values, and
+        # ambiguous selectors. `redact_label` is an independent final check, but its result is
+        # used only when the stricter durable-selector filter preserved the same copy. Dynamic
+        # copy beside a safe resource id must not sneak back into the prompt through prose.
+        persisted_label = selector.get("label") or selector.get("content_desc")
+        safe_label = (
+            str(persisted_label)
+            if persisted_label and redacted not in {None, "<redacted>"}
+            else value
+        )
+        return args, safe_label
+
+    def _policy_tap_candidates(
+        self,
+        state: Any,
+        phase: Any,
+        observation: AnalyzeResult,
+    ) -> list[Any]:
+        """Compile guard-owned exact calls from one fresh frame.
+
+        The optional model never sees the hierarchy and never authors arguments. It receives
+        only enabled app controls with a unique durable selector, locally-proved semantic
+        relevance, and a clean destructive-risk check. Toggle/input/system controls stay out of
+        this first integration because a generic tap can mutate state without proving progress.
+        """
+        from .policy import PolicyCandidate
+        from .session import _goal_terms, _match_score
+
+        fingerprint = observation.meta.fingerprint
+        package = observation.screen.package
+        goal_terms = set(_goal_terms(phase.objective))
+        ranked: list[tuple[int, str, Any]] = []
+        max_candidates = max(1, int(getattr(self.config.policy, "max_candidates", 4)))
+
+        for element in observation.elements:
+            if not element.clickable or element.enabled is False:
+                continue
+            if element.checkable or element.selected is True or element.window not in {None, "app"}:
+                continue
+            element_type = element.type.casefold()
+            if "edittext" in element_type or "textfield" in element_type or "input" in element_type:
+                continue
+
+            selector_value = self._policy_selector_arguments(element, observation.elements)
+            if selector_value is None:
+                continue
+            arguments, safe_label = selector_value
+
+            rid_label = re.sub(
+                r"(?<=[a-z0-9])(?=[A-Z])",
+                " ",
+                (element.resource_id or "").rsplit("/", 1)[-1],
+            ).replace("_", " ")
+            # Raw copy is used only by deterministic in-process classification. It is never
+            # placed in the PolicyContext, response, journal, or model prompt.
+            risk_label = " ".join(
+                value for value in (element.text, element.content_desc, rid_label) if value
+            )
+            if is_destructive_step(
+                RouteStep(kind="tap", label=risk_label),
+                self.config.memory.destructive_labels,
+            ):
+                continue
+
+            semantic_label = " ".join(value for value in (safe_label, rid_label) if value)
+            matched_terms = goal_terms & set(_goal_terms(semantic_label))
+            if not matched_terms or matched_terms <= _GENERIC_MANUAL_MATCH_TERMS:
+                continue
+            score = _match_score(phase.objective, semantic_label)
+            call = {"tool": "tap_and_analyze", "arguments": arguments}
+            material = json.dumps(
+                {
+                    "session_id": state.session_id,
+                    "phase_id": phase.id,
+                    "fingerprint": fingerprint,
+                    "package": package,
+                    "call": call,
+                },
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            candidate = PolicyCandidate(
+                # Dense opaque IDs are assigned after the bounded candidate set is known.
+                # FunctionGemma v3 was trained on exactly this 0..N-1 ID vocabulary.
+                candidate_id=0,
+                call=call,
+                model_arguments=arguments,
+                purpose=f"Tap the current-frame {safe_label!r} control and observe the result.",
+                proof="The exact call returns a folded post-action observation.",
+                safe=True,
+                authorized=True,
+                redundant=False,
+                session_id=state.session_id,
+                phase=phase.id,
+                observation_fingerprint=fingerprint,
+                package=package,
+            )
+            ranked.append((score, material, candidate))
+
+        # Keep the most goal-relevant guarded calls. Assign a dense hidden permutation of
+        # 0..N-1 because those are the only opaque IDs in the frozen adapter's vocabulary;
+        # use a separate stable permutation for display order so neither position nor source
+        # hierarchy order leaks a preference.
+        ranked.sort(key=lambda row: (-row[0], row[1]))
+        selected = ranked[:max_candidates]
+        id_rows = sorted(
+            selected,
+            key=lambda row: hashlib.sha256(f"policy-id\0{row[1]}".encode()).hexdigest(),
+        )
+        ids = {row[1]: candidate_id for candidate_id, row in enumerate(id_rows)}
+        ordered = sorted(
+            selected,
+            key=lambda row: hashlib.sha256(f"policy-order\0{row[1]}".encode()).hexdigest(),
+        )
+        return [dataclass_replace(row[2], candidate_id=ids[row[1]]) for row in ordered]
+
+    @staticmethod
+    def _policy_suggestion(candidate: Any) -> dict[str, Any]:
+        """Render a selected guard-owned call for advisory mode only."""
+        call: dict[str, Any] = {
+            "tool": str(candidate.call["tool"]),
+            "arguments": dict(candidate.call["arguments"]),
+        }
+        arguments = call["arguments"]
+        if "rid" in arguments:
+            cli = f"aua tap-and-analyze --rid {shlex.quote(str(arguments['rid']))}"
+        elif "desc" in arguments:
+            cli = f"aua tap-and-analyze --desc {shlex.quote(str(arguments['desc']))}"
+        else:
+            cli = f"aua tap-and-analyze --text {shlex.quote(str(arguments['text']))}"
+        return {
+            "kind": "policy_advisory",
+            "candidate_id": candidate.candidate_id,
+            "cli": cli,
+            "mcp": call,
+            "reason": (
+                "The optional local policy selected this guard-approved current-frame call. "
+                "AUA has not executed it and has not replaced the deterministic recommendation."
+            ),
+            "executes": True,
+        }
+
+    def _policy_context_is_current(
+        self,
+        state: Any,
+        phase: Any,
+        observation: AnalyzeResult,
+        candidate: Any,
+    ) -> tuple[bool, str | None]:
+        """Revalidate session, phase, and frame provenance after model latency."""
+        fingerprint = observation.meta.fingerprint
+        package = observation.screen.package
+        try:
+            current_state = self._session_state(state.session_id)
+        except Exception as exc:  # pragma: no cover - defensive, surfaced as policy metadata
+            return False, f"session revalidation failed: {type(exc).__name__}"
+        current_phase = next(
+            (item for item in current_state.phases if item.status != "completed"),
+            None,
+        )
+        if current_state.session_id != state.session_id or current_state.finished_ms is not None:
+            return False, "the goal session changed or finished during policy evaluation"
+        if current_phase is None or current_phase.id != phase.id:
+            return False, "the active goal phase changed during policy evaluation"
+        if candidate.observation_fingerprint != fingerprint or candidate.package != package:
+            return False, "the selected candidate is not bound to the supplied observation"
+        if observation.meta.device_serial not in {None, current_state.serial}:
+            return False, "the supplied observation belongs to another device"
+
+        # A warm Engine can observe a newer frame while a slow policy call is in flight. Never
+        # expose a selector from the older frame in that case. A short-lived Engine may have no
+        # cache here; session/phase/candidate provenance still provides the binding.
+        latest = self._last_analyze_result
+        if latest is not None:
+            latest_fingerprint = latest.meta.fingerprint
+            if latest_fingerprint and latest_fingerprint != fingerprint:
+                return False, "a newer observation replaced the policy input frame"
+            if latest.screen.package != package:
+                return False, "the foreground package changed during policy evaluation"
+        return True, None
+
+    def _session_policy_output(
+        self,
+        state: Any,
+        phase: Any,
+        observation: AnalyzeResult | None,
+        *,
+        recommended_call: Any,
+    ) -> dict[str, Any]:
+        """Evaluate the optional policy as a non-fatal, non-executing side channel."""
+        mode = self._session_policy_mode()
+        if mode == "off":
+            return {}
+
+        deterministic_kind = (
+            recommended_call.get("kind") if isinstance(recommended_call, dict) else None
+        )
+        if phase.kind != "verify" or deterministic_kind not in {
+            "manual_action",
+            "manual_observation",
+        }:
+            audit: dict[str, Any] = {
+                "mode": mode,
+                "status": "skipped_deterministic",
+                "provider": None,
+                "model_used": False,
+                "candidate_count": 0,
+                "eligible_candidate_ids": [],
+                "error": None,
+            }
+            return {"policy": audit}
+        if (
+            observation is None
+            or not observation.meta.fingerprint
+            or bool(observation.meta.stale_risk)
+            or not observation.screen.package
+        ):
+            audit = {
+                "mode": mode,
+                "status": "skipped_unbound_observation",
+                "provider": None,
+                "model_used": False,
+                "candidate_count": 0,
+                "eligible_candidate_ids": [],
+                "error": "policy requires a fresh fingerprinted observation",
+            }
+            return {"policy": audit}
+
+        try:
+            from .policy import PolicyContext, evaluate_policy, guard_candidates
+
+            candidates = self._policy_tap_candidates(state, phase, observation)
+            context = PolicyContext(
+                goal=phase.objective,
+                phase=phase.id,
+                session_id=state.session_id,
+                candidates=tuple(candidates),
+                observation={
+                    "fresh": True,
+                    **(
+                        {"known_screen": observation.meta.known_screen}
+                        if observation.meta.known_screen
+                        else {}
+                    ),
+                },
+                constraints=(
+                    "Select only a supplied guard-approved candidate.",
+                    "Do not invent or execute a call.",
+                ),
+                recent_outcomes=(
+                    "session_active=true",
+                    "outcome=known",
+                    "goal_checkpoint_reached=false",
+                ),
+                observation_fingerprint=observation.meta.fingerprint,
+                package=observation.screen.package,
+            )
+            max_candidates = max(1, int(getattr(self.config.policy, "max_candidates", 4)))
+            eligible = guard_candidates(context, max_candidates=max_candidates)
+            selector: PolicySelector | None = None
+            if len(eligible) > 1:
+                chain = self.factory.build_chain("policy")
+                selector = cast(
+                    "PolicySelector | None",
+                    chain.providers[0] if chain.providers else None,
+                )
+            decision = evaluate_policy(
+                context,
+                selector,
+                mode=mode,
+                max_candidates=max_candidates,
+            )
+            audit = decision.as_json()
+            # Exact calls belong only in the separate advisory field, never in shadow/audit.
+            audit.pop("recommended_call", None)
+            selected = decision.selected_candidate
+            suggestion = None
+            if selected is not None:
+                current, stale_reason = self._policy_context_is_current(
+                    state,
+                    phase,
+                    observation,
+                    selected,
+                )
+                if not current:
+                    audit["status"] = "rejected_stale_context"
+                    audit["error"] = stale_reason
+                    audit.pop("selected_candidate_id", None)
+                elif mode == "advisory" and decision.model_used:
+                    suggestion = self._policy_suggestion(selected)
+            out: dict[str, Any] = {"policy": audit}
+            if suggestion is not None:
+                out["policy_suggestion"] = suggestion
+            return out
+        except Exception as exc:  # policy is optional and must never break a UI result
+            logger.warning("optional policy evaluation failed: %s", exc)
+            audit = {
+                "mode": mode,
+                "status": "error",
+                "provider": None,
+                "model_used": False,
+                "candidate_count": 0,
+                "eligible_candidate_ids": [],
+                "error": f"policy evaluation failed: {type(exc).__name__}",
+            }
+            return {"policy": audit}
 
     def _phase_recommended_call(
         self,
@@ -5611,6 +5970,7 @@ class Engine:
                 observation=observation,
             )
         current = next((phase for phase in state.phases if phase.status != "completed"), None)
+        call: dict[str, Any] | None = None
         if current is not None:
             call = self._phase_recommended_call(
                 state,
@@ -5625,7 +5985,17 @@ class Engine:
                     phase_id=current.id,
                     call=call,
                 )
-        return {"ok": True, "goal_progress": phase_progress(state)}
+        out: dict[str, Any] = {"ok": True, "goal_progress": phase_progress(state)}
+        if current is not None:
+            out.update(
+                self._session_policy_output(
+                    state,
+                    current,
+                    observation,
+                    recommended_call=call or current.recommended_call,
+                )
+            )
+        return out
 
     def _session_state(self, session_id: str | None = None) -> Any:
         from .session import load_session_state

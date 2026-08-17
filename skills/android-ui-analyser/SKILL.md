@@ -66,6 +66,9 @@ structured `recommended_call` directly.
   debuggable SQLite.
 - A delivered deeplink, spinner disappearance, or unchanged short settle is not proof of the
   requested destination. Verify the final interactive affordance the user named.
+- Optional policy is off; failed v4 leaves bundled v3 shadow-only. Never act on
+  `policy_suggestion` or replace
+  `recommended_call`; FunctionGemma needs four choices (0/1 bypass; 2/3 withhold).
 
 ## Load more only when needed
 

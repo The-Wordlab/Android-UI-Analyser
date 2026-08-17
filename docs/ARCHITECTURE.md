@@ -158,12 +158,50 @@ for a human in the loop — but it is not required for the agent to operate.
 
 ## 8. Provider + fallback model (the configurable brain)
 
-Three pluggable provider kinds, each behind an interface with an ordered **fallback
-chain** (try provider A; on failure/timeout, try B, then C):
+Five pluggable provider kinds live behind interfaces. Perception and planning use ordered
+**fallback chains** (try provider A; on failure/timeout, try B, then C):
 - **OCR providers:** Apple Vision, RapidOCR, PaddleOCR, Tesseract, EasyOCR.
 - **Detection providers:** OmniParser-v2 (local), YOLO (local, user weights).
 - **Grounding/analysis providers:** local VLM (vLLM/Ollama/HF) and commercial
   (OpenAI / Anthropic / Gemini) selected by config, with API keys from env vars.
+- **Planner providers:** an opt-in goal navigator used only by explicit assist/navigate paths.
+- **Policy providers:** an optional opaque-ID selector behind a deterministic candidate guard.
 
 Selection precedence: **CLI flags > env vars > project config > user config >
 defaults.** Secrets are referenced by env-var name, never stored in plaintext config.
+
+## 9. Optional policy is a side channel, not an executor
+
+FunctionGemma is not part of the perception ladder and does not receive the Android hierarchy.
+During an active verification phase, deterministic AUA code may compile up to four complete
+current-frame tap calls with stable selectors. It removes unsafe, destructive, unauthorized,
+redundant, ambiguous, or stale candidates, keeps exact calls in a trusted map, and exposes only
+privacy-screened metadata plus dense opaque IDs to the selector. Session, phase, package, and
+observation provenance are revalidated after inference.
+
+The policy is off by default. Shadow emits audit metadata without the chosen call. The advisory
+interface can emit a separate `policy_suggestion`, but the deterministic `recommended_call` remains
+unchanged and no model-selected call is executed. Bundled v3's authenticated manifest caps rollout
+at shadow, so advisory returns `unsupported_mode` before inference. Zero candidates fail closed; one
+bypasses MLX; the frozen v3 adapter accepts exactly four and withholds advice for two/three.
+
+AUA packages only the modified ~15.2 MB LoRA adapter. The pinned ~543 MiB MLX base is external,
+must be supplied as an absolute local path, and is never downloaded automatically. The adapter's
+manifest pins each required base file, training/evaluation provenance, and its separate Gemma
+license materials. Its synthetic held-out accuracy was 99.8535%, but the strict gate is **FAIL**
+because the raw model made one unauthorized and one redundant selection. More importantly, a
+host-only engine-shaped production-serializer matrix failed at 60/96 semantic choices (62.5%).
+Protocol parsing, offered-ID validity, and provider/parser agreement were all 100%, while accuracy
+still varied by 37.5 percentage points across target IDs and 54.17 across target positions. The
+bundled v3 rollout is therefore shadow-only.
+
+A failure-driven v4 continuation then reached 2,767/2,768 validation (99.9639%, including 719/720
+production-shaped cases), 96/96 on the untouched production smoke, perfect held-out production
+choices for cardinalities 2/3/4 (64/64, 144/144, 512/512), and 4/4 clean closed loops. It still
+failed its independent combined test at 2,764/2,768 (99.8555%): critical accuracy was 99.6875% with
+four unauthorized `sequence_recover_unknown` decisions, all
+ending early with `session_finish` instead of using `analyze_screen`; parsing was 100% and redundant
+selections were zero. V4 remains ignored and unbundled. The next iteration needs recovery-focused
+data and evaluation that stay independent from training. This is why the guard, non-executing
+modes, and exact-cardinality boundary are architectural constraints rather than documentation
+caveats.

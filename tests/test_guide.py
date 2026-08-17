@@ -114,9 +114,47 @@ def test_brief_prefers_stable_selectors_and_current_playbook_facts() -> None:
 
 def test_json_is_structured() -> None:
     j = guide.render_json()
-    assert {"session_protocol", "escalation_ladder", "exit_codes", "schema_fields"} <= set(j)
+    assert {
+        "session_protocol",
+        "escalation_ladder",
+        "exit_codes",
+        "schema_fields",
+        "policy",
+    } <= set(j)
     assert any("daemon" in step["detail"].lower() for step in j["session_protocol"])
     assert any("grounding" in row["tier"].lower() for row in j["escalation_ladder"])
+
+
+def test_guide_keeps_optional_policy_advisory_and_cardinality_boundaries_explicit() -> None:
+    full = guide.render_markdown()
+    brief = guide.render_brief()
+    skill = guide.render_skill_markdown()
+
+    for text in (full, brief, skill):
+        assert "policy_suggestion" in text
+        assert "recommended_call" in text
+        assert "shadow-only" in text
+        assert "v4" in text.lower()
+        assert "0/1 bypass" in text or "Zero/one" in text or "zero/one" in text
+        assert "2/3" in text or "two/three" in text
+    for text in (full, brief):
+        assert "off by default" in text.lower()
+        assert "aua policy status" in text
+    assert "strict static gate is FAIL" in full
+    assert "60/96" in full
+    assert "62.5%" in full
+    assert "96/96" in full
+    assert "99.9639%" in full
+    assert "719/720" in full
+    assert "64/64" in full and "144/144" in full and "512/512" in full
+    assert "2,764/2,768" in full
+    assert "99.6875%" in full
+    assert "four unauthorized" in full
+    assert "sequence_recover_unknown" in full
+    assert "`session_finish` instead of `analyze_screen`" in full
+    assert "ignored/unbundled" in full
+    assert "recovery-focused" in full
+    assert "does not bundle or automatically download" in full
 
 
 def test_mcp_initialization_teaches_uncertain_daemon_outcomes() -> None:

@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "mlx-lora",
+  "name": "aua-functiongemma-candidate-policy-v3",
+  "description": "LoRA adapter for selecting one opaque, AUA-authored candidate call. It is not an autonomous Android agent.",
+  "modified_derivative": true,
+  "base_model": {
+    "name": "FunctionGemma 270M IT BF16 for MLX",
+    "upstream": "google/functiongemma-270m-it",
+    "conversion": "mlx-community/functiongemma-270m-it-bf16",
+    "conversion_tool": "mlx-lm 0.28.4",
+    "revision": "bb327a9ad61044e1496a2bee2365a6b6a6684c72",
+    "sha256": "76aabb2800b6b9e6da9160028dfb233bbfa723d8c33e21623022ca87a8fa9fd5",
+    "hash_scope": "sorted runtime-required relative path and content SHA-256 pairs; unrelated files are ignored",
+    "files": {
+      "chat_template.jinja": {
+        "bytes": 13792,
+        "sha256": "db61fb01017bd82401d3ffca4f8e066cd56ff6d38d2a30c4058770c0bf7ab49b"
+      },
+      "config.json": {
+        "bytes": 1539,
+        "sha256": "c60d3e4c9a04dcb53fae5e616d2d76a75f3eeecdc6e82f9b805904fc11724608"
+      },
+      "generation_config.json": {
+        "bytes": 176,
+        "sha256": "f3f694d69c044000d84e777938fe314137af2ae06014c552332d1c82f5e1b13d"
+      },
+      "model.safetensors": {
+        "bytes": 536222768,
+        "sha256": "fb64bf18b2911fcaa59d44c1b7d5842a011a874530be9dc5bc9d307e82b4edee"
+      },
+      "model.safetensors.index.json": {
+        "bytes": 17220,
+        "sha256": "419991d2afa817203a4941777d0511cc736c7c38912e33021366ba7b7a2bb83b"
+      },
+      "tokenizer.json": {
+        "bytes": 33378493,
+        "sha256": "3b83627b470a2b3eeb6cbd480490191e50f21549cb3de1d0fcc1a001a48c6c04"
+      },
+      "tokenizer_config.json": {
+        "bytes": 828,
+        "sha256": "9ffb9b4c29d60699a0c50b00abce43379640678852e442b1dec36a0421003a42"
+      }
+    }
+  },
+  "adapter": {
+    "weights": "adapters.safetensors",
+    "config": "adapter_config.json",
+    "bytes": 15215272,
+    "sha256": "21875181afa500ac0d11af944ae3bc92c71bf59b4bec202bc6c6b6221bf78743",
+    "training_output_sha256": "f4d2f2ed67ea1b50cdc8db511900df789d8767961ffc6f7271fe40478718575b",
+    "config_sha256": "aad9f7ce2f7f6f4810e70ff646b9f7f4261f27e546bd15d95d127e023d58dc01",
+    "fine_tune_type": "lora",
+    "rank": 16,
+    "scale": 32.0,
+    "dropout": 0.05,
+    "iterations": 1408
+  },
+  "modifications": {
+    "modified_by": "The Wordlab",
+    "modified_at": "2026-08-14",
+    "description": "MLX LoRA fine-tuning for guarded AUA candidate selection; Safetensors distribution metadata added 2026-08-15"
+  },
+  "prompt_schema": {
+    "name": "functiongemma-aua-candidate-policy-v3",
+    "candidate_ids": "dense opaque integers 0 through candidate_count minus 1",
+    "candidate_count": 4
+  },
+  "rollout": {
+    "max_mode": "shadow"
+  },
+  "training": {
+    "dataset_format": "functiongemma-aua-candidate-policy-v3",
+    "dataset_sha256": "f8983d45603a308ba95071af6497d6569ff1e03f1a11e332777bd0bacaa080db",
+    "train_sha256": "6b5fe6ffa43280004d72298c6ed3c340c9fdd884e180a076e7e571b89df3b609",
+    "valid_sha256": "cd86d1019c5c062c92245b0cd6e53754ae2ebfa030075a5c656ca8cf9c767831",
+    "test_sha256": "5653df0fc3222b55c26052e4c171673dfa4389b62738415b3f7add6e85ed5900",
+    "config_sha256": "e38a94afa9ae9db1c5989c85f02d32834c50e4883279996961d8eb4bf2e171d5",
+    "code": "../../../../experiments/functiongemma"
+  },
+  "evaluation": {
+    "heldout_cases": 2048,
+    "candidate_accuracy": 0.99853515625,
+    "critical_accuracy": 0.9984375,
+    "parse_success": 1.0,
+    "unauthorized_selections": 1,
+    "redundant_selections": 1,
+    "closed_loop_goal_completions": "4/4",
+    "production_smoke": {
+      "cases": 96,
+      "semantic_correct": 60,
+      "semantic_accuracy": 0.625,
+      "protocol_parse_success": 1.0,
+      "offered_id_success": 1.0,
+      "provider_protocol_agreement": 1.0,
+      "passed": false
+    },
+    "production_verdict": "shadow only; retrain on the production serializer before advisory use"
+  },
+  "terms": {
+    "agreement": "LICENSE",
+    "prohibited_use_policy": "GEMMA_PROHIBITED_USE_POLICY.md",
+    "notice": "NOTICE"
+  }
+}

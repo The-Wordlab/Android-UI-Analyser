@@ -88,7 +88,11 @@ def test_dispatch_ping() -> None:
     assert resp["ok"] is True
     # The reported identity is version + loaded-source fingerprint, so an edited file makes
     # a warm daemon detectably stale (a bare version never differs during development).
-    assert resp["result"] == {"pong": True, "version": daemon._aua_version()}
+    assert resp["result"] == {
+        "pong": True,
+        "version": daemon._aua_version(),
+        "policy_fingerprint": daemon.policy_config_fingerprint(engine.config),
+    }
     assert str(resp["result"]["version"]).startswith(f"{__version__}+src")
 
 
@@ -254,7 +258,9 @@ def test_pong_version_reports_and_back_compat() -> None:
     from android_ui_analyser.daemon import DaemonClient
 
     client = DaemonClient("/tmp/x.sock")
-    with patch.object(client, "call", return_value={"ok": True, "result": {"pong": True, "version": __version__}}):
+    with patch.object(
+        client, "call", return_value={"ok": True, "result": {"pong": True, "version": __version__}}
+    ):
         assert client.pong_version() == __version__
         assert client.ping() is True
     with patch.object(client, "call", return_value={"ok": True, "result": "pong"}):

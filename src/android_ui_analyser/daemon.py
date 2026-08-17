@@ -48,6 +48,107 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("android_ui_analyser.daemon")
 
+_POLICY_ENV_PREFIXES = (
+    "AUA_POLICY__",
+    "AUA_MODELS__FUNCTIONGEMMA__",
+    "AUA_MEMORY__DESTRUCTIVE_LABELS",
+)
+_POLICY_ENV_FIELDS = {
+    "AUA_POLICY__ENABLED": ("policy", "enabled"),
+    "AUA_POLICY__CHAIN": ("policy", "chain"),
+    "AUA_POLICY__MODE": ("policy", "mode"),
+    "AUA_POLICY__MAX_CANDIDATES": ("policy", "max_candidates"),
+    "AUA_MODELS__FUNCTIONGEMMA__MODEL_PATH": ("models", "functiongemma", "model_path"),
+    "AUA_MODELS__FUNCTIONGEMMA__ADAPTER_PATH": (
+        "models",
+        "functiongemma",
+        "adapter_path",
+    ),
+    "AUA_MODELS__FUNCTIONGEMMA__MAX_TOKENS": (
+        "models",
+        "functiongemma",
+        "max_tokens",
+    ),
+    "AUA_MODELS__FUNCTIONGEMMA__MODEL_SHA256": (
+        "models",
+        "functiongemma",
+        "model_sha256",
+    ),
+    "AUA_MODELS__FUNCTIONGEMMA__ADAPTER_SHA256": (
+        "models",
+        "functiongemma",
+        "adapter_sha256",
+    ),
+    "AUA_MODELS__FUNCTIONGEMMA__MANIFEST_SHA256": (
+        "models",
+        "functiongemma",
+        "manifest_sha256",
+    ),
+    # Candidate compilation uses this lexicon as a safety boundary. It must be identical in
+    # an explicit-config CLI and its detached daemon, and therefore participates in the same
+    # transport and fingerprint as the policy/model slice.
+    "AUA_MEMORY__DESTRUCTIVE_LABELS": ("memory", "destructive_labels"),
+}
+
+
+def _config_value(config: Config, path: tuple[str, ...]) -> Any:
+    value: Any = config
+    for part in path:
+        value = value.get(part) if isinstance(value, dict) else getattr(value, part, None)
+        if value is None:
+            break
+    return value
+
+
+def _env_value(value: Any) -> str | None:
+    """Serialize the deliberately small, non-secret daemon config allow-list."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (str, int, float)):
+        return str(value)
+    if isinstance(value, (list, tuple)) and all(
+        isinstance(item, (str, int, float, bool)) for item in value
+    ):
+        return ",".join(_env_value(item) or "" for item in value)
+    return None
+
+
+def _daemon_environment(config: Config) -> dict[str, str]:
+    """Preserve the process environment while pinning effective local-policy settings.
+
+    An explicit ``--config`` is only known to the parent CLI.  The detached child therefore
+    receives the effective policy slice through the existing nested-env config layer.  Stale
+    values for that slice are removed first, and the allow-list prevents unrelated config,
+    provider credentials, or model contents from being serialized into the child environment.
+    """
+    env = dict(os.environ)
+    for key in tuple(env):
+        if key.startswith(_POLICY_ENV_PREFIXES):
+            del env[key]
+    for key, path in _POLICY_ENV_FIELDS.items():
+        value = _env_value(_config_value(config, path))
+        if value is not None:
+            env[key] = value
+    return env
+
+
+def policy_config_fingerprint(config: Config) -> str:
+    """Opaque identity for the policy config transported to a detached daemon.
+
+    Only the same non-secret allow-list used by :func:`_daemon_environment` participates.
+    Returning a digest lets a client detect stale warm state without returning local paths.
+    """
+    policy_values = {
+        key: value
+        for key, path in _POLICY_ENV_FIELDS.items()
+        if (value := _env_value(_config_value(config, path))) is not None
+    }
+    payload = json.dumps(policy_values, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
 _SOCKET_BACKLOG = 5
 _START_POLL_INTERVAL = 0.1  # seconds between is_running checks
 _START_TIMEOUT = 5.0  # max seconds to wait after spawning
@@ -163,9 +264,7 @@ def _adopt_client_owner(engine: Engine, owner: str | None, caller: Any = None) -
     adopted_owner = leases.bind_owner_caller(owner, caller)
     if not adopted_owner:
         return
-    if leases.same_owner_identity(
-        adopted_owner, getattr(engine, "_lease_owner_resolved", None)
-    ):
+    if leases.same_owner_identity(adopted_owner, getattr(engine, "_lease_owner_resolved", None)):
         return
     device = getattr(engine, "_device", None)
     connected_serial = getattr(device, "serial", None)
@@ -205,9 +304,27 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
     args: dict[str, Any] = request.get("args") or {}
 
     try:
+        expected_policy = request.get("policy_fingerprint")
+        if (
+            cmd != "ping"
+            and isinstance(expected_policy, str)
+            and expected_policy
+            and expected_policy != policy_config_fingerprint(engine.config)
+        ):
+            return _result_err(
+                "policy_config_mismatch",
+                "the warm daemon was started with a different local policy configuration",
+                hint="Restart it: `aua daemon stop && aua daemon start`.",
+            )
         _adopt_client_owner(engine, request.get("owner"), request.get("caller"))
         if cmd == "ping":
-            return _result_ok({"pong": True, "version": _aua_version()})
+            return _result_ok(
+                {
+                    "pong": True,
+                    "version": _aua_version(),
+                    "policy_fingerprint": policy_config_fingerprint(engine.config),
+                }
+            )
 
         from .jobs import manager_for, reject_if_active
 
@@ -789,6 +906,38 @@ def _journal_dispatch(
     )
 
 
+def _decorate_requested_response(
+    engine: Engine,
+    request: dict[str, Any],
+    response: dict[str, Any],
+) -> dict[str, Any]:
+    """Attach response-local coaching in the warm process when the CLI requests it.
+
+    The server marks successful decoration explicitly. A newer CLI can therefore avoid doing
+    the work again, while retaining a safe client-side fallback when it reaches an older daemon
+    that ignores ``decorate_response``. The coaching boundary recognizes session methods that
+    already returned progress/policy and preserves those values without refreshing them again.
+    """
+
+    if request.get("decorate_response") is not True or response.get("ok") is not True:
+        return response
+    cmd = str(request.get("cmd") or "")
+    try:
+        from .coaching import decorate_result
+
+        result = decorate_result(
+            engine,
+            cmd,
+            response.get("result"),
+            args=request.get("args") if isinstance(request.get("args"), dict) else None,
+            current_recorded=False,
+        )
+    except Exception:  # pragma: no cover - coaching is optional; caller retains its fallback
+        logger.exception("daemon response decoration failed for cmd=%r", cmd)
+        return response
+    return {**response, "result": result, "response_decorated": True}
+
+
 def _handle_connection(
     engine: Engine, conn: socket.socket, activity: _Activity | None = None
 ) -> None:
@@ -822,6 +971,7 @@ def _handle_connection(
                     request = {"cmd": "?", "args": {}}
                 else:
                     response = dispatch(engine, request)
+                response = _decorate_requested_response(engine, request, response)
                 with contextlib.suppress(Exception):
                     _journal_dispatch(
                         engine,
@@ -876,6 +1026,8 @@ class DaemonClient:
         owner: str | None = None,
         invocation_id: str | None = None,
         expected_error_code: str | None = None,
+        policy_fingerprint: str | None = None,
+        decorate_response: bool = False,
     ) -> None:
         self._sock_path = sock_path
         self._timeout = 5.0 if timeout is None else timeout
@@ -891,6 +1043,8 @@ class DaemonClient:
             self._caller = None
         self._invocation_id = invocation_id
         self._expected_error_code = expected_error_code
+        self._policy_fingerprint = policy_fingerprint
+        self._decorate_response = decorate_response
 
     def __enter__(self) -> DaemonClient:
         return self
@@ -917,6 +1071,10 @@ class DaemonClient:
             request["invocation_id"] = self._invocation_id
         if self._expected_error_code:
             request["expected_error_code"] = self._expected_error_code
+        if self._policy_fingerprint:
+            request["policy_fingerprint"] = self._policy_fingerprint
+        if self._decorate_response:
+            request["decorate_response"] = True
         payload = json.dumps(request, ensure_ascii=False).encode() + b"\n"
 
         # A request that carries its own deadline needs a socket timeout above it. Naming the
@@ -1001,6 +1159,23 @@ class DaemonClient:
         except (OSError, json.JSONDecodeError, DaemonOutcomeUnknownError):
             # A daemon mid-shutdown may accept the connection but send nothing (empty line
             # → JSONDecodeError); treat any non-response as "not running".
+            return False
+
+    def pong_policy_fingerprint(self) -> str | None | bool:
+        """Return the daemon's policy identity, ``None`` for an older daemon, or ``False``
+        when no ping response can be obtained."""
+        try:
+            resp = self.call("ping")
+            result = resp.get("result")
+            if not resp.get("ok"):
+                return False
+            if isinstance(result, dict) and result.get("pong"):
+                fingerprint = result.get("policy_fingerprint")
+                return fingerprint if isinstance(fingerprint, str) and fingerprint else None
+            if result == "pong":
+                return None
+            return False
+        except (OSError, json.JSONDecodeError, DaemonOutcomeUnknownError):
             return False
 
 
@@ -1185,6 +1360,15 @@ def running_version(config: Config) -> str | None | bool:
     return version
 
 
+def running_policy_fingerprint(config: Config) -> str | None | bool:
+    """The live daemon's policy identity (``None`` means a pre-fingerprint daemon)."""
+    try:
+        client = DaemonClient(socket_path(config), timeout=2.0)
+        return client.pong_policy_fingerprint()
+    except (OSError, AuaError, AttributeError):
+        return False
+
+
 def start(config: Config, *, serial: str | None = None) -> dict[str, Any]:
     """Start the daemon as a detached background process.
 
@@ -1228,6 +1412,7 @@ def start(config: Config, *, serial: str | None = None) -> dict[str, Any]:
             cmd,
             stdout=log_fh,
             stderr=log_fh,
+            env=_daemon_environment(config),
             start_new_session=True,
             close_fds=True,
         )
@@ -1331,6 +1516,43 @@ def status(config: Config) -> dict[str, Any]:
     sock = socket_path(config)
     running = is_running(config)
     return {"running": running, "socket": sock}
+
+
+def policy_runtime_status(config: Config) -> dict[str, Any]:
+    """Policy readiness plus compatibility of any already-running warm daemon.
+
+    This is host-only: it inspects local files/dependency metadata and the Unix control socket;
+    it never connects to an Android device or loads the optional model.
+    """
+    from .policy import policy_status
+
+    result = policy_status(config)
+    expected = policy_config_fingerprint(config)
+    running = is_running(config)
+    actual: str | None | bool = False
+    if running:
+        actual = running_policy_fingerprint(config)
+    compatible = actual == expected if running and actual is not False else None
+    result["daemon"] = {
+        "running": running,
+        "compatible": compatible,
+        "policy_fingerprint": actual if isinstance(actual, str) else None,
+        "expected_policy_fingerprint": expected,
+        "reason": (
+            "not running"
+            if not running
+            else (
+                "policy configuration matches"
+                if compatible
+                else (
+                    "policy fingerprint unavailable while daemon is busy"
+                    if actual is False
+                    else "restart required: daemon policy configuration differs"
+                )
+            )
+        ),
+    }
+    return result
 
 
 # --------------------------------------------------------------------------- __main__

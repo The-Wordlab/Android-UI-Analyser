@@ -32,6 +32,11 @@ def test_unpinned_route_uses_the_leased_devices_socket(tmp_path, monkeypatch) ->
     )
     monkeypatch.setattr(daemon_mod, "is_running", lambda _cfg: True)
     monkeypatch.setattr(daemon_mod, "running_version", lambda _cfg: daemon_mod._aua_version())
+    monkeypatch.setattr(
+        daemon_mod,
+        "running_policy_fingerprint",
+        lambda route_cfg: daemon_mod.policy_config_fingerprint(route_cfg),
+    )
     monkeypatch.setattr(daemon_mod, "DaemonClient", Client)
 
     result = cli._route(engine, "analyze")
@@ -52,6 +57,11 @@ def test_two_owners_select_two_device_daemons(tmp_path, monkeypatch) -> None:
 
     monkeypatch.setattr(daemon_mod, "is_running", lambda _cfg: True)
     monkeypatch.setattr(daemon_mod, "running_version", lambda _cfg: daemon_mod._aua_version())
+    monkeypatch.setattr(
+        daemon_mod,
+        "running_policy_fingerprint",
+        lambda route_cfg: daemon_mod.policy_config_fingerprint(route_cfg),
+    )
     monkeypatch.setattr(daemon_mod, "DaemonClient", Client)
 
     for owner, serial in (("agent-a", "emulator-5558"), ("agent-b", "emulator-5560")):
