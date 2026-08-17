@@ -405,6 +405,10 @@ class RouteStep(BaseModel):
     substeps: list[RouteStep] = Field(default_factory=list)
     repeat: int | None = None
     max_retries: int | None = None
+    # Flow-only assertion payload.  The YAML parser validates the exact vocabulary before this
+    # shared route model sees it; keeping it in one mapping avoids turning every new semantic
+    # predicate into navigation-memory state that auto-recorded routes could accidentally use.
+    assertion: dict[str, Any] = Field(default_factory=dict)
 
 
 class RouteEdge(BaseModel):
@@ -553,8 +557,20 @@ def step_display(step: RouteStep) -> str:
         return f"{kind} [unlabeled]"
     if kind == "input":
         return "input '<filled>'" + (" + send" if step.submit else "")
-    if kind in ("key", "scroll-to", "wait-for", "assert-visible"):
+    if kind in ("key", "scroll-to", "wait-for", "assert-visible", "screenshot"):
         return f"{kind} '{step.arg}'"
+    if kind == "assert":
+        selector = (
+            f"#{step.resource_id}"
+            if step.resource_id
+            else step.content_desc or step.label or "<missing selector>"
+        )
+        checks = ",".join(sorted(step.assertion)) or "exists"
+        return f"assert '{selector}' ({checks})"
+    if kind == "assert-order":
+        selectors = step.assertion.get("selectors", [])
+        axis = step.assertion.get("axis", "vertical")
+        return f"assert-order {axis} ({len(selectors)} selectors)"
     if kind in ("swipe", "scroll"):
         return f"{kind} {step.arg}"
     if kind in ("launch-app", "stop-app", "open-link", "goto", "flow"):
@@ -619,6 +635,9 @@ _SAFE_GOTO_STEP_KINDS = frozenset(
         "wait-stable",
         "assert-visible",
         "assert-not-visible",
+        "assert",
+        "assert-order",
+        "screenshot",
         "hide-keyboard",
         "a11y-scroll",
     }

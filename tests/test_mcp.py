@@ -804,6 +804,30 @@ def test_mcp_flow_run_dry_run_roundtrip(tmp_path) -> None:  # type: ignore[no-un
     assert data["ok"] and data["dry_run"] and data["steps"][0]["step"] == "tap 'Continue'"
 
 
+def test_mcp_flow_run_accepts_inline_yaml_and_artifact_options(tmp_path: Path) -> None:
+    server = build_server(_engine())
+    artifacts = tmp_path / "mcp-flow-artifacts"
+
+    async def run() -> dict:
+        async with create_connected_server_and_client_session(server) as client:
+            result = await client.call_tool(
+                "flow_run",
+                {
+                    "yaml": "steps:\n  - assert: {text: Hello, count: 1}\n",
+                    "dry_run": True,
+                    "artifacts_dir": str(artifacts),
+                    "evidence": "none",
+                    "junit": True,
+                },
+            )
+            assert not result.isError, result
+            return json.loads(_first_text(result))
+
+    data = anyio.run(run)
+    assert data["ok"] is True and data["source"] == "inline_yaml"
+    assert Path(data["artifacts"]["junit"]).is_file()
+
+
 def test_mcp_navigate_requires_planner(monkeypatch) -> None:
     # navigate without planner.enabled → structured usage error, not a crash.
     from android_ui_analyser.engine import Engine

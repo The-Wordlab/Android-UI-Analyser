@@ -67,6 +67,30 @@ def test_run_suite_pass() -> None:
     assert result.failed == 0
 
 
+def test_suite_expect_reuses_exact_count_predicate() -> None:
+    suite = parse_suite(
+        """
+name: exact_count
+checks:
+  - expect: {rid: done, count: 1}
+"""
+    )
+    assert suite.checks[0].count == 1
+    result = run_suite(make_engine(device=FakeDevice(hierarchy_xml=_XML)), suite)
+    assert result.ok, result
+
+
+def test_suite_expect_rejects_invalid_count() -> None:
+    from android_ui_analyser.errors import UsageError
+
+    try:
+        parse_suite("name: invalid\nchecks:\n  - expect: {rid: done, count: -1}\n")
+    except UsageError as exc:
+        assert "non-negative integer" in str(exc)
+    else:
+        raise AssertionError("expected invalid count to be rejected")
+
+
 def test_run_suite_stops_on_fail() -> None:
     eng = make_engine(device=FakeDevice(hierarchy_xml=_XML, text_index={}))
     suite = parse_suite(

@@ -90,8 +90,6 @@ from .scroll_geom import (
     Box,
     Sample,
     _contains,
-    _iter_nodes,
-    _node_box,
     region_probe,
     scrollable_boxes,
     travel,
@@ -444,6 +442,7 @@ class StepFailure(NamedTuple):
     #            unsupported_action | wait_timeout | assert_failed
     at: int  # failing step index within the executed list
     step: RouteStep
+    detail: str | None = None
 
 
 def _goto_handoff(
@@ -2519,6 +2518,78 @@ class Engine:
         with_ocr = None if hierarchy_ocr or source == "auto" else False
         return self.analyze(source=source, with_ocr=with_ocr)
 
+    def _run_flow_assertion(self, step: RouteStep) -> ActionResult:
+        """Evaluate the rich flow ``assert:`` step through the public expect primitive."""
+
+        predicates = dict(step.assertion)
+        first = bool(predicates.pop("first", False))
+        count = predicates.pop("count", None)
+        return self.expect(
+            rid=step.resource_id,
+            text=step.label,
+            desc=step.content_desc,
+            exists=bool(predicates.pop("exists", False)),
+            absent=bool(predicates.pop("absent", False)),
+            text_is=predicates.pop("text_is", None),
+            text_contains=predicates.pop("text_contains", None),
+            checked=predicates.pop("checked", None),
+            enabled=predicates.pop("enabled", None),
+            selected=predicates.pop("selected", None),
+            focused=predicates.pop("focused", None),
+            count=count,
+            index=step.index,
+            first=first,
+            timeout_ms=step.timeout_ms or 0,
+            observe=False,
+        )
+
+    def _run_flow_order_assertion(self, step: RouteStep) -> tuple[bool, str]:
+        """Assert explicit horizontal/vertical ordering without guessing grid semantics."""
+
+        assertion = step.assertion
+        axis = assertion.get("axis")
+        selectors = assertion.get("selectors")
+        if axis not in {"horizontal", "vertical"} or not isinstance(selectors, list):
+            return False, "invalid assert_order payload"
+        deadline = time.monotonic() + max(0, step.timeout_ms or 0) / 1000.0
+        while True:
+            raw_tree = self.platform.dump_tree(self.device)
+            elements = self.platform.normalize_tree(
+                raw_tree,
+                self.device.window_size(),
+                ignored_app_ids=self.config.memory.ignore_packages,
+            ).elements
+            located: list[Element] = []
+            detail: str | None = None
+            for position, raw in enumerate(selectors):
+                if not isinstance(raw, dict):
+                    detail = f"selector[{position}] is not a mapping"
+                    break
+                selector = {key: raw.get(key) for key in ("rid", "text", "desc")}
+                matches = match_selector(elements, **selector)
+                index = raw.get("index")
+                if index is None and len(matches) != 1:
+                    detail = (
+                        f"selector[{position}] matched {len(matches)} elements; "
+                        "add index to disambiguate"
+                    )
+                    break
+                if not isinstance(index, int):
+                    index = 0
+                if not 0 <= index < len(matches):
+                    detail = f"selector[{position}] index {index} has {len(matches)} matches"
+                    break
+                located.append(matches[index])
+            if detail is None:
+                coordinate = 0 if axis == "horizontal" else 1
+                values = [element.center[coordinate] for element in located]
+                if all(left < right for left, right in zip(values, values[1:], strict=False)):
+                    return True, f"pass order axis={axis} centers={values}"
+                detail = f"expected strictly increasing {axis} centers, got {values}"
+            if time.monotonic() >= deadline:
+                return False, detail
+            self._job_sleep(0.25)
+
     def _run_steps(
         self,
         steps: list[RouteStep],
@@ -2534,6 +2605,7 @@ class Engine:
         flow_dir: Path | None = None,
         allow_unsafe_route_effects: bool = True,
         flow_plan: _ResolvedFlowPlan | None = None,
+        flow_artifacts: Any | None = None,
     ) -> tuple[StepFailure | None, AnalyzeResult]:
         """Execute *steps* with selector matching, settle waits, and re-perception.
 
@@ -2553,6 +2625,8 @@ class Engine:
             res = self._analyze_route_step(steps, 0, origin_package, hierarchy_ocr=hierarchy_ocr)
         lexicon = self.config.memory.destructive_labels
         for i, s in enumerate(steps):
+            step_started = time.perf_counter()
+            step_extra: dict[str, Any] = {}
             if is_destructive_step(s, lexicon) and not allow_destructive:
                 return StepFailure("destructive_step", i, s), res
             non_destructive_risks = [
@@ -2684,6 +2758,40 @@ class Engine:
                 if self.has(s.arg, timeout_ms=s.timeout_ms or 0, by=s.by or "text").found:
                     return StepFailure("assert_failed", i, s), res
                 reanalyze = False
+            elif kind == "assert":
+                assertion = self._run_flow_assertion(s)
+                if not assertion.ok:
+                    return StepFailure("assert_failed", i, s, assertion.detail), res
+                step_extra["assertion"] = assertion.detail
+                reanalyze = False
+            elif kind == "assert-order":
+                ok, detail = self._run_flow_order_assertion(s)
+                if not ok:
+                    return StepFailure("assert_failed", i, s, detail), res
+                step_extra["assertion"] = detail
+                reanalyze = False
+            elif kind == "screenshot":
+                if not s.arg:
+                    return StepFailure("unsupported_action", i, s), res
+                try:
+                    if flow_artifacts is not None:
+                        screenshot_path = flow_artifacts.capture_checkpoint(s.arg)
+                    else:
+                        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", s.arg).strip("-._")
+                        path = self._default_annotate_path(
+                            self.device.serial,
+                            suffix=f"flow-{safe_name or 'checkpoint'}",
+                            timestamped=True,
+                        )
+                        screenshot_path = self.screenshot(path).detail
+                except Exception as exc:  # noqa: BLE001 - preserve a resumable flow failure
+                    return StepFailure(
+                        "screenshot_failed", i, s, f"{type(exc).__name__}: {exc}"
+                    ), res
+                if screenshot_path:
+                    step_extra["screenshot"] = screenshot_path
+                reanalyze = False
+                settle = False
             elif kind == "hide-keyboard":
                 self.hide_keyboard(observe=False)
             elif kind == "paste":
@@ -2763,6 +2871,7 @@ class Engine:
                         flow_dir=flow_dir,
                         allow_unsafe_route_effects=allow_unsafe_route_effects,
                         flow_plan=flow_plan,
+                        flow_artifacts=flow_artifacts,
                     )
                     if executed is not None:
                         for row in sub_executed:
@@ -2777,7 +2886,7 @@ class Engine:
                                 }
                             )
                     if subfail is not None:
-                        return StepFailure(subfail.code, i, s), res
+                        return StepFailure(subfail.code, i, s, subfail.detail), res
                 reanalyze = False
                 settle = False
             elif kind == "retry":
@@ -2799,6 +2908,7 @@ class Engine:
                         flow_dir=flow_dir,
                         allow_unsafe_route_effects=allow_unsafe_route_effects,
                         flow_plan=flow_plan,
+                        flow_artifacts=flow_artifacts,
                     )
                     if executed is not None:
                         for row in sub_executed:
@@ -2815,7 +2925,7 @@ class Engine:
                     if subfail is None:
                         break
                 if subfail is not None:
-                    return StepFailure(subfail.code, i, s), res
+                    return StepFailure(subfail.code, i, s, subfail.detail), res
                 reanalyze = False
                 settle = False
             elif kind == "goto":
@@ -2856,6 +2966,7 @@ class Engine:
                     flow_dir=sub_dir,
                     allow_unsafe_route_effects=allow_unsafe_route_effects,
                     flow_plan=flow_plan,
+                    flow_artifacts=flow_artifacts,
                 )
                 if executed is not None:
                     for row in nested_executed:
@@ -2874,7 +2985,7 @@ class Engine:
                             }
                         )
                 if subfail is not None:
-                    return StepFailure(subfail.code, i, s), res  # surface sub-failure here
+                    return StepFailure(subfail.code, i, s, subfail.detail), res
                 arrival_verified, arrival_code, res, _arrival_evidence = (
                     self._flow_arrival_evidence(sub, res)
                 )
@@ -2884,8 +2995,6 @@ class Engine:
             else:
                 return StepFailure("unsupported_action", i, s), res
 
-            if executed is not None:
-                executed.append({"index": i, "step": step_display(s)})
             if reanalyze:
                 if settle:
                     nxt = steps[i + 1] if i + 1 < len(steps) else None
@@ -2895,6 +3004,16 @@ class Engine:
                 res = self._analyze_route_step(
                     steps, i + 1, origin_package, hierarchy_ocr=hierarchy_ocr
                 )
+            if executed is not None:
+                step_row: dict[str, Any] = {
+                    "index": i,
+                    "step": step_display(s),
+                    "duration_ms": max(0, int((time.perf_counter() - step_started) * 1000)),
+                    **step_extra,
+                }
+                if flow_artifacts is not None:
+                    flow_artifacts.record_step(step_row, kind=kind, observation=res)
+                executed.append(step_row)
         return None, res
 
     @staticmethod
@@ -3325,6 +3444,7 @@ class Engine:
         executed: list[dict[str, Any]],
         allow_transit_resume: bool = False,
         flow_plan: _ResolvedFlowPlan | None = None,
+        flow_artifacts: Any | None = None,
     ) -> tuple[StepFailure | None, AnalyzeResult]:
         """Execute a resolved flow after enforcing its package/context entry contract."""
 
@@ -3345,12 +3465,15 @@ class Engine:
                 flow_dir=flow_dir,
                 allow_unsafe_route_effects=allow_unsafe_route_effects,
                 flow_plan=flow_plan,
+                flow_artifacts=flow_artifacts,
             )
             for row in chunk_executed:
                 row["index"] += start
             executed.extend(chunk_executed)
             if failure is not None:
-                failure = StepFailure(failure.code, failure.at + start, failure.step)
+                failure = StepFailure(
+                    failure.code, failure.at + start, failure.step, failure.detail
+                )
             return failure, latest
 
         _active_context, mismatch = self._flow_runtime_state(
@@ -4238,12 +4361,16 @@ class Engine:
         name: str | None = None,
         *,
         file: str | None = None,
+        yaml: str | None = None,
         params: dict[str, str] | None = None,
         dry_run: bool = False,
         from_step: int = 0,
         allow_destructive: bool = True,
         assist: bool = False,
         allow_unsafe: bool = True,
+        artifacts_dir: str | None = None,
+        evidence: str = "failures",
+        junit: bool = False,
         _observation: AnalyzeResult | None = None,
     ) -> dict[str, Any]:
         """Replay a named (or ``--file``) flow in one call — the whole journey.
@@ -4255,11 +4382,34 @@ class Engine:
         (opt-in planner), a divergence triggers one recovery attempt (dismiss a blocking
         dialog) then resumes from the failed step before handing off.
         """
-        from .flows import FlowStore, anchor_paths, parse_flow_yaml, resolve_params
+        from .flow_artifacts import FlowArtifactWriter, validate_evidence_mode
+        from .flows import (
+            FlowStore,
+            anchor_paths,
+            parse_flow_yaml,
+            render_flow_yaml,
+            resolve_params,
+        )
+
+        run_started = time.perf_counter()
+        try:
+            evidence = validate_evidence_mode(evidence)
+        except ValueError as exc:
+            raise UsageError(str(exc)) from exc
+        if junit and not artifacts_dir:
+            raise UsageError("--junit needs --artifacts-dir")
+        if not artifacts_dir and evidence != "failures":
+            raise UsageError("--evidence needs --artifacts-dir")
+        sources = [name is not None, file is not None, yaml is not None]
+        if sum(sources) != 1:
+            raise UsageError(
+                "flow run needs exactly one of NAME, --file, or --yaml",
+                hint="use a saved name, a YAML path, or an inline YAML body",
+            )
 
         base_dir: Path | None = None
         flow_file: Path | None = None
-        if file:
+        if file is not None:
             path = Path(file).expanduser()
             if not path.is_file():
                 # Name the absolute location, always. Reporting the relative path back is
@@ -4279,28 +4429,67 @@ class Engine:
             flow_file = path.resolve()
             root_source_id = str(flow_file)
             base_dir = flow_file.parent
-        elif name:
+        elif yaml is not None:
+            flow = parse_flow_yaml(yaml, name="inline")
+            root_source_id = "inline:" + hashlib.sha256(yaml.encode("utf-8")).hexdigest()
+        elif name is not None:
             store = FlowStore(self.config.memory)
             flow = store.load(name)
             root_source_id = str(store.path(name).resolve())
             base_dir = store.flows_dir()
-        else:
-            raise UsageError("flow run needs a NAME or --file", hint="see `aua flow list`")
         # A flow's optional YAML `name:` is display metadata. Named replay is addressed by
         # its storage key (the filename), while file replay must keep using the exact file.
         # Returning or suggesting the display name made failed journeys impossible to resume
         # whenever those identities differed.
         runnable_name = name or flow.name
-        resume_prefix = (
-            f"aua flow run --file {shlex.quote(str(flow_file))}"
-            if flow_file is not None
-            else f"aua flow run {shlex.quote(runnable_name)}"
-        )
+        resume_prefix: str | None
+        if flow_file is not None:
+            resume_prefix = f"aua flow run --file {shlex.quote(str(flow_file))}"
+        elif yaml is not None:
+            resume_prefix = None
+        else:
+            resume_prefix = f"aua flow run {shlex.quote(runnable_name)}"
         identity: dict[str, Any] = {"flow": runnable_name}
         if flow.name != runnable_name:
             identity["declared_name"] = flow.name
         if flow_file is not None:
             identity["file"] = str(flow_file)
+        if yaml is not None:
+            identity["source"] = "inline_yaml"
+
+        artifact_writer: FlowArtifactWriter | None = None
+        if artifacts_dir:
+            artifact_writer = FlowArtifactWriter(
+                artifacts_dir,
+                flow_name=runnable_name,
+                evidence=evidence,
+                junit=junit,
+                screenshot=lambda path: str(self.screenshot(str(path)).detail or path),
+                diagnostics=lambda: (
+                    self.platform.diagnostic_logs(self.device, lines=400)
+                    if self.platform.supports("device.logs")
+                    else None
+                ),
+            )
+
+        def finish(
+            result: dict[str, Any], observation: AnalyzeResult | None = None
+        ) -> dict[str, Any]:
+            duration_ms = max(0, int((time.perf_counter() - run_started) * 1000))
+            result["duration_ms"] = duration_ms
+            if artifact_writer is None:
+                return result
+            if result.get("ok") is False:
+                if observation is not None:
+                    artifact_writer.record_failure(result, observation)
+                else:
+                    artifact_writer.record_preflight_failure(result)
+            return artifact_writer.finalize(
+                result,
+                canonical_flow_yaml=render_flow_yaml(flow),
+                duration_ms=duration_ms,
+            )
+
         active_context: str | None = None
         if flow.context_id and self._memory is not None and self._device is not None:
             session = self._memory.load_session(self._device.serial)
@@ -4353,45 +4542,49 @@ class Engine:
             if step_is_destructive(step, base_dir)
         ]
         if dry_run:
-            return {
-                "ok": True,
-                **identity,
-                "dry_run": True,
-                "app": flow.app,
-                "context_id": flow.context_id,
-                "arrival": flow.arrival,
-                "arrival_screen": flow.arrival_screen,
-                "arrival_status": flow.arrival_status or "unverified",
-                "active_context_id": active_context,
-                "context_compatible": (
-                    None
-                    if flow.context_id is not None and active_context is None
-                    else flow.context_id in (None, active_context)
-                ),
-                "would_execute": False,
-                "params_declared": sorted(flow.params),
-                "steps": disclosure["steps"],
-                "risks": disclosure["risks"],
-                "effects": disclosure["effects"],
-                "flow_graph": disclosure["flow_graph"],
-                "note": "not executed (--dry-run)",
-            }
+            return finish(
+                {
+                    "ok": True,
+                    **identity,
+                    "dry_run": True,
+                    "app": flow.app,
+                    "context_id": flow.context_id,
+                    "arrival": flow.arrival,
+                    "arrival_screen": flow.arrival_screen,
+                    "arrival_status": flow.arrival_status or "unverified",
+                    "active_context_id": active_context,
+                    "context_compatible": (
+                        None
+                        if flow.context_id is not None and active_context is None
+                        else flow.context_id in (None, active_context)
+                    ),
+                    "would_execute": False,
+                    "params_declared": sorted(flow.params),
+                    "steps": disclosure["steps"],
+                    "risks": disclosure["risks"],
+                    "effects": disclosure["effects"],
+                    "flow_graph": disclosure["flow_graph"],
+                    "note": "not executed (--dry-run)",
+                }
+            )
 
         if destructive_indices and not allow_destructive:
             index = destructive_indices[0]
-            return {
-                "ok": False,
-                "code": "destructive_step",
-                **identity,
-                "step_index": index,
-                "failed_step": {
-                    "display": step_display(steps[index]),
-                    **steps[index].model_dump(),
-                },
-                "steps_run": [],
-                "remaining_steps": [step_display(step) for step in steps[index:]],
-                "hint": "review the full flow, then rerun with --allow-destructive",
-            }
+            return finish(
+                {
+                    "ok": False,
+                    "code": "destructive_step",
+                    **identity,
+                    "step_index": index,
+                    "failed_step": {
+                        "display": step_display(steps[index]),
+                        **steps[index].model_dump(),
+                    },
+                    "steps_run": [],
+                    "remaining_steps": [step_display(step) for step in steps[index:]],
+                    "hint": "review the full flow, then rerun with --allow-destructive",
+                }
+            )
 
         # Execution always begins from a current foreground observation. ``reach`` hands its
         # just-captured frame through the private seam; direct flow_run pays for exactly one.
@@ -4442,6 +4635,7 @@ class Engine:
                 allow_unsafe_route_effects=allow_unsafe,
                 allow_transit_resume=slice_start > 0,
                 flow_plan=flow_plan,
+                flow_artifacts=artifact_writer,
             )
             for e in ex:
                 e["index"] += slice_start  # absolute flow indices
@@ -4465,16 +4659,22 @@ class Engine:
                 fail, res, idx = _exec(idx, res)  # resume from the failed step
         if fail is not None:
             assert idx is not None
-            hint = (
-                "fix the flow or finish the step manually, then resume with "
-                f"`{resume_prefix} --from-step {idx}`"
-            )
+            if resume_prefix is not None:
+                hint = (
+                    "fix the flow or finish the step manually, then resume with "
+                    f"`{resume_prefix} --from-step {idx}`"
+                )
+            else:
+                hint = (
+                    "fix the flow or finish the step manually, then submit the same inline "
+                    f"YAML again with from_step={idx}"
+                )
             if not assist:
                 hint += (
                     "; or add `--assist` to let a fast model clear blockers "
                     "(needs `planner.enabled` + its API key)"
                 )
-            return {
+            failure_result = {
                 "ok": False,
                 "code": fail.code,
                 **identity,
@@ -4489,8 +4689,14 @@ class Engine:
                     if (e.text or e.content_desc)
                 ][:20],
                 "hint": hint,
-                "resume_call": f"{resume_prefix} --from-step {idx}",
             }
+            if fail.detail:
+                failure_result["failure_detail"] = fail.detail
+            if resume_prefix is not None:
+                failure_result["resume_call"] = f"{resume_prefix} --from-step {idx}"
+            else:
+                failure_result["resume_from_step"] = idx
+            return finish(failure_result, res)
         arrival_verified, arrival_code, res, arrival_evidence = self._flow_arrival_evidence(
             flow,
             res,
@@ -4507,7 +4713,7 @@ class Engine:
         if arrival_verified is False:
             out["ok"] = False
             out["code"] = arrival_code or "arrival_unverified"
-        return out
+        return finish(out, res if out.get("ok") is False else None)
 
     def explore_mine(
         self, source: str, *, package: str | None = None, save: bool = True
@@ -10862,41 +11068,9 @@ class Engine:
     # ----------------------------------------------------------------- expect
 
     def _node_state(self, xml: str, el: Element) -> dict[str, Any]:
-        """Interaction state for *el*, from the parsed element plus the raw dump.
+        """Interaction state from the selected platform's native-tree adapter."""
 
-        ``Element`` carries optional ``checked``/``selected``/… fields, but until every
-        parse path fills them the a11y attributes are read straight off the node with the
-        same bounds. A Compose row commonly holds the label while a *descendant* holds the
-        switch, so when the element itself is not checkable the checkable descendant is what
-        ``checked`` reports — otherwise every toggle assertion reads False.
-        """
-        state: dict[str, Any] = {
-            "checkable": False,
-            "checked": False,
-            "enabled": el.enabled,
-            "selected": False,
-            "focused": el.focused,
-            "text": el.text,
-            "content_desc": el.content_desc,
-        }
-        node = next((n for n in _iter_nodes(xml) if _node_box(n) == tuple(el.bounds)), None)
-        if node is not None:
-            holder = node
-            if node.get("checkable") != "true":
-                holder = next((n for n in node.iter("node") if n.get("checkable") == "true"), node)
-            state.update(
-                checkable=holder.get("checkable") == "true",
-                checked=holder.get("checked") == "true",
-                enabled=node.get("enabled") == "true",
-                selected=node.get("selected") == "true",
-                focused=node.get("focused") == "true",
-            )
-        if el.checkable:  # the element itself is the toggle — its own parsed state wins
-            state["checkable"] = True
-            state["checked"] = bool(el.checked)
-        if el.selected is not None:
-            state["selected"] = el.selected
-        return state
+        return dict(self.platform.element_state(xml, el))
 
     def _check_predicates(
         self, el: Element, state: dict[str, Any], predicates: dict[str, Any]
@@ -10926,15 +11100,35 @@ class Engine:
         *,
         index: int | None,
         first: bool,
+        count: int | None = None,
     ) -> tuple[bool, str]:
         """One evaluation pass: ``(ok, detail)``. One hierarchy dump, no screenshots."""
-        from . import hierarchy
-
-        xml = self._dump()
+        xml = self.platform.dump_tree(self.device)
         w, h = self.device.window_size()
-        elements = hierarchy.parse_hierarchy(xml, (w, h))
+        elements = self.platform.normalize_tree(
+            xml,
+            (w, h),
+            ignored_app_ids=self.config.memory.ignore_packages,
+        ).elements
         label = selector_label(selector)
         matches = match_selector(elements, **selector)
+        if count is not None and len(matches) != count:
+            detail = detail_tokens(
+                "fail",
+                sought=label,
+                predicate="count",
+                expected=count,
+                actual=len(matches),
+            )
+            if matches:
+                detail += " | found: " + " | ".join(
+                    element_digest(el) for el in matches[:_MAX_CANDIDATES]
+                )
+            return False, detail
+        if count == 0:
+            return True, detail_tokens(
+                "pass", sought=label, predicate="count", expected=0, actual=0
+            )
         if predicates.get("absent"):
             if not matches:
                 return True, detail_tokens("pass", sought=label, predicate="absent")
@@ -10970,6 +11164,8 @@ class Engine:
                 failures
             )
         checks = ",".join(predicates) or "exists"
+        if count is not None:
+            checks += f",count={count}"
         return True, detail_tokens("pass", sought=label, id=el.id, checks=checks)
 
     def expect(
@@ -10986,6 +11182,7 @@ class Engine:
         enabled: bool | None = None,
         selected: bool | None = None,
         focused: bool | None = None,
+        count: int | None = None,
         index: int | None = None,
         first: bool = False,
         timeout_ms: int = 0,
@@ -11007,6 +11204,13 @@ class Engine:
             )
         if absent and exists:
             raise UsageError("--exists and --absent are mutually exclusive")
+        if count is not None and count < 0:
+            raise UsageError("--count must not be negative")
+        if count == 0 and any(
+            value is not None
+            for value in (text_is, text_contains, checked, enabled, selected, focused)
+        ):
+            raise UsageError("--count 0 cannot be combined with element state predicates")
         predicates: dict[str, Any] = {}
         if absent:
             predicates["absent"] = True
@@ -11024,7 +11228,9 @@ class Engine:
             predicates.setdefault("exists", True)
         deadline = time.monotonic() + max(0, timeout_ms) / 1000.0
         while True:
-            ok, detail = self._expect_once(selector, predicates, index=index, first=first)
+            ok, detail = self._expect_once(
+                selector, predicates, index=index, first=first, count=count
+            )
             if ok or time.monotonic() >= deadline:
                 return self._observe(
                     ActionResult(ok=ok, action="expect", detail=detail), observe, None

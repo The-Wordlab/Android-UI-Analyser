@@ -57,6 +57,9 @@ _KINDS = {
     "wait_stable": "wait-stable",
     "assert_visible": "assert-visible",
     "assert_not_visible": "assert-not-visible",
+    "assert": "assert",
+    "assert_order": "assert-order",
+    "screenshot": "screenshot",
     "hide_keyboard": "hide-keyboard",
     "paste": "paste",
     "launch_app": "launch-app",
@@ -88,6 +91,7 @@ _ARG_ALIAS = {
     "wait-for": "text",
     "assert-visible": "text",
     "assert-not-visible": "text",
+    "screenshot": "name",
     "launch-app": "package",
     "stop-app": "package",
     "open-link": "uri",
@@ -596,7 +600,113 @@ def _parse_step(item: Any, index: int) -> RouteStep:
 
     v = dict(value)
     kw: dict[str, Any] = {"kind": kind}
-    if kind in _ELEMENT_KINDS:
+    if kind == "assert":
+        explicit_by = v.pop("by", None)
+        if explicit_by not in (None, "id", "desc", "text"):
+            raise _step_error(index, "assert `by:` must be id, desc, or text")
+        raw_id = v.pop("id", None)
+        raw_rid = v.pop("rid", None)
+        if raw_id is not None and raw_rid is not None:
+            raise _step_error(index, "assert accepts `id:` or `rid:`, not both")
+        kw["resource_id"] = _string(
+            raw_id if raw_id is not None else raw_rid, field="assert id", index=index
+        )
+        kw["content_desc"] = _string(v.pop("desc", None), field="assert desc", index=index)
+        kw["label"] = _string(v.pop("text", None), field="assert text", index=index)
+        kw["by"] = explicit_by
+        if sum(bool(value) for value in (kw["resource_id"], kw["content_desc"], kw["label"])) != 1:
+            raise _step_error(
+                index, "assert needs exactly one of `id:`/`rid:`, `desc:`, or `text:`"
+            )
+        if explicit_by == "id" and not kw["resource_id"]:
+            raise _step_error(index, "assert `by: id` needs an `id:` selector")
+        if explicit_by == "desc" and not kw["content_desc"]:
+            raise _step_error(index, "assert `by: desc` needs a `desc:` selector")
+        if explicit_by == "text" and not kw["label"]:
+            raise _step_error(index, "assert `by: text` needs a `text:` selector")
+        predicates: dict[str, Any] = {}
+        for field in ("text_is", "text_contains"):
+            if field in v:
+                predicates[field] = _string(
+                    v.pop(field), field=f"assert {field}", index=index, optional=False
+                )
+        for field in ("exists", "absent", "checked", "enabled", "selected", "focused", "first"):
+            if field in v:
+                predicates[field] = _strict_bool(v.pop(field), field=f"assert {field}", index=index)
+        if "count" in v:
+            predicates["count"] = _strict_int(
+                v.pop("count"), field="assert count", index=index, minimum=0
+            )
+        if predicates.get("exists") and predicates.get("absent"):
+            raise _step_error(index, "assert `exists:` and `absent:` are mutually exclusive")
+        for presence in ("exists", "absent"):
+            if presence in predicates and predicates[presence] is False:
+                raise _step_error(
+                    index,
+                    f"assert `{presence}: false` is ambiguous; omit it or use the opposite predicate",
+                )
+        count = predicates.get("count")
+        state_predicates = {
+            "text_is",
+            "text_contains",
+            "checked",
+            "enabled",
+            "selected",
+            "focused",
+        }
+        if count == 0 and state_predicates.intersection(predicates):
+            raise _step_error(index, "assert `count: 0` cannot check state on a missing element")
+        if count == 0 and predicates.get("exists"):
+            raise _step_error(index, "assert `count: 0` conflicts with `exists: true`")
+        if isinstance(count, int) and count > 0 and predicates.get("absent"):
+            raise _step_error(index, "assert positive `count:` conflicts with `absent: true`")
+        kw["assertion"] = predicates or {"exists": True}
+        if (nth := v.pop("index", None)) is not None:
+            kw["index"] = _strict_int(nth, field="assert index", index=index, minimum=0)
+    elif kind == "assert-order":
+        axis = v.pop("axis", None)
+        if axis not in ("horizontal", "vertical"):
+            raise _step_error(index, "assert_order `axis:` must be horizontal or vertical")
+        raw_selectors = v.pop("selectors", None)
+        if not isinstance(raw_selectors, list) or len(raw_selectors) < 2:
+            raise _step_error(index, "assert_order needs at least two `selectors:`")
+        selectors: list[dict[str, Any]] = []
+        for selector_index, raw_selector in enumerate(raw_selectors):
+            if not isinstance(raw_selector, dict):
+                raise _step_error(
+                    index, f"assert_order selector[{selector_index}] must be a mapping"
+                )
+            selector_body = dict(raw_selector)
+            normalized: dict[str, Any] = {}
+            for field in ("id", "rid", "text", "desc"):
+                if field in selector_body:
+                    normalized["rid" if field == "id" else field] = _string(
+                        selector_body.pop(field),
+                        field=f"assert_order selector[{selector_index}] {field}",
+                        index=index,
+                        optional=False,
+                    )
+            if len([key for key in ("rid", "text", "desc") if normalized.get(key)]) != 1:
+                raise _step_error(
+                    index,
+                    f"assert_order selector[{selector_index}] needs exactly one of id/rid/text/desc",
+                )
+            if "index" in selector_body:
+                normalized["index"] = _strict_int(
+                    selector_body.pop("index"),
+                    field=f"assert_order selector[{selector_index}] index",
+                    index=index,
+                    minimum=0,
+                )
+            if selector_body:
+                raise _step_error(
+                    index,
+                    f"unknown keys for assert_order selector[{selector_index}]: "
+                    + ", ".join(sorted(map(str, selector_body))),
+                )
+            selectors.append(normalized)
+        kw["assertion"] = {"axis": axis, "selectors": selectors}
+    elif kind in _ELEMENT_KINDS:
         explicit_by = v.pop("by", None)
         if explicit_by not in (None, "id", "desc", "text"):
             raise _step_error(index, f"{key} `by:` must be id, desc, or text")
@@ -892,6 +1002,24 @@ def _render_step(s: RouteStep) -> dict[str, Any] | str:
                 "steps": [_render_step(substep) for substep in s.substeps],
             }
         }
+    if s.kind == "assert":
+        assert_body: dict[str, Any] = {}
+        if s.resource_id:
+            assert_body["id"] = s.resource_id
+        elif s.content_desc:
+            assert_body["desc"] = s.content_desc
+        elif s.label:
+            assert_body["text"] = s.label
+        if s.by:
+            assert_body["by"] = s.by
+        if s.index is not None:
+            assert_body["index"] = s.index
+        assert_body.update(s.assertion)
+        if s.timeout_ms is not None:
+            assert_body["timeout_ms"] = s.timeout_ms
+        return {"assert": assert_body}
+    if s.kind == "assert-order":
+        return {"assert_order": dict(s.assertion)}
     try:
         key = _KEYS[s.kind]
     except KeyError as exc:
@@ -1088,6 +1216,15 @@ def _substitute_step_params(
         return _PARAM_RE.sub(repl, text)
 
     def fix(step: RouteStep) -> RouteStep:
+        def sub_value(value: Any) -> Any:
+            if isinstance(value, str):
+                return sub(value)
+            if isinstance(value, list):
+                return [sub_value(item) for item in value]
+            if isinstance(value, dict):
+                return {key: sub_value(item) for key, item in value.items()}
+            return value
+
         return step.model_copy(
             update={
                 "label": sub(step.label),
@@ -1098,6 +1235,7 @@ def _substitute_step_params(
                 "package": sub(step.package),
                 "activity": sub(step.activity),
                 "direction": sub(step.direction),
+                "assertion": sub_value(step.assertion),
                 "substeps": [fix(substep) for substep in step.substeps],
             }
         )

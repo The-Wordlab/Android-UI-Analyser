@@ -509,12 +509,15 @@ A **flow** is a Maestro-style YAML journey — authored directly by you/your age
 aua flow run reset_account_google_login --param ACCOUNT="Engineering Team"
 aua flow run smoke --dry-run          # print the resolved steps, act on nothing
 aua flow run smoke --from-step 4      # resume after fixing a divergence
+aua flow run smoke --artifacts-dir artifacts/smoke --evidence failures --junit
 aua flow save reach_checkout --last 8        # preview scope/selectors/proof; writes nothing
 aua flow save reach_checkout --last 8 --save # save only after review
 aua flow list · aua flow show <name> · aua flow delete <name>
 ```
 
-Flows live flat under `<memory.dir>/flows/<name>.yaml` (they span transit packages by design — an auth leg stays with its origin app). Step vocabulary: `launch_app`, `tap` (by `id:`, `desc:`, or `text:`), `input` (with `${PARAM}` substitution), `key`, `swipe`, `scroll_to`, `wait_for`, `wait_stable`, `assert_visible`, and `goto:` to compose map navigation. `flow save` selects only the newest same-origin/context capture segment and is preview-first; only `--save` writes. Its result includes the authoritative path, current existence/collision status, and an exact `save_call` with `--force` when replacement is required. Collision previews also include `invalid_mode_probe`, the exact typed error code and CLI/MCP call for deliberately checking `--force` without `--save`; agents never need to guess. Saving still rechecks atomically, so a preview never authorizes a race. `flow delete` is idempotent and reports `status: already_absent` when cleanup was already complete. New recordings prefer a unique stable resource id, then a unique non-PII content description, then unique stable non-PII text, and refuse a step with no safe selector. The preview's value-free `selector_resilience` explains whether each selector is strong across frames and whether localization or positional ordering can break replay. It never persists typed values — inputs become required `${PARAM_n}` placeholders. A freshly recognized mapped destination is stored as `arrival_screen`. An unmapped destination remains explicit `arrival_status: unverified` unless the immediately preceding analyzed action satisfied a privacy-safe positive `--until` predicate on this exact package/context/frame; only then is that predicate promoted to authored `arrival:` proof with source `satisfied_action_until`. Flows are deliberate authored intent, so destructive steps run by default (`--no-allow-destructive` opts back into the guard). On divergence you get the failing step index, the remaining steps, and the current elements — fix, then `--from-step N`.
+Flows live flat under `<memory.dir>/flows/<name>.yaml` (they span transit packages by design — an auth leg stays with its origin app). Step vocabulary: `launch_app`, `tap` (by `id:`, `desc:`, or `text:`), `input` (with `${PARAM}` substitution), `key`, `swipe`, `scroll_to`, `wait_for`, `wait_stable`, `assert_visible`, rich `assert` predicates, explicit-axis `assert_order`, named `screenshot` checkpoints, and `goto:` to compose map navigation. `assert` shares the `expect` predicates (`exists`, `absent`, `count`, `text_is`, `text_contains`, `checked`, `enabled`, `selected`, `focused`); `assert_order` requires `axis: horizontal|vertical` plus two or more selectors so grid order is never guessed. `flow save` selects only the newest same-origin/context capture segment and is preview-first; only `--save` writes. Its result includes the authoritative path, current existence/collision status, and an exact `save_call` with `--force` when replacement is required. Collision previews also include `invalid_mode_probe`, the exact typed error code and CLI/MCP call for deliberately checking `--force` without `--save`; agents never need to guess. Saving still rechecks atomically, so a preview never authorizes a race. `flow delete` is idempotent and reports `status: already_absent` when cleanup was already complete. New recordings prefer a unique stable resource id, then a unique non-PII content description, then unique stable non-PII text, and refuse a step with no safe selector. The preview's value-free `selector_resilience` explains whether each selector is strong across frames and whether localization or positional ordering can break replay. It never persists typed values — inputs become required `${PARAM_n}` placeholders. A freshly recognized mapped destination is stored as `arrival_screen`. An unmapped destination remains explicit `arrival_status: unverified` unless the immediately preceding analyzed action satisfied a privacy-safe positive `--until` predicate on this exact package/context/frame; only then is that predicate promoted to authored `arrival:` proof with source `satisfied_action_until`. Flows are deliberate authored intent, so destructive steps run by default (`--no-allow-destructive` opts back into the guard). On divergence you get the failing step index, assertion detail, the remaining steps, and the current elements — fix, then `--from-step N`.
+
+`--artifacts-dir DIR` writes a portable run bundle (`flow.yaml`, `result.json`, `manifest.json`, `report.md`, named screenshots, and observations). `--evidence failures` captures the failed frame and platform diagnostics by default; `all` captures every completed leaf step; `none` keeps only explicit `screenshot:` checkpoints. Add `--junit` for `junit.xml`. Reusing a non-empty directory creates a unique run subdirectory instead of overwriting evidence. CLI and MCP both accept exactly one source: a saved `name`, `file`, or inline `yaml` (`--yaml` on the CLI).
 
 ```yaml
 # ~/.android-ui-analyser/flows/reset_account_google_login.yaml
@@ -533,6 +536,12 @@ steps:
   - tap: {text: "${ACCOUNT}", package: com.android.chrome}
   - tap: {text: "Continue", package: com.android.chrome}
   - wait_stable
+  - assert: {id: productTitle, count: 2}
+  - assert: {id: consentSwitch, checked: true}
+  - assert_order:
+      axis: horizontal
+      selectors: [{text: "Basic"}, {text: "Professional"}]
+  - screenshot: catalog_sorted
 ```
 
 ### Inspect and manage the map
@@ -1407,7 +1416,7 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 | `aua dev` / `aua a11y` | Dev options helpers / a11y scroll |
 | `aua map` | Show the active-context map (`--all-contexts`, `--audit`, or `--find "<goal>"`) |
 | `aua goto "<goal>"` | Drive the remembered route to a known screen — taps + verifies each hop (`--plan` previews, `--max-steps N`) |
-| `aua flow run\|save\|list\|…` | Maestro-style YAML journeys with goal aliases, arrival predicates, and reversible network steps |
+| `aua flow run\|save\|list\|…` | Maestro-style YAML journeys with rich assertions, named screenshots, artifact/JUnit bundles, and reversible network steps |
 | `aua navigate "<goal>"` | Opt-in planner drive (needs `planner.enabled`) |
 | `aua policy status` | Host-only readiness for optional guarded FunctionGemma advice |
 | `aua memory show\|path\|update\|forget` | Manage the per-app learned layout (`memory.backend: sqlite` optional) |

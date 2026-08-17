@@ -1057,14 +1057,17 @@ def _tool_definitions() -> list[types.Tool]:
         ),
         types.Tool(
             name="flow_run",
-            description="Replay a saved flow (whole journey — launch, taps, waits, "
+            description="Replay a saved, file-backed, or inline-YAML flow (whole journey — launch, taps, waits, "
             "asserts, cross-app auth) in one call; on divergence returns the failing "
             "step index + remaining steps, resumable via from_step. assist=true lets the "
-            "opt-in planner clear a blocker and resume (needs planner.enabled).",
+            "opt-in planner clear a blocker and resume (needs planner.enabled). Optional "
+            "artifacts_dir writes portable evidence and JUnit.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "name": {"type": "string"},
+                    "file": {"type": "string"},
+                    "yaml": {"type": "string"},
                     "params": {
                         "type": "object",
                         "description": "${NAME} placeholder values.",
@@ -1074,8 +1077,19 @@ def _tool_definitions() -> list[types.Tool]:
                     "from_step": {"type": "integer", "default": 0},
                     "allow_destructive": {"type": "boolean", "default": True},
                     "assist": {"type": "boolean", "default": False},
+                    "artifacts_dir": {"type": "string"},
+                    "evidence": {
+                        "type": "string",
+                        "enum": ["none", "failures", "all"],
+                        "default": "failures",
+                    },
+                    "junit": {"type": "boolean", "default": False},
                 },
-                "required": ["name"],
+                "oneOf": [
+                    {"required": ["name"]},
+                    {"required": ["file"]},
+                    {"required": ["yaml"]},
+                ],
                 "additionalProperties": False,
             },
         ),
@@ -1246,6 +1260,7 @@ def _tool_definitions() -> list[types.Tool]:
                     "enabled": {"type": "boolean"},
                     "selected": {"type": "boolean"},
                     "focused": {"type": "boolean"},
+                    "count": {"type": "integer", "minimum": 0},
                     "index": {"type": "integer"},
                     "first": {"type": "boolean", "default": False},
                     "timeout_ms": {"type": "integer", "default": 0},
@@ -2308,12 +2323,17 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         )
     if name == "flow_run":
         return engine.flow_run(
-            args["name"],
+            args.get("name"),
+            file=args.get("file"),
+            yaml=args.get("yaml"),
             params={str(k): str(v) for k, v in (args.get("params") or {}).items()},
             dry_run=args.get("dry_run", False),
             from_step=int(args.get("from_step", 0)),
             allow_destructive=args.get("allow_destructive", True),
             assist=args.get("assist", False),
+            artifacts_dir=args.get("artifacts_dir"),
+            evidence=args.get("evidence", "failures"),
+            junit=args.get("junit", False),
         )
     if name == "navigate":
         return engine.navigate(
@@ -2424,6 +2444,7 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 enabled=args.get("enabled"),
                 selected=args.get("selected"),
                 focused=args.get("focused"),
+                count=args.get("count"),
                 index=args.get("index"),
                 first=args.get("first", False),
                 timeout_ms=int(args.get("timeout_ms", args.get("timeout", 0))),

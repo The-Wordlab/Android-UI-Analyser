@@ -33,6 +33,7 @@ class SuiteCheck:
     exists: bool | None = None
     absent: bool | None = None
     match: str | None = None
+    count: int | None = None
     # wait_for
     wait_for: str | None = None
     timeout_ms: int | None = None
@@ -140,6 +141,11 @@ def _parse_check(item: Any, *, index: int, source: str) -> SuiteCheck:
             raise UsageError(
                 f"check[{index}].expect needs exactly one of rid/text/desc ({source})"
             )
+        count = body.get("count")
+        if count is not None and (
+            isinstance(count, bool) or not isinstance(count, int) or count < 0
+        ):
+            raise UsageError(f"check[{index}].expect count must be a non-negative integer")
         exists = body.get("exists")
         absent = body.get("absent")
         if exists is not None:
@@ -155,6 +161,7 @@ def _parse_check(item: Any, *, index: int, source: str) -> SuiteCheck:
             exists=exists,
             absent=absent,
             match=str(body["match"]) if body.get("match") is not None else None,
+            count=count,
             timeout_ms=int(body["timeout_ms"]) if body.get("timeout_ms") is not None else None,
         )
     raise UsageError(
@@ -191,6 +198,8 @@ def run_check(engine: Engine, check: SuiteCheck) -> tuple[bool, str]:
         kwargs["absent"] = check.absent
     if check.timeout_ms is not None:
         kwargs["timeout_ms"] = check.timeout_ms
+    if check.count is not None:
+        kwargs["count"] = check.count
     # Optional match:contains on a text selector → also require text_contains.
     if (
         check.match

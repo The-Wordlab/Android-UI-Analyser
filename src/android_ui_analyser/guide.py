@@ -255,7 +255,8 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "otherwise unique stable non-PII text. A capture with no safe selector is refused with "
         "edit/re-record guidance. "
         "`aua flow run <name> --param K=V` drives the whole journey — launch, taps, waits, "
-        "asserts, cross-app auth, even `goto:` steps — and on divergence returns the failing "
+        "rich `assert` count/text/state checks, explicit-axis `assert_order`, named `screenshot` "
+        "checkpoints, cross-app auth, even `goto:` steps — and on divergence returns the failing "
         "step index + remaining steps; fix and resume with `--from-step N`. Flows live under "
         "`<memory.dir>/flows/*.yaml` (`aua flow list|show|delete`); delete is idempotent and "
         "returns `status: already_absent` when cleanup is already complete. `--dry-run` previews. Use a "
@@ -267,7 +268,10 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "privacy-safe positive `--until` on this exact package/context/frame; only that captured "
         "proof becomes authored `arrival:` with source `satisfied_action_until`. No label is "
         "fabricated. Authored legacy `arrival:` predicates remain supported. Give reusable "
-        "flows goal-facing `aliases:`. "
+        "flows goal-facing `aliases:`. CLI and MCP accept one saved name, flow file, or inline "
+        "YAML body. `--artifacts-dir DIR --evidence failures --junit` writes a portable "
+        "flow/result/manifest/report/screenshot/platform-diagnostics/JUnit bundle; use evidence `all` only when "
+        "per-step pixels are worth the runtime cost. "
         "Offline journeys may use `network_offline`, `network_restore`, `network_profile`, or "
         "`network_profile_restore` "
         "steps; environment-changing flows are risk-previewed before automatic selection.",
@@ -1391,6 +1395,7 @@ def render_markdown(*, brief: bool = False) -> str:
     p.append("")
     p.append("# Replay a whole journey (authored or recorded) in ONE call:")
     p.append('aua flow run reset_account_google_login --param ACCOUNT="Engineering Team"')
+    p.append("aua flow run smoke --artifacts-dir artifacts/smoke --evidence failures --junit")
     p.append("aua flow save reach_checkout --last 8         # preview only; writes nothing")
     p.append(
         "aua flow save reach_checkout --last 8 --save  # commit after reviewing proof/warnings"

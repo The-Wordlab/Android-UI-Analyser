@@ -2718,6 +2718,9 @@ def expect(
     selected: bool | None = typer.Option(
         None, "--selected/--unselected", help="Selected state (tabs)."
     ),
+    count: int | None = typer.Option(
+        None, "--count", min=0, help="Exactly this many elements must match."
+    ),
     index: int | None = _SEL_INDEX,
     first: bool = _SEL_FIRST,
     timeout: int = typer.Option(
@@ -2752,6 +2755,7 @@ def expect(
             checked=checked,
             enabled=enabled,
             selected=selected,
+            count=count,
             index=index,
             first=first,
             timeout_ms=timeout,
@@ -6181,6 +6185,9 @@ def flow_run_cmd(
         [], "--param", "-p", help="Substitute ${NAME} placeholders: --param NAME=value."
     ),
     file: str | None = typer.Option(None, "--file", help="Run a flow YAML file directly."),
+    yaml: str | None = typer.Option(
+        None, "--yaml", help="Run an inline flow YAML body (useful for MCP-equivalent scripts)."
+    ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Print resolved steps; do not act."),
     from_step: int = typer.Option(0, "--from-step", help="Resume from this step index."),
     allow_destructive: bool = typer.Option(
@@ -6193,6 +6200,15 @@ def flow_run_cmd(
         "--assist",
         help="On divergence, let the opt-in planner LLM clear the blocker (needs planner.enabled).",
     ),
+    artifacts_dir: str | None = typer.Option(
+        None,
+        "--artifacts-dir",
+        help="Write flow.yaml, result.json, report.md, evidence, and optional JUnit here.",
+    ),
+    evidence: str = typer.Option(
+        "failures", "--evidence", help="Screenshot evidence: none, failures, or all."
+    ),
+    junit: bool = typer.Option(False, "--junit", help="Also write junit.xml (needs artifacts)."),
 ) -> None:
     """Replay a whole journey in one call; on divergence returns a resumable step index."""
 
@@ -6203,16 +6219,23 @@ def flow_run_cmd(
         # has never seen, and reported as missing even though `cwd` plainly contained it.
         # An absolute path always worked, which is exactly the shape of this bug.
         resolved = str(Path(file).expanduser().resolve()) if file else None
+        resolved_artifacts = (
+            str(Path(artifacts_dir).expanduser().resolve()) if artifacts_dir else None
+        )
         result = _route(
             engine,
             "flow_run",
             name=name,
             file=resolved,
+            yaml=yaml,
             params=_parse_params(param),
             dry_run=dry_run,
             from_step=from_step,
             allow_destructive=allow_destructive,
             assist=assist,
+            artifacts_dir=resolved_artifacts,
+            evidence=evidence,
+            junit=junit,
         )
         _emit(result, fmt)
         if isinstance(result, dict) and result.get("ok") is False:

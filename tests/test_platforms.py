@@ -122,6 +122,40 @@ def test_engine_uses_injected_strategy_for_tree_capture_and_normalization() -> N
     ]
 
 
+def test_flow_artifacts_do_not_fall_back_to_android_logs_on_another_platform(tmp_path) -> None:
+    cfg = Config.model_validate(
+        {
+            "memory": {"enabled": False},
+            "cache": {"dir": str(tmp_path / "cache")},
+            "perf": {"prefetch": False},
+            "lease": {"enabled": False},
+        }
+    )
+    runtime = FakeDevice(package="example.native")
+    platform = _InjectedPlatform(cfg)
+
+    result = Engine(cfg, device=runtime, platform=platform).flow_run(
+        yaml="steps:\n  - assert: {text: Missing, exists: true}\n",
+        artifacts_dir=str(tmp_path / "artifacts"),
+    )
+
+    assert result["ok"] is False
+    assert not any(call[0] == "logcat" for call in runtime.calls)
+    assert not (tmp_path / "artifacts" / "failure-diagnostics.txt").exists()
+
+
+def test_android_platform_provides_bounded_failure_diagnostics() -> None:
+    runtime = FakeDevice()
+    runtime.log_now(tag="First", msg="older")
+    runtime.log_now(tag="Second", msg="newer")
+
+    logs = AndroidPlatform(Config()).diagnostic_logs(runtime, lines=1)
+
+    assert "newer" in logs
+    assert "older" not in logs
+    assert ("logcat", (None, True)) in runtime.calls
+
+
 def test_android_strategy_normalizes_xml_and_ignores_system_overlay_package() -> None:
     raw = """<hierarchy>
       <node class="android.widget.TextView" text="App" package="com.example.app"

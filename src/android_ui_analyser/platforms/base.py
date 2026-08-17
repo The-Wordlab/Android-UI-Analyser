@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
 from ..device import Device
+from ..errors import DeviceError
 from ..schema import DeviceInfo, Element
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -80,5 +81,36 @@ class PlatformAdapter(ABC):
     ) -> NormalizedTree:
         """Translate a native UI tree into canonical elements and foreground app id."""
 
+    def element_state(self, raw_tree: str, element: Element) -> dict[str, object]:
+        """Return assertion state for one normalized element.
+
+        Generic platforms can rely on canonical element attributes. A platform whose native
+        tree represents compound controls differently may override this without leaking its
+        tree grammar into the engine.
+        """
+
+        return {
+            "checkable": bool(element.checkable),
+            "checked": bool(element.checked),
+            "enabled": element.enabled,
+            "selected": bool(element.selected),
+            "focused": element.focused,
+            "text": element.text,
+            "content_desc": element.content_desc,
+        }
+
     def supports(self, capability: str) -> bool:
         return capability in self.capabilities
+
+    def diagnostic_logs(self, runtime: Device, *, lines: int = 400) -> str:
+        """Return recent platform diagnostics for a failed test artifact.
+
+        This optional operation is deliberately capability-gated.  A platform that advertises
+        ``device.logs`` must implement it; every other platform gets an explicit unsupported
+        result instead of an Android fallback in the engine.
+        """
+
+        raise DeviceError(
+            f"platform '{self.name}' does not support diagnostic logs",
+            code="unsupported_capability",
+        )

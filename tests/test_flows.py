@@ -280,8 +280,7 @@ def test_named_flow_failure_resumes_by_storage_key_not_declared_name(tmp_path: P
     store = FlowStore(cfg.memory)
     store.flows_dir().mkdir(parents=True)
     (store.flows_dir() / "open_cached.yaml").write_text(
-        f"name: Friendly cached title\napp: {P}\nsteps:\n"
-        "  - tap: {text: Definitely missing}\n",
+        f"name: Friendly cached title\napp: {P}\nsteps:\n  - tap: {{text: Definitely missing}}\n",
         encoding="utf-8",
     )
     device = ScriptedDevice([HOME], package=P, serial="emu-storage-resume")
@@ -363,9 +362,7 @@ def test_no_allow_destructive_scans_the_whole_flow_before_step_zero(tmp_path: Pa
     )
     device = ScriptedDevice([HOME], package=P, serial="emu-late-danger")
 
-    result = _engine(tmp_path, device).flow_run(
-        file=str(flow_file), allow_destructive=False
-    )
+    result = _engine(tmp_path, device).flow_run(file=str(flow_file), allow_destructive=False)
 
     assert result["ok"] is False and result["code"] == "destructive_step"
     assert result["steps_run"] == []
@@ -1018,8 +1015,7 @@ def test_nested_explicit_context_is_refused_before_an_earlier_parent_step(
     )
     parent = tmp_path / "parent_context.yaml"
     parent.write_text(
-        f"name: parent_context\napp: {P}\nsteps:\n"
-        "  - key: back\n  - flow: context_child\n",
+        f"name: parent_context\napp: {P}\nsteps:\n  - key: back\n  - flow: context_child\n",
         encoding="utf-8",
     )
     device = ScriptedDevice([HOME], package=P, serial="emu-nested-context")
@@ -1068,8 +1064,7 @@ def test_nested_flow_invalid_arrival_is_refused_before_substeps(
     child_path = FlowStore(cfg.memory).path("child_with_invalid_proof")
     child_path.parent.mkdir(parents=True, exist_ok=True)
     child_path.write_text(
-        f"name: child_with_invalid_proof\napp: {P}\narrival: {arrival!r}\n"
-        "steps:\n  - key: back\n",
+        f"name: child_with_invalid_proof\napp: {P}\narrival: {arrival!r}\nsteps:\n  - key: back\n",
         encoding="utf-8",
     )
     parent = tmp_path / "parent_invalid_proof.yaml"
@@ -1222,6 +1217,38 @@ def test_cli_flow_run_dry_run(tmp_path: Path, monkeypatch) -> None:
     data = json.loads(out.stdout)
     assert data["dry_run"] and data["steps"][0]["step"] == "tap 'Apps'"
     assert dev.calls == []
+
+
+def test_cli_flow_run_inline_yaml_and_artifact_options(tmp_path: Path, monkeypatch) -> None:
+    import android_ui_analyser.engine as engine_mod
+
+    monkeypatch.setattr(
+        engine_mod,
+        "connect",
+        lambda serial=None: ScriptedDevice([HOME], package=P, serial="emu-inline-dry"),
+    )
+    artifacts = tmp_path / "cli-artifacts"
+    out = runner.invoke(
+        app,
+        [
+            "--format",
+            "compact",
+            "flow",
+            "run",
+            "--yaml",
+            "steps:\n  - assert: {text: Ready, count: 1}\n",
+            "--dry-run",
+            "--artifacts-dir",
+            str(artifacts),
+            "--evidence",
+            "none",
+            "--junit",
+        ],
+    )
+    assert out.exit_code == 0, out.stderr
+    data = json.loads(out.stdout)
+    assert data["source"] == "inline_yaml" and data["dry_run"] is True
+    assert Path(data["artifacts"]["junit"]).is_file()
 
 
 def test_cli_flow_run_param_parsing_error() -> None:

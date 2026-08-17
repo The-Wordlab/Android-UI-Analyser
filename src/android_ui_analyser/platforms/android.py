@@ -9,7 +9,8 @@ from collections.abc import Sequence
 from .. import hierarchy
 from ..device import Device, connect, list_devices
 from ..memory import matches_any
-from ..schema import DeviceInfo
+from ..schema import DeviceInfo, Element
+from ..scroll_geom import _iter_nodes, _node_box
 from .base import NormalizedTree, PlatformAdapter
 from .registry import register_platform
 
@@ -70,6 +71,37 @@ class AndroidPlatform(PlatformAdapter):
         from .. import leases
 
         return leases.probe_capabilities(self.config.cache.dir, target_id)
+
+    def diagnostic_logs(self, runtime: Device, *, lines: int = 400) -> str:
+        raw = runtime.logcat(dump=True)
+        return "\n".join(raw.splitlines()[-max(1, lines) :])
+
+    def element_state(self, raw_tree: str, element: Element) -> dict[str, object]:
+        state = super().element_state(raw_tree, element)
+        node = next(
+            (node for node in _iter_nodes(raw_tree) if _node_box(node) == tuple(element.bounds)),
+            None,
+        )
+        if node is not None:
+            holder = node
+            if node.get("checkable") != "true":
+                holder = next(
+                    (child for child in node.iter("node") if child.get("checkable") == "true"),
+                    node,
+                )
+            state.update(
+                checkable=holder.get("checkable") == "true",
+                checked=holder.get("checked") == "true",
+                enabled=node.get("enabled") == "true",
+                selected=node.get("selected") == "true",
+                focused=node.get("focused") == "true",
+            )
+        if element.checkable:
+            state["checkable"] = True
+            state["checked"] = bool(element.checked)
+        if element.selected is not None:
+            state["selected"] = element.selected
+        return state
 
     def normalize_tree(
         self,
