@@ -1,0 +1,10 @@
+version: 1
+checkpoints:
+  - id: token_revealed
+    description: Confirm the painted canvas token is visible
+    assertions:
+      - assert: {text: ORBIT-27, exists: true}
+cleanup:
+  description: Restore the fixture home
+  assertions:
+    - assert: {rid: fixture_home, exists: true}

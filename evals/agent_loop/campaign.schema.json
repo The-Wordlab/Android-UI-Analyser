@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aua.dev/schemas/agent-loop-campaign-v1.json",
+  "title": "AUA agent-loop evaluation campaign",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "campaign_id", "scenarios", "runs"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "campaign_id": {"type": "string", "minLength": 1},
+    "baseline_lane": {"type": "string", "default": "baseline"},
+    "candidate_lane": {"type": "string", "default": "candidate"},
+    "scenarios": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "title", "goal", "time_limit_s"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$"},
+          "title": {"type": "string", "minLength": 1},
+          "goal": {"type": "string", "minLength": 1},
+          "contract": {"type": "string", "minLength": 1},
+          "reset_flow": {"type": "string", "minLength": 1},
+          "time_limit_s": {"type": "number", "exclusiveMinimum": 0},
+          "required_checkpoints": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "default": []
+          },
+          "cleanup_required": {"type": "boolean", "default": true},
+          "candidate_reuse_expected": {"type": "boolean", "default": false}
+        }
+      }
+    },
+    "runs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["run_id", "scenario_id", "lane", "bundle"],
+        "properties": {
+          "run_id": {"type": "string", "minLength": 1},
+          "scenario_id": {"type": "string", "minLength": 1},
+          "lane": {"type": "string", "minLength": 1},
+          "repeat": {"type": "integer", "minimum": 1, "default": 1},
+          "bundle": {"type": "string", "minLength": 1},
+          "verifier": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  }
+}

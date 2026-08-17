@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "campaign_id": "public-fixture-example",
+  "baseline_lane": "baseline",
+  "candidate_lane": "candidate",
+  "scenarios": [
+    {
+      "id": "classic-sort",
+      "title": "Sort the classic grid and restore it",
+      "goal": "Sort the fictional products by ascending price, verify the result, then restore name order.",
+      "contract": "contracts/classic-sort.yaml",
+      "reset_flow": "flows/reset-fixture.yaml",
+      "time_limit_s": 180,
+      "required_checkpoints": ["price_sorted"],
+      "cleanup_required": true
+    },
+    {
+      "id": "compose-sort",
+      "title": "Sort the Compose grid and restore it",
+      "goal": "Sort the fictional Compose products by ascending price, verify the name and price pairing at both ends, then restore name order.",
+      "contract": "contracts/compose-sort.yaml",
+      "reset_flow": "flows/reset-fixture.yaml",
+      "time_limit_s": 180,
+      "required_checkpoints": ["price_sorted"],
+      "cleanup_required": true
+    },
+    {
+      "id": "async-recovery",
+      "title": "Recover from a deterministic transient failure",
+      "goal": "Open the expedition status, recover from its temporary failure, verify that the expedition becomes ready, then reset the fixture.",
+      "contract": "contracts/async-recovery.yaml",
+      "reset_flow": "flows/reset-fixture.yaml",
+      "time_limit_s": 180,
+      "required_checkpoints": ["expedition_ready"],
+      "cleanup_required": true
+    },
+    {
+      "id": "canvas-reveal",
+      "title": "Use a canvas-only control",
+      "goal": "Open the canvas lab, reveal and report the painted token, then reset the fixture.",
+      "contract": "contracts/canvas-reveal.yaml",
+      "reset_flow": "flows/reset-fixture.yaml",
+      "time_limit_s": 180,
+      "required_checkpoints": ["token_revealed"],
+      "cleanup_required": true
+    },
+    {
+      "id": "notification-permission",
+      "title": "Handle a real platform permission",
+      "goal": "Request notification permission, deny the Android dialog, verify the recorded result, then reset the fixture.",
+      "contract": "contracts/notification-permission.yaml",
+      "reset_flow": "flows/reset-fixture.yaml",
+      "time_limit_s": 180,
+      "required_checkpoints": ["permission_denied"],
+      "cleanup_required": true
+    },
+    {
+      "id": "lease-contention",
+      "title": "Wait for a busy device lease",
+      "goal": "When the device becomes available, open the classic grid, verify its default order, then reset the fixture.",
+      "contract": "contracts/default-order.yaml",
+      "reset_flow": "flows/reset-fixture.yaml",
+      "time_limit_s": 180,
+      "required_checkpoints": ["default_order"],
+      "cleanup_required": true
+    },
+    {
+      "id": "candidate-reuse",
+      "title": "Reuse a verified candidate flow",
+      "goal": "Sort the classic fictional products by ascending price, verify the result, then restore name order.",
+      "contract": "contracts/classic-sort.yaml",
+      "reset_flow": "flows/reset-fixture.yaml",
+      "time_limit_s": 120,
+      "required_checkpoints": ["price_sorted"],
+      "cleanup_required": true,
+      "candidate_reuse_expected": true
+    }
+  ],
+  "runs": [
+    {
+      "run_id": "baseline-classic-1",
+      "scenario_id": "classic-sort",
+      "lane": "baseline",
+      "repeat": 1,
+      "bundle": "bundles/baseline-classic-1",
+      "verifier": "verifiers/baseline-classic-1.json"
+    },
+    {
+      "run_id": "candidate-classic-1",
+      "scenario_id": "classic-sort",
+      "lane": "candidate",
+      "repeat": 1,
+      "bundle": "bundles/candidate-classic-1",
+      "verifier": "verifiers/candidate-classic-1.json"
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+version: 1
+checkpoints:
+  - id: default_order
+    description: Confirm the classic products start in name order
+    assertions:
+      - assert_order:
+          axis: reading
+          selectors:
+            - {text: Alpine Mug}
+            - {text: Beacon Lamp}
+            - {text: Cedar Notebook}
+            - {text: Drift Puzzle}
+cleanup:
+  description: Restore the fixture home
+  assertions:
+    - assert: {rid: fixture_home, exists: true}

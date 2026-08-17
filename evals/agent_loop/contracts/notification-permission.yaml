@@ -1,0 +1,10 @@
+version: 1
+checkpoints:
+  - id: permission_denied
+    description: Confirm the fixture recorded notification permission denial
+    assertions:
+      - assert: {text: "Last request result: notification permission denied.", exists: true}
+cleanup:
+  description: Restore the fixture home
+  assertions:
+    - assert: {rid: fixture_home, exists: true}

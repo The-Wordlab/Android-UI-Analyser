@@ -1,0 +1,33 @@
+version: 1
+checkpoints:
+  - id: price_sorted
+    description: Confirm the classic products are ordered by ascending price
+    assertions:
+      - assert_order:
+          axis: reading
+          selectors:
+            - {text: Cedar Notebook}
+            - {text: Alpine Mug}
+            - {text: Beacon Lamp}
+            - {text: Drift Puzzle}
+      - assert: {text: "Current order: price", exists: true}
+      - assert:
+          rid: classic_item_card
+          index: 0
+          contains_all: [{text: Cedar Notebook}, {text: "$4.25"}]
+      - assert:
+          rid: classic_item_card
+          index: 1
+          contains_all: [{text: Alpine Mug}, {text: "$7.99"}]
+      - assert:
+          rid: classic_item_card
+          index: 2
+          contains_all: [{text: Beacon Lamp}, {text: "$12.50"}]
+      - assert:
+          rid: classic_item_card
+          index: 3
+          contains_all: [{text: Drift Puzzle}, {text: "$18.00"}]
+cleanup:
+  description: Restore the fixture home
+  assertions:
+    - assert: {rid: fixture_home, exists: true}

@@ -20,7 +20,8 @@ do not replace an AUA workflow with raw `adb`.
 
 1. Start goal-oriented work with `aua session start --goal "<what must be verified>"`. Add
    `--app <package>` for an unrelated foreground app. Reuse its observation and follow its
-   exact `recommended_call`; do not immediately re-analyze.
+   exact `recommended_call`; do not immediately re-analyze. `--contract` requires fresh
+   proof and strict finish. `--artifacts-dir` records evidence; `--wait-for-lease` waits safely.
 2. Prefer navigation in this order: verified `goto`, matching saved `flow`, proven deeplink,
    then a manual analyzed action. Preview risky routes; goal text never authorizes destructive,
    external, settings, data, payment, send, or sign-out effects.
@@ -43,6 +44,8 @@ do not replace an AUA workflow with raw `adb`.
    counts `folded_internal_events` such as an action-bound wait. The snapshot precedes its current
    review/finish call, so `reporting_call_included` is false and
    `top_level_calls_including_reporting_call` adds that call.
+8. After a contract passes, `session candidate-flow NAME --save` requires explicit
+   `--reset-flow` and passing reset/replay.
 
 Flow previews expose value-free `selector_resilience`. Trust an unmapped arrival only when its
 source is `satisfied_action_until` from the preceding action's privacy-safe positive `--until`
