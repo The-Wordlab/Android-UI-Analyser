@@ -7227,6 +7227,23 @@ class Engine:
                     )
                 else:
                     result.note = "No separate analyze needed; state is in observation."
+                # Say it in the note too, not only in `change`: the screen this observation
+                # describes belongs to a different app, so every id in it is a dead end for
+                # whatever the caller was doing.
+                left = change.get("app_left_foreground") if isinstance(change, dict) else None
+                if left:
+                    dialog = (
+                        " A system crash dialog is on screen."
+                        if left.get("crash_dialog")
+                        else ""
+                    )
+                    result.note = (
+                        f"WARNING: {left['from']} left the foreground — {left['to']} is in front "
+                        f"now, so this observation is NOT your app.{dialog} Check "
+                        '`aua logcat --grep "FATAL EXCEPTION|ANR in" --since last-action` for the '
+                        "cause, then relaunch with `aua app restart-and-analyze "
+                        f"{left['from']}` instead of navigating this screen. {result.note}"
+                    )
         else:
             self._pre_action_sig = None
             if self.config.perf.prefetch:
@@ -9709,6 +9726,13 @@ class Engine:
         current.steps_run = steps_run
         current.elapsed_ms = int((time.monotonic() - started_at) * 1000)
         current.verified = ok
+        # Every other observed action reports arrival in the top-level `known_screen`; this one
+        # hid it inside `await_terms`, so a caller reading the documented field got None for a
+        # call that fully succeeded. Fall back to the observation's own answer.
+        if current.known_screen is None and current.observation is not None:
+            meta = getattr(current.observation, "meta", None)
+            if meta is not None:
+                current.known_screen = meta.known_screen
         return current
 
     def hide_keyboard(
@@ -12119,10 +12143,15 @@ class Engine:
             # activities (e.g. a Dev Tools menu) and default resolution picks whichever the
             # manifest lists first, which is not necessarily the product's own entry.
             entry, launch_note = self._launch_entry(package, activity)
+            # Journal the launch. Without this it was invisible to `session review`, which then
+            # reported 10 calls for an 18-call run — and the invisible ones were the crash
+            # recovery, i.e. exactly the work its efficiency advice was reasoning about.
+            step = self._step("app-launch", arg=package)
             with self._acting():
                 if clear_state:
                     device.clear_app(package)
                 device.launch_app(package, activity=entry)
+            self._record_action_safe(step)
             if mem is not None:
                 with self._mem_lock:
                     if clear_state:
@@ -12689,6 +12718,37 @@ class Engine:
             ),
         }
 
+    @staticmethod
+    def _app_left_foreground(
+        activity_before: str | None, activity_after: str | None, obs: AnalyzeResult
+    ) -> dict[str, Any] | None:
+        """Report the app under test vanishing from the foreground — nearly always a crash.
+
+        A tap that kills the app answered ``ok: true`` with a cheerful observation of the
+        launcher, leaving the caller to infer the crash from ``activity_after`` by hand.
+        A weaker caller does not make that leap: it concludes the button "navigated home"
+        and then spends its whole budget trying to navigate back inside a dead app.
+
+        Both signals Android gives us are checked — the system's ``aerr_*`` crash dialog, and
+        the foreground falling back to a launcher. An ordinary app-to-app hand-off (a share
+        sheet, a browser) is deliberately NOT reported: the package changing is normal there.
+        """
+
+        def package_of(activity: str | None) -> str | None:
+            if not activity or "/" not in activity:
+                return None
+            return activity.split("/", 1)[0] or None
+
+        before_pkg = package_of(activity_before)
+        after_pkg = package_of(activity_after)
+        if not before_pkg or not after_pkg or before_pkg == after_pkg:
+            return None
+        crash_dialog = any("aerr_" in str(e.resource_id or "") for e in obs.elements)
+        to_launcher = any(hint in after_pkg.lower() for hint in ("launcher", "home"))
+        if not crash_dialog and not to_launcher:
+            return None
+        return {"from": before_pkg, "to": after_pkg, "crash_dialog": crash_dialog}
+
     def _change_summary(self, before: dict[str, Any] | None, obs: AnalyzeResult) -> dict[str, Any]:
         """Structured before/after deltas, with "nothing changed" stated rather than implied.
 
@@ -12723,6 +12783,9 @@ class Engine:
             ),
             "node_count_after": len(obs.elements),
         }
+        left = self._app_left_foreground(activity_before, activity_after, obs)
+        if left is not None:
+            out["app_left_foreground"] = left
         if before is None:
             # No baseline: say so instead of implying stability from silence.
             out.update(

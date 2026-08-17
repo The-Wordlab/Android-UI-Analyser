@@ -282,7 +282,18 @@ class Projection:
             no_ime=no_ime and not show_all,
             no_wrappers=no_wrappers and not show_all,
             where_text=tuple(s.lower() for s in (where_text or ()) if s),
-            where_rid=tuple(s.lower() for s in (where_rid or ()) if s),
+            # `--where-rid a,b,c` used to be ONE substring that matched nothing, and an empty
+            # `elements` list is indistinguishable from "verified absent" — the most dangerous
+            # answer this tool can give. Android resource ids cannot contain a comma, so
+            # splitting is unambiguous here. `where_text` is deliberately NOT split: real UI
+            # copy contains commas, and splitting it would silently widen the caller's filter.
+            where_rid=tuple(
+                part.strip().lower()
+                for raw in (where_rid or ())
+                if raw
+                for part in str(raw).split(",")
+                if part.strip()
+            ),
             clickable_only=clickable,
             regions=tuple(_parse_region(r) for r in (region or ())),
             limit=limit,

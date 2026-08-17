@@ -4972,12 +4972,26 @@ def daemon(
             ) from exc
         cfg = engine.config
         if a == "start":
-            daemon_mod.start(cfg)
+            started = daemon_mod.start(cfg) or {}
+            detail = daemon_mod.status(cfg)
+            # Report the daemon's OBSERVED state, not a flat ok=True: a child that dies at
+            # startup (a bad config slice is enough) left agents believing they had warm
+            # state while every later command silently paid the full device attach cost.
+            running = bool(detail.get("running")) or daemon_mod.is_running(cfg)
             out: dict[str, Any] = {
-                "ok": True,
+                "ok": running,
                 "action": "daemon-start",
-                "detail": daemon_mod.status(cfg),
+                "detail": detail,
             }
+            if not running:
+                out["error"] = {
+                    "code": "daemon_not_started",
+                    "message": f"the daemon did not come up ({started.get('status') or 'unknown'})",
+                    "hint": (
+                        "Commands still work, they just pay full device attach cost each "
+                        f"time. The child's traceback is in {cfg.cache.dir}/daemon.log."
+                    ),
+                }
             # Best-effort: surface what we already know about the foreground app, so an
             # agent that starts the daemon first immediately sees the map + top gotos.
             if daemon_mod.is_running(cfg) and not quiet:
@@ -5108,6 +5122,11 @@ def lease_cmd(
     ctx: typer.Context,
     action: str = typer.Argument("list", metavar="ACTION", help="list|acquire|renew|release"),
     serial_arg: str | None = typer.Argument(None, metavar="[SERIAL]", help="Device to act on."),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="On release: drop a lease this agent does not own (wedged device escape hatch).",
+    ),
 ) -> None:
     """Who is driving which emulator — and claim one for this agent.
 
@@ -5120,9 +5139,14 @@ def lease_cmd(
         aua lease acquire --needs root,proxy
         aua lease release emulator-5554
 
-    Leases expire on their own: a crashed agent blocks nobody, and there is nothing to clean
-    up. `--owner` (or `$AUA_OWNER`) names the agent; otherwise it is derived and stable for
-    the life of the calling process.
+    A lease ages out once its owning process is gone. It does NOT age out while that process
+    is still alive — and an owner is stable for the life of the calling process, so a
+    long-running orchestrator that touched a device keeps holding it (a warm daemon serving
+    that device keeps the entry fresh). When a device is wedged that way, break it with
+    `aua lease release <serial> --force`; `aua lease list` names the holder.
+
+    `--owner` (or `$AUA_OWNER`) names the agent; otherwise it is derived and stable for the
+    life of the calling process.
     """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
@@ -5181,12 +5205,22 @@ def lease_cmd(
                 )
             return
         if verb == "release":
-            ok = lease_mod.release(cache, target, owner=owner)
-            _echo_json({"ok": ok, "action": "lease-release", "serial": target}, fmt)
+            # `--force` passes owner=None, which skips the ownership check. The escape hatch
+            # exists because a lease can outlive the work it protected: a long-lived warm
+            # daemon keeps a finished client's lease alive, and while that client's pid is
+            # still around the entry never ages out — so the device stayed locked with no way
+            # for the operator to free it, against this command's own documented promise.
+            ok = lease_mod.release(cache, target, owner=None if force else owner)
+            _echo_json(
+                {"ok": ok, "action": "lease-release", "serial": target, "forced": force}, fmt
+            )
             if not ok:
                 raise DeviceLeasedError(
                     f"{target} is held by another agent",
-                    hint="An agent may only release its own lease.",
+                    hint=(
+                        "An agent may only release its own lease. Use "
+                        f"`aua lease release {target} --force` to break a wedged one."
+                    ),
                 )
             return
         raise UsageError(

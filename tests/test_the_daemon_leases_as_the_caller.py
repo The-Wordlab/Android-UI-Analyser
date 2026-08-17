@@ -141,7 +141,16 @@ def test_the_refusal_offers_a_move_that_can_actually_work(tmp_path: Any) -> None
     assert "--owner someone-else:1" in hint, "adopting the holder is the move for a split identity"
 
 
-def test_the_free_device_hint_survives_when_one_is_free(tmp_path: Any) -> None:
+def test_a_pinned_caller_is_never_offered_someone_elses_device(tmp_path: Any) -> None:
+    """Reverses "routing is still the first answer" — measured 2026-08-17.
+
+    This asserted that a caller who pinned `--serial` gets the other free serials listed, so it
+    could re-run without one. Three agents did exactly that and walked onto devices they were
+    never assigned; one had a human driving it, and two agents then drove the same screen, which
+    showed up as "flaky taps". Routing is only safe when the caller expressed no preference —
+    `explicit=None` takes the auto-pick branch below and still routes. When a caller NAMES a
+    device, the recoveries must be ones that cannot corrupt another run: wait, or bring your own.
+    """
     acquire(tmp_path, "emulator-5554", owner="someone-else:1", ttl_s=DEFAULT_TTL_S)
 
     with pytest.raises(DeviceLeasedError) as caught:
@@ -152,4 +161,8 @@ def test_the_free_device_hint_survives_when_one_is_free(tmp_path: Any) -> None:
             candidates=[("emulator-5554", {}), ("emulator-5556", {})],
         )
 
-    assert "emulator-5556" in (caught.value.hint or ""), "routing is still the first answer"
+    hint = caught.value.hint or ""
+    assert "emulator-5556" not in hint, "a free device must not be advertised to a pinned caller"
+    assert "omit --serial" not in hint
+    assert "aua emulator start" in hint, "bring-your-own is the recovery that always works"
+    assert "idle" in hint, "waiting it out has to stay actionable"

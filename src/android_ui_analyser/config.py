@@ -196,6 +196,20 @@ class PolicyCfg(_ChainCfg):
     enabled: bool = False
     chain: list[str] = Field(default_factory=lambda: ["functiongemma"])
     mode: Literal["off", "shadow", "advisory"] = "off"
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _mode_survives_the_env_round_trip(cls, v: Any) -> Any:
+        """Accept the boolean ``False`` that ``off`` becomes on its way through the env layer.
+
+        A detached daemon receives this slice as ``AUA_POLICY__MODE=off``, and
+        :func:`_coerce_scalar` maps the string ``"off"`` to ``False`` like any other
+        off/on flag. Validation then rejected ``False`` for this Literal, so the daemon
+        child died at startup on the DEFAULT config — silently, because only
+        ``daemon.log`` records the traceback. ``off`` is the only member of this Literal
+        that collides with that coercion, so mapping ``False`` back is unambiguous.
+        """
+        return "off" if v is False else v
     # The adapter was trained and evaluated on exactly four-way choice sets.
     max_candidates: int = Field(default=4, ge=1, le=4)
 

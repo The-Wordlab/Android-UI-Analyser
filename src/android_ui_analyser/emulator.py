@@ -779,10 +779,20 @@ def _serial_shell(serial: str) -> Callable[[str], str]:
 
 
 def _wait_for_boot(shell: Callable[[str], str], *, timeout_s: float = 90.0) -> bool:
-    """Block until ``sys.boot_completed`` is 1. Returns False on timeout."""
+    """Block until the device is actually usable, not merely booted. False on timeout.
+
+    ``sys.boot_completed`` flips before PackageManager will answer queries, so a caller that
+    trusted it got empty results from its very first `pm`/`dumpsys package` call — reported as
+    "the app is not installed" rather than "ask again in a moment". Requiring PackageManager to
+    name a package too costs one extra shell round trip and removes that whole class of
+    start-up flake.
+    """
     deadline = time.monotonic() + max(5.0, timeout_s)
+    booted = False
     while time.monotonic() < deadline:
-        if (shell("getprop sys.boot_completed") or "").strip() == "1":
+        if not booted and (shell("getprop sys.boot_completed") or "").strip() == "1":
+            booted = True
+        if booted and "package:" in (shell("pm path android") or ""):
             return True
         time.sleep(_POLL_S)
     return False

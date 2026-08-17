@@ -493,22 +493,20 @@ def choose_device(
     if explicit:
         current = read_lease(cache_dir, explicit)
         if current is not None and not _entry_matches_owner(current, owner):
-            free = _free_report()
-            # "omit --serial to auto-pick" is a dead end when nothing is free: dropping the
-            # flag lands on the no-free-device branch below. Measured 2026-08-10 — an agent
-            # followed it, got refused again, and spent the rest of its run reading aua's
-            # source for a way through. So when there is nowhere to route, say what works.
+            # This function's contract is that explicit intent is NEVER redirected — but the
+            # hint used to open with "free now: <others> — omit --serial to auto-pick", which
+            # is a redirect instruction. Agents followed it onto devices they were never
+            # assigned, including one a human was actively driving, and two of them then drove
+            # the same screen. A caller who named a device must never be handed someone else's;
+            # the only safe moves are wait, bring your own, or prove you are the holder.
             hint = (
-                f"free now: {free} — omit --serial to auto-pick"
-                if free != "none"
-                else (
-                    f"nothing else is free. The lease expires after "
-                    f"{int(current.get('ttl_s') or ttl_s)}s idle "
-                    f"(`aua lease list` shows idle_s), or start your own device with "
-                    f"`aua emulator start --headless --parallel` and pass its serial. "
-                    f"You are `{owner}`; pass `--owner {current.get('owner')}` only if that "
-                    f"holder is you under another name."
-                )
+                f"Do NOT switch devices — you asked for {explicit}, and another agent's screen "
+                f"is not a substitute for it. Either wait (this lease expires after "
+                f"{int(current.get('ttl_s') or ttl_s)}s idle; `aua lease list` shows idle_s), "
+                f"or bring your own with `aua emulator start --headless --parallel` and pass "
+                f"the serial it returns. You are `{owner}`: pass "
+                f"`--owner {current.get('owner')}` only if that holder is you under another "
+                f"name, or `aua lease release {explicit} --force` if you know it is a dead run."
             )
             raise DeviceLeasedError(
                 f"{explicit} is leased by {current.get('owner')} "
@@ -553,18 +551,25 @@ def choose_device(
     # stranded the same caller three more times in one session. "wait" is not actionable
     # without saying how long, and the command that actually frees a device — `lease release`,
     # which takes the holder's `--owner` — went unmentioned, so it stayed invisible.
-    holders = sorted({str(e.get("owner")) for e in list_leases(cache_dir) if e.get("serial") in known})
-    recover = (
-        f" A stale holder's lease is yours to hand back: "
-        f"`aua --owner {holders[0]} lease release <serial>`."
+    holders = sorted(
+        {str(e.get("owner")) for e in list_leases(cache_dir) if e.get("serial") in known}
+    )
+    # A daemon leases as its *caller*, so one agent legitimately appears under two owner names
+    # and adopting the holder is identity reconciliation, not theft. That distinction has to be
+    # spelled out: phrased as "a stale holder's lease is yours to hand back", it read as
+    # permission to take any busy device, and agents did.
+    adopt = (
+        f" If a listed holder is you under another name (a daemon leases as its caller), rerun "
+        f"with `--owner {holders[0]}`."
         if holders
         else ""
     )
     raise DeviceLeasedError(
         f"no free device{' matching ' + ','.join(needs) if needs else ''}: {detail}",
         hint=(
-            f"`aua lease list` shows idle_s; a lease expires after {ttl_s}s idle."
-            f"{recover} Otherwise start your own: `aua emulator start --headless --parallel`"
-            f"{', or widen --needs' if needs else ''}."
+            f"Start your own rather than taking one: `aua emulator start --headless --parallel`"
+            f"{', or widen --needs' if needs else ''}. `aua lease list` shows idle_s and a lease "
+            f"expires after {ttl_s}s idle, so waiting also works.{adopt} Only if you know a "
+            f"listed holder is a dead run: `aua lease release <serial> --force`."
         ),
     )

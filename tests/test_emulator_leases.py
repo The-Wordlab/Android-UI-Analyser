@@ -331,12 +331,23 @@ def test_unpinned_selection_keeps_single_physical_device_behavior(tmp_path):
 
 
 def test_explicit_serial_on_a_held_device_is_refused_not_redirected(tmp_path):
-    """Silently moving a test pinned to a device's state would invalidate it invisibly."""
+    """Silently moving a test pinned to a device's state would invalidate it invisibly.
+
+    This used to assert the hint said "free now: <other serials> — omit --serial to auto-pick",
+    which contradicted the test's own name: it IS a redirect, and agents took it. Three of them
+    walked onto devices they were never assigned, one of which a human was driving at the time.
+    """
     held, _ = _choose(tmp_path, "claude")
     with pytest.raises(DeviceLeasedError) as err:
         _choose(tmp_path, "cursor", explicit=held)
     assert "claude" in err.value.message
-    assert err.value.hint and "free now" in err.value.hint
+    hint = err.value.hint or ""
+    # Never advertise another device to a caller who named one.
+    assert "omit --serial" not in hint
+    assert "free now" not in hint
+    # Do offer the moves that cannot corrupt someone else's run.
+    assert "emulator start" in hint  # bring your own
+    assert "idle" in hint  # or wait it out
     assert int(err.value.exit_code) == 9
 
 

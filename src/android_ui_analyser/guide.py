@@ -644,6 +644,11 @@ ORIENTATION: tuple[tuple[str, str], ...] = (
         "back to a known screen — no adb, no sleep",
     ),
     (
+        'aua logcat --grep "FATAL EXCEPTION|ANR in" --since last-action',
+        "WHEN A RESULT LOOKS WRONG — why the app died, without dropping to raw `adb`. Reach for "
+        "this the moment a screen is not the app you were driving",
+    ),
+    (
         "aua guide --brief",
         "the manual, short form — the full `aua guide` is ~46KB and the loop above covers most "
         "tasks; reach for it only when something above did not answer you",
