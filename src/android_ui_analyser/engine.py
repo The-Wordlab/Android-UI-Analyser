@@ -13344,7 +13344,7 @@ class Engine:
             raise UsageError(
                 f"install --fresh removes {app_id} and ALL its data (feature flags, login "
                 "session, local config) — pass --yes to confirm",
-                hint=f"Or keep the data: `aua app install {path} --reinstall`.",
+                hint=f"Or keep the data: `aua install {path} --reinstall`.",
             )
         started = time.perf_counter()
         if pushed:
