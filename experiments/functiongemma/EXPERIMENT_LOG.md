@@ -155,6 +155,12 @@ all four cases: Network & internet, Connected devices, Apps, and Notifications. 
 suggestion was exposed, and no row was tapped. This improves the identical deterministic audit from
 2/4 to 4/4. The emulator was stopped by the owning session cleanup.
 
+The frozen v6 advisory configuration was then rerun unchanged against the corrected compiler. All
+four cases again produced the exact requested call, but now each had one eligible candidate, so AUA
+correctly bypassed model construction and inference (`model_used=false`) in 4/4. This is causal
+evidence that the AUA change fixed the historical task; it is not evidence that the v6 weights
+reasoned better. The earlier v6 live audit remains preserved rather than overwritten.
+
 The first app-launch bootstrap frame was still weaker than the immediately following fresh hierarchy
 frame and returned `manual_observation`; this is a separate launch-readback/candidate-recall case to
 keep in the independent benchmark. The learned selector must now be evaluated on genuinely ambiguous
@@ -239,6 +245,29 @@ FunctionGemma 270M remains worth testing as a bounded, resident local selector b
 fast to train, and demonstrably learns targeted serializer failures. It is not yet an autopilot. If
 v7 exact-context training still cannot clear the broad live benchmark, compare the same corpus and
 gates against a 1–3B controller before investing in a larger general planner.
+
+### V7 supervised-learning contract
+
+V7 keeps the frozen v5 recovery foundation and deliberately drops v6's 576-way expansion of only
+forty semantic states. It adds 1,536 independent training states in which two, three, or four safe
+controls share a requested destination and differ by candidate-backed summary evidence. Each state
+uses only `N²` variants to balance target ID and list position. The resulting corpus contains 58,808
+rows: 44,224 train, 7,292 validation, and 7,292 untouched test. Native FunctionGemma validation
+passes, the longest row is 744 tokens, split vocabularies are disjoint, and the corpus contains no
+journals, maps, screenshots, hierarchy XML, typed input, device reads, or private app material.
+
+The provider manifest now supports authenticated `candidate_counts: [2, 3, 4]` while retaining the
+legacy bundled v3 `candidate_count: 4` contract. An untouched 99-case semantic smoke covers all
+three cardinalities with balanced target IDs/positions. The unchanged v6 adapter scores 94/99
+(94.95%): c2 7/8, c3 26/27, c4 61/64, with 100% parsing and offered-ID enforcement. Its five misses
+form the pre-v7 baseline; v7 must reach 99/99 without regressing the strict recovery/static gates.
+
+Training is supervised from the base FunctionGemma checkpoint, not reinforcement learning or a v6
+continuation. Three 6,144-iteration rank-32 seeds (61, 67, 71) share the same validated corpus and
+strict checkpoint-selection policy. Aggregate loss cannot promote a checkpoint: it must pass exact
+parsing, offered-ID, authorization, redundancy, worst-family, untouched test, production smoke,
+semantic smoke, and closed-loop gates. RunPod launchers use no network volume, retrieve artifacts
+before deletion, and require exact Pod/SSH-key/network-volume cleanup evidence.
 
 ## Resume checklist for another session
 
