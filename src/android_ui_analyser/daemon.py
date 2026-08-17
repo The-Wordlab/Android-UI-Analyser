@@ -1019,7 +1019,7 @@ _LONG_POLL_COMMANDS = frozenset(
 
 
 def _mic_request_timeout(cmd: str, args: dict[str, Any]) -> float:
-    """Bound a daemon wait above every allowed audio/synthesis/hold phase."""
+    """Bound a daemon wait above every allowed audio/synthesis/control phase."""
 
     from . import mic as mic_mod
 

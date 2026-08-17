@@ -30,6 +30,26 @@ _CHUNK_MS = 100
 _AFFECTED_SINGLE_INJECTION_VERSION = (36, 4, 10)
 MAX_WAV_DURATION_S = 300.0
 SPEECH_SYNTHESIS_TIMEOUT_S = 120.0
+CONTROL_MODES = ("hold", "toggle")
+
+
+def validate_control_mode(control_mode: str, *, has_target: bool) -> str:
+    """Return one canonical mic control mode before any synthesis/device side effect."""
+
+    if not isinstance(control_mode, str) or control_mode.casefold() not in CONTROL_MODES:
+        raise UsageError(
+            "microphone control mode must be 'hold' or 'toggle'",
+            code="mic_control_mode_invalid",
+            hint="Use the default `hold`, or pass `--control-mode toggle` for tap-to-start.",
+        )
+    normalized = control_mode.casefold()
+    if normalized == "toggle" and not has_target:
+        raise UsageError(
+            "toggle microphone control mode needs a control target",
+            code="mic_toggle_target_required",
+            hint="Pass one CONTROL-ID/--rid/--text/--desc target, or use audio-only `hold` mode.",
+        )
+    return normalized
 
 
 class MicDeliveryUncertainError(DeviceError):
@@ -109,13 +129,73 @@ class MicDeliveredReleaseError(MicDeliveryUncertainError):
         super().__init__(
             message
             or (
-                "the microphone audio was delivered, but AUA could not release the held "
-                "control cleanly"
+                "the microphone audio was delivered, but AUA could not finish the target "
+                "control gesture cleanly"
             ),
             hint=hint
             or (
                 "Do not repeat the audio action. Inspect error.result.observation and verify "
-                "the control is no longer held before continuing."
+                "the control is no longer active before continuing."
+            ),
+            result=result,
+            followup_errors=followup_errors,
+        )
+
+
+class MicToggleStartUncertainError(MicDeliveryUncertainError):
+    """A single-attempt toggle START may have landed, so recording state is unknown."""
+
+    code = "mic_toggle_start_uncertain"
+
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        hint: str | None = None,
+        result: dict[str, Any] | None = None,
+        followup_errors: Sequence[dict[str, str]] | None = None,
+    ) -> None:
+        super().__init__(
+            message
+            or (
+                "the toggle START tap did not return a confirmation; it may have landed, "
+                "so recording state is unknown"
+            ),
+            hint=hint
+            or (
+                "AUA did not inject audio and will not send a blind second tap. Recording may "
+                "be active: protect nearby speech, inspect error.result.observation, and stop "
+                "it only after the visible control state is clear."
+            ),
+            result=result,
+            followup_errors=followup_errors,
+        )
+
+
+class MicToggleStopUncertainError(MicDeliveryUncertainError):
+    """Toggle START was confirmed but STOP could not be sent or confirmed safely."""
+
+    code = "mic_toggle_stop_uncertain"
+
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        hint: str | None = None,
+        result: dict[str, Any] | None = None,
+        followup_errors: Sequence[dict[str, str]] | None = None,
+    ) -> None:
+        super().__init__(
+            message
+            or (
+                "toggle START was confirmed, but AUA could not safely confirm STOP; "
+                "recording state is unknown"
+            ),
+            hint=hint
+            or (
+                "Do not repeat the audio or toggle blindly. Recording may still be active: "
+                "protect nearby speech, inspect error.result.observation, and stop it only "
+                "after the visible control state is clear."
             ),
             result=result,
             followup_errors=followup_errors,
