@@ -170,6 +170,12 @@ class FakeDevice(Device):
     def long_click(self, x: int, y: int, duration_ms: int = 600) -> None:
         self.calls.append(("long_click", (x, y, duration_ms)))
 
+    def touch_down(self, x: int, y: int) -> None:
+        self.calls.append(("touch_down", (x, y)))
+
+    def touch_up(self, x: int, y: int) -> None:
+        self.calls.append(("touch_up", (x, y)))
+
     def send_text(self, text: str, *, clear: bool = True) -> None:
         self.calls.append(("send_text", (text, clear)))
 
@@ -286,9 +292,7 @@ class FakeDevice(Device):
     def log_now(self, tag: str = "Test", msg: str = "hello", *, offset_ms: int = 0) -> str:
         """Append a line stamped off the DEVICE clock in device-local time, as apps do."""
         device_ms = (self.get_clock_ms() or 0) + offset_ms
-        local = datetime.fromtimestamp(
-            device_ms / 1000.0 + self.utc_offset * 60, tz=UTC
-        )
+        local = datetime.fromtimestamp(device_ms / 1000.0 + self.utc_offset * 60, tz=UTC)
         line = (
             f"{local.month:02d}-{local.day:02d} {local.hour:02d}:{local.minute:02d}:"
             f"{local.second:02d}.{local.microsecond // 1000:03d}  1234  5678 I {tag}: {msg}"
@@ -308,9 +312,7 @@ class FakeDevice(Device):
         if since_ms is None:
             return raw
         # Models `logcat -T <device epoch>`: the device compares against its own clock.
-        return "\n".join(
-            filter_logcat(raw, since_ms=since_ms, tz_offset_minutes=self.utc_offset)
-        )
+        return "\n".join(filter_logcat(raw, since_ms=since_ms, tz_offset_minutes=self.utc_offset))
 
     def erase_chars(self, count: int) -> None:
         self.calls.append(("erase_chars", (count,)))
@@ -324,7 +326,7 @@ class FakeDevice(Device):
             else:
                 entries.append(f'    <string name="{key}">{value}</string>')
         body = "\n".join(entries)
-        return "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n<map>\n" f"{body}\n</map>"
+        return f"<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n<map>\n{body}\n</map>"
 
     def _run_as(self, command: str) -> str:
         """Serve `run-as <pkg> ls|grep|cat` against :attr:`prefs` (or refuse like Android)."""

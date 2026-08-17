@@ -101,10 +101,12 @@ def test_arrival_polling_stops_as_soon_as_the_app_is_there() -> None:
 
 
 def test_observing_the_landing_screen_does_not_reintroduce_polling() -> None:
-    """The observation may cost a read; it must not cost a retry loop."""
+    """The observation may cost reads; an unattributed tree needs one ownership proof."""
     dev = LaunchDevice(arrives=True)
     count = _counting_current_app(dev)
     _engine(dev).app("launch", package=PKG, observe=True)
-    # One arrival check plus the observation's own read. A polling regression shows up here as a
-    # number that grows with the failure budget rather than staying a small constant.
-    assert count() <= 2, f"a healthy observed launch read the foreground {count()} times"
+    # One arrival check, the observation's own read, and at most one foreground recheck before an
+    # otherwise useful hierarchy with no package attribution can be bound to the requested app.
+    # A polling regression shows up here as a number that grows with the failure budget rather
+    # than staying a small constant.
+    assert count() <= 3, f"a healthy observed launch read the foreground {count()} times"

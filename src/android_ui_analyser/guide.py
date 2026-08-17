@@ -30,7 +30,8 @@ SKILL_DESCRIPTION = (
     'coordinates. Use whenever the task involves an Android device/emulator: "test the '
     'Android app", "what\'s on screen", "tap/type/swipe the X", "is the named text visible", "drive '
     'the emulator", automating or debugging an Android UI flow, checking a screen after a '
-    "change, testing offline/network behavior, or inspecting/seeding a debuggable app's "
+    "change, testing offline/network or emulator microphone/voice-input behavior, or "
+    "inspecting/seeding a debuggable app's "
     "SQLite database. Start goal-oriented work with `aua session start --goal`; hierarchy-first "
     "(tens of ms); falls back to OCR/detection/grounding vision on "
     "Compose/Flutter/WebView/canvas/game screens the accessibility tree can't see."
@@ -78,6 +79,8 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "If `aua devices` is empty and you need to **verify a change without bothering the "
         "user** (no emulator window on their desktop), boot one quietly: "
         '`aua session start --goal "…" --start-emulator` (or `aua emulator start --headless`). '
+        "For microphone/voice-input tests add `--audio`; the normal unattended default uses "
+        "`-no-audio` to avoid unnecessary host audio initialization. "
         "When the user needs to watch, add `--headed`; it is valid with an already attached "
         "visible emulator, and if AUA must start one its ownership is recorded so "
         "`aua session finish` stops only that AVD. Headless uses `-no-window` + **host GPU** on Mac — not "
@@ -490,10 +493,10 @@ BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
         "Attach automatically and clean up only what you started",
         "Run `aua devices`, then `aua daemon start` when several calls are coming. AUA leases one "
         "compatible emulator to the calling agent process automatically: never ask the user for "
-        "a lease or manually steal one. A dead owner makes its device immediately reusable. Prefer "
-        "an existing headed device (`--headed` is valid there too); when none exists, "
-        "`session start --start-emulator` is the explicit boot permission (`--headed` shows "
-        "it), and `session finish` owns its cleanup.",
+        "a lease or manually steal one. A dead owner makes its device reusable. Prefer an "
+        "existing headed device; otherwise `session start --start-emulator` grants boot "
+        "permission (`--headed` displays it; `--audio` enables microphone injection). "
+        "`session finish` cleans up.",
     ),
     (
         "Observe once and use stable selectors",
@@ -731,13 +734,27 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "emulator",
         "`emulator list|status|recommend-proxy|ensure-proxy [--name aua_proxy] [--api 30] "
         "[--force] [--start]|start [--avd NAME] [--headless|--windowed] [--gpu host|…] "
-        "[--parallel] [--port N] [--read-only] [--owner TAG] [--idle-stop 900] [--wait N]|"
+        "[--audio] [--parallel] [--port N] [--read-only] [--owner TAG] [--idle-stop 900] [--wait N]|"
         "stop [--serial emulator-5554|--avd NAME|--owner TAG|--mine|--all]` — boot headless "
         "for unattended verify (Mac defaults to `-gpu host`); **`--parallel` for multi-agent** "
         "(unique port + read-only + owner); **always stop yours** (`--serial` / "
         "`AUA_OWNER=… --mine`); idle watchdog auto-stops after `--idle-stop` as backup; "
         "`ensure-proxy` creates a small rootable google_apis AVD "
         "(HTTPS proxy system CA — Play Store AVDs refuse `adb root`)",
+    ),
+    (
+        "mic",
+        "`mic inject PCM-WAV [HOLD-ID]` or `--rid/--text/--desc <control>`; the optional "
+        "control stays down for `--pre-roll-ms` + server-backpressured audio + "
+        "`--post-roll-ms`, then the command returns the post-action observation. Input is "
+        "uncompressed PCM WAV: U8/S16, mono/stereo, <=48 kHz, <=5 minutes. On macOS, `mic speak TEXT "
+        "[--voice NAME] [--rate WPM]` uses `/usr/bin/say` and the same injection/hold path. "
+        "Needs the `[audio]` extra and an emulator started with `--audio`; physical devices "
+        "do not expose this API. `mic_delivery_uncertain` means samples may already have been "
+        "delivered: inspect `error.result.observation` and never retry the voice action. If "
+        "`mic_emulator_unavailable` occurs, inspect `aua devices` first. Emulator 36.4.10 "
+        "permits one AUA injection attempt per boot; `mic_repeat_unsafe` requires a restart. "
+        "`mic_delivered_release_failed` means audio arrived; do not repeat it.",
     ),
     (
         "has",
@@ -792,11 +809,12 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "`erase [ID] --chars N` (Maestro eraseText; omit ``--chars`` to clear the whole field)",
     ),
     (
-        "location / orientation / airplane / network / media / record / clock",
+        "location / orientation / airplane / network / media / mic / record / clock",
         "`location set LAT,LON`, `orientation set|get`, `airplane on|off|toggle`, "
         "`network status [--verify]|offline --verify|restore`, `network profile "
         "list|apply|status|restore` (all modes are saved, verified, and reversible), "
-        "`media add PATH`, `record start|stop PATH`, `clock set --ms <unix-ms>` / "
+        "`media add PATH`, `mic inject PCM-WAV [HOLD-ID]`, `mic speak TEXT [HOLD-ID]`, "
+        "`record start|stop PATH`, `clock set --ms <unix-ms>` / "
         "`clock restore` (time travel invalidates auth — always restore)",
     ),
     (
@@ -1271,6 +1289,34 @@ def render_markdown(*, brief: bool = False) -> str:
     )
 
     p.append("")
+    p.append("## Emulator microphone input")
+    p.append(
+        "Install the optional transport (`pip install 'android-ui-analyser[audio]'`) and boot "
+        "the selected AVD with audio enabled. AUA matches its runtime discovery record by adb "
+        "serial and keeps the emulator bearer token out of output. Physical devices are refused "
+        "before streaming.\n"
+        "```bash\n"
+        "aua emulator start --headless --audio\n"
+        "aua mic inject sample.wav\n"
+        "aua mic inject sample.wav --rid hold_to_talk --pre-roll-ms 300 --post-roll-ms 500\n"
+        'aua mic speak "Testing one two" --voice Samantha --rate 175 --rid hold_to_talk\n'
+        "```\n"
+        "WAV input is uncompressed unsigned 8-bit or little-endian signed 16-bit PCM, mono or "
+        "stereo, at 48 kHz or less, up to five minutes. `mic speak` is macOS-only; elsewhere synthesize a compatible "
+        "WAV and use `mic inject`. The stream uses emulator backpressure and waits for its close "
+        "response before releasing the optional hold. An `INTERNAL` close becomes "
+        "`mic_delivery_uncertain` with the post-action screen in `error.result.observation`: "
+        "samples may already have arrived, so never repeat the voice action. Timeouts and "
+        "unclassified RPC closes can also follow partial delivery, so inspect the UI before a "
+        "new attempt. `mic_delivered_release_failed` means audio arrived but hold release "
+        "failed; do not repeat it. If "
+        "`mic_emulator_unavailable` reports that the emulator exited or went offline, inspect "
+        "`aua devices` and restart only that emulator with `--audio` when necessary. Android "
+        "Emulator 36.4.10 is limited to one injection attempt per boot across all AUA workers; "
+        "`mic_repeat_unsafe` means restart only that emulator before one new attempt."
+    )
+
+    p.append("")
     p.append("## Agent best practices (do / don't)")
     p.append("")
     p.append(
@@ -1550,15 +1596,15 @@ structured `recommended_call` directly.
 ## Device and safety rules
 
 - AUA leases automatically. Never steal another agent's device; respect user-named boundaries.
-- Start an emulator only with explicit scope (`session start --start-emulator`); use `--headed`
-  only when visibility is required.
+- Start an emulator only with explicit scope (`session start --start-emulator`). For voice,
+  boot with `--audio`, use `mic inject`/`mic speak`, and inspect uncertain delivery instead of
+  replaying it.
 - Use `aua network offline --verify`; session cleanup restores it. Use guarded `aua db` for
   debuggable SQLite.
 - A delivered deeplink, spinner disappearance, or unchanged short settle is not proof of the
   requested destination. Verify the final interactive affordance the user named.
-- Optional policy is off; failed v4 leaves bundled v3 shadow-only. Never act on
-  `policy_suggestion` or replace
-  `recommended_call`; FunctionGemma needs four choices (0/1 bypass; 2/3 withhold).
+- Policy is off: bundled v3 is shadow-only and failed v4 stays unbundled. Never execute
+  `policy_suggestion`; 0/1 bypass, 2/3 withhold, and four runs FunctionGemma.
 
 ## Load more only when needed
 

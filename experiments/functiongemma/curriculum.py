@@ -171,7 +171,9 @@ SELECT_CANDIDATE_TOOL: dict[str, Any] = {
 # The model itself sees only ``select_candidate``; these schemas validate planner candidates.
 PUBLIC_AUA_ARGUMENTS: dict[str, frozenset[str]] = {
     "capabilities": frozenset({"goal", "phase_done", "expect_error"}),
-    "session_start": frozenset({"goal", "start_emulator", "headed", "avd", "package", "activity"}),
+    "session_start": frozenset(
+        {"goal", "start_emulator", "headed", "audio", "avd", "package", "activity"}
+    ),
     "session_progress": frozenset({"session_id", "phase_done", "expect_error"}),
     "session_review": frozenset({"session_id", "phase_done", "expect_error"}),
     "session_finish": frozenset({"session_id", "phase_done", "expect_error"}),

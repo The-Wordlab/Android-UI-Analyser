@@ -41,6 +41,8 @@ rapidocr = ["rapidocr-onnxruntime>=1.3", "onnxruntime>=1.17"]
 paddle = ["paddleocr>=2.7", "paddlepaddle>=2.6"]
 tesseract = ["pytesseract>=0.3.10"]
 easyocr = ["easyocr>=1.7"]
+# --- Emulator audio input ---
+audio = ["grpcio>=1.64"]
 # --- Detection ---
 yolo = ["ultralytics>=8.2", "torch>=2.2"]
 omniparser = ["ultralytics>=8.2", "torch>=2.2", "huggingface-hub>=0.23"]
@@ -56,7 +58,7 @@ dev = [
     "types-PyYAML>=6.0",
 ]
 all = [
-    "android-ui-analyser[apple,rapidocr,paddle,tesseract,easyocr,yolo,omniparser,proxy,lxml]",
+    "android-ui-analyser[apple,rapidocr,paddle,tesseract,easyocr,audio,yolo,omniparser,proxy,lxml]",
 ]
 # --- Headless HTTP mock / record-replay ---
 proxy = ["mitmproxy>=10.0"]

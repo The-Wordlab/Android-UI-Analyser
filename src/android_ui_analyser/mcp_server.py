@@ -53,6 +53,28 @@ def _selector_from_args(args: dict[str, Any]) -> dict[str, Any] | None:
     return sel
 
 
+def _optional_mic_target(
+    args: dict[str, Any],
+) -> tuple[int | None, dict[str, Any] | None]:
+    """Return an optional hold target while refusing ambiguous mixed addressing."""
+
+    target_keys = [key for key in ("id", "rid", "text", "desc") if args.get(key) is not None]
+    if len(target_keys) > 1:
+        raise UsageError(
+            "microphone hold accepts only one id/rid/text/desc target",
+            hint="Pass one fresh id or one stable selector; omit all four to inject without holding.",
+        )
+    if not target_keys:
+        if args.get("index") is not None or args.get("first"):
+            raise UsageError("--index/first needs a microphone hold selector")
+        return None, None
+    if target_keys[0] == "id":
+        if args.get("index") is not None or args.get("first"):
+            raise UsageError("index/first cannot modify a numeric microphone hold id")
+        return int(args["id"]), None
+    return None, _selector_from_args(args)
+
+
 def _dump(result: Any) -> Any:
     return result.model_dump(mode="json") if hasattr(result, "model_dump") else result
 
@@ -129,6 +151,8 @@ _ANALYZED_TOOL_NAMES: dict[str, str] = {
     "wait": "wait_and_analyze",
     "wait_changed": "wait_changed_and_analyze",
     "long_press": "long_press_and_analyze",
+    "mic_inject": "mic_inject_and_analyze",
+    "mic_speak": "mic_speak_and_analyze",
     "scroll_to": "scroll_to_and_analyze",
     "wait_stable": "wait_stable_and_analyze",
     "double_tap": "double_tap_and_analyze",
@@ -329,6 +353,14 @@ def _tool_definitions() -> list[types.Tool]:
                         "default": False,
                         "description": (
                             "Require a visible emulator; if AUA starts one, show its window."
+                        ),
+                    },
+                    "audio": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "When start_emulator boots one, keep host audio enabled so "
+                            "microphone injection is available."
                         ),
                     },
                     "avd": {"type": "string", "description": "AVD name when several exist."},
@@ -888,6 +920,50 @@ def _tool_definitions() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="mic_inject",
+            description=(
+                "Inject a host U8/S16 PCM WAV into an Android Emulator microphone. Optionally "
+                "hold one fresh id or stable selector for pre-roll, playback, and post-roll."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Host path to a PCM WAV."},
+                    "id": {"type": "integer", "minimum": 0},
+                    **_SELECTOR_PROPS,
+                    "pre_roll_ms": {"type": "integer", "minimum": 0, "default": 250},
+                    "post_roll_ms": {"type": "integer", "minimum": 0, "default": 250},
+                    "observe": _OBSERVE_PROP,
+                    "with_image": _WITH_IMAGE_PROP,
+                },
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="mic_speak",
+            description=(
+                "On macOS, synthesize text with /usr/bin/say and inject it into an Android "
+                "Emulator microphone; optionally hold one id or stable selector throughout."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "speech": {"type": "string", "minLength": 1},
+                    "id": {"type": "integer", "minimum": 0},
+                    **_SELECTOR_PROPS,
+                    "voice": {"type": "string", "description": "Installed macOS say voice."},
+                    "rate": {"type": "integer", "minimum": 1},
+                    "pre_roll_ms": {"type": "integer", "minimum": 0, "default": 250},
+                    "post_roll_ms": {"type": "integer", "minimum": 0, "default": 250},
+                    "observe": _OBSERVE_PROP,
+                    "with_image": _WITH_IMAGE_PROP,
+                },
+                "required": ["speech"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
             name="scroll_to",
             description="Scroll until the given text is visible; returns whether it was found. "
             "It searches ONE way: `direction` up (default) looks further down the list, down "
@@ -1031,6 +1107,11 @@ def _tool_definitions() -> list[types.Tool]:
                 "properties": {
                     "avd": {"type": "string", "description": "AVD name (omit if only one exists)."},
                     "headless": {"type": "boolean", "default": True},
+                    "audio": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Keep host audio enabled for emulator microphone injection.",
+                    },
                     "parallel": {
                         "type": "boolean",
                         "default": False,
@@ -1942,6 +2023,7 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 str(args["goal"]),
                 start_emulator=bool(args.get("start_emulator", False)),
                 headed=bool(args.get("headed", False)),
+                audio=bool(args.get("audio", False)),
                 avd=args.get("avd"),
                 package=args.get("package"),
                 activity=args.get("activity"),
@@ -2145,6 +2227,34 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 with_image=img,
             )
         )
+    if name == "mic_inject":
+        element_id, selector = _optional_mic_target(args)
+        return _dump(
+            engine.mic_inject(
+                args["path"],
+                element_id,
+                selector=selector,
+                pre_roll_ms=int(args.get("pre_roll_ms", 250)),
+                post_roll_ms=int(args.get("post_roll_ms", 250)),
+                observe=args.get("observe", True),
+                with_image=img,
+            )
+        )
+    if name == "mic_speak":
+        element_id, selector = _optional_mic_target(args)
+        return _dump(
+            engine.mic_speak(
+                str(args["speech"]),
+                element_id,
+                selector=selector,
+                voice=args.get("voice"),
+                rate=int(args["rate"]) if args.get("rate") is not None else None,
+                pre_roll_ms=int(args.get("pre_roll_ms", 250)),
+                post_roll_ms=int(args.get("post_roll_ms", 250)),
+                observe=args.get("observe", True),
+                with_image=img,
+            )
+        )
     if name == "scroll_to":
         return _dump(
             engine.scroll_to(
@@ -2213,6 +2323,7 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         out = emulator_mod.start(
             args.get("avd"),
             headless=headless,
+            audio=bool(args.get("audio", False)),
             animations=bool(args.get("animations", False)),
             wait_s=float(args.get("wait", 120)),
             cache_dir=engine.config.cache.dir,
