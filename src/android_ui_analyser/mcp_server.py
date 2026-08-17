@@ -2507,15 +2507,15 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
     if name == "list_devices":
         return [d.model_dump(mode="json") for d in engine.list_devices()]
     if name == "emulator_list":
-        from . import emulator as emulator_mod
+        emulator_mod = engine.platform.capability("virtual_devices")
 
         return emulator_mod.list_avds()
     if name == "emulator_status":
-        from . import emulator as emulator_mod
+        emulator_mod = engine.platform.capability("virtual_devices")
 
         return emulator_mod.status(cache_dir=engine.config.cache.dir)
     if name == "emulator_start":
-        from . import emulator as emulator_mod
+        emulator_mod = engine.platform.capability("virtual_devices")
 
         headless = bool(args.get("headless", True))
         idle = args.get("idle_stop")
@@ -2544,7 +2544,7 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 _mcp_started_owners().add(str(out["owner"]))
         return out
     if name == "emulator_stop":
-        from . import emulator as emulator_mod
+        emulator_mod = engine.platform.capability("virtual_devices")
 
         out = emulator_mod.stop(
             serial=args.get("serial"),
@@ -3007,14 +3007,22 @@ def _mcp_started_owners() -> set[str]:
     return _MCP_STARTED_OWNERS
 
 
-def cleanup_mcp_emulators(cache_dir: str | Path | None = None) -> dict[str, Any]:
+def cleanup_mcp_emulators(
+    cache_dir: str | Path | None = None, *, platform: Any | None = None
+) -> dict[str, Any]:
     """Best-effort stop of emulators this MCP process started and forgot to tear down."""
     import contextlib
 
-    from . import emulator as emulator_mod
-    from .config import load_config
+    if not _MCP_STARTED_SERIALS and not _MCP_STARTED_OWNERS:
+        return {"ok": True, "action": "mcp-emulator-cleanup", "stopped": []}
 
-    cache = cache_dir or load_config().cache.dir
+    from .config import load_config
+    from .platforms import PlatformFactory
+
+    cfg = load_config()
+    selected = platform or PlatformFactory(cfg).create()
+    emulator_mod = selected.capability("virtual_devices")
+    cache = cache_dir or cfg.cache.dir
     stopped: list[str] = []
     serials = list(_MCP_STARTED_SERIALS)
     for ser in serials:
@@ -3192,7 +3200,7 @@ def run_stdio(config: Config | None = None) -> None:
         with contextlib.suppress(Exception):
             engine.close()
         with contextlib.suppress(Exception):
-            cleanup_mcp_emulators(engine.config.cache.dir)
+            cleanup_mcp_emulators(engine.config.cache.dir, platform=engine.platform)
 
 
 __all__ = [

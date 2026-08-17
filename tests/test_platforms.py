@@ -10,8 +10,13 @@ from android_ui_analyser.cli import GlobalOpts, hoist_global_options
 from android_ui_analyser.config import Config, load_config
 from android_ui_analyser.device import Device
 from android_ui_analyser.engine import Engine
-from android_ui_analyser.errors import ConfigError
+from android_ui_analyser.errors import (
+    ConfigError,
+    InvalidPlatformCapabilityError,
+    UnsupportedPlatformCapabilityError,
+)
 from android_ui_analyser.platforms import (
+    CAPABILITY_METHODS,
     NormalizedTree,
     PlatformAdapter,
     PlatformFactory,
@@ -73,6 +78,30 @@ class _InjectedPlatform(_RegisteredPlatform):
         return NormalizedTree([element], app_id="example.native")
 
 
+class _FakeDatabaseService:
+    def __init__(self) -> None:
+        self.calls: list[tuple[Device, str]] = []
+
+    def list_databases(self, runtime: Device, app_id: str) -> dict[str, object]:
+        self.calls.append((runtime, app_id))
+        return {"ok": True, "databases": ["plugin.db"]}
+
+    backup_database = database_schema = execute_database = list_backups = list_databases
+    query_database = restore_database = list_databases
+
+
+class _CapabilityPlatform(_InjectedPlatform):
+    name = "capability-test"
+    capabilities = frozenset({"ui.tree", "app_database"})
+
+    def __init__(self, config: Config, database: _FakeDatabaseService) -> None:
+        super().__init__(config)
+        self.database = database
+
+    def load_capability(self, capability: str) -> object | None:
+        return self.database if capability == "app_database" else None
+
+
 def test_android_is_the_only_builtin_platform() -> None:
     builtins = registered_platforms()
     assert builtins["android"] is AndroidPlatform
@@ -87,6 +116,62 @@ def test_factory_selects_and_memoizes_registered_strategy() -> None:
 
     assert isinstance(first, _RegisteredPlatform)
     assert factory.create() is first
+
+
+def test_missing_optional_capability_is_a_typed_platform_refusal() -> None:
+    platform = _RegisteredPlatform(Config())
+
+    with pytest.raises(UnsupportedPlatformCapabilityError) as exc:
+        platform.capability("virtual-devices")
+
+    assert exc.value.code == "platform_capability_unsupported"
+    assert "test-native" in exc.value.message
+    assert "virtual_devices" in exc.value.message
+
+
+def test_android_capabilities_are_lazy_and_memoized(monkeypatch: pytest.MonkeyPatch) -> None:
+    platform = AndroidPlatform(Config())
+    loaded: list[str] = []
+
+    class Service:
+        ensure_proxy_avd = list_avds = recommend_proxy_avd = start = status = stop = lambda: None
+
+    sentinel = Service()
+    monkeypatch.setattr(platform, "prepare_host", lambda: None)
+    monkeypatch.setattr(
+        "android_ui_analyser.platforms.android.importlib.import_module",
+        lambda name: loaded.append(name) or sentinel,
+    )
+
+    assert platform.capability("virtual_devices") is sentinel
+    assert platform.capability("virtual-devices") is sentinel
+    assert loaded == ["android_ui_analyser.emulator"]
+
+
+def test_android_services_satisfy_every_common_capability_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    platform = AndroidPlatform(Config())
+    monkeypatch.setattr(platform, "prepare_host", lambda: None)
+
+    assert set(CAPABILITY_METHODS) <= platform.capabilities
+    for capability in CAPABILITY_METHODS:
+        assert platform.capability(capability) is not None
+
+
+def test_incomplete_plugin_capability_is_rejected_at_the_gate() -> None:
+    class Broken(_RegisteredPlatform):
+        name = "broken"
+        capabilities = frozenset({"ui.tree", "app_database"})
+
+        def load_capability(self, capability: str) -> object | None:
+            return object() if capability == "app_database" else None
+
+    with pytest.raises(InvalidPlatformCapabilityError) as exc:
+        Broken(Config()).capability("app_database")
+
+    assert exc.value.code == "platform_capability_invalid"
+    assert "list_databases" in exc.value.message
 
 
 def test_factory_reports_installed_platforms_for_unknown_name() -> None:
@@ -154,6 +239,19 @@ def test_android_platform_provides_bounded_failure_diagnostics() -> None:
     assert "newer" in logs
     assert "older" not in logs
     assert ("logcat", (None, True)) in runtime.calls
+
+
+def test_engine_optional_action_uses_selected_platform_capability() -> None:
+    cfg = Config.model_validate({"memory": {"enabled": False}, "lease": {"enabled": False}})
+    runtime = FakeDevice(package="example.native")
+    service = _FakeDatabaseService()
+    platform = _CapabilityPlatform(cfg, service)
+    engine = Engine(cfg, device=runtime, platform=platform)
+
+    result = engine.database_list("example.native")
+
+    assert result == {"ok": True, "databases": ["plugin.db"]}
+    assert service.calls == [(runtime, "example.native")]
 
 
 def test_android_strategy_normalizes_xml_and_ignores_system_overlay_package() -> None:

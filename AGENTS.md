@@ -14,6 +14,9 @@ specific.
 - Define the platform-neutral operation on `PlatformAdapter`, or on a focused capability protocol
   owned and returned by the adapter. The adapter may delegate to its platform runtime; it does not
   need to become one giant class.
+- Per-target actions belong on the semantic `Device` runtime returned by `PlatformAdapter.connect`.
+  Host-wide/optional actions belong to a named service returned by `PlatformAdapter.capability`;
+  add or update its complete structural contract in `platforms/services.py`.
 - Implement the operation for Android in `platforms/android.py` or an Android-only module reached
   exclusively through `AndroidPlatform`. Declare the matching capability in the adapter.
 - Core code calls the selected adapter. Do not add new `platform == "android"` branches in the
@@ -26,8 +29,8 @@ specific.
 - Add a platform-neutral test with a fake adapter and an Android regression test. The neutral test
   must prove the feature does not invoke Android tooling directly.
 
-Existing direct Android calls are migration debt, not examples to copy. When a feature touches one,
-move the touched boundary behind the adapter when practical; do not expand the leak.
+Raw Android calls are allowed only inside the Android runtime/service implementation modules loaded
+by `AndroidPlatform`. Their location is not permission for a generic caller to import them.
 
 Before considering a device-facing feature complete, be able to answer:
 

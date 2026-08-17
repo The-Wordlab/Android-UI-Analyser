@@ -314,6 +314,23 @@ class Device(ABC):
         except Exception:  # pragma: no cover - device-specific
             self.press("back")
 
+    def keyboard_visible(self) -> bool | None:
+        """Whether a software keyboard is visible; ``None`` when the platform cannot tell."""
+
+        # Compatibility bridge for Device plugins written before this semantic operation was
+        # added. New runtimes should override it; older Android-like runtimes commonly already
+        # implement ``shell`` and therefore keep their previous verification behavior.
+        try:
+            out = self.shell("dumpsys input_method | grep -m1 mInputShown")
+        except Exception:  # pragma: no cover - unsupported runtime
+            return None
+        text = (out or "").strip()
+        if "mInputShown=true" in text:
+            return True
+        if "mInputShown=false" in text:
+            return False
+        return None
+
     # -- Maestro-style device controls (best-effort; emulators fare better) ---------
 
     def set_clipboard(self, text: str) -> None:
@@ -418,6 +435,18 @@ class Device(ABC):
     def adb_reverse_remove(self, device_port: int) -> None:
         """Remove a reverse port mapping (no-op if absent)."""
         return None
+
+    def reverse_port(self, device_port: int, host_port: int) -> None:
+        """Expose a host TCP port to the target using the platform's native transport."""
+
+        # Compatibility bridge for older Device plugins. New implementations should override
+        # this semantic name; Android's historical ``adb_reverse`` method remains callable.
+        self.adb_reverse(device_port, host_port)
+
+    def remove_reverse_port(self, device_port: int) -> None:
+        """Remove a mapping created by :meth:`reverse_port`."""
+
+        self.adb_reverse_remove(device_port)
 
     def logcat(self, *, since_ms: int | None = None, dump: bool = True) -> str:
         """Dump (or clear) logcat. ``dump=False`` clears the buffer and returns ``""``.

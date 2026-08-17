@@ -115,7 +115,6 @@ from .selectors import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from .flags import PrefsRead
     from .policy import PolicyMode, PolicySelector
 
 logger = logging.getLogger("android_ui_analyser.engine")
@@ -443,9 +442,15 @@ def _package_from_xml(xml: str, ignore: Sequence[str] = ("com.android.systemui",
     chrome and IMEs overlay every app, so an open keyboard must never win the vote.
     Falls back to the overall majority when every node is ignorable.
     """
-    from .platforms.android import package_from_tree
-
-    return package_from_tree(xml, ignore)
+    packages = re.findall(r'package="([^"]+)"', xml)
+    if not packages:
+        return None
+    counts = Counter(
+        package for package in packages if package and not matches_any(package, ignore)
+    )
+    if not counts:
+        counts = Counter(packages)
+    return counts.most_common(1)[0][0]
 
 
 def _parse_legacy_steps(action: str) -> list[RouteStep] | None:
@@ -1463,8 +1468,8 @@ class Engine:
             if decision.use_vision and routing.allows(Tier.vision, ceiling):
                 # Prefer WebView DOM/a11y enrichment over OCR when the tree looks hollow.
                 wv_cfg = self.config.perception.webview
-                if wv_cfg.enabled:
-                    from . import webview as webview_mod
+                if wv_cfg.enabled and self.platform.supports("webview"):
+                    webview_mod = self.platform.capability("webview")
 
                     xml_dump = self.platform.dump_tree(
                         device,
@@ -2053,9 +2058,9 @@ class Engine:
         ):
             return False
         self._flag_context_checked_at[package] = now
-        from .flags import read_context_flags
+        flags = self.platform.capability("feature_flags")
 
-        result = read_context_flags(
+        result = flags.read_context_flags(
             device,
             package,
             prefs_file=cfg.prefs_files.get(package),
@@ -3147,9 +3152,9 @@ class Engine:
             if step.kind == "flags-apply":
                 if not step.arg:
                     raise UsageError("flags_apply step needs a flags file")
-                from .flags import load_flags_file
+                flags = self.platform.capability("feature_flags")
 
-                app, pairs = load_flags_file(step.arg)
+                app, pairs = flags.load_flags_file(step.arg)
                 plan.flags[id(step)] = _ResolvedFlagsResource(
                     str(Path(step.arg).expanduser().resolve()),
                     app,
@@ -3158,7 +3163,7 @@ class Engine:
             elif step.kind == "mock-replay":
                 if not step.arg:
                     raise UsageError("mock_replay step needs a cassette name or path")
-                from . import proxy_mock as pm
+                pm = self.platform.capability("proxy")
 
                 cassette = pm.cassette_dir(self.config.memory.dir) / f"{step.arg}.yaml"
                 alternate = Path(step.arg).expanduser()
@@ -5469,9 +5474,9 @@ class Engine:
         if observation is None and start_emulator and self._device is None:
             online = [device for device in self.list_devices() if device.state == "device"]
             if not online:
-                from . import emulator as emulator_mod
                 from . import leases
 
+                emulator_mod = self.platform.capability("virtual_devices")
                 boot_owner = leases.resolve_owner(getattr(self, "_lease_owner", None))
                 boot = emulator_mod.start(
                     avd,
@@ -5553,7 +5558,7 @@ class Engine:
                     )
         except Exception:
             if emulator_started:
-                from . import emulator as emulator_mod
+                emulator_mod = self.platform.capability("virtual_devices")
 
                 with contextlib.suppress(Exception):
                     emulator_mod.stop(
@@ -5566,7 +5571,6 @@ class Engine:
         finally:
             self._lease_wait_s = 0.0
         plan = self._goal_session_plan(goal, observed)
-        from . import network, network_profiles
         from .session import complete_current_ui_phase_from_observation, create_session_state
 
         serial = observed.meta.device_serial or self.device.serial
@@ -5583,6 +5587,18 @@ class Engine:
                 capture_context_id = cursor.active_context_id
                 capture_segment = cursor.capture_segment
                 capture_start_order = cursor.next_capture_order
+        network_backup_preexisting = False
+        network_profile_preexisting = False
+        if self.platform.supports("network"):
+            network = self.platform.capability("network")
+            network_backup_preexisting = network.backup_path(
+                self.config.cache.dir, serial
+            ).is_file()
+        if self.platform.supports("network_profiles"):
+            network_profiles = self.platform.capability("network_profiles")
+            network_profile_preexisting = network_profiles.profile_path(
+                self.config.cache.dir, serial
+            ).is_file()
         state = create_session_state(
             self.config.cache.dir,
             goal=goal,
@@ -5590,10 +5606,8 @@ class Engine:
             owner=session_owner,
             recommended_kind=plan.recommended_call.kind,
             recommended_cli=plan.recommended_call.cli,
-            network_backup_preexisting=network.backup_path(self.config.cache.dir, serial).is_file(),
-            network_profile_preexisting=network_profiles.profile_path(
-                self.config.cache.dir, serial
-            ).is_file(),
+            network_backup_preexisting=network_backup_preexisting,
+            network_profile_preexisting=network_profile_preexisting,
             emulator_started=emulator_started,
             contract=contract,
             contract_yaml=canonical_contract_yaml,
@@ -6885,7 +6899,6 @@ class Engine:
         allow_incomplete: bool = False,
     ) -> dict[str, Any]:
         """Restore only reversible state created after this session started, then review it."""
-        from . import network, network_profiles
         from .session import finish_session_state, phase_progress
 
         state = self._session_state(session_id)
@@ -6972,17 +6985,23 @@ class Engine:
 
         if (
             not state.network_profile_preexisting
-            and network_profiles.profile_path(self.config.cache.dir, state.serial).is_file()
+            and self.platform.supports("network_profiles")
+            and self.platform.capability("network_profiles")
+            .profile_path(self.config.cache.dir, state.serial)
+            .is_file()
         ):
             restore("network_profile_restore", self.network_profile_restore)
         if (
             not state.network_backup_preexisting
-            and network.backup_path(self.config.cache.dir, state.serial).is_file()
+            and self.platform.supports("network")
+            and self.platform.capability("network")
+            .backup_path(self.config.cache.dir, state.serial)
+            .is_file()
         ):
             restore("network_restore", self.network_restore)
 
         if state.emulator_started:
-            from . import emulator as emulator_mod
+            emulator_mod = self.platform.capability("virtual_devices")
 
             stopped = restore(
                 "owned_emulator_stop",
@@ -9065,7 +9084,7 @@ class Engine:
                 "microphone pre-roll and post-roll must be zero or greater",
                 code="mic_roll_invalid",
             )
-        from . import mic as mic_mod
+        mic_mod = self.platform.capability("microphone")
 
         has_control = element_id is not None or selector is not None
         control_mode = mic_mod.validate_control_mode(control_mode, has_target=has_control)
@@ -9142,7 +9161,7 @@ class Engine:
         down_attempted = False
         toggle_stop_allowed = True
         action_error: BaseException | None = None
-        terminal_mic_error: mic_mod.MicDeliveryUncertainError | None = None
+        terminal_mic_error: Any | None = None
         injection_attempted = False
         injection_completed = False
 
@@ -9360,7 +9379,7 @@ class Engine:
     ) -> ActionResult:
         """Synthesize *text* with macOS ``say`` and inject the resulting temporary WAV."""
 
-        from . import mic as mic_mod
+        mic_mod = self.platform.capability("microphone")
 
         has_control = element_id is not None or selector is not None
         control_mode = mic_mod.validate_control_mode(control_mode, has_target=has_control)
@@ -10641,16 +10660,7 @@ class Engine:
         Tri-state on purpose: "cannot tell" must not read as "hidden", or this check would
         recreate the very false-success it exists to catch.
         """
-        try:
-            out = self.device.shell("dumpsys input_method | grep -m1 mInputShown")
-        except Exception:  # pragma: no cover - device/shell unavailable
-            return None
-        text = (out or "").strip()
-        if "mInputShown=true" in text:
-            return True
-        if "mInputShown=false" in text:
-            return False
-        return None
+        return self.device.keyboard_visible()
 
     def open_link(
         self,
@@ -11130,7 +11140,7 @@ class Engine:
 
         def _net_present(spec: str) -> bool:
             try:
-                from . import proxy_mock
+                proxy_mock = self.platform.capability("proxy")
 
                 flows = proxy_mock.read_flows_since(self.config.cache.dir, wall_baseline)
             except Exception:  # proxy not running / extra not installed
@@ -12052,7 +12062,7 @@ class Engine:
         )
 
     def network_status(self) -> NetworkResult:
-        from . import network
+        network = self.platform.capability("network")
 
         device = self.device
         path = network.backup_path(self.config.cache.dir, device.serial)
@@ -12068,7 +12078,8 @@ class Engine:
         )
 
     def network_offline(self, *, verify: bool = True, timeout_ms: int = 10_000) -> NetworkResult:
-        from . import network, network_profiles
+        network = self.platform.capability("network")
+        network_profiles = self.platform.capability("network_profiles")
 
         device = self.device
         profile = network_profiles.load_profile(
@@ -12112,7 +12123,7 @@ class Engine:
         return result
 
     def network_restore(self, *, timeout_ms: int = 15_000) -> NetworkResult:
-        from . import network
+        network = self.platform.capability("network")
 
         device = self.device
         path = network.backup_path(self.config.cache.dir, device.serial)
@@ -12141,7 +12152,7 @@ class Engine:
         return result
 
     def network_profile_list(self) -> dict[str, Any]:
-        from . import network_profiles
+        network_profiles = self.platform.capability("network_profiles")
 
         return {
             "ok": True,
@@ -12172,7 +12183,8 @@ class Engine:
         }
 
     def network_profile_status(self) -> NetworkResult:
-        from . import network, network_profiles
+        network = self.platform.capability("network")
+        network_profiles = self.platform.capability("network_profiles")
 
         device = self.device
         path = network_profiles.profile_path(self.config.cache.dir, device.serial)
@@ -12242,7 +12254,8 @@ class Engine:
         loss_percent: float = 10.0,
         timeout_ms: int = 15_000,
     ) -> NetworkResult:
-        from . import network, network_profiles
+        network = self.platform.capability("network")
+        network_profiles = self.platform.capability("network_profiles")
 
         name = network_profiles.normalize_profile(profile)
         if not 0.1 <= loss_percent <= 100:
@@ -12353,7 +12366,8 @@ class Engine:
         return result
 
     def network_profile_restore(self, *, timeout_ms: int = 20_000) -> NetworkResult:
-        from . import network, network_profiles
+        network = self.platform.capability("network")
+        network_profiles = self.platform.capability("network_profiles")
 
         device = self.device
         path = network_profiles.profile_path(self.config.cache.dir, device.serial)
@@ -12454,18 +12468,18 @@ class Engine:
 
     def _proxy_port(self) -> int | None:
         """Listen port of the running mitm, or ``None`` if none has been chosen yet."""
-        from . import proxy_mock as pm
+        pm = self.platform.capability("proxy")
 
         return pm.load_listen_port(Path(self.config.cache.dir).expanduser())
 
     def dev_show(self) -> dict[str, Any]:
-        from . import devopts
+        devopts = self.platform.capability("developer_settings")
 
         state = devopts.read_state(self.device.shell)
         return {"ok": True, "action": "dev-show", **state}
 
     def dev_anim(self, mode: str) -> dict[str, Any]:
-        from . import devopts
+        devopts = self.platform.capability("developer_settings")
 
         path = self._dev_backup_path()
         m = (mode or "").lower()
@@ -12481,7 +12495,7 @@ class Engine:
         return {"ok": True, "action": f"dev-anim-{m}", **state}
 
     def dev_crashes(self, enabled: bool) -> dict[str, Any]:
-        from . import devopts
+        devopts = self.platform.capability("developer_settings")
 
         state = devopts.crashes_set(self.device.shell, enabled, self._dev_backup_path())
         return {
@@ -12491,7 +12505,7 @@ class Engine:
         }
 
     def dev_profile(self, name: str) -> dict[str, Any]:
-        from . import devopts
+        devopts = self.platform.capability("developer_settings")
 
         path = self._dev_backup_path()
         n = (name or "").lower()
@@ -12575,15 +12589,15 @@ class Engine:
         building its tab list once) are invisible to the process that received the
         deeplink: without it the caller screenshots the OLD ui and blames the flag.
         """
-        from .flags import build_uri, dump_result, parse_assignments
+        flags = self.platform.capability("feature_flags")
 
         pairs = (
-            parse_assignments(list(assignments))
+            flags.parse_assignments(list(assignments))
             if not isinstance(assignments, dict)
             else dict(assignments)
         )
         templates = dict(self.config.flags.templates)
-        uri = build_uri(package, pairs, templates)
+        uri = flags.build_uri(package, pairs, templates)
         entry = (activity or self._foreground_activity(package)) if restart else None
         mem = self._memory
         if mem is not None and not self._join_memory_writers(timeout_s=5.0):
@@ -12601,7 +12615,7 @@ class Engine:
             else None
         )
         restarted = self._restart_app(package, entry) if restart else Restart(False, None, None)
-        payload = dump_result(
+        payload = flags.dump_result(
             package=package,
             uri=uri,
             flags=pairs,
@@ -12769,14 +12783,14 @@ class Engine:
         *,
         prefs_file: str | None,
         deadline_s: float,
-    ) -> PrefsRead:
+    ) -> Any:
         """Poll the app's prefs until every requested key is there, or time runs out."""
-        from .flags import read_prefs
+        flags = self.platform.capability("feature_flags")
 
         name = prefs_file or self.config.flags.prefs_files.get(package)
         deadline = time.monotonic() + deadline_s
         while True:
-            prefs = read_prefs(self.device, package, pairs, prefs_file=name)
+            prefs = flags.read_prefs(self.device, package, pairs, prefs_file=name)
             if not prefs.verified or not (prefs.ignored or prefs.mismatched):
                 return prefs
             if time.monotonic() >= deadline:
@@ -12796,10 +12810,10 @@ class Engine:
         prefs_file: str | None = None,
         _snapshot: _ResolvedFlagsResource | None = None,
     ) -> dict[str, Any]:
-        from .flags import load_flags_file
+        flags = self.platform.capability("feature_flags")
 
         if _snapshot is None:
-            app, pairs = load_flags_file(path)
+            app, pairs = flags.load_flags_file(path)
             source_path = str(Path(path).expanduser().resolve())
         else:
             app, pairs = _snapshot.app, deepcopy(_snapshot.pairs)
@@ -12831,7 +12845,7 @@ class Engine:
         port: int | None = None,
         install_ca: bool = True,
     ) -> dict[str, Any]:
-        from . import proxy_mock as pm
+        pm = self.platform.capability("proxy")
 
         cache = Path(self.config.cache.dir).expanduser()
         # Touch the device first so a dead serial does not leave a stray mitmdump.
@@ -12848,7 +12862,7 @@ class Engine:
         preferred = port if port and port > 0 else None
         pid, listen = pm.start_mitm(cache_dir=cache, port=preferred, mode="map")
         try:
-            device.adb_reverse(listen, listen)
+            device.reverse_port(listen, listen)
             device.set_http_proxy(f"127.0.0.1:{listen}")
         except Exception:
             with contextlib.suppress(Exception):
@@ -12885,7 +12899,7 @@ class Engine:
         return out
 
     def proxy_stop(self) -> dict[str, Any]:
-        from . import proxy_mock as pm
+        pm = self.platform.capability("proxy")
 
         cache = Path(self.config.cache.dir).expanduser()
         p = self._proxy_port()
@@ -12893,7 +12907,7 @@ class Engine:
             self.device.set_http_proxy(None)
         if p is not None:
             with contextlib.suppress(Exception):
-                self.device.adb_reverse_remove(p)
+                self.device.remove_reverse_port(p)
         stopped = pm.stop_mitm(cache)
         return {"ok": True, "action": "proxy-stop", "stopped": stopped, "port": p}
 
@@ -12905,7 +12919,7 @@ class Engine:
         status: int = 200,
         body: str | None = None,
     ) -> dict[str, Any]:
-        from . import proxy_mock as pm
+        pm = self.platform.capability("proxy")
 
         cache = Path(self.config.cache.dir).expanduser()
         rules_file = pm.rules_path(cache)
@@ -12916,7 +12930,7 @@ class Engine:
         return {"ok": True, "action": "mock-map", "rule": rule, "count": len(rules)}
 
     def mock_record(self, action: str, name: str | None = None) -> dict[str, Any]:
-        from . import proxy_mock as pm
+        pm = self.platform.capability("proxy")
 
         cache = Path(self.config.cache.dir).expanduser()
         a = (action or "").lower()
@@ -12934,7 +12948,7 @@ class Engine:
             pm.stop_mitm(cache)
             _pid, listen = pm.start_mitm(cache_dir=cache, port=prev, mode="record")
             with contextlib.suppress(Exception):
-                self.device.adb_reverse(listen, listen)
+                self.device.reverse_port(listen, listen)
                 self.device.set_http_proxy(f"127.0.0.1:{listen}")
             return {
                 "ok": True,
@@ -12967,7 +12981,7 @@ class Engine:
             pm.stop_mitm(cache)
             _pid, listen = pm.start_mitm(cache_dir=cache, port=prev, mode="map")
             with contextlib.suppress(Exception):
-                self.device.adb_reverse(listen, listen)
+                self.device.reverse_port(listen, listen)
                 self.device.set_http_proxy(f"127.0.0.1:{listen}")
             out: dict[str, Any] = {
                 "ok": True,
@@ -13001,7 +13015,7 @@ class Engine:
         *,
         _snapshot: _ResolvedCassetteResource | None = None,
     ) -> dict[str, Any]:
-        from . import proxy_mock as pm
+        pm = self.platform.capability("proxy")
 
         cache = Path(self.config.cache.dir).expanduser()
         if _snapshot is None:
@@ -13447,7 +13461,7 @@ class Engine:
     # ----------------------------------------------------------------- app databases
 
     def database_list(self, package: str) -> dict[str, Any]:
-        from . import app_database
+        app_database = self.platform.capability("app_database")
 
         return app_database.list_databases(self.device, package)
 
@@ -13459,7 +13473,7 @@ class Engine:
         table: str | None = None,
         restart: bool = True,
     ) -> dict[str, Any]:
-        from . import app_database
+        app_database = self.platform.capability("app_database")
 
         return app_database.database_schema(
             self.device,
@@ -13480,7 +13494,7 @@ class Engine:
         timeout_ms: int = 5000,
         restart: bool = True,
     ) -> dict[str, Any]:
-        from . import app_database
+        app_database = self.platform.capability("app_database")
 
         return app_database.query_database(
             self.device,
@@ -13504,7 +13518,7 @@ class Engine:
         restart: bool = True,
         confirmed: bool = False,
     ) -> dict[str, Any]:
-        from . import app_database
+        app_database = self.platform.capability("app_database")
 
         return app_database.execute_database(
             self.device,
@@ -13525,7 +13539,7 @@ class Engine:
         *,
         restart: bool = True,
     ) -> dict[str, Any]:
-        from . import app_database
+        app_database = self.platform.capability("app_database")
 
         return app_database.backup_database(
             self.device,
@@ -13536,7 +13550,7 @@ class Engine:
         )
 
     def database_backups(self, package: str, database: str) -> dict[str, Any]:
-        from . import app_database
+        app_database = self.platform.capability("app_database")
 
         return app_database.list_backups(
             self.device,
@@ -13554,7 +13568,7 @@ class Engine:
         restart: bool = True,
         confirmed: bool = False,
     ) -> dict[str, Any]:
-        from . import app_database
+        app_database = self.platform.capability("app_database")
 
         return app_database.restore_database(
             self.device,
@@ -14240,6 +14254,7 @@ class Engine:
             serial=self.device.serial,
             cache_dir=Path(self.config.cache.dir).expanduser(),
             cfg=self.config.capture,
+            platform=self.platform.name,
         )
 
     def capture_sidecar_stop(self) -> dict[str, Any]:

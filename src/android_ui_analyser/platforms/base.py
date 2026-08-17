@@ -11,11 +11,16 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from ..device import Device
-from ..errors import DeviceError
+from ..errors import (
+    DeviceError,
+    InvalidPlatformCapabilityError,
+    UnsupportedPlatformCapabilityError,
+)
 from ..schema import DeviceInfo, Element
+from .services import missing_members
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..config import Config
@@ -67,6 +72,7 @@ class PlatformAdapter(ABC):
 
     def __init__(self, config: Config) -> None:
         self.config = config
+        self._capability_cache: dict[str, Any] = {}
 
     def prepare_host(self) -> None:
         """Make host-side tooling discoverable before connecting, if necessary."""
@@ -86,7 +92,7 @@ class PlatformAdapter(ABC):
 
         return 0
 
-    def probe_target_capabilities(self, target_id: str) -> dict[str, bool]:
+    def probe_target_capabilities(self, target_id: str) -> dict[str, Any]:
         """Return runtime capabilities used by lease requirements such as ``--needs``."""
 
         return {}
@@ -95,6 +101,13 @@ class PlatformAdapter(ABC):
         """Capture the platform-native UI tree from an already connected runtime."""
 
         return runtime.dump_hierarchy(compressed=compact)
+
+    def recent_logs(self, target_id: str, *, limit: int = 80) -> list[str]:
+        """Return recent target log lines without exposing a native logging command."""
+
+        count = max(1, int(limit))
+        text = self.connect(target_id).logcat()
+        return [line for line in text.splitlines() if line.strip()][-count:]
 
     @abstractmethod
     def normalize_tree(
@@ -211,3 +224,46 @@ class PlatformAdapter(ABC):
             f"platform '{self.name}' does not support screenshots",
             code="unsupported_capability",
         )
+
+    def load_capability(self, capability: str) -> Any | None:
+        """Return the implementation of one optional semantic capability.
+
+        Target-level operations live on :class:`Device`; host/platform-wide operations use
+        this second gate.  Implementations are structural services: for example,
+        ``virtual_devices`` exposes ``list_avds/start/stop`` and ``app_database`` exposes
+        ``list_databases/query_database/execute_database``.  The stable capability names and
+        their public method surfaces are the plugin contract; core code must never import a
+        concrete platform module as a fallback.
+
+        Returning ``None`` means unsupported.  Subclasses should load lazily so an iOS or web
+        adapter does not need Android dependencies installed merely to start AUA.
+        """
+
+        return None
+
+    def capability(self, capability: str) -> Any:
+        """Resolve and memoize a semantic service, or raise a typed refusal."""
+
+        key = str(capability).strip().lower().replace("-", "_")
+        if key not in self.capabilities:
+            raise UnsupportedPlatformCapabilityError(self.name, key)
+        if key not in self._capability_cache:
+            service = self.load_capability(key)
+            if service is None:
+                raise UnsupportedPlatformCapabilityError(self.name, key)
+            missing = missing_members(key, service)
+            if missing:
+                raise InvalidPlatformCapabilityError(self.name, key, missing)
+            self._capability_cache[key] = service
+        return self._capability_cache[key]
+
+    def doctor_checks(self) -> dict[str, Any]:
+        """Platform-owned environment checks for ``aua doctor``."""
+
+        return {
+            "platform": {
+                "ok": True,
+                "detail": self.name,
+                "capabilities": sorted(self.capabilities),
+            }
+        }

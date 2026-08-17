@@ -13,7 +13,6 @@ import contextlib
 import logging
 import os
 import shlex
-import shutil
 import sys
 import time
 import uuid
@@ -227,6 +226,12 @@ def _opts(ctx: typer.Context) -> GlobalOpts:
     if not isinstance(ctx.obj, GlobalOpts):  # pragma: no cover - defensive
         ctx.obj = GlobalOpts()
     return ctx.obj
+
+
+def _platform_capability(ctx: typer.Context, capability: str) -> Any:
+    """Resolve one optional platform service without connecting to a target."""
+
+    return _opts(ctx).engine().platform.capability(capability)
 
 
 def _version_callback(value: bool) -> None:
@@ -1713,13 +1718,6 @@ def main(
         format="%(levelname)s %(name)s: %(message)s",
         force=True,
     )
-    # Normalise adb discovery before any command (or adbutils) looks at PATH: the SDK's
-    # adb is often off PATH in non-interactive shells, which used to make `doctor` fail
-    # on a working machine. Cheap, stdlib-only, and a no-op when adb is already on PATH.
-    from . import emulator as emulator_mod
-
-    emulator_mod.ensure_adb_on_path()
-
     if format is not None and format not in {f.value for f in OutputFormat}:
         # Surface as a usage error (exit 2) before any command runs.
         err = UsageError(
@@ -3772,12 +3770,14 @@ def fanout(
     import subprocess
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    from .device import list_devices as _list
-
     opts = _opts(ctx)
     targets = [s.strip() for s in (serials or "").split(",") if s.strip()]
     if not targets:
-        targets = [d.serial for d in _list() if getattr(d, "state", "device") == "device"]
+        targets = [
+            d.serial
+            for d in opts.engine().list_devices()
+            if getattr(d, "state", "device") == "device"
+        ]
     if not targets:
         raise UsageError(
             "no devices for fanout",
@@ -3786,6 +3786,8 @@ def fanout(
 
     def one(ser: str) -> dict[str, Any]:
         cmd = ["aua", "--serial", ser, "--format", "compact", *command]
+        if opts.platform:
+            cmd[1:1] = ["--platform", opts.platform]
         if opts.config:
             cmd[1:1] = ["--config", opts.config]
         try:
@@ -3840,7 +3842,7 @@ def _emulator_emit(payload: dict[str, Any], ctx: typer.Context) -> None:
 @emulator_app.command("list")
 def emulator_list_cmd(ctx: typer.Context) -> None:
     """List configured AVDs (marks Play Store vs rootable Google APIs)."""
-    from . import emulator as emulator_mod
+    emulator_mod = _platform_capability(ctx, "virtual_devices")
 
     try:
         _emulator_emit(emulator_mod.list_avds(), ctx)
@@ -3864,7 +3866,7 @@ def emulator_recommend_proxy_cmd(
     Google Play images refuse `adb root`, so mitm system-CA install fails. This prints
     the package + commands; does not download or create anything.
     """
-    from . import emulator as emulator_mod
+    emulator_mod = _platform_capability(ctx, "virtual_devices")
 
     try:
         _emulator_emit(emulator_mod.recommend_proxy_avd(api=api, name=name), ctx)
@@ -3895,10 +3897,9 @@ def emulator_ensure_proxy_cmd(
     Needed for `aua proxy` HTTPS capture when the app only trusts system CAs. Prefer this
     over Google Play AVDs — those block `adb root`. Downloads can take several minutes.
     """
-    from . import emulator as emulator_mod
-
     opts = _opts(ctx)
     cfg = opts.load()
+    emulator_mod = _platform_capability(ctx, "virtual_devices")
     try:
         payload = emulator_mod.ensure_proxy_avd(name=name, api=api, force=force)
         if start_after:
@@ -3922,10 +3923,9 @@ def emulator_ensure_proxy_cmd(
 @emulator_app.command("status")
 def emulator_status_cmd(ctx: typer.Context) -> None:
     """SDK / AVD tooling + currently running emulator-* serials."""
-    from . import emulator as emulator_mod
-
     opts = _opts(ctx)
     cfg = opts.load()
+    emulator_mod = _platform_capability(ctx, "virtual_devices")
     try:
         _emulator_emit(emulator_mod.status(cache_dir=cfg.cache.dir), ctx)
     except AuaError as err:
@@ -4021,10 +4021,9 @@ def emulator_start_cmd(
     With ``--apk … --launch`` this is the whole bootstrap in one call: boot, install the build if
     it is not already there, open it, and return the first screen with usable element ids.
     """
-    from . import emulator as emulator_mod
-
     opts = _opts(ctx)
     cfg = opts.load()
+    emulator_mod = _platform_capability(ctx, "virtual_devices")
     if (launch or reinstall or fresh) and not apk:
         err = UsageError(
             "--launch/--reinstall/--fresh only apply to --apk",
@@ -4123,10 +4122,9 @@ def emulator_stop_cmd(
     killing it cannot be undone. Prefer `--serial` or `--mine` (scoped by `$AUA_OWNER` when
     parallel agents share a host).
     """
-    from . import emulator as emulator_mod
-
     opts = _opts(ctx)
     cfg = opts.load()
+    emulator_mod = _platform_capability(ctx, "virtual_devices")
     # A *global* `--serial` — written before the subcommand, the position every other command
     # wants it in — used to be dropped on the floor here. `emulator stop` declares its own
     # `--serial`, so `hoist_global_options` rightly leaves the subcommand's flag alone, and this
@@ -5042,12 +5040,12 @@ def mic_inject_cmd(
         )
         # Resolve in the caller's cwd before daemon routing; a warm daemon can have a different
         # cwd and must never reinterpret a relative path as a different audio file.
-        from .mic import inspect_pcm_wav, validate_control_mode
+        mic = engine.platform.capability("microphone")
 
-        normalized_mode = validate_control_mode(
+        normalized_mode = mic.validate_control_mode(
             control_mode, has_target=element_id is not None or selector is not None
         )
-        resolved_path = str(inspect_pcm_wav(path).path)
+        resolved_path = str(mic.inspect_pcm_wav(path).path)
         _emit(
             _route(
                 engine,
@@ -5119,9 +5117,9 @@ def mic_speak_cmd(
             index=index,
             first=first,
         )
-        from .mic import validate_control_mode
+        mic = engine.platform.capability("microphone")
 
-        normalized_mode = validate_control_mode(
+        normalized_mode = mic.validate_control_mode(
             control_mode, has_target=element_id is not None or selector is not None
         )
         _emit(
@@ -5585,19 +5583,12 @@ def doctor(ctx: typer.Context) -> None:
 def _build_doctor_report(engine: Engine) -> dict[str, Any]:
     checks: dict[str, Any] = {}
 
-    adb = shutil.which("adb")
-    checks["adb"] = {"ok": adb is not None, "detail": adb or "adb not found on PATH"}
-
     try:
-        import importlib.util
-
-        spec = importlib.util.find_spec("uiautomator2")
-        checks["uiautomator2"] = {
-            "ok": spec is not None,
-            "detail": "importable" if spec is not None else "not installed",
-        }
+        checks.update(engine.platform.doctor_checks())
+    except AuaError as exc:
+        checks["platform"] = {"ok": False, "detail": exc.message}
     except Exception as exc:  # pragma: no cover - defensive
-        checks["uiautomator2"] = {"ok": False, "detail": f"error: {exc}"}
+        checks["platform"] = {"ok": False, "detail": str(exc)}
 
     try:
         infos = engine.list_devices()
@@ -5607,38 +5598,20 @@ def _build_doctor_report(engine: Engine) -> dict[str, Any]:
             "detail": [d.model_dump(mode="json") for d in infos] if infos else "no devices",
         }
         if not infos:
-            checks["devices"]["hint"] = (
-                "No device attached — for unattended verify boot a headless AVD: "
-                "`aua emulator start --headless` (see `aua emulator list`)."
-            )
+            if engine.platform.supports("virtual_devices"):
+                checks["devices"]["hint"] = (
+                    "No target attached — boot a virtual device with "
+                    "`aua emulator start` (see `aua emulator list`)."
+                )
+            else:
+                checks["devices"]["hint"] = (
+                    f"No {engine.platform.name} target is available; connect one or configure "
+                    "the selected platform plugin."
+                )
     except AuaError as exc:
         checks["devices"] = {"ok": False, "detail": exc.message}
     except Exception as exc:  # pragma: no cover - defensive
         checks["devices"] = {"ok": False, "detail": str(exc)}
-
-    try:
-        from . import emulator as emulator_mod
-
-        emu = emulator_mod.status(cache_dir=engine.config.cache.dir)
-        checks["emulator"] = {
-            "ok": bool(emu.get("emulator_ok")),
-            "detail": {
-                "binary": emu.get("emulator"),
-                "avds": emu.get("avds") or [],
-                "rootable": emu.get("rootable") or [],
-                "play_store": emu.get("play_store") or [],
-                "running": emu.get("running") or [],
-            },
-        }
-        if emu.get("hint"):
-            checks["emulator"]["hint"] = emu["hint"]
-        elif (emu.get("play_store") or []) and not (emu.get("rootable") or []):
-            checks["emulator"]["hint"] = (
-                "Only Google Play AVDs — HTTPS proxy needs a rootable image: "
-                "`aua emulator ensure-proxy`."
-            )
-    except Exception as exc:  # pragma: no cover - defensive
-        checks["emulator"] = {"ok": False, "detail": str(exc)}
 
     checks["skills"] = _installed_skill_checks()
 
@@ -5719,10 +5692,17 @@ def _render_doctor_pretty(report: dict[str, Any]) -> str:
     lines: list[str] = ["aua doctor", "=========="]
     checks = report.get("checks", {})
 
-    adb = checks.get("adb", {})
-    lines.append(f"[{mark(adb.get('ok', False))}] adb           {adb.get('detail', '')}")
-    u2 = checks.get("uiautomator2", {})
-    lines.append(f"[{mark(u2.get('ok', False))}] uiautomator2  {u2.get('detail', '')}")
+    platform = checks.get("platform", {})
+    if platform:
+        lines.append(
+            f"[{mark(platform.get('ok', False))}] platform      {platform.get('detail', '')}"
+        )
+    adb = checks.get("adb")
+    if adb:
+        lines.append(f"[{mark(adb.get('ok', False))}] adb           {adb.get('detail', '')}")
+    u2 = checks.get("uiautomator2")
+    if u2:
+        lines.append(f"[{mark(u2.get('ok', False))}] uiautomator2  {u2.get('detail', '')}")
     dev = checks.get("devices", {})
     dev_detail = dev.get("detail", "")
     if isinstance(dev_detail, list):
@@ -7188,7 +7168,7 @@ def proxy_ca_install_cmd(ctx: typer.Context) -> None:
     """Install the mitm CA into the system trust store (Android 14+ zygote overlay)."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        from . import proxy_mock as pm
+        pm = engine.platform.capability("proxy")
 
         _emit(pm.install_system_ca(engine.device.serial), fmt)
 

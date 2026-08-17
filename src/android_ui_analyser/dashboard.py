@@ -12,10 +12,8 @@ import json
 import logging
 import mimetypes
 import os
-import re
 import secrets
 import socket
-import subprocess
 import threading
 import time
 import webbrowser
@@ -29,27 +27,26 @@ from .errors import AuaError, DeviceError, UsageError
 logger = logging.getLogger(__name__)
 
 _DEFAULT_PORT = 8765
-_PKG_RE = re.compile(
-    r"(?:mResumedActivity|mFocusedActivity|topResumedActivity|"
-    r"mCurrentFocus|mFocusedApp).*?\s+([a-zA-Z0-9_.]+)/"
-)
 
 
 def _safe_serial(serial: str) -> str:
     return str(serial).replace(":", "_").replace("/", "_")
 
 
-def list_online_serials() -> list[str]:
-    from .device import list_devices
+def list_online_serials(config: Any | None = None) -> list[str]:
+    from .config import load_config
+    from .platforms import PlatformFactory
 
-    return [d.serial for d in list_devices() if d.state == "device"]
+    cfg = config or load_config()
+    platform = PlatformFactory(cfg).create()
+    return [d.serial for d in platform.list_targets() if d.state == "device"]
 
 
-def resolve_serial(serial: str | None) -> str:
+def resolve_serial(serial: str | None, *, config: Any | None = None) -> str:
     """Resolve a single device serial (detail view / legacy callers)."""
     if serial:
         return serial
-    online = list_online_serials()
+    online = list_online_serials() if config is None else list_online_serials(config)
     if not online:
         raise DeviceError(
             "no device found for dashboard",
@@ -65,7 +62,7 @@ def resolve_serial(serial: str | None) -> str:
 
 
 def resolve_dashboard_targets(
-    serial: str | None = None, *, grid: bool = False
+    serial: str | None = None, *, grid: bool = False, config: Any | None = None
 ) -> dict[str, Any]:
     """Pick grid vs detail mode.
 
@@ -73,7 +70,7 @@ def resolve_dashboard_targets(
     * ``--grid`` or multiple online devices with no serial → grid of all.
     * Exactly one device → detail.
     """
-    online = list_online_serials()
+    online = list_online_serials() if config is None else list_online_serials(config)
     if serial:
         if serial not in online and online:
             # Still allow watching a serial that briefly dropped offline.
@@ -158,9 +155,7 @@ def recent_marks(cache_dir: str | Path, serial: str, *, limit: int = 40) -> list
     return marks[-limit:]
 
 
-def ensure_capture(
-    *, serial: str, config: Any, allow_sidecar: bool = True
-) -> dict[str, Any]:
+def ensure_capture(*, serial: str, config: Any, allow_sidecar: bool = True) -> dict[str, Any]:
     """Turn capture on for *serial* without disturbing the agent's workflow.
 
     Prefer the warm daemon's buffer; otherwise start the host capture sidecar so a
@@ -207,7 +202,12 @@ def ensure_capture(
         )
     from . import capture_sidecar as cs
 
-    started = cs.start(serial=serial, cache_dir=cache, cfg=config.capture)
+    started = cs.start(
+        serial=serial,
+        cache_dir=cache,
+        cfg=config.capture,
+        platform=str(config.device.platform),
+    )
     out["via"] = "sidecar"
     out["capture"] = started
     out["socket"] = started.get("socket")
@@ -227,43 +227,6 @@ def _pick_free_port(preferred: int) -> int:
                 continue
             return port
     raise UsageError(f"no free port near {preferred}", hint="Pass --port explicitly.")
-
-
-def _adb_logcat(serial: str, lines: int = 80) -> list[str]:
-    n = max(1, min(int(lines), 500))
-    try:
-        proc = subprocess.run(
-            ["adb", "-s", serial, "logcat", "-d", "-t", str(n)],
-            capture_output=True,
-            text=True,
-            timeout=8,
-            check=False,
-        )
-        text = proc.stdout or ""
-        return [ln for ln in text.splitlines() if ln.strip()][-n:]
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
-        return [f"<logcat failed: {exc}>"]
-
-
-def _pkg_from_dumpsys(serial: str) -> str | None:
-    try:
-        proc = subprocess.run(
-            ["adb", "-s", serial, "shell", "dumpsys", "activity", "activities"],
-            capture_output=True,
-            text=True,
-            timeout=6,
-            check=False,
-        )
-        text = proc.stdout or ""
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return None
-    for line in text.splitlines():
-        m = _PKG_RE.search(line)
-        if m:
-            pkg = m.group(1)
-            if pkg and not pkg.startswith("com.android.systemui"):
-                return pkg
-    return None
 
 
 _DASHBOARD_HTML = """<!DOCTYPE html>
@@ -1272,6 +1235,9 @@ class _DashboardState:
         self.ensures = ensures
         self.poll_ms = poll_ms
         self.config = config
+        from .platforms import PlatformFactory
+
+        self.platform = PlatformFactory(config).create()
         self._fallback: dict[str, tuple[bytes, float]] = {}
         self._fallback_lock = threading.Lock()
         self._pkg_cache: dict[str, tuple[str | None, float]] = {}
@@ -1320,14 +1286,10 @@ class _DashboardState:
             return cached[0]
         pkg: str | None = None
         try:
-            from .device import connect
-
-            info = connect(ser).current_app() or {}
+            info = self.platform.connect(ser).current_app() or {}
             pkg = info.get("package") or None
         except Exception as exc:  # noqa: BLE001
             logger.debug("current_app failed: %s", exc)
-        if not pkg:
-            pkg = _pkg_from_dumpsys(ser)
         self._pkg_cache[ser] = (pkg or None, now)
         return pkg or None
 
@@ -1346,22 +1308,17 @@ class _DashboardState:
         return value
 
     @staticmethod
-    def _database_int(
-        payload: dict[str, Any], name: str, default: int, *, maximum: int
-    ) -> int:
+    def _database_int(payload: dict[str, Any], name: str, default: int, *, maximum: int) -> int:
         value = payload.get(name, default)
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise UsageError(f"dashboard database field {name!r} must be a positive integer")
         if value > maximum:
-            raise UsageError(
-                f"dashboard database field {name!r} must be at most {maximum}"
-            )
+            raise UsageError(f"dashboard database field {name!r} must be at most {maximum}")
         return value
 
     def database_operation(self, action: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Run one dashboard database request through the guarded database service."""
-        from . import app_database
-        from .device import connect
+        app_database = self.platform.capability("app_database")
 
         serial = self._database_text(payload, "serial") if payload.get("serial") else self.focus
         if not serial:
@@ -1373,7 +1330,7 @@ class _DashboardState:
             )
         package = self._database_text(payload, "package")
         restart = self._database_bool(payload, "restart", True)
-        device = connect(serial)
+        device = self.platform.connect(serial)
 
         with self._database_lock:
             if action == "list":
@@ -1399,9 +1356,7 @@ class _DashboardState:
                     self._database_text(payload, "sql"),
                     parameters=payload.get("parameters"),
                     limit=self._database_int(payload, "limit", 100, maximum=1000),
-                    timeout_ms=self._database_int(
-                        payload, "timeout_ms", 5000, maximum=60_000
-                    ),
+                    timeout_ms=self._database_int(payload, "timeout_ms", 5000, maximum=60_000),
                     restart=restart,
                 )
             if action == "backup":
@@ -1433,9 +1388,7 @@ class _DashboardState:
                     database,
                     self._database_text(payload, "sql"),
                     parameters=payload.get("parameters"),
-                    timeout_ms=self._database_int(
-                        payload, "timeout_ms", 5000, maximum=60_000
-                    ),
+                    timeout_ms=self._database_int(payload, "timeout_ms", 5000, maximum=60_000),
                     restart=restart,
                     confirmed=True,
                 )
@@ -1464,9 +1417,7 @@ class _DashboardState:
         from . import journal as journal_mod
 
         ser = serial or self.focus
-        events = journal_mod.read_since(
-            self.cache_dir, ser, since_ms=since_ms, limit=limit
-        )
+        events = journal_mod.read_since(self.cache_dir, ser, since_ms=since_ms, limit=limit)
         window = journal_mod.read_since(self.cache_dir, ser, since_ms=None, limit=400)
         stats = journal_mod.failure_stats(window)
         return {"events": events, "stats": stats}
@@ -1564,7 +1515,7 @@ class _DashboardState:
 
     def devices_payload(self) -> dict[str, Any]:
         # Refresh online list so tiles appear/disappear as agents start/stop.
-        online = list_online_serials()
+        online = list_online_serials(self.config)
         known = list(dict.fromkeys([*self.serials, *online]))
         self.serials = known
         for ser in online:
@@ -1641,11 +1592,7 @@ class _DashboardState:
                 "slow": stats.get("slow", []),
             },
             "capture_detail": detail,
-            "ensure": {
-                k: ens.get(k)
-                for k in ("via", "ok", "hint", "daemon_error")
-                if k in ens
-            },
+            "ensure": {k: ens.get(k) for k in ("via", "ok", "hint", "daemon_error") if k in ens},
             "poll_ms": self.poll_ms,
             "mode": self.mode,
         }
@@ -1667,9 +1614,7 @@ class _DashboardState:
             if hit and (time.time() - hit[1]) < 0.8:
                 return hit[0], "image/jpeg"
         try:
-            from .device import connect
-
-            img = connect(ser).screenshot()
+            img = self.platform.connect(ser).screenshot()
             raw = getattr(img, "png_bytes", None)
             if raw is None and hasattr(img, "pil"):
                 import io
@@ -1691,6 +1636,13 @@ class _DashboardState:
             b"\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
         )
         return placeholder, "image/png"
+
+    def log_lines(self, serial: str, lines: int = 80) -> list[str]:
+        n = max(1, min(int(lines), 500))
+        try:
+            return self.platform.recent_logs(serial, limit=n)
+        except Exception as exc:  # noqa: BLE001 — dashboard remains available
+            return [f"<device logs failed: {exc}>"]
 
 
 def _make_handler(state: _DashboardState) -> type[BaseHTTPRequestHandler]:
@@ -1775,7 +1727,7 @@ def _make_handler(state: _DashboardState) -> type[BaseHTTPRequestHandler]:
                     n = max(1, min(int(lines_raw), 500))
                 except ValueError:
                     n = 80
-                self._json({"ok": True, "lines": _adb_logcat(ser or "", n) if ser else []})
+                self._json({"ok": True, "lines": state.log_lines(ser, n) if ser else []})
                 return
             if path.startswith("/api/file"):
                 ser = self._qs_serial(qs)
@@ -1883,7 +1835,9 @@ def run(
     from .config import load_config
 
     cfg = config or load_config()
-    targets = resolve_dashboard_targets(serial or getattr(cfg.device, "serial", None), grid=grid)
+    targets = resolve_dashboard_targets(
+        serial or getattr(cfg.device, "serial", None), grid=grid, config=cfg
+    )
     mode = str(targets["mode"])
     serials: list[str] = list(targets["serials"])
     focus: str | None = targets.get("focus")
@@ -1895,9 +1849,7 @@ def run(
     ensures: dict[str, dict[str, Any]] = {}
     for ser in serials:
         with contextlib.suppress(Exception):
-            ensures[ser] = ensure_capture(
-                serial=ser, config=cfg, allow_sidecar=allow_sidecar
-            )
+            ensures[ser] = ensure_capture(serial=ser, config=cfg, allow_sidecar=allow_sidecar)
 
     listen = _pick_free_port(port)
     state = _DashboardState(
@@ -1930,7 +1882,10 @@ def run(
             )
             + "Leave this running; stop with Ctrl-C. Agent work is unaffected."
         ),
-        "ensures": {k: {kk: vv for kk, vv in v.items() if kk in ("via", "ok", "hint")} for k, v in ensures.items()},
+        "ensures": {
+            k: {kk: vv for kk, vv in v.items() if kk in ("via", "ok", "hint")}
+            for k, v in ensures.items()
+        },
     }
 
     def _serve() -> None:
@@ -1941,9 +1896,7 @@ def run(
         threading.Timer(0.4, lambda: webbrowser.open(url)).start()
 
     if block:
-        logger.info(
-            "dashboard on %s (mode=%s serials=%s)", url, mode, ",".join(serials)
-        )
+        logger.info("dashboard on %s (mode=%s serials=%s)", url, mode, ",".join(serials))
         print(json.dumps(info, indent=2, ensure_ascii=False), flush=True)
         try:
             _serve()

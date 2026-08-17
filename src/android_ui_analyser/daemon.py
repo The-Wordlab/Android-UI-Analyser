@@ -37,6 +37,7 @@ import subprocess
 import sys
 import threading
 import time
+import wave
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -1050,8 +1051,6 @@ _LONG_POLL_COMMANDS = frozenset(
 def _mic_request_timeout(cmd: str, args: dict[str, Any]) -> float:
     """Bound a daemon wait above every allowed audio/synthesis/control phase."""
 
-    from . import mic as mic_mod
-
     roll_s = 0.0
     for key in ("pre_roll_ms", "post_roll_ms"):
         value = args.get(key, 250)
@@ -1060,11 +1059,15 @@ def _mic_request_timeout(cmd: str, args: dict[str, Any]) -> float:
     # Observation and the gRPC duration-derived deadline need headroom beyond the media itself.
     buffer_s = 60.0
     if cmd == "mic_speak":
-        return mic_mod.SPEECH_SYNTHESIS_TIMEOUT_S + mic_mod.MAX_WAV_DURATION_S + roll_s + buffer_s
+        # These are protocol bounds, not backend calls: synthesis gets 120 s and every adapter
+        # must reject generated media longer than AUA's public five-minute input ceiling.
+        return 120.0 + 300.0 + roll_s + buffer_s
     path = args.get("wav_path")
     if isinstance(path, (str, Path)):
-        with contextlib.suppress(Exception):
-            return mic_mod.inspect_pcm_wav(path).duration_s + roll_s + buffer_s
+        with contextlib.suppress(Exception), wave.open(str(path), "rb") as wav:
+            rate = wav.getframerate()
+            if rate > 0:
+                return wav.getnframes() / rate + roll_s + buffer_s
     return 60.0 + roll_s
 
 

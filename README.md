@@ -906,6 +906,8 @@ so later agents and contributors can reproduce or improve the adapter without de
 Android is the only built-in platform today, but the engine selects it through a platform
 strategy. `device.platform`, `--platform`, or `AUA_PLATFORM` can select an installed adapter;
 third-party packages register adapters through the `aua.platforms` Python entry-point group.
+The choice is process/config scoped (not repeated on every command), and both target actions and
+optional services are gated: another platform never silently falls back to ADB.
 See [Platform adapters](docs/platform-plugins.md) for the contract and a minimal plugin skeleton.
 
 ## Adding a provider

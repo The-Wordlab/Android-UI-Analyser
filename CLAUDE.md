@@ -72,6 +72,10 @@ remains the default, but new work must preserve the ability to plug in iOS, web,
 - First define a platform-neutral method on `PlatformAdapter`, or a focused capability protocol
   owned and returned by it. The adapter may delegate to platform-owned runtime/services rather than
   accumulating every implementation in one file.
+- Per-target operations belong on the semantic `Device` runtime returned by `connect`; host-wide or
+  optional operations use `PlatformAdapter.capability(name)`. Capability names and their required
+  structural members live in `platforms/services.py`; claiming an incomplete service is a typed
+  configuration error.
 - Put the Android implementation in `platforms/android.py` or an Android-only module reachable only
   through `AndroidPlatform`, and add the corresponding name to its `capabilities` set.
 - Core layers call the selected adapter and use its capability contract. Never add new
@@ -84,9 +88,9 @@ remains the default, but new work must preserve the ability to plug in iOS, web,
 - Every new platform operation needs a fake-adapter test proving the core has no Android dependency,
   plus an Android adapter regression test.
 
-Existing direct ADB calls predate this boundary and are migration debt, not patterns to copy. If new
-work touches such a call, move the touched operation behind the adapter when practical and never
-spread it into another core module. The detailed plugin contract is in
+Raw ADB/native calls are confined to Android runtime/service implementation modules loaded by
+`AndroidPlatform`; they are not patterns for generic callers. The architecture test
+`tests/test_platform_boundary.py` prevents new core bypasses. The detailed plugin contract is in
 `docs/platform-plugins.md`; repository-wide coding-agent instructions are also in `AGENTS.md`.
 
 ## How the tool works (quick reference)

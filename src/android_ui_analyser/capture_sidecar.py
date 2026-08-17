@@ -21,7 +21,6 @@ from pathlib import Path
 from typing import Any
 
 from .capture import CaptureBuffer, CaptureCfgView
-from .device import connect
 from .errors import UsageError
 
 logger = logging.getLogger(__name__)
@@ -35,10 +34,15 @@ def pid_path(cache_dir: Path) -> Path:
     return Path(cache_dir).expanduser() / "capture_sidecar.pid"
 
 
-def start(*, serial: str, cache_dir: Path, cfg: Any) -> dict[str, Any]:
+def start(*, serial: str, cache_dir: Path, cfg: Any, platform: str = "android") -> dict[str, Any]:
     sock = socket_path(cache_dir)
     if _ping(sock):
-        return {"ok": True, "action": "capture-sidecar-start", "status": "already_running", "socket": sock}
+        return {
+            "ok": True,
+            "action": "capture-sidecar-start",
+            "status": "already_running",
+            "socket": sock,
+        }
     cache_dir = Path(cache_dir).expanduser()
     cache_dir.mkdir(parents=True, exist_ok=True)
     log = cache_dir / "capture_sidecar.log"
@@ -50,6 +54,8 @@ def start(*, serial: str, cache_dir: Path, cfg: Any) -> dict[str, Any]:
         sock,
         "--serial",
         serial,
+        "--platform",
+        platform,
         "--cache",
         str(cache_dir),
         "--idle-fps",
@@ -133,11 +139,22 @@ def _ping(sock: str) -> bool:
         return False
 
 
-def serve(sock: str, *, serial: str, cache_dir: Path, view: CaptureCfgView) -> None:
+def serve(
+    sock: str,
+    *,
+    serial: str,
+    cache_dir: Path,
+    view: CaptureCfgView,
+    platform: str = "android",
+) -> None:
+    from .config import load_config
+    from .platforms import PlatformFactory
+
     with contextlib.suppress(FileNotFoundError):
         os.unlink(sock)
     Path(sock).parent.mkdir(parents=True, exist_ok=True)
-    device = connect(serial)
+    config = load_config(cli_overrides={"device": {"platform": platform, "serial": serial}})
+    device = PlatformFactory(config).create().connect(serial)
     buf = CaptureBuffer(
         root=Path(cache_dir) / "captures",
         serial=serial,
@@ -191,9 +208,7 @@ def serve(sock: str, *, serial: str, cache_dir: Path, view: CaptureCfgView) -> N
                     fps=float(req.get("fps") or 8),
                 )
             elif cmd == "explain":
-                resp = buf.explain_local(
-                    seconds=req.get("seconds"), since_ms=req.get("since_ms")
-                )
+                resp = buf.explain_local(seconds=req.get("seconds"), since_ms=req.get("since_ms"))
             elif cmd == "stop":
                 stop_ev.set()
                 resp = {"ok": True, "action": "stop"}
@@ -202,9 +217,7 @@ def serve(sock: str, *, serial: str, cache_dir: Path, view: CaptureCfgView) -> N
             conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
         except Exception as exc:  # noqa: BLE001
             with contextlib.suppress(Exception):
-                conn.sendall(
-                    (json.dumps({"ok": False, "error": str(exc)}) + "\n").encode("utf-8")
-                )
+                conn.sendall((json.dumps({"ok": False, "error": str(exc)}) + "\n").encode("utf-8"))
         finally:
             with contextlib.suppress(Exception):
                 conn.close()
@@ -231,6 +244,7 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser(description="aua capture sidecar")
     p.add_argument("--socket", required=True)
     p.add_argument("--serial", required=True)
+    p.add_argument("--platform", default="android")
     p.add_argument("--cache", required=True)
     p.add_argument("--idle-fps", type=float, default=2.0)
     p.add_argument("--burst-fps", type=float, default=10.0)
@@ -242,4 +256,10 @@ if __name__ == "__main__":
         burst_ms=ns.burst_ms,
         extend_burst_on_change=True,
     )
-    serve(ns.socket, serial=ns.serial, cache_dir=Path(ns.cache), view=view)
+    serve(
+        ns.socket,
+        serial=ns.serial,
+        cache_dir=Path(ns.cache),
+        view=view,
+        platform=ns.platform,
+    )

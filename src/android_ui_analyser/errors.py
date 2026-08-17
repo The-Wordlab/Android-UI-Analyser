@@ -77,6 +77,27 @@ class UsageError(AuaError):
     code = "usage"
 
 
+class UnsupportedPlatformCapabilityError(UsageError):
+    """The selected platform does not implement one optional AUA capability.
+
+    This is a usage-level, machine-readable refusal rather than a missing attribute or a
+    backend import error.  Agents can therefore choose a different action/platform, and a
+    third-party platform can grow capability-by-capability without pretending to support the
+    entire Android surface on day one.
+    """
+
+    code = "platform_capability_unsupported"
+
+    def __init__(self, platform: str, capability: str) -> None:
+        super().__init__(
+            f"platform {platform!r} does not support capability {capability!r}",
+            hint=(
+                "Choose a platform adapter that provides this capability, or install/update "
+                f"a {platform!r} platform plugin that implements {capability!r}."
+            ),
+        )
+
+
 class DeviceError(AuaError):
     exit_code = ExitCode.DEVICE
     code = "device"
@@ -115,6 +136,19 @@ class DeviceLeasedError(AuaError):
 class ConfigError(AuaError):
     exit_code = ExitCode.CONFIG
     code = "config"
+
+
+class InvalidPlatformCapabilityError(ConfigError):
+    """A plugin advertised a capability but did not implement its common contract."""
+
+    code = "platform_capability_invalid"
+
+    def __init__(self, platform: str, capability: str, missing: list[str]) -> None:
+        joined = ", ".join(missing)
+        super().__init__(
+            f"platform {platform!r} has an invalid {capability!r} capability; missing: {joined}",
+            hint="Update the platform plugin to implement the complete capability contract.",
+        )
 
 
 class ProviderError(AuaError):

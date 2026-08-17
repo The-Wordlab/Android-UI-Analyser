@@ -393,55 +393,6 @@ def idle_seconds(entry: dict[str, Any]) -> float:
     return max(0.0, _now() - float(entry.get("last_activity") or 0))
 
 
-# --------------------------------------------------------------------------- capabilities
-
-# Capabilities are probed from the *device*, not from an AVD's config.ini: that works for
-# physical devices too, needs no serial→AVD mapping, and reports what is actually true rather
-# than what was configured. Probing costs a few adb round-trips, so it is cached — and only
-# runs at all when a caller passes --needs.
-_CAPS_TTL_S = 3600
-
-
-def _adb_shell(serial: str, command: str) -> str:
-    try:
-        out = subprocess.run(  # noqa: S603
-            ["adb", "-s", serial, "shell", command],
-            capture_output=True, text=True, timeout=10, check=False,
-        )
-        return (out.stdout or "").strip()
-    except Exception:
-        return ""
-
-
-def probe_capabilities(cache_dir: str | Path, serial: str) -> dict[str, Any]:
-    """What *serial* can do: ``root``, ``play``, ``proxy``.
-
-    ``proxy`` means "an HTTPS-intercepting proxy can work here", which requires installing a
-    CA into the system trust store — so it tracks rootability rather than being independent.
-    """
-    path = Path(cache_dir).expanduser() / "caps" / f"{serial.replace(':', '_')}.json"
-    with contextlib.suppress(Exception):
-        cached = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(cached, dict) and (_now() - float(cached.get("probed") or 0)) < _CAPS_TTL_S:
-            return cached
-
-    tags = _adb_shell(serial, "getprop ro.build.tags")
-    debuggable = _adb_shell(serial, "getprop ro.debuggable")
-    vending = _adb_shell(serial, "pm list packages com.android.vending")
-    rootable = ("test-keys" in tags) or debuggable.strip() == "1"
-    caps: dict[str, Any] = {
-        "serial": serial,
-        "root": rootable,
-        "play": "com.android.vending" in vending,
-        "proxy": rootable,  # system-CA install is the gate
-        "probed": _now(),
-    }
-    with contextlib.suppress(Exception):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(caps, indent=2) + "\n", encoding="utf-8")
-    return caps
-
-
 # --------------------------------------------------------------------------- selection
 
 
