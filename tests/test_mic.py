@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
+import android_ui_analyser.device as device_mod
 import android_ui_analyser.emulator as emulator_mod
 import android_ui_analyser.engine as engine_mod
 import android_ui_analyser.mic as mic
@@ -19,6 +20,7 @@ from android_ui_analyser import journal
 from android_ui_analyser.capabilities import capability_manifest
 from android_ui_analyser.cli import _daemon_error, app
 from android_ui_analyser.daemon import _mic_request_timeout, dispatch
+from android_ui_analyser.device import Uiautomator2Device
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.errors import DeviceError, UsageError
 from android_ui_analyser.mcp_server import _dispatch as mcp_dispatch
@@ -32,7 +34,24 @@ HOLD_XML = """<?xml version="1.0" encoding="UTF-8"?>
 <hierarchy rotation="0">
   <node index="0" class="android.widget.Button" text="Hold to talk"
         resource-id="org.example:id/hold_to_talk" clickable="true" long-clickable="true"
-        enabled="true" bounds="[20,100][300,220]"/>
+        enabled="true" package="com.test.app" bounds="[20,100][300,220]"/>
+</hierarchy>"""
+
+SIBLING_TOGGLE_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy rotation="0">
+  <node class="android.view.View" package="com.test.app" enabled="true"
+        resource-id="com.test.app:id/tile" bounds="[0,80][400,260]">
+    <node class="android.view.View" package="com.test.app" clickable="true" enabled="true"
+          resource-id="com.test.app:id/toggle" bounds="[20,100][180,180]"/>
+    <node class="android.widget.TextView" package="com.test.app" enabled="true"
+          text="Voice input" bounds="[20,200][300,240]"/>
+  </node>
+</hierarchy>"""
+
+PHRASE_TOGGLE_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy rotation="0">
+  <node class="android.widget.TextView" package="com.test.app" clickable="true" enabled="true"
+        text="Terms of use and Privacy policy" bounds="[20,100][380,140]"/>
 </hierarchy>"""
 
 
@@ -150,6 +169,63 @@ class _FakeGrpc:
         assert target == "127.0.0.1:8554"
         self.channel_options = options
         return self.channel
+
+
+def test_single_attempt_tap_uses_one_adb_process_and_never_uiautomator_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    device = object.__new__(Uiautomator2Device)
+    device.serial = "emulator-5554"
+
+    class RetryTrap:
+        def click(self, *_target: int) -> None:
+            raise AssertionError("uiautomator2 click can retry internally and must not be called")
+
+    device._d = RetryTrap()
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(device_mod.subprocess, "run", fake_run)
+
+    device.click_once(123, 456)
+
+    assert len(calls) == 1
+    assert calls[0][0] == [
+        "adb",
+        "-s",
+        "emulator-5554",
+        "shell",
+        "input",
+        "tap",
+        "123",
+        "456",
+    ]
+    assert calls[0][1]["check"] is False
+
+
+def test_single_attempt_tap_failure_is_typed_and_never_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    device = object.__new__(Uiautomator2Device)
+    device.serial = "emulator-5554"
+    calls = 0
+
+    def fake_run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        nonlocal calls
+        calls += 1
+        return subprocess.CompletedProcess(command, 1, "", "transport lost")
+
+    monkeypatch.setattr(device_mod.subprocess, "run", fake_run)
+
+    with pytest.raises(DeviceError) as caught:
+        device.click_once(123, 456)
+
+    assert calls == 1
+    assert caught.value.code == "tap_delivery_uncertain"
+    assert "Do not repeat" in str(caught.value.hint)
 
 
 def test_discovers_matching_emulator_endpoint_without_exposing_token(tmp_path: Path) -> None:
@@ -534,6 +610,603 @@ def test_hold_selector_stays_down_for_pre_audio_post_and_releases_on_failure(
     assert [name for name, _value in events] == ["down", "inject", "up"]
 
 
+def test_targetless_default_remains_audio_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    device = FakeDevice(serial="emulator-5554")
+    engine = Engine(
+        make_config(cache={"dir": str(tmp_path / "cache")}, memory={"enabled": False}),
+        device=device,
+    )
+    prepared = _prepared(tmp_path / "voice.wav")
+    injected: list[mic.PreparedInjection] = []
+    monkeypatch.setattr(mic, "prepare_injection", lambda *_args, **_kwargs: prepared)
+    monkeypatch.setattr(mic, "inject_prepared", lambda value: injected.append(value))
+
+    result = engine.mic_inject(
+        prepared.wav.path,
+        pre_roll_ms=0,
+        post_roll_ms=0,
+        observe=False,
+    )
+
+    assert result.ok is True
+    assert injected == [prepared]
+    assert not any(
+        name in {"click", "click_once", "touch_down", "touch_up"} for name, _ in device.calls
+    )
+
+
+def test_toggle_selector_taps_start_and_stop_around_audio_with_cache_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    device = FakeDevice(
+        hierarchy_xml=HOLD_XML,
+        serial="emulator-5554",
+        width=400,
+        height=800,
+    )
+    engine = Engine(
+        make_config(
+            cache={"dir": str(tmp_path / "cache"), "enabled": False},
+            memory={"enabled": False},
+        ),
+        device=device,
+    )
+    prepared = _prepared(tmp_path / "voice.wav")
+    events: list[tuple[str, Any]] = []
+    monkeypatch.setattr(mic, "prepare_injection", lambda *_args, **_kwargs: prepared)
+    monkeypatch.setattr(
+        mic,
+        "inject_prepared",
+        lambda _prepared: events.append(("inject", None)),
+    )
+    monkeypatch.setattr(
+        device,
+        "click_once",
+        lambda x, y: events.append(("tap", (x, y))),
+    )
+    monkeypatch.setattr(engine_mod.time, "sleep", lambda value: events.append(("sleep", value)))
+
+    result = engine.mic_inject(
+        prepared.wav.path,
+        selector={"rid": "hold_to_talk"},
+        control_mode="toggle",
+        pre_roll_ms=100,
+        post_roll_ms=200,
+        observe=False,
+    )
+
+    assert result.ok is True
+    assert [name for name, _ in events] == ["tap", "sleep", "inject", "sleep", "tap"]
+    assert events[0][1] == events[-1][1]
+    assert events[1][1] == pytest.approx(0.1)
+    assert events[3][1] == pytest.approx(0.2)
+    assert "toggle control" in str(result.detail)
+
+
+def test_toggle_numeric_id_refuses_sibling_retarget_before_any_tap_or_audio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    device = FakeDevice(
+        hierarchy_xml=SIBLING_TOGGLE_XML,
+        serial="emulator-5554",
+        width=400,
+        height=800,
+    )
+    engine = Engine(
+        make_config(cache={"dir": str(tmp_path / "cache")}, memory={"enabled": False}),
+        device=device,
+    )
+    label = next(el for el in engine.analyze().elements if el.text == "Voice input")
+    prepared = _prepared(tmp_path / "voice.wav")
+    injections = 0
+    monkeypatch.setattr(mic, "prepare_injection", lambda *_args, **_kwargs: prepared)
+
+    def inject(_prepared: mic.PreparedInjection) -> None:
+        nonlocal injections
+        injections += 1
+
+    monkeypatch.setattr(mic, "inject_prepared", inject)
+
+    with pytest.raises(UsageError) as caught:
+        engine.mic_inject(
+            prepared.wav.path,
+            label.id,
+            control_mode="toggle",
+            pre_roll_ms=0,
+            post_roll_ms=0,
+            observe=False,
+        )
+
+    assert caught.value.code == "unsafe_action_target"
+    assert injections == 0
+    assert not any(name == "click_once" for name, _ in device.calls)
+
+
+def test_toggle_text_selector_uses_phrase_aim_for_both_taps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    device = FakeDevice(
+        hierarchy_xml=PHRASE_TOGGLE_XML,
+        serial="emulator-5554",
+        width=400,
+        height=800,
+    )
+    engine = Engine(
+        make_config(
+            cache={"dir": str(tmp_path / "cache"), "enabled": False},
+            memory={"enabled": False},
+        ),
+        device=device,
+    )
+    prepared = _prepared(tmp_path / "voice.wav")
+    taps: list[tuple[int, int]] = []
+    monkeypatch.setattr(mic, "prepare_injection", lambda *_args, **_kwargs: prepared)
+    monkeypatch.setattr(mic, "inject_prepared", lambda _prepared: None)
+    monkeypatch.setattr(device, "click_once", lambda x, y: taps.append((x, y)))
+
+    engine.mic_inject(
+        prepared.wav.path,
+        selector={"text": "Privacy policy"},
+        control_mode="toggle",
+        pre_roll_ms=0,
+        post_roll_ms=0,
+        observe=False,
+    )
+
+    assert len(taps) == 2 and taps[0] == taps[1]
+    assert taps[0][0] > 200, "the phrase is right of the full line's centre"
+
+
+def test_toggle_known_injection_failure_still_stops_once_and_preserves_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    device = FakeDevice(hierarchy_xml=HOLD_XML, serial="emulator-5554", width=400, height=800)
+    engine = Engine(
+        make_config(cache={"dir": str(tmp_path / "cache")}, memory={"enabled": False}),
+        device=device,
+    )
+    prepared = _prepared(tmp_path / "voice.wav")
+    events: list[str] = []
+    original = DeviceError("stream failed", code="mic_injection_failed")
+    monkeypatch.setattr(mic, "prepare_injection", lambda *_args, **_kwargs: prepared)
+    monkeypatch.setattr(
+        device,
+        "click_once",
+        lambda *_target: events.append("tap"),
+    )
+
+    def fail(_prepared: mic.PreparedInjection) -> None:
+        events.append("inject")
+        raise original
+
+    monkeypatch.setattr(mic, "inject_prepared", fail)
+
+    with pytest.raises(DeviceError) as caught:
+        engine.mic_inject(
+            prepared.wav.path,
+            selector={"rid": "hold_to_talk"},
+            control_mode="toggle",
+            pre_roll_ms=0,
+            post_roll_ms=0,
+            observe=False,
+        )
+
+    assert caught.value is original
+    assert events == ["tap", "inject", "tap"]
+
+
+def test_ambiguous_toggle_start_injects_nothing_sends_no_stop_and_forces_observation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    device = FakeDevice(hierarchy_xml=HOLD_XML, serial="emulator-5554", width=400, height=800)
+    engine = Engine(
+        make_config(cache={"dir": str(tmp_path / "cache")}, memory={"enabled": False}),
+        device=device,
+    )
+    prepared = _prepared(tmp_path / "voice.wav")
+    taps = 0
+    injections = 0
+
+    def ambiguous_start(*_target: int) -> None:
+        nonlocal taps
+        taps += 1
+        raise DeviceError("tap response lost", code="tap_delivery_uncertain")
+
+    def inject(_prepared: mic.PreparedInjection) -> None:
+        nonlocal injections
+        injections += 1
+
+    monkeypatch.setattr(mic, "prepare_injection", lambda *_args, **_kwargs: prepared)
+    monkeypatch.setattr(mic, "inject_prepared", inject)
+    monkeypatch.setattr(device, "click_once", ambiguous_start)
+    monkeypatch.setattr(
+        engine,
+        "_await_post_action_ready",
+        lambda **_kwargs: {"changed": True, "via": "hierarchy", "ms": 1},
+    )
+
+    with pytest.raises(mic.MicToggleStartUncertainError) as caught:
+        engine.mic_inject(
+            prepared.wav.path,
+            selector={"rid": "hold_to_talk"},
+            control_mode="toggle",
+            pre_roll_ms=0,
+            post_roll_ms=0,
+            observe=False,
+        )
+
+    error = caught.value.to_dict()["error"]
+    assert taps == 1 and injections == 0
+    assert error["code"] == "mic_toggle_start_uncertain"
+    assert "Recording may be active" in error["hint"]
+    assert error["result"]["observation_present"] is True
+    assert "audio was not injected" in error["result"]["detail"]
+    rebuilt = _daemon_error(error)
+    assert isinstance(rebuilt, mic.MicToggleStartUncertainError)
+    assert rebuilt.to_dict()["error"]["result"]["observation_present"] is True
+
+
+def test_toggle_stop_uncertainty_wraps_known_audio_error_and_forces_observation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    device = FakeDevice(hierarchy_xml=HOLD_XML, serial="emulator-5554", width=400, height=800)
+    engine = Engine(
+        make_config(cache={"dir": str(tmp_path / "cache")}, memory={"enabled": False}),
+        device=device,
+    )
+    prepared = _prepared(tmp_path / "voice.wav")
+    taps = 0
+    original = DeviceError("stream failed", code="mic_injection_failed")
+
+    def tap(*_target: int) -> None:
+        nonlocal taps
+        taps += 1
+        if taps == 2:
+            raise DeviceError("stop response lost", code="tap_delivery_uncertain")
+
+    monkeypatch.setattr(mic, "prepare_injection", lambda *_args, **_kwargs: prepared)
+    monkeypatch.setattr(
+        mic,
+        "inject_prepared",
+        lambda _prepared: (_ for _ in ()).throw(original),
+    )
+    monkeypatch.setattr(device, "click_once", tap)
+    monkeypatch.setattr(
+        engine,
+        "_await_post_action_ready",
+        lambda **_kwargs: {"changed": True, "via": "hierarchy", "ms": 1},
+    )
+
+    with pytest.raises(mic.MicToggleStopUncertainError) as caught:
+        engine.mic_inject(
+            prepared.wav.path,
+            selector={"rid": "hold_to_talk"},
+            control_mode="toggle",
+            pre_roll_ms=0,
+            post_roll_ms=0,
+            observe=False,
+        )
+
+    error = caught.value.to_dict()["error"]
+    assert taps == 2
+    assert error["code"] == "mic_toggle_stop_uncertain"
+    assert [item["code"] for item in error["followup_errors"]] == [
+        "mic_injection_failed",
+        "tap_delivery_uncertain",
+    ]
+    assert error["result"]["observation_present"] is True
+
+
+def test_clean_toggle_delivery_with_uncertain_stop_is_nonretryable_and_observed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    device = FakeDevice(hierarchy_xml=HOLD_XML, serial="emulator-5554", width=400, height=800)
+    engine = Engine(
+        make_config(cache={"dir": str(tmp_path / "cache")}, memory={"enabled": False}),
+        device=device,
+    )
+    prepared = _prepared(tmp_path / "voice.wav")
+    taps = 0
+
+    def tap(*_target: int) -> None:
+        nonlocal taps
+        taps += 1
+        if taps == 2:
+            raise DeviceError("stop response lost", code="tap_delivery_uncertain")
+
+    monkeypatch.setattr(mic, "prepare_injection", lambda *_args, **_kwargs: prepared)
+    monkeypatch.setattr(mic, "inject_prepared", lambda _prepared: None)
+    monkeypatch.setattr(device, "click_once", tap)
+    monkeypatch.setattr(
+        engine,
+        "_await_post_action_ready",
+        lambda **_kwargs: {"changed": True, "via": "hierarchy", "ms": 1},
+    )
+
+    with pytest.raises(mic.MicToggleStopUncertainError) as caught:
+        engine.mic_inject(
+            prepared.wav.path,
+            selector={"rid": "hold_to_talk"},
+            control_mode="toggle",
+            pre_roll_ms=0,
+            post_roll_ms=0,
+            observe=False,
+        )
+
+    error = caught.value.to_dict()["error"]
+    assert taps == 2
+    assert error["code"] == "mic_toggle_stop_uncertain"
+    assert error["followup_errors"][0]["code"] == "tap_delivery_uncertain"
+    assert error["result"]["observation_present"] is True
+    assert "Do not repeat" in error["hint"]
+    rebuilt = _daemon_error(error)
+    assert isinstance(rebuilt, mic.MicToggleStopUncertainError)
+    assert int(rebuilt.exit_code) == 3
+    assert rebuilt.to_dict()["error"]["followup_errors"] == error["followup_errors"]
+
+
+def test_internal_delivery_remains_primary_when_toggle_stop_is_ambiguous(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    device = FakeDevice(hierarchy_xml=HOLD_XML, serial="emulator-5554", width=400, height=800)
+    engine = Engine(
+        make_config(cache={"dir": str(tmp_path / "cache")}, memory={"enabled": False}),
+        device=device,
+    )
+    prepared = _prepared(tmp_path / "voice.wav")
+    taps = 0
+
+    def tap(*_target: int) -> None:
+        nonlocal taps
+        taps += 1
+        if taps == 2:
+            raise DeviceError("stop response lost", code="tap_delivery_uncertain")
+
+    monkeypatch.setattr(mic, "prepare_injection", lambda *_args, **_kwargs: prepared)
+    monkeypatch.setattr(
+        mic,
+        "inject_prepared",
+        lambda _prepared: (_ for _ in ()).throw(mic.MicDeliveryUncertainError()),
+    )
+    monkeypatch.setattr(device, "click_once", tap)
+    monkeypatch.setattr(
+        engine,
+        "_await_post_action_ready",
+        lambda **_kwargs: {"changed": True, "via": "hierarchy", "ms": 1},
+    )
+
+    with pytest.raises(mic.MicDeliveryUncertainError) as caught:
+        engine.mic_inject(
+            prepared.wav.path,
+            selector={"rid": "hold_to_talk"},
+            control_mode="toggle",
+            pre_roll_ms=0,
+            post_roll_ms=0,
+            observe=False,
+        )
+
+    error = caught.value.to_dict()["error"]
+    assert type(caught.value) is mic.MicDeliveryUncertainError
+    assert taps == 2
+    assert error["code"] == "mic_delivery_uncertain"
+    assert error["followup_errors"][0]["stage"] == "toggle_stop"
+    assert error["result"]["observation_present"] is True
+
+
+@pytest.mark.parametrize(
+    ("pre_roll_ms", "post_roll_ms", "fail_on_sleep", "injections"),
+    [
+        (100, 0, 1, 0),
+        (0, 100, 1, 1),
+    ],
+)
+def test_toggle_roll_failure_still_attempts_one_stop_and_preserves_primary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pre_roll_ms: int,
+    post_roll_ms: int,
+    fail_on_sleep: int,
+    injections: int,
+) -> None:
+    device = FakeDevice(hierarchy_xml=HOLD_XML, serial="emulator-5554", width=400, height=800)
+    engine = Engine(
+        make_config(cache={"dir": str(tmp_path / "cache")}, memory={"enabled": False}),
+        device=device,
+    )
+    prepared = _prepared(tmp_path / "voice.wav")
+    events: list[str] = []
+    original = KeyboardInterrupt("cancelled during roll")
+    sleep_calls = 0
+
+    def tap(*_target: int) -> None:
+        events.append("tap")
+
+    def inject(_prepared: mic.PreparedInjection) -> None:
+        events.append("inject")
+
+    def sleep(_seconds: float) -> None:
+        nonlocal sleep_calls
+        sleep_calls += 1
+        events.append("sleep")
+        if sleep_calls == fail_on_sleep:
+            raise original
+
+    monkeypatch.setattr(mic, "prepare_injection", lambda *_args, **_kwargs: prepared)
+    monkeypatch.setattr(mic, "inject_prepared", inject)
+    monkeypatch.setattr(device, "click_once", tap)
+    monkeypatch.setattr(engine_mod.time, "sleep", sleep)
+
+    with pytest.raises(KeyboardInterrupt) as caught:
+        engine.mic_inject(
+            prepared.wav.path,
+            selector={"rid": "hold_to_talk"},
+            control_mode="toggle",
+            pre_roll_ms=pre_roll_ms,
+            post_roll_ms=post_roll_ms,
+            observe=False,
+        )
+
+    assert caught.value is original
+    assert events.count("tap") == 2
+    assert events.count("inject") == injections
+
+
+def test_guard_and_prestart_owner_refusals_happen_before_any_toggle_tap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    device = FakeDevice(hierarchy_xml=HOLD_XML, serial="emulator-5554", width=400, height=800)
+    engine = Engine(
+        make_config(cache={"dir": str(tmp_path / "cache")}, memory={"enabled": False}),
+        device=device,
+    )
+    prepared = _prepared(tmp_path / "voice.wav")
+    taps = 0
+    injections = 0
+    monkeypatch.setattr(mic, "prepare_injection", lambda *_args, **_kwargs: prepared)
+
+    def tap(*_target: int) -> None:
+        nonlocal taps
+        taps += 1
+
+    def inject(_prepared: mic.PreparedInjection) -> None:
+        nonlocal injections
+        injections += 1
+
+    monkeypatch.setattr(device, "click_once", tap)
+    monkeypatch.setattr(mic, "inject_prepared", inject)
+    monkeypatch.setattr(
+        mic,
+        "claim_injection_attempt",
+        lambda _prepared: (_ for _ in ()).throw(
+            DeviceError("one attempt per boot", code="mic_repeat_unsafe")
+        ),
+    )
+
+    with pytest.raises(DeviceError) as guarded:
+        engine.mic_inject(
+            prepared.wav.path,
+            selector={"rid": "hold_to_talk"},
+            control_mode="toggle",
+        )
+    assert guarded.value.code == "mic_repeat_unsafe"
+    assert taps == injections == 0
+
+    monkeypatch.setattr(
+        mic,
+        "claim_injection_attempt",
+        lambda value: setattr(device, "_pkg", "com.other.app") or value,
+    )
+    with pytest.raises(DeviceError) as moved:
+        engine.mic_inject(
+            prepared.wav.path,
+            selector={"rid": "hold_to_talk"},
+            control_mode="toggle",
+        )
+    assert moved.value.code == "mic_toggle_owner_changed"
+    assert taps == injections == 0
+
+
+def test_toggle_owner_change_after_start_sends_no_audio_or_blind_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    device = FakeDevice(hierarchy_xml=HOLD_XML, serial="emulator-5554", width=400, height=800)
+    engine = Engine(
+        make_config(cache={"dir": str(tmp_path / "cache")}, memory={"enabled": False}),
+        device=device,
+    )
+    prepared = _prepared(tmp_path / "voice.wav")
+    taps = 0
+    injections = 0
+
+    def start_then_navigate(*_target: int) -> None:
+        nonlocal taps
+        taps += 1
+        device._pkg = "com.other.app"
+
+    def inject(_prepared: mic.PreparedInjection) -> None:
+        nonlocal injections
+        injections += 1
+
+    monkeypatch.setattr(mic, "prepare_injection", lambda *_args, **_kwargs: prepared)
+    monkeypatch.setattr(mic, "inject_prepared", inject)
+    monkeypatch.setattr(device, "click_once", start_then_navigate)
+    monkeypatch.setattr(
+        engine,
+        "_await_post_action_ready",
+        lambda **_kwargs: {"changed": True, "via": "hierarchy", "ms": 1},
+    )
+
+    with pytest.raises(mic.MicToggleStopUncertainError) as caught:
+        engine.mic_inject(
+            prepared.wav.path,
+            selector={"rid": "hold_to_talk"},
+            control_mode="toggle",
+            pre_roll_ms=0,
+            post_roll_ms=0,
+            observe=False,
+        )
+
+    error = caught.value.to_dict()["error"]
+    assert taps == 1 and injections == 0
+    assert error["code"] == "mic_toggle_stop_uncertain"
+    assert error["followup_errors"][0]["code"] == "mic_toggle_owner_changed"
+    assert error["result"]["observation_present"] is True
+
+
+@pytest.mark.parametrize(
+    ("xml", "code"),
+    [
+        (HOLD_XML.replace('enabled="true"', 'enabled="false"'), "mic_toggle_target_inactive"),
+        (
+            HOLD_XML.replace('enabled="true"', 'enabled="true" selected="true"'),
+            "mic_toggle_already_active",
+        ),
+        (
+            HOLD_XML.replace('enabled="true"', 'enabled="true" checked="true"'),
+            "mic_toggle_already_active",
+        ),
+    ],
+)
+def test_toggle_rejects_inactive_or_already_on_control_before_gesture_or_audio(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    xml: str,
+    code: str,
+) -> None:
+    device = FakeDevice(hierarchy_xml=xml, serial="emulator-5554", width=400, height=800)
+    engine = Engine(
+        make_config(cache={"dir": str(tmp_path / "cache")}, memory={"enabled": False}),
+        device=device,
+    )
+    prepared = _prepared(tmp_path / "voice.wav")
+    injected = False
+    monkeypatch.setattr(mic, "prepare_injection", lambda *_args, **_kwargs: prepared)
+
+    def inject(_prepared: mic.PreparedInjection) -> None:
+        nonlocal injected
+        injected = True
+
+    monkeypatch.setattr(mic, "inject_prepared", inject)
+
+    with pytest.raises(UsageError) as caught:
+        engine.mic_inject(
+            prepared.wav.path,
+            selector={"rid": "hold_to_talk"},
+            control_mode="toggle",
+            pre_roll_ms=0,
+            post_roll_ms=0,
+            observe=False,
+        )
+
+    assert caught.value.code == code
+    assert injected is False
+    assert not any(
+        name in {"click", "click_once", "touch_down", "touch_up"} for name, _ in device.calls
+    )
+
+
 def test_touch_down_lost_response_still_attempts_release_and_preserves_original_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -842,6 +1515,7 @@ def test_cli_daemon_and_mcp_expose_equivalent_mic_calls(
                 "path": str(wav_path),
                 "id": element_id,
                 "selector": kwargs.get("selector"),
+                "control_mode": kwargs.get("control_mode"),
                 "pre": kwargs.get("pre_roll_ms"),
                 "post": kwargs.get("post_roll_ms"),
                 "observe": kwargs.get("observe"),
@@ -869,6 +1543,8 @@ def test_cli_daemon_and_mcp_expose_equivalent_mic_calls(
             wav_path,
             "--rid",
             "hold_to_talk",
+            "--control-mode",
+            "toggle",
             "--pre-roll-ms",
             "10",
             "--post-roll-ms",
@@ -886,6 +1562,7 @@ def test_cli_daemon_and_mcp_expose_equivalent_mic_calls(
             "args": {
                 "wav_path": wav_path,
                 "selector": {"rid": "hold_to_talk"},
+                "control_mode": "toggle",
                 "pre_roll_ms": 10,
                 "post_roll_ms": 20,
                 "observe": True,
@@ -900,6 +1577,7 @@ def test_cli_daemon_and_mcp_expose_equivalent_mic_calls(
         {
             "path": wav_path,
             "rid": "hold_to_talk",
+            "control_mode": "toggle",
             "pre_roll_ms": 10,
             "post_roll_ms": 20,
         },
@@ -916,6 +1594,7 @@ def test_cli_daemon_and_mcp_expose_equivalent_mic_calls(
                 "index": None,
                 "first": False,
             },
+            "control_mode": "toggle",
             "pre": 10,
             "post": 20,
             "observe": True,
@@ -924,6 +1603,7 @@ def test_cli_daemon_and_mcp_expose_equivalent_mic_calls(
             "path": wav_path,
             "id": None,
             "selector": {"rid": "hold_to_talk"},
+            "control_mode": "toggle",
             "pre": 10,
             "post": 20,
             "observe": True,
@@ -932,6 +1612,7 @@ def test_cli_daemon_and_mcp_expose_equivalent_mic_calls(
             "path": wav_path,
             "id": None,
             "selector": {"rid": "hold_to_talk", "text": None, "desc": None},
+            "control_mode": "toggle",
             "pre": 10,
             "post": 20,
             "observe": True,
@@ -1022,6 +1703,106 @@ def test_cli_resolves_relative_wav_before_routing_and_rejects_orphan_selector_mo
     assert calls == [str(wav.resolve())]
 
 
+def test_invalid_control_modes_fail_before_wav_prepare_or_speech_synthesis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = Engine(
+        make_config(cache={"dir": str(tmp_path / "cache")}, memory={"enabled": False}),
+        device=FakeDevice(hierarchy_xml=HOLD_XML, serial="emulator-5554"),
+    )
+    prepared = 0
+    synthesized = 0
+
+    def prepare(*_args: Any, **_kwargs: Any) -> mic.PreparedInjection:
+        nonlocal prepared
+        prepared += 1
+        raise AssertionError("invalid control input must fail before WAV/endpoint preparation")
+
+    def synthesize(*_args: Any, **_kwargs: Any) -> Path:
+        nonlocal synthesized
+        synthesized += 1
+        raise AssertionError("invalid control input must fail before private speech synthesis")
+
+    monkeypatch.setattr(mic, "prepare_injection", prepare)
+    monkeypatch.setattr(mic, "synthesize_speech", synthesize)
+
+    with pytest.raises(UsageError) as invalid:
+        engine.mic_inject(
+            "unused.wav",
+            selector={"rid": "hold_to_talk"},
+            control_mode="press",
+        )
+    assert invalid.value.code == "mic_control_mode_invalid"
+
+    with pytest.raises(UsageError) as missing:
+        engine.mic_inject("unused.wav", control_mode="toggle")
+    assert missing.value.code == "mic_toggle_target_required"
+
+    with pytest.raises(UsageError) as private_invalid:
+        engine.mic_speak(
+            "private words",
+            selector={"rid": "hold_to_talk"},
+            control_mode="press",
+        )
+    assert private_invalid.value.code == "mic_control_mode_invalid"
+
+    with pytest.raises(UsageError) as private_missing:
+        engine.mic_speak("private words", control_mode="toggle")
+    assert private_missing.value.code == "mic_toggle_target_required"
+    assert prepared == synthesized == 0
+
+    daemon = dispatch(
+        engine,
+        {"cmd": "mic_inject", "args": {"wav_path": "unused.wav", "control_mode": "toggle"}},
+    )
+    assert daemon["error"]["code"] == "mic_toggle_target_required"
+
+    with pytest.raises(UsageError) as mcp_error:
+        mcp_dispatch(
+            engine,
+            "mic_speak_and_analyze",
+            {"speech": "private words", "control_mode": "toggle"},
+        )
+    assert mcp_error.value.code == "mic_toggle_target_required"
+
+    cli_missing = runner.invoke(
+        app,
+        ["--no-lease", "mic", "inject", "unused.wav", "--control-mode", "toggle"],
+    )
+    assert cli_missing.exit_code == 2
+    assert json.loads(cli_missing.stderr)["error"]["code"] == "mic_toggle_target_required"
+
+    cli_invalid = runner.invoke(
+        app,
+        [
+            "--no-lease",
+            "mic",
+            "speak",
+            "private words",
+            "--rid",
+            "hold_to_talk",
+            "--control-mode",
+            "press",
+        ],
+    )
+    assert cli_invalid.exit_code == 2
+    assert json.loads(cli_invalid.stderr)["error"]["code"] == "mic_control_mode_invalid"
+
+
+def test_mcp_and_cli_publish_control_mode_contract() -> None:
+    tools = {tool.name: tool for tool in _tool_definitions()}
+    for name in ("mic_inject_and_analyze", "mic_speak_and_analyze"):
+        mode = tools[name].inputSchema["properties"]["control_mode"]
+        assert mode["enum"] == ["hold", "toggle"]
+        assert mode["default"] == "hold"
+
+    inject_help = runner.invoke(app, ["mic", "inject", "--help"])
+    speak_help = runner.invoke(app, ["mic", "speak", "--help"])
+    assert inject_help.exit_code == speak_help.exit_code == 0
+    assert "--control-mode" in inject_help.stdout
+    assert "--control-mode" in speak_help.stdout
+
+
 def test_mic_speak_cli_daemon_mcp_and_capability_names_are_in_parity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1048,20 +1829,48 @@ def test_mic_speak_cli_daemon_mcp_and_capability_names_are_in_parity(
 
     cli = runner.invoke(
         app,
-        ["--no-lease", "mic", "speak", "hello world", "--voice", "Alex", "--rate", "160"],
+        [
+            "--no-lease",
+            "mic",
+            "speak",
+            "hello world",
+            "--rid",
+            "hold_to_talk",
+            "--control-mode",
+            "toggle",
+            "--voice",
+            "Alex",
+            "--rate",
+            "160",
+        ],
     )
     assert cli.exit_code == 0, cli.stderr
 
     engine = Engine(make_config(memory={"enabled": False}), device=FakeDevice())
     assert dispatch(
         engine,
-        {"cmd": "mic_speak", "args": {"text": "hello world", "voice": "Alex", "rate": 160}},
+        {
+            "cmd": "mic_speak",
+            "args": {
+                "text": "hello world",
+                "selector": {"rid": "hold_to_talk"},
+                "control_mode": "toggle",
+                "voice": "Alex",
+                "rate": 160,
+            },
+        },
     )["ok"]
     assert (
         mcp_dispatch(
             engine,
             "mic_speak_and_analyze",
-            {"speech": "hello world", "voice": "Alex", "rate": 160},
+            {
+                "speech": "hello world",
+                "rid": "hold_to_talk",
+                "control_mode": "toggle",
+                "voice": "Alex",
+                "rate": 160,
+            },
         )["action"]
         == "mic-speak"
     )
@@ -1071,6 +1880,7 @@ def test_mic_speak_cli_daemon_mcp_and_capability_names_are_in_parity(
     capability = next(item for item in capability_manifest() if item["id"] == "microphone")
     assert capability["mcp"] == "mic_inject_and_analyze"
     assert len(calls) == 3
+    assert all(kwargs["control_mode"] == "toggle" for _text, kwargs in calls)
 
 
 @pytest.mark.parametrize("modifier", [{"index": 0}, {"first": True}])
@@ -1079,7 +1889,7 @@ def test_mcp_rejects_selector_modifiers_on_numeric_mic_hold_id(
 ) -> None:
     engine = Engine(make_config(memory={"enabled": False}), device=FakeDevice())
 
-    with pytest.raises(UsageError, match="cannot modify a numeric microphone hold id"):
+    with pytest.raises(UsageError, match="cannot modify a numeric microphone control id"):
         mcp_dispatch(
             engine,
             "mic_inject_and_analyze",

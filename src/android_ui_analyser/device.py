@@ -134,6 +134,20 @@ class Device(ABC):
     @abstractmethod
     def click(self, x: int, y: int) -> None: ...
 
+    def click_once(self, x: int, y: int) -> None:
+        """Send one non-retrying tap whose delivery may be ambiguous on failure.
+
+        Toggle controls cannot safely use :meth:`click`: reconnecting and repeating a tap can
+        undo a start or re-enable a stop.  Implementations that cannot guarantee one attempt
+        fail closed; the normal click API and all existing callers remain unchanged.
+        """
+
+        raise DeviceError(
+            "this device adapter cannot guarantee a single-attempt tap",
+            code="single_tap_unsupported",
+            hint="Use the default hold gesture, or update the device adapter with click_once support.",
+        )
+
     @abstractmethod
     def long_click(self, x: int, y: int, duration_ms: int = 600) -> None: ...
 
@@ -632,6 +646,37 @@ class Uiautomator2Device(Device):
 
     def click(self, x: int, y: int) -> None:
         self._call("click", x, y)
+
+    def click_once(self, x: int, y: int) -> None:
+        """Tap through one adb process; never enter uiautomator2's internal retry path."""
+
+        command = ["adb", "-s", self.serial, "shell", "input", "tap", str(x), str(y)]
+        try:
+            completed = subprocess.run(  # noqa: S603
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10.0,
+            )
+        except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
+            raise DeviceError(
+                "the single-attempt tap did not return a confirmation and may have landed",
+                code="tap_delivery_uncertain",
+                hint=(
+                    "Do not repeat the tap blindly. Inspect the current UI/control state before "
+                    "deciding how to continue."
+                ),
+            ) from exc
+        if completed.returncode != 0:
+            raise DeviceError(
+                "the single-attempt tap did not return a confirmation and may have landed",
+                code="tap_delivery_uncertain",
+                hint=(
+                    "Do not repeat the tap blindly. Inspect the current UI/control state before "
+                    "deciding how to continue."
+                ),
+            )
 
     def long_click(self, x: int, y: int, duration_ms: int = 600) -> None:
         self._call("long_click", x, y, duration_ms / 1000.0)

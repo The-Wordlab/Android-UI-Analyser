@@ -170,6 +170,9 @@ class FakeDevice(Device):
     def click(self, x: int, y: int) -> None:
         self.calls.append(("click", (x, y)))
 
+    def click_once(self, x: int, y: int) -> None:
+        self.calls.append(("click_once", (x, y)))
+
     def long_click(self, x: int, y: int, duration_ms: int = 600) -> None:
         self.calls.append(("long_click", (x, y, duration_ms)))
 

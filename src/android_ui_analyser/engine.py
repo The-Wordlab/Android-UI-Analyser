@@ -8122,6 +8122,7 @@ class Engine:
         element_id: int | None = None,
         *,
         selector: dict[str, Any] | None = None,
+        control_mode: str = "hold",
         pre_roll_ms: int = 250,
         post_roll_ms: int = 250,
         observe: bool = True,
@@ -8129,12 +8130,7 @@ class Engine:
         _action: str = "mic-inject",
         _source: str | None = None,
     ) -> ActionResult:
-        """Inject PCM WAV audio, optionally holding one UI control for the whole stream.
-
-        Endpoint discovery, WAV validation, and the optional gRPC import all happen before
-        touch-down. Once held, MODE_UNSPECIFIED injection blocks under emulator backpressure;
-        touch-up therefore naturally follows the final consumed sample plus post-roll.
-        """
+        """Inject PCM WAV audio with an optional hold or tap-to-toggle control."""
 
         if pre_roll_ms < 0 or post_roll_ms < 0:
             raise UsageError(
@@ -8143,111 +8139,271 @@ class Engine:
             )
         from . import mic as mic_mod
 
+        has_control = element_id is not None or selector is not None
+        control_mode = mic_mod.validate_control_mode(control_mode, has_target=has_control)
         prepared = mic_mod.prepare_injection(self.device.serial, wav_path)
-        has_hold = element_id is not None or selector is not None
         el: Element | None = None
         acting: dict[str, Any] | None = None
         target: list[int] | None = None
-        if has_hold:
-            named = self._target(element_id, selector, verb="long-press")
-            el, acting = self._acting_target(named, verb="long-press")
-            cx, cy = self._aim(el)
+        toggle_owner: str | None = None
+        if has_control:
+            verb = "tap" if control_mode == "toggle" else "long-press"
+            if control_mode == "toggle":
+                owner_before_target = self.device.current_app()
+                toggle_owner = str(owner_before_target.get("package") or "")
+                if not toggle_owner:
+                    raise DeviceError(
+                        "could not prove which foreground app owns the toggle control",
+                        code="mic_toggle_owner_unknown",
+                        hint="No gesture or audio was sent. Observe the app again before retrying.",
+                    )
+            named = self._target(element_id, selector, verb=verb)
+            el, acting = self._acting_target(named, verb=verb)
+            if control_mode == "toggle":
+                if element_id is not None and acting.get("relation") == "sibling-subtree":
+                    raise UsageError(
+                        f"numeric id {element_id} names a label, not the sibling toggle control",
+                        hint=(
+                            "No gesture was sent. Use the acting control's fresh id/rid from "
+                            "`aua target`, or use the visible-text selector deliberately."
+                        ),
+                        code="unsafe_action_target",
+                    )
+                if not el.enabled or not el.clickable:
+                    raise UsageError(
+                        "toggle microphone control must be enabled and clickable",
+                        code="mic_toggle_target_inactive",
+                        hint="No gesture or audio was sent. Choose the active tap-to-start control.",
+                    )
+                if el.checked is True or el.selected is True:
+                    raise UsageError(
+                        "toggle microphone control is already active",
+                        code="mic_toggle_already_active",
+                        hint=(
+                            "No gesture or audio was sent. Stop the active recording first, then "
+                            "retry only after the control visibly returns to its off state."
+                        ),
+                    )
+                needle = (selector or {}).get("text") if el.id == named.id else None
+                cx, _ = self._tap_point(el, needle)
+                _, cy = self._aim(el)
+                owner = self.device.current_app()
+                current_owner = str(owner.get("package") or "")
+                if not current_owner or current_owner != toggle_owner:
+                    raise DeviceError(
+                        "the foreground app changed after resolving the toggle control",
+                        code="mic_toggle_owner_changed",
+                        hint=(
+                            "No gesture or audio was sent. Observe the current app and resolve "
+                            "the control again."
+                        ),
+                    )
+            else:
+                cx, cy = self._aim(el)
             target = [cx, cy]
-        # Claim the affected-build one-attempt guard before touch-down. Burning an attempt if
-        # touch-down subsequently fails is conservative; allowing another stream can crash the
-        # emulator process on 36.4.10.
+        # Claim the affected-build one-attempt guard before either opening gesture. Burning an
+        # attempt if control start subsequently fails is conservative; allowing another stream
+        # can crash the emulator process on 36.4.10.
         prepared = mic_mod.claim_injection_attempt(prepared)
 
         # Settle timing still needs to know which public action ran, but microphone samples
         # (like typed values) must not silently become a replayable navigation route.
         self._step(_action, el)
         mark = _action if el is None else _action_mark("mic", el)
-        held = False
+        control_started = False
         down_attempted = False
+        toggle_stop_allowed = True
         action_error: BaseException | None = None
-        delivery_uncertain: mic_mod.MicDeliveryUncertainError | None = None
-        delivery_release_failed: mic_mod.MicDeliveredReleaseError | None = None
+        terminal_mic_error: mic_mod.MicDeliveryUncertainError | None = None
+        injection_attempted = False
         injection_completed = False
+
+        def toggle_owner_failure(stage: str) -> DeviceError | None:
+            try:
+                current = self.device.current_app()
+            except BaseException as exc:
+                return DeviceError(
+                    f"could not prove toggle control ownership {stage}: {type(exc).__name__}",
+                    code="mic_toggle_owner_unknown",
+                    hint="Do not tap or retry blindly; recording state may be unknown.",
+                )
+            current_package = str(current.get("package") or "")
+            if not current_package or current_package != toggle_owner:
+                return DeviceError(
+                    f"the foreground app changed {stage}",
+                    code="mic_toggle_owner_changed",
+                    hint="AUA refused to tap the snapshotted point in a different app.",
+                )
+            return None
+
         try:
             with self._acting(mark):
                 try:
                     if target is not None:
-                        # A transport can deliver DOWN and then lose its response.  Mark the
-                        # attempt first so cleanup conservatively sends the harmless matching
-                        # UP even when touch_down itself raises.
-                        down_attempted = True
-                        self.device.touch_down(*target)
-                        held = True
-                        if pre_roll_ms:
+                        if control_mode == "hold":
+                            # DOWN can land before its response is lost. Mark the attempt first
+                            # so cleanup sends the harmless matching UP even when this raises.
+                            down_attempted = True
+                            self.device.touch_down(*target)
+                            control_started = True
+                        else:
+                            owner_error = toggle_owner_failure("immediately before toggle START")
+                            if owner_error is not None:
+                                action_error = owner_error
+                            else:
+                                try:
+                                    self.device.click_once(*target)
+                                except BaseException as exc:
+                                    # Never compensate for an ambiguous START: a second tap could
+                                    # either stop a delivered first tap or start recording itself.
+                                    terminal_mic_error = mic_mod.MicToggleStartUncertainError()
+                                    logger.warning(
+                                        "toggle START was not confirmed: %s", type(exc).__name__
+                                    )
+                                else:
+                                    control_started = True
+                        if control_started and pre_roll_ms:
                             time.sleep(pre_roll_ms / 1000.0)
-                    try:
-                        mic_mod.inject_prepared(prepared)
-                        injection_completed = True
-                    except mic_mod.MicDeliveryUncertainError as exc:
-                        # INTERNAL can arrive after every sample was delivered. Finish the
-                        # gesture and observe exactly once, but retain a non-zero structured
-                        # outcome so a caller never mistakes the close for clean success.
-                        delivery_uncertain = exc
-                    if held and post_roll_ms:
-                        time.sleep(post_roll_ms / 1000.0)
+
+                    if control_mode == "toggle" and control_started and terminal_mic_error is None:
+                        owner_error = toggle_owner_failure("before audio injection")
+                        if owner_error is not None:
+                            toggle_stop_allowed = False
+                            terminal_mic_error = mic_mod.MicToggleStopUncertainError(
+                                "toggle START was confirmed, but the original app no longer "
+                                "provably owned the screen before audio injection"
+                            ).note_followup_failure("ownership_before_audio", owner_error)
+
+                    if terminal_mic_error is None and action_error is None:
+                        injection_attempted = True
+                        try:
+                            mic_mod.inject_prepared(prepared)
+                            injection_completed = True
+                        except mic_mod.MicDeliveryUncertainError as exc:
+                            # INTERNAL can arrive after every sample was delivered. Finish the
+                            # control and force one observation, but retain the typed outcome.
+                            terminal_mic_error = exc
+                        except BaseException as exc:
+                            action_error = exc
+
+                    if (
+                        control_started
+                        and action_error is None
+                        and injection_attempted
+                        and (injection_completed or terminal_mic_error is not None)
+                        and post_roll_ms
+                    ):
+                        try:
+                            time.sleep(post_roll_ms / 1000.0)
+                        except BaseException as exc:
+                            if terminal_mic_error is not None:
+                                terminal_mic_error.note_followup_failure("post_roll", exc)
+                            else:
+                                action_error = exc
                 except BaseException as exc:
-                    if delivery_uncertain is not None:
-                        delivery_uncertain.note_followup_failure("post_roll", exc)
+                    if terminal_mic_error is not None:
+                        terminal_mic_error.note_followup_failure("control_action", exc)
                     else:
                         action_error = exc
-                        raise
                 finally:
-                    if down_attempted and target is not None:
+                    should_finish_hold = (
+                        control_mode == "hold" and down_attempted and target is not None
+                    )
+                    should_finish_toggle = (
+                        control_mode == "toggle"
+                        and control_started
+                        and toggle_stop_allowed
+                        and target is not None
+                    )
+                    if should_finish_hold or should_finish_toggle:
+                        assert target is not None
                         try:
-                            self.device.touch_up(*target)
+                            if should_finish_hold:
+                                self.device.touch_up(*target)
+                            else:
+                                owner_error = toggle_owner_failure("before toggle STOP")
+                                if owner_error is not None:
+                                    raise owner_error
+                                # Exact snapshotted point, exactly once; never re-resolve a
+                                # label whose meaning may have changed from Start to Stop.
+                                self.device.click_once(*target)
                         except BaseException as exc:
-                            if delivery_uncertain is not None:
-                                delivery_uncertain.note_followup_failure("touch_release", exc)
+                            finish_stage = (
+                                "touch_release" if control_mode == "hold" else "toggle_stop"
+                            )
+                            if terminal_mic_error is not None:
+                                terminal_mic_error.note_followup_failure(finish_stage, exc)
                                 logger.warning(
-                                    "touch-up also failed after ambiguous microphone delivery"
+                                    "control cleanup also failed after ambiguous microphone action"
                                 )
                             elif injection_completed and action_error is None:
-                                delivery_release_failed = (
-                                    mic_mod.MicDeliveredReleaseError().note_followup_failure(
-                                        "touch_release", exc
-                                    )
+                                error_type = (
+                                    mic_mod.MicDeliveredReleaseError
+                                    if control_mode == "hold"
+                                    else mic_mod.MicToggleStopUncertainError
                                 )
-                                logger.warning(
-                                    "touch-up failed after microphone audio was delivered"
+                                terminal_mic_error = error_type().note_followup_failure(
+                                    finish_stage, exc
                                 )
+                                logger.warning("control cleanup failed after audio delivery")
                             elif action_error is None:
-                                raise
+                                if control_mode == "toggle":
+                                    terminal_mic_error = (
+                                        mic_mod.MicToggleStopUncertainError().note_followup_failure(
+                                            finish_stage, exc
+                                        )
+                                    )
+                                else:
+                                    action_error = exc
                             else:
-                                # Preserve the injection error, which normally explains an
-                                # emulator loss more directly than the consequent release error.
-                                logger.warning(
-                                    "touch-up also failed after microphone injection failed"
-                                )
+                                if control_mode == "toggle":
+                                    terminal_mic_error = mic_mod.MicToggleStopUncertainError()
+                                    terminal_mic_error.note_followup_failure(
+                                        "audio_action", action_error
+                                    )
+                                    terminal_mic_error.note_followup_failure(finish_stage, exc)
+                                    action_error = None
+                                else:
+                                    # Preserve the known injection error for hold mode, whose
+                                    # UP cleanup is idempotent and does not toggle recording on.
+                                    logger.warning(
+                                        "touch-up also failed after microphone injection failed"
+                                    )
         except BaseException as exc:
-            terminal_mic_error = delivery_uncertain or delivery_release_failed
-            if terminal_mic_error is None:
-                raise
-            terminal_mic_error.note_followup_failure("action_cleanup", exc)
+            if terminal_mic_error is not None:
+                terminal_mic_error.note_followup_failure("action_cleanup", exc)
+            elif action_error is None:
+                action_error = exc
+
+        if terminal_mic_error is None and action_error is not None:
+            raise action_error
 
         wav = prepared.wav
         channel_label = "mono" if wav.channels == 1 else "stereo"
-        detail = (
-            f"injected {wav.duration_s:.3f}s PCM {wav.sample_format} {channel_label} "
-            f"at {wav.sample_rate} Hz"
+        media_detail = (
+            f"{wav.duration_s:.3f}s PCM {wav.sample_format} {channel_label} at {wav.sample_rate} Hz"
         )
+        if injection_completed:
+            detail = f"injected {media_detail}"
+        elif injection_attempted:
+            detail = f"audio delivery did not complete cleanly for {media_detail}"
+        else:
+            detail = f"audio was not injected ({media_detail})"
         if _source:
             detail = f"{_source}; {detail}"
         if target is not None:
-            detail += f" while held ({pre_roll_ms}ms pre-roll, {post_roll_ms}ms post-roll)"
+            control_label = "push-to-talk hold" if control_mode == "hold" else "toggle control"
+            detail += (
+                f" with {control_label} ({pre_roll_ms}ms pre-roll, {post_roll_ms}ms post-roll)"
+            )
         action_result = ActionResult(
-            ok=delivery_uncertain is None and delivery_release_failed is None,
+            ok=terminal_mic_error is None,
             action=_action,
             id=el.id if el is not None else None,
             target=target,
             detail=detail,
             acting=acting,
         )
-        terminal_mic_error = delivery_uncertain or delivery_release_failed
         if terminal_mic_error is not None:
             try:
                 # A late transport/gesture failure is the one outcome where a fresh screen is
@@ -8266,6 +8422,7 @@ class Engine:
         element_id: int | None = None,
         *,
         selector: dict[str, Any] | None = None,
+        control_mode: str = "hold",
         voice: str | None = None,
         rate: int | None = None,
         pre_roll_ms: int = 250,
@@ -8275,9 +8432,17 @@ class Engine:
     ) -> ActionResult:
         """Synthesize *text* with macOS ``say`` and inject the resulting temporary WAV."""
 
-        import tempfile
-
         from . import mic as mic_mod
+
+        has_control = element_id is not None or selector is not None
+        control_mode = mic_mod.validate_control_mode(control_mode, has_target=has_control)
+        if pre_roll_ms < 0 or post_roll_ms < 0:
+            raise UsageError(
+                "microphone pre-roll and post-roll must be zero or greater",
+                code="mic_roll_invalid",
+            )
+
+        import tempfile
 
         with tempfile.TemporaryDirectory(prefix="aua-mic-") as temp_dir:
             wav_path = Path(temp_dir) / "speech.wav"
@@ -8286,6 +8451,7 @@ class Engine:
                 wav_path,
                 element_id,
                 selector=selector,
+                control_mode=control_mode,
                 pre_roll_ms=pre_roll_ms,
                 post_roll_ms=post_roll_ms,
                 observe=observe,
