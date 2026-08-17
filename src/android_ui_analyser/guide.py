@@ -139,7 +139,11 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "an app quirk, or no inline route/flow answers the goal; it is a playbook, not a "
         "mandatory first round trip. As you learn things, teach it back with "
         '`aua remember --about "…" | --note "…" | --recipe NAME --note "…" | --deeplink URI --note "…"` '
-        "so the next run starts even more informed. Check for an equivalent fact first rather "
+        "so the next run starts even more informed. When the playbook says the launch is "
+        "AMBIGUOUS, the build declares more than one MAIN/LAUNCHER Activity and a cold start may "
+        "open a Dev Tools entry instead of the product — pin the right one once with "
+        "`aua remember --launch-activity <Activity>` and every later `aua app launch` uses it. "
+        "Check for an equivalent fact first rather "
         "than appending a near-duplicate; scope version/flag/locale/account-dependent claims, and "
         "when a new build contradicts one preserve its evidence with "
         "`aua knowledge stale <id>` before adding the replacement.",

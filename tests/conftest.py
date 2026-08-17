@@ -114,6 +114,9 @@ class FakeDevice(Device):
         self._h = height
         self._pkg = package
         self._act = activity
+        # MAIN/LAUNCHER classes the fake package "declares"; more than one models a dev build
+        # with a Dev Tools icon beside the product entry. Empty = the platform resolves it.
+        self._launcher_activities: list[str] = []
         self._text_index = text_index or {}
         # Resource-id → bounds (for by="id" lookups; keys may be a tail or full id).
         self._resource_index = resource_index or {}
@@ -190,6 +193,10 @@ class FakeDevice(Device):
 
     def press(self, key: str) -> None:
         self.calls.append(("press", (key,)))
+
+    def launcher_activities(self, package: str) -> list[str]:
+        self.calls.append(("launcher_activities", (package,)))
+        return list(self._launcher_activities)
 
     def launch_app(self, package: str, *, activity: str | None = None) -> None:
         self.calls.append(("launch_app", (package,) if activity is None else (package, activity)))

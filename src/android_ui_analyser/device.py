@@ -253,6 +253,15 @@ class Device(ABC):
     def launch_app(self, package: str, *, activity: str | None = None) -> None:
         raise DeviceError("app launch requires a real device")  # overridden by real device
 
+    def launcher_activities(self, package: str) -> list[str]:
+        """Fully-qualified MAIN/LAUNCHER Activity classes *package* declares, in manifest order.
+
+        More than one means a cold start is ambiguous — dev builds commonly ship a Dev Tools
+        icon beside the product one — so the caller should pin an entry rather than let the
+        platform pick. Empty when unknown or unsupported.
+        """
+        return []
+
     def stop_app(self, package: str) -> None:  # overridden by real device
         raise DeviceError("app stop requires a real device")
 
@@ -852,27 +861,31 @@ class Uiautomator2Device(Device):
         except Exception:  # pragma: no cover - best effort
             time.sleep(0.1)
 
+    def launcher_activities(self, package: str) -> list[str]:
+        resolved = self.shell(
+            "cmd package query-activities --brief "
+            "-a android.intent.action.MAIN -c android.intent.category.LAUNCHER "
+            f"-p {shlex.quote(package)}"
+        )
+        # PackageManager emits manifest/query order, which is what makes "the first one" a
+        # stable choice rather than a coin flip across runs.
+        return [
+            match.group(0).split("/", 1)[1]
+            for line in resolved.splitlines()
+            if (match := re.search(r"[A-Za-z0-9._]+/[A-Za-z0-9._$]+", line))
+            and match.group(0).split("/", 1)[0] == package
+        ]
+
     def launch_app(self, package: str, *, activity: str | None = None) -> None:
         if activity is None:
             # uiautomator2 falls back to Monkey for an unresolved launcher, which prints a
             # page of warnings into agent transcripts and obscures the actual launch result.
             # Ask Android for the exported launcher component and start it explicitly first.
-            resolved = self.shell(
-                "cmd package query-activities --brief "
-                "-a android.intent.action.MAIN -c android.intent.category.LAUNCHER "
-                f"-p {shlex.quote(package)}"
-            )
-            components = [
-                match.group(0)
-                for line in resolved.splitlines()
-                if (match := re.search(r"[A-Za-z0-9._]+/[A-Za-z0-9._$]+", line))
-                and match.group(0).split("/", 1)[0] == package
-            ]
-            # PackageManager emits manifest/query order. Choosing the first exported launcher
-            # avoids both ResolverActivity and Monkey when a dev build has a second tools icon.
-            # Callers can still pin a different entry with --activity.
-            component = components[0] if components else None
-            if component is None:
+            activities = self.launcher_activities(package)
+            # Choosing the first exported launcher avoids both ResolverActivity and Monkey when
+            # a dev build has a second tools icon. Callers can still pin a different entry with
+            # --activity, and `app launch` pins one durably in the app's memory.
+            if not activities:
                 installed = self.shell(f"pm path {shlex.quote(package)}")
                 if not any(line.strip().startswith("package:") for line in installed.splitlines()):
                     raise DeviceError(
@@ -885,8 +898,7 @@ class Uiautomator2Device(Device):
                     )
                 self._call("app_start", package)
                 return
-            resolved_package, activity = component.split("/", 1)
-            assert resolved_package == package  # filtered above
+            activity = activities[0]
         # `am start` prints its refusal (commonly a non-exported Activity) and exits 0, and
         # uiautomator2's app_start discards that output — so the caller learned nothing and
         # went on to drive a screen that was never opened. Run it here and read the answer.

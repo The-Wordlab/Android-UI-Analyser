@@ -5553,6 +5553,11 @@ def remember(
     deeplink: str | None = typer.Option(
         None, "--deeplink", help="A useful deeplink URI (needs/uses --note)."
     ),
+    launch_activity: str | None = typer.Option(
+        None,
+        "--launch-activity",
+        help="Pin the MAIN/LAUNCHER Activity bare `app launch` should cold-start.",
+    ),
     app_pkg: str | None = typer.Option(None, "--app", help="Package (default: current)."),
 ) -> None:
     """Teach the app playbook: a description, a quirk note, a login/etc. recipe, or a deeplink.
@@ -5560,6 +5565,9 @@ def remember(
     The agent should record what it learns so the NEXT run starts informed, e.g.
     `aua remember --recipe login_full --note "tap 'Login with test user'"` or
     `aua remember --deeplink "myapp://set-flags?flag=value" --note "set flags, then restart"`.
+
+    `--launch-activity .ui.MainActivity` fixes a multi-launcher build: dev flavours often ship a
+    Dev Tools entry beside the product one, and without a pin every cold start is a guess.
     """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
@@ -5582,13 +5590,21 @@ def remember(
         if deeplink:
             store.remember_deeplink(pkg, deeplink, note=note)
             did.append("deeplink")
+        if launch_activity:
+            # source="user" so later autodetection can refresh the alternatives but never
+            # overwrite the entry someone deliberately taught.
+            entry = store.remember_launch_entry(pkg, launch_activity, source="user")
+            did.append(f"launch:{entry.activity}" if entry is not None else "launch")
         if note and not recipe and not deeplink:
             store.remember_note(pkg, note)
             did.append("note")
         if not did:
             raise UsageError(
                 "remember needs something to store",
-                hint="pass --about / --note / --recipe NAME --note / --deeplink URI",
+                hint=(
+                    "pass --about / --note / --recipe NAME --note / --deeplink URI / "
+                    "--launch-activity ACTIVITY"
+                ),
             )
         typer.echo(json.dumps({"ok": True, "action": "remember", "package": pkg, "saved": did}))
 

@@ -357,7 +357,18 @@ def test_app_launch_activity_threads_to_device() -> None:
     eng = _engine(dev)
     eng.app("launch", package="com.x", activity=".LaunchActivity")
     assert ("launch_app", ("com.x", ".LaunchActivity")) in dev.calls
-    eng.app("launch", package="com.x")  # bare launch keeps the old 1-tuple shape
+    # An explicit --activity is remembered, so the next bare launch reuses that entry rather
+    # than falling back to an unpinned resolve (see tests/test_launch_entry.py).
+    eng.app("launch", package="com.x")
+    assert ("launch_app", ("com.x", "com.x.LaunchActivity")) in dev.calls
+
+
+def test_bare_launch_stays_unpinned_when_nothing_is_known() -> None:
+    # No pin and no declared MAIN/LAUNCHER: the platform still resolves the entry itself, which
+    # is the 1-tuple call shape the device layer has always received.
+    dev = FakeDevice(hierarchy_xml=_XML, package="com.x")
+    eng = _engine(dev)
+    eng.app("launch", package="com.x")
     assert ("launch_app", ("com.x",)) in dev.calls
 
 

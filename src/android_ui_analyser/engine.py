@@ -11502,6 +11502,45 @@ class Engine:
                 return False
             time.sleep(0.3)
 
+    def _launch_entry(self, package: str, activity: str | None) -> tuple[str | None, str | None]:
+        """Decide which Activity a cold start targets, teaching the app map on the way.
+
+        Returns ``(activity_or_None, note_or_None)``. ``None`` means "let the platform resolve
+        it" — the pre-existing behaviour. The note is set only when the choice stayed ambiguous,
+        so the agent learns it should pin one instead of trusting the screen it happens to get.
+
+        An explicit ``--activity`` wins outright. Otherwise a pin already in the map is reused,
+        which is what makes a repeated journey open the same screen every time. With no pin, the
+        declared MAIN/LAUNCHER set decides: exactly one is auto-pinned, several stay unpinned.
+        """
+        if activity:
+            return activity, None
+        mem = self._memory
+        if mem is None:
+            return None, None
+        with self._mem_lock:
+            pinned = mem.launch_activity(package)
+        if pinned:
+            return pinned, None
+        try:
+            declared = self.device.launcher_activities(package)
+        except Exception as exc:  # noqa: BLE001 — a launch must not fail over a memory nicety
+            logger.debug("could not read the launcher activities of %s: %s", package, exc)
+            return None, None
+        with self._mem_lock:
+            entry = mem.record_launcher_activities(package, declared)
+        if entry is not None:
+            return entry.activity, None
+        if len(declared) > 1:
+            listed = ", ".join(declared)
+            return None, (
+                f"{package} declares {len(declared)} launcher activities ({listed}), so this "
+                "multi-launcher build cold-started on whichever one the manifest lists first — "
+                "possibly a Dev Tools entry rather than the product. Pin the right one with "
+                "`aua remember --launch-activity <Activity>` to make later launches deterministic."
+            )
+        return None, None
+
     def _restart_app(self, package: str, activity: str | None) -> Restart:
         """Force-stop + relaunch, and confirm the app came back.
 
@@ -11511,6 +11550,14 @@ class Engine:
         left the app dead.
         """
         device = self.device
+        if not activity:
+            # `flags set` restarts with no mid-flow Activity to return to. Without the learned
+            # pin this fell through to an unpinned resolve — the coin flip that can reopen a Dev
+            # Tools entry, so the flags the caller just set get verified against the wrong screen.
+            mem = self._memory
+            if mem is not None:
+                with self._mem_lock:
+                    activity = mem.launch_activity(package)
         with self._acting():
             device.stop_app(package)
             pinned = False
@@ -11868,13 +11915,14 @@ class Engine:
             mem = self._memory
             if mem is not None and not self._join_memory_writers(timeout_s=5.0):
                 raise UsageError("memory provenance is still being finalized")
+            # --activity pins the entry Activity — some builds have multiple launcher
+            # activities (e.g. a Dev Tools menu) and default resolution picks whichever the
+            # manifest lists first, which is not necessarily the product's own entry.
+            entry, launch_note = self._launch_entry(package, activity)
             with self._acting():
                 if clear_state:
                     device.clear_app(package)
-                # --activity pins the entry Activity — some builds have multiple launcher
-                # activities (e.g. a Dev Tools menu) and default resolution is
-                # nondeterministic.
-                device.launch_app(package, activity=activity)
+                device.launch_app(package, activity=entry)
             if mem is not None:
                 with self._mem_lock:
                     if clear_state:
@@ -11890,7 +11938,7 @@ class Engine:
                             package,
                             app_version=self._version_for(device, package),
                         )
-            detail = f"{package}/{activity}" if activity else package
+            detail = f"{package}/{entry}" if entry else package
             if clear_state:
                 detail = f"{detail} (cleared)"
             if not self._await_foreground(device, package):
@@ -11903,9 +11951,21 @@ class Engine:
                         "That Activity may not be exported (`am start` denies it) — retry "
                         "without --activity."
                         if activity
-                        else "Check the package name, and that the device is unlocked."
+                        else (
+                            # A wrong pin is silent otherwise: the caller never asked for this
+                            # Activity, so "retry without --activity" would be misleading advice.
+                            "The remembered launch Activity may be wrong or unexported — re-pin "
+                            "with `aua remember --launch-activity <Activity>`."
+                            if entry
+                            else "Check the package name, and that the device is unlocked."
+                        )
                     ),
                 )
+            if mem is not None and activity:
+                # Only an explicit --activity teaches a NEW pin here: a reused pin needs no
+                # rewrite, and the single-launcher case was already pinned while resolving.
+                with self._mem_lock:
+                    mem.remember_launch_entry(package, activity, source="explicit")
             # `_acting()` starts a speculative hierarchy dump as soon as the launch command
             # returns. Foreground verification happens afterwards, so that speculative slot
             # may describe the app we just left or a half-attached transition window. Never
@@ -11963,6 +12023,10 @@ class Engine:
                 # only inside a small bound; a persistent mismatch stays a typed failure.
                 fresh = self._await_launch_hierarchy(package)
                 self._adopt_recovered_launch_observation(launched, fresh)
+            if launch_note:
+                # `_observe` owns `note` when it attaches a screen, so the ambiguity warning is
+                # prepended afterwards rather than passed in — it must not be silently dropped.
+                launched.note = f"{launch_note} {launched.note}" if launched.note else launch_note
             return launched
         if a in ("kill", "force-stop"):
             if not package:
