@@ -209,6 +209,19 @@ def test_smoke_mode_applies_bounded_overrides(tmp_path: Path) -> None:
     assert len(fake.calls) == 1
 
 
+def test_benchmark_mode_runs_exactly_128_mlx_iterations(tmp_path: Path) -> None:
+    result, fake, _, _ = _run(tmp_path, mode="benchmark")
+
+    args = result["exact_args"]
+    assert args["iters"] == 128
+    assert args["batch_size"] == 8
+    assert args["grad_accumulation_steps"] == 4
+    assert args["save_every"] == 128
+    assert args["steps_per_eval"] == 64
+    assert args["steps_per_report"] == 5
+    assert len(fake.calls) == 1
+
+
 def test_tampered_split_fails_before_training_or_metadata(tmp_path: Path) -> None:
     model, data, config = _fixture_files(tmp_path)
     (data / "train.jsonl").write_text("tampered\n", encoding="utf-8")

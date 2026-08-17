@@ -54,6 +54,7 @@ from .memory import (
     arrival_destination_terms,
     context_view,
     is_destructive_step,
+    launch_payload,
     matches_any,
     playbook_view,
     recorded_selector,
@@ -6508,8 +6509,9 @@ class Engine:
             max_deeplinks=8,
             max_notes=10,
         )
-        has_playbook = any(
-            playbook[key] for key in ("description", "deeplinks", "recipes", "notes")
+        launch = launch_payload(app)
+        has_playbook = bool(
+            any(playbook[key] for key in ("description", "deeplinks", "recipes", "notes")) or launch
         )
         if not app.screens and not has_playbook:
             return out
@@ -6530,6 +6532,7 @@ class Engine:
         )
         if playbook["description"]:
             out["description"] = playbook["description"]
+        out.update(launch)
         if playbook["recipes"]:
             out["recipes"] = {r.name: r.note for r in playbook["recipes"]}
         if playbook["deeplinks"]:

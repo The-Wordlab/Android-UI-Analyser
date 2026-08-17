@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from android_ui_analyser.engine import Engine
-from android_ui_analyser.memory import AppMemoryStore, _playbook_lines
+from android_ui_analyser.memory import AppMemoryStore, _playbook_lines, launch_payload
 from conftest import FakeDevice, make_config
 
 PKG = "com.example.app.dev"
@@ -114,3 +114,54 @@ def test_restart_falls_back_to_learned_entry(tmp_path: Path) -> None:
     assert result.ok
     assert ("launch_app", (PKG, PRODUCT)) in dev.calls
     assert ("launch_app", (PKG,)) not in dev.calls
+
+
+def test_launch_payload_reports_the_pin(tmp_path: Path) -> None:
+    # `about --format json` consumers branch on the field, not on prose in the playbook text.
+    store = _store(tmp_path)
+    store.remember_launch_entry(PKG, PRODUCT, source="user", alternatives=[DEVTOOLS])
+    app = store.load(PKG)
+    assert app is not None
+    assert launch_payload(app) == {
+        "launch": {"activity": PRODUCT, "source": "user", "alternatives": [DEVTOOLS]}
+    }
+
+
+def test_launch_payload_reports_ambiguity(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.record_launcher_activities(PKG, [PRODUCT, DEVTOOLS])
+    app = store.load(PKG)
+    assert app is not None
+    assert launch_payload(app) == {"launch_ambiguous": [PRODUCT, DEVTOOLS]}
+
+
+def test_launch_payload_is_empty_when_there_is_nothing_to_say(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.record_launcher_activities(PKG, [])
+    app = store.load(PKG)
+    assert app is None or launch_payload(app) == {}
+
+
+def test_orient_reports_a_pin_as_the_only_known_fact(tmp_path: Path) -> None:
+    # A launch pin alone must make the app "known": otherwise `daemon start` reports known=False
+    # and the agent re-discovers an ambiguity that was already resolved.
+    store = _store(tmp_path)
+    store.remember_launch_entry(PKG, PRODUCT, source="user", alternatives=[DEVTOOLS])
+    eng = _engine(tmp_path, FakeDevice(package=PKG))
+    out = eng.orient()
+    assert out["known"] is True
+    assert out["launch"] == {
+        "activity": PRODUCT,
+        "source": "user",
+        "alternatives": [DEVTOOLS],
+    }
+
+
+def test_orient_surfaces_an_unresolved_ambiguity(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.record_launcher_activities(PKG, [PRODUCT, DEVTOOLS])
+    eng = _engine(tmp_path, FakeDevice(package=PKG))
+    out = eng.orient()
+    assert out["known"] is True
+    assert out["launch_ambiguous"] == [PRODUCT, DEVTOOLS]
+    assert "launch" not in out  # the two fields are mutually exclusive

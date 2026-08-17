@@ -230,6 +230,15 @@ def _effective_args(
                 "val_batches": min(int(effective["val_batches"]), 4),
             }
         )
+    elif mode == "benchmark":
+        effective.update(
+            {
+                "iters": 128,
+                "save_every": 128,
+                "steps_per_eval": 64,
+                "steps_per_report": min(int(effective["steps_per_report"]), 10),
+            }
+        )
     return effective
 
 
@@ -270,7 +279,7 @@ def run(
     now: Callable[[], str] = _utc_now,
 ) -> dict[str, Any]:
     """Validate, seed, train, and persist an auditable run record."""
-    if mode not in {"smoke", "full", "resume"}:
+    if mode not in {"smoke", "benchmark", "full", "resume"}:
         raise ValueError(f"unsupported mode: {mode}")
     config_path = _resolve_local(config_path)
     raw_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -359,7 +368,7 @@ def run(
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("smoke", "full", "resume"))
+    parser.add_argument("mode", choices=("smoke", "benchmark", "full", "resume"))
     parser.add_argument("--model", required=True, help="Downloaded local model directory")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)

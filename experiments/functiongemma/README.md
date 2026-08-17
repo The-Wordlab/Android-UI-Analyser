@@ -46,12 +46,83 @@ The recorded runs use the public MLX conversion `mlx-community/functiongemma-270
 to a local snapshot. Commands below require that local directory; the training runner does not fetch
 a model implicitly.
 
+## Cost-safe RunPod CUDA benchmark
+
+`runpod_benchmark.py` measures CUDA compatibility and throughput without connecting to Android. Its
+default is the frozen v3 corpus, `train-lora.yaml`, and exactly 128 MLX microbatch iterations
+(32 optimizer updates with batch size 8 and gradient accumulation 4)
+from the pinned base-model revision. It is a speed/compatibility benchmark, not a quality promotion.
+
+Install the current RunPod CLI, then inspect the no-cost plan. Dry-run is the default:
+
+```bash
+brew install runpod/runpodctl/runpodctl
+
+.venv/bin/python experiments/functiongemma/runpod_benchmark.py
+```
+
+The launcher reads `RUNPOD_API_KEY` and `HF_TOKEN` from the process environment or the ignored root
+`.env`. It never prints either value. The RunPod key is passed to `runpodctl` only through its process
+environment; the Hugging Face token is sent to the worker only over encrypted SSH stdin and is not
+stored in Pod environment metadata, command arguments, or artifacts.
+
+Explicitly authorize one billable L40S benchmark:
+
+```bash
+.venv/bin/python experiments/functiongemma/runpod_benchmark.py --execute
+```
+
+Use `--gpu "NVIDIA GeForce RTX 5090"` for the matching 5090 measurement. Defaults cap the accepted
+price at `$1.25/hour`, cap the 90-minute hard-TTL ceiling at `$2.00`, and use no persistent volume.
+The actual hourly price is checked immediately after creation; an over-limit Pod is terminated before
+training.
+
+Cost containment does not depend on the launcher remaining alive:
+
+- Pod creation includes RunPod's server-side absolute `--terminate-after` deadline.
+- The local launcher secret-scans the downloaded tarball in memory before any artifact file or
+  extraction directory is created, then writes and hashes it before cleanup.
+- A `finally` path sends DELETE for the exact Pod ID on success, failure, timeout, or any available
+  SIGHUP/SIGINT/SIGQUIT/SIGTERM termination signal.
+- Those signals received during artifact export or cleanup are deferred until DELETE and the audits
+  finish, so a repeated termination signal cannot skip the exact-ID deletion path.
+- It then lists Pods and requires zero active resources matching the exact ID or unique run name.
+- It snapshots `GET /networkvolumes` before creation and after Pod deletion, proving that no new
+  persistent network volume appeared; the create request itself sets volume size zero and supplies no
+  network-volume ID.
+- A lost create response is recovered by that unique name. An unverified cleanup is always the
+  primary reported failure, even after an earlier worker failure, while the server-side deadline
+  remains armed.
+
+Each run writes under `runs/functiongemma/runpod/<unique-run-id>/`:
+
+- `artifacts.tar.gz` and its SHA256 in `launcher-metadata.json`
+- safely extracted adapter, worker metadata, frozen manifest/validation report, and training config
+- exact base revision, reviewed source overrides, GPU/package details, timing, price, and cleanup audit
+
+The uploaded source contains the pinned Git archive plus only `train.py` and `runpod_worker.py` from
+the reviewed worktree. It cannot include ignored `.env`, `runs/`, model caches, or device journals.
+
+An optional v4-shaped **throughput-only** benchmark must pin its distinct manifest explicitly:
+
+```bash
+.venv/bin/python experiments/functiongemma/runpod_benchmark.py --execute \
+  --curriculum-version v4 \
+  --config experiments/functiongemma/train-lora-v4.yaml \
+  --expected-manifest-sha256 3a271e8ff153b9179997edbb9822962b383348405bc77b15259dc3a733b6a9b7
+```
+
+That command still starts from the base model and must not be reported as the historical v4 quality
+run. The historical v4 was a continuation from the exact validation-selected v3 adapter. A true cloud
+continuation requires an authenticated parent-adapter upload and `resume` provenance, which this
+benchmark launcher deliberately does not guess or substitute with the distribution bundle.
+
 ## Reproduce the pipeline
 
 Generate the deterministic synthetic splits:
 
 ```bash
-.venv/bin/python experiments/functiongemma/generate_dataset.py \
+.venv/bin/python -m experiments.functiongemma.generate_dataset \
   --output-dir runs/functiongemma/data
 ```
 

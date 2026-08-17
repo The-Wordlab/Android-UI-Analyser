@@ -3835,6 +3835,26 @@ def _launch_lines(app: AppMap) -> list[str]:
     return []
 
 
+def launch_payload(app: AppMap) -> dict[str, Any]:
+    """The cold-start entry as ``about``-style JSON, so agents can branch on it structurally.
+
+    ``{"launch": {...}}`` once an entry is pinned, ``{"launch_ambiguous": [...]}`` while a
+    multi-launcher build has none, and ``{}`` when there is nothing to report — callers merge it
+    into their payload. The markdown twin is :func:`_launch_lines`.
+    """
+    if app.launch is not None:
+        return {
+            "launch": {
+                "activity": app.launch.activity,
+                "source": app.launch.source,
+                "alternatives": list(app.launch.alternatives),
+            }
+        }
+    if len(app.launcher_activities) > 1:
+        return {"launch_ambiguous": list(app.launcher_activities)}
+    return {}
+
+
 def _playbook_lines(app: AppMap, *, context_id: str | None = None) -> list[str]:
     """The current app playbook, deduplicated through :func:`playbook_view`."""
     view = playbook_view(app, context_id=context_id)

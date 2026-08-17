@@ -5672,7 +5672,7 @@ def about(
             pkg,
             explicit_package=app_pkg is not None,
         )
-        from .memory import _playbook_lines, playbook_view
+        from .memory import _playbook_lines, launch_payload, playbook_view
 
         current = playbook_view(app_map, context_id=selected_context)
         if fmt in (OutputFormat.json, OutputFormat.compact):
@@ -5687,6 +5687,7 @@ def about(
                 "notes": current["notes"],
                 "counts": current["counts"],
             }
+            play.update(launch_payload(app_map))
             typer.echo(json.dumps(play, indent=None if fmt is OutputFormat.compact else 2))
         else:
             lines = _playbook_lines(app_map, context_id=selected_context)
