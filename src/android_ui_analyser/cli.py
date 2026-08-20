@@ -5936,7 +5936,7 @@ def record_start_cmd(
     ),
 ) -> None:
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(engine.record_start(remote), fmt)
+        _emit(_route(engine, "record_start", path=remote), fmt)
 
     _run(ctx, go)
 
@@ -5947,7 +5947,10 @@ def record_stop_cmd(
     path: str = typer.Argument(..., help="Local path to save the MP4."),
 ) -> None:
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(engine.record_stop(path), fmt)
+        # Resolve in the caller's cwd. A warm daemon may have been launched from a
+        # different directory and must not save the recording there.
+        local_path = str(Path(path).expanduser().resolve())
+        _emit(_route(engine, "record_stop", local_path=local_path), fmt)
 
     _run(ctx, go)
 
