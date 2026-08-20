@@ -936,6 +936,8 @@ def serve(
     Path(sock_path).parent.mkdir(parents=True, exist_ok=True)
 
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    capture_init: threading.Thread | None = None
+    capture_shutdown = threading.Event()
     try:
         srv.bind(sock_path)
         srv.listen(_SOCKET_BACKLOG)
@@ -944,15 +946,36 @@ def serve(
         logger.info("daemon listening on %s", sock_path)
         write_pidfile(sock_path + ".pid")  # so `daemon stop` / `daemon reap` can find us
         if engine.config.capture.enabled:
-            try:
-                with contextlib.suppress(Exception):
-                    engine.capture_start()
+            # A cold uiautomator2 attach can take longer than the client's startup probe.
+            # Running it here used to leave a listening socket with nobody in accept(), so the
+            # first `session start` timed out and a live PID was misreported as `daemon_busy`.
+            # Auto-start is host-only: connect_if_needed=False guarantees this worker cannot
+            # race the foreground request for device attachment. Once the Engine owns a Device,
+            # the existing sampler may read it in the background exactly as before.
+            def start_capture() -> None:
+                # A manually started, unpinned daemon does not know its target yet. Wait for a
+                # foreground command to select/connect one instead of choosing a device from
+                # this background thread. That preserves automatic capture without creating a
+                # second lease/device owner during startup.
+                while (
+                    getattr(engine.config.device, "serial", None) is None
+                    and getattr(engine, "_device", None) is None
+                ):
+                    if capture_shutdown.wait(0.05):
+                        return
+                try:
+                    engine.capture_start(connect_if_needed=False)
+                except Exception:  # noqa: BLE001 - capture remains an optional daemon service
+                    logger.exception("capture buffer auto-start failed")
+                else:
                     logger.info("capture buffer started")
-            finally:
-                # Startup is outside dispatch's command-lifetime finally. The rolling sampler
-                # uses its own short background fence; do not retain this bootstrap claim.
-                with contextlib.suppress(Exception):
-                    engine.release_device_use()
+
+            capture_init = threading.Thread(
+                target=start_capture,
+                name="aua-capture-init",
+                daemon=True,
+            )
+            capture_init.start()
         push_hub = None
         push_port = int(getattr(engine.config.daemon, "push_ws_port", 0) or 0)
         if push_port > 0:
@@ -998,6 +1021,12 @@ def serve(
                     conn.close()
 
     finally:
+        # Never close the Engine underneath an initializer that may still publish a live
+        # buffer. The old synchronous path had this ordering implicitly; preserve it now that
+        # startup is concurrent with socket service.
+        if capture_init is not None:
+            capture_shutdown.set()
+            capture_init.join()
         with contextlib.suppress(Exception):
             from .jobs import manager_for
 

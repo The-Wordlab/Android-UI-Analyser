@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+import pytest
 from PIL import Image
 
 from android_ui_analyser.capture import (
@@ -179,6 +180,28 @@ def test_engine_capture_hint_after_burst(tmp_path: Path) -> None:
     last = engine.capture_last(since="last-action")
     assert last["count"] >= 1
     engine.capture_stop()
+
+
+def test_daemon_capture_autostart_never_connects_the_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = make_config(
+        cache={"dir": str(tmp_path / "cache")},
+        device={"serial": "emulator-fixture"},
+        capture={"enabled": True, "idle_fps": 1, "burst_fps": 1},
+    )
+    engine = Engine(cfg)
+
+    def unexpected_connect(_serial: str | None) -> FakeDevice:
+        raise AssertionError("daemon capture auto-start tried to attach the device")
+
+    monkeypatch.setattr(engine, "_connect_target", unexpected_connect)
+    try:
+        status = engine.capture_start(connect_if_needed=False)
+        assert status["running"] is True
+        assert engine._device is None
+    finally:
+        engine.capture_stop()
 
 
 def test_capture_status_without_buffer(tmp_path: Path) -> None:

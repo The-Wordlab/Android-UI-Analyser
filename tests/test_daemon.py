@@ -508,6 +508,57 @@ def test_multiple_sequential_connections(settings_engine: tuple) -> None:
             assert client.ping() is True
 
 
+def test_first_session_request_is_served_while_capture_initializes_slowly(
+    sock_path: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A listening fresh daemon must not call a slow capture initializer before accept()."""
+
+    engine = make_engine(device=FakeDevice(), capture={"enabled": True})
+    engine.config.device.serial = "emulator-fixture"
+    capture_started = threading.Event()
+    release_capture = threading.Event()
+    capture_calls: list[bool] = []
+
+    def slow_capture_start(*, connect_if_needed: bool = True) -> dict[str, object]:
+        capture_calls.append(connect_if_needed)
+        capture_started.set()
+        assert release_capture.wait(timeout=3.0), "test did not release capture initialization"
+        return {"running": True}
+
+    monkeypatch.setattr(engine, "capture_start", slow_capture_start)
+    monkeypatch.setattr(
+        engine,
+        "session_start",
+        lambda goal, **_kwargs: {"ok": True, "session_id": "session-first", "goal": goal},
+    )
+
+    ready = threading.Event()
+    stop = threading.Event()
+    thread = threading.Thread(
+        target=serve,
+        args=(engine, sock_path),
+        kwargs={"ready_event": ready, "_stop_event": stop},
+        daemon=True,
+    )
+    thread.start()
+    try:
+        assert ready.wait(timeout=1.0), "daemon did not enter its accept loop"
+        assert capture_started.wait(timeout=1.0), "capture auto-start was not attempted"
+        response = DaemonClient(sock_path, timeout=1.0).call(
+            "session_start", goal="verify the fixture"
+        )
+
+        assert response["ok"] is True
+        assert response["result"]["session_id"] == "session-first"
+        assert not release_capture.is_set(), "capture initialization unexpectedly completed first"
+        assert capture_calls == [False], "daemon auto-start must never attach the device"
+    finally:
+        release_capture.set()
+        stop.set()
+        thread.join(timeout=3.0)
+        assert not thread.is_alive()
+
+
 def test_socket_file_removed_after_shutdown(sock_path: str) -> None:
     """After serve() exits, the socket file is cleaned up."""
     device = FakeDevice()

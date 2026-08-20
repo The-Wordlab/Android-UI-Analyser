@@ -723,6 +723,12 @@ class Engine:
             config.output.with_image if config.output.with_image else None
         )
         self._capture: Any = None  # CaptureBuffer | None — set by capture_start
+        # Capture auto-start happens on the daemon's background initializer. Lifecycle
+        # commands can arrive on the socket while that initializer is still creating its
+        # directories, so start/stop/on/off must be one atomic state transition. This lock is
+        # deliberately capture-only: the background initializer is forbidden from connecting
+        # to the device and therefore must not serialize the daemon's first real request.
+        self._capture_lock = threading.RLock()
         # True only while the UiAutomation slot is on loan to the on-device helper.
         # Read by :meth:`_capture_screenshot`, which is the one device call that can
         # arrive from another thread during a handover.
@@ -17936,74 +17942,105 @@ class Engine:
             return None
         return "recent pixel change after last action — `aua capture last --since last-action`"
 
-    def capture_start(self) -> dict[str, Any]:
-        """Start the rolling capture buffer (daemon-warm sessions)."""
+    def capture_start(self, *, connect_if_needed: bool = True) -> dict[str, Any]:
+        """Start the rolling capture buffer (daemon-warm sessions).
+
+        ``connect_if_needed=False`` is the daemon auto-start seam. A per-device daemon already
+        knows its target from config, so initializing the host-side buffer must not eagerly
+        attach uiautomator2 before the accept loop can answer its first request. The sampler
+        already waits for ``self._device`` instead of connecting by itself; this keeps buffer
+        creation subject to the same rule.
+        """
         from .capture import CaptureBuffer, CaptureCfgView
 
-        if not self.config.capture.enabled and self._capture is None:
-            # Explicit start still allowed even if config default is off.
-            pass
-        cfg = self.config.capture
-        device = self.device
-        root = Path(self.config.cache.dir).expanduser() / "captures"
-        view = CaptureCfgView(
-            enabled=True,
-            idle_fps=cfg.idle_fps,
-            burst_fps=cfg.burst_fps,
-            burst_ms=cfg.burst_ms,
-            extend_burst_on_change=cfg.extend_burst_on_change,
-            ttl_s=cfg.ttl_s,
-            max_mb=cfg.max_mb,
-            jpeg_quality=cfg.jpeg_quality,
-            hint=cfg.hint,
-        )
-        if self._capture is not None:
-            self._capture.resume()
-            if not self._capture.running:
-                self._capture.start()
-            return self._capture.status()
-        # Default is the u2 path: it is ~2.2x faster than `adb exec-out screencap -p` (the
-        # device encodes JPEG instead of a full-res PNG) and every frame is re-encoded to JPEG
-        # on write anyway, so the lossless capture buys nothing here. The opt-in flag stays for
-        # callers that need pixel-exact frames.
-        # Deliberately not ``device.screenshot``: a bound method keeps the uiautomator2
-        # client alive past every teardown, which is what let a sampling tick reconnect the
-        # server mid-handover. The engine picks the source per frame instead.
-        shot = self._capture_screenshot_fn()
-        buf = CaptureBuffer(
-            root=root,
-            serial=device.serial,
-            cfg=view,
-            screenshot=shot,
-        )
-        buf.start()
-        self._capture = buf
-        return buf.status()
+        with self._capture_lock:
+            if not self.config.capture.enabled and self._capture is None:
+                # Explicit start still allowed even if config default is off.
+                pass
+            cfg = self.config.capture
+            serial: str | None
+            if self._device is not None:
+                serial = str(self._device.serial)
+            else:
+                configured = getattr(self.config.device, "serial", None)
+                serial = str(configured) if configured else None
+            if serial is None:
+                if not connect_if_needed:
+                    raise UsageError(
+                        "capture auto-start needs a device-bound daemon",
+                        hint=(
+                            "Start the daemon with --serial, or run `aua capture start` after "
+                            "selecting a device."
+                        ),
+                    )
+                serial = str(self.device.serial)
+            root = Path(self.config.cache.dir).expanduser() / "captures"
+            view = CaptureCfgView(
+                enabled=True,
+                idle_fps=cfg.idle_fps,
+                burst_fps=cfg.burst_fps,
+                burst_ms=cfg.burst_ms,
+                extend_burst_on_change=cfg.extend_burst_on_change,
+                ttl_s=cfg.ttl_s,
+                max_mb=cfg.max_mb,
+                jpeg_quality=cfg.jpeg_quality,
+                hint=cfg.hint,
+            )
+            if self._capture is not None:
+                self._capture.resume()
+                if not self._capture.running:
+                    self._capture.start()
+                return self._capture.status()
+            # Default is the u2 path: it is ~2.2x faster than `adb exec-out screencap -p` (the
+            # device encodes JPEG instead of a full-res PNG) and every frame is re-encoded to JPEG
+            # on write anyway, so the lossless capture buys nothing here. The opt-in flag stays for
+            # callers that need pixel-exact frames.
+            # Deliberately not ``device.screenshot``: a bound method keeps the uiautomator2
+            # client alive past every teardown, which is what let a sampling tick reconnect the
+            # server mid-handover. The engine picks the source per frame instead.
+            shot = self._capture_screenshot_fn()
+            buf = CaptureBuffer(
+                root=root,
+                serial=serial,
+                cfg=view,
+                screenshot=shot,
+            )
+            buf.start()
+            self._capture = buf
+            return buf.status()
 
     def capture_stop(self) -> dict[str, Any]:
-        buf = self._capture
-        if buf is None:
-            return {"ok": True, "action": "capture-stop", "running": False}
-        buf.stop()
-        self._capture = None
-        return {
-            "ok": True,
-            "action": "capture-stop",
-            "running": False,
-            "session_id": buf.session_id,
-        }
+        with self._capture_lock:
+            buf = self._capture
+            if buf is None:
+                return {"ok": True, "action": "capture-stop", "running": False}
+            buf.stop()
+            self._capture = None
+            return {
+                "ok": True,
+                "action": "capture-stop",
+                "running": False,
+                "session_id": buf.session_id,
+            }
 
     def capture_on(self) -> dict[str, Any]:
-        if self._capture is None:
-            return self.capture_start()
-        self._capture.resume()
-        return self._capture.status()
+        with self._capture_lock:
+            if self._capture is None:
+                return self.capture_start()
+            self._capture.resume()
+            return self._capture.status()
 
     def capture_off(self) -> dict[str, Any]:
-        if self._capture is None:
-            return {"ok": True, "action": "capture-status", "running": False, "paused": True}
-        self._capture.pause()
-        return self._capture.status()
+        with self._capture_lock:
+            if self._capture is None:
+                return {
+                    "ok": True,
+                    "action": "capture-status",
+                    "running": False,
+                    "paused": True,
+                }
+            self._capture.pause()
+            return self._capture.status()
 
     def capture_idle_pause(self) -> bool:
         """Stop sampling because the client went quiet; frames already kept stay readable."""
