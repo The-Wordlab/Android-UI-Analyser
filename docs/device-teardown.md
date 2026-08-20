@@ -109,8 +109,8 @@ The existing idle watchdog stopped an aua-started headless emulator after wall-c
 That is a weak signal — an agent can legitimately sit in a 120s wait — so the timeout had to stay
 long (900s) to be safe. It now also requires **no live lease**, which is a strong signal precisely
 because a dead owner's lease expires instantly. That is what makes
-`teardown.emulator_idle_stop_s: 120` a reasonable thing to configure; the default stays 900 so
-existing users see no change. It reaps the device's ledger before stopping it, because the host-side
+`teardown.emulator_idle_stop_s: 120` a reasonable thing to configure; the default is 1200 seconds
+so manual use of a windowed emulator is not mistaken for AUA activity. It reaps the device's ledger before stopping it, because the host-side
 residue outlives the emulator.
 
 An emulator AUA did not start is never touched.
@@ -146,5 +146,5 @@ teardown:
   watchdog: true              # detached net: survives the agent, the daemon, the shell
   grace_s: 120.0              # how long an unheld change is left alone
   watchdog_poll_s: 15.0
-  emulator_idle_stop_s: 900.0 # stop an aua-started emulator idle AND unleased this long (0=off)
+  emulator_idle_stop_s: 1200.0 # stop an aua-started emulator idle AND unleased this long (0=off)
 ```

@@ -1971,7 +1971,7 @@ def test_mic_journal_redacts_speech_paths_and_summarizes_uncertain_observation(
         cache_dir=tmp_path,
         serial="emulator-5554",
         source="mcp",
-        cmd="mic_speak_and_analyze",
+        cmd="mic_speak",
         args={"speech": private_speech},
         ok=False,
         error=error,
@@ -2011,11 +2011,12 @@ def test_mic_journal_redacts_speech_paths_and_summarizes_uncertain_observation(
     assert private_path not in serialized_details
     assert private_screen_text not in serialized_details
     assert events[0]["args"]["speech"] == f"<redacted speech: {len(private_speech)} chars>"
+    assert journal.redact_args({"text": private_speech}, cmd="mic_speak")["text"] == (
+        f"<redacted speech: {len(private_speech)} chars>"
+    )
     assert events[0]["error"]["result"]["observation"]["elements_count"] == 1
     assert events[1]["args"]["wav_path"] == "<redacted audio path>"
-    assert events[2]["error"]["message"] == (
-        "cannot use WAV file '<redacted audio path>': malformed"
-    )
+    assert events[2]["error"]["message"] == "<redacted post-microphone text>"
 
 
 def test_public_mic_implementation_and_docs_stay_app_agnostic() -> None:

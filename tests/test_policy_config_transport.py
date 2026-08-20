@@ -425,6 +425,8 @@ def test_warm_daemon_detail_is_revised_at_cli_emit_boundary(
     monkeypatch.setattr(cli_mod, "_ENGINE", None)
     monkeypatch.setattr(cli_mod, "_UNTIL", None)
     monkeypatch.setattr(cli_mod, "_OBSERVATION_VIEW", None)
+    monkeypatch.setattr(cli_mod, "_CLI_OUTPUT_FORMAT", OutputFormat.json)
+    monkeypatch.setattr(cli_mod, "_CLI_OBSERVE_FIELDS_SPEC", None)
     monkeypatch.setattr(cli_mod, "_ANNOTATION_WARNINGS", [])
     cli_mod._CLI_JOURNAL_CONTEXTS.clear()
 
@@ -549,6 +551,8 @@ def test_cli_detail_matches_projected_until_response_emitted_to_agent(
     monkeypatch.setattr(cli_mod, "_INVOCATION_ID", "cli-visible-response")
     monkeypatch.setattr(cli_mod, "_ENGINE", engine)
     monkeypatch.setattr(cli_mod, "_UNTIL", ("text:Arrived", 1_000, 50))
+    monkeypatch.setattr(cli_mod, "_CLI_OUTPUT_FORMAT", OutputFormat.json)
+    monkeypatch.setattr(cli_mod, "_CLI_OBSERVE_FIELDS_SPEC", "id,text")
     monkeypatch.setattr(
         cli_mod,
         "_OBSERVATION_VIEW",
@@ -569,8 +573,144 @@ def test_cli_detail_matches_projected_until_response_emitted_to_agent(
     detail = journal.read_detail(tmp_path, "fictional-5554", event["detail_id"])
     assert detail is not None
     assert detail["response"]["result"] == emitted
+    assert detail["request"]["client"]["format"] == "json"
+    assert detail["request"]["client"]["until"] == "text:Arrived"
+    assert detail["request"]["client"]["until_timeout_ms"] == 1_000
+    assert detail["request"]["client"]["until_poll_ms"] == 50
+    assert detail["request"]["client"]["observe_fields"] == "id,text"
+    assert detail["request"]["client"]["observation_projection"]["fields"] == [
+        "id",
+        "text",
+    ]
     assert emitted["await_outcome"] == "satisfied"
     assert emitted["observation"]["elements"] == [{"id": 7, "text": "Arrived"}]
+
+
+def test_private_cli_until_row_inherits_input_redaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from android_ui_analyser import coaching, journal
+    from android_ui_analyser.projection import Projection
+    from android_ui_analyser.schema import (
+        ActionResult,
+        AnalyzeResult,
+        Element,
+        Meta,
+        OutputFormat,
+        Screen,
+    )
+
+    private_input = "correct horse, battery staple"
+
+    def observation(parts: list[str]) -> AnalyzeResult:
+        return AnalyzeResult(
+            screen=Screen(
+                width=1080,
+                height=2400,
+                package="com.example",
+                source="hierarchy",
+            ),
+            elements=[
+                Element(
+                    id=index,
+                    type="TextView",
+                    text=text,
+                    bounds=[0, 0, 10, 10],
+                    center=[5, 5],
+                )
+                for index, text in enumerate(parts)
+            ],
+            meta=Meta(duration_ms=3, tier_used="hierarchy", path="hierarchy"),
+        )
+
+    early = ActionResult(
+        ok=True,
+        action="input",
+        detail=private_input,
+        observation=observation(["correct horse", "battery staple"]),
+        observation_present=True,
+    )
+    arrived = ActionResult(
+        ok=True,
+        action="await-predicate",
+        observation=observation(["correct horse", "battery staple"]),
+        observation_present=True,
+        await_outcome="satisfied",
+    )
+    config = Config()
+    config.daemon.enabled = False
+    config.cache.dir = str(tmp_path)
+    config.device.serial = "fictional-5554"
+    engine = SimpleNamespace(
+        config=config,
+        device=SimpleNamespace(serial="fictional-5554"),
+        _lease_serial="fictional-5554",
+        _lease_owner_resolved="agent-a",
+        input_text=lambda **_kwargs: early,
+        await_predicate=lambda **_kwargs: arrived,
+    )
+
+    monkeypatch.setattr(cli_mod, "_warm", lambda _engine: None)
+    monkeypatch.setattr(
+        coaching,
+        "decorate_result",
+        lambda _engine, _cmd, result, **_kwargs: result,
+    )
+    monkeypatch.setattr(cli_mod, "_INVOCATION_ID", "private-until-response")
+    monkeypatch.setattr(cli_mod, "_ENGINE", engine)
+    monkeypatch.setattr(
+        cli_mod,
+        "_UNTIL",
+        ("text:correct horse\\, battery staple", 1_000, 50),
+    )
+    monkeypatch.setattr(cli_mod, "_CLI_OUTPUT_FORMAT", OutputFormat.json)
+    monkeypatch.setattr(cli_mod, "_CLI_OBSERVE_FIELDS_SPEC", "id,text")
+    monkeypatch.setattr(
+        cli_mod,
+        "_OBSERVATION_VIEW",
+        Projection.for_observation("id,text"),
+    )
+    monkeypatch.setattr(cli_mod, "_ANNOTATION_WARNINGS", [])
+    cli_mod._CLI_JOURNAL_CONTEXTS.clear()
+
+    result = cli_mod._route(
+        engine,
+        "input_text",
+        element_id=7,
+        text=private_input,
+        observe=True,
+    )
+    cli_mod._emit(result, OutputFormat.json)
+    capsys.readouterr()
+
+    events = journal.read_since(tmp_path, "fictional-5554", limit=10)
+    await_event = next(row for row in events if row["cmd"] == "await_predicate")
+    await_detail = journal.read_detail(
+        tmp_path,
+        "fictional-5554",
+        await_event["detail_id"],
+    )
+    input_event = next(row for row in events if row["cmd"] == "input")
+    input_detail = journal.read_detail(
+        tmp_path,
+        "fictional-5554",
+        input_event["detail_id"],
+    )
+    assert await_detail is not None
+    assert input_detail is not None
+    serialized = json.dumps([await_event, await_detail, input_event, input_detail])
+    assert private_input not in serialized
+    assert "correct horse" not in serialized
+    assert "battery staple" not in serialized
+    assert await_event["args"]["predicate"] == "<redacted post-input text>"
+    assert await_detail["request"]["args"]["predicate"] == (
+        "<redacted post-input text>"
+    )
+    assert input_detail["request"]["client"]["until"] == (
+        "<redacted post-input text>"
+    )
 
 
 def test_daemon_response_decoration_uses_the_warm_engine(monkeypatch) -> None:
@@ -685,10 +825,18 @@ def test_daemon_client_serializes_the_decoration_request(monkeypatch) -> None:
     response = daemon_mod.DaemonClient(
         "/fictional/daemon.sock",
         decorate_response=True,
+        journal_privacy_cmd="input",
     ).call("analyze")
 
     assert response["response_decorated"] is True
-    assert sent == [{"cmd": "analyze", "args": {}, "decorate_response": True}]
+    assert sent == [
+        {
+            "cmd": "analyze",
+            "args": {},
+            "decorate_response": True,
+            "journal_privacy_cmd": "input",
+        }
+    ]
 
 
 def test_cli_and_mcp_policy_status_are_host_only_and_have_identical_readiness(

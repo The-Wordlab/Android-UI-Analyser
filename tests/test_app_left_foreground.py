@@ -10,6 +10,7 @@ from __future__ import annotations
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.projection import Projection
 from android_ui_analyser.schema import (
+    ActionResult,
     AnalyzeResult,
     Element,
     Meta,
@@ -18,6 +19,7 @@ from android_ui_analyser.schema import (
     ScreenSource,
     Tier,
 )
+from conftest import FakeDevice, make_config
 
 
 def _element(rid: str | None = None) -> Element:
@@ -114,3 +116,53 @@ def test_unknown_activities_are_not_guessed_at() -> None:
     assert Engine._app_left_foreground("com.x/.A", None, _obs()) is None
     # No "/" means we cannot name a package, so we must not invent one.
     assert Engine._app_left_foreground("com.x", "nexuslauncher", _obs()) is None
+
+
+def test_detected_crash_attaches_the_last_action_error_logs(monkeypatch) -> None:
+    app_id = "com.example.app"
+    launcher = "com.example.launcher"
+    device = FakeDevice(package=launcher, activity=".LauncherActivity")
+    engine = Engine(
+        make_config(memory={"enabled": False}, lease={"enabled": False}),
+        device=device,
+    )
+    engine._pre_action_state = {
+        "count": 1,
+        "focused": None,
+        "labels": ["Crash now"],
+        "rids": ["crashNow"],
+        "package": app_id,
+        "activity": f"{app_id}/.MainActivity",
+        "known_screen": None,
+    }
+    device.log_now(
+        "AndroidRuntime",
+        "java.lang.IllegalStateException: stale failure from the previous action",
+        offset_ms=-1_000,
+    )
+    engine.logcat_mark("last-action")
+    device.log_now("AndroidRuntime", "FATAL EXCEPTION: main")
+    device.log_now("AndroidRuntime", f"Process: {app_id}, PID: 1234")
+    device.log_now("AndroidRuntime", "java.lang.IllegalStateException: broken state")
+    device.log_now(
+        "AndroidRuntime",
+        f"at {app_id}.MainActivity.onClick(MainActivity.kt:42)",
+    )
+    monkeypatch.setattr(
+        engine,
+        "_analyze_post_action",
+        lambda *_args, **_kwargs: _obs("launcher"),
+    )
+
+    result = engine._observe(ActionResult(ok=True, action="tap"), True, settle=False)
+
+    assert result.change is not None and result.change["app_left_foreground"]["from"] == app_id
+    assert result.crash_evidence is not None
+    assert result.crash_evidence["available"] is True
+    assert result.crash_evidence["since"] == "last-action"
+    assert result.crash_evidence["kind"] == "fatal"
+    evidence_lines = "\n".join(result.crash_evidence["lines"])
+    assert "IllegalStateException: broken state" in evidence_lines
+    assert "stale failure" not in evidence_lines
+    assert "attached in `crash_evidence`" in (result.note or "")
+    assert "Check `aua logcat" not in (result.note or "")

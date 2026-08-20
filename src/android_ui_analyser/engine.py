@@ -155,6 +155,8 @@ _MAX_FLOW_DEPTH = 5  # bound on nested `flow:` sub-flow composition (cycle backs
 # time it returns). Measured ~150ms headless vs 600-1200ms windowed on the same emulator.
 _FAST_DUMP_MS = 250.0
 _CHANGE_TEXT_CAP = 12  # text deltas echoed back per direction; a list screen would dump hundreds
+_CRASH_LOG_SCAN_LINES = 600  # bounded read from one already-short last-action window
+_CRASH_EVIDENCE_LINES = 60  # enough for exception + causes without dumping the full device log
 _FLAGS_VERIFY_DEADLINE_S = 2.0  # how long a flag write gets to reach the app's prefs file
 _FLAGS_ENTRY_TIMEOUT_S = 3.0  # how long a pinned entry Activity gets before the default one
 _FLAGS_FOREGROUND_TIMEOUT_S = 6.0  # how long the relaunched app gets to reach the foreground
@@ -10506,14 +10508,28 @@ class Engine:
                 # whatever the caller was doing.
                 left = change.get("app_left_foreground") if isinstance(change, dict) else None
                 if left:
+                    result.crash_evidence = self._crash_evidence(str(left["from"]))
                     dialog = (
                         " A system crash dialog is on screen." if left.get("crash_dialog") else ""
                     )
+                    evidence = result.crash_evidence
+                    if evidence.get("available") and evidence.get("count"):
+                        log_note = "The crash/error log block is attached in `crash_evidence`."
+                    elif evidence.get("available"):
+                        log_note = (
+                            "AUA checked the action's diagnostic-log window but found no "
+                            "fatal, ANR, or error-priority lines; the checked window is in "
+                            "`crash_evidence`."
+                        )
+                    else:
+                        log_note = (
+                            "AUA could not read this platform's diagnostic logs; the structured "
+                            "reason is in `crash_evidence`."
+                        )
                     result.note = (
                         f"WARNING: {left['from']} left the foreground — {left['to']} is in front "
-                        f"now, so this observation is NOT your app.{dialog} Check "
-                        '`aua logcat --grep "FATAL EXCEPTION|ANR in" --since last-action` for the '
-                        "cause, then relaunch with `aua app restart-and-analyze "
+                        f"now, so this observation is NOT your app.{dialog} {log_note} Then "
+                        "relaunch with `aua app restart-and-analyze "
                         f"{left['from']}` instead of navigating this screen. {result.note}"
                     )
         else:
@@ -17589,6 +17605,64 @@ class Engine:
         if not crash_dialog and not to_launcher:
             return None
         return {"from": before_pkg, "to": after_pkg, "crash_dialog": crash_dialog}
+
+    def _crash_evidence(self, app_id: str) -> dict[str, Any]:
+        """Read and reduce the diagnostic window already opened before the failed action."""
+        from . import logcat as logcat_mod
+
+        source = "device.logs"
+        if not self.platform.supports(source):
+            return {
+                "available": False,
+                "source": source,
+                "app_id": app_id,
+                "code": "platform_capability_unsupported",
+                "detail": (
+                    f"platform {self.platform.name!r} does not support capability {source!r}"
+                ),
+            }
+
+        device = self.device
+        path = logcat_mod.marks_path(self.config.cache.dir, device.serial)
+        marks = logcat_mod.load_marks(path)
+        clock = logcat_mod.resolve_clock(device, self.config.cache.dir)
+        since_ms, since_label = logcat_mod.resolve_since_ms(marks, None, clock=clock)
+        base: dict[str, Any] = {
+            "available": True,
+            "source": source,
+            "app_id": app_id,
+            "since": since_label,
+            "since_unix_ms": since_ms,
+            "clock": clock.name,
+        }
+        try:
+            raw = self.platform.diagnostic_logs(
+                device,
+                lines=_CRASH_LOG_SCAN_LINES,
+                since_ms=since_ms,
+            )
+        except AuaError as exc:
+            return {
+                **base,
+                "available": False,
+                "code": exc.code,
+                "detail": exc.message,
+            }
+        except Exception as exc:  # noqa: BLE001 — diagnostic evidence must not hide the action
+            return {
+                **base,
+                "available": False,
+                "code": "diagnostic_logs_failed",
+                "detail": str(exc),
+            }
+        return {
+            **base,
+            **logcat_mod.extract_crash_evidence(
+                raw,
+                app_id=app_id,
+                limit=_CRASH_EVIDENCE_LINES,
+            ),
+        }
 
     def _change_summary(self, before: dict[str, Any] | None, obs: AnalyzeResult) -> dict[str, Any]:
         """Structured before/after deltas, with "nothing changed" stated rather than implied.

@@ -177,9 +177,12 @@ def test_input_text_never_enters_compact_or_full_journal(tmp_path: Path) -> None
     result = {
         "ok": True,
         "action": "input",
-        "detail": private_input,
+        "detail": "correct horse",
         "observation": {
-            "elements": [{"id": 1, "text": f"Draft: {private_input}"}],
+            "elements": [
+                {"id": 1, "text": "correct horse"},
+                {"id": 2, "text": "battery staple"},
+            ],
         },
     }
     detail_id = journal.record(
@@ -190,6 +193,7 @@ def test_input_text_never_enters_compact_or_full_journal(tmp_path: Path) -> None
         args=args,
         result=result,
         extra={"invocation_id": "private-input-test"},
+        privacy_cmd="tap",
     )
     assert detail_id is not None
     assert journal.record_emitted_response(
@@ -210,5 +214,12 @@ def test_input_text_never_enters_compact_or_full_journal(tmp_path: Path) -> None
     assert detail["request"]["args"]["text"] == (
         f"<redacted input: {len(private_input)} chars>"
     )
+    assert detail["response"]["result"]["action"] == "input"
+    assert detail["response"]["result"]["observation"]["elements"] == [
+        {"id": 1, "text": "<redacted post-input text>"},
+        {"id": 2, "text": "<redacted post-input text>"},
+    ]
     assert private_input not in json.dumps(event)
     assert private_input not in json.dumps(detail)
+    assert "correct horse" not in json.dumps(detail)
+    assert "battery staple" not in json.dumps(detail)

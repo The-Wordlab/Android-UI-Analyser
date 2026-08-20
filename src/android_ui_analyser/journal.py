@@ -39,6 +39,25 @@ _MAX_RESULT = 1200
 _MAX_FILE_BYTES = 8 * 1024 * 1024  # rotate soft-cap per serial file
 _MAX_DETAIL_FILE_BYTES = 32 * 1024 * 1024
 _INPUT_COMMANDS = frozenset({"input", "input_text", "input_and_analyze"})
+_PRIVATE_RESPONSE_COMMANDS = _INPUT_COMMANDS | frozenset(
+    {
+        "mic_speak",
+        "mic_speak_and_analyze",
+        "mic_inject",
+        "mic_inject_and_analyze",
+    }
+)
+_PRIVATE_RESPONSE_PROTOCOL_STRINGS = frozenset(
+    {"action", "code", "await_outcome", "stop_reason"}
+)
+
+
+def _effective_privacy_cmd(cmd: str, privacy_cmd: str | None) -> str:
+    """Return the strongest privacy class; metadata can never downgrade a real command."""
+
+    if cmd in _PRIVATE_RESPONSE_COMMANDS:
+        return cmd
+    return privacy_cmd or cmd
 
 
 def journal_dir(cache_dir: str | Path) -> Path:
@@ -60,6 +79,22 @@ def journal_path(cache_dir: str | Path, serial: str | None) -> Path:
 
 def journal_detail_path(cache_dir: str | Path, serial: str | None) -> Path:
     return journal_dir(cache_dir) / f"{_serial_key(serial)}.details.jsonl"
+
+
+def detail_revision(cache_dir: str | Path, serial: str | None) -> str:
+    """Return a cheap change token for detail rows visible to one dashboard scope."""
+
+    current_paths = [journal_detail_path(cache_dir, serial)]
+    host = journal_detail_path(cache_dir, None)
+    if host not in current_paths:
+        current_paths.append(host)
+    parts: list[str] = []
+    for current in current_paths:
+        for path in (current, current.with_suffix(current.suffix + ".1")):
+            with contextlib.suppress(OSError):
+                stat = path.stat()
+                parts.append(f"{path.name}:{stat.st_mtime_ns}:{stat.st_size}")
+    return "|".join(parts)
 
 
 def _truncate(val: Any, limit: int = _MAX_STR) -> Any:
@@ -124,9 +159,11 @@ def _detail_sensitive_literals(
 
     found: set[str] = set()
     lowered = str(key).lower() if key is not None else ""
-    mic_speech = depth == 1 and ((cmd == "mic_speak" and lowered == "text") or (
-        cmd == "mic_speak_and_analyze" and lowered == "speech"
-    ))
+    mic_speech = (
+        depth == 1
+        and cmd in {"mic_speak", "mic_speak_and_analyze"}
+        and lowered in {"text", "speech"}
+    )
     mic_path = depth == 1 and cmd in {
         "mic_inject",
         "mic_inject_and_analyze",
@@ -185,9 +222,10 @@ def _detail_value(
     if request:
         if depth == 1 and cmd in _INPUT_COMMANDS and lowered in {"text", "value"}:
             return f"<redacted input: {len(str(value))} chars>"
-        if depth == 1 and (
-            (cmd == "mic_speak" and lowered == "text")
-            or (cmd == "mic_speak_and_analyze" and lowered == "speech")
+        if (
+            depth == 1
+            and cmd in {"mic_speak", "mic_speak_and_analyze"}
+            and lowered in {"text", "speech"}
         ):
             return f"<redacted speech: {len(str(value))} chars>"
         if depth == 1 and cmd in {"mic_inject", "mic_inject_and_analyze"} and lowered in {
@@ -234,6 +272,47 @@ def _detail_value(
     return str(value)
 
 
+def _private_response_value(
+    value: Any,
+    *,
+    cmd: str,
+    key: object | None = None,
+) -> Any:
+    """Hide post-input/audio text even when the UI transforms or splits it.
+
+    Exact literal replacement cannot prove privacy after a UI divides input across nodes,
+    changes case, or reports only a basename. For these commands, retain response structure
+    and non-text values while exposing only fixed AUA protocol strings.
+    """
+
+    if hasattr(value, "model_dump"):
+        with contextlib.suppress(Exception):
+            value = value.model_dump(mode="json")
+    if isinstance(value, dict):
+        return {
+            str(nested_key): _private_response_value(
+                nested,
+                cmd=cmd,
+                key=nested_key,
+            )
+            for nested_key, nested in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_private_response_value(nested, cmd=cmd) for nested in value]
+    if isinstance(value, bytes):
+        return f"<binary: {len(value)} bytes>"
+    if isinstance(value, Path):
+        value = str(value)
+    if isinstance(value, str):
+        if str(key).lower() in _PRIVATE_RESPONSE_PROTOCOL_STRINGS:
+            return value
+        private_kind = "input" if cmd in _INPUT_COMMANDS else "microphone"
+        return f"<redacted post-{private_kind} text>"
+    if value is None or isinstance(value, (int, float, bool)):
+        return value
+    return "<redacted private response value>"
+
+
 def _detail_record(
     *,
     detail_id: str,
@@ -245,30 +324,32 @@ def _detail_record(
     ok: bool,
     result: Any,
     error: dict[str, Any] | None,
+    privacy_cmd: str | None = None,
 ) -> dict[str, Any]:
-    literals = frozenset(_detail_sensitive_literals(args or {}, cmd=cmd))
-    private_mic_command = cmd in {
-        "mic_speak",
-        "mic_speak_and_analyze",
-        "mic_inject",
-        "mic_inject_and_analyze",
-    }
+    effective_cmd = _effective_privacy_cmd(cmd, privacy_cmd)
+    derived_private = cmd not in _PRIVATE_RESPONSE_COMMANDS and (
+        privacy_cmd in _PRIVATE_RESPONSE_COMMANDS
+    )
+    literals = frozenset(_detail_sensitive_literals(args or {}, cmd=effective_cmd))
+    private_response = effective_cmd in _PRIVATE_RESPONSE_COMMANDS
     response: dict[str, Any] = {"ok": ok}
     if result is not None:
-        detail_result = summarize_result(result) if private_mic_command else result
+        detail_result = (
+            _private_response_value(result, cmd=effective_cmd) if private_response else result
+        )
         response["result"] = _detail_value(
             detail_result,
-            cmd=cmd,
+            cmd=effective_cmd,
             request=False,
             sensitive_literals=literals,
         )
     if error is not None:
         detail_error = (
-            summarize_error(error, cmd=cmd, args=args) if private_mic_command else error
+            _private_response_value(error, cmd=effective_cmd) if private_response else error
         )
         response["error"] = _detail_value(
             detail_error,
-            cmd=cmd,
+            cmd=effective_cmd,
             request=False,
             sensitive_literals=literals,
         )
@@ -279,11 +360,15 @@ def _detail_record(
         "source": source,
         "request": {
             "cmd": cmd,
-            "args": _detail_value(
-                args or {},
-                cmd=cmd,
-                request=True,
-                sensitive_literals=literals,
+            "args": (
+                _private_response_value(args or {}, cmd=effective_cmd)
+                if derived_private
+                else _detail_value(
+                    args or {},
+                    cmd=effective_cmd,
+                    request=True,
+                    sensitive_literals=literals,
+                )
             ),
         },
         "response": response,
@@ -424,6 +509,7 @@ def record(
     error: dict[str, Any] | None = None,
     extra: dict[str, Any] | None = None,
     owner: str | None = None,
+    privacy_cmd: str | None = None,
 ) -> str | None:
     """Append one journal event (best-effort; never raises into the caller).
 
@@ -437,12 +523,19 @@ def record(
         now = time.time()
         ts_ms = int(now * 1000)
         detail_id = uuid.uuid4().hex
+        effective_cmd = _effective_privacy_cmd(cmd, privacy_cmd)
+        derived_private = cmd not in _PRIVATE_RESPONSE_COMMANDS and (
+            privacy_cmd in _PRIVATE_RESPONSE_COMMANDS
+        )
+        compact_args = redact_args(args, cmd=effective_cmd)
+        if derived_private:
+            compact_args = _private_response_value(compact_args, cmd=effective_cmd)
         event: dict[str, Any] = {
             "ts": now,
             "ts_ms": ts_ms,
             "source": source,
             "cmd": cmd,
-            "args": redact_args(args, cmd=cmd),
+            "args": compact_args,
             "ok": ok,
             "serial": serial,
             "pid": os.getpid(),
@@ -464,18 +557,26 @@ def record(
                 event[key] = correlation[key]
         if duration_ms is not None:
             event["duration_ms"] = round(float(duration_ms), 1)
-        sensitive_literals = frozenset(_detail_sensitive_literals(args or {}, cmd=cmd))
+        sensitive_literals = frozenset(
+            _detail_sensitive_literals(args or {}, cmd=effective_cmd)
+        )
         if error:
+            compact_error: Any = summarize_error(error, cmd=effective_cmd, args=args)
+            if effective_cmd in _PRIVATE_RESPONSE_COMMANDS:
+                compact_error = _private_response_value(compact_error, cmd=effective_cmd)
             event["error"] = _detail_value(
-                summarize_error(error, cmd=cmd, args=args),
-                cmd=cmd,
+                compact_error,
+                cmd=effective_cmd,
                 request=False,
                 sensitive_literals=sensitive_literals,
             )
         if result is not None:
+            compact_result = summarize_result(result)
+            if effective_cmd in _PRIVATE_RESPONSE_COMMANDS:
+                compact_result = _private_response_value(compact_result, cmd=effective_cmd)
             event["result"] = _detail_value(
-                summarize_result(result),
-                cmd=cmd,
+                compact_result,
+                cmd=effective_cmd,
                 request=False,
                 sensitive_literals=sensitive_literals,
             )
@@ -491,6 +592,7 @@ def record(
             ok=ok,
             result=result,
             error=error,
+            privacy_cmd=privacy_cmd,
         )
         with _lock:
             detail_path = journal_detail_path(cache_dir, serial)
@@ -601,6 +703,7 @@ def record_emitted_response(
     cmd: str,
     args: dict[str, Any] | None,
     result: Any,
+    request_context: dict[str, Any] | None = None,
 ) -> bool:
     """Append the final CLI-visible response to an existing exchange detail.
 
@@ -641,6 +744,21 @@ def record_emitted_response(
             result=result_value,
             error=None,
         )
+        if request_context:
+            stored_context = dict(request_context)
+            if cmd in _PRIVATE_RESPONSE_COMMANDS and "until" in stored_context:
+                stored_context["until"] = _private_response_value(
+                    stored_context["until"],
+                    cmd=cmd,
+                    key="until",
+                )
+            literals = frozenset(_detail_sensitive_literals(args or {}, cmd=cmd))
+            revised["request"]["client"] = _detail_value(
+                stored_context,
+                cmd=cmd,
+                request=True,
+                sensitive_literals=literals,
+            )
         with _lock:
             path = journal_detail_path(cache_dir, serial)
             _rotate(path, _MAX_DETAIL_FILE_BYTES)

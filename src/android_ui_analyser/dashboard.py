@@ -67,19 +67,19 @@ def resolve_serial(serial: str | None, *, config: Any | None = None) -> str:
         listing = ", ".join(online)
         raise DeviceError(
             f"multiple devices attached ({listing})",
-            hint="Pass --serial <id>, or `aua dashboard --grid` to watch all.",
+            hint="Pass --serial <id>; unpinned `aua dashboard` watches all in a grid.",
         )
     return online[0]
 
 
 def resolve_dashboard_targets(
-    serial: str | None = None, *, grid: bool = False, config: Any | None = None
+    serial: str | None = None, *, grid: bool = True, config: Any | None = None
 ) -> dict[str, Any]:
     """Pick grid vs detail mode.
 
     * Explicit ``--serial`` → detail for that device.
-    * ``--grid`` or multiple online devices with no serial → grid of all.
-    * Exactly one device → detail.
+    * Unpinned/default ``--grid`` → grid that can discover later devices.
+    * Explicit ``--detail`` with no serial → detail for the first online device.
     """
     online = list_online_serials() if config is None else list_online_serials(config)
     if serial:
@@ -93,25 +93,107 @@ def resolve_dashboard_targets(
             hint="Start headless AVDs (`aua emulator start --headless --parallel`) "
             "or pass --serial.",
         )
-    if grid or len(online) > 1:
+    if grid:
         return {"mode": "grid", "serials": online, "focus": None}
     return {"mode": "detail", "serials": online, "focus": online[0]}
 
 
-def owner_for_serial(cache_dir: str | Path, serial: str) -> str | None:
-    """Look up parallel-agent owner tag from aua emulator meta, if any."""
+def _emulator_meta_for_serial(
+    cache_dir: str | Path, serial: str
+) -> dict[str, Any] | None:
+    """Return the newest AUA emulator record for *serial*, ignoring sidecar metadata."""
+
     root = Path(cache_dir).expanduser() / "emulator"
     if not root.is_dir():
         return None
+    matches: list[tuple[float, dict[str, Any]]] = []
     for path in root.glob("*.json"):
         try:
             meta = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if isinstance(meta, dict) and meta.get("serial") == serial:
-            owner = meta.get("owner")
-            return str(owner) if owner else None
-    return None
+        if not isinstance(meta, dict) or meta.get("serial") != serial:
+            continue
+        stamp = float(meta.get("started_at") or 0)
+        with contextlib.suppress(OSError):
+            stamp = max(stamp, path.stat().st_mtime)
+        matches.append((stamp, dict(meta)))
+    return max(matches, key=lambda item: item[0])[1] if matches else None
+
+
+def owner_for_serial(cache_dir: str | Path, serial: str) -> str | None:
+    """Look up the owner tag that started the AUA-managed emulator, if any."""
+
+    meta = _emulator_meta_for_serial(cache_dir, serial)
+    owner = meta.get("owner") if meta else None
+    return str(owner) if owner else None
+
+
+def _pid_is_alive(pid: Any) -> bool:
+    if not isinstance(pid, int) or pid <= 1:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def device_runtime_status(
+    cache_dir: str | Path,
+    serial: str,
+    *,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Describe the live lease and AUA emulator idle-stop watchdog for the dashboard."""
+
+    from . import journal as journal_mod
+    from . import leases
+
+    current_time = time.time() if now is None else now
+    lease = leases.read_lease(cache_dir, serial)
+    lease_status: dict[str, Any] = {"held": lease is not None}
+    if lease is not None:
+        last_lease_activity = float(lease.get("last_activity") or 0)
+        ttl_s = float(lease.get("ttl_s") or 0)
+        lease_status.update(
+            {
+                "owner": str(lease.get("owner") or "unknown"),
+                "owner_pid": lease.get("owner_pid"),
+                "app": lease.get("app"),
+                "idle_s": max(0.0, current_time - last_lease_activity),
+                "ttl_s": ttl_s,
+                "expires_in_s": max(0.0, ttl_s - (current_time - last_lease_activity)),
+            }
+        )
+
+    meta = _emulator_meta_for_serial(cache_dir, serial)
+    watchdog: dict[str, Any] = {"managed": bool(meta and meta.get("started_by_aua"))}
+    if watchdog["managed"] and meta is not None:
+        timeout_s = max(0.0, float(meta.get("idle_timeout_s") or 0))
+        last_activity = float(meta.get("last_activity") or meta.get("started_at") or 0)
+        journal_path = journal_mod.journal_path(cache_dir, serial)
+        if journal_path.is_file():
+            with contextlib.suppress(OSError):
+                last_activity = max(last_activity, journal_path.stat().st_mtime)
+        idle_s = max(0.0, current_time - last_activity)
+        enabled = timeout_s > 0
+        watchdog.update(
+            {
+                "enabled": enabled,
+                "running": enabled and _pid_is_alive(meta.get("watchdog_pid")),
+                "idle_s": idle_s,
+                "timeout_s": timeout_s,
+                "remaining_s": max(0.0, timeout_s - idle_s) if enabled else None,
+                "instance": meta.get("instance") or meta.get("avd"),
+                "explicit": bool(meta.get("idle_stop_explicit")),
+            }
+        )
+    return {"lease": lease_status, "watchdog": watchdog}
 
 
 def captures_root(cache_dir: str | Path, serial: str) -> Path:
@@ -392,6 +474,12 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     margin-top: 0.4rem; font-size: 0.7rem; color: var(--muted);
     display: flex; gap: 0.6rem; flex-wrap: wrap;
   }
+  .tile .tile-runtime {
+    margin-top: 0.4rem; display: grid; gap: 0.18rem;
+    color: var(--muted); font-size: 0.68rem; overflow-wrap: anywhere;
+  }
+  .tile .tile-runtime .held { color: var(--accent); }
+  .tile .tile-runtime .down { color: var(--danger); }
   .database-workspace { max-width: 1600px; margin: 0 auto 0.85rem; padding: 0 0.85rem; }
   .db-toolbar, .db-actions {
     display: flex; gap: 0.55rem; align-items: end; flex-wrap: wrap;
@@ -453,6 +541,8 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   <span id="serial" class="pill">—</span>
   <span id="capture" class="pill">capture …</span>
   <span id="via" class="pill">via …</span>
+  <span id="lease" class="pill">lease …</span>
+  <span id="watchdog" class="pill">auto-stop …</span>
   <span id="age" class="pill">frame …</span>
   <span id="failpill" class="pill hidden">fails 0</span>
   <span id="pkg" class="pill hidden">pkg …</span>
@@ -617,6 +707,8 @@ if (isGrid) {
   document.getElementById('serial').classList.add('hidden');
   document.getElementById('capture').classList.add('hidden');
   document.getElementById('via').classList.add('hidden');
+  document.getElementById('lease').classList.add('hidden');
+  document.getElementById('watchdog').classList.add('hidden');
   document.getElementById('age').classList.add('hidden');
 } else {
   detailView.classList.remove('hidden');
@@ -632,6 +724,7 @@ const journalEl = document.getElementById('journal');
 let lastSrc = '';
 let sinceMs = 0;
 const seenKeys = new Set();
+let detailRevision = '';
 const tileSrc = {};
 
 function qSerial(extra) {
@@ -644,6 +737,30 @@ function fmtAge(ms) {
   if (ms == null) return 'no frame yet';
   if (ms < 1000) return Math.round(ms) + ' ms ago';
   return (ms / 1000).toFixed(1) + 's ago';
+}
+function fmtDuration(seconds) {
+  if (seconds == null || !Number.isFinite(Number(seconds))) return '—';
+  const value = Math.max(0, Number(seconds));
+  if (value < 60) return Math.ceil(value) + 's';
+  if (value < 3600) return Math.ceil(value / 60) + 'm';
+  const totalMinutes = Math.ceil(value / 60);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return hours + 'h' + (minutes ? ' ' + minutes + 'm' : '');
+}
+function leaseText(lease) {
+  if (!lease || !lease.held) return 'unleased';
+  return 'lease ' + (lease.owner || 'unknown');
+}
+function watchdogText(watchdog, lease) {
+  if (!watchdog || !watchdog.managed) return 'auto-stop n/a';
+  if (!watchdog.enabled) return 'auto-stop off';
+  if (!watchdog.running) return 'watchdog down';
+  if (watchdog.remaining_s <= 0) {
+    return lease && lease.held ? 'idle limit reached · lease blocks stop' : 'auto-stop due';
+  }
+  const countdown = 'auto-stop in ' + fmtDuration(watchdog.remaining_s);
+  return lease && lease.held ? countdown + ' · lease blocks' : countdown;
 }
 function fmtTime(ms) {
   if (!ms) return '';
@@ -712,7 +829,7 @@ function renderExchange(panel, exchange, note) {
     panel.appendChild(noteElement);
   }
 }
-async function loadEventExchange(e, panel) {
+async function loadEventExchange(e, panel, showLoading = true) {
   if (!e.detail_id) {
     renderExchange(
       panel,
@@ -721,7 +838,7 @@ async function loadEventExchange(e, panel) {
     );
     return;
   }
-  panel.textContent = 'Loading full request and response…';
+  if (showLoading) panel.textContent = 'Loading full request and response…';
   try {
     const response = await fetch('/api/event' + qSerial({detail_id: e.detail_id}), {
       cache: 'no-store',
@@ -743,6 +860,21 @@ async function loadEventExchange(e, panel) {
       'Full detail could not be loaded; showing the compact journaled payload.'
     );
   }
+}
+function loadEventDetails(details, showLoading = true) {
+  const exchange = details.querySelector('.exchange');
+  if (!exchange || !details.journalEvent) return Promise.resolve();
+  if (details.dataset.loading === 'true') {
+    details.dataset.refreshPending = 'true';
+    return Promise.resolve();
+  }
+  details.dataset.loading = 'true';
+  return loadEventExchange(details.journalEvent, exchange, showLoading).finally(() => {
+    details.dataset.loading = 'false';
+    const refreshPending = details.dataset.refreshPending === 'true';
+    details.dataset.refreshPending = 'false';
+    if (refreshPending && details.open) return loadEventDetails(details, false);
+  });
 }
 function prependEvent(e) {
   const key = e.detail_id || ((e.ts_ms || 0) + ':' + (e.cmd || '') + ':' + (e.source || '') + ':' + (e.pid || ''));
@@ -766,16 +898,22 @@ function prependEvent(e) {
   const exchange = document.createElement('div');
   exchange.className = 'exchange';
   exchange.textContent = 'Expand to load the full request and response.';
-  let loaded = false;
+  details.journalEvent = e;
   details.addEventListener('toggle', () => {
-    if (!details.open || loaded) return;
-    loaded = true;
-    loadEventExchange(e, exchange);
+    if (details.open) loadEventDetails(details);
   });
   details.append(summary, exchange);
   li.appendChild(details);
   journalEl.insertBefore(li, journalEl.firstChild);
   while (journalEl.children.length > 200) journalEl.removeChild(journalEl.lastChild);
+}
+
+async function refreshOpenEventExchanges() {
+  const loads = [];
+  journalEl.querySelectorAll('details[open][data-detail-id]').forEach(details => {
+    loads.push(loadEventDetails(details, false));
+  });
+  await Promise.all(loads);
 }
 
 function ensureTile(d) {
@@ -796,18 +934,32 @@ function ensureTile(d) {
       '<div class="tile-meta">' +
         '<span class="age"></span>' +
         '<span class="pkg"></span>' +
+      '</div>' +
+      '<div class="tile-runtime">' +
+        '<span class="lease"></span>' +
+        '<span class="watchdog"></span>' +
       '</div>';
     tiles.appendChild(a);
   }
   a.querySelector('.ser').textContent = d.serial;
   const own = a.querySelector('.owner');
-  if (d.owner) { own.textContent = 'owner ' + d.owner; own.classList.remove('hidden'); }
-  else { own.textContent = ''; }
+  if (d.owner) { own.textContent = 'started ' + d.owner; own.classList.remove('hidden'); }
+  else { own.textContent = ''; own.classList.add('hidden'); }
   const cap = a.querySelector('.cap');
   cap.textContent = d.capture_running ? 'live' : (d.has_frame ? 'frame' : 'idle');
   cap.className = 'pill cap ' + (d.capture_running ? 'ok' : '');
   a.querySelector('.age').textContent = fmtAge(d.frame_age_ms);
   a.querySelector('.pkg').textContent = d.package ? ('pkg ' + d.package) : '';
+  const lease = d.lease || {};
+  const leaseEl = a.querySelector('.tile-runtime .lease');
+  leaseEl.textContent = leaseText(lease);
+  leaseEl.className = 'lease' + (lease.held ? ' held' : '');
+  const watchdog = d.watchdog || {};
+  const watchdogEl = a.querySelector('.tile-runtime .watchdog');
+  watchdogEl.textContent = watchdogText(watchdog, lease);
+  watchdogEl.className = 'watchdog' + (
+    watchdog.managed && watchdog.enabled && !watchdog.running ? ' down' : ''
+  );
   const img = a.querySelector('img');
   if (d.has_frame) {
     const src = '/api/frame.jpg?serial=' + encodeURIComponent(d.serial) + '&t=' + Date.now();
@@ -849,6 +1001,16 @@ async function tickStatus() {
     cap.textContent = s.capture_running ? 'capture on' : 'capture off';
     cap.className = 'pill ' + (s.capture_running ? 'ok' : 'bad');
     document.getElementById('via').textContent = 'via ' + (s.via || '—');
+    const lease = s.lease || {};
+    const leasePill = document.getElementById('lease');
+    leasePill.textContent = leaseText(lease);
+    leasePill.className = 'pill' + (lease.held ? ' ok' : '');
+    const watchdog = s.watchdog || {};
+    const watchdogPill = document.getElementById('watchdog');
+    watchdogPill.textContent = watchdogText(watchdog, lease);
+    watchdogPill.className = 'pill' + (
+      watchdog.managed && watchdog.enabled && !watchdog.running ? ' bad' : ''
+    );
     document.getElementById('age').textContent = fmtAge(s.frame_age_ms);
     const fc = (s.stats && s.stats.fail_count) || 0;
     const fp = document.getElementById('failpill');
@@ -925,11 +1087,17 @@ async function tickEvents() {
     const base = sinceMs ? ('since_ms=' + sinceMs + '&limit=150') : 'limit=150';
     const r = await fetch('/api/events' + qSerial() + (qSerial() ? '&' : '?') + base, {cache: 'no-store'});
     const d = await r.json();
+    const nextDetailRevision = String(d.detail_revision || '');
+    const detailChanged = Boolean(
+      detailRevision && nextDetailRevision && nextDetailRevision !== detailRevision
+    );
+    detailRevision = nextDetailRevision;
     const evs = d.events || [];
     evs.forEach(e => {
       if (e.ts_ms && e.ts_ms >= sinceMs) sinceMs = e.ts_ms + 1;
       prependEvent(e);
     });
+    if (detailChanged) await refreshOpenEventExchanges();
   } catch (e) {}
 }
 
@@ -1368,6 +1536,7 @@ class _DashboardState:
         self._fallback_lock = threading.Lock()
         self._pkg_cache: dict[str, tuple[str | None, float]] = {}
         self._map_cache: dict[str, tuple[dict[str, Any], float]] = {}
+        self._runtime_cache: dict[str, tuple[dict[str, Any], float]] = {}
         self.database_token = secrets.token_urlsafe(32)
         self._database_lock = threading.Lock()
 
@@ -1412,6 +1581,15 @@ class _DashboardState:
         except Exception as exc:  # noqa: BLE001
             logger.debug("daemon %s skipped: %s", cmd, exc)
         return None
+
+    def device_runtime(self, serial: str) -> dict[str, Any]:
+        now = time.time()
+        cached = self._runtime_cache.get(serial)
+        if cached and (now - cached[1]) < 1.0:
+            return cached[0]
+        status = device_runtime_status(self.cache_dir, serial, now=now)
+        self._runtime_cache[serial] = (status, now)
+        return status
 
     def foreground_package(self, serial: str | None = None) -> str | None:
         ser = serial or self.focus
@@ -1559,7 +1737,11 @@ class _DashboardState:
         events = journal_mod.read_since(self.cache_dir, ser, since_ms=since_ms, limit=limit)
         window = journal_mod.read_since(self.cache_dir, ser, since_ms=None, limit=400)
         stats = journal_mod.failure_stats(window)
-        return {"events": events, "stats": stats}
+        return {
+            "events": events,
+            "stats": stats,
+            "detail_revision": journal_mod.detail_revision(self.cache_dir, ser),
+        }
 
     def journal_detail(
         self, detail_id: str, serial: str | None = None
@@ -1655,9 +1837,11 @@ class _DashboardState:
         pkg = None
         with contextlib.suppress(Exception):
             pkg = self.foreground_package(serial)
+        runtime = self.device_runtime(serial)
         return {
             "serial": serial,
             "owner": owner_for_serial(self.cache_dir, serial),
+            **runtime,
             "package": pkg,
             "via": via,
             "capture_running": capture_running,
@@ -1727,10 +1911,12 @@ class _DashboardState:
             stats = self.journal_bundle(ser, limit=1).get("stats") or {}
 
         ens = self.ensures.get(ser) or {}
+        runtime = self.device_runtime(ser)
         return {
             "ok": True,
             "serial": ser,
             "owner": owner_for_serial(self.cache_dir, ser),
+            **runtime,
             "via": via,
             "package": pkg,
             "capture_running": capture_running,
@@ -2036,8 +2222,8 @@ def run(
 ) -> dict[str, Any]:
     """Ensure capture, serve the dashboard, optionally open a browser.
 
-    With multiple online devices (or ``grid=True``), serves a tile grid of live
-    frames. Pass ``serial`` (or open ``/?serial=…``) for the full detail view.
+    By default, serves a tile grid that discovers online devices as they appear.
+    Pass ``serial`` (or open ``/?serial=…``) for the full detail view.
     """
     from .config import load_config
 

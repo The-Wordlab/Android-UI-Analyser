@@ -14,6 +14,7 @@ from android_ui_analyser import engine as engine_mod
 from android_ui_analyser.cli import app
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.logcat import (
+    extract_crash_evidence,
     filter_logcat,
     line_unix_ms,
     load_marks,
@@ -29,9 +30,23 @@ runner = CliRunner()
 _REF_YEAR = 2026
 
 
-def _line(mon: int, day: int, h: int, m: int, s: int, ms: int, tag: str, msg: str) -> str:
+def _line(
+    mon: int,
+    day: int,
+    h: int,
+    m: int,
+    s: int,
+    ms: int,
+    tag: str,
+    msg: str,
+    *,
+    priority: str = "I",
+    pid: int = 1234,
+    tid: int = 5678,
+) -> str:
     return (
-        f"{mon:02d}-{day:02d} {h:02d}:{m:02d}:{s:02d}.{ms:03d}  1234  5678 I {tag}: {msg}"
+        f"{mon:02d}-{day:02d} {h:02d}:{m:02d}:{s:02d}.{ms:03d}  "
+        f"{pid}  {tid} {priority} {tag}: {msg}"
     )
 
 
@@ -88,6 +103,83 @@ def test_filter_grep_tag_since_lines() -> None:
 
     last = filter_logcat(raw, lines=1, ref_year=_REF_YEAR)
     assert last == [lines[-1]]
+
+
+def test_crash_evidence_keeps_the_exception_stack_and_drops_unrelated_errors() -> None:
+    raw = "\n".join(
+        [
+            _line(8, 20, 12, 0, 0, 0, "Other", "unrelated error", priority="E", pid=9000),
+            _line(
+                8,
+                20,
+                12,
+                0,
+                0,
+                1,
+                "AndroidRuntime",
+                "FATAL EXCEPTION: main",
+                priority="E",
+            ),
+            _line(
+                8,
+                20,
+                12,
+                0,
+                0,
+                2,
+                "AndroidRuntime",
+                "Process: com.example.app, PID: 1234",
+                priority="E",
+            ),
+            _line(
+                8,
+                20,
+                12,
+                0,
+                0,
+                3,
+                "AndroidRuntime",
+                "java.lang.IllegalStateException: broken state",
+                priority="E",
+            ),
+            _line(
+                8,
+                20,
+                12,
+                0,
+                0,
+                4,
+                "AndroidRuntime",
+                "at com.example.app.MainActivity.onClick(MainActivity.kt:42)",
+                priority="E",
+            ),
+            _line(8, 20, 12, 0, 0, 5, "Noise", "ordinary info", pid=9001),
+        ]
+    )
+
+    evidence = extract_crash_evidence(raw, app_id="com.example.app")
+
+    assert evidence["kind"] == "fatal"
+    assert evidence["matched_app"] is True
+    assert evidence["count"] == 4
+    assert "FATAL EXCEPTION" in evidence["lines"][0]
+    assert "IllegalStateException" in "\n".join(evidence["lines"])
+    assert "unrelated error" not in "\n".join(evidence["lines"])
+
+
+def test_crash_evidence_falls_back_to_error_priority_lines() -> None:
+    raw = "\n".join(
+        [
+            _line(8, 20, 12, 0, 0, 0, "Example", "request failed", priority="E"),
+            _line(8, 20, 12, 0, 0, 1, "Example", "ordinary retry", priority="I"),
+        ]
+    )
+
+    evidence = extract_crash_evidence(raw, app_id="com.example.app")
+
+    assert evidence["kind"] == "error"
+    assert evidence["count"] == 1
+    assert "request failed" in evidence["lines"][0]
 
 
 def test_engine_logcat_mark_and_dump() -> None:

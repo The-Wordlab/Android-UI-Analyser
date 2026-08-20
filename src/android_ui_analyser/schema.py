@@ -582,6 +582,10 @@ class ActionResult(BaseModel):
     # reporting success is not evidence of effect" is this project's first lesson. `changed` is
     # an explicit boolean (None = no baseline to compare) so "nothing changed" is checkable.
     change: dict[str, Any] | None = None
+    # A bounded fatal/ANR/error block read automatically from the action's own diagnostic-log
+    # window when the app leaves the foreground. This is structured and top-level so CLI and MCP
+    # callers receive the cause without parsing the warning or spending another tool call.
+    crash_evidence: dict[str, Any] | None = None
     await_outcome: str | None = None
     # Per-term results, reported satisfied or not: *which* term is missing is how a reader
     # tells a failed load from a slow one.

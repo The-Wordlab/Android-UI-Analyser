@@ -68,7 +68,7 @@ def test_resolve_serial_requires_choice(monkeypatch: pytest.MonkeyPatch) -> None
     assert dash.resolve_serial("emulator-5554") == "emulator-5554"
 
 
-def test_resolve_dashboard_targets_grid_when_multiple(
+def test_resolve_dashboard_targets_grid_by_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from android_ui_analyser import dashboard as dash
@@ -85,8 +85,14 @@ def test_resolve_dashboard_targets_grid_when_multiple(
     forced = dash.resolve_dashboard_targets("emulator-5554")
     assert forced["mode"] == "detail"
     assert forced["focus"] == "emulator-5554"
-    grid = dash.resolve_dashboard_targets(None, grid=True)
-    assert grid["mode"] == "grid"
+    detail = dash.resolve_dashboard_targets(None, grid=False)
+    assert detail["mode"] == "detail"
+    assert detail["focus"] == "emulator-5554"
+
+    monkeypatch.setattr(dash, "list_online_serials", lambda: ["emulator-5554"])
+    one_device = dash.resolve_dashboard_targets(None)
+    assert one_device["mode"] == "grid"
+    assert one_device["focus"] is None
 
 
 def test_owner_for_serial(tmp_path: Path) -> None:
@@ -107,6 +113,68 @@ def test_owner_for_serial(tmp_path: Path) -> None:
     )
     assert dash.owner_for_serial(tmp_path, "emulator-5554") == "agent-a"
     assert dash.owner_for_serial(tmp_path, "emulator-5556") is None
+
+
+def test_device_runtime_status_reports_lease_and_idle_watchdog(tmp_path: Path) -> None:
+    from android_ui_analyser import dashboard as dash
+    from android_ui_analyser import leases
+
+    serial = "emulator-5554"
+    now = time.time()
+    rec = tmp_path / "emulator"
+    rec.mkdir()
+    meta = rec / "pixel.json"
+    meta.write_text(
+        json.dumps(
+            {
+                "avd": "Pixel",
+                "instance": "Pixel",
+                "serial": serial,
+                "owner": "starter-a",
+                "started_by_aua": True,
+                "started_at": now - 600,
+                "last_activity": now - 300,
+                "idle_timeout_s": 1200,
+                "watchdog_pid": os.getpid(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert leases.acquire(tmp_path, serial, owner="agent-a", ttl_s=900)
+
+    runtime = dash.device_runtime_status(tmp_path, serial, now=now)
+
+    assert runtime["lease"]["held"] is True
+    assert runtime["lease"]["owner"] == "agent-a"
+    assert runtime["watchdog"] == {
+        "managed": True,
+        "enabled": True,
+        "running": True,
+        "idle_s": 300.0,
+        "timeout_s": 1200.0,
+        "remaining_s": 900.0,
+        "instance": "Pixel",
+        "explicit": False,
+    }
+
+    meta.write_text(
+        json.dumps(
+            {
+                "avd": "Pixel",
+                "serial": serial,
+                "started_by_aua": True,
+                "started_at": now - 600,
+                "last_activity": now - 300,
+                "idle_timeout_s": 0,
+                "idle_stop_explicit": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    disabled = dash.device_runtime_status(tmp_path, serial, now=now)
+    assert disabled["watchdog"]["enabled"] is False
+    assert disabled["watchdog"]["running"] is False
+    assert disabled["watchdog"]["remaining_s"] is None
 
 
 def test_ensure_capture_falls_back_to_sidecar(
@@ -173,6 +241,13 @@ def test_dashboard_journal_rows_expand_request_and_response_as_text() -> None:
     assert "responsePayload.textContent" in dash._DASHBOARD_HTML
     assert "'/api/event'" in dash._DASHBOARD_HTML
     assert "X-AUA-Dashboard-Token" in dash._DASHBOARD_HTML
+    assert "refreshOpenEventExchanges" in dash._DASHBOARD_HTML
+    assert "details.dataset.refreshPending = 'true'" in dash._DASHBOARD_HTML
+    assert "d.detail_revision" in dash._DASHBOARD_HTML
+    assert 'id="lease"' in dash._DASHBOARD_HTML
+    assert 'id="watchdog"' in dash._DASHBOARD_HTML
+    assert "leaseText(lease)" in dash._DASHBOARD_HTML
+    assert "watchdogText(watchdog, lease)" in dash._DASHBOARD_HTML
     assert "</script>" not in dash._script_json("</script><script>alert(1)</script>")
     assert "\\u003c/script\\u003e" in dash._script_json("</script>")
 
@@ -432,6 +507,8 @@ def test_dashboard_journal_detail_is_token_protected_and_serial_scoped(
         ) as response:
             compact = json.loads(response.read())
         assert compact["events"][0]["detail_id"] == detail_id
+        initial_detail_revision = compact["detail_revision"]
+        assert initial_detail_revision
         assert full_only not in json.dumps(compact)
 
         with pytest.raises(urllib.error.HTTPError) as unauthorized:
@@ -452,6 +529,26 @@ def test_dashboard_journal_detail_is_token_protected_and_serial_scoped(
         assert payload["detail"]["response"]["result"]["elements"] == [
             {"id": 1, "text": "Ready"}
         ]
+
+        assert journal.record_emitted_response(
+            cache_dir=tmp_path,
+            serial="emulator-5554",
+            invocation_id="dashboard-live-revision",
+            detail_id=detail_id,
+            cmd="analyze",
+            args={"source": "auto"},
+            result={"ok": True, "full_only": "final agent response"},
+        )
+        with urllib.request.urlopen(
+            root_url + "api/events?serial=emulator-5554&limit=1", timeout=2
+        ) as response:
+            revised_compact = json.loads(response.read())
+        assert revised_compact["detail_revision"] != initial_detail_revision
+        with urllib.request.urlopen(authorized, timeout=2) as response:
+            revised_payload = json.loads(response.read())
+        assert revised_payload["detail"]["response"]["result"]["full_only"] == (
+            "final agent response"
+        )
 
         with urllib.request.urlopen(root_url + "api/devices", timeout=2) as response:
             devices = json.loads(response.read())

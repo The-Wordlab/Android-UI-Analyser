@@ -102,6 +102,27 @@ class _CapabilityPlatform(_InjectedPlatform):
         return self.database if capability == "app_database" else None
 
 
+class _LogPlatform(_InjectedPlatform):
+    name = "log-test"
+    capabilities = frozenset({"ui.tree", "device.logs"})
+
+    def diagnostic_logs(
+        self,
+        runtime: Device,
+        *,
+        lines: int = 400,
+        since_ms: int | None = None,
+    ) -> str:
+        self.calls.append(("diagnostic_logs", (runtime, lines, since_ms)))
+        return (
+            "08-20 12:00:00.001  1234  1234 E AndroidRuntime: FATAL EXCEPTION: main\n"
+            "08-20 12:00:00.002  1234  1234 E AndroidRuntime: "
+            "Process: example.native, PID: 1234\n"
+            "08-20 12:00:00.003  1234  1234 E AndroidRuntime: "
+            "java.lang.IllegalStateException: broken\n"
+        )
+
+
 def test_android_is_the_only_builtin_platform() -> None:
     builtins = registered_platforms()
     assert builtins["android"] is AndroidPlatform
@@ -236,11 +257,54 @@ def test_android_platform_provides_bounded_failure_diagnostics() -> None:
     runtime.log_now(tag="First", msg="older")
     runtime.log_now(tag="Second", msg="newer")
 
-    logs = AndroidPlatform(Config()).diagnostic_logs(runtime, lines=1)
+    logs = AndroidPlatform(Config()).diagnostic_logs(runtime, lines=1, since_ms=123456)
 
     assert "newer" in logs
     assert "older" not in logs
-    assert ("logcat", (None, True)) in runtime.calls
+    assert ("logcat", (123456, True)) in runtime.calls
+
+
+def test_crash_evidence_uses_the_selected_platform_log_capability() -> None:
+    cfg = Config.model_validate(
+        {
+            "memory": {"enabled": False},
+            "lease": {"enabled": False},
+        }
+    )
+    runtime = FakeDevice(package="example.native")
+    platform = _LogPlatform(cfg)
+
+    evidence = Engine(cfg, device=runtime, platform=platform)._crash_evidence("example.native")
+
+    assert evidence["available"] is True
+    assert evidence["kind"] == "fatal"
+    assert "IllegalStateException" in "\n".join(evidence["lines"])
+    diagnostic_call = next(call for call in platform.calls if call[0] == "diagnostic_logs")
+    assert diagnostic_call[1][0] is runtime
+    assert isinstance(diagnostic_call[1][2], int)
+    assert not any(name == "logcat" for name, _args in runtime.calls), (
+        "the engine must use the selected adapter, not reach an Android runtime directly"
+    )
+
+
+def test_crash_evidence_reports_an_unsupported_log_capability() -> None:
+    cfg = Config.model_validate({"memory": {"enabled": False}, "lease": {"enabled": False}})
+    runtime = FakeDevice(package="example.native")
+
+    evidence = Engine(
+        cfg,
+        device=runtime,
+        platform=_InjectedPlatform(cfg),
+    )._crash_evidence("example.native")
+
+    assert evidence == {
+        "available": False,
+        "source": "device.logs",
+        "app_id": "example.native",
+        "code": "platform_capability_unsupported",
+        "detail": "platform 'injected' does not support capability 'device.logs'",
+    }
+    assert not any(name == "logcat" for name, _args in runtime.calls)
 
 
 def test_engine_optional_action_uses_selected_platform_capability() -> None:

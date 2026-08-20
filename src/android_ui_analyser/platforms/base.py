@@ -140,12 +140,19 @@ class PlatformAdapter(ABC):
     def supports(self, capability: str) -> bool:
         return capability in self.capabilities
 
-    def diagnostic_logs(self, runtime: Device, *, lines: int = 400) -> str:
+    def diagnostic_logs(
+        self,
+        runtime: Device,
+        *,
+        lines: int = 400,
+        since_ms: int | None = None,
+    ) -> str:
         """Return recent platform diagnostics for a failed test artifact.
 
         This optional operation is deliberately capability-gated.  A platform that advertises
         ``device.logs`` must implement it; every other platform gets an explicit unsupported
-        result instead of an Android fallback in the engine.
+        result instead of an Android fallback in the engine. ``since_ms`` is the target-clock
+        start of the relevant action window when the platform supports time-bounded logs.
         """
 
         raise DeviceError(

@@ -1011,6 +1011,11 @@ def _journal_dispatch(
         ),
         extra=extra or None,
         owner=request.get("owner") or getattr(engine, "_lease_owner_resolved", None),
+        privacy_cmd=(
+            str(request["journal_privacy_cmd"])
+            if request.get("journal_privacy_cmd")
+            else None
+        ),
     )
 
 
@@ -1185,6 +1190,7 @@ class DaemonClient:
         expected_error_code: str | None = None,
         policy_fingerprint: str | None = None,
         decorate_response: bool = False,
+        journal_privacy_cmd: str | None = None,
     ) -> None:
         self._sock_path = sock_path
         self._timeout = 5.0 if timeout is None else timeout
@@ -1202,6 +1208,7 @@ class DaemonClient:
         self._expected_error_code = expected_error_code
         self._policy_fingerprint = policy_fingerprint
         self._decorate_response = decorate_response
+        self._journal_privacy_cmd = journal_privacy_cmd
 
     def __enter__(self) -> DaemonClient:
         return self
@@ -1232,6 +1239,8 @@ class DaemonClient:
             request["policy_fingerprint"] = self._policy_fingerprint
         if self._decorate_response:
             request["decorate_response"] = True
+        if self._journal_privacy_cmd:
+            request["journal_privacy_cmd"] = self._journal_privacy_cmd
         payload = json.dumps(request, ensure_ascii=False).encode() + b"\n"
 
         # A request that carries its own deadline needs a socket timeout above it. Naming the

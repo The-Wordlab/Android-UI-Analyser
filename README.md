@@ -1116,9 +1116,9 @@ them, run a separate process:
 aua dashboard --serial emulator-5554
 # → opens http://127.0.0.1:8765  (enables capture via daemon or sidecar)
 
-# Multiple parallel agents (auto grid of live screens):
-aua dashboard            # several emulators online → tile grid
-aua dashboard --grid     # force grid even with one device
+# Live grid (default, including with one device):
+aua dashboard            # later emulators appear automatically
+aua dashboard --detail   # optionally focus the first online device
 # Click a tile → detail (journal / map / logcat) for that serial
 ```
 
@@ -1126,7 +1126,15 @@ The page live-polls capture frames + recent action marks. In a device detail vie
 **Agent I/O journal** keeps rows compact while they stream; expand any row to inspect the full
 agent request and AUA response. Full payloads load only on demand, and credentials, SQL, bind
 parameters, typed input, microphone speech, and audio paths remain redacted. Events recorded by an
-older AUA version expand to the compact payload that was retained at the time.
+older AUA version expand to the compact payload that was retained at the time. After input or
+microphone commands, free-form response strings are hidden as well: a UI can split or transform a
+private value, so exact-string replacement alone is not a privacy boundary.
+
+Grid tiles and device detail headers show the live lease holder separately from the owner that
+started the emulator. They also show the AUA idle watchdog state and remaining auto-stop time.
+Auto-stop is lease-gated: reaching the idle threshold never stops a device while a live agent still
+holds its lease. Emulators AUA did not start report `auto-stop n/a`; an explicit `--idle-stop 0`
+reports `auto-stop off`.
 
 In the same detail view, the
 **App database workspace** discovers databases for the foreground package, browses schema,
@@ -1513,7 +1521,7 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 | `aua proxy start\|stop` / `aua mock …` | HTTPS mitm record/map/replay (`[proxy]` extra) |
 | `aua capture …` | Session capture / export / explain |
 | `aua helper status\|enable\|remove` | Optional on-device helper APK — runs a long flow on the device (rootable targets, off by default) |
-| `aua dashboard` | Live browser sneak-peek (`--grid` for multi-agent tiles; works with headless) |
+| `aua dashboard` | Live browser grid of emulator tiles by default; works with headless devices |
 | `aua logcat` / `aua suite` | Device-clock log windows / scripted suites |
 | `aua dev` / `aua a11y` | Dev options helpers / a11y scroll |
 | `aua map` | Show the active-context map (`--all-contexts`, `--audit`, or `--find "<goal>"`) |

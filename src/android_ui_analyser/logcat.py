@@ -35,6 +35,28 @@ _EPOCH_MS = re.compile(r"^(?P<ms>\d{13})\b")
 _TAG_RE = re.compile(
     r"^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3}\s+\d+\s+\d+\s+[VDIWEF]\s+(?P<tag>[^:]+):"
 )
+_DETAIL_RE = re.compile(
+    r"^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3}\s+"
+    r"(?P<pid>\d+)\s+(?P<tid>\d+)\s+(?P<priority>[VDIWEF])\s+"
+    r"(?P<tag>[^:]+):\s?(?P<message>.*)$"
+)
+_CRASH_MARKERS = (
+    "fatal exception",
+    "anr in ",
+    "fatal signal",
+    "am_crash",
+    "has crashed",
+)
+_STACK_MARKERS = (
+    "process:",
+    "java.lang.",
+    "kotlin.",
+    "caused by:",
+    "suppressed:",
+    "at ",
+    "... ",
+    "reason:",
+)
 
 
 def marks_path(cache_dir: str | Path, serial: str) -> Path:
@@ -316,3 +338,125 @@ def filter_logcat(
     if lines is not None and lines >= 0:
         out = out[-lines:]
     return out
+
+
+def extract_crash_evidence(
+    raw: str,
+    *,
+    app_id: str | None = None,
+    limit: int = 60,
+) -> dict[str, Any]:
+    """Extract one bounded fatal/ANR/error block from a diagnostic log window.
+
+    A line-only ``grep FATAL`` drops the exception type and stack that explain the crash. This
+    keeps the surrounding same-process error block, prefers a block naming *app_id*, and falls
+    back to error-priority lines when a platform uses a different crash marker. The caller is
+    expected to pass an already bounded time window (normally ``last-action``).
+    """
+
+    source = [line for line in raw.splitlines() if line.strip()]
+    records: list[dict[str, str] | None] = []
+    for line in source:
+        match = _DETAIL_RE.match(line.lstrip())
+        records.append(match.groupdict() if match else None)
+
+    anchors = [
+        index
+        for index, line in enumerate(source)
+        if any(marker in line.casefold() for marker in _CRASH_MARKERS)
+    ]
+    selected: set[int] = set()
+    selected_kind = "none"
+    app_folded = (app_id or "").casefold()
+
+    if anchors:
+        blocks: list[tuple[set[int], str, bool]] = []
+        for anchor in anchors:
+            anchor_record = records[anchor]
+            anchor_pid = anchor_record.get("pid") if anchor_record else None
+            anchor_tag = anchor_record.get("tag") if anchor_record else None
+            anchor_text = source[anchor].casefold()
+            kind = (
+                "anr"
+                if "anr in " in anchor_text
+                else "fatal"
+                if "fatal exception" in anchor_text or "fatal signal" in anchor_text
+                else "crash"
+            )
+            block: set[int] = {anchor}
+            start = max(0, anchor - 2)
+            end = min(len(source), anchor + 81)
+            for index in range(start, end):
+                line = source[index]
+                folded = line.casefold()
+                record = records[index]
+                priority = record.get("priority") if record else None
+                pid = record.get("pid") if record else None
+                tag = record.get("tag") if record else None
+                message = (record.get("message") or line if record else line).strip().casefold()
+                same_process = bool(anchor_pid and pid == anchor_pid)
+                same_tag = bool(anchor_tag and tag == anchor_tag)
+                if (
+                    index == anchor
+                    or (app_folded and app_folded in folded)
+                    or (
+                        priority in {"E", "F"}
+                        and (same_process or (anchor_pid is None and same_tag))
+                    )
+                    or (same_process and index <= anchor + 40)
+                    or (
+                        index <= anchor + 40
+                        and any(message.startswith(marker) for marker in _STACK_MARKERS)
+                    )
+                ):
+                    block.add(index)
+            names_app = bool(app_folded and any(app_folded in source[i].casefold() for i in block))
+            blocks.append((block, kind, names_app))
+
+        relevant = [block for block in blocks if block[2]] or blocks
+        for block, kind, _names_app in relevant:
+            selected.update(block)
+            if (
+                kind == "fatal"
+                or selected_kind == "none"
+                or (kind == "anr" and selected_kind == "crash")
+            ):
+                selected_kind = kind
+    else:
+        error_indices = {
+            index
+            for index, record in enumerate(records)
+            if record is not None and record.get("priority") in {"E", "F"}
+        }
+        app_pids = {
+            record["pid"]
+            for index, record in enumerate(records)
+            if record is not None and index in error_indices and app_folded in source[index].casefold()
+        }
+        if app_pids:
+            selected = {
+                index
+                for index in error_indices
+                if (record := records[index]) is not None and record.get("pid") in app_pids
+            }
+        else:
+            selected = error_indices
+        if selected:
+            selected_kind = "error"
+
+    ordered = sorted(selected)
+    bounded_limit = max(1, int(limit))
+    truncated = len(ordered) > bounded_limit
+    if truncated:
+        head_count = max(1, (bounded_limit * 2) // 3)
+        tail_count = bounded_limit - head_count
+        ordered = ordered[:head_count] + (ordered[-tail_count:] if tail_count else [])
+    lines = [source[index] for index in ordered]
+    return {
+        "kind": selected_kind,
+        "lines": lines,
+        "count": len(lines),
+        "total_count": len(selected),
+        "truncated": truncated,
+        "matched_app": bool(app_folded and any(app_folded in line.casefold() for line in lines)),
+    }

@@ -218,8 +218,14 @@ class AndroidPlatform(PlatformAdapter):
             "emulator": emulator_check,
         }
 
-    def diagnostic_logs(self, runtime: Device, *, lines: int = 400) -> str:
-        raw = runtime.logcat(dump=True)
+    def diagnostic_logs(
+        self,
+        runtime: Device,
+        *,
+        lines: int = 400,
+        since_ms: int | None = None,
+    ) -> str:
+        raw = runtime.logcat(since_ms=since_ms, dump=True)
         return "\n".join(raw.splitlines()[-max(1, lines) :])
 
     def capture_screenshot(self, runtime: Device) -> ScreenImage:

@@ -205,7 +205,7 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "then replaces the database without stale sidecars. Use `db backups` / "
         "`db restore … --yes` to roll back. Query/execute results can contain user data; "
         "request only the columns and rows the task needs. For human inspection, the "
-        "single-device `aua dashboard` detail view has a database workspace backed by the "
+        "per-device `aua dashboard` detail view has a database workspace backed by the "
         "same service and typed mutation/restore confirmations.",
     ),
     (
@@ -940,13 +940,14 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "`meta.capture_hint` / action `capture_hint` after fast transitions; suite failures "
         "attach `capture last --since last-action`. Sneak-peek a headless agent live: "
         "`aua dashboard` (separate process — enables capture via daemon or sidecar, "
-        "opens http://127.0.0.1:8765; **grid** when multiple agents/emulators are online)",
+        "opens http://127.0.0.1:8765 in a live device **grid** by default)",
     ),
     (
         "dashboard",
-        "`dashboard [--serial …] [--grid] [--port 8765] [--no-open] [--poll-ms 500]` — "
-        "localhost sneak-peek; auto **grid of live screens** when several emulators are "
-        "online (click a tile for journal/map); the detail view browses debuggable app "
+        "`dashboard [--serial …] [--grid|--detail] [--port 8765] [--no-open] [--poll-ms 500]` — "
+        "localhost sneak-peek; defaults to a live device **grid** that discovers later "
+        "emulators and shows lease/idle-watchdog state (click a tile for journal/map); "
+        "the detail view browses debuggable app "
         "databases, schema, bounded queries, restore points, and guarded writes; enables "
         "capture; does not stop the agent (Ctrl-C closes the dashboard only)",
     ),
@@ -1429,7 +1430,7 @@ def render_markdown(*, brief: bool = False) -> str:
         "# …\n"
         'aua emulator stop --serial "$AUA_SERIAL"   # only yours — never bare stop --all\n'
         "```\n"
-        "Sneak-peek all of them: `aua dashboard` (auto **grid** when multiple are online).\n"
+        "Sneak-peek all of them: `aua dashboard` (live device **grid** by default).\n"
         "Headless on Mac uses **host GPU** (Metal). **Always stop AVDs you started** before "
         "ending — idle `--idle-stop` (default 900s) and MCP exit cleanup are backups only.\n"
         "For **proxy / mock HTTPS** (apps that only trust system CAs), Play Store AVDs "

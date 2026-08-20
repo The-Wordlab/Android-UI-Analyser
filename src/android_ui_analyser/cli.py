@@ -326,10 +326,11 @@ def _run(ctx: typer.Context, fn: Callable[[Engine, OutputFormat], T]) -> T:
     """
     opts = _opts(ctx)
     try:
-        global _INVOCATION_ID
+        global _INVOCATION_ID, _CLI_OUTPUT_FORMAT, _CLI_OBSERVE_FIELDS_SPEC
         _INVOCATION_ID = uuid.uuid4().hex
         _CLI_JOURNAL_CONTEXTS.clear()
         cfg_fmt = opts.fmt()
+        _CLI_OUTPUT_FORMAT = cfg_fmt
         # A global --until is logically part of the action, so validate it before constructing
         # the engine or applying any side effect.  Previously the parser lived only inside
         # `await_predicate`, which runs after the tap/input: a typo could therefore mutate the
@@ -380,6 +381,7 @@ def _run(ctx: typer.Context, fn: Callable[[Engine, OutputFormat], T]) -> T:
         spec = opts.observe_fields
         if spec is None:
             spec = getattr(engine.config.output, "observation_fields", None)
+        _CLI_OBSERVE_FIELDS_SPEC = spec
         _OBSERVATION_VIEW = Projection.for_observation(spec, fmt=cfg_fmt)
         _ENGINE = engine
         _EXPECTED_ERROR_CODE = opts.expect_error
@@ -700,6 +702,8 @@ _ENGINE: Any = None
 _INVOCATION_ID: str | None = None
 _ANNOTATION_WARNINGS: list[dict[str, Any]] = []
 _EXPECTED_ERROR_CODE: str | None = None
+_CLI_OUTPUT_FORMAT: OutputFormat | None = None
+_CLI_OBSERVE_FIELDS_SPEC: str | None = None
 # Fingerprint of the screen this process actually handed back, captured on the way out and
 # stamped when the turn closes. The next call compares against it to answer "is the screen you
 # have been thinking about still up" without a second device read.
@@ -714,9 +718,59 @@ class _CliJournalContext:
     detail_id: str | None
     cmd: str
     args: dict[str, Any]
+    client: dict[str, Any]
 
 
 _CLI_JOURNAL_CONTEXTS: dict[int, _CliJournalContext] = {}
+
+
+def _projection_request(view: Projection | None) -> dict[str, Any] | None:
+    if view is None:
+        return None
+    values: dict[str, Any] = {
+        "fields": list(view.fields),
+        "nonempty": view.nonempty,
+        "keep_actionable": view.keep_actionable,
+        "no_system": view.no_system,
+        "no_ime": view.no_ime,
+        "no_wrappers": view.no_wrappers,
+        "where_text": list(view.where_text),
+        "where_rid": list(view.where_rid),
+        "clickable": view.clickable_only,
+        "regions": [list(region) for region in view.regions],
+        "limit": view.limit,
+        "meta": list(view.meta_keys) if view.meta_keys is not None else None,
+        "no_meta": view.no_meta,
+        "tsv": view.tsv,
+    }
+    return {
+        key: value
+        for key, value in values.items()
+        if value is not None and value is not False and value != [] and value != ()
+    }
+
+
+def _cli_request_context() -> dict[str, Any]:
+    context: dict[str, Any] = {}
+    if _CLI_OUTPUT_FORMAT is not None:
+        context["format"] = _CLI_OUTPUT_FORMAT.value
+    if _UNTIL is not None:
+        predicate, timeout_ms, poll_ms = _UNTIL
+        context.update(
+            {
+                "until": predicate,
+                "until_timeout_ms": timeout_ms,
+                "until_poll_ms": poll_ms,
+            }
+        )
+    if _CLI_OBSERVE_FIELDS_SPEC is not None:
+        context["observe_fields"] = _CLI_OBSERVE_FIELDS_SPEC
+    observation_projection = _projection_request(_OBSERVATION_VIEW)
+    if observation_projection is not None:
+        context["observation_projection"] = observation_projection
+    if _EXPECTED_ERROR_CODE:
+        context["expect_error"] = _EXPECTED_ERROR_CODE
+    return context
 
 
 def _remember_cli_journal(
@@ -738,6 +792,7 @@ def _remember_cli_journal(
             detail_id=detail_id,
             cmd=cmd,
             args=dict(args),
+            client=_cli_request_context(),
         )
     return result
 
@@ -746,7 +801,12 @@ def _take_cli_journal(result: Any) -> _CliJournalContext | None:
     return _CLI_JOURNAL_CONTEXTS.pop(id(result), None)
 
 
-def _record_cli_emitted(context: _CliJournalContext | None, result: Any) -> None:
+def _record_cli_emitted(
+    context: _CliJournalContext | None,
+    result: Any,
+    *,
+    client: dict[str, Any] | None = None,
+) -> None:
     if context is None:
         return
     with contextlib.suppress(Exception):
@@ -760,6 +820,7 @@ def _record_cli_emitted(context: _CliJournalContext | None, result: Any) -> None
             cmd=context.cmd,
             args=context.args,
             result=result,
+            request_context=client if client is not None else context.client,
         )
 
 
@@ -858,7 +919,7 @@ def _await_timeout_note(predicate: str, timeout_ms: int, result: Any) -> str:
     )
 
 
-def _await_until(result: Any) -> Any:
+def _await_until(result: Any, *, journal_privacy_cmd: str | None = None) -> Any:
     """Honour a global ``--until``: wait for the predicate, then adopt *that* screen.
 
     The post-action settle can only ever wait ~1.1s (``_await_post_action_ready``), stretched
@@ -890,6 +951,7 @@ def _await_until(result: Any) -> Any:
             poll_ms=poll_ms,
             observe=True,
             adopt_action=True,
+            _journal_privacy_cmd=journal_privacy_cmd,
         )
         # This wait is folded into the action response below; it is journaled as its own
         # internal row but is not itself emitted by the CLI.
@@ -951,7 +1013,10 @@ def _emit(
     journal_context = _journal_context or _take_cli_journal(result)
     if isinstance(result, dict):
         result = _rehydrate(result)
-    result = _await_until(result)
+    result = _await_until(
+        result,
+        journal_privacy_cmd=journal_context.cmd if journal_context is not None else None,
+    )
     result = _caller_turn(result)
     projected = _project_observation(result, fmt)
     if _ANNOTATION_WARNINGS:
@@ -1193,6 +1258,12 @@ def _analyze_payload(result: Any) -> dict[str, Any] | None:
 def _emit_analyze(result: Any, fmt: OutputFormat, view: Projection) -> None:
     """Emit an analyze result, through *view* when it asked for anything."""
     journal_context = _take_cli_journal(result)
+    projection = _projection_request(view) if view.active else None
+    if journal_context is not None and projection is not None:
+        journal_context = replace(
+            journal_context,
+            client={**journal_context.client, "projection": projection},
+        )
     result = _caller_turn(result)
     payload = _analyze_payload(result) if view.active else None
     if payload is None:
@@ -1471,6 +1542,10 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
     matching :class:`AuaError` (it is the answer, so it must not be swallowed).
     """
     cfg = engine.config
+    journal_privacy_cmd_raw = kwargs.pop("_journal_privacy_cmd", None)
+    journal_privacy_cmd = (
+        str(journal_privacy_cmd_raw) if journal_privacy_cmd_raw else None
+    )
     # Resolve the process-bound lease *before* choosing a daemon socket.  A daemon is bound
     # to one physical device, so routing an unpinned call through the unsuffixed socket and
     # leasing only inside that daemon can make the lease registry say "emulator-5558" while
@@ -1577,6 +1652,8 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
                 }
                 if _EXPECTED_ERROR_CODE:
                     client_options["expected_error_code"] = _EXPECTED_ERROR_CODE
+                if journal_privacy_cmd:
+                    client_options["journal_privacy_cmd"] = journal_privacy_cmd
                 client_options["policy_fingerprint"] = expected_policy
                 # The warm daemon owns the long-lived Engine/provider cache. Ask it to attach
                 # goal progress and optional policy output before journaling/serialization so a
@@ -1678,6 +1755,7 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
                         else {}
                     ),
                 },
+                privacy_cmd=journal_privacy_cmd,
             )
         return _remember_cli_journal(
             result,
@@ -1711,6 +1789,7 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
                         else {}
                     ),
                 },
+                privacy_cmd=journal_privacy_cmd,
             )
         raise
 
@@ -5756,12 +5835,12 @@ def orient(ctx: typer.Context) -> None:
 def dashboard(
     ctx: typer.Context,
     serial: str | None = typer.Option(
-        None, "--serial", help="Device serial (detail view). Omit with multiple devices for grid."
+        None, "--serial", help="Pin the detail view to one device serial."
     ),
     grid: bool = typer.Option(
-        False,
-        "--grid",
-        help="Force multi-device grid (live screens). Auto-on when several emulators are online.",
+        True,
+        "--grid/--detail",
+        help="Start with the live device grid (default); --detail focuses the first device.",
     ),
     port: int = typer.Option(
         8765, "--port", help="Preferred localhost port (tries nearby if busy)."
@@ -5776,9 +5855,9 @@ def dashboard(
     """Sneak-peek a headless agent run in the browser (separate process).
 
     Enables capture if needed (warm daemon buffer, or host sidecar), then serves a
-    localhost page with live frames + recent action marks. With multiple online
-    emulators, opens a **grid** of screens (click a tile for journal/map). Does not
-    stop the agent. Ctrl-C exits the dashboard only.
+    localhost page with live frames + recent action marks. It opens a **grid** of
+    screens by default and discovers emulators started later; click a tile for its
+    journal/map. Does not stop the agent. Ctrl-C exits the dashboard only.
     """
     from . import dashboard as dash
 
