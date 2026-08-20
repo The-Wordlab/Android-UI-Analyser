@@ -495,8 +495,9 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     <h2>App database workspace</h2>
     <p class="db-note">
       Inspect SQLite data through the app's debuggable <code>run-as</code> sandbox.
-      Schema, queries, backups, mutations, and restores briefly stop the app to capture a
-      coherent snapshot; keep “restart app” selected to relaunch it afterward.
+      Read-only queries preserve the current app screen by default. Schema, backups, mutations,
+      restores, and optional coherent queries briefly stop the app; keep “restart app” selected
+      to relaunch it afterward.
     </p>
     <div class="db-toolbar">
       <label class="db-field grow">Package
@@ -537,6 +538,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
           <label class="db-field">Row limit
             <input id="db-limit" class="db-input" type="number" min="1" max="1000" value="100" style="width:6.5rem"/>
           </label>
+          <label><input id="db-coherent-query" type="checkbox"/> coherent query (stops app)</label>
         </div>
         <div class="db-actions">
           <button id="db-query-button" class="db-button primary" disabled>Run read-only query</button>
@@ -863,6 +865,7 @@ const dbSql = document.getElementById('db-sql');
 const dbParams = document.getElementById('db-params');
 const dbLimit = document.getElementById('db-limit');
 const dbRestart = document.getElementById('db-restart');
+const dbCoherentQuery = document.getElementById('db-coherent-query');
 const dbConfirmDialog = document.getElementById('db-confirm-dialog');
 const dbConfirmInput = document.getElementById('db-confirm-input');
 const dbConfirmSubmit = document.getElementById('db-confirm-submit');
@@ -1047,13 +1050,18 @@ async function runDatabaseQuery() {
     setDatabaseStatus(error.message, 'bad');
     return;
   }
-  setDatabaseStatus('Running read-only query against a coherent snapshot…');
+  setDatabaseStatus(
+    dbCoherentQuery.checked ?
+      'Stopping the app for a coherent read-only snapshot…' :
+      'Running read-only query without stopping the app…'
+  );
   try {
     const data = await databaseRequest('query', {
       ...databaseSelection(),
       sql: dbSql.value,
       parameters: parameters,
       limit: Number(dbLimit.value || 100),
+      live: !dbCoherentQuery.checked,
     });
     renderDatabaseTable(data.columns, data.rows);
     dbResultMeta.textContent = data.row_count + ' row' + (data.row_count === 1 ? '' : 's') +
@@ -1349,6 +1357,7 @@ class _DashboardState:
                     restart=restart,
                 )
             if action == "query":
+                live = self._database_bool(payload, "live", True)
                 return app_database.query_database(
                     device,
                     package,
@@ -1358,6 +1367,7 @@ class _DashboardState:
                     limit=self._database_int(payload, "limit", 100, maximum=1000),
                     timeout_ms=self._database_int(payload, "timeout_ms", 5000, maximum=60_000),
                     restart=restart,
+                    live=live,
                 )
             if action == "backup":
                 return app_database.backup_database(

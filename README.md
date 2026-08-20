@@ -1138,11 +1138,13 @@ aua db query com.example.app app.db \
   --params '{"chat":"abc"}' --limit 100
 ```
 
-Android system images frequently omit the `sqlite3` executable. AUA stops the package,
-copies the selected database plus any WAL/SHM sidecars through `run-as`, operates on a private
-host snapshot with Python SQLite, and relaunches the package by default. Pass `--no-restart`
-only when the next step expects the app to remain stopped. Queries run with SQLite
-`query_only`, a row limit, and a timeout; blobs are returned as base64 metadata.
+Android system images frequently omit the `sqlite3` executable. Read-only queries copy the
+selected database plus its WAL through `run-as` while the app keeps running, then use Python
+SQLite in read-only mode so the current screen and navigation state are preserved. Pass
+`--coherent` when transactional coherence matters more than UI continuity; that mode stops the
+package, includes WAL/SHM in the snapshot, and relaunches by default (`--no-restart` leaves it
+stopped). Queries use SQLite `query_only`, a row limit, and a timeout; blobs are returned as
+base64 metadata.
 
 Data mutation is explicit and recoverable:
 

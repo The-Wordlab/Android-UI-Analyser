@@ -114,7 +114,8 @@ aua wait-and-analyze --for "<text>"  # wait on state and return the satisfied sc
 aua install <app.apk> --launch # put a build on the device and open it (no `adb install`)
 aua emulator start --apk <app.apk> --launch  # boot + install + launch in one call
 aua db list <pkg>              # discover private SQLite databases (debuggable builds)
-aua db query <pkg> <db> "SELECT …"   # coherent host-side snapshot → JSON rows
+aua db query <pkg> <db> "SELECT …"   # live host-side snapshot; current UI is preserved
+aua db query <pkg> <db> "SELECT …" --coherent  # stop app for transactional coherence
 aua db execute <pkg> <db> "UPDATE …" --yes  # backup + validate + replace + relaunch
 ```
 

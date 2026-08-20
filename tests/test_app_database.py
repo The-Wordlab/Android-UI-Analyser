@@ -109,7 +109,7 @@ def test_list_reports_primary_databases_and_sidecars(tmp_path: Path) -> None:
     assert not [call for call in device.calls if call[0] == "stop_app"]
 
 
-def test_query_is_read_only_parameterized_bounded_and_restarts(tmp_path: Path) -> None:
+def test_query_is_read_only_parameterized_bounded_and_preserves_app_state(tmp_path: Path) -> None:
     device = _device(tmp_path)
 
     result = app_database.query_database(
@@ -125,8 +125,10 @@ def test_query_is_read_only_parameterized_bounded_and_restarts(tmp_path: Path) -
     assert result["rows"][0][:2] == [10, "before"]
     assert result["rows"][0][2] == {"base64": "AAEC", "bytes": 3}
     assert result["truncated"] is False
-    assert [call[0] for call in device.calls].count("stop_app") == 1
-    assert [call[0] for call in device.calls].count("launch_app") == 1
+    assert not [call for call in device.calls if call[0] in ("stop_app", "launch_app")]
+    assert result["coherent"] is False
+    assert result["app_stopped"] is False
+    assert result["app_restarted"] is False
 
     original = dict(device.app_files)
     with pytest.raises(UsageError, match="query failed"):
@@ -396,10 +398,10 @@ def test_cli_execute_requires_yes_then_returns_the_restore_point(
 # --------------------------------------------------------------------- state-loss warning
 
 
-def test_query_warns_that_navigation_state_is_lost(tmp_path: Path) -> None:
+def test_coherent_query_warns_that_navigation_state_is_lost(tmp_path: Path) -> None:
     device = _device(tmp_path)
 
-    result = app_database.query_database(device, PKG, DB, "SELECT 1")
+    result = app_database.query_database(device, PKG, DB, "SELECT 1", live=False)
 
     assert result["app_restarted"] is True
     assert "warning" in result
@@ -408,10 +410,10 @@ def test_query_warns_that_navigation_state_is_lost(tmp_path: Path) -> None:
     assert "navigat" in result["warning"].lower()
 
 
-def test_query_no_restart_warning_says_the_app_was_left_stopped(tmp_path: Path) -> None:
+def test_coherent_query_no_restart_warning_says_the_app_was_left_stopped(tmp_path: Path) -> None:
     device = _device(tmp_path)
 
-    result = app_database.query_database(device, PKG, DB, "SELECT 1", restart=False)
+    result = app_database.query_database(device, PKG, DB, "SELECT 1", restart=False, live=False)
 
     assert result["app_restarted"] is False
     assert "warning" in result
@@ -525,16 +527,21 @@ def test_execute_backup_restore_have_no_live_bypass() -> None:
     assert "live" not in inspect.signature(app_database.restore_database).parameters
 
 
-def test_engine_and_mcp_expose_the_live_query_flag(
+def test_engine_cli_and_mcp_default_to_live_and_expose_coherent_opt_in(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     device = _device(tmp_path)
     engine = _engine(tmp_path, device)
 
-    engine_result = engine.database_query(PKG, DB, "SELECT 1", live=True)
+    engine_result = engine.database_query(PKG, DB, "SELECT 1")
     assert engine_result["coherent"] is False
     assert not [call for call in device.calls if call[0] == "stop_app"]
+
+    device.calls.clear()
+    coherent_engine_result = engine.database_query(PKG, DB, "SELECT 1", live=False)
+    assert coherent_engine_result["coherent"] is True
+    assert [call[0] for call in device.calls].count("stop_app") == 1
 
     monkeypatch.setattr(engine_mod, "connect", lambda serial=None: device)
     monkeypatch.setattr(
@@ -547,20 +554,35 @@ def test_engine_and_mcp_expose_the_live_query_flag(
     )
     cli_result = CliRunner().invoke(
         app,
-        ["db", "query", PKG, DB, "SELECT 1", "--live"],
+        ["db", "query", PKG, DB, "SELECT 1"],
     )
     assert cli_result.exit_code == 0, cli_result.output
     assert json.loads(cli_result.stdout)["coherent"] is False
 
+    coherent_cli_result = CliRunner().invoke(
+        app,
+        ["db", "query", PKG, DB, "SELECT 1", "--coherent"],
+    )
+    assert coherent_cli_result.exit_code == 0, coherent_cli_result.output
+    assert json.loads(coherent_cli_result.stdout)["coherent"] is True
+
     server = build_server(engine)
 
-    async def call_mcp() -> dict[str, object]:
+    async def call_mcp() -> tuple[dict[str, object], dict[str, object]]:
         async with create_connected_server_and_client_session(server) as client:
             response = await client.call_tool(
                 "database_query",
-                {"package": PKG, "database": DB, "sql": "SELECT 1", "live": True},
+                {"package": PKG, "database": DB, "sql": "SELECT 1"},
             )
-            return json.loads(_first_text(response))
+            coherent_response = await client.call_tool(
+                "database_query",
+                {"package": PKG, "database": DB, "sql": "SELECT 1", "live": False},
+            )
+            return (
+                json.loads(_first_text(response)),
+                json.loads(_first_text(coherent_response)),
+            )
 
-    mcp_result = anyio.run(call_mcp)
+    mcp_result, coherent_mcp_result = anyio.run(call_mcp)
     assert mcp_result["coherent"] is False
+    assert coherent_mcp_result["coherent"] is True

@@ -159,7 +159,8 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     Capability(
         "database",
-        "Inspect debuggable app SQLite state with coherent WAL-aware snapshots.",
+        "Inspect debuggable app SQLite state without disrupting UI; coherent snapshots "
+        "remain optional.",
         ("database", "sqlite", "room", "cache", "persisted", "thread"),
         60,
         "aua db list <package>",

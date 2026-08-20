@@ -189,9 +189,11 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "Inspect or seed app state through AUA, not hand-written adb",
         "For a debuggable build, `aua db list <pkg>` discovers private SQLite files, "
         '`aua db schema <pkg> <db>` describes them, and `aua db query <pkg> <db> "SELECT …"` '
-        "returns bounded JSON rows. Android images often have no `sqlite3`, so AUA stops the "
-        "app, snapshots the database plus WAL/SHM through `run-as`, queries with host SQLite, "
-        "and relaunches by default (`--no-restart` leaves it stopped). Data mutation is "
+        "returns bounded JSON rows without stopping the app, preserving its current UI. Android "
+        "images often have no `sqlite3`, so AUA copies the database plus WAL through `run-as` "
+        "and queries it read-only with host SQLite. Use `db query … --coherent` when transactional "
+        "coherence is required; it stops/relaunches the app (`--no-restart` leaves it stopped). "
+        "Data mutation is "
         '`aua db execute <pkg> <db> "UPDATE …" --yes`: it creates a restore point, runs one '
         "transaction, rejects schema/PRAGMA/ATTACH changes, checks foreign keys and integrity, "
         "then replaces the database without stale sidecars. Use `db backups` / "
@@ -879,10 +881,11 @@ KEY_FLAGS: list[tuple[str, str]] = [
     (
         "db",
         "`list <pkg>`, `schema <pkg> <db> [--table NAME]`, "
-        '`query <pkg> <db> "SELECT …" [--params JSON --limit N]`, '
+        '`query <pkg> <db> "SELECT …" [--params JSON --limit N --coherent]`, '
         '`execute <pkg> <db> "UPDATE …" --yes`, `backup|backups|restore`. '
-        "All coherent reads stop/relaunch the app; execute backs up first and accepts data "
-        "mutations only; restore preserves the current state as a new safety backup",
+        "Queries preserve UI by default; `--coherent`, schema, and state-changing operations "
+        "stop/relaunch the app. Execute backs up first and accepts data mutations only; restore "
+        "preserves the current state as a new safety backup",
     ),
     (
         "clipboard / paste / copy",
@@ -1061,8 +1064,8 @@ AGENT_BEST_PRACTICES_PERCEPTION: list[tuple[str, str, str]] = [
     (
         "Hand-roll `adb exec-out run-as` + DB/WAL copies + host sqlite + push-back",
         "Use `aua db list|schema|query|execute|backup|restore`",
-        "AUA targets the leased device/package, snapshots sidecars coherently, returns JSON, "
-        "and makes every confirmed mutation recoverable.",
+        "AUA targets the leased device/package, preserves UI for normal queries, offers coherent "
+        "snapshots when needed, returns JSON, and makes every confirmed mutation recoverable.",
     ),
     (
         "`adb -s <serial> install -r <apk>` to get the build on the device",

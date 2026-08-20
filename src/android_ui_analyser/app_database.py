@@ -249,7 +249,8 @@ _LIVE_SNAPSHOT_WARNING = (
     "checksum validates, so a torn copy fails safe (a slightly older but internally "
     "consistent state) rather than returning corrupt data -- but this is a point-in-time-ish "
     "read, not a transactionally coherent one. In-app navigation and UI state were NOT "
-    "touched. For a guaranteed-coherent snapshot, omit --live."
+    "touched. For a guaranteed-coherent snapshot, request coherent mode (`--coherent` in "
+    "the CLI or `live: false` through MCP/API)."
 )
 
 
@@ -533,15 +534,15 @@ def query_database(
     limit: int = _DEFAULT_LIMIT,
     timeout_ms: int = _DEFAULT_TIMEOUT_MS,
     restart: bool = True,
-    live: bool = False,
+    live: bool = True,
 ) -> dict[str, Any]:
     """Run one read-only statement against a host-side database snapshot.
 
-    By default this stops the app to get a transactionally coherent snapshot (see
-    ``_stopped_app``); pass ``live=True`` to read a copy taken while the app keeps running
-    instead -- no navigation/UI state is lost, but the copy may be torn (see
-    ``_snapshot_live_to_temp`` / ``_LIVE_SNAPSHOT_WARNING``). ``restart`` is meaningless when
-    ``live`` is set, since the app is never stopped.
+    By default this reads a copy taken while the app keeps running, so navigation/UI state is
+    preserved; pass ``live=False`` for a transactionally coherent stop-first snapshot (see
+    ``_stopped_app``). The live copy may be torn (see ``_snapshot_live_to_temp`` /
+    ``_LIVE_SNAPSHOT_WARNING``). ``restart`` is meaningful only in coherent mode, since the app
+    is never stopped in live mode.
     """
     package = _validate_package(package)
     database = _validate_database(database)

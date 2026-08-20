@@ -16994,7 +16994,7 @@ class Engine:
         limit: int = 100,
         timeout_ms: int = 5000,
         restart: bool = True,
-        live: bool = False,
+        live: bool = True,
     ) -> dict[str, Any]:
         app_database = self.platform.capability("app_database")
 

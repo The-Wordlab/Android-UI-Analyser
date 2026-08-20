@@ -4701,21 +4701,20 @@ def database_query_cmd(
     ),
     restart: bool = _DATABASE_RESTART,
     live: bool = typer.Option(
-        False,
-        "--live",
-        help="Read a copy taken WITHOUT stopping the app (no navigation/UI state lost), "
-        "instead of the default coherent stop-and-snapshot. The copy may be torn -- "
-        "the app can be mid-write -- so this is a point-in-time-ish read, not a "
-        "transactionally guaranteed one. Ignores --restart (the app is never stopped).",
+        True,
+        "--live/--coherent",
+        help="Keep the app running and preserve navigation/UI state (default). Pass "
+        "--coherent to stop the app for a transactionally coherent snapshot. Live copies "
+        "may be point-in-time-ish if the app is mid-write; --restart applies only to "
+        "--coherent.",
     ),
 ) -> None:
-    """Run one read-only query against a coherent host-side snapshot.
+    """Run one read-only query without disturbing the current app screen.
 
-    By default this force-stops the app to get that coherent snapshot, then relaunches it
-    (or leaves it stopped with ``--no-restart``) -- either way, in-app navigation and UI state
-    from before the call is gone; the result's ``warning`` says so. Pass ``--live`` to read
-    without stopping the app at all, at the cost of a possibly torn (not transactionally
-    coherent) snapshot -- also flagged in the result.
+    The default live snapshot preserves in-app navigation/UI state. Pass ``--coherent`` when a
+    transactionally coherent snapshot is required; that mode force-stops the app and relaunches
+    it by default (or leaves it stopped with ``--no-restart``), so its result warns that the
+    previous UI state is gone.
     """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:

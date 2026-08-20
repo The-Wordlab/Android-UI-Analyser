@@ -2162,10 +2162,10 @@ def _tool_definitions() -> list[types.Tool]:
             name="database_query",
             description=(
                 "Run one read-only SQLite statement against a private-database snapshot and "
-                "return columns plus JSON rows. By default this force-stops the app for a "
-                "coherent snapshot (the result's `warning` says navigation/UI state is gone); "
-                "pass `live: true` to read without stopping the app, at the cost of a "
-                "possibly torn (not transactionally coherent) snapshot."
+                "return columns plus JSON rows. By default this keeps the app running and "
+                "preserves navigation/UI state. Pass `live: false` only when a transactionally "
+                "coherent snapshot is required; that force-stops the app and the result's "
+                "`warning` says the previous UI state is gone."
             ),
             inputSchema={
                 "type": "object",
@@ -2179,9 +2179,10 @@ def _tool_definitions() -> list[types.Tool]:
                     "restart": {"type": "boolean", "default": True},
                     "live": {
                         "type": "boolean",
-                        "default": False,
-                        "description": "Read without stopping the app (no state lost); the "
-                        "copy may be torn. Ignores `restart`.",
+                        "default": True,
+                        "description": "Keep the app running and preserve UI state (default). "
+                        "Set false for a coherent stop-first snapshot. Ignores `restart` when "
+                        "true.",
                     },
                 },
                 "required": ["package", "database", "sql"],
@@ -3121,7 +3122,7 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
             limit=int(args.get("limit", 100)),
             timeout_ms=int(args.get("timeout_ms", 5000)),
             restart=args.get("restart", True),
-            live=bool(args.get("live", False)),
+            live=bool(args.get("live", True)),
         )
     if name == "database_execute":
         return engine.database_execute(

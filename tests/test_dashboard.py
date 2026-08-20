@@ -202,6 +202,27 @@ def test_dashboard_database_operations_delegate_and_require_typed_confirmation(
         )
         return {"ok": True, "changes": 1}
 
+    def fake_query(
+        actual_device: object,
+        package: str,
+        database: str,
+        sql: str,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        assert actual_device is device
+        calls.append(
+            (
+                "query",
+                {
+                    "package": package,
+                    "database": database,
+                    "sql": sql,
+                    **kwargs,
+                },
+            )
+        )
+        return {"ok": True, "rows": []}
+
     def fake_restore(
         actual_device: object,
         cache_dir: Path,
@@ -226,6 +247,7 @@ def test_dashboard_database_operations_delegate_and_require_typed_confirmation(
         return {"ok": True, "backup_id": backup_id}
 
     monkeypatch.setattr(app_database, "list_databases", fake_list)
+    monkeypatch.setattr(app_database, "query_database", fake_query)
     monkeypatch.setattr(app_database, "execute_database", fake_execute)
     monkeypatch.setattr(app_database, "restore_database", fake_restore)
 
@@ -239,14 +261,27 @@ def test_dashboard_database_operations_delegate_and_require_typed_confirmation(
         )
     assert len(calls) == 1
 
+    query = {
+        "package": "com.example.debug",
+        "database": "app.db",
+        "sql": "SELECT 1",
+    }
+    queried = state.database_operation("query", query)
+    assert queried == {"ok": True, "rows": []}
+    assert calls[-1][1]["live"] is True
+
+    state.database_operation("query", {**query, "live": False})
+    assert calls[-1][1]["live"] is False
+
     mutation = {
         "package": "com.example.debug",
         "database": "app.db",
         "sql": "UPDATE items SET done = 1",
     }
+    call_count = len(calls)
     with pytest.raises(UsageError, match="MUTATE app.db"):
         state.database_operation("execute", mutation)
-    assert len(calls) == 1
+    assert len(calls) == call_count
 
     result = state.database_operation(
         "execute", {**mutation, "confirmation": "MUTATE app.db"}
