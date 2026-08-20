@@ -143,6 +143,7 @@ CAPABILITY_METHODS: dict[str, frozenset[str]] = {
             # device setting points at it. See `proxy_mock.proxy_health`.
             "ensure_reverse_tunnel",
             "flow_matches",
+            "guard_rule_scope",
             "install_system_ca",
             "load_cassette",
             "load_doc",

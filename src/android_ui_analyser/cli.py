@@ -8516,11 +8516,13 @@ def mock_map_cmd(
     path: str = typer.Argument(..., help="Path to match (prefix or exact)."),
     status: int = typer.Option(200, "--status", help="Response status."),
     body: str | None = typer.Option(None, "--body", help="JSON or raw body string."),
+    host: str | None = typer.Option(None, "--host", help="Restrict the rule to one host."),
+    times: int = typer.Option(0, "--times", help="Fire at most N times (0 = unlimited)."),
 ) -> None:
     """Add a live mock rule (reloaded by the mitmproxy addon)."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        _emit(engine.mock_map(method, path, status=status, body=body), fmt)
+        _emit(engine.mock_map(method, path, status=status, body=body, host=host, times=times), fmt)
 
     _run(ctx, go)
 

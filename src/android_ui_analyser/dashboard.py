@@ -1239,7 +1239,7 @@ async function pxSelectFlow(f) {
   const box = document.getElementById('px-detail');
   box.innerHTML = '<div class="empty">Loading\u2026</div>';
   try {
-    const r = await fetch('/api/proxy/flow' + qSerial({n: f.n}), {cache: 'no-store'});
+    const r = await fetch('/api/proxy/flow' + qSerial({n: f.n, ts: f.ts || ''}), {cache: 'no-store'});
     const d = await r.json();
     if (!d.ok) {
       box.innerHTML = '';
@@ -1904,7 +1904,9 @@ class _DashboardState:
         from .platforms import PlatformFactory
 
         self.platform = PlatformFactory(config).create()
-        self._fallback: dict[str, tuple[bytes, float]] = {}
+        # serial -> (bytes, taken_at, mime). The mime travels with the bytes: a cached
+        # PNG served as image/jpeg is a broken image in the tile.
+        self._fallback: dict[str, tuple[bytes, float, str]] = {}
         self._fallback_lock = threading.Lock()
         # serial -> True/False when we have an authoritative capture state, absent
         # when we do not know yet and should keep trusting the capture file.
@@ -1930,6 +1932,21 @@ class _DashboardState:
         ens = self.ensures.get(serial) or {}
         via = ens.get("via")
         return str(via) if via else None
+
+    def _leased_elsewhere(self, serial: str) -> bool:
+        """Is another agent holding this device right now?"""
+        from . import leases
+
+        try:
+            lease = leases.read_lease(self.cache_dir, serial)
+        except Exception:  # noqa: BLE001 — a watcher never fails on a bookkeeping read
+            return False
+        if not lease:
+            return False
+        try:
+            return str(lease.get("owner") or "") != str(leases.resolve_owner(None))
+        except Exception:  # noqa: BLE001
+            return True
 
     def note_capture_live(self, serial: str, live: bool | None) -> None:
         """Record whether something is writing capture frames for *serial* right now.
@@ -2452,15 +2469,22 @@ class _DashboardState:
         out["manipulated"] = sum(1 for f in flows if f.get("action"))
         return out
 
-    def proxy_flow_detail(self, n: int) -> dict[str, Any]:
-        """Full headers and bodies for one logged exchange, when body capture was on."""
+    def proxy_flow_detail(self, n: int, ts: float | None = None) -> dict[str, Any]:
+        """Full headers and bodies for one logged exchange, when body capture was on.
+
+        *ts* disambiguates: the addon's sequence number restarts at 1 with every mitmdump
+        process while the log is append-only, so after one `proxy stop`/`start` two rows
+        share an ``n`` and matching on it alone hands back the wrong exchange.
+        """
         pm = self._proxy_service()
         bodies: list[dict[str, Any]] = []
         with contextlib.suppress(Exception):
             bodies = pm.read_flow_bodies(self.cache_dir)
-        for entry in reversed(bodies):
-            if int(entry.get("n") or 0) == int(n):
-                return {"ok": True, "flow": entry}
+        candidates = [e for e in bodies if int(e.get("n") or 0) == int(n)]
+        if ts is not None and len(candidates) > 1:
+            candidates.sort(key=lambda e: abs(float(e.get("ts") or 0) - float(ts)))
+        if candidates:
+            return {"ok": True, "flow": candidates[0] if ts is not None else candidates[-1]}
         return {
             "ok": False,
             "error": {
@@ -2492,6 +2516,8 @@ class _DashboardState:
                     self._database_text(payload, "path"),
                     status=self._database_int(payload, "status", 200, maximum=599),
                     body=self._proxy_optional_text(payload, "body"),
+                    host=self._proxy_optional_text(payload, "host"),
+                    times=self._proxy_count(payload, "times", maximum=10_000),
                     serial=serial,
                 )
             if action == "rewrite":
@@ -2563,7 +2589,16 @@ class _DashboardState:
         with self._fallback_lock:
             hit = self._fallback.get(ser)
             if hit and (time.time() - hit[1]) < 0.8:
-                return hit[0], "image/jpeg"
+                return hit[0], hit[2]
+        if self._leased_elsewhere(ser):
+            # Screenshotting here attaches uiautomator2 and takes the UiAutomation slot
+            # from the agent that holds this device — for a preview thumbnail. Whatever
+            # capture already wrote is the honest picture; a watcher never interrupts.
+            stale = latest_frame(self.cache_dir, ser)
+            if stale is not None and stale.is_file():
+                with contextlib.suppress(OSError):
+                    return stale.read_bytes(), "image/jpeg"
+            return _PLACEHOLDER_PNG, "image/png"
         try:
             img = self.platform.connect(ser).screenshot()
             raw = getattr(img, "png_bytes", None)
@@ -2575,9 +2610,9 @@ class _DashboardState:
                 raw = buf.getvalue()
             if raw:
                 data = bytes(raw)
-                with self._fallback_lock:
-                    self._fallback[ser] = (data, time.time())
                 mime = "image/png" if data[:8] == b"\x89PNG\r\n\x1a\n" else "image/jpeg"
+                with self._fallback_lock:
+                    self._fallback[ser] = (data, time.time(), mime)
                 return data, mime
         except Exception as exc:  # noqa: BLE001
             logger.debug("fallback screencap failed: %s", exc)
@@ -2679,8 +2714,13 @@ def _make_handler(state: _DashboardState) -> type[BaseHTTPRequestHandler]:
                         400,
                     )
                     return
+                ts_raw = (qs.get("ts") or [""])[0]
                 try:
-                    self._json(state.proxy_flow_detail(int(raw)))
+                    ts = float(ts_raw) if ts_raw else None
+                except ValueError:
+                    ts = None
+                try:
+                    self._json(state.proxy_flow_detail(int(raw), ts))
                 except AuaError as exc:
                     self._json({"ok": False, **exc.to_dict()}, 400)
                 return

@@ -1021,3 +1021,91 @@ def test_proxy_panel_is_in_the_detail_html() -> None:
     assert "/api/proxy/" in html
     # The panel is detail-only: a grid tile has no serial to scope these calls to.
     assert "if (isGrid) return;" in html
+
+
+def test_dashboard_stub_rules_keep_the_host_and_times_the_form_collected(
+    tmp_path: Path,
+) -> None:
+    """The panel pre-fills the host from the clicked request and offers a Times field.
+
+    `mock_map` could express neither, so both were silently dropped and a stub meant for
+    one endpoint on one host was armed against every host, forever.
+    """
+    state = _dashboard_state(tmp_path)
+    seen: dict[str, Any] = {}
+
+    class _FakeEngine:
+        def mock_map(self, method: str, path: str, **kw: Any) -> dict:
+            seen.update({"method": method, "path": path, **kw})
+            return {"ok": True}
+
+    state._engine = _FakeEngine()
+    state.proxy_operation(
+        "stub",
+        {"method": "GET", "path": "/v1/feed", "host": "api.example.test", "times": 1},
+    )
+    assert seen["host"] == "api.example.test"
+    assert seen["times"] == 1
+
+
+def test_proxy_flow_detail_disambiguates_a_reused_sequence_number(tmp_path: Path) -> None:
+    """The addon's `n` restarts at 1 per mitmdump process, the log is append-only."""
+    svc = _FakeProxyService(tmp_path)
+    svc.bodies = [
+        {"n": 1, "ts": 1000.0, "path": "/first-session", "response_body": "a"},
+        {"n": 1, "ts": 9000.0, "path": "/second-session", "response_body": "b"},
+    ]
+    state = _proxy_state(tmp_path, svc)
+    assert state.proxy_flow_detail(1, 1000.0)["flow"]["path"] == "/first-session"
+    assert state.proxy_flow_detail(1, 9000.0)["flow"]["path"] == "/second-session"
+    # With no timestamp the newest is still the sane default.
+    assert state.proxy_flow_detail(1)["flow"]["path"] == "/second-session"
+
+
+def test_a_tile_never_takes_the_uiautomation_slot_from_the_agent_using_the_device(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The frame fallback goes through platform.connect(), which attaches uiautomator2.
+
+    Tiles now request a frame every poll, so without this the dashboard would grab the
+    UiAutomation slot roughly once a second out from under whichever agent is driving.
+    """
+    from android_ui_analyser import leases
+
+    state = _dashboard_state(tmp_path)
+
+    def refuse(_ser: str) -> Any:
+        raise AssertionError("the dashboard must not connect to a device another agent holds")
+
+    monkeypatch.setattr(state.platform, "connect", refuse)
+    monkeypatch.setattr(
+        leases, "read_lease", lambda _cache, _ser: {"owner": "some-other-agent"}
+    )
+
+    frames = tmp_path / "captures" / "emulator-5554" / "s1" / "frames"
+    frames.mkdir(parents=True)
+    (frames / "1.jpg").write_bytes(b"last-known")
+    long_ago = time.time() - 300
+    os.utime(frames / "1.jpg", (long_ago, long_ago))
+    state.note_capture_live("emulator-5554", False)
+
+    data, _mime = state.frame_bytes("emulator-5554")
+    assert data == b"last-known"
+
+    # Nobody holding it → the screencap fallback is allowed again.
+    monkeypatch.setattr(leases, "read_lease", lambda _cache, _ser: None)
+    live_png = b"\x89PNG\r\n\x1a\nfresh"
+
+    class _Img:
+        png_bytes = live_png
+
+    class _Dev:
+        def screenshot(self) -> _Img:
+            return _Img()
+
+    monkeypatch.setattr(state.platform, "connect", lambda _ser: _Dev())
+    data, mime = state.frame_bytes("emulator-5554")
+    assert data == live_png
+    # The cached bytes must keep their own mime; a PNG served as JPEG is a broken tile.
+    assert state.frame_bytes("emulator-5554") == (live_png, "image/png")
+    assert mime == "image/png"

@@ -250,3 +250,39 @@ def test_mock_rewrite_requires_an_actual_change(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     with pytest.raises(UsageError, match="must change something"):
         engine.mock_rewrite("GET", "/api/v1/widgets")
+
+
+def test_an_engine_without_a_device_still_journals_the_undo_for_its_target(
+    tmp_path: Path,
+) -> None:
+    """`record_device_change` falls back to this engine's own device and records NOTHING
+    when there is none. The dashboard's engine deliberately never connects, so a rule it
+    armed used to leave no undo record — unretractable by the reaper that exists for it."""
+    cfg = make_config(
+        cache={"dir": str(tmp_path / "cache")}, memory={"dir": str(tmp_path / "mem")}
+    )
+    engine = Engine(cfg)  # no device, exactly like the dashboard's
+
+    engine.mock_map("GET", "/api/v1/widgets", host="api.example.test", serial="emulator-5554")
+    engine.mock_rewrite("GET", "/api/v1/gadgets", status=429, serial="emulator-5554")
+
+    # One record per key by design — a single `clear_mock_rules` retracts the whole set.
+    # What matters is that it exists at all: before, the ledger was empty.
+    kinds = [e.kind for e in device_ledger.read_ledger("emulator-5554")]
+    assert "mock_rules" in kinds
+
+
+def test_mock_map_carries_a_host_and_a_times_budget(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    rule = engine.mock_map(
+        "GET", "/api/v1/widgets", status=204, host="api.example.test", times=2
+    )["rule"]
+    assert rule["request"]["host"] == "api.example.test"
+    assert rule["times"] == 2
+
+
+def test_mock_map_refuses_a_stub_that_matches_every_request(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    with pytest.raises(UsageError, match="every request"):
+        engine.mock_map("*", "*")
+    assert engine.mock_map("*", "*", host="api.example.test")["ok"] is True

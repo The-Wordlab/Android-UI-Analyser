@@ -16774,12 +16774,17 @@ class Engine:
         # Journal the undo *before* the rule is armed: a crash right after this call must
         # still leave a stranger enough to clear it, or a left-armed stub silently poisons
         # whichever agent inherits this cache dir next.
+        # `serial` matters here: record_device_change falls back to this engine's own
+        # device and silently records nothing when there is none. The dashboard's engine
+        # deliberately never connects, so without this the rule it just armed would be
+        # unretractable by the reaper that exists for exactly that case.
         self.record_device_change(
             key="mock_rules",
             kind="mock_rules",
             op="clear_mock_rules",
             args={"cache_dir": str(cache)},
             detail=detail,
+            serial=serial,
         )
         pm.save_doc(rules_file, doc)
         out: dict[str, Any] = {"ok": True, "action": action, "rule": rule, "count": len(rules)}
@@ -16799,11 +16804,14 @@ class Engine:
         *,
         status: int = 200,
         body: str | None = None,
+        host: str | None = None,
+        times: int = 0,
         serial: str | None = None,
     ) -> dict[str, Any]:
         pm = self.platform.capability("proxy")
 
-        rule = pm.map_rule(method, path, status=status, body=body)
+        rule = pm.map_rule(method, path, status=status, body=body, host=host, times=times)
+        pm.guard_rule_scope(rule)
         return self._arm_mock_rule(
             rule,
             action="mock-map",
