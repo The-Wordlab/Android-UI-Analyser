@@ -1263,7 +1263,7 @@ async function pxSelectFlow(f) {
 
 function pxParseSet(text) {
   const out = {};
-  (text || '').split('\n').forEach(line => {
+  (text || '').split('\\n').forEach(line => {
     const t = line.trim();
     if (!t) return;
     const i = t.indexOf('=');
