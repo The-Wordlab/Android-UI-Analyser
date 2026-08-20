@@ -4702,11 +4702,11 @@ def app_cmd(
     action: str = typer.Argument(
         ...,
         metavar="ACTION",
-        help="foreground|launch-and-analyze|launch|restart-and-analyze|restart|stop|kill|clear|"
-        "grant|current.",
+        help="exists|status|foreground|launch-and-analyze|launch|restart-and-analyze|restart|"
+        "stop|kill|clear|grant|current.",
     ),
     package: str | None = typer.Argument(
-        None, metavar="[PKG]", help="Package for launch/stop/kill/clear/grant."
+        None, metavar="[PKG]", help="Package for exists/status/launch/stop/kill/clear/grant."
     ),
     activity: str | None = typer.Option(
         None,
@@ -4746,6 +4746,22 @@ def app_cmd(
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
         a = action.lower().replace("_", "-")
+        if a in ("exists", "status"):
+            if not package:
+                raise UsageError(
+                    f"app {a} needs a package",
+                    hint=f"e.g. `aua app {a} com.example.app`",
+                )
+            result = _route(engine, "app_status", package=package)
+            _emit(result, fmt)
+            installed = (
+                bool(result.get("installed"))
+                if isinstance(result, dict)
+                else bool(getattr(result, "installed", False))
+            )
+            if a == "exists" and not installed:
+                raise typer.Exit(1)
+            return
         explicit_analyze = a in ("launch-and-analyze", "restart-and-analyze")
         if a in ("launch-and-analyze", "restart-and-analyze"):
             a = a.removesuffix("-and-analyze")
@@ -4803,6 +4819,47 @@ def app_cmd(
             ),
             fmt,
         )
+
+    _run(ctx, go)
+
+
+@app.command(name="shell")
+def shell_cmd(
+    ctx: typer.Context,
+    command: list[str] = typer.Argument(
+        ...,
+        metavar="COMMAND...",
+        help="Read-only command argv. Each output stream is capped at 256 KiB; use `--` before "
+        "command flags, e.g. `aua shell -- logcat -d`.",
+    ),
+    shell_timeout: int = typer.Option(
+        30,
+        "--shell-timeout",
+        min=1,
+        max=120,
+        help="Maximum seconds to wait (1-120).",
+    ),
+) -> None:
+    """Run one bounded read-only command on AUA's leased target.
+
+    Android's remote shell parses the command string, so AUA shell-quotes every argv item before
+    handing it to adb; operators, substitutions, and newlines inside an argument stay literal. A
+    conservative allow-list permits package/status and diagnostic reads such as ``pm path``,
+    ``getprop``, ``dumpsys package``, ``settings get``, ``pidof`` and ``logcat -d``. Unknown or
+    mutating verbs are refused. Stdout and stderr are each capped at 256 KiB and report truncation.
+    """
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        result = _route(
+            engine,
+            "shell",
+            argv=list(command),
+            timeout_ms=int(shell_timeout) * 1000,
+        )
+        _emit(result, fmt)
+        ok = bool(result.get("ok")) if isinstance(result, dict) else bool(result.ok)
+        if not ok:
+            raise typer.Exit(1)
 
     _run(ctx, go)
 

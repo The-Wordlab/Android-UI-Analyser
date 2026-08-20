@@ -685,6 +685,14 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
             result = engine.app(**args)
             return _result_ok(result.model_dump(mode="json"))
 
+        elif cmd == "app_status":
+            result = engine.app_status(**args)
+            return _result_ok(result.model_dump(mode="json"))
+
+        elif cmd == "shell":
+            result = engine.shell(**args)
+            return _result_ok(result.model_dump(mode="json"))
+
         elif cmd == "install_app":
             result = engine.install_app(**args)
             return _result_ok(result.model_dump(mode="json"))
@@ -802,7 +810,7 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
                 "wait_changed, wait_after_change, "
                 "job_start, job_status, job_wait, job_cancel, job_list, "
                 "memory_update, goto, flow_run, flow_save, navigate, orient, list_devices, app, "
-                "install_app, "
+                "app_status, shell, install_app, "
                 "database_list, database_schema, database_query, database_execute, "
                 "database_backup, database_backups, database_restore, "
                 "logcat, logcat_mark, suite_run, dev_show, dev_anim, dev_crashes, dev_profile, "

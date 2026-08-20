@@ -1501,8 +1501,10 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 | `aua clock set --ms <unix-ms>` | Set device clock (emulator / rooted) |
 | `aua screenshot [path]` | Save a raw screenshot (`--region` / `--scale`) |
 | `aua inspect <id>` | Dump full details for one element |
+| `aua app exists\|status <package>` | Read package presence/version from the leased target (`exists` exits 1 when absent) |
 | `aua app launch\|stop\|kill\|clear\|grant` | App control (`launch --clear` = clearState) |
 | `aua install <app.apk> [--launch]` | Install a build (skips the push when that version is already there); `--reinstall` keeps data, `--fresh --yes` wipes it |
+| `aua shell COMMAND…` | Bounded read-only diagnostic on the leased target; argv is remote-shell-quoted, unknown/mutating verbs are refused, and each output stream is capped at 256 KiB |
 | `aua db list\|schema\|query` | Structured private SQLite inspection for debuggable apps |
 | `aua db execute\|backup\|backups\|restore` | Confirmed, backed-up data mutation and rollback |
 | `aua emulator list\|status\|start\|stop` | Boot/stop AVDs (`--headless`, `--audio`, `--parallel`, `--gpu`, `--mine`/`--owner`); `start --apk <app.apk> --launch` boots, installs, and opens in one call |

@@ -869,9 +869,18 @@ KEY_FLAGS: list[tuple[str, str]] = [
     ),
     (
         "app",
-        "`launch <pkg> [--activity .Entry] [--clear --yes]`, `stop|kill|clear|grant`. "
+        "`exists|status <pkg>`, `launch <pkg> [--activity .Entry] [--clear --yes]`, "
+        "`stop|kill|clear|grant`. `exists` exits 1 when absent; status is informational. "
         "`clear` / `launch --clear` wipe ALL app data (typically flags + login) — **requires "
         "`--yes` / `--yes-wipe-flags`**; re-apply flags afterwards",
+    ),
+    (
+        "shell",
+        "`COMMAND … [--shell-timeout 30]` — run one bounded read-only diagnostic on the "
+        "leased target. Every argv item is quoted before Android's remote shell parses it. "
+        "Stdout/stderr are each capped at 256 KiB; output reports truncation plus "
+        "serial/argv/exit_code/mode. Unknown or mutating verbs are refused; use `--` before "
+        "command flags, e.g. `aua shell -- logcat -d`",
     ),
     (
         "install",
@@ -1081,6 +1090,14 @@ AGENT_BEST_PRACTICES_PERCEPTION: list[tuple[str, str, str]] = [
         "verifies the package manager actually registered it (adb can print Success when it did "
         "not), says so when the target is a `-read-only` emulator that discards the install, and "
         "returns the launched screen — so boot/install/launch/observe is one call, not four.",
+    ),
+    (
+        "Use raw `adb -s … shell` for package checks or diagnostics",
+        "Use `aua app exists|status <package>` or the bounded read-only `aua shell <argv…>`",
+        "AUA selects and leases the target, reports the exact serial, returns structured output, "
+        "quotes every argv item before Android's remote shell parses it, caps each output stream "
+        "at 256 KiB, and refuses unknown/mutating verbs so raw shell cannot bypass confirmations "
+        "or cleanup.",
     ),
     (
         "`analyze` after every `tap`/`input` (or always `--no-observe` then re-analyze)",

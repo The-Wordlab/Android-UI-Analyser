@@ -94,6 +94,7 @@ class AndroidPlatform(PlatformAdapter):
             "app.files",
             "app.install",
             "app.lifecycle",
+            "app.status",
             "device.logs",
             "device.network",
             "device.proxy",

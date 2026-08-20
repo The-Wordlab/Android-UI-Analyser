@@ -218,6 +218,23 @@ CAPABILITIES: tuple[Capability, ...] = (
         "install_app",
         risk="replaces the installed build; --fresh also removes its data",
     ),
+    Capability(
+        "app_status",
+        "Check whether a package exists on the leased target and report its installed version.",
+        ("package", "installed", "exists", "version", "app status"),
+        77,
+        "aua app status <package>",
+        "app_status",
+    ),
+    Capability(
+        "shell_read_only",
+        "Run a bounded read-only target diagnostic without selecting a device through adb.",
+        ("shell", "getprop", "dumpsys", "package path", "pidof", "diagnostic"),
+        78,
+        "aua shell pm path <package>",
+        "shell_read_only",
+        risk="read-only allow-list; unknown or mutating commands are refused",
+    ),
 )
 
 

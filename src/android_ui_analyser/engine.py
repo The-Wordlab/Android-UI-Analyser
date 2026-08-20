@@ -90,6 +90,7 @@ from .providers.registry import ProviderFactory, registered_names, run_chain
 from .schema import (
     ActionResult,
     AnalyzeResult,
+    AppStatusResult,
     DeviceInfo,
     Element,
     HasResult,
@@ -100,6 +101,7 @@ from .schema import (
     ResolveResult,
     Screen,
     ScreenSource,
+    ShellResult,
     Source,
     Tier,
     center_of,
@@ -16922,6 +16924,48 @@ class Engine:
         raise UsageError(
             f"unknown app action '{action}'",
             hint="foreground|launch|stop|kill|clear|grant|current",
+        )
+
+    def app_status(self, package: str) -> AppStatusResult:
+        """Report package presence/version on the device selected by AUA's lease."""
+
+        app_id = str(package or "").strip()
+        if not app_id:
+            raise UsageError("app status needs a package name")
+        platform = self.platform
+        if not platform.supports("app.status"):
+            raise DeviceError(
+                f"platform '{platform.name}' cannot query installed app status",
+                code="unsupported_capability",
+            )
+        device = self.device
+        status = platform.installed_app(device, app_id)
+        return AppStatusResult(
+            package=status.app_id,
+            installed=status.installed,
+            serial=device.serial,
+            version_name=status.version_name,
+            version_code=status.version_code,
+        )
+
+    def shell(self, argv: list[str], *, timeout_ms: int = 30_000) -> ShellResult:
+        """Run one bounded read-only target command through the leased device runtime."""
+
+        if not argv:
+            raise UsageError(
+                "shell needs a command",
+                hint="e.g. `aua shell pm path com.example.app`",
+            )
+        if not 100 <= int(timeout_ms) <= 120_000:
+            raise UsageError("shell timeout must be between 100 and 120000 ms")
+        platform = self.platform
+        if not platform.supports("device.shell"):
+            raise DeviceError(
+                f"platform '{platform.name}' cannot run read-only target commands",
+                code="unsupported_capability",
+            )
+        return self.device.run_read_only_shell(
+            [str(part) for part in argv], timeout_s=int(timeout_ms) / 1000.0
         )
 
     # ----------------------------------------------------------------- app bundle installs

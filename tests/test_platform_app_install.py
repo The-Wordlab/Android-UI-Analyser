@@ -98,6 +98,7 @@ def test_android_advertises_the_capability_and_delegates_each_operation(tmp_path
     monkeypatch.setattr(android_apk, "uninstall", record("uninstall"))
 
     assert platform.supports("app.install")
+    assert platform.supports("app.status")
     assert platform.inspect_app_bundle(Path("example-debug.apk")) == AppBundle(
         app_id="com.example.app", version_name="2.1.0", version_code="7"
     )

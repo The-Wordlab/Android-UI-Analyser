@@ -16,15 +16,16 @@ import re
 import shlex
 import signal
 import subprocess
+import threading
 import time
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from .errors import DeviceError, UsageError
 from .providers.base import Bounds, ScreenImage
-from .schema import DeviceInfo, MatchMode
+from .schema import DeviceInfo, MatchMode, ShellResult
 
 logger = logging.getLogger("android_ui_analyser.device")
 
@@ -41,6 +42,142 @@ _ACTIVITY_DUMP_SENTINEL = "ACTIVITY MANAGER ACTIVITIES"
 
 _RECONNECT_WARN_WINDOW_S = 30.0
 _last_reconnect_warn: dict[str, float] = {}
+_SHELL_OUTPUT_LIMIT_BYTES = 256 * 1024
+
+
+_READ_ONLY_PM_ACTIONS = frozenset(
+    {
+        "dump",
+        "get-app-links",
+        "get-moduleinfo",
+        "has-feature",
+        "list",
+        "list-permissions",
+        "path",
+        "query-activities",
+        "resolve-activity",
+    }
+)
+_READ_ONLY_CMD_PACKAGE_ACTIONS = frozenset(
+    {
+        "dump",
+        "get-app-links",
+        "get-moduleinfo",
+        "has-feature",
+        "list",
+        "list-permissions",
+        "path",
+        "query-activities",
+        "resolve-activity",
+    }
+)
+_READ_ONLY_SIMPLE_COMMANDS = frozenset(
+    {
+        "df",
+        "getprop",
+        "id",
+        "pidof",
+        "printenv",
+        "ps",
+        "pwd",
+        "stat",
+        "uname",
+        "which",
+        "whoami",
+    }
+)
+
+
+def _android_shell_is_read_only(argv: list[str]) -> bool:
+    """Conservatively recognize commands that cannot intentionally change Android state.
+
+    This is intentionally an allow-list, not a list of known-dangerous commands. Android grows
+    new shell verbs over time, and an unknown verb must not become a mutation escape hatch merely
+    because AUA has not learned its name yet. :func:`_quote_android_shell_argv` separately makes
+    every accepted argument one literal remote-shell word.
+    """
+
+    if not argv or any(not isinstance(part, str) or "\x00" in part for part in argv):
+        return False
+    command = argv[0]
+    rest = argv[1:]
+    if command in _READ_ONLY_SIMPLE_COMMANDS:
+        return True
+    if command == "pm":
+        if not rest or rest[0] not in _READ_ONLY_PM_ACTIONS:
+            return False
+        return rest[0] not in {"dump", "path"} or len(rest) >= 2
+    if command == "cmd":
+        if len(rest) < 2 or rest[0] != "package" or rest[1] not in _READ_ONLY_CMD_PACKAGE_ACTIONS:
+            return False
+        return rest[1] not in {"dump", "path"} or len(rest) >= 3
+    if command == "settings":
+        return bool(rest) and rest[0] in {"get", "list"}
+    if command == "content":
+        return bool(rest) and rest[0] == "query"
+    if command == "wm":
+        return len(rest) == 1 and rest[0] in {"density", "size"}
+    if command == "date":
+        return not rest or (len(rest) == 1 and rest[0].startswith("+"))
+    if command == "logcat":
+        blocked = ("-c", "--clear", "-f", "--file", "-r", "--rotate-kbytes")
+        return "-d" in rest and not any(
+            part.startswith(prefix) for part in rest for prefix in blocked
+        )
+    if command == "dumpsys":
+        if not rest:
+            return False
+        service, args = rest[0], rest[1:]
+        if service == "package":
+            return bool(args) and any(not part.startswith("-") for part in args)
+        if service == "window":
+            return not args or (
+                len(args) == 1 and args[0] in {"displays", "policy", "tokens", "windows"}
+            )
+        if service == "activity":
+            return not args or (len(args) == 1 and args[0] in {"activities", "processes", "top"})
+        if service == "cpuinfo":
+            return "--reset" not in args and "reset" not in args
+        if service == "meminfo":
+            return bool(args) and "--reset" not in args and "reset" not in args
+        if service == "gfxinfo":
+            return bool(args) and "reset" not in args
+        return False
+    if command == "ip" and rest:
+        forbidden = {"add", "change", "delete", "del", "flush", "replace", "set"}
+        return rest[0] in {"addr", "address", "link", "neigh", "route", "rule"} and not any(
+            part in forbidden for part in rest[1:]
+        )
+    return False
+
+
+def _quote_android_shell_argv(argv: list[str]) -> str:
+    """Encode argv as one POSIX-shell command with every metacharacter kept literal.
+
+    ``adb shell`` reconstructs and passes a command string to Android's remote shell. Supplying
+    separate host argv entries therefore does *not* stop ``;``, ``|``, redirection, substitutions,
+    or newlines from being interpreted remotely. ``shlex.join`` is the inverse of
+    ``shlex.split`` for these words and quotes each risky entry before adb sees it.
+    """
+
+    return shlex.join(argv)
+
+
+def _drain_shell_stream(
+    stream: BinaryIO,
+    sink: bytearray,
+    truncated: list[bool],
+    *,
+    limit_bytes: int,
+) -> None:
+    """Drain one subprocess stream without retaining more than *limit_bytes* in memory."""
+
+    while chunk := stream.read(64 * 1024):
+        remaining = max(0, limit_bytes - len(sink))
+        if remaining:
+            sink.extend(chunk[:remaining])
+        if len(chunk) > remaining:
+            truncated[0] = True
 
 
 def _warn_reconnect(name: str, exc: Exception) -> None:
@@ -483,6 +620,13 @@ class Device(ABC):
     def shell(self, command: str) -> str:
         """Run a shell command on the device; return combined stdout text."""
         raise DeviceError("shell requires a real device")
+
+    def run_read_only_shell(self, argv: list[str], *, timeout_s: float = 30.0) -> ShellResult:
+        """Run one structured read-only target command, or refuse when unsupported."""
+        raise DeviceError(
+            "this device adapter does not support structured read-only shell commands",
+            code="unsupported_capability",
+        )
 
     def read_app_file(self, package: str, path: str) -> bytes:
         """Read one private app file as bytes through Android ``run-as``."""
@@ -1513,6 +1657,87 @@ class Uiautomator2Device(Device):
                 hint="Check the device is online (`adb devices`) and the command is valid.",
             ) from exc
         return out if isinstance(out, str) else str(getattr(out, "output", out) or "")
+
+    def run_read_only_shell(self, argv: list[str], *, timeout_s: float = 30.0) -> ShellResult:
+        """Run a conservative read-only argv through adb, pinned to this runtime's serial."""
+
+        args = [str(part) for part in argv]
+        if not _android_shell_is_read_only(args):
+            command = args[0] if args else "<empty>"
+            raise UsageError(
+                f"aua shell refuses {command!r}: it is unknown or may mutate device state",
+                code="shell_mutation_refused",
+                hint=(
+                    "`aua shell` is read-only by design. Use the structured AUA surface for "
+                    "mutations so ownership, confirmation, verification, and cleanup remain "
+                    "enforced (for example `aua app`, `aua install`, `aua network`, `aua flags`, "
+                    "or an analyzed input action)."
+                ),
+            )
+        from .emulator import adb_bin
+
+        started = time.perf_counter()
+        remote_command = _quote_android_shell_argv(args)
+        try:
+            process = subprocess.Popen(  # noqa: S603
+                [adb_bin(), "-s", self.serial, "shell", remote_command],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except FileNotFoundError as exc:
+            raise DeviceError(
+                "adb is not on PATH",
+                code="adb_missing",
+                hint="Install Android SDK platform-tools, then re-run `aua doctor`.",
+            ) from exc
+        stdout = bytearray()
+        stderr = bytearray()
+        stdout_truncated = [False]
+        stderr_truncated = [False]
+        assert process.stdout is not None  # PIPE above
+        assert process.stderr is not None  # PIPE above
+        drains = [
+            threading.Thread(
+                target=_drain_shell_stream,
+                args=(process.stdout, stdout, stdout_truncated),
+                kwargs={"limit_bytes": _SHELL_OUTPUT_LIMIT_BYTES},
+                daemon=True,
+            ),
+            threading.Thread(
+                target=_drain_shell_stream,
+                args=(process.stderr, stderr, stderr_truncated),
+                kwargs={"limit_bytes": _SHELL_OUTPUT_LIMIT_BYTES},
+                daemon=True,
+            ),
+        ]
+        for drain in drains:
+            drain.start()
+        try:
+            returncode = process.wait(timeout=max(0.1, float(timeout_s)))
+        except subprocess.TimeoutExpired as exc:
+            process.kill()
+            process.wait()
+            for drain in drains:
+                drain.join(timeout=2.0)
+            raise DeviceError(
+                f"read-only shell command timed out after {timeout_s:g}s on {self.serial}",
+                code="shell_timeout",
+                hint="Narrow the query or raise --shell-timeout (maximum 120 seconds).",
+            ) from exc
+        for drain in drains:
+            drain.join()
+        return ShellResult(
+            ok=returncode == 0,
+            serial=self.serial,
+            argv=args,
+            stdout=stdout.decode("utf-8", errors="replace"),
+            stderr=stderr.decode("utf-8", errors="replace"),
+            stdout_truncated=stdout_truncated[0],
+            stderr_truncated=stderr_truncated[0],
+            output_limit_bytes=_SHELL_OUTPUT_LIMIT_BYTES,
+            exit_code=int(returncode),
+            duration_ms=max(0, int((time.perf_counter() - started) * 1000)),
+        )
 
     def read_app_file(self, package: str, path: str) -> bytes:
         try:

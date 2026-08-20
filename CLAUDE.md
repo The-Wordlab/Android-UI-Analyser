@@ -112,6 +112,8 @@ aua swipe-and-analyze up · aua key-and-analyze back
 aua has "<text>"               # exit 0 if present, 1 if not — cheap branch check
 aua wait-and-analyze --for "<text>"  # wait on state and return the satisfied screen
 aua install <app.apk> --launch # put a build on the device and open it (no `adb install`)
+aua app exists <package>       # package-manager presence/version on the leased target
+aua shell pm path <package>    # leased, argv-quoted read-only diagnostic; 256 KiB per output stream
 aua emulator start --apk <app.apk> --launch  # boot + install + launch in one call
 aua db list <pkg>              # discover private SQLite databases (debuggable builds)
 aua db query <pkg> <db> "SELECT …"   # live host-side snapshot; current UI is preserved

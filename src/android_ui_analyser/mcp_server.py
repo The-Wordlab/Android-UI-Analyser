@@ -2089,6 +2089,42 @@ def _tool_definitions() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="app_status",
+            description="Read package presence and version from AUA's leased target. This is "
+            "read-only; the result includes the exact selected serial.",
+            inputSchema={
+                "type": "object",
+                "properties": {"package": {"type": "string", "minLength": 1}},
+                "required": ["package"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="shell_read_only",
+            description="Run one bounded read-only diagnostic command on AUA's leased target. "
+            "Every argv item is quoted before Android's remote shell parses it; unknown or "
+            "mutating verbs are refused, and each output stream is capped at 256 KiB.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "argv": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "description": "Command argv, for example ['pm', 'path', 'com.example.app'].",
+                    },
+                    "timeout_ms": {
+                        "type": "integer",
+                        "default": 30000,
+                        "minimum": 100,
+                        "maximum": 120000,
+                    },
+                },
+                "required": ["argv"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
             name="install_app",
             description="Install an app bundle (.apk) on the device instead of shelling out to "
             "`adb install`. Idempotent: an app already there at the bundle's version is left "
@@ -3088,6 +3124,15 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 confirmed=args.get("confirmed", False),
                 observe=True,
                 with_image=img,
+            )
+        )
+    if name == "app_status":
+        return _dump(engine.app_status(args["package"]))
+    if name == "shell_read_only":
+        return _dump(
+            engine.shell(
+                list(args["argv"]),
+                timeout_ms=int(args.get("timeout_ms", 30000)),
             )
         )
     if name == "install_app":
