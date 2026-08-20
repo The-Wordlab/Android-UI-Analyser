@@ -336,12 +336,12 @@ def _run(ctx: typer.Context, fn: Callable[[Engine, OutputFormat], T]) -> T:
             standalone_until = getattr(ctx.command, "name", None) == "wait-and-analyze"
             try:
                 terms = _parse_await_terms(opts.until, require_positive=False)
-            except UsageError as error:
+            except UsageError as parse_error:
                 _journal_cli_recovery(
                     ctx,
                     event="usage_error",
                     ok=False,
-                    error=error,
+                    error=parse_error,
                 )
                 raise
             if not standalone_until and not any(not term.negated for term in terms):
