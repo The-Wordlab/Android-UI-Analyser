@@ -58,6 +58,38 @@ def test_absence_only_action_until_has_exact_recovery_and_is_journaled(
     assert event["args"] == {"command": "aua tap-and-analyze"}
 
 
+def test_misspelled_action_until_is_refused_before_android_and_is_journaled(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        engine_mod,
+        "connect",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("safe usage recovery must not connect to Android")
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "--until",
+            "nosuchfield:Loading",
+            "tap-and-analyze",
+            "--rid",
+            "continueButton",
+        ],
+    )
+
+    assert result.exit_code == 2
+    error = _error(result)
+    assert error["code"] == "usage"
+    assert "unknown field" in str(error["message"])
+    event = _events()[-1]
+    assert event["cmd"] == "cli_usage_error"
+    assert event["ok"] is False
+    assert event["args"] == {"command": "aua tap-and-analyze"}
+
+
 def test_unknown_command_recovery_is_structured_and_journaled() -> None:
     result = runner.invoke(app, ["screen"])
 

@@ -334,7 +334,16 @@ def _run(ctx: typer.Context, fn: Callable[[Engine, OutputFormat], T]) -> T:
         # device and then fail as a usage error.  A usage error must mean zero device actions.
         if opts.until:
             standalone_until = getattr(ctx.command, "name", None) == "wait-and-analyze"
-            terms = _parse_await_terms(opts.until, require_positive=False)
+            try:
+                terms = _parse_await_terms(opts.until, require_positive=False)
+            except UsageError as error:
+                _journal_cli_recovery(
+                    ctx,
+                    event="usage_error",
+                    ok=False,
+                    error=error,
+                )
+                raise
             if not standalone_until and not any(not term.negated for term in terms):
                 recommended_call = f"aua await-and-analyze {shlex.quote(opts.until)} --observe"
                 error = RecommendedUsageError(

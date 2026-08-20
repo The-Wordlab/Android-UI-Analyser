@@ -290,6 +290,19 @@ def test_adopt_action_rejects_negative_only_before_reading_the_device(tmp_path) 
     assert dev.hierarchy_calls == 0
 
 
+def test_adopt_action_rejects_malformed_predicate_before_reading_the_device(tmp_path) -> None:
+    """Relaxing standalone absence must not make malformed action evidence reach Android."""
+    dev = FakeDevice(package="com.example.app")
+    cfg = make_config(memory={"dir": str(tmp_path / "home")}, daemon={"enabled": False})
+    eng = Engine(cfg, device=dev, factory=ProviderFactory(cfg))
+
+    with pytest.raises(UsageError, match="unknown field"):
+        eng.await_predicate("!nosuchfield:Loading", adopt_action=True)
+
+    assert dev.calls == []
+    assert dev.hierarchy_calls == 0
+
+
 def test_failed_action_is_not_waited_on(monkeypatch) -> None:
     """Waiting after an action that never happened would just burn the whole budget."""
     out, calls = _run(
