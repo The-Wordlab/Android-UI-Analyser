@@ -360,10 +360,11 @@ def test_mcp_session_and_reach_dispatch_contract(monkeypatch: pytest.MonkeyPatch
             "session_start",
             {
                 "goal": "open settings",
-                "start_emulator": False,
+                "start_emulator": True,
                 "headed": True,
                 "audio": False,
                 "avd": None,
+                "needs": None,
                 "package": None,
                 "activity": None,
             },

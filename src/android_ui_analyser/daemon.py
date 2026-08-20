@@ -145,6 +145,12 @@ def _daemon_environment(config: Config) -> dict[str, str]:
         value = _env_value(_config_value(config, path))
         if value is not None:
             env[key] = value
+    # The socket name is host-global/per-device, while these directories can be overridden per
+    # QA run. Pin the effective values into the child instead of inheriting whatever happened
+    # to be in the launching shell. A later caller compares a digest and replaces this daemon
+    # before it can serve state from another run's cache.
+    env["AUA_CACHE__DIR"] = str(config.cache.dir)
+    env["AUA_LEASE__REGISTRY_DIR"] = str(config.lease.registry_dir)
     return env
 
 
@@ -160,6 +166,22 @@ def policy_config_fingerprint(config: Config) -> str:
         if (value := _env_value(_config_value(config, path))) is not None
     }
     payload = json.dumps(policy_values, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def runtime_config_fingerprint(config: Config) -> str:
+    """Opaque identity for daemon state directories that must never cross callers."""
+
+    payload = json.dumps(
+        {
+            "cache_dir": str(Path(config.cache.dir).expanduser().resolve()),
+            "lease_registry_dir": str(
+                Path(config.lease.registry_dir).expanduser().resolve()
+            ),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
     return hashlib.sha256(payload).hexdigest()
 
 
@@ -340,7 +362,7 @@ def _adopt_client_owner(
     engine._lease_generation_resolved = None
     engine._lease_owner_resolved = adopted_owner
     if not claim_device:
-        held = leases.primary_held_by(engine.config.cache.dir, adopted_owner)
+        held = leases.primary_held_by(engine.config.lease.registry_dir, adopted_owner)
         if len(held) == 1:
             engine._lease_serial = held[0]
         return
@@ -408,6 +430,18 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
                 "the warm daemon was started with a different local policy configuration",
                 hint="Restart it: `aua daemon stop && aua daemon start`.",
             )
+        expected_runtime = request.get("runtime_fingerprint")
+        if (
+            cmd != "ping"
+            and isinstance(expected_runtime, str)
+            and expected_runtime
+            and expected_runtime != runtime_config_fingerprint(engine.config)
+        ):
+            return _result_err(
+                "daemon_runtime_mismatch",
+                "the warm daemon belongs to a different cache/lease runtime",
+                hint="AUA will replace it automatically; retry this command once.",
+            )
         _adopt_client_owner(
             engine,
             request.get("owner"),
@@ -424,6 +458,7 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
                     "pong": True,
                     "version": _aua_version(),
                     "policy_fingerprint": policy_config_fingerprint(engine.config),
+                    "runtime_fingerprint": runtime_config_fingerprint(engine.config),
                 }
             )
 
@@ -1279,6 +1314,7 @@ class DaemonClient:
         invocation_id: str | None = None,
         expected_error_code: str | None = None,
         policy_fingerprint: str | None = None,
+        runtime_fingerprint: str | None = None,
         decorate_response: bool = False,
         journal_privacy_cmd: str | None = None,
     ) -> None:
@@ -1297,6 +1333,7 @@ class DaemonClient:
         self._invocation_id = invocation_id
         self._expected_error_code = expected_error_code
         self._policy_fingerprint = policy_fingerprint
+        self._runtime_fingerprint = runtime_fingerprint
         self._decorate_response = decorate_response
         self._journal_privacy_cmd = journal_privacy_cmd
 
@@ -1327,6 +1364,8 @@ class DaemonClient:
             request["expected_error_code"] = self._expected_error_code
         if self._policy_fingerprint:
             request["policy_fingerprint"] = self._policy_fingerprint
+        if self._runtime_fingerprint:
+            request["runtime_fingerprint"] = self._runtime_fingerprint
         if self._decorate_response:
             request["decorate_response"] = True
         if self._journal_privacy_cmd:
@@ -1436,6 +1475,21 @@ class DaemonClient:
             if result == "pong":
                 return None
             return False
+        except (OSError, json.JSONDecodeError, DaemonOutcomeUnknownError):
+            return False
+
+    def pong_runtime_fingerprint(self) -> str | None | bool:
+        """Return the daemon's cache/lease runtime identity, or False when unavailable."""
+
+        try:
+            resp = self.call("ping")
+            result = resp.get("result")
+            if not resp.get("ok"):
+                return False
+            if isinstance(result, dict) and result.get("pong"):
+                fingerprint = result.get("runtime_fingerprint")
+                return fingerprint if isinstance(fingerprint, str) and fingerprint else None
+            return None if result == "pong" else False
         except (OSError, json.JSONDecodeError, DaemonOutcomeUnknownError):
             return False
 
@@ -1626,6 +1680,16 @@ def running_policy_fingerprint(config: Config) -> str | None | bool:
     try:
         client = DaemonClient(socket_path(config), timeout=2.0)
         return client.pong_policy_fingerprint()
+    except (OSError, AuaError, AttributeError):
+        return False
+
+
+def running_runtime_fingerprint(config: Config) -> str | None | bool:
+    """The live daemon's cache/lease authority (None means a legacy daemon)."""
+
+    try:
+        client = DaemonClient(socket_path(config), timeout=2.0)
+        return client.pong_runtime_fingerprint()
     except (OSError, AuaError, AttributeError):
         return False
 

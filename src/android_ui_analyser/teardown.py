@@ -43,6 +43,7 @@ def reap(
     *,
     platform: Any,
     cache_dir: str | Path | None = None,
+    lease_registry_dir: str | Path | None = None,
     grace_s: float = device_ledger.DEFAULT_GRACE_S,
     force: bool = False,
     dry_run: bool = False,
@@ -58,7 +59,11 @@ def reap(
         return {"serial": serial, "skipped": "nothing pending", "undone": [], "failed": []}
 
     why = device_ledger.reapable(
-        serial, entries=entries, cache_dir=cache_dir, grace_s=grace_s
+        serial,
+        entries=entries,
+        cache_dir=cache_dir,
+        lease_registry_dir=lease_registry_dir,
+        grace_s=grace_s,
     )
     if why is None and not force:
         return {
@@ -115,6 +120,7 @@ def sweep(
     *,
     platform: Any,
     cache_dir: str | Path | None = None,
+    lease_registry_dir: str | Path | None = None,
     grace_s: float = device_ledger.DEFAULT_GRACE_S,
     skip: str | None = None,
     dry_run: bool = False,
@@ -129,7 +135,12 @@ def sweep(
         if skip and serial == skip:
             continue
         report = reap(
-            serial, platform=platform, cache_dir=cache_dir, grace_s=grace_s, dry_run=dry_run
+            serial,
+            platform=platform,
+            cache_dir=cache_dir,
+            lease_registry_dir=lease_registry_dir,
+            grace_s=grace_s,
+            dry_run=dry_run,
         )
         if report.get("undone") or report.get("failed"):
             out.append(report)
@@ -168,6 +179,7 @@ def ensure_watchdog(
     serial: str,
     *,
     cache_dir: str | Path,
+    lease_registry_dir: str | Path | None = None,
     platform_name: str,
     grace_s: float = device_ledger.DEFAULT_GRACE_S,
     poll_s: float = 15.0,
@@ -190,6 +202,8 @@ def ensure_watchdog(
         str(serial),
         "--cache",
         str(cache_dir),
+        "--lease-registry",
+        str(lease_registry_dir or cache_dir),
         "--platform",
         str(platform_name),
         "--grace-s",

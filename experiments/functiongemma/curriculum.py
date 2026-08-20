@@ -183,6 +183,7 @@ PUBLIC_AUA_ARGUMENTS: dict[str, frozenset[str]] = {
             "headed",
             "audio",
             "avd",
+            "needs",
             "package",
             "activity",
         }

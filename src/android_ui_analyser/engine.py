@@ -42,6 +42,7 @@ from .device import Device, connect, list_devices
 from .errors import (
     AuaError,
     DeviceError,
+    DeviceLeasedError,
     ElementNotFoundError,
     JobCancelledError,
     ProviderError,
@@ -870,6 +871,12 @@ class Engine:
             return self._lease_serial
         return serial
 
+    @property
+    def _lease_registry_dir(self) -> str:
+        """Host-wide lease authority, independent of this run's artifact/cache directory."""
+
+        return str(self.config.lease.registry_dir)
+
     def begin_device_use(self, serial: str | None = None) -> None:
         """Fence this thread's complete device command against release or lease transfer."""
 
@@ -897,11 +904,11 @@ class Engine:
 
         from . import leases
 
-        guard = leases.device_command(self.config.cache.dir, target)
+        guard = leases.device_command(self._lease_registry_dir, target)
         guard.__enter__()
         try:
             generation = leases.validate_use(
-                self.config.cache.dir,
+                self._lease_registry_dir,
                 target,
                 owner=owner,
             )
@@ -938,9 +945,9 @@ class Engine:
             return
         from . import leases
 
-        with leases.device_use(self.config.cache.dir, target):
+        with leases.device_use(self._lease_registry_dir, target):
             leases.validate_use(
-                self.config.cache.dir,
+                self._lease_registry_dir,
                 target,
                 owner=resolved_owner,
                 expected_generation=generation,
@@ -1056,7 +1063,7 @@ class Engine:
         owner = leases.resolve_owner(self._lease_owner)
         if self._lease_wait_s:
             serial, _why, waited_ms = leases.wait_for_device(
-                cfg.cache.dir,
+                self._lease_registry_dir,
                 owner=owner,
                 explicit=explicit,
                 candidates=candidates,
@@ -1068,7 +1075,7 @@ class Engine:
             self._lease_waited_ms = waited_ms
         else:
             serial, _why = leases.choose_device(
-                cfg.cache.dir,
+                self._lease_registry_dir,
                 owner=owner,
                 explicit=explicit,
                 candidates=initial,
@@ -1080,6 +1087,110 @@ class Engine:
         self._lease_serial = serial
         self._lease_owner_resolved = owner
         return serial
+
+    def _prepare_session_target(
+        self,
+        *,
+        wait_for_lease_s: float,
+        start_emulator: bool,
+        headed: bool,
+        audio: bool,
+        avd: str | None,
+    ) -> dict[str, Any]:
+        """Select/claim a compatible target, provisioning one only when the pool has none."""
+
+        if self._device is not None:
+            return {
+                "serial": self._device.serial,
+                "emulator_started": False,
+                "lease_waited_ms": 0,
+            }
+
+        self._lease_wait_s = float(wait_for_lease_s)
+        self._lease_waited_ms = 0
+        # Window/audio requests are target requirements too. Probe every online candidate and use
+        # one only when its actual emulator process satisfies them; otherwise provision a known
+        # matching instance below.
+        requested_needs = list(self._lease_needs or [])
+        if headed and "headed" not in requested_needs:
+            requested_needs.append("headed")
+        if audio and "audio" not in requested_needs:
+            requested_needs.append("audio")
+        self._lease_needs = requested_needs
+        selection_error: DeviceLeasedError | None = None
+        try:
+            try:
+                selected = self._lease_device()
+            except DeviceLeasedError as exc:
+                selection_error = exc
+                selected = None
+            if selected:
+                self.config.device.serial = selected
+                return {
+                    "serial": selected,
+                    "emulator_started": False,
+                    "lease_waited_ms": self._lease_waited_ms,
+                }
+            if self.config.device.serial:
+                if selection_error is not None:
+                    raise selection_error
+                raise DeviceError(f"requested device {self.config.device.serial} is not online")
+            if not start_emulator:
+                if selection_error is not None:
+                    raise selection_error
+                raise DeviceError(
+                    "no compatible unleased device is online",
+                    hint="Allow automatic provisioning or attach a compatible Android target.",
+                )
+
+            from . import leases
+
+            emulator_mod = self.platform.capability("virtual_devices")
+            selected_avd = emulator_mod.select_avd_for_session(
+                avd,
+                needs=[
+                    need
+                    for need in (self._lease_needs or [])
+                    if need in {"root", "play", "proxy"}
+                ],
+            )
+            boot_owner = leases.resolve_owner(getattr(self, "_lease_owner", None))
+            boot = emulator_mod.start(
+                selected_avd,
+                headless=not headed,
+                audio=audio,
+                cache_dir=self.config.cache.dir,
+                lease_registry_dir=self._lease_registry_dir,
+                owner=boot_owner,
+                parallel=True,
+            )
+            serial = str(boot["serial"])
+            self.config.device.serial = serial
+            self._lease_serial = None
+            self._leased_serial_resolved = None
+            self._lease_owner_resolved = None
+            try:
+                claimed = self._lease_device()
+                if claimed != serial:
+                    raise DeviceError(
+                        f"automatic session provisioning started {serial} but leased {claimed}"
+                    )
+            except Exception:
+                with contextlib.suppress(Exception):
+                    emulator_mod.stop(
+                        serial=serial,
+                        cache_dir=self.config.cache.dir,
+                        requested_by="session-start-claim-rollback",
+                    )
+                raise
+            return {
+                **boot,
+                "serial": serial,
+                "emulator_started": True,
+                "lease_waited_ms": self._lease_waited_ms,
+            }
+        finally:
+            self._lease_wait_s = 0.0
 
     def _reset_owner_transient_state(self) -> None:
         """Drop observations and transport state when a warm daemon changes caller owner.
@@ -1270,6 +1381,7 @@ class Engine:
             teardown.ensure_watchdog(
                 serial,
                 cache_dir=self.config.cache.dir,
+                lease_registry_dir=self._lease_registry_dir,
                 platform_name=self.platform.name,
                 grace_s=float(self.config.teardown.grace_s),
                 poll_s=float(self.config.teardown.watchdog_poll_s),
@@ -1297,6 +1409,7 @@ class Engine:
             reports = teardown.sweep(
                 platform=self.platform,
                 cache_dir=self.config.cache.dir,
+                lease_registry_dir=self._lease_registry_dir,
                 grace_s=float(cfg.grace_s),
                 skip=skip,
             )
@@ -1333,7 +1446,9 @@ class Engine:
             return  # platform cannot boot targets, so it cannot have orphaned any
         try:
             adopted = virtual.adopt_idle_watchdogs(
-                cache_dir=self.config.cache.dir, idle_timeout_s=timeout
+                cache_dir=self.config.cache.dir,
+                idle_timeout_s=timeout,
+                lease_registry_dir=self._lease_registry_dir,
             )
         except Exception as exc:
             logger.debug("emulator watchdog adoption skipped: %s", exc)
@@ -1351,7 +1466,9 @@ class Engine:
         from . import device_ledger
 
         pending = device_ledger.status(
-            cache_dir=self.config.cache.dir, grace_s=float(self.config.teardown.grace_s)
+            cache_dir=self.config.cache.dir,
+            lease_registry_dir=self._lease_registry_dir,
+            grace_s=float(self.config.teardown.grace_s),
         )
         return {
             "ok": True,
@@ -1377,6 +1494,7 @@ class Engine:
                     serial,
                     platform=self.platform,
                     cache_dir=self.config.cache.dir,
+                    lease_registry_dir=self._lease_registry_dir,
                     grace_s=grace,
                     force=force,
                     dry_run=dry_run,
@@ -1388,6 +1506,7 @@ class Engine:
                     target,
                     platform=self.platform,
                     cache_dir=self.config.cache.dir,
+                    lease_registry_dir=self._lease_registry_dir,
                     grace_s=grace,
                     force=force,
                     dry_run=dry_run,
@@ -1417,7 +1536,7 @@ class Engine:
         from . import leases
 
         with contextlib.suppress(Exception):
-            leases.renew(self.config.cache.dir, serial, owner=owner)
+            leases.renew(self._lease_registry_dir, serial, owner=owner)
 
     def list_devices(self) -> list[DeviceInfo]:
         return self._list_targets()
@@ -6947,10 +7066,11 @@ class Engine:
         evidence: str = "failures",
         junit: bool = False,
         wait_for_lease_s: float = 0,
-        start_emulator: bool = False,
+        start_emulator: bool = True,
         headed: bool = False,
         audio: bool = False,
         avd: str | None = None,
+        needs: list[str] | None = None,
         package: str | None = None,
         activity: str | None = None,
         apk: str | None = None,
@@ -6991,28 +7111,20 @@ class Engine:
             raise UsageError("--wait-for-lease must not be negative")
         if wait_for_lease_s and observation is not None:
             raise UsageError("wait_for_lease_s cannot be combined with an injected observation")
-        self._lease_wait_s = float(wait_for_lease_s)
+        if needs is not None:
+            self._lease_needs = [str(item).strip().lower() for item in needs if str(item).strip()]
         self._lease_waited_ms = 0
         emulator_started = False
-        if observation is None and start_emulator and self._device is None:
-            online = [device for device in self.list_devices() if device.state == "device"]
-            if not online:
-                from . import leases
-
-                emulator_mod = self.platform.capability("virtual_devices")
-                boot_owner = leases.resolve_owner(getattr(self, "_lease_owner", None))
-                boot = emulator_mod.start(
-                    avd,
-                    headless=not headed,
-                    audio=audio,
-                    cache_dir=self.config.cache.dir,
-                    owner=boot_owner,
-                )
-                serial = str(boot["serial"])
-                self.config.device.serial = serial
-                self._lease_serial = serial
-                self._lease_owner_resolved = boot_owner
-                emulator_started = True
+        if observation is None:
+            prepared = self._prepare_session_target(
+                wait_for_lease_s=wait_for_lease_s,
+                start_emulator=start_emulator,
+                headed=headed,
+                audio=audio,
+                avd=avd,
+            )
+            emulator_started = bool(prepared.get("emulator_started"))
+            self._lease_waited_ms = int(prepared.get("lease_waited_ms") or 0)
         installed_bundle: dict[str, Any] | None = None
         try:
             if observation is None and apk:
@@ -7091,8 +7203,6 @@ class Engine:
                     )
                 self.close()
             raise
-        finally:
-            self._lease_wait_s = 0.0
         plan = self._goal_session_plan(goal, observed)
         from .session import complete_current_ui_phase_from_observation, create_session_state
 
@@ -9050,7 +9160,7 @@ class Engine:
                 or getattr(cached_device, "serial", None)
             )
             if serial is None and owner:
-                held = leases.primary_held_by(self.config.cache.dir, owner)
+                held = leases.primary_held_by(self._lease_registry_dir, owner)
                 serial = held[0] if len(held) == 1 else None
             if serial is not None:
                 state = load_session_state(
@@ -9336,6 +9446,37 @@ class Engine:
                 # Closing is tied to the owned stop itself, not unrelated restore errors. A
                 # failed network cleanup must never leave a dead emulator cached in this Engine.
                 self.close()
+
+        # A completed session is also the ownership boundary. Release after every device cleanup
+        # action, and drop the command fence first so the lease transition can take its exclusive
+        # lock. Failed cleanup deliberately keeps the lease, allowing the same process to retry.
+        lease_serial = getattr(self, "_lease_serial", None)
+        lease_owner = getattr(self, "_lease_owner_resolved", None)
+        if not errors and lease_serial == state.serial and lease_owner:
+            from . import leases
+
+            self.release_device_use()
+            released = leases.release(
+                self._lease_registry_dir,
+                state.serial,
+                owner=lease_owner,
+            )
+            cleanup.append(
+                {
+                    "action": "lease_release",
+                    "ok": released,
+                    "result": {"serial": state.serial, "released": released},
+                }
+            )
+            if released:
+                self._lease_serial = None
+                self._leased_serial_resolved = None
+                self._lease_owner_resolved = None
+                self._lease_generation_resolved = None
+            else:
+                errors.append(
+                    {"action": "lease_release", "message": "session lease was not released"}
+                )
 
         if not errors:
             state = finish_session_state(self.config.cache.dir, state)

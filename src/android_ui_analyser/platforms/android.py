@@ -28,6 +28,43 @@ _PACKAGE_RE = re.compile(r'package="([^"]+)"')
 _CAPS_TTL_S = 3600
 
 
+def _runtime_emulator_capabilities(target_id: str) -> dict[str, bool]:
+    """Visibility/audio facts for an emulator process, conservative when attribution is unclear."""
+
+    if not target_id.startswith("emulator-"):
+        # A physical target has its own display/audio hardware; AUA does not need to provision a
+        # host window for it.
+        return {"headed": True, "audio": True}
+    try:
+        port = int(target_id.rsplit("-", 1)[1])
+        result = subprocess.run(  # noqa: S603
+            ["ps", "-axo", "command="],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except Exception:
+        return {"headed": False, "audio": False}
+    port_pattern = re.compile(rf"(?:^|\s)-port\s+{port}(?:\s|$)")
+    command = next(
+        (
+            line
+            for line in (result.stdout or "").splitlines()
+            if port_pattern.search(line) and ("emulator" in line or "qemu" in line)
+        ),
+        "",
+    )
+    if not command:
+        # A default-port emulator may not disclose ``-port``. Unknown is not proof that it can
+        # satisfy a requested visible/audio session, so AUA will provision a known-good instance.
+        return {"headed": False, "audio": False}
+    return {
+        "headed": "-no-window" not in command,
+        "audio": "-no-audio" not in command,
+    }
+
+
 def _android_shell(target_id: str, command: str) -> str:
     try:
         result = subprocess.run(  # noqa: S603
@@ -50,7 +87,7 @@ def probe_android_capabilities(cache_dir: str | Path, target_id: str) -> dict[st
     with contextlib.suppress(Exception):
         cached = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(cached, dict) and (now - float(cached.get("probed") or 0)) < _CAPS_TTL_S:
-            return cached
+            return {**cached, **_runtime_emulator_capabilities(target_id)}
 
     tags = _android_shell(target_id, "getprop ro.build.tags")
     debuggable = _android_shell(target_id, "getprop ro.debuggable")
@@ -62,6 +99,7 @@ def probe_android_capabilities(cache_dir: str | Path, target_id: str) -> dict[st
         "play": "com.android.vending" in vending,
         "proxy": rootable,
         "probed": now,
+        **_runtime_emulator_capabilities(target_id),
     }
     with contextlib.suppress(Exception):
         path.parent.mkdir(parents=True, exist_ok=True)

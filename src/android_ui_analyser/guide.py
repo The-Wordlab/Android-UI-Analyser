@@ -82,41 +82,41 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "run `network restore` separately first.",
     ),
     (
-        "Ensure a device is available (headless is fine)",
-        "If `aua devices` is empty and you need to **verify a change without bothering the "
-        "user** (no emulator window on their desktop), boot one quietly: "
-        '`aua session start --goal "…" --start-emulator` (or `aua emulator start --headless`). '
+        "Let session start select or provision the device",
+        "Do not list devices, start an emulator, set `AUA_OWNER`, or acquire a lease before "
+        "goal work. `aua session start` probes every attached target, including leased ones so "
+        "dead owner processes free immediately, and claims the first compatible free target for "
+        "the calling agent process. If none matches, it selects a configured AVD from "
+        "`--needs root,play,proxy` and boots it headless automatically. Use "
+        "`--no-start-emulator` only when provisioning is forbidden. "
         "For microphone/voice-input tests add `--audio`; the normal unattended default uses "
         "`-no-audio` to avoid unnecessary host audio initialization. "
         "When the user needs to watch, add `--headed`; it is valid with an already attached "
         "visible emulator, and if AUA must start one its ownership is recorded so "
         "`aua session finish` stops only that AVD. Headless uses `-no-window` + **host GPU** on Mac — not "
-        "SwiftShader; pick `--avd <name>` when several AVDs exist — `aua emulator list`). "
+        "SwiftShader; `--avd <name>` is an optional hard preference, not a discovery step. "
         "Prefer an already running device when one is attached; don't kill the user's headed "
         "emulator unless they asked. **Prefer a rootable Google APIs AVD over a Play Store "
         "image whenever the test does not specifically need Play services** — root is what "
         "unlocks the capabilities that are otherwise simply unavailable, and a Play image "
         "refuses `adb root`: HTTPS proxy / mock record (system CA), and the optional on-device "
         "helper that runs a long flow on the phone instead of one round trip per step. "
-        "Create one with `aua emulator recommend-proxy` / `ensure-proxy`, then "
-        "`aua emulator start --avd aua_proxy --headless`. "
+        "Create one once with `aua emulator recommend-proxy` / `ensure-proxy`; later sessions "
+        "select it automatically with `--needs root,proxy`. "
         "Every AUA-started emulator checks its inherited Android proxy setting before app "
         "launch and automatically clears it only when it is both unowned and confirmed "
         "blackholed; reachable foreign proxies and AUA-owned proxies are preserved. "
-        "A long boot emits `AUA_PROGRESS` plus ten-second heartbeats on stderr while reserving "
+        "A long automatic boot emits `AUA_PROGRESS` plus ten-second heartbeats on stderr while reserving "
         "stdout for the final result. If your shell yields a live process/session id, poll that "
         "same process — never issue a duplicate start. "
-        "**Parallel agents on one host:** each boots with "
-        "`aua emulator start --headless --parallel` (unique `-port` + `-read-only` + owner "
-        "tag). Standalone start provisions but does not retarget. An agent with no lease may "
-        "select the returned instance once with `aua lease acquire <serial>`; an existing lease "
-        "requires the warned `--replace` handoff, which cleans and releases the old device. "
-        "After assignment, omit `--serial` from ordinary device commands. Tear down only yours with "
-        "`aua emulator stop --serial <yours>` or `AUA_OWNER=… aua emulator stop --mine`.",
+        "Parallel sessions serialize host-wide selection, allocate unique ports, and boot "
+        "read-only AVD instances when the shared pool has no free match. After assignment, omit "
+        "`--serial` from ordinary device commands and end with the returned `session finish` call.",
     ),
     (
-        "ALWAYS stop headless emulators YOU started",
-        "**Hard requirement before you end the session** (not optional, not 'if convenient'): "
+        "Standalone/admin emulator starts require explicit stop",
+        "`aua emulator start` is an administrative standalone operation, not the goal-session "
+        "bootstrap. If you use it directly, the hard cleanup requirement is: "
         "`aua emulator stop --serial <yours>` (safest with parallel agents) or "
         "`AUA_OWNER=… aua emulator stop --mine` / `--avd <name>`. Orphaned headless AVDs burn "
         "CPU and battery. Do this even if the test failed. "
@@ -492,7 +492,8 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "only/first device\" and they drive each other's screens; nothing errors, the results "
         "are just wrong. So each command **claims a lease** on the device it uses and keeps "
         "you on the same one (element ids, app state and the learned map are all per-device). "
-        "Lease selection happens before transport selection, so each serial gets its own daemon "
+        "Lease records live in one host-wide registry even when callers isolate per-run caches. "
+        "Selection happens before transport selection, so each serial gets its own daemon "
         "socket and a warm daemon is forbidden from claiming a different device than it drives. "
         "You need do nothing: no lease command and no owner prompt. By default AUA derives the "
         "long-lived agent process, records its PID plus start token, and gives that normal owner "
@@ -515,8 +516,8 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "token expiry; goal-session ownership remains separate. That explicit pending transfer "
         "is the sole exception to immediate process-death release: its reservation survives a "
         "source crash only until the token expires, so the spawned child cannot lose the device. "
-        "Ask for what the device must support with `--needs root,play,proxy` and you get a "
-        "capable one or a refusal — never a device that silently cannot do it. "
+        "Ask for what the device must support with `aua session start --needs root,play,proxy`; "
+        "AUA selects a capable free device or provisions a matching AVD automatically. "
         "**Exit 9 (`device_leased`) means another agent holds it.** If the serial was only a "
         "redundant stale pin, omit it and stay on your existing assignment. If the user explicitly "
         "requested that target, never redirect: wait, provision with user intent, or reconcile "
@@ -577,12 +578,10 @@ BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
     ),
     (
         "Attach automatically and clean up only what you started",
-        "AUA gives each agent one sticky lease; omit `--serial` from ordinary commands. "
-        "A new target needs warned `lease acquire --replace`; `lease transfer` / "
-        "`accept` delegates it. Never steal. Dead owners release immediately; a pending transfer "
-        "reserves for five minutes. Prefer an existing headed device; otherwise allow boot through "
-        "`session start --start-emulator` (`--headed` shows it; "
-        "`--audio` enables microphone input). "
+        "First call `session start`: it scans the host-wide pool, frees dead owners, matches "
+        "capabilities, and selects or boots a target. Never list/start/acquire manually. The sticky "
+        "lease stays implicit; omit `--serial` from ordinary commands. Never steal. Add "
+        "`--needs root,play,proxy`, `--headed`, or `--audio` only when required. "
         "`session finish` cleans up.",
     ),
     (
@@ -1443,22 +1442,16 @@ def render_markdown(*, brief: bool = False) -> str:
         "When you shipped a change and just need confidence it works — and the user should "
         "**not** see an emulator window pop up — prefer a headless AVD:\n"
         "```bash\n"
-        "aua devices                          # already have a device? use it\n"
-        "aua emulator list                    # marks Play Store vs rootable\n"
-        "aua emulator start --headless        # provisioning only; returns <serial>\n"
-        "aua lease acquire <serial>            # if unleased; --replace confirms a switch\n"
-        "aua daemon start --quiet\n"
-        "aua --format compact analyze         # same analyze path as a headed emulator\n"
+        "aua session start --goal 'verify the change'\n"
+        "# AUA selects a compatible free device or boots and leases one automatically\n"
         "# … drive the flow under test …\n"
-        "aua emulator stop --serial <serial>  # REQUIRED — or: stop --mine / --avd <name>\n"
+        "aua session finish                   # cleans session-owned state/emulator\n"
         "```\n"
-        "**Parallel agents on one host** (each owns one emulator):\n"
+        "**Parallel agents on one host** use the same call (selection is serialized):\n"
         "```bash\n"
-        "aua emulator start --headless --parallel --avd Pixel_7\n"
-        "# → serial; if unleased: aua lease acquire <serial>  (--replace switches)\n"
-        "aua --format compact analyze\n"
-        "# …\n"
-        "aua emulator stop --serial <serial>   # only yours — never bare stop --all\n"
+        "aua session start --goal 'record HTTPS' --needs root,proxy\n"
+        "# … AUA may boot a unique read-only instance when every match is leased …\n"
+        "aua session finish\n"
         "```\n"
         "Sneak-peek all of them: `aua dashboard` (live device **grid** by default).\n"
         "Headless on Mac uses **host GPU** (Metal). **Always stop AVDs you started** before "
@@ -1467,10 +1460,10 @@ def render_markdown(*, brief: bool = False) -> str:
         "will not work — create a small rootable one:\n"
         "```bash\n"
         "aua emulator recommend-proxy         # package + why (no download)\n"
-        "aua emulator ensure-proxy --start    # download google_apis image + boot aua_proxy\n"
-        "aua lease acquire <serial>            # only if unleased; --replace switches explicitly\n"
+        "aua emulator ensure-proxy            # one-time image setup\n"
+        "aua session start --goal 'record HTTPS' --needs root,proxy\n"
         "aua proxy start\n"
-        "aua emulator stop --mine             # cleanup when done\n"
+        "aua session finish                    # cleanup when done\n"
         "```\n"
         "Analyze/tap/wait work identically; hierarchy + screenshots do not need a visible "
         "window. Never wipe or stop an emulator the user already had open unless they asked."
@@ -1808,7 +1801,8 @@ do not substitute raw `adb`.
 
 ## Operating loop
 
-1. Start goal-oriented work with `aua session start --goal "<what must be verified>"`. Add
+1. Start with `aua session start --goal "<what must be verified>"`; it selects/provisions a
+   compatible target and leases it to the caller process. Add `--needs root,play,proxy` and
    `--app <package>` for an unrelated foreground app. Reuse its observation and follow its
    exact `recommended_call`; do not immediately re-analyze. `--contract` requires fresh
    proof and strict finish. `--artifacts-dir` records evidence; `--wait-for-lease` waits safely.
@@ -1828,11 +1822,10 @@ do not substitute raw `adb`.
    instead of spending a separate progress call. Use `aua job start await ...` only for a
    read-only wait that may outlive one agent call. If `daemon_outcome_unknown` appears, never
    repeat the action; wait, then inspect one fresh screen.
-7. End with the returned cleanup call, normally `aua session finish`.
-   Use `review.accounting`, not estimates: `top_level_calls` counts caller-visible invocations (`lifecycle_calls` +
-   `task_calls`); `journal_events` adds `folded_internal_events` such as an action-bound wait. The snapshot precedes
-   review/finish (`reporting_call_included` is false), so
-   `top_level_calls_including_reporting_call` adds it.
+7. End with the returned cleanup call, normally `aua session finish`. Use `review.accounting`, not estimates:
+   `top_level_calls` counts caller-visible invocations and equals `lifecycle_calls` + `task_calls`;
+   `journal_events` adds `folded_internal_events` such as an action-bound wait. The snapshot excludes
+   this review/finish (`reporting_call_included` is false); `top_level_calls_including_reporting_call` adds it.
 8. After a contract passes, `session candidate-flow NAME --save` requires explicit
    `--reset-flow` and passing reset/replay.
 
@@ -1842,13 +1835,12 @@ on the same package/context/frame.
 
 ## Device and safety rules
 
-- One leased device stays implicit: omit `--serial`; switching or transfer is explicit.
-- Start an emulator only with explicit scope (`session start --start-emulator`); use `--headed`
-  only when visibility is required. For voice input boot with `--audio`; use `mic inject` or
-  macOS `mic speak`. Controls default to hold; `--control-mode toggle` requires an initially-off
-  target that remains recording through post-roll, using one START/STOP tap each. Toggle is
-  best-effort without an observable active-state/STOP selector, so use short media. Never repeat
-  late-delivery or uncertain-toggle errors; protect nearby speech and inspect their observation.
+- First call `session start`; never list/start devices, set `AUA_OWNER`, or acquire a lease.
+  It scans leased targets, frees dead owners, and selects/provisions a capable match. One device
+  stays implicit: omit `--serial`; switching or transfer is explicit.
+- Use `--no-start-emulator` only when provisioning is forbidden; use `--headed` only when
+  visibility is required. For voice input add `--audio`, then use `mic inject` or macOS `mic speak`;
+  never repeat late-delivery or uncertain-toggle errors.
 - Use `aua network offline --verify`; session cleanup restores it. Use guarded `aua db` for
   debuggable SQLite.
 - A delivered deeplink, spinner disappearance, or unchanged short settle is not proof of the

@@ -120,9 +120,8 @@ def test_start_headless_waits_for_serial(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert out["gpu"] == "host" or out["gpu"] == "swiftshader" or out["gpu"] == "auto"
     assert out["idle_timeout_s"] == 1200.0
     assert out["watchdog_pid"] == 7777
-    assert "aua lease acquire emulator-5554" in out["hint"]
-    assert "Standalone start did not retarget" in out["hint"]
-    assert "--replace" in out["hint"]
+    assert "aua session start --goal <goal>" in out["hint"]
+    assert "Standalone start only provisions" in out["hint"]
     assert "omit `--serial` from ordinary commands" in out["hint"]
     assert "emulator stop --mine" in out["hint"]
     assert "--serial emulator-5554" in out["hint"]
@@ -147,8 +146,8 @@ def test_emulator_start_help_explains_provisioning_vs_lease_selection() -> None:
 
     assert result.exit_code == 0
     help_text = " ".join(result.stdout.split())
-    assert "does not retarget an existing lease" in help_text
-    assert "lease acquire SERIAL --replace" in help_text
+    assert "owns pool selection" in help_text
+    assert "process-bound leasing" in help_text
     assert "Pin later commands" not in help_text
 
 

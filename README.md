@@ -144,26 +144,24 @@ reports it with the exact install command instead of leaving autopilot to hand o
 
 ## Connect a device or emulator
 
-`aua` drives whatever `adb` can see. Use an emulator or a physical device — either works.
+`aua session start` selects from everything `adb` can see. It checks host-wide leases and target
+capabilities, then leases a compatible free target to the calling agent process. If none is free,
+it boots a matching configured AVD automatically.
 
 ### Option A — Emulator (AVD)
 
-Prefer an already-running device when one is attached. Otherwise `aua` can boot (and, for proxy work, create) an AVD:
+Agents do not list, start, name an owner, or acquire a lease before goal work:
 
 ```bash
-aua emulator list                   # marks Play Store vs rootable Google APIs
-aua emulator start --headless       # provisioning only; returns <serial>
-aua lease acquire <serial>          # if unleased; add --replace to confirm a switch
-aua --format compact analyze
+aua session start --goal "verify the change"
+# re-use the returned observation; later commands follow the automatic sticky lease
 # … drive the flow …
-aua emulator stop --mine            # agents: ALWAYS stop AVDs you started
-# Safety net: headless auto-stops after --idle-stop seconds of no aua activity (default 900)
+aua session finish                  # restores session state and stops its owned emulator
 
-# Parallel agents on one host (each gets its own serial; tear down only yours):
-aua emulator start --headless --parallel --avd Pixel_7
-# → serial; if unleased: aua lease acquire <serial>  (--replace switches explicitly)
-aua analyze                         # later device commands follow that sticky lease
-aua emulator stop --serial <serial> # or: AUA_OWNER=<owner> aua emulator stop --mine
+# Capability-aware selection/provisioning:
+aua session start --goal "record HTTPS" --needs root,proxy
+aua session start --goal "verify Play billing" --needs play
+aua session start --goal "show the QA run" --headed
 ```
 
 Each AUA-started emulator checks the inherited Android proxy setting before app launch. A proxy
@@ -178,10 +176,10 @@ id, poll that same process; do not launch a duplicate `emulator start`.
 
 ```bash
 aua emulator recommend-proxy        # suggests a small package (no download)
-aua emulator ensure-proxy --start   # downloads google_apis image + boots aua_proxy
-aua lease acquire <serial>          # only if unleased; --replace cleans/releases the old lease
+aua emulator ensure-proxy           # one-time google_apis image setup
+aua session start --goal "record HTTPS" --needs root,proxy
 aua proxy start                     # needs: pip/uv install with [proxy]
-aua emulator stop --mine
+aua session finish
 ```
 
 You can still create AVDs by hand (`sdkmanager` / `avdmanager` / Android Studio). Prefer SDK `cmdline-tools/latest` under `$ANDROID_HOME` over stale Homebrew copies. On Mac, headless defaults to **host GPU** so fans stay quiet; override with `--gpu swiftshader` only for CI without a display.
@@ -193,9 +191,7 @@ Emulator's authenticated control API. This is emulator-only (not a USB phone), n
 `audio` extra, and the AVD must be started with audio enabled:
 
 ```bash
-aua emulator start --headless --audio
-# Equivalent goal bootstrap when AUA should boot only if no device is attached:
-aua session start --goal "verify voice input" --start-emulator --audio
+aua session start --goal "verify voice input" --audio
 
 aua mic inject sample.wav
 aua mic inject sample.wav --rid hold_to_talk       # DOWN → audio → UP (default hold)
@@ -379,23 +375,22 @@ available OCR before accepting `!text:` as visually absent or declaring a positi
 
 ### Several agents at once
 
-With more than one agent running, every one of them resolves to "the only/first device" and
-they end up driving each other's screens — nothing errors, the results are just wrong. So each
-command **claims a lease** on the device it uses, and keeps that agent on the same one
-(element IDs, app state and the learned screen map are all per-device):
+With more than one agent running, leases use one host-wide registry even when every run has an
+isolated cache. Start goal work with one command:
 
 ```bash
-export AUA_OWNER=claude-search       # optional; otherwise derived and stable per process
-aua tap-and-analyze 5                            # claims a free emulator, then sticks to it
-aua --needs root,proxy lease acquire # reserve one that can do HTTPS interception
-aua lease list                       # who holds what, and how long they have been idle
+aua session start --goal "verify search"             # automatic process-bound lease
+aua session start --goal "record HTTPS" --needs root,proxy
+aua lease list                                    # administrative inspection only
 ```
 
+`session start` probes all attached targets (including leased ones), discards a lease as soon as
+its owner PID/start-token is dead, selects a compatible free target, or provisions a matching AVD.
 Each normal owner gets exactly one device. After AUA assigns it, omit `--serial` from ordinary
 commands: the lease is the routing source, and repeating a physical serial adds stale state.
 Keep a serial for initial selection and intentional administration/fanout. Asking for another
 device first fails with `lease_switch_required` and changes nothing; acknowledge the switch with
-`aua lease acquire <new> --replace`, which cleans and releases the previous device.
+the administrative `aua lease acquire <new> --replace`, which cleans and releases the previous device.
 `aua fanout` preserves the same rule by giving each explicitly targeted worker its own stable,
 one-device logical owner scope.
 
@@ -1095,7 +1090,8 @@ aua network profile list
 aua network profile apply wifi-only
 aua network profile apply cellular-only
 aua network profile apply slow                 # emulator EDGE bandwidth + 80-400 ms latency
-aua --needs root network profile apply lossy --loss-percent 10
+aua session start --goal "verify packet loss" --needs root
+aua network profile apply lossy --loss-percent 10
 aua network profile status
 aua network profile restore
 ```
@@ -1116,8 +1112,8 @@ Security Config trusts **system CAs only** need a rootable emulator and a system
 (see [Emulator](#option-a--emulator-avd)):
 
 ```bash
-aua emulator ensure-proxy --start
-aua lease acquire <serial>                 # only if unleased; --replace switches explicitly
+aua emulator ensure-proxy                  # one-time rootable image setup
+aua session start --goal "record login HTTPS" --needs root,proxy
 aua proxy start                            # random high port + system CA by default
 aua mock record start login_flow
 # … drive the app …
@@ -1125,7 +1121,7 @@ aua mock record stop login_flow            # cassette under memory.dir/cassettes
 aua mock map GET /v1/foo --status 200 --body '{"ok":true}'
 aua mock replay login_flow
 aua proxy stop
-aua emulator stop --mine
+aua session finish
 ```
 
 Empty cassettes almost always mean TLS rejected the forged cert (Play Store AVD / no system

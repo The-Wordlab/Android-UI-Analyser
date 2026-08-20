@@ -180,6 +180,7 @@ def device_runtime_status(
     cache_dir: str | Path,
     serial: str,
     *,
+    lease_registry_dir: str | Path | None = None,
     now: float | None = None,
 ) -> dict[str, Any]:
     """Describe the live lease and AUA emulator idle-stop watchdog for the dashboard."""
@@ -188,7 +189,7 @@ def device_runtime_status(
     from . import leases
 
     current_time = time.time() if now is None else now
-    lease = leases.read_lease(cache_dir, serial)
+    lease = leases.read_lease(lease_registry_dir or cache_dir, serial)
     lease_status: dict[str, Any] = {"held": lease is not None}
     if lease is not None:
         last_lease_activity = float(lease.get("last_activity") or 0)
@@ -2010,7 +2011,12 @@ class _DashboardState:
         cached = self._runtime_cache.get(serial)
         if cached and (now - cached[1]) < 1.0:
             return cached[0]
-        status = device_runtime_status(self.cache_dir, serial, now=now)
+        status = device_runtime_status(
+            self.cache_dir,
+            serial,
+            lease_registry_dir=self.config.lease.registry_dir,
+            now=now,
+        )
         self._runtime_cache[serial] = (status, now)
         return status
 

@@ -92,6 +92,7 @@ def test_dispatch_ping() -> None:
         "pong": True,
         "version": daemon._aua_version(),
         "policy_fingerprint": daemon.policy_config_fingerprint(engine.config),
+        "runtime_fingerprint": daemon.runtime_config_fingerprint(engine.config),
     }
     assert str(resp["result"]["version"]).startswith(f"{__version__}+src")
 

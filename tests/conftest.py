@@ -580,6 +580,7 @@ def make_config(**overrides: Any) -> Config:
     if state:
         base["memory"]["dir"] = str(Path(state) / "memory_home")
         base["cache"]["dir"] = str(Path(state) / "cache")
+        base["lease"]["registry_dir"] = str(Path(state) / "lease_registry")
         # Capture is always-on with a real daemon; keep unit tests quiet unless opted in.
         base["capture"]["enabled"] = False
         # Deterministic memory assertions: record on the calling thread.
@@ -589,6 +590,13 @@ def make_config(**overrides: Any) -> Config:
         # Most tests exercise hierarchy semantics, not host OCR. Production defaults to
         # augmentation; focused OCR tests opt in explicitly.
         base["ocr"]["augment_hierarchy"] = False
+    # Legacy unit tests commonly use ``cache={"dir": tmp_path}`` as their complete isolated
+    # coordination root. Preserve that test-helper shorthand; production Config keeps its
+    # host-wide lease registry, while new multi-run tests pass ``lease.registry_dir`` explicitly.
+    if "cache" in overrides and "lease" not in overrides:
+        cache_override = overrides.get("cache")
+        if isinstance(cache_override, dict) and cache_override.get("dir"):
+            base["lease"]["registry_dir"] = str(cache_override["dir"])
     merged = _deep_merge(base, overrides) if overrides else base
     return Config.model_validate(merged)
 
@@ -604,6 +612,7 @@ def _aua_isolate_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("_AUA_TEST_STATE_DIR", str(state))
     monkeypatch.setenv("AUA_MEMORY__DIR", str(state / "memory_home"))
     monkeypatch.setenv("AUA_CACHE__DIR", str(state / "cache"))
+    monkeypatch.setenv("AUA_LEASE__REGISTRY_DIR", str(state / "lease_registry"))
     # CLI commands run in-process (never reach a stray dev-machine daemon socket).
     monkeypatch.setenv("AUA_DAEMON__ENABLED", "false")
     monkeypatch.setenv("AUA_PERF__ASYNC_MEMORY", "false")

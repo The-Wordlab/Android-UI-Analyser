@@ -32,6 +32,7 @@ def run_watchdog(
     *,
     serial: str,
     cache_dir: str,
+    lease_registry_dir: str | None = None,
     platform_name: str = "android",
     grace_s: float = 120.0,
     poll_s: float = 15.0,
@@ -56,14 +57,23 @@ def run_watchdog(
                     max_lifetime_s / 3600.0,
                 )
                 return 0
-            why = device_ledger.reapable(serial, cache_dir=cache_dir, grace_s=grace_s)
+            why = device_ledger.reapable(
+                serial,
+                cache_dir=cache_dir,
+                lease_registry_dir=lease_registry_dir,
+                grace_s=grace_s,
+            )
             if why is not None:
                 if platform is None:
                     platform = _build_platform(cache_dir, platform_name)
                 if platform is None:
                     return 1
                 report = teardown.reap(
-                    serial, platform=platform, cache_dir=cache_dir, grace_s=grace_s
+                    serial,
+                    platform=platform,
+                    cache_dir=cache_dir,
+                    lease_registry_dir=lease_registry_dir,
+                    grace_s=grace_s,
                 )
                 for item in report.get("undone", []):
                     logger.warning("undid %s on %s: %s", item["kind"], serial, item["result"])
@@ -101,6 +111,7 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="aua-teardown-watchdog")
     p.add_argument("--serial", required=True)
     p.add_argument("--cache", required=True)
+    p.add_argument("--lease-registry", required=True)
     p.add_argument("--platform", default="android")
     p.add_argument("--grace-s", type=float, default=120.0)
     p.add_argument("--poll-s", type=float, default=15.0)
@@ -108,6 +119,7 @@ def main(argv: list[str] | None = None) -> int:
     return run_watchdog(
         serial=args.serial,
         cache_dir=args.cache,
+        lease_registry_dir=args.lease_registry,
         platform_name=args.platform,
         grace_s=args.grace_s,
         poll_s=args.poll_s,

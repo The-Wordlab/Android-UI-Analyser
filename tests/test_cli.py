@@ -56,6 +56,7 @@ def isolated_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Keep analyze-cache / annotated-image writes out of the real ~/.cache."""
     cache = tmp_path / "cache"
     monkeypatch.setenv("AUA_CACHE__DIR", str(cache))
+    monkeypatch.setenv("AUA_LEASE__REGISTRY_DIR", str(cache))
     # Daemon off so commands always run in-process during tests.
     monkeypatch.setenv("AUA_DAEMON__ENABLED", "false")
     return cache

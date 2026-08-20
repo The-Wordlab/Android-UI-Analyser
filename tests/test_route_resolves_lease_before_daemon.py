@@ -37,6 +37,11 @@ def test_unpinned_route_uses_the_leased_devices_socket(tmp_path, monkeypatch) ->
         "running_policy_fingerprint",
         lambda route_cfg: daemon_mod.policy_config_fingerprint(route_cfg),
     )
+    monkeypatch.setattr(
+        daemon_mod,
+        "running_runtime_fingerprint",
+        lambda route_cfg: daemon_mod.runtime_config_fingerprint(route_cfg),
+    )
     monkeypatch.setattr(daemon_mod, "DaemonClient", Client)
 
     result = cli._route(engine, "analyze")
@@ -61,6 +66,11 @@ def test_two_owners_select_two_device_daemons(tmp_path, monkeypatch) -> None:
         daemon_mod,
         "running_policy_fingerprint",
         lambda route_cfg: daemon_mod.policy_config_fingerprint(route_cfg),
+    )
+    monkeypatch.setattr(
+        daemon_mod,
+        "running_runtime_fingerprint",
+        lambda route_cfg: daemon_mod.runtime_config_fingerprint(route_cfg),
     )
     monkeypatch.setattr(daemon_mod, "DaemonClient", Client)
 

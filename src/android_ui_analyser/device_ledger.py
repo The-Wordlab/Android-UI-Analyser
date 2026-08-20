@@ -288,13 +288,16 @@ def owner_state(entry: Entry) -> str:
 
 
 def _lease_dirs(entries: list[Entry], extra: str | Path | None) -> list[Path]:
-    """Every cache dir whose lease files could speak for this serial.
+    """The host-wide registry plus legacy cache dirs that may still hold old leases.
 
-    Parallel agents may run with separate caches, so a lease can live somewhere the reaper was
-    not started from. Any live lease found in any of them means hands off.
+    Current AUA writes one shared registry even when workers isolate their run caches. Legacy
+    entries are still consulted during migration; any live lease found anywhere means hands off.
     """
     seen: dict[str, Path] = {}
-    candidates = [e.cache_dir for e in entries]
+    candidates = [
+        os.environ.get("AUA_LEASE__REGISTRY_DIR") or "~/.cache/android-ui-analyser",
+        *(e.cache_dir for e in entries),
+    ]
     candidates.append(str(extra) if extra else None)
     # The documented override before the built-in default: a user who moved their cache — or a
     # test suite that redirects it — must not have the reaper consult a lease store nobody
@@ -313,6 +316,7 @@ def reapable(
     *,
     entries: list[Entry] | None = None,
     cache_dir: str | Path | None = None,
+    lease_registry_dir: str | Path | None = None,
     grace_s: float = DEFAULT_GRACE_S,
     now: float | None = None,
 ) -> str | None:
@@ -329,7 +333,10 @@ def reapable(
     if not entries:
         return None
 
-    for directory in _lease_dirs(entries, cache_dir):
+    # ``cache_dir`` is retained as the legacy coordination argument. Current callers pass the
+    # explicit host-wide registry so cleanup cannot mistake an isolated run cache for authority.
+    lease_authority = lease_registry_dir if lease_registry_dir is not None else cache_dir
+    for directory in _lease_dirs(entries, lease_authority):
         if leases.read_lease(directory, serial) is not None:
             return None  # someone holds it right now
 
@@ -790,14 +797,23 @@ def replay(
     }
 
 
-def status(*, cache_dir: str | Path | None = None, grace_s: float = DEFAULT_GRACE_S) -> list[
-    dict[str, Any]
-]:
+def status(
+    *,
+    cache_dir: str | Path | None = None,
+    lease_registry_dir: str | Path | None = None,
+    grace_s: float = DEFAULT_GRACE_S,
+) -> list[dict[str, Any]]:
     """What is pending, per serial, and whether it may be reaped right now."""
     out = []
     for serial in pending_serials():
         entries = read_ledger(serial)
-        why = reapable(serial, entries=entries, cache_dir=cache_dir, grace_s=grace_s)
+        why = reapable(
+            serial,
+            entries=entries,
+            cache_dir=cache_dir,
+            lease_registry_dir=lease_registry_dir,
+            grace_s=grace_s,
+        )
         out.append(
             {
                 "serial": serial,

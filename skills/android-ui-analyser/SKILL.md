@@ -18,7 +18,8 @@ do not substitute raw `adb`.
 
 ## Operating loop
 
-1. Start goal-oriented work with `aua session start --goal "<what must be verified>"`. Add
+1. Start with `aua session start --goal "<what must be verified>"`; it selects/provisions a
+   compatible target and leases it to the caller process. Add `--needs root,play,proxy` and
    `--app <package>` for an unrelated foreground app. Reuse its observation and follow its
    exact `recommended_call`; do not immediately re-analyze. `--contract` requires fresh
    proof and strict finish. `--artifacts-dir` records evidence; `--wait-for-lease` waits safely.
@@ -38,11 +39,10 @@ do not substitute raw `adb`.
    instead of spending a separate progress call. Use `aua job start await ...` only for a
    read-only wait that may outlive one agent call. If `daemon_outcome_unknown` appears, never
    repeat the action; wait, then inspect one fresh screen.
-7. End with the returned cleanup call, normally `aua session finish`.
-   Use `review.accounting`, not estimates: `top_level_calls` counts caller-visible invocations (`lifecycle_calls` +
-   `task_calls`); `journal_events` adds `folded_internal_events` such as an action-bound wait. The snapshot precedes
-   review/finish (`reporting_call_included` is false), so
-   `top_level_calls_including_reporting_call` adds it.
+7. End with the returned cleanup call, normally `aua session finish`. Use `review.accounting`, not estimates:
+   `top_level_calls` counts caller-visible invocations and equals `lifecycle_calls` + `task_calls`;
+   `journal_events` adds `folded_internal_events` such as an action-bound wait. The snapshot excludes
+   this review/finish (`reporting_call_included` is false); `top_level_calls_including_reporting_call` adds it.
 8. After a contract passes, `session candidate-flow NAME --save` requires explicit
    `--reset-flow` and passing reset/replay.
 
@@ -52,13 +52,12 @@ on the same package/context/frame.
 
 ## Device and safety rules
 
-- One leased device stays implicit: omit `--serial`; switching or transfer is explicit.
-- Start an emulator only with explicit scope (`session start --start-emulator`); use `--headed`
-  only when visibility is required. For voice input boot with `--audio`; use `mic inject` or
-  macOS `mic speak`. Controls default to hold; `--control-mode toggle` requires an initially-off
-  target that remains recording through post-roll, using one START/STOP tap each. Toggle is
-  best-effort without an observable active-state/STOP selector, so use short media. Never repeat
-  late-delivery or uncertain-toggle errors; protect nearby speech and inspect their observation.
+- First call `session start`; never list/start devices, set `AUA_OWNER`, or acquire a lease.
+  It scans leased targets, frees dead owners, and selects/provisions a capable match. One device
+  stays implicit: omit `--serial`; switching or transfer is explicit.
+- Use `--no-start-emulator` only when provisioning is forbidden; use `--headed` only when
+  visibility is required. For voice input add `--audio`, then use `mic inject` or macOS `mic speak`;
+  never repeat late-delivery or uncertain-toggle errors.
 - Use `aua network offline --verify`; session cleanup restores it. Use guarded `aua db` for
   debuggable SQLite.
 - A delivered deeplink, spinner disappearance, or unchanged short settle is not proof of the

@@ -197,6 +197,10 @@ class LeaseCfg(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     enabled: bool = True
+    # Coordination is host-wide, deliberately independent of ``cache.dir``. Callers use
+    # per-run caches to isolate screenshots, journals, proxy rules and session artifacts; if
+    # leases followed that override, two agents would each see the same device as free.
+    registry_dir: str = "~/.cache/android-ui-analyser"
     # Long waits renew from inside their polling loop; this is the fallback for owners that
     # cannot be bound to a live process.
     ttl_s: int = 120
@@ -914,6 +918,11 @@ daemon:
   # ``<socket>.<sanitized-serial>`` so multiple warm daemons can coexist.
   push_ws_port: 0         # >0 → localhost WebSocket push of screen_changed events
   watch_interval_ms: 150  # host fingerprint poll for wait_changed / push
+
+lease:
+  enabled: true
+  registry_dir: "~/.cache/android-ui-analyser" # host-wide; never follows per-run cache.dir
+  ttl_s: 120              # fallback only for legacy owners without a live process identity
 
 capture:
   enabled: true           # rolling screencap while daemon is warm

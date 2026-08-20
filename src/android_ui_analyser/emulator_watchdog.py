@@ -47,7 +47,12 @@ def _last_activity(meta: dict, cache_dir: Path, serial: str | None) -> float:
     return last
 
 
-def _leased(cache_dir: Path, serial: str | None) -> str | None:
+def _leased(
+    cache_dir: Path,
+    serial: str | None,
+    *,
+    lease_registry_dir: str | Path | None = None,
+) -> str | None:
     """The live lease holder for *serial*, or ``None``.
 
     Wall-clock idleness alone is a weak reason to stop an emulator: an agent can legitimately
@@ -60,7 +65,7 @@ def _leased(cache_dir: Path, serial: str | None) -> str | None:
     from . import leases
 
     try:
-        entry = leases.read_lease(cache_dir, serial) if serial else None
+        entry = leases.read_lease(lease_registry_dir or cache_dir, serial) if serial else None
     except Exception:
         return "unknown"  # cannot tell — treat as held, never guess a device is free
     return str(entry.get("owner")) if entry else None
@@ -104,9 +109,15 @@ def _reset_device_changes(cache: Path, serial: str | None) -> None:
         logger.warning("undid %s on %s: %s", item["kind"], serial, item["result"])
 
 
-def run_watchdog(*, cache_dir: str, instance: str) -> int:
+def run_watchdog(
+    *,
+    cache_dir: str,
+    instance: str,
+    lease_registry_dir: str | None = None,
+) -> int:
     cache = Path(cache_dir).expanduser()
     path = _meta_path(cache, instance)
+    lease_registry = lease_registry_dir or cache_dir
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     logger.info("emulator watchdog watching instance=%s cache=%s", instance, cache)
 
@@ -128,7 +139,7 @@ def run_watchdog(*, cache_dir: str, instance: str) -> int:
         last = _last_activity(meta, cache, serial)
         idle_for = time.time() - last
         if idle_for >= idle_s:
-            holder = _leased(cache, serial)
+            holder = _leased(cache, serial, lease_registry_dir=lease_registry)
             if holder is not None:
                 # Idle but still leased: an agent is between steps, or paused inside a long
                 # wait. Killing its emulator here would fail a test that was working.
@@ -176,6 +187,7 @@ def run_watchdog(*, cache_dir: str, instance: str) -> int:
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="aua-emulator-watchdog")
     p.add_argument("--cache", required=True)
+    p.add_argument("--lease-registry", required=True)
     p.add_argument(
         "--instance",
         help="Meta file stem ({avd} or {avd}.p{port}). Preferred over --avd.",
@@ -188,7 +200,11 @@ def main(argv: list[str] | None = None) -> int:
     instance = args.instance or args.avd
     if not instance:
         p.error("one of --instance / --avd is required")
-    return run_watchdog(cache_dir=args.cache, instance=instance)
+    return run_watchdog(
+        cache_dir=args.cache,
+        instance=instance,
+        lease_registry_dir=args.lease_registry,
+    )
 
 
 if __name__ == "__main__":

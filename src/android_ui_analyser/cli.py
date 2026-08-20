@@ -1541,6 +1541,18 @@ def _replace_policy_mismatched_daemon(daemon_mod: Any, cfg: Any, expected: str) 
     return False
 
 
+def _replace_runtime_mismatched_daemon(daemon_mod: Any, cfg: Any, expected: str) -> bool:
+    """Replace a per-device daemon that was born in another run's cache authority."""
+
+    if _daemon_is_mid_job(daemon_mod, cfg):
+        return False
+    with contextlib.suppress(Exception):
+        daemon_mod.stop(cfg)
+        daemon_mod.start(cfg, serial=cfg.device.serial)
+        return daemon_mod.running_runtime_fingerprint(cfg) == expected
+    return False
+
+
 def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
     """Run an engine call through the daemon when one is live, else in-process.
 
@@ -1561,20 +1573,24 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
     # Lease discovery does not connect to uiautomator2; it is the cheap ownership decision
     # every transport must share.
     host_only = method in _HOST_ONLY_ROUTE_METHODS
+    # Session bootstrap owns pool discovery, optional provisioning, and the first lease claim.
+    # Run that boundary in this caller process so the lease is bound to the agent rather than a
+    # detached daemon, then let ordinary calls use the selected per-device warm daemon.
+    bootstrap_session = method == "session_start"
     if host_only:
         # Host-only flow metadata commands still belong to the calling agent's active goal
         # session. Resolve identity and the explicit serial without claiming/connecting to the
         # device, so two idempotent deletes are both accounted for instead of the second one
         # becoming an anonymous journal row.
         _resolve_owner_context_without_device(engine)
-    else:
+    elif not bootstrap_session:
         lease_serial = getattr(engine, "_lease_serial", None)
         lease_device = getattr(engine, "_lease_device", None)
         if not lease_serial and callable(lease_device):
             lease_serial = lease_device()
         if lease_serial:
             cfg.device.serial = lease_serial
-    if getattr(cfg.daemon, "enabled", False) and not host_only:
+    if getattr(cfg.daemon, "enabled", False) and not host_only and not bootstrap_session:
         try:
             from . import daemon as daemon_mod
 
@@ -1635,6 +1651,24 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
                 )
             expected_policy: str | None = None
             if ver is not False and not skew:
+                expected_runtime = daemon_mod.runtime_config_fingerprint(cfg)
+                live_runtime: str | None | bool = False
+                with contextlib.suppress(Exception):
+                    live_runtime = daemon_mod.running_runtime_fingerprint(cfg)
+                runtime_mismatch = (
+                    live_runtime is not False and live_runtime != expected_runtime
+                )
+                if runtime_mismatch and _replace_runtime_mismatched_daemon(
+                    daemon_mod, cfg, expected_runtime
+                ):
+                    ver = daemon_mod.running_version(cfg)
+                    runtime_mismatch = False
+                if runtime_mismatch:
+                    raise UsageError(
+                        "the running daemon belongs to a different cache/lease runtime",
+                        hint=_restart_hint(daemon_mod, cfg),
+                        code="daemon_runtime_mismatch",
+                    )
                 expected_policy = daemon_mod.policy_config_fingerprint(cfg)
                 live_policy = daemon_mod.running_policy_fingerprint(cfg)
                 # ``False`` is an unresponsive/busy ping; the expected fingerprint is also
@@ -1662,6 +1696,9 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
                 if journal_privacy_cmd:
                     client_options["journal_privacy_cmd"] = journal_privacy_cmd
                 client_options["policy_fingerprint"] = expected_policy
+                client_options["runtime_fingerprint"] = (
+                    daemon_mod.runtime_config_fingerprint(cfg)
+                )
                 # The warm daemon owns the long-lived Engine/provider cache. Ask it to attach
                 # goal progress and optional policy output before journaling/serialization so a
                 # short-lived CLI process never reloads the local model for the same response.
@@ -1720,13 +1757,17 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
 
     t0 = time.monotonic()
     serial = cfg.device.serial if host_only else None
-    if not host_only:
+    if not host_only and not bootstrap_session:
         with contextlib.suppress(Exception):
             serial = engine.device.serial
     try:
-        if not host_only:
+        if not host_only and not bootstrap_session:
             _warm(engine)
         result = getattr(engine, method)(**kwargs)
+        if bootstrap_session and isinstance(result, dict):
+            selected = result.get("serial")
+            if isinstance(selected, str) and selected:
+                serial = selected
         from .coaching import decorate_result
 
         result = decorate_result(
@@ -3772,15 +3813,15 @@ def session_start_cmd(
         help="Wait up to this many seconds for the requested/eligible device; never steal.",
     ),
     start_emulator: bool = typer.Option(
-        False,
-        "--start-emulator",
-        help="When no device is attached, explicitly permit AUA to boot an AVD.",
+        True,
+        "--start-emulator/--no-start-emulator",
+        help="Automatically boot a compatible AVD when no matching unleased device is online.",
     ),
     headed: bool = typer.Option(
         False,
         "--headed",
         help=(
-            "Require a visible emulator for this session; when --start-emulator boots one, "
+            "Require a visible emulator for this session; when AUA boots one, "
             "show its window instead of using headless mode."
         ),
     ),
@@ -3788,11 +3829,16 @@ def session_start_cmd(
         False,
         "--audio/--no-audio",
         help=(
-            "When --start-emulator boots one, keep host audio enabled so microphone "
+            "When AUA boots one, keep host audio enabled so microphone "
             "injection is available."
         ),
     ),
     avd: str | None = typer.Option(None, "--avd", help="AVD name when several are configured."),
+    needs: str | None = typer.Option(
+        None,
+        "--needs",
+        help="Required target capabilities: root, play, proxy. AUA selects or boots a match.",
+    ),
     package: str | None = typer.Option(
         None,
         "--app",
@@ -3822,8 +3868,8 @@ def session_start_cmd(
 ) -> None:
     """Observe once and return the safest exact CLI and MCP next call.
 
-    ``--start-emulator --apk <path>`` makes this the entire bootstrap in one call: boot an AVD,
-    install the build, launch it, observe, and return the goal plan.
+    With ``--apk <path>`` this is the entire bootstrap in one call: choose or boot a compatible
+    target, lease it, install the build, launch it, observe, and return the goal plan.
     """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
@@ -3846,6 +3892,11 @@ def session_start_cmd(
             headed=headed,
             audio=audio,
             avd=avd,
+            needs=(
+                _split_needs(needs)
+                if needs is not None
+                else list(getattr(engine, "_lease_needs", None) or [])
+            ),
             package=package,
             activity=activity,
             apk=apk,
@@ -4214,7 +4265,7 @@ def fanout(
 
     opts = _opts(ctx)
     base_owner = lease_mod.resolve_owner(opts.owner)
-    base_held = set(lease_mod.primary_held_by(opts.load().cache.dir, base_owner))
+    base_held = set(lease_mod.primary_held_by(opts.load().lease.registry_dir, base_owner))
     targets = [s.strip() for s in (serials or "").split(",") if s.strip()]
     if not targets:
         targets = [
@@ -4443,13 +4494,13 @@ def emulator_ensure_proxy_cmd(
                     headless=True,
                     wait_s=float(wait),
                     cache_dir=cfg.cache.dir,
+                    lease_registry_dir=cfg.lease.registry_dir,
                 )
             payload["started"] = boot
             payload["hint"] = (
-                f"Booted {boot.get('serial')}; standalone start did not retarget your lease. "
-                f"With no current lease, run `aua lease acquire {boot.get('serial')}` once; "
-                "add `--replace` only to acknowledge switching from an existing device. Then "
-                "run `aua proxy start` without a serial."
+                f"Booted {boot.get('serial')}. Start goal work with "
+                "`aua session start --goal <goal> --needs root,proxy`; AUA selects and leases "
+                "automatically. Then run `aua proxy start` without a serial."
             )
         _emulator_emit(payload, ctx)
     except AuaError as err:
@@ -4565,9 +4616,8 @@ def emulator_start_cmd(
     A confirmed unowned proxy black hole inherited from the AVD is cleared before app launch;
     reachable foreign proxies and AUA-owned proxies are preserved.
 
-    Standalone start provisions an emulator; it does not retarget an existing lease. An unleased
-    agent may select the returned serial once. Switching requires ``aua lease acquire SERIAL
-    --replace``; ordinary commands then omit ``--serial``.
+    Standalone start provisions an emulator. Agents should use ``aua session start`` for goal
+    work; it owns pool selection, compatible provisioning, and process-bound leasing.
     """
     opts = _opts(ctx)
     cfg = opts.load()
@@ -4588,6 +4638,7 @@ def emulator_start_cmd(
                 audio=audio,
                 wait_s=float(wait),
                 cache_dir=cfg.cache.dir,
+                lease_registry_dir=cfg.lease.registry_dir,
                 gpu=gpu,
                 # No `if headless` gate: a windowed AVD nobody has touched for the timeout is just
                 # as forgotten as a headless one, and it was the case with no safety net at all.
@@ -6217,7 +6268,7 @@ def lease_cmd(
     def go(engine: Engine, fmt: OutputFormat) -> None:
         from . import leases as lease_mod
 
-        cache = engine.config.cache.dir
+        cache = engine.config.lease.registry_dir
         owner = lease_mod.resolve_owner(_opts(ctx).owner)
         verb = (action or "list").strip().lower()
 

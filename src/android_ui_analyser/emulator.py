@@ -474,9 +474,8 @@ def ensure_proxy_avd(
         "config": str(cfg),
         "steps": steps,
         "hint": (
-            f"`aua emulator start --avd {name} --headless` then "
-            "select the returned serial with `aua lease acquire <serial>` only when this agent "
-            "has no lease (`--replace` explicitly switches and cleans the old one); then run "
+            "Start goal work with `aua session start --needs root,proxy --goal <goal>`; it "
+            "selects or boots this compatible image and leases it automatically. Then run "
             "`aua proxy start` without a serial "
             "(system CA needs this rootable image)."
         ),
@@ -714,6 +713,67 @@ def list_avds() -> dict[str, Any]:
     }
 
 
+def select_avd_for_session(
+    avd: str | None = None,
+    *,
+    needs: list[str] | None = None,
+) -> str:
+    """Choose a configured AVD whose offline image facts satisfy session requirements."""
+
+    listed = list_avds()
+    details = [item for item in listed.get("details", []) if isinstance(item, dict)]
+    if not details:
+        raise UsageError(
+            "no Android Virtual Devices configured",
+            hint="`aua emulator ensure-proxy` creates a rootable default AVD.",
+        )
+    requested = [str(item).strip().lower() for item in (needs or []) if str(item).strip()]
+    supported = {"root", "play", "proxy"}
+    unknown = sorted(set(requested) - supported)
+    if unknown:
+        raise UsageError(
+            f"cannot select an AVD for unknown requirement(s): {', '.join(unknown)}",
+            hint="Supported device requirements are root, play, and proxy.",
+        )
+
+    def matches(item: dict[str, Any]) -> bool:
+        return all(
+            {
+                "root": item.get("rootable") is True,
+                "proxy": item.get("rootable") is True,
+                "play": item.get("play_store") is True,
+            }[need]
+            for need in requested
+        )
+
+    if avd is not None:
+        selected = next((item for item in details if item.get("name") == avd), None)
+        if selected is None:
+            names = ", ".join(str(item.get("name")) for item in details)
+            raise UsageError(f"unknown AVD {avd!r}", hint=f"Known AVDs: {names}.")
+        if not matches(selected):
+            raise UsageError(
+                f"AVD {avd!r} does not satisfy: {', '.join(requested)}",
+                hint="Omit --avd to let session start choose a compatible image.",
+            )
+        return avd
+
+    compatible = [item for item in details if matches(item)]
+    if not compatible:
+        available = ", ".join(
+            f"{item.get('name')}"
+            f"(root={bool(item.get('rootable'))},play={bool(item.get('play_store'))})"
+            for item in details
+        )
+        raise UsageError(
+            f"no configured AVD satisfies: {', '.join(requested) or 'default'}",
+            hint=f"Configured images: {available}.",
+        )
+    # Preserve the emulator tool's configured order. It is stable, user-controlled, and keeps
+    # an explicit local default without inventing a second AVD preference configuration.
+    return str(compatible[0]["name"])
+
+
 def running_emulators() -> list[dict[str, Any]]:
     """Emulator serials currently visible to adb (``emulator-*``)."""
     from .device import list_devices
@@ -928,7 +988,12 @@ def _kill_watchdog(meta: dict[str, Any] | None) -> None:
             os.kill(wpid, signal.SIGTERM)
 
 
-def _spawn_idle_watchdog(*, cache_dir: Path, instance: str) -> int | None:
+def _spawn_idle_watchdog(
+    *,
+    cache_dir: Path,
+    instance: str,
+    lease_registry_dir: str | Path | None = None,
+) -> int | None:
     """Detach a watchdog that stops this instance after idle_timeout_s. Returns pid or None."""
     log = cache_dir / "emulator" / f"{instance}.watchdog.log"
     cache_dir.joinpath("emulator").mkdir(parents=True, exist_ok=True)
@@ -940,6 +1005,8 @@ def _spawn_idle_watchdog(*, cache_dir: Path, instance: str) -> int | None:
         str(cache_dir),
         "--instance",
         instance,
+        "--lease-registry",
+        str(lease_registry_dir or cache_dir),
     ]
     try:
         with open(log, "a", encoding="utf-8") as fh:  # noqa: SIM115
@@ -989,6 +1056,7 @@ def start(
     read_only: bool | None = None,
     parallel: bool = False,
     owner: str | None = None,
+    lease_registry_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     """Boot an AVD (headless by default) and wait until adb sees ``state=device``.
 
@@ -1172,7 +1240,9 @@ def start(
     meta["idle_stop_explicit"] = idle_stop_explicit
     if idle_timeout_s > 0:
         watchdog_pid = _spawn_idle_watchdog(
-            cache_dir=Path(cache_dir).expanduser(), instance=inst
+            cache_dir=Path(cache_dir).expanduser(),
+            instance=inst,
+            lease_registry_dir=lease_registry_dir,
         )
         meta["watchdog_pid"] = watchdog_pid
     meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
@@ -1230,9 +1300,9 @@ def start(
         "watchdog_pid": watchdog_pid,
         "log": str(log_path),
         "hint": (
-            f"Standalone start did not retarget your lease. With no current lease, select this "
-            f"instance once with `aua lease acquire {serial}`; to switch, use the same call with "
-            f"`--replace` after its release warning. Then omit `--serial` from ordinary commands. "
+            "Standalone start only provisions the emulator. Agents should begin goal work with "
+            "`aua session start --goal <goal>`, which selects and leases automatically; then omit "
+            "`--serial` from ordinary commands. "
             f"**Required when finished:** {stop_hint}. "
             + (
                 f"Safety net: auto-stops after {int(idle_timeout_s)}s idle."
@@ -1323,6 +1393,7 @@ def adopt_idle_watchdogs(
     *,
     cache_dir: str | Path,
     idle_timeout_s: float,
+    lease_registry_dir: str | Path | None = None,
 ) -> list[dict[str, Any]]:
     """Give a watchdog back to any aua-started emulator that is running without a live one.
 
@@ -1387,7 +1458,11 @@ def adopt_idle_watchdogs(
         # existing stamp is the honest baseline — resetting it here would hand every adopted
         # emulator a fresh 20 minutes on every command and it would never age out at all.
         fresh.setdefault("last_activity", float(meta.get("started_at") or time.time()))
-        pid = _spawn_idle_watchdog(cache_dir=root, instance=instance)
+        pid = _spawn_idle_watchdog(
+            cache_dir=root,
+            instance=instance,
+            lease_registry_dir=lease_registry_dir,
+        )
         fresh["watchdog_pid"] = pid
         with contextlib.suppress(OSError):
             atomic_write_text(path, json.dumps(fresh, indent=2) + "\n")

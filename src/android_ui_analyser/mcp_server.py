@@ -399,8 +399,13 @@ def _tool_definitions() -> list[types.Tool]:
                     },
                     "start_emulator": {
                         "type": "boolean",
-                        "default": False,
-                        "description": "Explicitly permit booting an AVD when no device is attached.",
+                        "default": True,
+                        "description": "Boot a compatible AVD when no matching device is free.",
+                    },
+                    "needs": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["root", "play", "proxy"]},
+                        "description": "Required target capabilities used for selection/provisioning.",
                     },
                     "headed": {
                         "type": "boolean",
@@ -1263,8 +1268,8 @@ def _tool_definitions() -> list[types.Tool]:
             "Use parallel=true when multiple agents share a host (unique port + read-only + owner). "
             "Automatically clears a confirmed unowned proxy black hole inherited from the AVD; "
             "reachable foreign and AUA-owned proxies are preserved. "
-            "This provisions an AVD but does not retarget an existing lease; prefer "
-            "session_start(start_emulator=true) for goal work. Ordinary device tools follow the "
+            "This provisions an AVD but does not open a goal session; agents should call "
+            "session_start for automatic selection/provisioning/leasing. Ordinary device tools follow the "
             "owner's one automatic sticky lease and do not repeat a serial. "
             "REQUIRED: call emulator_stop when done (or stop_mine) — orphaned AVDs burn CPU. "
             "Idle auto-stop is only a safety net.",
@@ -2467,10 +2472,11 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         return {"capabilities": capabilities_for_goal(str(goal)) if goal else capability_manifest()}
     if name == "session_start":
         start_kwargs: dict[str, Any] = {
-            "start_emulator": bool(args.get("start_emulator", False)),
+            "start_emulator": bool(args.get("start_emulator", True)),
             "headed": bool(args.get("headed", False)),
             "audio": bool(args.get("audio", False)),
             "avd": args.get("avd"),
+            "needs": args.get("needs"),
             "package": args.get("package"),
             "activity": args.get("activity"),
         }
@@ -2810,6 +2816,7 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
             animations=bool(args.get("animations", False)),
             wait_s=float(args.get("wait", 120)),
             cache_dir=engine.config.cache.dir,
+            lease_registry_dir=engine.config.lease.registry_dir,
             gpu=args.get("gpu"),
             idle_timeout_s=float(idle),
             parallel=bool(args.get("parallel", False)),
@@ -3349,6 +3356,7 @@ _LEASE_FREE_TOOLS = frozenset(
         "reconcile_status",
         "reconcile_submit",
         "session_candidate_flow",
+        "session_start",
         "session_progress",
         "session_review",
     }
@@ -3364,7 +3372,10 @@ def _mcp_started_owners() -> set[str]:
 
 
 def cleanup_mcp_emulators(
-    cache_dir: str | Path | None = None, *, platform: Any | None = None
+    cache_dir: str | Path | None = None,
+    *,
+    platform: Any | None = None,
+    lease_registry_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     """Best-effort stop of emulators this MCP process started and forgot to tear down."""
     import contextlib
@@ -3384,6 +3395,7 @@ def cleanup_mcp_emulators(
     selected = platform or PlatformFactory(cfg).create()
     emulator_mod = selected.capability("virtual_devices")
     cache = cache_dir or cfg.cache.dir
+    lease_registry = lease_registry_dir or cache
     from . import leases
 
     stopped: list[str] = []
@@ -3392,7 +3404,7 @@ def cleanup_mcp_emulators(
     caller_process = (caller.get("pid"), caller.get("started"))
     serials = list(_MCP_STARTED_SERIALS)
     for ser in serials:
-        lease = leases.read_lease(cache, ser)
+        lease = leases.read_lease(lease_registry, ser)
         lease_process = (
             lease.get("owner_pid") if lease else None,
             lease.get("owner_started") if lease else None,
@@ -3586,7 +3598,11 @@ def run_stdio(config: Config | None = None) -> None:
     engine = build_default_engine(config)
     server = build_server(engine)
     # If the MCP client disconnects without emulator_stop, tear down what we started.
-    atexit.register(cleanup_mcp_emulators, engine.config.cache.dir)
+    atexit.register(
+        cleanup_mcp_emulators,
+        engine.config.cache.dir,
+        lease_registry_dir=engine.config.lease.registry_dir,
+    )
 
     async def _serve() -> None:
         async with stdio_server() as (read_stream, write_stream):
@@ -3602,7 +3618,11 @@ def run_stdio(config: Config | None = None) -> None:
         with contextlib.suppress(Exception):
             engine.close()
         with contextlib.suppress(Exception):
-            cleanup_mcp_emulators(engine.config.cache.dir, platform=engine.platform)
+            cleanup_mcp_emulators(
+                engine.config.cache.dir,
+                platform=engine.platform,
+                lease_registry_dir=engine.config.lease.registry_dir,
+            )
 
 
 __all__ = [
