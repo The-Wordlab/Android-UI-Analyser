@@ -7204,7 +7204,9 @@ class Engine:
 
                 # Tear down only the boot this session performed (`prepared` carries the
                 # instance/pid the platform recorded); a bare serial can name a foreign
-                # device after a provisioning collision.
+                # device after a provisioning collision. Drop this command's shared use
+                # fence before rollback takes the exclusive stop/ownership transaction.
+                self.release_device_use()
                 with contextlib.suppress(Exception):
                     emulator_mod.stop_spawned_instance(
                         instance=str(prepared.get("instance") or ""),
@@ -9443,6 +9445,10 @@ class Engine:
         if state.emulator_started:
             emulator_mod = self.platform.capability("virtual_devices")
 
+            # Network restoration above still needs the command's shared device fence. The
+            # stop below needs the exclusive transition fence so another process cannot
+            # acquire between its lease check and kill; release the shared fence first.
+            self.release_device_use()
             stopped = restore(
                 "owned_emulator_stop",
                 lambda: emulator_mod.stop(

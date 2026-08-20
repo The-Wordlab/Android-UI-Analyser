@@ -18,7 +18,7 @@ import signal
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -633,13 +633,21 @@ def _leased_console_ports(lease_registry_dir: str | Path | None) -> set[int]:
     if lease_registry_dir is None:
         return set()
     out: set[int] = set()
-    with contextlib.suppress(Exception):
+    try:
         from . import leases
 
         for serial in leases.live_leased_serials(lease_registry_dir):
             p = _port_from_serial(serial)
             if p is not None:
                 out.add(p)
+    except OSError as exc:
+        raise DeviceError(
+            "cannot read the host-wide lease registry; refusing emulator provisioning",
+            hint=(
+                f"Lease authority {Path(lease_registry_dir).expanduser()} is inaccessible: "
+                f"{exc}. Restore access, then retry."
+            ),
+        ) from exc
     return out
 
 
@@ -720,6 +728,22 @@ def _live_foreign_lease(
         return entry
     except Exception:
         return {"serial": serial, "owner": "unknown", "inaccessible": True}
+
+
+@contextlib.contextmanager
+def _stop_lease_transaction(
+    lease_registry_dir: str | Path | None,
+    serial: str | None,
+) -> Iterator[None]:
+    """Fence one stop decision and kill against device use and ownership transitions."""
+
+    if lease_registry_dir is None or not serial:
+        yield
+        return
+    from . import leases
+
+    with leases.device_transaction(lease_registry_dir, serial):
+        yield
 
 
 def resolve_owner(explicit: str | None = None) -> str | None:
@@ -1715,32 +1739,38 @@ def stop_spawned_instance(
         if record_is_ours and isinstance(meta.get("serial"), str) and meta.get("serial")
         else None
     )
-    foreign = _live_foreign_lease(lease_registry_dir, serial, owner)
     skipped: list[dict[str, Any]] = []
     stopped: list[str] = []
     own_pid = pid if isinstance(pid, int) else (recorded_pid if record_is_ours else None)
-    may_kill_own_process = True
-    if foreign is not None and serial:
-        skipped.append({"serial": serial, "holder": str(foreign.get("owner") or "unknown")})
-        lease_acquired = float(foreign.get("acquired") or 0)
-        boot_started = float(meta.get("started_at") or 0)
-        if not lease_acquired or not boot_started or lease_acquired >= boot_started:
-            # The lease may cover the device we just booted (claimed by another agent in
-            # the gap before our own claim). Terminating our process would kill it.
-            may_kill_own_process = False
-    elif serial:
-        with contextlib.suppress(Exception):
-            _adb_emu_kill(serial)
-            stopped.append(serial)
-    if may_kill_own_process and isinstance(own_pid, int) and own_pid > 1:
-        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-            os.killpg(own_pid, signal.SIGTERM)
-    if record_is_ours and may_kill_own_process and meta_path is not None:
-        _kill_watchdog(meta)
-        meta_path.unlink(missing_ok=True)
-        port = meta.get("port")
-        if isinstance(port, int):
-            release_console_port(port)
+    with _stop_lease_transaction(lease_registry_dir, serial):
+        # The lease read and every process/device kill stay inside the same exclusive
+        # target fence used by acquire/release/transfer. No process can claim this serial
+        # after the check and before the kill.
+        foreign = _live_foreign_lease(lease_registry_dir, serial, owner)
+        may_kill_own_process = True
+        if foreign is not None and serial:
+            skipped.append(
+                {"serial": serial, "holder": str(foreign.get("owner") or "unknown")}
+            )
+            lease_acquired = float(foreign.get("acquired") or 0)
+            boot_started = float(meta.get("started_at") or 0)
+            if not lease_acquired or not boot_started or lease_acquired >= boot_started:
+                # The lease may cover the device we just booted (claimed by another agent in
+                # the gap before our own claim). Terminating our process would kill it.
+                may_kill_own_process = False
+        elif serial:
+            with contextlib.suppress(Exception):
+                _adb_emu_kill(serial)
+                stopped.append(serial)
+        if may_kill_own_process and isinstance(own_pid, int) and own_pid > 1:
+            with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                os.killpg(own_pid, signal.SIGTERM)
+        if record_is_ours and may_kill_own_process and meta_path is not None:
+            _kill_watchdog(meta)
+            meta_path.unlink(missing_ok=True)
+            port = meta.get("port")
+            if isinstance(port, int):
+                release_console_port(port)
     matched = (
         [_instance_identity({**meta, "_path": str(meta_path)})] if record_is_ours else []
     )
@@ -1856,28 +1886,30 @@ def stop(
         skipped_mine: list[dict[str, Any]] = []
         for meta in records:
             ser = meta.get("serial")
-            foreign = _live_foreign_lease(
-                lease_registry_dir, ser if isinstance(ser, str) else None, lease_owner
-            )
-            if foreign is not None:
-                # A record AUA wrote does not outrank a live lease: the instance may have
-                # been handed to another agent, and its pid is that agent's device now.
-                skipped_mine.append(
-                    {"serial": ser, "holder": str(foreign.get("owner") or "unknown")}
+            target_serial = ser if isinstance(ser, str) else None
+            with _stop_lease_transaction(lease_registry_dir, target_serial):
+                foreign = _live_foreign_lease(
+                    lease_registry_dir, target_serial, lease_owner
                 )
-                continue
-            if isinstance(ser, str) and ser:
-                with contextlib.suppress(Exception):
-                    _adb_emu_kill(ser)
-                    stopped_mine.append(ser)
-            pid = meta.get("pid")
-            if isinstance(pid, int):
-                with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-                    os.killpg(pid, signal.SIGTERM)
-            _kill_watchdog(meta)
-            path = Path(str(meta.get("_path") or ""))
-            if path.is_file():
-                path.unlink(missing_ok=True)
+                if foreign is not None:
+                    # A record AUA wrote does not outrank a live lease: the instance may have
+                    # been handed to another agent, and its pid is that agent's device now.
+                    skipped_mine.append(
+                        {"serial": ser, "holder": str(foreign.get("owner") or "unknown")}
+                    )
+                    continue
+                if target_serial:
+                    with contextlib.suppress(Exception):
+                        _adb_emu_kill(target_serial)
+                        stopped_mine.append(target_serial)
+                pid = meta.get("pid")
+                if isinstance(pid, int):
+                    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                        os.killpg(pid, signal.SIGTERM)
+                _kill_watchdog(meta)
+                path = Path(str(meta.get("_path") or ""))
+                if path.is_file():
+                    path.unlink(missing_ok=True)
         _log_stop(
             cache_dir,
             origin=origin,
@@ -1915,26 +1947,28 @@ def stop(
             skipped_avd: list[dict[str, Any]] = []
             for meta in avd_records:
                 ser = meta.get("serial")
-                foreign = _live_foreign_lease(
-                    lease_registry_dir, ser if isinstance(ser, str) else None, lease_owner
-                )
-                if foreign is not None:
-                    skipped_avd.append(
-                        {"serial": ser, "holder": str(foreign.get("owner") or "unknown")}
+                target_serial = ser if isinstance(ser, str) else None
+                with _stop_lease_transaction(lease_registry_dir, target_serial):
+                    foreign = _live_foreign_lease(
+                        lease_registry_dir, target_serial, lease_owner
                     )
-                    continue
-                if isinstance(ser, str) and ser:
-                    with contextlib.suppress(Exception):
-                        _adb_emu_kill(ser)
-                        stopped_avd.append(ser)
-                pid = meta.get("pid")
-                if isinstance(pid, int):
-                    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-                        os.killpg(pid, signal.SIGTERM)
-                _kill_watchdog(meta)
-                path = Path(str(meta.get("_path") or ""))
-                if path.is_file():
-                    path.unlink(missing_ok=True)
+                    if foreign is not None:
+                        skipped_avd.append(
+                            {"serial": ser, "holder": str(foreign.get("owner") or "unknown")}
+                        )
+                        continue
+                    if target_serial:
+                        with contextlib.suppress(Exception):
+                            _adb_emu_kill(target_serial)
+                            stopped_avd.append(target_serial)
+                    pid = meta.get("pid")
+                    if isinstance(pid, int):
+                        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                            os.killpg(pid, signal.SIGTERM)
+                    _kill_watchdog(meta)
+                    path = Path(str(meta.get("_path") or ""))
+                    if path.is_file():
+                        path.unlink(missing_ok=True)
             avd_matched = [_instance_identity(m) for m in avd_records]
             _log_stop(
                 cache_dir,
@@ -1975,20 +2009,20 @@ def stop(
                 path.unlink(missing_ok=True)
                 continue
             ser = meta.get("serial") if isinstance(meta, dict) else None
-            if (
-                _live_foreign_lease(
-                    lease_registry_dir, ser if isinstance(ser, str) else None, lease_owner
-                )
-                is not None
-            ):
-                continue  # a record whose device another live agent leases is not residue
-            pid = meta.get("pid")
-            if isinstance(pid, int):
-                with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-                    os.killpg(pid, signal.SIGTERM)
-                    stopped_pids.append(pid)
-            _kill_watchdog(meta)
-            path.unlink(missing_ok=True)
+            target_serial = ser if isinstance(ser, str) else None
+            with _stop_lease_transaction(lease_registry_dir, target_serial):
+                if (
+                    _live_foreign_lease(lease_registry_dir, target_serial, lease_owner)
+                    is not None
+                ):
+                    continue  # a record whose device another live agent leases is not residue
+                pid = meta.get("pid")
+                if isinstance(pid, int):
+                    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                        os.killpg(pid, signal.SIGTERM)
+                        stopped_pids.append(pid)
+                _kill_watchdog(meta)
+                path.unlink(missing_ok=True)
         _log_stop(
             cache_dir,
             origin=origin,
@@ -2019,15 +2053,18 @@ def stop(
     skipped_live: list[dict[str, Any]] = []
     for t in targets:
         ser = t["serial"]
-        foreign = _live_foreign_lease(lease_registry_dir, ser, lease_owner)
-        if foreign is not None:
-            skipped_live.append({"serial": ser, "holder": str(foreign.get("owner") or "unknown")})
-            continue
-        try:
-            _adb_emu_kill(ser)
-            stopped.append(ser)
-        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
-            logger.debug("emu kill %s failed: %s", ser, exc)
+        with _stop_lease_transaction(lease_registry_dir, ser):
+            foreign = _live_foreign_lease(lease_registry_dir, ser, lease_owner)
+            if foreign is not None:
+                skipped_live.append(
+                    {"serial": ser, "holder": str(foreign.get("owner") or "unknown")}
+                )
+                continue
+            try:
+                _adb_emu_kill(ser)
+                stopped.append(ser)
+            except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+                logger.debug("emu kill %s failed: %s", ser, exc)
 
     for path in list(_pid_dir(cache_dir).glob("*.json")):
         try:

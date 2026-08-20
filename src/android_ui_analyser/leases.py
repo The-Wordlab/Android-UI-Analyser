@@ -801,10 +801,19 @@ def read_lease(cache_dir: str | Path, serial: str) -> dict[str, Any] | None:
     path = _lease_path(cache_dir, serial)
     try:
         entry = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        # Missing is genuinely free; corrupt is self-healing (writes are atomic, so a torn
-        # entry cannot be a live holder mid-write — it is residue worth reclaiming).
+    except FileNotFoundError:
+        # Missing is the only metadata state that proves the target is free.
         return None
+    except json.JSONDecodeError:
+        # Atomic writes make corruption unusual, but they cannot prove that no live holder
+        # exists (the file may have been damaged after a valid claim). Fail closed until an
+        # operator explicitly repairs/removes it instead of silently double-allocating.
+        return {
+            "serial": serial,
+            "owner": "<corrupt lease metadata>",
+            "inaccessible": True,
+            "corrupt": True,
+        }
     except OSError:
         # Unreadable is NOT free. Access control must fail closed: treating an EACCES/EIO
         # blip as "nobody holds this" would let a second owner claim a device that is
@@ -815,9 +824,32 @@ def read_lease(cache_dir: str | Path, serial: str) -> dict[str, Any] | None:
             "owner": "<unreadable lease metadata>",
             "inaccessible": True,
         }
-    if not isinstance(entry, dict) or _expired(entry):
+    if not isinstance(entry, dict) or not entry.get("owner") or not entry.get("serial"):
+        return {
+            "serial": serial,
+            "owner": "<corrupt lease metadata>",
+            "inaccessible": True,
+            "corrupt": True,
+        }
+    if _expired(entry):
         return None
     return entry
+
+
+def _lease_metadata_paths(cache_dir: str | Path) -> list[Path]:
+    """Enumerate lease records without turning registry I/O failure into an empty pool."""
+
+    directory = lease_dir(cache_dir)
+    try:
+        with os.scandir(directory) as entries:
+            paths = [
+                Path(entry.path)
+                for entry in entries
+                if entry.name.endswith(".json") and entry.is_file()
+            ]
+    except FileNotFoundError:
+        return []
+    return sorted(paths)
 
 
 def live_leased_serials(cache_dir: str | Path) -> set[str]:
@@ -828,20 +860,27 @@ def live_leased_serials(cache_dir: str | Path) -> set[str]:
     never make that emulator's console port look free to allocate.
     """
     out: set[str] = set()
-    directory = lease_dir(cache_dir)
-    if not directory.is_dir():
-        return out
-    for path in directory.glob("*.json"):
+    for path in _lease_metadata_paths(cache_dir):
         try:
             entry = json.loads(path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError):
+        except FileNotFoundError:
+            continue
+        except json.JSONDecodeError:
+            out.add(path.stem)
             continue
         except OSError:
             # Fail closed: an entry that cannot be read may be a live holder, and the stem
             # is its (sanitised) serial. Blocking one port beats double-allocating it.
             out.add(path.stem)
             continue
-        if not isinstance(entry, dict) or _expired(entry):
+        if (
+            not isinstance(entry, dict)
+            or not entry.get("owner")
+            or not entry.get("serial")
+        ):
+            out.add(path.stem)
+            continue
+        if _expired(entry):
             continue
         serial = entry.get("serial")
         if isinstance(serial, str) and serial:
@@ -865,7 +904,11 @@ def acquire(
 ) -> bool:
     """Claim *serial* for *owner*. True when held afterwards (including a sticky re-claim)."""
 
-    with _owner_guard(cache_dir, owner), _lease_guard(cache_dir, serial):
+    with (
+        _owner_guard(cache_dir, owner),
+        _device_guard(cache_dir, serial),
+        _lease_guard(cache_dir, serial),
+    ):
         held_entries = held_entries_by(cache_dir, owner)
         existing = [str(entry["serial"]) for entry in held_entries]
         others = [held for held in existing if held != serial]
@@ -1014,12 +1057,40 @@ def _release_unlocked(
 def list_leases(cache_dir: str | Path) -> list[dict[str, Any]]:
     """Live leases only — expired entries are reported as free, never as holders."""
     out: list[dict[str, Any]] = []
-    for path in sorted(lease_dir(cache_dir).glob("*.json")):
+    for path in _lease_metadata_paths(cache_dir):
         try:
             entry = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except FileNotFoundError:
             continue
-        if isinstance(entry, dict) and not _expired(entry):
+        except json.JSONDecodeError:
+            out.append(
+                {
+                    "serial": path.stem,
+                    "owner": "<corrupt lease metadata>",
+                    "inaccessible": True,
+                    "corrupt": True,
+                }
+            )
+            continue
+        except OSError:
+            out.append(
+                {
+                    "serial": path.stem,
+                    "owner": "<unreadable lease metadata>",
+                    "inaccessible": True,
+                }
+            )
+            continue
+        if not isinstance(entry, dict) or not entry.get("owner") or not entry.get("serial"):
+            out.append(
+                {
+                    "serial": path.stem,
+                    "owner": "<corrupt lease metadata>",
+                    "inaccessible": True,
+                    "corrupt": True,
+                }
+            )
+        elif not _expired(entry):
             out.append(entry)
     return out
 
@@ -1052,7 +1123,11 @@ def primary_held_by(cache_dir: str | Path, owner: str) -> list[str]:
 def promote_replacement(cache_dir: str | Path, serial: str, *, owner: str) -> bool:
     """Make a reserved replacement the owner's ordinary sticky target."""
 
-    with _owner_guard(cache_dir, owner), _lease_guard(cache_dir, serial):
+    with (
+        _owner_guard(cache_dir, owner),
+        _device_guard(cache_dir, serial),
+        _lease_guard(cache_dir, serial),
+    ):
         current = read_lease(cache_dir, serial)
         if current is None or not _entry_matches_owner(current, owner):
             return False
@@ -1230,7 +1305,7 @@ def _accept_handoff_unlocked(
         raise UsageError("lease accept needs a handoff token")
     digest = _handoff_digest(clean_token)
     matches: list[str] = []
-    for path in lease_dir(cache_dir).glob("*.json"):
+    for path in _lease_metadata_paths(cache_dir):
         try:
             candidate = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):

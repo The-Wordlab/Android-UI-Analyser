@@ -209,13 +209,17 @@ def test_lease_records_what_it_is_for(tmp_path):
     assert L.idle_seconds(entry) < 5
 
 
-def test_corrupt_lease_file_reads_as_free(tmp_path):
-    """A half-written file must not wedge a device — free is the safe interpretation."""
+def test_corrupt_lease_file_fails_closed_until_explicit_repair(tmp_path):
+    """Corruption cannot prove the prior owner is dead, so it must never enable takeover."""
     path = L.lease_dir(tmp_path) / "emulator-5554.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text('{"serial": "emulator-5554", "own', encoding="utf-8")
-    assert L.read_lease(tmp_path, "emulator-5554") is None
-    assert L.acquire(tmp_path, "emulator-5554", owner="claude") is True
+    entry = L.read_lease(tmp_path, "emulator-5554")
+    assert entry is not None
+    assert entry["owner"] == "<corrupt lease metadata>"
+    assert entry["corrupt"] is True
+    assert L.acquire(tmp_path, "emulator-5554", owner="claude") is False
+    assert L.list_leases(tmp_path) == [entry]
 
 
 def test_serial_is_sanitised_into_the_filename(tmp_path):

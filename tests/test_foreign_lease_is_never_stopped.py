@@ -107,6 +107,26 @@ def test_unreadable_lease_metadata_blocks_its_port(tmp_path: Path) -> None:
     assert port == 5556, "an unreadable lease must fail closed, not read as a free port"
 
 
+def test_unreadable_registry_refuses_provisioning(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    registry = tmp_path / "registry"
+    (registry / "leases").mkdir(parents=True)
+    real_scandir = leases.os.scandir
+
+    def fail_registry(path: str | os.PathLike[str]):
+        if Path(path) == registry / "leases":
+            raise PermissionError("registry denied")
+        return real_scandir(path)
+
+    monkeypatch.setattr(leases.os, "scandir", fail_registry)
+
+    with pytest.raises(DeviceError, match="refusing emulator provisioning"):
+        em.allocate_console_port(
+            None, cache_dir=tmp_path / "cache", lease_registry_dir=registry
+        )
+
+
 # ------------------------------------------------------------------ boot collision
 
 
@@ -212,6 +232,104 @@ def test_the_leaseholder_may_still_stop_its_own_device(
 
     assert out["stopped"] == [SER_GUARD]
     assert out["skipped_leased"] == []
+
+
+def test_stop_check_and_kill_are_atomic_against_a_concurrent_acquire(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No owner can appear after a free check but before the stop reaches the target."""
+
+    registry = tmp_path / "registry"
+    serial = SER_GUARD
+    monkeypatch.setattr(
+        em, "running_emulators", lambda: [{"serial": serial, "state": "device"}]
+    )
+    kill_entered = threading.Event()
+    allow_kill = threading.Event()
+    acquire_finished = threading.Event()
+    outcomes: dict[str, Any] = {}
+
+    def slow_kill(target: str) -> None:
+        assert target == serial
+        kill_entered.set()
+        assert allow_kill.wait(timeout=2)
+
+    def run_stop() -> None:
+        outcomes["stop"] = em.stop(
+            serial=serial,
+            cache_dir=tmp_path / "cache",
+            lease_registry_dir=registry,
+            lease_owner="stopper",
+        )
+
+    def run_acquire() -> None:
+        outcomes["acquired"] = leases.acquire(registry, serial, owner="new-owner")
+        acquire_finished.set()
+
+    monkeypatch.setattr(em, "_adb_emu_kill", slow_kill)
+    stopper = threading.Thread(target=run_stop)
+    acquirer = threading.Thread(target=run_acquire)
+    stopper.start()
+    assert kill_entered.wait(timeout=2)
+    acquirer.start()
+    assert not acquire_finished.wait(timeout=0.1), (
+        "acquire crossed the stop's lease-check/kill transaction"
+    )
+    allow_kill.set()
+    stopper.join(timeout=2)
+    acquirer.join(timeout=2)
+
+    assert not stopper.is_alive() and not acquirer.is_alive()
+    assert outcomes["stop"]["stopped"] == [serial]
+    assert outcomes["acquired"] is True
+
+
+def test_spawned_rollback_is_atomic_against_a_concurrent_acquire(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    registry = tmp_path / "registry"
+    cache = tmp_path / "cache"
+    serial = SER_GUARD
+    _boot_record(cache, serial=serial, pid=4242, started_at=time.time())
+    kill_entered = threading.Event()
+    allow_kill = threading.Event()
+    acquire_finished = threading.Event()
+    outcomes: dict[str, Any] = {}
+
+    def slow_kill(target: str) -> None:
+        assert target == serial
+        kill_entered.set()
+        assert allow_kill.wait(timeout=2)
+
+    def run_rollback() -> None:
+        outcomes["rollback"] = em.stop_spawned_instance(
+            instance="fake.p5554",
+            pid=4242,
+            cache_dir=cache,
+            lease_registry_dir=registry,
+            owner="stopper",
+        )
+
+    def run_acquire() -> None:
+        outcomes["acquired"] = leases.acquire(registry, serial, owner="new-owner")
+        acquire_finished.set()
+
+    monkeypatch.setattr(em, "_adb_emu_kill", slow_kill)
+    rollback = threading.Thread(target=run_rollback)
+    acquirer = threading.Thread(target=run_acquire)
+    rollback.start()
+    assert kill_entered.wait(timeout=2)
+    acquirer.start()
+    assert not acquire_finished.wait(timeout=0.1), (
+        "acquire crossed the rollback's lease-check/kill transaction"
+    )
+    allow_kill.set()
+    rollback.join(timeout=2)
+    acquirer.join(timeout=2)
+
+    assert not rollback.is_alive() and not acquirer.is_alive()
+    assert outcomes["rollback"]["stopped"] == [serial]
+    assert outcomes["acquired"] is True
 
 
 def test_a_dead_owners_lease_does_not_block_a_stop(
