@@ -413,25 +413,44 @@ def cassette_dir(memory_dir: str | Path) -> Path:
     return Path(memory_dir).expanduser() / "cassettes"
 
 
-def rules_path(cache_dir: str | Path) -> Path:
-    return Path(cache_dir).expanduser() / "mock_rules.json"
+def _serial_suffix(serial: str | None) -> str:
+    """``.emulator-5580`` for a target, empty for the legacy shared file.
+
+    Every piece of proxy state used to live at one path per cache dir. That was invisible
+    while only one proxy ran at a time and wrong the moment two did: both mitmdumps read
+    the same rules file and appended to the same logs, so one agent's mock rule fired on
+    another agent's device, and each read the other's traffic back as its own.
+    """
+    if not serial:
+        return ""
+    safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in str(serial))
+    return f".{safe}"
 
 
-def record_path(cache_dir: str | Path) -> Path:
+def _existing(primary: Path, fallback: Path) -> Path:
+    """*primary*, or *fallback* when only the pre-split shared file exists on disk."""
+    return primary if primary.is_file() or not fallback.is_file() else fallback
+
+
+def rules_path(cache_dir: str | Path, serial: str | None = None) -> Path:
+    return Path(cache_dir).expanduser() / f"mock_rules{_serial_suffix(serial)}.json"
+
+
+def record_path(cache_dir: str | Path, serial: str | None = None) -> Path:
     """In-progress cassette capture — append-only.
 
     Was a JSON array the addon re-read and rewrote on every single response, which is
     O(n²) writes and turns a chat surface into a stall.
     """
-    return Path(cache_dir).expanduser() / "mock_record.jsonl"
+    return Path(cache_dir).expanduser() / f"mock_record{_serial_suffix(serial)}.jsonl"
 
 
-def load_record(cache_dir: str | Path) -> list[dict[str, Any]]:
+def load_record(cache_dir: str | Path, serial: str | None = None) -> list[dict[str, Any]]:
     """Entries captured so far, skipping any half-written trailing line."""
-    return _read_jsonl(record_path(cache_dir))
+    return _read_jsonl(_existing(record_path(cache_dir, serial), record_path(cache_dir)))
 
 
-def reset_record(cache_dir: str | Path) -> None:
+def reset_record(cache_dir: str | Path, serial: str | None = None) -> None:
     """Start a clean JSONL capture file for a new ``mock record start``.
 
     Must not write anything but an empty file: the addon opens this path in ``"a"`` mode and
@@ -440,12 +459,12 @@ def reset_record(cache_dir: str | Path) -> None:
     onto the very first appended line with no separator, corrupting the file from that point on
     for any reader that expects either a single JSON document or clean JSONL.
     """
-    path = record_path(cache_dir)
+    path = record_path(cache_dir, serial)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("", encoding="utf-8")
 
 
-def record_window_path(cache_dir: str | Path) -> Path:
+def record_window_path(cache_dir: str | Path, serial: str | None = None) -> Path:
     """Where the *scope* of the current recording is remembered across the two CLI calls.
 
     ``mock record start`` and ``mock record stop`` are separate process invocations, so the
@@ -454,11 +473,13 @@ def record_window_path(cache_dir: str | Path) -> Path:
     timestamp (to filter ``flow_log.jsonl``, which already carries real timestamps) and a byte
     offset into ``mitmdump.log`` (which has none — see ``diagnose_empty_recording``).
     """
-    return Path(cache_dir).expanduser() / "mock_record_window.json"
+    return Path(cache_dir).expanduser() / f"mock_record_window{_serial_suffix(serial)}.json"
 
 
-def save_record_window(cache_dir: str | Path, *, since_ts: float, log_offset: int) -> None:
-    path = record_window_path(cache_dir)
+def save_record_window(
+    cache_dir: str | Path, *, since_ts: float, log_offset: int, serial: str | None = None
+) -> None:
+    path = record_window_path(cache_dir, serial)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps({"since_ts": float(since_ts), "log_offset": int(log_offset)}),
@@ -466,8 +487,8 @@ def save_record_window(cache_dir: str | Path, *, since_ts: float, log_offset: in
     )
 
 
-def load_record_window(cache_dir: str | Path) -> dict[str, Any] | None:
-    path = record_window_path(cache_dir)
+def load_record_window(cache_dir: str | Path, serial: str | None = None) -> dict[str, Any] | None:
+    path = _existing(record_window_path(cache_dir, serial), record_window_path(cache_dir))
     if not path.is_file():
         return None
     try:
@@ -482,18 +503,18 @@ def load_record_window(cache_dir: str | Path) -> dict[str, Any] | None:
     }
 
 
-def clear_record_window(cache_dir: str | Path) -> None:
+def clear_record_window(cache_dir: str | Path, serial: str | None = None) -> None:
     with contextlib.suppress(OSError):
-        record_window_path(cache_dir).unlink()
+        record_window_path(cache_dir, serial).unlink()
 
 
-def flow_bodies_path(cache_dir: str | Path) -> Path:
-    """Full request/response detail for ``aua proxy flow <n>`` (bounded, rotated)."""
-    return Path(cache_dir).expanduser() / "flow_bodies.jsonl"
+def flow_bodies_path(cache_dir: str | Path, serial: str | None = None) -> Path:
+    """Full request/response detail for one target (bounded, rotated)."""
+    return Path(cache_dir).expanduser() / f"flow_bodies{_serial_suffix(serial)}.jsonl"
 
 
-def read_flow_bodies(cache_dir: str | Path) -> list[dict[str, Any]]:
-    return _read_jsonl(flow_bodies_path(cache_dir))
+def read_flow_bodies(cache_dir: str | Path, serial: str | None = None) -> list[dict[str, Any]]:
+    return _read_jsonl(_existing(flow_bodies_path(cache_dir, serial), flow_bodies_path(cache_dir)))
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -517,8 +538,8 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return out
 
 
-def flow_log_path(cache_dir: str | Path) -> Path:
-    """Append-only JSONL of completed HTTP exchanges, for ``await net:``.
+def flow_log_path(cache_dir: str | Path, serial: str | None = None) -> Path:
+    """Append-only JSONL of one target's completed HTTP exchanges, for ``await net:``.
 
     Separate from :func:`record_path` on purpose. That one is the cassette record: it is
     written only in ``record`` mode, keeps whole bodies, and re-reads + rewrites the entire
@@ -526,15 +547,17 @@ def flow_log_path(cache_dir: str | Path) -> Path:
     surface streams. This one is always on, one small line per exchange, and append-only so
     a reader can tail it without racing the writer.
     """
-    return Path(cache_dir).expanduser() / "flow_log.jsonl"
+    return Path(cache_dir).expanduser() / f"flow_log{_serial_suffix(serial)}.jsonl"
 
 
-def read_flows_since(cache_dir: str | Path, since_ts: float) -> list[dict[str, Any]]:
-    """Completed exchanges logged after *since_ts* (epoch seconds).
+def read_flows_since(
+    cache_dir: str | Path, since_ts: float, serial: str | None = None
+) -> list[dict[str, Any]]:
+    """One target's completed exchanges logged after *since_ts* (epoch seconds).
 
     Tolerates partial trailing lines: the proxy appends while we read.
     """
-    path = flow_log_path(cache_dir)
+    path = _existing(flow_log_path(cache_dir, serial), flow_log_path(cache_dir))
     if not path.is_file():
         return []
     out: list[dict[str, Any]] = []
@@ -1346,14 +1369,14 @@ def write_rules(path: Path, entries: list[dict[str, Any]], *, owner: str | None 
     save_doc(path, doc)
 
 
-def clear_rules(cache_dir: str | Path) -> int:
+def clear_rules(cache_dir: str | Path, serial: str | None = None) -> int:
     """Disarm mock mode and drop every rule and owner tag; return how many rules were removed.
 
     Also the undo for the ``mock_rules`` ledger mutation (see ``device_ledger``): arming a rule
     or record mode is host-side state that outlives the command, and this is the one call that
     fully resets it — used by both ``aua mock clear`` and a stranger's reaper.
     """
-    path = rules_path(cache_dir)
+    path = rules_path(cache_dir, serial)
     removed = len(load_rules(path))
     save_doc(path, {"mode": "map", "capture_bodies": True, "rules": []})
     return removed
@@ -1458,25 +1481,30 @@ def guard_rule_scope(rule: dict[str, Any]) -> None:
         )
 
 
-def reset_session_files(cache_dir: str | Path) -> list[str]:
+def reset_session_files(cache_dir: str | Path, serial: str | None = None) -> list[str]:
     """Drop every leftover rule/record artefact; return the names actually removed.
 
     A cache dir outlives the run that filled it, so without this the next ``proxy start``
     silently re-arms the previous scenario's stubs — which is indistinguishable, from the
     agent's side, from the app misbehaving.
+
+    Scoped to *serial* when given, so resetting one target never wipes the rules another
+    agent has armed on a different device.
     """
     cache = Path(cache_dir).expanduser()
+    suffix = _serial_suffix(serial)
+    names = [
+        f"mock_rules{suffix}.json",
+        f"mock_record{suffix}.jsonl",
+        f"mock_record_window{suffix}.json",
+        f"flow_log{suffix}.jsonl",
+        f"flow_bodies{suffix}.jsonl",
+    ]
+    if not serial:
+        # Whole-cache reset also sweeps formats no current writer produces.
+        names += ["mock_record.json", "mock_mode.txt", "mock_record_name.txt"]
     removed: list[str] = []
-    for name in (
-        "mock_rules.json",
-        "mock_record.jsonl",
-        "mock_record.json",  # pre-JSONL capture file
-        "mock_mode.txt",
-        "mock_record_name.txt",
-        "mock_record_window.json",
-        "flow_log.jsonl",
-        "flow_bodies.jsonl",
-    ):
+    for name in names:
         path = cache / name
         if path.exists():
             with contextlib.suppress(OSError):
@@ -1844,7 +1872,7 @@ def _is_system_host(host: str) -> bool:
 
 
 def diagnose_empty_recording(
-    cache_dir: str | Path, *, since_ts: float, log_offset: int = 0
+    cache_dir: str | Path, *, since_ts: float, log_offset: int = 0, serial: str | None = None
 ) -> dict[str, Any]:
     """Why ``mock record stop`` captured no flows, scoped to *this* recording only.
 
@@ -1890,7 +1918,7 @@ def diagnose_empty_recording(
             host = host_match.group(1) if host_match else ""
             (tls_system if _is_system_host(host) else tls_other).append(line)
 
-    flows = read_flows_since(cache_dir, since_ts)
+    flows = read_flows_since(cache_dir, since_ts, serial)
     flows_system = [f for f in flows if _is_system_host(str(f.get("host") or ""))]
     flows_other = [f for f in flows if not _is_system_host(str(f.get("host") or ""))]
 
@@ -1918,6 +1946,7 @@ def start_mitm(
     cache_dir: Path,
     port: int | None = None,
     mode: str = "map",
+    serial: str | None = None,
 ) -> tuple[int, int]:
     """Spawn mitmdump; return ``(pid, listen_port)``.
 
@@ -1936,7 +1965,7 @@ def start_mitm(
     ensure_mitm_ca()  # CA must exist before clients CONNECT
     listen = pick_listen_port(preferred=port if port and port > 0 else None)
     addon = ensure_addon(cache_dir)
-    rules = rules_path(cache_dir)
+    rules = rules_path(cache_dir, serial)
     if not rules.is_file():
         write_rules(rules, [])
     set_mode(rules, mode)
@@ -1944,9 +1973,9 @@ def start_mitm(
     env = os.environ.copy()
     env["AUA_MOCK_RULES"] = str(rules)
     env["AUA_MOCK_MODE"] = mode
-    env["AUA_MOCK_RECORD"] = str(record_path(cache_dir))
-    env["AUA_FLOW_LOG"] = str(flow_log_path(cache_dir))
-    env["AUA_FLOW_BODIES"] = str(flow_bodies_path(cache_dir))
+    env["AUA_MOCK_RECORD"] = str(record_path(cache_dir, serial))
+    env["AUA_FLOW_LOG"] = str(flow_log_path(cache_dir, serial))
+    env["AUA_FLOW_BODIES"] = str(flow_bodies_path(cache_dir, serial))
     log_fh = open(log, "ab")  # noqa: SIM115 — kept open for child stderr
     try:
         proc = subprocess.Popen(  # noqa: S603

@@ -21,6 +21,9 @@ from android_ui_analyser.engine import Engine
 from android_ui_analyser.errors import UsageError
 from conftest import FakeDevice, make_config
 
+# The serial conftest.FakeDevice reports; proxy state is per-target.
+SERIAL = "fake-emulator-5554"
+
 
 def _engine(tmp_path: Path) -> Engine:
     cfg = make_config(
@@ -50,13 +53,13 @@ def test_mock_clear_removes_every_rule_and_disarms_mode(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     engine.mock_map("GET", "/api/v1/widgets")
     cache = Path(engine.config.cache.dir)
-    pm.set_mode(pm.rules_path(cache), "record")
+    pm.set_mode(pm.rules_path(cache, SERIAL), "record")
 
     out = engine.mock_clear()
 
     assert out["ok"] is True
     assert out["removed"] == 1
-    doc = pm.load_doc(pm.rules_path(cache))
+    doc = pm.load_doc(pm.rules_path(cache, SERIAL))
     assert doc["rules"] == []
     assert doc["mode"] == "map"
 
@@ -70,7 +73,7 @@ def test_mock_rm_removes_one_rule_by_id(tmp_path: Path) -> None:
 
     assert out["ok"] is True
     assert out["count"] == 1
-    remaining = pm.load_rules(pm.rules_path(Path(engine.config.cache.dir)))
+    remaining = pm.load_rules(pm.rules_path(Path(engine.config.cache.dir), SERIAL))
     assert all(r["id"] != r1["id"] for r in remaining)
 
 
@@ -87,7 +90,7 @@ def test_mock_rm_copes_with_legacy_rules_that_have_a_null_id(tmp_path: Path) -> 
     assigned, or from hand-edited cassettes. Removal must be able to target them."""
     engine = _engine(tmp_path)
     cache = Path(engine.config.cache.dir)
-    path = pm.rules_path(cache)
+    path = pm.rules_path(cache, SERIAL)
     legacy = pm.map_rule("GET", "/api/v1/legacy")
     legacy["id"] = None
     pm.write_rules(path, [legacy])
@@ -112,7 +115,7 @@ def test_mock_map_warns_when_it_inherits_rules_it_did_not_create(
     cache = Path(engine.config.cache.dir)
     # A rule left behind by an unrelated, untagged earlier session — no owner recorded — is
     # exactly the shape of the stale-rules problem this reproduces.
-    pm.write_rules(pm.rules_path(cache), [pm.map_rule("GET", "/api/v1/stale")])
+    pm.write_rules(pm.rules_path(cache, SERIAL), [pm.map_rule("GET", "/api/v1/stale")])
 
     monkeypatch.setenv("AUA_OWNER", "this-session")
     out = engine.mock_map("GET", "/api/v1/widgets")
@@ -187,7 +190,7 @@ def test_the_catalogued_mock_rules_undo_actually_clears_the_file(tmp_path: Path)
     )
     UNDO_OPS[entry.op].handler(ctx, entry.args)
 
-    doc = pm.load_doc(pm.rules_path(cache))
+    doc = pm.load_doc(pm.rules_path(cache, SERIAL))
     assert doc["rules"] == []
 
 

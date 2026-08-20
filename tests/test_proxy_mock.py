@@ -14,6 +14,9 @@ from android_ui_analyser.engine import Engine
 from android_ui_analyser.errors import UsageError
 from conftest import FakeDevice, make_config
 
+# The serial conftest.FakeDevice reports; proxy state is per-target.
+SERIAL = "fake-emulator-5554"
+
 
 def test_map_rule_and_cassette_roundtrip(tmp_path: Path) -> None:
     rule = pm.map_rule("GET", "/notifications", status=200, body='{"items":[]}')
@@ -40,7 +43,7 @@ def test_engine_mock_map_replay(tmp_path: Path) -> None:
     pm.save_cassette(cass, "empty", [pm.map_rule("GET", "/notifications", body={"items": []})])
     replay = engine.mock_replay("empty")
     assert replay["entries"] == 1
-    rules = pm.load_rules(pm.rules_path(Path(cfg.cache.dir)))
+    rules = pm.load_rules(pm.rules_path(Path(cfg.cache.dir), SERIAL))
     assert rules[0]["request"]["path"] == "/notifications"
 
 
@@ -72,7 +75,7 @@ def test_proxy_start_uses_random_port(tmp_path: Path, monkeypatch: pytest.Monkey
     cache = tmp_path / "cache"
     engine = Engine(make_config(cache={"dir": str(cache)}), device=device)
 
-    def fake_start(*, cache_dir: Path, port: int | None = None, mode: str = "map") -> tuple[int, int]:
+    def fake_start(*, cache_dir: Path, port: int | None = None, mode: str = "map", serial: str | None = None) -> tuple[int, int]:
         listen = pm.pick_listen_port(preferred=port)
         pm.save_listen_port(cache_dir, listen)
         (cache_dir / "mitmproxy.pid").write_text("12345", encoding="utf-8")
@@ -86,7 +89,7 @@ def test_proxy_start_uses_random_port(tmp_path: Path, monkeypatch: pytest.Monkey
     # Record must reuse the same port, not fall back to 8080.
     seen: list[int | None] = []
 
-    def fake_start2(*, cache_dir: Path, port: int | None = None, mode: str = "map") -> tuple[int, int]:
+    def fake_start2(*, cache_dir: Path, port: int | None = None, mode: str = "map", serial: str | None = None) -> tuple[int, int]:
         seen.append(port)
         listen = port or 54321
         pm.save_listen_port(cache_dir, listen)
@@ -131,7 +134,7 @@ def test_mock_record_survives_the_start_mode_flip_restart(
     cfg = make_config(cache={"dir": str(cache)}, memory={"dir": str(tmp_path / "mem")})
     engine = Engine(cfg, device=device)
 
-    def fake_start(*, cache_dir: Path, port: int | None = None, mode: str = "map") -> tuple[int, int]:
+    def fake_start(*, cache_dir: Path, port: int | None = None, mode: str = "map", serial: str | None = None) -> tuple[int, int]:
         return 4242, port or 49099
 
     monkeypatch.setattr(pm, "start_mitm", fake_start)
@@ -146,7 +149,7 @@ def test_mock_record_survives_the_start_mode_flip_restart(
     # into `response.body` unconditionally in record mode — independent of `capture_bodies`,
     # which only gates the separate always-on flow-bodies log).
     widget_body = '{"id": 42, "name": "left-handed smoke shifter", "in_stock": true}'
-    rec = pm.record_path(cache)
+    rec = pm.record_path(cache, SERIAL)
     with rec.open("a", encoding="utf-8") as fh:
         fh.write(
             json.dumps(
@@ -198,7 +201,9 @@ def test_diagnose_empty_recording_ignores_stale_tls_failures_before_the_window(
     )
     offset = log.stat().st_size  # the recording window starts strictly after this line
 
-    diag = pm.diagnose_empty_recording(tmp_path, since_ts=time.time(), log_offset=offset)
+    diag = pm.diagnose_empty_recording(
+        tmp_path,
+        serial=SERIAL, since_ts=time.time(), log_offset=offset)
 
     assert diag["diagnosis"] != "tls_failed"
     assert diag["tls_failures_app"] == []
@@ -215,7 +220,7 @@ def test_diagnose_empty_recording_does_not_blame_the_ca_when_flows_decrypted_in_
     )
     offset = log.stat().st_size
     since = time.time()
-    flow_log = pm.flow_log_path(tmp_path)
+    flow_log = pm.flow_log_path(tmp_path, SERIAL)
     flow_log.parent.mkdir(parents=True, exist_ok=True)
     with flow_log.open("a", encoding="utf-8") as fh:
         fh.write(
@@ -234,7 +239,9 @@ def test_diagnose_empty_recording_does_not_blame_the_ca_when_flows_decrypted_in_
             + "\n"
         )
 
-    diag = pm.diagnose_empty_recording(tmp_path, since_ts=since, log_offset=offset)
+    diag = pm.diagnose_empty_recording(
+        tmp_path,
+        serial=SERIAL, since_ts=since, log_offset=offset)
 
     assert diag["diagnosis"] != "tls_failed", (
         "the CA must never be blamed when flows for the app under test demonstrably "
@@ -253,7 +260,9 @@ def test_diagnose_empty_recording_flags_real_ca_distrust_for_non_system_hosts(
         encoding="utf-8",
     )
 
-    diag = pm.diagnose_empty_recording(tmp_path, since_ts=0.0, log_offset=0)
+    diag = pm.diagnose_empty_recording(
+        tmp_path,
+        serial=SERIAL, since_ts=0.0, log_offset=0)
 
     assert diag["diagnosis"] == "tls_failed"
     assert diag["tls_failures_app"]
@@ -269,7 +278,9 @@ def test_diagnose_empty_recording_treats_system_only_failures_as_no_app_traffic(
         encoding="utf-8",
     )
 
-    diag = pm.diagnose_empty_recording(tmp_path, since_ts=0.0, log_offset=0)
+    diag = pm.diagnose_empty_recording(
+        tmp_path,
+        serial=SERIAL, since_ts=0.0, log_offset=0)
 
     assert diag["diagnosis"] != "tls_failed", (
         "OS/Google-services traffic legitimately never trusts the overlay and must not be "
@@ -285,7 +296,7 @@ def test_mock_record_stop_hint_does_not_blame_ca_when_window_decrypted_fine(
     cfg = make_config(cache={"dir": str(cache)}, memory={"dir": str(tmp_path / "mem")})
     engine = Engine(cfg, device=device)
 
-    def fake_start(*, cache_dir: Path, port: int | None = None, mode: str = "map") -> tuple[int, int]:
+    def fake_start(*, cache_dir: Path, port: int | None = None, mode: str = "map", serial: str | None = None) -> tuple[int, int]:
         return 4242, port or 49099
 
     monkeypatch.setattr(pm, "start_mitm", fake_start)
@@ -305,7 +316,7 @@ def test_mock_record_stop_hint_does_not_blame_ca_when_window_decrypted_fine(
     # The app under test made a real, decrypted call during the window (recorded on the
     # always-on flow log), but nothing landed in the cassette this time.
     since = time.time()
-    with pm.flow_log_path(cache).open("a", encoding="utf-8") as fh:
+    with pm.flow_log_path(cache, SERIAL).open("a", encoding="utf-8") as fh:
         fh.write(
             json.dumps(
                 {

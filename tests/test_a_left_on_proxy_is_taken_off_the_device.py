@@ -47,7 +47,7 @@ class _FakeProxy:
         return self.orphan
 
     # -- process ---------------------------------------------------------
-    def start_mitm(self, *, cache_dir: Path, port: int | None, mode: str) -> tuple[int, int]:
+    def start_mitm(self, *, cache_dir: Path, port: int | None, mode: str, serial=None) -> tuple[int, int]:
         listen = port or 49097
         self.started.append(listen)
         return 4242, listen

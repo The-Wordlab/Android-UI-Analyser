@@ -268,6 +268,48 @@ class RecommendedUsageError(UsageError):
         return out
 
 
+_JOURNAL_RESPONSE_CAP = 8_000
+
+
+def redacted_argv(argv: list[str]) -> list[str]:
+    """The shape of what the caller typed, with every value replaced.
+
+    Raw argv cannot be journalled as-is: a parse failure can leave a secret sitting in an
+    untyped positional. But recording nothing meant a reader could not see which command
+    an agent had actually attempted — the name survived only inside the prose of an error
+    message, so "what did it send?" was unanswerable from the journal.
+
+    Kept: option NAMES, and the first bare token (the subcommand being attempted, which is
+    what a reader needs and is never a secret). Replaced: every option value and every
+    later positional.
+    """
+    raw = list(argv or [])
+    out: list[str] = []
+    seen_command = False
+    expect_value = False
+    for token in raw:
+        if expect_value:
+            out.append("<redacted>")
+            expect_value = False
+            continue
+        if token.startswith("-"):
+            name, sep, _value = token.partition("=")
+            if sep:
+                out.append(f"{name}=<redacted>")
+            else:
+                out.append(name)
+                # A bare flag may or may not take a value; assume it might, so a secret
+                # passed as `--token SECRET` never lands here verbatim.
+                expect_value = not name.startswith("--no-")
+            continue
+        if not seen_command:
+            out.append(token)  # the attempted command name — the whole point of this row
+            seen_command = True
+            continue
+        out.append("<redacted>")
+    return out
+
+
 def _journal_cli_recovery(
     ctx: click.Context,
     *,
@@ -275,12 +317,16 @@ def _journal_cli_recovery(
     ok: bool,
     error: AuaError | None = None,
     recommended_call: str | None = None,
+    response_text: str | None = None,
+    argv: list[str] | None = None,
 ) -> None:
     """Best-effort host-side journal row for help and pre-device CLI recovery.
 
-    Raw argv is deliberately excluded: a parse failure can leave a secret in an untyped
-    positional. Only the command path, typed error, and safe recommended call are retained.
-    This never resolves a lease or connects to Android.
+    Records the shape of the request (see :func:`redacted_argv`) and the text actually
+    handed back to the caller, so a human reading the dashboard can judge whether what the
+    tool returned was any use. Without the response body these rows were unreadable: a help
+    call showed as a content-free marker, which is indistinguishable from help returning
+    nothing at all. This never resolves a lease or connects to Android.
     """
     with contextlib.suppress(Exception):
         from . import journal as journal_mod
@@ -299,12 +345,18 @@ def _journal_cli_recovery(
         exact_call = recommended_call or getattr(error, "recommended_call", None)
         if exact_call:
             result["recommended_call"] = exact_call
+        if response_text:
+            text = str(response_text)
+            result["response_text"] = text[:_JOURNAL_RESPONSE_CAP]
+            result["response_lines"] = text.count("\n") + 1
+            if len(text) > _JOURNAL_RESPONSE_CAP:
+                result["response_truncated"] = True
         journal_mod.record(
             cache_dir=cfg.cache.dir,
             serial=(opts.serial if opts is not None else None) or cfg.device.serial,
             source="cli",
             cmd=f"cli_{event}",
-            args={"command": command_path},
+            args={"command": command_path, "argv": redacted_argv(argv or [])},
             ok=ok,
             result=result,
             error=error_value if isinstance(error_value, dict) else None,
@@ -1902,13 +1954,19 @@ class UnknownCommand(AuaError):
     exit_code = ExitCode.USAGE
     code = "unknown_command"
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, available: list[str] | None = None) -> None:
         from .guide import COMMAND_SYNONYMS
 
         self.meant = COMMAND_SYNONYMS.get(name.lower())
+        # The real vocabulary. Without it the only way to learn a command name was
+        # `aua --help`, whose first page carried none — so a caller that guessed wrong
+        # had nothing new to go on and guessed again.
+        self.available = sorted(available or [])
         message = f"`aua {name}` is not a command."
         if self.meant:
             message += f" Use `aua {self.meant}`."
+        elif self.available:
+            message += f" Available: {', '.join(self.available)}."
         self.recommended_call = f"aua {self.meant} --help" if self.meant else "aua guide --brief"
         super().__init__(message, hint=_GUIDE_POINTER)
 
@@ -1920,6 +1978,8 @@ class UnknownCommand(AuaError):
         if isinstance(err, dict):
             if self.meant:
                 err["did_you_mean"] = self.meant
+            if self.available:
+                err["available_commands"] = self.available
             err["recommended_call"] = self.recommended_call
             err["how_to_drive"] = [f"{cmd}  # {why}" for cmd, why in ORIENTATION]
         return out
@@ -1939,6 +1999,7 @@ class GuidingGroup(TyperGroup):
         # only way to page it is to catch what it wrote.
         import contextlib
         import io
+        import textwrap
 
         from .guide import ORIENTATION
 
@@ -1948,18 +2009,30 @@ class GuidingGroup(TyperGroup):
         rendered = buffer.getvalue() or formatter.getvalue()
         # Paging alone would make page 1 fifty-five lines of global options and not one command.
         # Whatever a truncating reader gets, it must be the loop.
+        names = sorted(self.list_commands(ctx))
         head = [
             "The loop — everything else is a variation on these:",
             *(f"  {cmd}  # {why}" for cmd, why in ORIENTATION),
             "",
+            # The rendered help puts ~55 lines of global options ahead of the command
+            # table, so on a paged terminal page 1 carried not one command name and
+            # `aua --help | grep <name>` found nothing. Agents answered that by guessing
+            # names, failing, and re-reading page 1 — measured 110 help calls in one run.
+            "All commands (`aua <command> --help` for one):",
+            *textwrap.wrap(", ".join(names), width=76, initial_indent="  ",
+                           subsequent_indent="  "),
+            "",
         ]
         body = "\n".join([*head, rendered.rstrip("\n")])
-        click.echo(paginate(body, _page_arg(), more="aua --help --page {page}"))
+        shown = paginate(body, _page_arg(), more="aua --help --page {page}")
+        click.echo(shown)
         _journal_cli_recovery(
             ctx,
             event="help",
             ok=True,
             recommended_call="aua guide --brief",
+            response_text=shown,
+            argv=["--help"] + ([f"--page={_page_arg()}"] if _page_arg() > 1 else []),
         )
 
     def resolve_command(
@@ -1971,13 +2044,17 @@ class GuidingGroup(TyperGroup):
             name = next((a for a in args if not a.startswith("-")), "")
             if not name or name in self.commands:
                 raise
-            err = UnknownCommand(name)
+            import json
+
+            err = UnknownCommand(name, list(self.list_commands(ctx)))
             _journal_cli_recovery(
                 ctx,
                 event="usage_error",
                 ok=False,
                 error=err,
                 recommended_call=err.recommended_call,
+                response_text=json.dumps(err.to_dict(), ensure_ascii=False, indent=2),
+                argv=list(args),
             )
             emit_error(err)
             raise typer.Exit(int(err.exit_code)) from None
@@ -2003,6 +2080,8 @@ class GuidingGroup(TyperGroup):
             # hint — the exact failure this is here to stop.
             path = getattr(exc.ctx, "command_path", None) or ctx.info_name
             recommended_call = f"{path} {choices.split('|')[0].strip()}"
+            import json
+
             err = RecommendedUsageError(
                 f"`{path} {metavar}` needs a value",
                 hint=f"One of: {choices}. Pass it as the first argument, e.g. "
@@ -2015,6 +2094,7 @@ class GuidingGroup(TyperGroup):
                 ok=False,
                 error=err,
                 recommended_call=recommended_call,
+                response_text=json.dumps(err.to_dict(), ensure_ascii=False, indent=2),
             )
             emit_error(err)
             raise typer.Exit(int(err.exit_code)) from None
@@ -8559,42 +8639,46 @@ def mock_rewrite_cmd(
     request through and edits what comes back — the status an app sees, a header, a JSON
     field — which is how you reproduce a server-side condition you cannot trigger on demand.
     """
-    import json
-
-    headers: dict[str, str] = {}
-    for item in header:
-        name, sep, value = item.partition(":")
-        if not sep or not name.strip():
-            raise UsageError(
-                f"--header {item!r} is not `Name: value`",
-                hint="Example: --header 'Retry-After: 30'.",
-            )
-        headers[name.strip()] = value.strip()
-
-    sets: dict[str, Any] = {}
-    for item in set_json:
-        field, sep, raw = item.partition("=")
-        if not sep or not field.strip():
-            raise UsageError(
-                f"--set {item!r} is not `path=value`",
-                hint='Example: --set \'items[0].title="hi"\' or --set enabled=false.',
-            )
-        try:
-            sets[field.strip()] = json.loads(raw)
-        except json.JSONDecodeError:
-            sets[field.strip()] = raw  # a bare string is the common case
-
-    pairs: list[tuple[str, str]] = []
-    for item in replace:
-        old, sep, new = item.partition("=>")
-        if not sep:
-            raise UsageError(
-                f"--replace {item!r} is not `old=>new`",
-                hint="Example: --replace 'premium=>free'.",
-            )
-        pairs.append((old, new))
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
+        # Parsed in here, not in the command body: `_run` is what turns a UsageError into
+        # the one-line JSON envelope every other refusal uses. Raised outside it, a
+        # malformed `--set` printed a forty-line Python traceback and exited 1 instead of 2.
+        import json
+
+        headers: dict[str, str] = {}
+        for item in header:
+            name, sep, value = item.partition(":")
+            if not sep or not name.strip():
+                raise UsageError(
+                    f"--header {item!r} is not `Name: value`",
+                    hint="Example: --header 'Retry-After: 30'.",
+                )
+            headers[name.strip()] = value.strip()
+
+        sets: dict[str, Any] = {}
+        for item in set_json:
+            field, sep, raw = item.partition("=")
+            if not sep or not field.strip():
+                raise UsageError(
+                    f"--set {item!r} is not `path=value`",
+                    hint='Example: --set \'items[0].title="hi"\' or --set enabled=false.',
+                )
+            try:
+                sets[field.strip()] = json.loads(raw)
+            except json.JSONDecodeError:
+                sets[field.strip()] = raw  # a bare string is the common case
+
+        pairs: list[tuple[str, str]] = []
+        for item in replace:
+            old, sep, new = item.partition("=>")
+            if not sep:
+                raise UsageError(
+                    f"--replace {item!r} is not `old=>new`",
+                    hint="Example: --replace 'premium=>free'.",
+                )
+            pairs.append((old, new))
+
         _emit(
             engine.mock_rewrite(
                 method,

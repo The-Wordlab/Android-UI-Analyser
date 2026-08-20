@@ -75,8 +75,12 @@ class _Flow:
         self.metadata: dict = {}
 
 
-def _load(monkeypatch: pytest.MonkeyPatch, cache: Path):
-    """Exec ADDON_SCRIPT against the stub and return the addon instance."""
+def _load(monkeypatch: pytest.MonkeyPatch, cache: Path, serial: str | None = None):
+    """Exec ADDON_SCRIPT against the stub and return the addon instance.
+
+    *serial* points the addon at one target's state, the way `proxy start` does — that is
+    what an engine-armed rule writes to.
+    """
     http_mod = types.ModuleType("mitmproxy.http")
     http_mod.Response = _Response  # type: ignore[attr-defined]
     http_mod.HTTPFlow = _Flow  # type: ignore[attr-defined]
@@ -86,10 +90,10 @@ def _load(monkeypatch: pytest.MonkeyPatch, cache: Path):
     monkeypatch.setitem(sys.modules, "mitmproxy.http", http_mod)
 
     cache.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("AUA_MOCK_RULES", str(pm.rules_path(cache)))
-    monkeypatch.setenv("AUA_MOCK_RECORD", str(pm.record_path(cache)))
-    monkeypatch.setenv("AUA_FLOW_LOG", str(pm.flow_log_path(cache)))
-    monkeypatch.setenv("AUA_FLOW_BODIES", str(pm.flow_bodies_path(cache)))
+    monkeypatch.setenv("AUA_MOCK_RULES", str(pm.rules_path(cache, serial)))
+    monkeypatch.setenv("AUA_MOCK_RECORD", str(pm.record_path(cache, serial)))
+    monkeypatch.setenv("AUA_FLOW_LOG", str(pm.flow_log_path(cache, serial)))
+    monkeypatch.setenv("AUA_FLOW_BODIES", str(pm.flow_bodies_path(cache, serial)))
     monkeypatch.setenv("AUA_MOCK_MODE", "map")
 
     namespace: dict = {"__name__": "aua_mitm_addon"}
@@ -107,9 +111,9 @@ def _exchange(addon, *, method="GET", path="/", host="api.example.com", body="",
     return flow
 
 
-def _rules(cache: Path, entries: list[dict], *, mode: str = "map") -> None:
+def _rules(cache: Path, entries: list[dict], *, mode: str = "map", serial: str | None = None) -> None:
     pm.save_doc(
-        pm.rules_path(cache),
+        pm.rules_path(cache, serial),
         {"mode": mode, "capture_bodies": True, "rules": entries},
     )
 
@@ -384,7 +388,7 @@ def test_a_rule_armed_through_the_engine_is_applied_by_the_addon(
     )
     rule_id = armed["rule"]["id"]
 
-    addon = _load(monkeypatch, cache)
+    addon = _load(monkeypatch, cache, engine.device.serial)
     flow = _exchange(
         addon,
         path="/v1/feed",
@@ -398,7 +402,7 @@ def test_a_rule_armed_through_the_engine_is_applied_by_the_addon(
     assert flow.metadata["aua_rule"] == rule_id
 
     # And the panel's "which rules actually fired" signal comes from this same log line.
-    logged = pm.read_flows_since(cache, 0)
+    logged = pm.read_flows_since(cache, 0, engine.device.serial)
     assert [(e["action"], e["rule"]) for e in logged] == [("rewrite", rule_id)]
 
 
@@ -415,7 +419,7 @@ def test_an_engine_armed_stub_is_also_applied_by_the_addon(
     )
     engine.mock_map("POST", "/v1/pay", status=402, body='{"reason":"stubbed"}')
 
-    addon = _load(monkeypatch, cache)
+    addon = _load(monkeypatch, cache, engine.device.serial)
     flow = _exchange(addon, method="POST", path="/v1/pay")
 
     assert flow.response.status_code == 402

@@ -33,6 +33,102 @@ _DEFAULT_PORT = 8765
 # whatever was writing it has stopped.
 _FRAME_STALE_S = 3.0
 
+# Header names whose VALUE is a credential or a tracking identity. The proxy captures whole
+# exchanges, so the panel would otherwise hand a bearer token to anything that can reach
+# localhost — and to anyone the page is screenshotted for.
+_SECRET_HEADERS = frozenset(
+    {
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "set-cookie",
+        "x-api-key",
+        "x-auth-token",
+        "x-access-token",
+        "x-session-token",
+        "x-csrf-token",
+        "x-device-key",
+        "x-ad-id",
+        "x-advertising-id",
+        "x-correlation-id",
+        "x-organization-id",
+        "x-goog-api-key",
+        "api-key",
+        "authentication",
+    }
+)
+
+# Body keys whose value is a credential. Matched case-insensitively as a substring, so
+# `streamToken`, `access_token` and `refreshToken` are all caught by "token".
+_SECRET_BODY_KEYS = ("token", "password", "secret", "api_key", "apikey", "authorization",
+                     "credential", "session_id", "cookie")
+
+_REDACTED = "<redacted>"
+
+
+def _redact_headers(headers: Any) -> Any:
+    if not isinstance(headers, dict):
+        return headers
+    return {
+        k: (_REDACTED if str(k).lower() in _SECRET_HEADERS else v) for k, v in headers.items()
+    }
+
+
+def _redact_body(value: Any, depth: int = 0) -> Any:
+    """Blank out credential-shaped values anywhere in a decoded JSON body."""
+    if depth > 6:
+        return value
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for k, v in value.items():
+            low = str(k).lower()
+            if any(marker in low for marker in _SECRET_BODY_KEYS):
+                out[k] = _REDACTED
+            else:
+                out[k] = _redact_body(v, depth + 1)
+        return out
+    if isinstance(value, list):
+        return [_redact_body(v, depth + 1) for v in value[:200]]
+    return value
+
+
+def redact_flow(entry: dict[str, Any]) -> dict[str, Any]:
+    """A captured exchange with its credentials removed.
+
+    The panel is read over plain HTTP on localhost and is routinely screenshotted into
+    bug reports, so a captured `authorization` bearer must never leave this function.
+    Header and field NAMES are kept — knowing an endpoint sends a bearer is exactly the
+    kind of thing the panel is for; knowing its value is not.
+    """
+    out = dict(entry)
+    for field in ("request_headers", "response_headers"):
+        if field in out:
+            out[field] = _redact_headers(out[field])
+    for field in ("request_body", "response_body"):
+        raw = out.get(field)
+        if not isinstance(raw, str) or not raw.strip().startswith(("{", "[")):
+            continue
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        out[field] = json.dumps(_redact_body(parsed), ensure_ascii=False)
+    if isinstance(out.get("query"), str) and out["query"]:
+        out["query"] = _redact_query(out["query"])
+    return out
+
+
+def _redact_query(query: str) -> str:
+    parts = []
+    for chunk in query.split("&"):
+        name, sep, _value = chunk.partition("=")
+        low = name.lower()
+        if sep and any(marker in low for marker in _SECRET_BODY_KEYS):
+            parts.append(f"{name}={_REDACTED}")
+        else:
+            parts.append(chunk)
+    return "&".join(parts)
+
 # url -> (server, thread) for dashboards started with block=False, so callers that
 # do not own the serve loop can still stop one.
 _SERVERS: dict[str, tuple[ThreadingHTTPServer, threading.Thread]] = {}
@@ -1324,7 +1420,7 @@ function pxArm() {
 async function tickProxy() {
   if (isGrid) return;
   try {
-    const r = await fetch('/api/proxy' + qSerial(), {cache: 'no-store'});
+    const r = await fetch('/api/proxy' + qSerial({limit: 300}), {cache: 'no-store'});
     const d = await r.json();
     const state = document.getElementById('px-state');
     if (!d.supported) {
@@ -2415,7 +2511,7 @@ class _DashboardState:
             self._engine = Engine(self.config)
         return self._engine
 
-    def proxy_payload(self, serial: str | None = None, *, limit: int = 60) -> dict[str, Any]:
+    def proxy_payload(self, serial: str | None = None, *, limit: int = 200) -> dict[str, Any]:
         """Proxy health, armed rules and the live traffic feed for one device."""
         ser = serial or self.focus
         try:
@@ -2442,7 +2538,7 @@ class _DashboardState:
         mode = "off"
         owner = None
         with contextlib.suppress(Exception):
-            doc = pm.load_doc(pm.rules_path(self.cache_dir))
+            doc = pm.load_doc(pm.rules_path(self.cache_dir, ser))
             rules, _changed = pm.backfill_rule_ids(doc["rules"])
             mode = str(doc.get("mode") or "off")
             owner = doc.get("owner")
@@ -2451,7 +2547,7 @@ class _DashboardState:
 
         flows: list[dict[str, Any]] = []
         with contextlib.suppress(Exception):
-            flows = pm.read_flows_since(self.cache_dir, 0)
+            flows = pm.read_flows_since(self.cache_dir, 0, ser)
         # Which rules have actually fired, so an armed rule reads differently from a spent
         # one. The addon spends a rule's `times` budget in its own process and deliberately
         # never writes it back, so the flow log is the only place this is knowable.
@@ -2469,7 +2565,9 @@ class _DashboardState:
         out["manipulated"] = sum(1 for f in flows if f.get("action"))
         return out
 
-    def proxy_flow_detail(self, n: int, ts: float | None = None) -> dict[str, Any]:
+    def proxy_flow_detail(
+        self, n: int, ts: float | None = None, serial: str | None = None
+    ) -> dict[str, Any]:
         """Full headers and bodies for one logged exchange, when body capture was on.
 
         *ts* disambiguates: the addon's sequence number restarts at 1 with every mitmdump
@@ -2479,12 +2577,13 @@ class _DashboardState:
         pm = self._proxy_service()
         bodies: list[dict[str, Any]] = []
         with contextlib.suppress(Exception):
-            bodies = pm.read_flow_bodies(self.cache_dir)
+            bodies = pm.read_flow_bodies(self.cache_dir, serial or self.focus)
         candidates = [e for e in bodies if int(e.get("n") or 0) == int(n)]
         if ts is not None and len(candidates) > 1:
             candidates.sort(key=lambda e: abs(float(e.get("ts") or 0) - float(ts)))
         if candidates:
-            return {"ok": True, "flow": candidates[0] if ts is not None else candidates[-1]}
+            chosen = candidates[0] if ts is not None else candidates[-1]
+            return {"ok": True, "flow": redact_flow(chosen)}
         return {
             "ok": False,
             "error": {
@@ -2695,7 +2794,9 @@ def _make_handler(state: _DashboardState) -> type[BaseHTTPRequestHandler]:
                 ser = self._scoped_qs_serial(qs)
                 if ser is None:
                     return
-                self._json(state.proxy_payload(ser))
+                raw_limit = (qs.get("limit") or [""])[0]
+                limit = int(raw_limit) if raw_limit.isdigit() else 200
+                self._json(state.proxy_payload(ser, limit=limit))
                 return
             if path == "/api/proxy/flow":
                 ser = self._scoped_qs_serial(qs)
@@ -2720,7 +2821,7 @@ def _make_handler(state: _DashboardState) -> type[BaseHTTPRequestHandler]:
                 except ValueError:
                     ts = None
                 try:
-                    self._json(state.proxy_flow_detail(int(raw), ts))
+                    self._json(state.proxy_flow_detail(int(raw), ts, ser))
                 except AuaError as exc:
                     self._json({"ok": False, **exc.to_dict()}, 400)
                 return

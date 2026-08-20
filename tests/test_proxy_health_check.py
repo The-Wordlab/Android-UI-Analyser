@@ -560,7 +560,10 @@ def test_mock_record_start_refreshes_the_stale_pid_so_it_does_not_cry_wolf_next_
     _arm_state(tmp_path, port=PORT, pid=PID)
     cache = tmp_path / "cache"
 
-    def fake_start(*, cache_dir: Path, port: int | None = None, mode: str = "map"):
+    def fake_start(
+        *, cache_dir: Path, port: int | None = None, mode: str = "map",
+        serial: str | None = None,
+    ):
         return PID + 1, port or PORT
 
     monkeypatch.setattr(pm, "start_mitm", fake_start)
@@ -582,7 +585,10 @@ def test_mock_record_start_warns_when_the_refreshed_proxy_is_still_unreachable(
     _arm_state(tmp_path, port=PORT, pid=PID)
     cache = tmp_path / "cache"
 
-    def fake_start(*, cache_dir: Path, port: int | None = None, mode: str = "map"):
+    def fake_start(
+        *, cache_dir: Path, port: int | None = None, mode: str = "map",
+        serial: str | None = None,
+    ):
         return PID + 1, port or PORT
 
     monkeypatch.setattr(pm, "start_mitm", fake_start)

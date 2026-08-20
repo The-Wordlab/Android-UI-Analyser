@@ -14358,7 +14358,9 @@ class Engine:
             try:
                 proxy_mock = self.platform.capability("proxy")
 
-                flows = proxy_mock.read_flows_since(self.config.cache.dir, wall_baseline)
+                flows = proxy_mock.read_flows_since(
+                    self.config.cache.dir, wall_baseline, self._proxy_serial()
+                )
             except Exception:  # proxy not running / extra not installed
                 return False
             return any(proxy_mock.flow_matches(f, spec) for f in flows)
@@ -16331,7 +16333,9 @@ class Engine:
                 logger.warning("system CA install failed: %s", exc)
         # ``port<=0`` / omitted → random free high port (never hardcodes 8080).
         preferred = port if port and port > 0 else None
-        pid, listen = pm.start_mitm(cache_dir=cache, port=preferred, mode="map")
+        pid, listen = pm.start_mitm(
+            cache_dir=cache, port=preferred, mode="map", serial=device.serial
+        )
         # Journal the undos *before* the device is rewired. A crash between the record and the
         # mutation leaves a redundant undo, which is harmless; a crash the other way leaves a
         # device pointed at a dead port with nothing on disk that says so — every app reports
@@ -16735,6 +16739,24 @@ class Engine:
         message = status.get("hint") or status.get("warning") or status.get("detail")
         return f"proxy health check: {message}" if message else None
 
+    def _proxy_serial(self, serial: str | None = None) -> str | None:
+        """Which target this proxy/mock call belongs to, resolved without connecting.
+
+        Proxy state is per-serial: two agents on two devices each get their own rules and
+        their own traffic log. Falls back to the lease this engine already holds, so an
+        ordinary `aua mock map` still lands on the device the agent is driving without the
+        caller having to name it.
+        """
+        if serial:
+            return str(serial)
+        if self._device is not None:
+            return self._device.serial
+        with contextlib.suppress(Exception):
+            leased = self._leased_serial()
+            if leased:
+                return str(leased)
+        return getattr(self.config.device, "serial", None) or None
+
     def _arm_mock_rule(
         self,
         rule: dict[str, Any],
@@ -16755,7 +16777,8 @@ class Engine:
         pm = self.platform.capability("proxy")
 
         cache = Path(self.config.cache.dir).expanduser()
-        rules_file = pm.rules_path(cache)
+        target = self._proxy_serial(serial)
+        rules_file = pm.rules_path(cache, target)
         doc = pm.load_doc(rules_file)
         existing = list(doc["rules"])
         owner = str(leases.resolve_owner(None))
@@ -16782,9 +16805,9 @@ class Engine:
             key="mock_rules",
             kind="mock_rules",
             op="clear_mock_rules",
-            args={"cache_dir": str(cache)},
+            args={"cache_dir": str(cache), "serial": target},
             detail=detail,
-            serial=serial,
+            serial=target,
         )
         pm.save_doc(rules_file, doc)
         out: dict[str, Any] = {"ok": True, "action": action, "rule": rule, "count": len(rules)}
@@ -16869,39 +16892,52 @@ class Engine:
             serial=serial,
         )
 
-    def mock_list(self) -> dict[str, Any]:
+    def mock_list(self, *, serial: str | None = None) -> dict[str, Any]:
         pm = self.platform.capability("proxy")
 
         cache = Path(self.config.cache.dir).expanduser()
-        rules_file = pm.rules_path(cache)
+        target = self._proxy_serial(serial)
+        rules_file = pm.rules_path(cache, target)
         doc = pm.load_doc(rules_file)
         rules, changed = pm.backfill_rule_ids(doc["rules"])
         if changed:
             pm.write_rules(rules_file, rules)
+        # How many times each rule actually fired. The addon spends a rule's `times` budget
+        # in its own process and deliberately never writes it back, so the flow log is the
+        # only place this is knowable — and without it a caller cannot tell a rule that is
+        # armed from one that has already been used up, or one that never matched at all.
+        fired: dict[str, int] = {}
+        with contextlib.suppress(Exception):
+            for entry in pm.read_flows_since(cache, 0, target):
+                rid = entry.get("rule")
+                if rid:
+                    fired[str(rid)] = fired.get(str(rid), 0) + 1
+        listed = [dict(rule, fired=fired.get(str(rule.get("id")), 0)) for rule in rules]
         return {
             "ok": True,
             "action": "mock-list",
             "mode": doc["mode"],
             "owner": doc.get("owner"),
-            "count": len(rules),
-            "rules": rules,
+            "serial": target,
+            "count": len(listed),
+            "rules": listed,
         }
 
-    def mock_clear(self) -> dict[str, Any]:
+    def mock_clear(self, *, serial: str | None = None) -> dict[str, Any]:
         pm = self.platform.capability("proxy")
 
         cache = Path(self.config.cache.dir).expanduser()
-        removed = pm.clear_rules(cache)
+        removed = pm.clear_rules(cache, self._proxy_serial(serial))
         # The change is undone right here, deliberately — forget the pending journal entry or
         # a reaper replays a no-op undo against a device that has already moved on.
         self.forget_device_change("mock_rules")
         return {"ok": True, "action": "mock-clear", "removed": removed}
 
-    def mock_rm(self, rule_id: str) -> dict[str, Any]:
+    def mock_rm(self, rule_id: str, *, serial: str | None = None) -> dict[str, Any]:
         pm = self.platform.capability("proxy")
 
         cache = Path(self.config.cache.dir).expanduser()
-        rules_file = pm.rules_path(cache)
+        rules_file = pm.rules_path(cache, self._proxy_serial(serial))
         rules, _changed = pm.backfill_rule_ids(pm.load_rules(rules_file))
         kept = [r for r in rules if str(r.get("id")) != str(rule_id)]
         if len(kept) == len(rules):
@@ -16912,10 +16948,13 @@ class Engine:
         pm.write_rules(rules_file, kept)
         return {"ok": True, "action": "mock-rm", "id": rule_id, "count": len(kept)}
 
-    def mock_record(self, action: str, name: str | None = None) -> dict[str, Any]:
+    def mock_record(
+        self, action: str, name: str | None = None, *, serial: str | None = None
+    ) -> dict[str, Any]:
         pm = self.platform.capability("proxy")
 
         cache = Path(self.config.cache.dir).expanduser()
+        target = self._proxy_serial(serial)
         a = (action or "").lower()
         if a == "start":
             if not name:
@@ -16926,12 +16965,14 @@ class Engine:
             # `proxy_mock.diagnose_empty_recording`.
             log = cache / "mitmdump.log"
             log_offset = log.stat().st_size if log.is_file() else 0
-            pm.save_record_window(cache, since_ts=time.time(), log_offset=log_offset)
+            pm.save_record_window(
+                cache, since_ts=time.time(), log_offset=log_offset, serial=target
+            )
             # Clean JSONL seed: the addon appends one `json.dumps(entry) + "\n"` per completed
             # flow directly to disk as it happens (see `AuaMock.response()`), so there is
             # nothing to lose here — this only has to not corrupt that stream (see
             # `proxy_mock.reset_record`).
-            pm.reset_record(cache)
+            pm.reset_record(cache, target)
             # Recording is persistent, device-pointing proxy state: a crash here must still
             # leave a stranger enough to disarm it, or the next agent silently inherits
             # `record` mode.
@@ -16950,7 +16991,9 @@ class Engine:
             # Keep the same listen port when one is already bound so adb reverse stays valid.
             prev = pm.load_listen_port(cache)
             pm.stop_mitm(cache)
-            pid, listen = pm.start_mitm(cache_dir=cache, port=prev, mode="record")
+            pid, listen = pm.start_mitm(
+                cache_dir=cache, port=prev, mode="record", serial=target
+            )
             self._refresh_proxy_ownership_pid(pm, listen, pid)
             with contextlib.suppress(Exception):
                 self.device.reverse_port(listen, listen)
@@ -16976,14 +17019,14 @@ class Engine:
             )
             if not rec_name:
                 raise UsageError("mock record stop needs the cassette NAME")
-            window = pm.load_record_window(cache)
-            entries = pm.load_record(cache)
+            window = pm.load_record_window(cache, target)
+            entries = pm.load_record(cache, target)
             dest = pm.cassette_dir(self.config.memory.dir) / f"{rec_name}.yaml"
             pm.save_cassette(dest, rec_name, entries)
             # Flip back to map mode on the same port.
             prev = pm.load_listen_port(cache)
             pm.stop_mitm(cache)
-            pid, listen = pm.start_mitm(cache_dir=cache, port=prev, mode="map")
+            pid, listen = pm.start_mitm(cache_dir=cache, port=prev, mode="map", serial=target)
             self._refresh_proxy_ownership_pid(pm, listen, pid)
             with contextlib.suppress(Exception):
                 self.device.reverse_port(listen, listen)
@@ -16999,7 +17042,9 @@ class Engine:
             if not entries:
                 since_ts = window["since_ts"] if window else 0.0
                 log_offset = window["log_offset"] if window else 0
-                diag = pm.diagnose_empty_recording(cache, since_ts=since_ts, log_offset=log_offset)
+                diag = pm.diagnose_empty_recording(
+                    cache, since_ts=since_ts, log_offset=log_offset, serial=target
+                )
                 out["ok"] = False
                 out["diagnosis"] = diag
                 diagnosis = diag["diagnosis"]
@@ -17036,7 +17081,7 @@ class Engine:
                         "proxy (`aua proxy status`) and that the app under test made HTTPS "
                         "calls during this window."
                     )
-            pm.clear_record_window(cache)
+            pm.clear_record_window(cache, target)
             return out
         raise UsageError(
             f"unknown mock record action {action!r}",
@@ -17074,7 +17119,7 @@ class Engine:
             args={"cache_dir": str(cache)},
             detail=f"cassette {name!r} loaded as live mock rules via `aua mock replay`",
         )
-        pm.write_rules(pm.rules_path(cache), entries, owner=owner)
+        pm.write_rules(pm.rules_path(cache, self._proxy_serial()), entries, owner=owner)
         self._record_action_safe(RouteStep(kind="mock-replay", arg=name))
         return {
             "ok": True,

@@ -86,3 +86,23 @@ def test_mock_rewrite_rejects_malformed_option_syntax(monkeypatch: Any) -> None:
     ):
         result = runner.invoke(cli_app, ["mock", "rewrite", "GET", "/v1/feed", *bad])
         assert result.exit_code != 0, f"{bad} should have been refused: {result.output}"
+
+
+def test_malformed_options_answer_with_the_json_envelope_not_a_traceback(
+    monkeypatch: Any,
+) -> None:
+    """These were parsed in the command body, outside `_run`'s error wrapper, so a typo
+    printed a forty-line Python traceback and exited 1 — while every other refusal in the
+    tool emits one line of JSON and exits 2. An agent cannot branch on a traceback."""
+    _capture(monkeypatch)
+
+    for bad in (
+        ["--header", "NoColon"],
+        ["--set", "notanassignment"],
+        ["--replace", "nofatarrow"],
+    ):
+        result = runner.invoke(
+            cli_app, ["mock", "rewrite", "GET", "/v1/feed", "--host", "api.example.test", *bad]
+        )
+        assert result.exit_code == 2, f"{bad}: expected the usage exit code"
+        assert "Traceback" not in result.output, f"{bad}: raw traceback reached the caller"

@@ -766,13 +766,15 @@ class _FakeProxyService:
         self.doc: dict[str, Any] = {"mode": "off", "owner": "agent-a", "rules": []}
         self.flows: list[dict[str, Any]] = []
         self.bodies: list[dict[str, Any]] = []
+        self.flow_reads: list[str | None] = []
+        self.body_reads: list[str | None] = []
 
     def proxy_health(self, serial: str, cache_dir: Any, *, self_heal: bool = False) -> dict:
         assert self_heal is False, "the dashboard must never heal the device"
         return dict(self.health, serial=serial)
 
-    def rules_path(self, cache_dir: Any) -> Path:
-        return self.root / "mock_rules.json"
+    def rules_path(self, cache_dir: Any, serial: str | None = None) -> Path:
+        return self.root / f"mock_rules.{serial or 'shared'}.json"
 
     def load_doc(self, path: Path) -> dict[str, Any]:
         return {k: (list(v) if isinstance(v, list) else v) for k, v in self.doc.items()}
@@ -780,10 +782,14 @@ class _FakeProxyService:
     def backfill_rule_ids(self, rules: list[dict]) -> tuple[list[dict], bool]:
         return list(rules), False
 
-    def read_flows_since(self, cache_dir: Any, since_ts: float) -> list[dict]:
+    def read_flows_since(
+        self, cache_dir: Any, since_ts: float, serial: str | None = None
+    ) -> list[dict]:
+        self.flow_reads.append(serial)
         return [f for f in self.flows if float(f.get("ts") or 0) > since_ts]
 
-    def read_flow_bodies(self, cache_dir: Any) -> list[dict]:
+    def read_flow_bodies(self, cache_dir: Any, serial: str | None = None) -> list[dict]:
+        self.body_reads.append(serial)
         return list(self.bodies)
 
 
@@ -1109,3 +1115,65 @@ def test_a_tile_never_takes_the_uiautomation_slot_from_the_agent_using_the_devic
     # The cached bytes must keep their own mime; a PNG served as JPEG is a broken tile.
     assert state.frame_bytes("emulator-5554") == (live_png, "image/png")
     assert mime == "image/png"
+
+
+def test_the_flow_detail_view_never_hands_out_a_credential(tmp_path: Path) -> None:
+    """The proxy captures whole exchanges, and this endpoint serves them over plain HTTP
+    on localhost — into a page people screenshot into bug reports. A real run had it
+    returning the app's bearer token, x-api-key, x-device-key and a streamToken."""
+
+    svc = _FakeProxyService(tmp_path)
+    svc.bodies = [
+        {
+            "n": 1,
+            "ts": 1.0,
+            "method": "POST",
+            "path": "/v1/session",
+            "query": "access_token=QUERYSECRET&page=2",
+            "request_headers": {
+                "Authorization": "Bearer SECRET-BEARER",
+                "X-Api-Key": "SECRET-KEY",
+                "x-device-key": "SECRET-DEVICE",
+                "Content-Type": "application/json",
+            },
+            "response_headers": {"Set-Cookie": "sid=SECRET-COOKIE", "Server": "uvicorn"},
+            "response_body": json.dumps(
+                {
+                    "streamToken": "SECRET-STREAM",
+                    "user": {"name": "Ada", "refresh_token": "SECRET-REFRESH"},
+                    "items": [{"password": "SECRET-PW"}],
+                }
+            ),
+        }
+    ]
+    state = _proxy_state(tmp_path, svc)
+    flow = state.proxy_flow_detail(1)["flow"]
+    rendered = json.dumps(flow)
+
+    for secret in (
+        "SECRET-BEARER",
+        "SECRET-KEY",
+        "SECRET-DEVICE",
+        "SECRET-COOKIE",
+        "SECRET-STREAM",
+        "SECRET-REFRESH",
+        "SECRET-PW",
+        "QUERYSECRET",
+    ):
+        assert secret not in rendered, f"{secret} leaked from the proxy panel"
+
+    # Names and non-secret values survive — knowing an endpoint sends a bearer is the point.
+    assert "Authorization" in flow["request_headers"]
+    assert flow["request_headers"]["Content-Type"] == "application/json"
+    assert flow["response_headers"]["Server"] == "uvicorn"
+    assert json.loads(flow["response_body"])["user"]["name"] == "Ada"
+    assert "page=2" in flow["query"]
+
+
+def test_the_proxy_panel_reads_only_its_own_device(tmp_path: Path) -> None:
+    svc = _FakeProxyService(tmp_path)
+    state = _proxy_state(tmp_path, svc)
+    state.proxy_payload("emulator-5554")
+    state.proxy_flow_detail(1, None, "emulator-5554")
+    assert svc.flow_reads == ["emulator-5554"]
+    assert svc.body_reads == ["emulator-5554"]

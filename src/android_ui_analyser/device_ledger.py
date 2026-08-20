@@ -518,8 +518,12 @@ def _undo_clear_mock_rules(ctx: UndoContext, args: dict[str, Any]) -> str:
     """
     proxy = ctx.require_capability("proxy")
     cache_dir = str(args.get("cache_dir") or "~/.cache/android-ui-analyser")
-    removed = proxy.clear_rules(cache_dir)
-    return f"mock rules cleared ({removed} removed), mode disarmed"
+    # Rules are per-target. The ledger already is too, so the entry's own serial is the
+    # right scope — clearing the unscoped path would retract nothing and report success.
+    serial = str(args.get("serial") or ctx.serial or "") or None
+    removed = proxy.clear_rules(cache_dir, serial)
+    where = f" for {serial}" if serial else ""
+    return f"mock rules cleared ({removed} removed){where}, mode disarmed"
 
 
 def _undo_set_airplane_mode(ctx: UndoContext, args: dict[str, Any]) -> str:

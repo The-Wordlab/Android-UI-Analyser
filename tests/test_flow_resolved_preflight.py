@@ -221,7 +221,7 @@ def test_flow_execution_uses_preflighted_cassette_after_file_breaks(
 
     assert result["ok"] is True
     assert loads == [cassette]
-    assert pm.load_rules(pm.rules_path(engine.config.cache.dir)) == [original_rule]
+    assert pm.load_rules(pm.rules_path(engine.config.cache.dir, engine.device.serial)) == [original_rule]
     assert [step.kind for step in journal] == ["key", "mock-replay"]
     assert journal[-1].arg == "original"
     assert ("press", ("back",)) in engine.device.calls
