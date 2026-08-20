@@ -156,8 +156,8 @@ def test_android_capabilities_are_lazy_and_memoized(monkeypatch: pytest.MonkeyPa
 
     class Service:
         adopt_idle_watchdogs = ensure_proxy_avd = list_avds = recommend_proxy_avd = (
-            start
-        ) = status = stop = lambda: None
+            select_avd_for_session
+        ) = start = status = stop = stop_spawned_instance = lambda: None
 
     sentinel = Service()
     monkeypatch.setattr(platform, "prepare_host", lambda: None)

@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from android_ui_analyser import daemon as daemon_mod
 from android_ui_analyser import emulator, leases
 from android_ui_analyser.config import Config
@@ -294,3 +296,141 @@ def test_daemon_refuses_an_old_runs_cache_before_touching_its_engine(tmp_path: P
     assert response["ok"] is False
     assert response["error"]["code"] == "daemon_runtime_mismatch"
     assert touched == []
+
+
+def test_claim_rollback_never_stops_a_foreign_leased_serial(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """The live failure, end to end at the engine seam.
+
+    Provisioning collided with another worker's leased emulator (adb had blinked, so its
+    console port looked free); the claim then failed with device_leased — and the rollback
+    used to issue `stop(serial=...)`, killing the foreign worker's device mid-run. The
+    rollback may reap only the boot it performed (instance + pid), and the foreign lease
+    must survive untouched.
+    """
+    import os
+
+    from android_ui_analyser.errors import DeviceLeasedError
+
+    registry = tmp_path / "coordination"
+    foreign = leases.LeaseOwner(
+        "foreign-worker", pid=os.getpid(), started=leases._proc_started(os.getpid())
+    )
+    assert leases.acquire(registry, "emulator-5554", owner=foreign)
+
+    cfg = make_config(
+        cache={"dir": str(tmp_path / "run")},
+        lease={"registry_dir": str(registry)},
+    )
+    engine = Engine(cfg)
+    engine._lease_owner = "session-agent"
+    online = [DeviceInfo(serial="emulator-5554", model="busy", android_version="14")]
+    monkeypatch.setattr(engine, "_list_targets", lambda: list(online))
+    monkeypatch.setattr(engine.platform, "target_preference", lambda info: info.serial)
+    monkeypatch.setattr(engine.platform, "probe_target_capabilities", lambda _serial: {})
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    class VirtualDevices:
+        def select_avd_for_session(self, avd: str | None, *, needs: list[str]) -> str:
+            return avd or "explicit-avd"
+
+        def start(self, avd: str, **kwargs: Any) -> dict[str, Any]:
+            calls.append(("start", {"avd": avd, **kwargs}))
+            # The collision: the "new" boot answers on the foreign worker's serial.
+            return {
+                "ok": True,
+                "serial": "emulator-5554",
+                "instance": f"{avd}.p5554",
+                "pid": 64064,
+                "avd": avd,
+            }
+
+        def stop(self, **kwargs: Any) -> dict[str, Any]:
+            raise AssertionError(f"serial-scoped stop reached a foreign lease: {kwargs}")
+
+        def stop_spawned_instance(self, **kwargs: Any) -> dict[str, Any]:
+            calls.append(("stop_spawned_instance", kwargs))
+            return {"ok": True, "stopped": [], "skipped_leased": []}
+
+    virtual = VirtualDevices()
+    monkeypatch.setattr(
+        engine.platform,
+        "capability",
+        lambda name: virtual if name == "virtual_devices" else None,
+    )
+
+    with pytest.raises(DeviceLeasedError):
+        engine._prepare_session_target(
+            wait_for_lease_s=0,
+            start_emulator=True,
+            headed=False,
+            audio=False,
+            avd="explicit-avd",
+        )
+
+    rollback = dict(calls)["stop_spawned_instance"]
+    assert rollback["instance"] == "explicit-avd.p5554"
+    assert rollback["pid"] == 64064
+    assert rollback["requested_by"] == "session-start-claim-rollback"
+    assert str(rollback["lease_registry_dir"]) == str(registry)
+    assert leases.holder(registry, "emulator-5554") == "foreign-worker"
+
+
+def test_session_finish_failure_retains_the_lease_until_cleanup_succeeds(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    cfg = make_config(
+        cache={"dir": str(tmp_path / "run")},
+        lease={"registry_dir": str(tmp_path / "coordination")},
+    )
+    engine = Engine(cfg)
+    owner = leases.resolve_owner("session-agent")
+    serial = "emulator-5554"
+    assert leases.acquire(cfg.lease.registry_dir, serial, owner=owner)
+    engine._lease_owner = owner
+    engine._lease_owner_resolved = owner
+    engine._lease_serial = serial
+    engine._leased_serial_resolved = (True, serial)
+    state = create_session_state(
+        cfg.cache.dir,
+        owner=str(owner),
+        serial=serial,
+        goal="cleanup failure keeps ownership",
+        recommended_kind="manual_action",
+        recommended_cli="aua analyze",
+        network_backup_preexisting=False,
+        network_profile_preexisting=False,
+        emulator_started=True,
+    )
+    monkeypatch.setattr(engine, "session_review", lambda _session_id: {"ok": True})
+    stop_results = iter(
+        [
+            {"ok": False, "detail": "device unreachable", "stopped": []},
+            {"ok": True, "stopped": [serial]},
+        ]
+    )
+
+    class VirtualDevices:
+        def stop(self, **kwargs: Any) -> dict[str, Any]:
+            return next(stop_results)
+
+    virtual = VirtualDevices()
+    real_capability = engine.platform.capability
+    monkeypatch.setattr(
+        engine.platform,
+        "capability",
+        lambda name: virtual if name == "virtual_devices" else real_capability(name),
+    )
+
+    failed = engine.session_finish(state.session_id)
+
+    assert failed["ok"] is False
+    assert leases.holder(cfg.lease.registry_dir, serial) == str(owner), (
+        "failed cleanup must retain the lease so the same process can retry"
+    )
+
+    retried = engine.session_finish(state.session_id)
+
+    assert retried["ok"] is True
+    assert leases.read_lease(cfg.lease.registry_dir, serial) is None

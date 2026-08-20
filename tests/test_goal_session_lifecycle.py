@@ -14,7 +14,7 @@ from android_ui_analyser.cli import _apply_phases_done, app
 from android_ui_analyser.coaching import decorate_result
 from android_ui_analyser.daemon import dispatch
 from android_ui_analyser.engine import Engine
-from android_ui_analyser.schema import AnalyzeResult, Element, Meta, Screen, Source
+from android_ui_analyser.schema import AnalyzeResult, DeviceInfo, Element, Meta, Screen, Source
 from android_ui_analyser.session import (
     complete_environment_phase,
     create_session_state,
@@ -483,6 +483,17 @@ def _start(engine: Engine, monkeypatch: Any) -> dict[str, Any]:
 def test_cli_headed_accepts_an_already_attached_emulator(monkeypatch: Any) -> None:
     device = FakeDevice(serial="goal-headed-attached")
     monkeypatch.setattr(engine_mod, "connect", lambda serial=None: device)
+    # Attached means listed: the selection consults the module-global device listing, and
+    # a headed request verifies the candidate's actual window/audio facts via the probe.
+    monkeypatch.setattr(
+        engine_mod,
+        "list_devices",
+        lambda: [DeviceInfo(serial=device.serial, model="fake", android_version="14")],
+    )
+    monkeypatch.setattr(
+        "android_ui_analyser.platforms.android.probe_android_capabilities",
+        lambda _cache, _serial: {"headed": True, "audio": True},
+    )
     monkeypatch.setattr(Engine, "analyze", lambda self, **_kwargs: _observation(device.serial))
 
     result = runner.invoke(
@@ -1142,16 +1153,28 @@ def test_explicit_session_emulator_start_is_owned_and_finished(
         memory={"enabled": False, "dir": str(tmp_path / "memory")},
     )
     engine = Engine(cfg)
-    monkeypatch.setattr(engine, "list_devices", lambda: [])
+    # Patch the module-global seam `_list_targets` actually consults. Patching the engine's
+    # `list_devices` *method* left the real adb listing live, so on a host with running
+    # emulators this test silently selected (and leased) a real device instead of booting.
+    online: list[DeviceInfo] = []
+    monkeypatch.setattr(engine_mod, "list_devices", lambda: list(online))
+    monkeypatch.setattr(
+        engine.platform,
+        "probe_target_capabilities",
+        lambda _serial: {"headed": True, "audio": True},
+    )
     starts: list[dict[str, Any]] = []
     stops: list[dict[str, Any]] = []
-    monkeypatch.setattr(
-        emulator,
-        "start",
-        lambda avd, **kwargs: (
-            starts.append({"avd": avd, **kwargs}) or {"ok": True, "serial": "emulator-5590"}
-        ),
-    )
+    monkeypatch.setattr(emulator, "select_avd_for_session", lambda avd, **_kwargs: avd)
+
+    def fake_start(avd: str, **kwargs: Any) -> dict[str, Any]:
+        starts.append({"avd": avd, **kwargs})
+        online.append(
+            DeviceInfo(serial="emulator-5590", model="fake", android_version="14")
+        )
+        return {"ok": True, "serial": "emulator-5590", "instance": "fake.p5590", "pid": 4242}
+
+    monkeypatch.setattr(emulator, "start", fake_start)
     monkeypatch.setattr(
         emulator,
         "stop",
@@ -1185,11 +1208,19 @@ def test_owned_emulator_is_uncached_when_stop_succeeds_despite_restore_error(
         memory={"enabled": False, "dir": str(tmp_path / "memory")},
     )
     engine = Engine(cfg)
-    monkeypatch.setattr(engine, "list_devices", lambda: [])
+    # The module-global seam is what `_list_targets` consults; a live host emulator must
+    # never satisfy this test's selection (that is how the boot path went unexercised).
+    monkeypatch.setattr(engine_mod, "list_devices", lambda: [])
+    monkeypatch.setattr(emulator, "select_avd_for_session", lambda avd, **_kwargs: avd or "fake")
     monkeypatch.setattr(
         emulator,
         "start",
-        lambda _avd, **_kwargs: {"ok": True, "serial": "emulator-5592"},
+        lambda _avd, **_kwargs: {
+            "ok": True,
+            "serial": "emulator-5592",
+            "instance": "fake.p5592",
+            "pid": 4242,
+        },
     )
     monkeypatch.setattr(
         emulator,

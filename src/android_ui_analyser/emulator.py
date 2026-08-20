@@ -620,8 +620,34 @@ def release_console_port(port: int | None) -> None:
         (_reservation_dir() / f"{int(port)}.port").unlink()
 
 
+def _leased_console_ports(lease_registry_dir: str | Path | None) -> set[int]:
+    """Console ports of serials the lease registry says are held by a live owner.
+
+    The adb snapshot is not the authority on which ports are occupied: a live failure saw
+    adb briefly omit a foreign worker's emulator-5554 while a second agent allocated a
+    port, so 5554 looked free, the new boot answered on the foreign device, and the
+    claim-failure rollback stopped it. The registry is host-wide and process-bound, so a
+    live lease marks its port used regardless of what adb happens to report — and a dead
+    owner's lease reads as expired, freeing the port immediately.
+    """
+    if lease_registry_dir is None:
+        return set()
+    out: set[int] = set()
+    with contextlib.suppress(Exception):
+        from . import leases
+
+        for serial in leases.live_leased_serials(lease_registry_dir):
+            p = _port_from_serial(serial)
+            if p is not None:
+                out.add(p)
+    return out
+
+
 def allocate_console_port(
-    preferred: int | None = None, *, cache_dir: str | Path | None = None
+    preferred: int | None = None,
+    *,
+    cache_dir: str | Path | None = None,
+    lease_registry_dir: str | Path | None = None,
 ) -> int:
     """Pick a free even emulator console port (5554–5682), and reserve it.
 
@@ -631,7 +657,11 @@ def allocate_console_port(
     to adb, while its serial actually belonged to the winner's AVD. Two agents then drove
     one device believing they each had their own.
     """
-    used = _used_console_ports(cache_dir=cache_dir) | _reserved_console_ports()
+    used = (
+        _used_console_ports(cache_dir=cache_dir)
+        | _reserved_console_ports()
+        | _leased_console_ports(lease_registry_dir)
+    )
     if preferred is not None:
         port = int(preferred)
         if port % 2 != 0:
@@ -664,6 +694,32 @@ def allocate_console_port(
         hint=f"All even ports {_EMULATOR_PORT_MIN}–{_EMULATOR_PORT_MAX} are taken — "
         "`aua emulator stop --mine` (or `--owner`) to free some.",
     )
+
+
+def _live_foreign_lease(
+    lease_registry_dir: str | Path | None,
+    serial: str | None,
+    owner: str | None,
+) -> dict[str, Any] | None:
+    """The live lease that makes *serial* untouchable for this caller, or ``None``.
+
+    A stop must never guess: when the registry cannot be read, the answer is "held by
+    unknown", because killing a device someone else is driving is the unrecoverable
+    direction. A lease whose owner process is dead reads as expired and does not block.
+    """
+    if lease_registry_dir is None or not serial:
+        return None
+    try:
+        from . import leases
+
+        entry = leases.read_lease(lease_registry_dir, serial)
+        if entry is None:
+            return None
+        if owner is not None and leases.entry_owned_by(entry, owner):
+            return None
+        return entry
+    except Exception:
+        return {"serial": serial, "owner": "unknown", "inaccessible": True}
 
 
 def resolve_owner(explicit: str | None = None) -> str | None:
@@ -1107,7 +1163,9 @@ def start(
 
     console_port: int | None = None
     if parallel or port is not None:
-        console_port = allocate_console_port(port, cache_dir=cache_dir)
+        console_port = allocate_console_port(
+            port, cache_dir=cache_dir, lease_registry_dir=lease_registry_dir
+        )
 
     if read_only is None:
         read_only = False
@@ -1122,6 +1180,7 @@ def start(
     # Reserve the instance meta early so a concurrent --parallel start does not pick the
     # same console port between allocate and Popen.
     meta_path = _pid_dir(cache_dir) / f"{inst}.json"
+    wrote_reserve = False
     if console_port is not None and not meta_path.is_file():
         reserve = {
             "avd": avd,
@@ -1137,8 +1196,22 @@ def start(
             reserve["owner"] = owner_tag
         with contextlib.suppress(OSError):
             meta_path.write_text(json.dumps(reserve, indent=2) + "\n", encoding="utf-8")
+            wrote_reserve = True
 
     before = {d["serial"] for d in running_emulators()}
+    if expected_serial is not None and expected_serial in before:
+        # The allocated port already answers as a live device: the used-port snapshot
+        # missed it (adb blink, foreign worker's cache). Booting onto it would collide,
+        # and any cleanup keyed by this serial would hit that foreign instance — so fail
+        # here, before spawning anything, without having touched the device.
+        release_console_port(console_port)
+        if wrote_reserve:
+            meta_path.unlink(missing_ok=True)
+        raise DeviceError(
+            f"console port {console_port} already belongs to a running emulator "
+            f"({expected_serial})",
+            hint="Another instance owns this serial; retry to allocate a different port.",
+        )
     bin_path = emulator_bin()
     gpu_mode = (gpu or default_gpu_mode(headless=headless)).strip() or "auto"
     cmd = [bin_path, "-avd", avd]
@@ -1222,6 +1295,20 @@ def start(
         raise DeviceError(
             f"emulator {avd!r} did not become ready within {int(wait_s)}s",
             hint=f"Check the log: {log_path}\n{tail}",
+        )
+
+    if proc.poll() is not None:
+        # The serial answered, but the process this call spawned is already dead — so the
+        # device that satisfied the wait belongs to someone else (a port race, or an adb
+        # blink that hid a running instance during allocation). Fail before the proxy
+        # cleanup below can mutate settings on a foreign target, and clean only our own
+        # bookkeeping: the serial is explicitly not ours to stop.
+        meta_path.unlink(missing_ok=True)
+        release_console_port(console_port)
+        raise DeviceError(
+            f"emulator {avd!r} exited during startup while {serial} stayed online; "
+            "that serial belongs to another instance",
+            hint="Retry the start; a different console port will be allocated.",
         )
 
     # The instance is up and adb can see it, so the reservation has done its job and the
@@ -1529,6 +1616,7 @@ def _log_stop(
     request: dict[str, Any],
     matched: list[dict[str, Any]],
     stopped: list[str],
+    skipped_leased: list[dict[str, Any]] | None = None,
 ) -> None:
     """Append an attributable record of one stop, and say it out loud on stderr.
 
@@ -1553,6 +1641,12 @@ def _log_stop(
         "matched": matched,
         "stopped": stopped,
     }
+    if skipped_leased:
+        entry["skipped_leased"] = skipped_leased
+        logger.warning(
+            "emulator stop skipped leased target(s): %s",
+            ", ".join(f"{s.get('serial')} (held by {s.get('holder')})" for s in skipped_leased),
+        )
     logger.warning(
         "emulator stop via=%s stopped=%s by pid=%s owner=%s request=%s",
         requested_via,
@@ -1579,6 +1673,98 @@ def _instance_identity(meta: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def stop_spawned_instance(
+    *,
+    instance: str,
+    pid: int | None,
+    cache_dir: str | Path,
+    lease_registry_dir: str | Path | None = None,
+    owner: str | None = None,
+    requested_by: str | None = None,
+) -> dict[str, Any]:
+    """Roll back exactly one boot this process performed — never an ambiguous serial.
+
+    The claim-failure rollback that motivated this used ``stop(serial=...)``. When
+    provisioning had collided with a foreign worker's emulator (adb briefly omitted it, so
+    its console port looked free), that serial named *their* device, and the rollback shut
+    it down mid-run. A rollback owns only what it demonstrably created: the recorded
+    emulator process and its instance record under this cache.
+
+    The serial is stopped gracefully only when no live foreign lease claims it. When a
+    foreign lease exists, the timeline decides what is still ours:
+
+    * lease acquired **before** our boot record — the serial always belonged to the other
+      worker, so our spawned process is an unbound loser we may (and must) terminate;
+    * lease acquired **after** our boot — another agent legitimately claimed the fresh
+      device between our boot and our failed claim, so nothing here is ours to touch.
+    """
+    origin = _stop_origin(requested_by)
+    meta_path = _pid_dir(cache_dir) / f"{instance}.json" if instance else None
+    meta: dict[str, Any] = {}
+    if meta_path is not None and meta_path.is_file():
+        with contextlib.suppress(OSError, json.JSONDecodeError):
+            loaded = json.loads(meta_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                meta = loaded
+    recorded_pid = meta.get("pid")
+    record_is_ours = bool(meta) and (
+        pid is None or not isinstance(recorded_pid, int) or recorded_pid == pid
+    )
+    serial = (
+        str(meta["serial"])
+        if record_is_ours and isinstance(meta.get("serial"), str) and meta.get("serial")
+        else None
+    )
+    foreign = _live_foreign_lease(lease_registry_dir, serial, owner)
+    skipped: list[dict[str, Any]] = []
+    stopped: list[str] = []
+    own_pid = pid if isinstance(pid, int) else (recorded_pid if record_is_ours else None)
+    may_kill_own_process = True
+    if foreign is not None and serial:
+        skipped.append({"serial": serial, "holder": str(foreign.get("owner") or "unknown")})
+        lease_acquired = float(foreign.get("acquired") or 0)
+        boot_started = float(meta.get("started_at") or 0)
+        if not lease_acquired or not boot_started or lease_acquired >= boot_started:
+            # The lease may cover the device we just booted (claimed by another agent in
+            # the gap before our own claim). Terminating our process would kill it.
+            may_kill_own_process = False
+    elif serial:
+        with contextlib.suppress(Exception):
+            _adb_emu_kill(serial)
+            stopped.append(serial)
+    if may_kill_own_process and isinstance(own_pid, int) and own_pid > 1:
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(own_pid, signal.SIGTERM)
+    if record_is_ours and may_kill_own_process and meta_path is not None:
+        _kill_watchdog(meta)
+        meta_path.unlink(missing_ok=True)
+        port = meta.get("port")
+        if isinstance(port, int):
+            release_console_port(port)
+    matched = (
+        [_instance_identity({**meta, "_path": str(meta_path)})] if record_is_ours else []
+    )
+    _log_stop(
+        cache_dir,
+        origin=origin,
+        requested_via="spawned-instance",
+        request={"instance": instance, "pid": pid, "serial": serial},
+        matched=matched,
+        stopped=stopped,
+        skipped_leased=skipped or None,
+    )
+    return {
+        "ok": True,
+        "action": "emulator-stop",
+        "stopped": stopped,
+        "matched": matched,
+        "skipped_leased": skipped,
+        "requested_via": "spawned-instance",
+        "origin": origin,
+        "instance": instance or None,
+    }
+
+
 def stop(
     *,
     serial: str | None = None,
@@ -1588,8 +1774,16 @@ def stop(
     owner: str | None = None,
     cache_dir: str | Path,
     requested_by: str | None = None,
+    lease_registry_dir: str | Path | None = None,
+    lease_owner: str | None = None,
 ) -> dict[str, Any]:
     """Stop a running emulator (``adb emu kill``), scoped by serial/AVD/owner/mine.
+
+    When *lease_registry_dir* is given, any matched target holding a live lease that
+    *lease_owner* does not own is skipped rather than killed, and reported under
+    ``skipped_leased``: a device another live agent is driving is never AUA's to stop,
+    however it was scoped. Free it first with ``aua lease release <serial>`` (its holder),
+    or wait for the holder process to exit.
 
     An untargeted call is refused rather than treated as "all". ``--all`` kills every
     emulator; ``--mine`` kills AVDs recorded under aua's cache (optionally filtered by
@@ -1659,8 +1853,19 @@ def stop(
             )
             return payload
         stopped_mine: list[str] = []
+        skipped_mine: list[dict[str, Any]] = []
         for meta in records:
             ser = meta.get("serial")
+            foreign = _live_foreign_lease(
+                lease_registry_dir, ser if isinstance(ser, str) else None, lease_owner
+            )
+            if foreign is not None:
+                # A record AUA wrote does not outrank a live lease: the instance may have
+                # been handed to another agent, and its pid is that agent's device now.
+                skipped_mine.append(
+                    {"serial": ser, "holder": str(foreign.get("owner") or "unknown")}
+                )
+                continue
             if isinstance(ser, str) and ser:
                 with contextlib.suppress(Exception):
                     _adb_emu_kill(ser)
@@ -1680,11 +1885,13 @@ def stop(
             request=request,
             matched=matched,
             stopped=stopped_mine,
+            skipped_leased=skipped_mine or None,
         )
         return {
             "ok": True,
             "action": "emulator-stop",
             "stopped": stopped_mine,
+            "skipped_leased": skipped_mine,
             "owner": owner_tag,
             "matched": matched,
             "considered": considered,
@@ -1705,8 +1912,17 @@ def stop(
         ]
         if avd_records:
             stopped_avd: list[str] = []
+            skipped_avd: list[dict[str, Any]] = []
             for meta in avd_records:
                 ser = meta.get("serial")
+                foreign = _live_foreign_lease(
+                    lease_registry_dir, ser if isinstance(ser, str) else None, lease_owner
+                )
+                if foreign is not None:
+                    skipped_avd.append(
+                        {"serial": ser, "holder": str(foreign.get("owner") or "unknown")}
+                    )
+                    continue
                 if isinstance(ser, str) and ser:
                     with contextlib.suppress(Exception):
                         _adb_emu_kill(ser)
@@ -1727,11 +1943,13 @@ def stop(
                 request=request,
                 matched=avd_matched,
                 stopped=stopped_avd,
+                skipped_leased=skipped_avd or None,
             )
             return {
                 "ok": True,
                 "action": "emulator-stop",
                 "stopped": stopped_avd,
+                "skipped_leased": skipped_avd,
                 "matched": avd_matched,
                 "requested_via": "avd-records",
                 "origin": origin,
@@ -1756,6 +1974,14 @@ def stop(
             except json.JSONDecodeError:
                 path.unlink(missing_ok=True)
                 continue
+            ser = meta.get("serial") if isinstance(meta, dict) else None
+            if (
+                _live_foreign_lease(
+                    lease_registry_dir, ser if isinstance(ser, str) else None, lease_owner
+                )
+                is not None
+            ):
+                continue  # a record whose device another live agent leases is not residue
             pid = meta.get("pid")
             if isinstance(pid, int):
                 with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
@@ -1790,8 +2016,13 @@ def stop(
         )
 
     stopped: list[str] = []
+    skipped_live: list[dict[str, Any]] = []
     for t in targets:
         ser = t["serial"]
+        foreign = _live_foreign_lease(lease_registry_dir, ser, lease_owner)
+        if foreign is not None:
+            skipped_live.append({"serial": ser, "holder": str(foreign.get("owner") or "unknown")})
+            continue
         try:
             _adb_emu_kill(ser)
             stopped.append(ser)
@@ -1817,12 +2048,21 @@ def stop(
         request=request,
         matched=live_matched,
         stopped=stopped,
+        skipped_leased=skipped_live or None,
     )
-    return {
+    result: dict[str, Any] = {
         "ok": True,
         "action": "emulator-stop",
         "stopped": stopped,
+        "skipped_leased": skipped_live,
         "matched": live_matched,
         "requested_via": requested_via,
         "origin": origin,
     }
+    if skipped_live:
+        result["hint"] = (
+            "Skipped target(s) hold a live lease owned by another agent. A leased device is "
+            "never stopped; its holder must release it (`aua lease release <serial>`), or its "
+            "lease frees the moment the holder process exits."
+        )
+    return result

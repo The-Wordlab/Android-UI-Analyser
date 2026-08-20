@@ -2834,6 +2834,7 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         return out
     if name == "emulator_stop":
         emulator_mod = engine.platform.capability("virtual_devices")
+        from . import leases as leases_mod
 
         out = emulator_mod.stop(
             serial=args.get("serial"),
@@ -2842,6 +2843,8 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
             mine=bool(args.get("mine", False)),
             all_devices=bool(args.get("all", False)),
             cache_dir=engine.config.cache.dir,
+            lease_registry_dir=engine.config.lease.registry_dir,
+            lease_owner=leases_mod.resolve_owner(args.get("owner")),
         )
         stopped = out.get("stopped") if isinstance(out, dict) else None
         if isinstance(stopped, list):
@@ -3419,7 +3422,12 @@ def cleanup_mcp_emulators(
             _MCP_STARTED_SERIALS.discard(ser)
             continue
         with contextlib.suppress(Exception):
-            out = emulator_mod.stop(serial=ser, cache_dir=cache)
+            out = emulator_mod.stop(
+                serial=ser,
+                cache_dir=cache,
+                lease_registry_dir=lease_registry,
+                lease_owner=leases.resolve_owner(),
+            )
             if isinstance(out, dict):
                 stopped.extend(str(s) for s in (out.get("stopped") or []))
         _MCP_STARTED_SERIALS.discard(ser)
@@ -3427,7 +3435,13 @@ def cleanup_mcp_emulators(
     for owner in list(_MCP_STARTED_OWNERS):
         if not preserved:
             with contextlib.suppress(Exception):
-                out = emulator_mod.stop(mine=True, owner=owner, cache_dir=cache)
+                out = emulator_mod.stop(
+                    mine=True,
+                    owner=owner,
+                    cache_dir=cache,
+                    lease_registry_dir=lease_registry,
+                    lease_owner=leases.resolve_owner(),
+                )
                 if isinstance(out, dict):
                     stopped.extend(str(s) for s in (out.get("stopped") or []))
         _MCP_STARTED_OWNERS.discard(owner)

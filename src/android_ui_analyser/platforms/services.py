@@ -186,9 +186,14 @@ CAPABILITY_METHODS: dict[str, frozenset[str]] = {
             "ensure_proxy_avd",
             "list_avds",
             "recommend_proxy_avd",
+            "select_avd_for_session",
             "start",
             "status",
             "stop",
+            # Rollback teardown scoped to one boot this process performed. A bare serial
+            # can name a foreign device after a provisioning collision, so provisioning
+            # rollbacks must be able to stop by owned instance/pid, never by serial.
+            "stop_spawned_instance",
         }
     ),
     WEBVIEW: frozenset({"enrich", "should_try_webview"}),

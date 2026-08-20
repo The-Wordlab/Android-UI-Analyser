@@ -754,6 +754,14 @@ def _owner_process(owner: str) -> tuple[int, str] | None:
     return pid, started
 
 
+def _claims_process_identity(owner: str) -> bool:
+    """Whether *owner* names a specific caller process, which may since have died."""
+
+    if isinstance(owner, LeaseOwner):
+        return bool(owner.pid and owner.started)
+    return _OWNER_RE.match(owner) is not None
+
+
 def same_owner_identity(left: str | None, right: str | None) -> bool:
     """True only for the same label and, when bound, the same live caller identity."""
     if left is None or right is None or str(left) != str(right):
@@ -793,11 +801,52 @@ def read_lease(cache_dir: str | Path, serial: str) -> dict[str, Any] | None:
     path = _lease_path(cache_dir, serial)
     try:
         entry = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (FileNotFoundError, json.JSONDecodeError):
+        # Missing is genuinely free; corrupt is self-healing (writes are atomic, so a torn
+        # entry cannot be a live holder mid-write — it is residue worth reclaiming).
         return None
+    except OSError:
+        # Unreadable is NOT free. Access control must fail closed: treating an EACCES/EIO
+        # blip as "nobody holds this" would let a second owner claim a device that is
+        # actively driven. The synthetic entry matches no owner, so acquisition, selection
+        # and use-validation all refuse until the metadata can actually be read.
+        return {
+            "serial": serial,
+            "owner": "<unreadable lease metadata>",
+            "inaccessible": True,
+        }
     if not isinstance(entry, dict) or _expired(entry):
         return None
     return entry
+
+
+def live_leased_serials(cache_dir: str | Path) -> set[str]:
+    """Every serial with a live lease in this registry; dead/expired owners drop out.
+
+    Provisioning must treat these targets as occupied even when a transport snapshot
+    momentarily omits them: adb briefly losing sight of a foreign worker's emulator must
+    never make that emulator's console port look free to allocate.
+    """
+    out: set[str] = set()
+    directory = lease_dir(cache_dir)
+    if not directory.is_dir():
+        return out
+    for path in directory.glob("*.json"):
+        try:
+            entry = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            continue
+        except OSError:
+            # Fail closed: an entry that cannot be read may be a live holder, and the stem
+            # is its (sanitised) serial. Blocking one port beats double-allocating it.
+            out.add(path.stem)
+            continue
+        if not isinstance(entry, dict) or _expired(entry):
+            continue
+        serial = entry.get("serial")
+        if isinstance(serial, str) and serial:
+            out.add(serial)
+    return out
 
 
 def _write(path: Path, entry: dict[str, Any]) -> None:
@@ -868,6 +917,11 @@ def _acquire_unlocked(
     if replacement_from:
         entry["replacement_from"] = list(replacement_from)
     owner_process = _owner_process(owner)
+    if owner_process is None and _claims_process_identity(owner):
+        # The caller names a specific process, and that process is gone (or its pid was
+        # reused). Degrading to a TTL lease here would let a daemon keep a dead caller's
+        # claim alive on its own clock — process-bound ownership must fail, not soften.
+        return False
     if owner_process is not None:
         entry["owner_pid"], entry["owner_started"] = owner_process
 

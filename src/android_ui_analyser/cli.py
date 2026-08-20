@@ -4827,6 +4827,8 @@ def emulator_stop_cmd(
         emit_error(err)
         raise typer.Exit(int(err.exit_code))
     serial = serial or opts.serial
+    from . import leases
+
     try:
         _emulator_emit(
             emulator_mod.stop(
@@ -4836,6 +4838,10 @@ def emulator_stop_cmd(
                 mine=mine,
                 owner=owner,
                 cache_dir=cfg.cache.dir,
+                # A target another live agent leases is skipped, never killed; the caller's
+                # own lease (matched by process identity) still authorises its own stop.
+                lease_registry_dir=cfg.lease.registry_dir,
+                lease_owner=leases.resolve_owner(owner),
             ),
             ctx,
         )

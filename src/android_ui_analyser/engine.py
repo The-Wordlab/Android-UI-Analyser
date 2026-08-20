@@ -1176,10 +1176,17 @@ class Engine:
                         f"automatic session provisioning started {serial} but leased {claimed}"
                     )
             except Exception:
+                # Roll back only what this boot demonstrably created — its own spawned
+                # process and instance record. A serial-scoped stop here once killed a
+                # foreign worker's emulator: the claim had failed precisely because that
+                # serial was somebody else's leased device.
                 with contextlib.suppress(Exception):
-                    emulator_mod.stop(
-                        serial=serial,
+                    emulator_mod.stop_spawned_instance(
+                        instance=str(boot.get("instance") or ""),
+                        pid=boot.get("pid"),
                         cache_dir=self.config.cache.dir,
+                        lease_registry_dir=self._lease_registry_dir,
+                        owner=boot_owner,
                         requested_by="session-start-claim-rollback",
                     )
                 raise
@@ -7195,10 +7202,16 @@ class Engine:
             if emulator_started:
                 emulator_mod = self.platform.capability("virtual_devices")
 
+                # Tear down only the boot this session performed (`prepared` carries the
+                # instance/pid the platform recorded); a bare serial can name a foreign
+                # device after a provisioning collision.
                 with contextlib.suppress(Exception):
-                    emulator_mod.stop(
-                        serial=self.config.device.serial,
+                    emulator_mod.stop_spawned_instance(
+                        instance=str(prepared.get("instance") or ""),
+                        pid=prepared.get("pid"),
                         cache_dir=self.config.cache.dir,
+                        lease_registry_dir=self._lease_registry_dir,
+                        owner=getattr(self, "_lease_owner_resolved", None),
                         requested_by="session-start-rollback",
                     )
                 self.close()
@@ -9426,6 +9439,7 @@ class Engine:
         ):
             restore("network_restore", self.network_restore)
 
+        lease_owner = getattr(self, "_lease_owner_resolved", None)
         if state.emulator_started:
             emulator_mod = self.platform.capability("virtual_devices")
 
@@ -9435,6 +9449,10 @@ class Engine:
                     serial=state.serial,
                     cache_dir=self.config.cache.dir,
                     requested_by="session-finish",
+                    # The session's own lease authorises this stop; a live lease held by
+                    # anyone else (e.g. after a handoff) makes the device untouchable.
+                    lease_registry_dir=self._lease_registry_dir,
+                    lease_owner=lease_owner or state.owner,
                 ),
             )
             stopped_serials = stopped.get("stopped", []) if stopped is not None else []
@@ -9451,7 +9469,6 @@ class Engine:
         # action, and drop the command fence first so the lease transition can take its exclusive
         # lock. Failed cleanup deliberately keeps the lease, allowing the same process to retry.
         lease_serial = getattr(self, "_lease_serial", None)
-        lease_owner = getattr(self, "_lease_owner_resolved", None)
         if not errors and lease_serial == state.serial and lease_owner:
             from . import leases
 

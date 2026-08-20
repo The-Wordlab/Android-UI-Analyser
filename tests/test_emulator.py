@@ -87,6 +87,10 @@ def test_start_headless_waits_for_serial(monkeypatch: pytest.MonkeyPatch, tmp_pa
     class FakeProc:
         pid = 4242
 
+        @staticmethod
+        def poll() -> None:
+            return None  # the fake boot is a live process; exit would mean collision
+
     monkeypatch.setattr(emu.subprocess, "Popen", lambda *a, **k: FakeProc())
     monkeypatch.setattr(emu.time, "sleep", lambda *_: None)
     monkeypatch.setattr(emu, "_wait_for_boot", lambda *_a, **_k: True)
@@ -180,6 +184,10 @@ def test_start_idle_stop_zero_skips_watchdog(
     class FakeProc:
         pid = 4242
 
+        @staticmethod
+        def poll() -> None:
+            return None  # the fake boot is a live process; exit would mean collision
+
     spawned: list[Any] = []
     monkeypatch.setattr(emu.subprocess, "Popen", lambda *a, **k: FakeProc())
     monkeypatch.setattr(emu.time, "sleep", lambda *_: None)
@@ -223,12 +231,21 @@ def test_start_parallel_allocates_port_and_owner(
             }
         ]
 
-    monkeypatch.setattr(emu, "running_emulators", running)
-
     class FakeProc:
         pid = 4242
 
+        @staticmethod
+        def poll() -> None:
+            return None  # the fake boot is a live process; exit would mean collision
+
     cmds: list[list[str]] = []
+
+    def running_after_spawn() -> list[dict[str, Any]]:
+        # The booted serial appears only once Popen ran: a device already online before
+        # the spawn is a foreign collision, which start() now refuses pre-boot.
+        return running() if cmds else []
+
+    monkeypatch.setattr(emu, "running_emulators", running_after_spawn)
 
     def fake_popen(cmd: list[str], **_k: Any) -> FakeProc:
         cmds.append(list(cmd))
@@ -316,6 +333,10 @@ def test_parallel_second_instance_gets_next_port(
 
     class FakeProc:
         pid = 99
+
+        @staticmethod
+        def poll() -> None:
+            return None  # the fake boot is a live process; exit would mean collision
 
     monkeypatch.setattr(emu.subprocess, "Popen", lambda *a, **k: FakeProc())
     monkeypatch.setattr(emu.time, "sleep", lambda *_: None)

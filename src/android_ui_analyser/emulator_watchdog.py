@@ -173,12 +173,18 @@ def run_watchdog(
             # very different consequences: one is a timeout to lengthen, the other is a bug.
             with __import__("contextlib").suppress(Exception):
                 if serial:
-                    stop(serial=serial, cache_dir=cache, requested_by="idle-watchdog")
+                    stop(
+                        serial=serial,
+                        cache_dir=cache,
+                        requested_by="idle-watchdog",
+                        lease_registry_dir=lease_registry,
+                    )
                 else:
                     stop(
                         avd=str(meta.get("avd") or instance),
                         cache_dir=cache,
                         requested_by="idle-watchdog",
+                        lease_registry_dir=lease_registry,
                     )
             return 0
         time.sleep(_POLL_S)
