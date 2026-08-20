@@ -115,6 +115,23 @@ residue outlives the emulator.
 
 An emulator AUA did not start is never touched.
 
+#### Warm handoff between goal sessions
+
+Back-to-back goal sessions should not turn emulator boot into per-scenario setup. The intended
+session boundary restores every owned mutation and releases the process-bound lease, but leaves a
+healthy AUA-started emulator online and unleased. A later `session start` can then select that warm
+target; its fresh app install provides scenario isolation without requiring an emulator reboot.
+
+The lease-gated idle watchdog above owns retirement. If no next session arrives before
+`teardown.emulator_idle_stop_s`, it reaps the ledger and stops the emulator. A live lease always
+blocks retirement, and AUA never retires an emulator it did not start. Agents do not request, keep,
+or stop warm targets themselves.
+
+This is the required lifecycle, not the behavior of the current `session finish`: today a session
+that booted its emulator records `owned_emulator_stop` and stops it immediately. That cleanup step
+must become a warm-pool handoff before callers can rely on the behavior described here; callers must
+continue to invoke `session finish` exactly once in the meantime.
+
 ## Adding a mutation
 
 1. Add to `device_ledger.MUTATION_CATALOGUE`: the kind, the `module.py:function` that performs it,
