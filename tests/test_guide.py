@@ -216,6 +216,22 @@ def test_generated_skill_is_brief_and_progressively_reveals_the_manual() -> None
     assert "restore point" in full, "full reference content must not be discarded"
 
 
+def test_agent_guidance_uses_the_sticky_lease_for_ordinary_commands() -> None:
+    full = guide.render_markdown(brief=False)
+    brief = guide.render_brief()
+    skill = guide.render_skill_markdown()
+
+    for text in (full, brief, skill):
+        assert "omit `--serial`" in text
+        assert "pin every later command" not in text.lower()
+    assert "omit `--serial` from ordinary" in full
+    assert "omit `--serial` from" in brief
+    assert "switching or transfer is explicit" in skill
+    assert "lease acquire <new> --replace" in full
+    assert "lease accept <token>" in full
+    assert "aua emulator stop --serial <yours>" in full
+
+
 def test_guide_defines_authoritative_call_accounting_without_inflating_calls() -> None:
     protocol = dict(guide.SESSION_PROTOCOL)["Start from the user's goal"]
     brief = guide.render_brief()

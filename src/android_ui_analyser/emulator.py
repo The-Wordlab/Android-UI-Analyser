@@ -475,7 +475,10 @@ def ensure_proxy_avd(
         "steps": steps,
         "hint": (
             f"`aua emulator start --avd {name} --headless` then "
-            "`aua --serial <serial> proxy start` (system CA needs this rootable image)."
+            "select the returned serial with `aua lease acquire <serial>` only when this agent "
+            "has no lease (`--replace` explicitly switches and cleans the old one); then run "
+            "`aua proxy start` without a serial "
+            "(system CA needs this rootable image)."
         ),
     }
 
@@ -1000,8 +1003,10 @@ def start(
 
     *parallel*: allocate a free console port, pass ``-read-only`` so multiple agents can
     boot the same AVD name concurrently, tag with *owner* (or ``$AUA_OWNER``, or an
-    auto id). Pin later commands with the returned ``serial``; stop with
-    ``stop --serial`` / ``--owner`` / ``--mine`` (scoped by ``$AUA_OWNER``).
+    auto id). Standalone start only provisions: when this agent has no lease, the returned
+    ``serial`` can select its one sticky device; switching an existing lease requires the
+    explicit, warned ``lease acquire <serial> --replace`` path. Stop with ``stop --serial`` /
+    ``--owner`` / ``--mine`` (scoped by ``$AUA_OWNER``).
     """
     listed = list_avds()
     names: list[str] = list(listed["avds"])
@@ -1225,9 +1230,9 @@ def start(
         "watchdog_pid": watchdog_pid,
         "log": str(log_path),
         "hint": (
-            f"Pin with `aua --serial {serial} …` (or `export AUA_SERIAL={serial}`"
-            + (f" AUA_OWNER={owner_tag}" if owner_tag else "")
-            + "). "
+            f"Standalone start did not retarget your lease. With no current lease, select this "
+            f"instance once with `aua lease acquire {serial}`; to switch, use the same call with "
+            f"`--replace` after its release warning. Then omit `--serial` from ordinary commands. "
             f"**Required when finished:** {stop_hint}. "
             + (
                 f"Safety net: auto-stops after {int(idle_timeout_s)}s idle."

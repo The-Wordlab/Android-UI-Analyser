@@ -426,6 +426,10 @@ def _run(ctx: typer.Context, fn: Callable[[Engine, OutputFormat], T]) -> T:
                 _ANNOTATION_WARNINGS.append(
                     {"annotation": kind, "code": "annotation_failed", "message": str(err)}
                 )
+        # An inline annotation can read the local Device before the real command routes to a
+        # warm daemon. Its read is finished now; keeping that process's device fence while
+        # waiting on the daemon would deadlock the daemon on the same physical target.
+        engine.release_device_use()
         try:
             return fn(engine, cfg_fmt)
         finally:
@@ -433,7 +437,10 @@ def _run(ctx: typer.Context, fn: Callable[[Engine, OutputFormat], T]) -> T:
             # thinks about a screen, and skipping the stamp would make the *next* gap measure
             # two turns instead of one. The fingerprint comes from the payload this process
             # emitted, because under the warm daemon the engine that observed is elsewhere.
-            engine.close_caller_turn(_EMITTED_FINGERPRINT)
+            try:
+                engine.close_caller_turn(_EMITTED_FINGERPRINT)
+            finally:
+                engine.release_device_use()
     except AuaError as err:
         emit_error(err)
         raise typer.Exit(int(err.exit_code)) from err
@@ -2007,7 +2014,10 @@ def main(
         help="Platform strategy (default: android; installed plugins may add others).",
     ),
     serial: str | None = typer.Option(
-        None, "--serial", help="Target device serial (default: only/first)."
+        None,
+        "--serial",
+        help="Initial/explicit target override; ordinary commands use the agent's one sticky "
+        "lease. Switching requires `lease acquire <serial> --replace`.",
     ),
     config: str | None = typer.Option(None, "--config", help="Explicit config file path."),
     format: str | None = typer.Option(
@@ -4200,7 +4210,11 @@ def fanout(
     import subprocess
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
+    from . import leases as lease_mod
+
     opts = _opts(ctx)
+    base_owner = lease_mod.resolve_owner(opts.owner)
+    base_held = set(lease_mod.primary_held_by(opts.load().cache.dir, base_owner))
     targets = [s.strip() for s in (serials or "").split(",") if s.strip()]
     if not targets:
         targets = [
@@ -4215,7 +4229,19 @@ def fanout(
         )
 
     def one(ser: str) -> dict[str, Any]:
-        cmd = ["aua", "--serial", ser, "--format", "compact", *command]
+        scoped_owner = (
+            str(base_owner) if ser in base_held else f"{base_owner}:fanout:{ser}"
+        )
+        cmd = [
+            "aua",
+            "--owner",
+            scoped_owner,
+            "--serial",
+            ser,
+            "--format",
+            "compact",
+            *command,
+        ]
         if opts.platform:
             cmd[1:1] = ["--platform", opts.platform]
         if opts.config:
@@ -4232,6 +4258,7 @@ def fanout(
             payload = out
         return {
             "serial": ser,
+            "lease_owner": scoped_owner,
             "ok": proc.returncode == 0,
             "exit_code": proc.returncode,
             "result": payload,
@@ -4419,8 +4446,10 @@ def emulator_ensure_proxy_cmd(
                 )
             payload["started"] = boot
             payload["hint"] = (
-                f"Booted {boot.get('serial')}. Next: "
-                f"`aua --serial {boot.get('serial')} proxy start`."
+                f"Booted {boot.get('serial')}; standalone start did not retarget your lease. "
+                f"With no current lease, run `aua lease acquire {boot.get('serial')}` once; "
+                "add `--replace` only to acknowledge switching from an existing device. Then "
+                "run `aua proxy start` without a serial."
             )
         _emulator_emit(payload, ctx)
     except AuaError as err:
@@ -4484,7 +4513,9 @@ def emulator_start_cmd(
         False,
         "--parallel",
         help="Safe for concurrent agents: allocate a free -port, pass -read-only, tag an owner. "
-        "Pin later commands with the returned serial; stop with --serial or AUA_OWNER=… --mine.",
+        "Standalone start does not retarget a lease. Select it only when unleased, or explicitly "
+        "switch with lease acquire --replace; ordinary commands then stay unpinned. Stop with "
+        "--serial or AUA_OWNER=… --mine.",
     ),
     port: int | None = typer.Option(
         None,
@@ -4533,6 +4564,10 @@ def emulator_start_cmd(
     If a runner yields while this command is active, poll that process instead of retrying it.
     A confirmed unowned proxy black hole inherited from the AVD is cleared before app launch;
     reachable foreign proxies and AUA-owned proxies are preserved.
+
+    Standalone start provisions an emulator; it does not retarget an existing lease. An unleased
+    agent may select the returned serial once. Switching requires ``aua lease acquire SERIAL
+    --replace``; ordinary commands then omit ``--serial``.
     """
     opts = _opts(ctx)
     cfg = opts.load()
@@ -6111,15 +6146,46 @@ def policy_status_cmd(ctx: typer.Context) -> None:
 # --------------------------------------------------------------------------- doctor
 
 
+def _lease_cleanup_complete(result: Any) -> bool:
+    """Whether teardown proved that no durable device mutation was deferred."""
+
+    if not isinstance(result, dict) or not result.get("ok", False):
+        return False
+    reports = result.get("reports")
+    if not isinstance(reports, list):
+        return False
+    for report in reports:
+        if not isinstance(report, dict):
+            return False
+        skipped = report.get("skipped")
+        if skipped not in (None, "", "nothing pending"):
+            return False
+        remaining = report.get("remaining", 0)
+        if not isinstance(remaining, (int, float)) or remaining != 0:
+            return False
+    return True
+
+
 @app.command(name="lease")
 def lease_cmd(
     ctx: typer.Context,
-    action: str = typer.Argument("list", metavar="ACTION", help="list|acquire|renew|release"),
-    serial_arg: str | None = typer.Argument(None, metavar="[SERIAL]", help="Device to act on."),
+    action: str = typer.Argument(
+        "list",
+        metavar="ACTION",
+        help="list|acquire|renew|release|transfer|accept|cancel-transfer",
+    ),
+    serial_arg: str | None = typer.Argument(
+        None, metavar="[SERIAL_OR_TOKEN]", help="Device to act on, or a transfer token to accept."
+    ),
     force: bool = typer.Option(
         False,
         "--force",
         help="On release: drop a lease this agent does not own (wedged device escape hatch).",
+    ),
+    replace_lease: bool = typer.Option(
+        False,
+        "--replace",
+        help="On acquire: acknowledge cleaning and releasing this agent's previous device.",
     ),
 ) -> None:
     """Who is driving which emulator — and claim one for this agent.
@@ -6132,11 +6198,16 @@ def lease_cmd(
         aua lease list
         aua lease acquire --needs root,proxy
         aua lease release emulator-5554
+        aua lease transfer emulator-5554     # returns a one-time token
+        aua lease accept <token>              # run from the receiving agent
+        aua lease cancel-transfer emulator-5554
 
     A lease ages out once its owning process is gone. It does NOT age out while that process
     is still alive — and an owner is stable for the life of the calling process, so a
     long-running orchestrator that touched a device keeps holding it (a warm daemon serving
-    that device keeps the entry fresh). When a device is wedged that way, break it with
+    that device keeps the entry fresh). The sole exception is an explicitly pending transfer:
+    its reservation survives a source crash for at most five minutes so the receiver can accept
+    it. When a device is wedged, break it with
     `aua lease release <serial> --force`; `aua lease list` names the holder.
 
     `--owner` (or `$AUA_OWNER`) names the agent; otherwise it is derived and stable for the
@@ -6150,11 +6221,17 @@ def lease_cmd(
         owner = lease_mod.resolve_owner(_opts(ctx).owner)
         verb = (action or "list").strip().lower()
 
+        if replace_lease and verb != "acquire":
+            raise UsageError("--replace is only valid with `lease acquire`")
+        if force and verb != "release":
+            raise UsageError("--force is only valid with `lease release`")
+
         if verb == "list":
             live = {e["serial"]: e for e in lease_mod.list_leases(cache)}
             rows = []
             for d in engine.list_devices():
                 held = live.get(d.serial)
+                handoff = lease_mod.pending_handoff(held) if held else None
                 rows.append(
                     {
                         "serial": d.serial,
@@ -6163,23 +6240,171 @@ def lease_cmd(
                         "idle_s": round(lease_mod.idle_seconds(held), 1) if held else None,
                         "app": held.get("app") if held else None,
                         "needs": held.get("needs") if held else None,
-                        "mine": bool(held and held.get("owner") == owner),
+                        "role": held.get("role", "primary") if held else None,
+                        "mine": lease_mod.entry_owned_by(held, owner),
+                        "handoff_pending": bool(handoff),
+                        "handoff_expires_in_s": (
+                            max(0, int(float(handoff.get("expires") or 0) - time.time()))
+                            if handoff
+                            else None
+                        ),
                     }
                 )
             _echo_json({"owner": owner, "devices": rows}, fmt)
             return
 
         if verb == "acquire":
-            # Claiming *is* device resolution, so just resolve — same code path every command
-            # takes, which keeps `acquire` from drifting from the implicit claim.
-            # The command's positional target is more specific than an ambient config/env pin.
-            # Without applying it here, `lease acquire phone-123` silently leased whichever
-            # device normal auto-selection chose unless callers also exported AUA_SERIAL.
-            if serial_arg:
-                engine.config.device.serial = serial_arg
-            serial = engine._lease_device()
+            with lease_mod.owner_transaction(cache, owner):
+                # Claiming is device resolution, so it shares the exact path every command uses.
+                # The positional target is more specific than an ambient config/env pin.
+                if serial_arg:
+                    engine.config.device.serial = serial_arg
+                previous = lease_mod.held_by(cache, owner)
+                engine._lease_allow_replacement = replace_lease
+                try:
+                    serial = engine._lease_device()
+                finally:
+                    engine._lease_allow_replacement = False
+                if not serial:
+                    raise DeviceError("no device was available to lease")
+                replaced = [old_serial for old_serial in previous if old_serial != serial]
+                resets: list[dict[str, Any]] = []
+                if replaced:
+                    # The new target is reserved first. Old targets remain leased until every
+                    # durable device mutation is reset, so no other agent can inherit dirty state.
+                    with contextlib.ExitStack() as cleanup_locks:
+                        for locked_serial in sorted({serial, *replaced}):
+                            cleanup_locks.enter_context(
+                                lease_mod.device_transaction(cache, locked_serial)
+                            )
+                        if not lease_mod.renew(cache, serial, owner=owner):
+                            raise DeviceError(
+                                f"the replacement reservation on {serial} changed before cleanup",
+                                hint=(
+                                    "The original lease was kept. Run `aua lease list`, then retry "
+                                    "the replacement against a free target."
+                                ),
+                            )
+                        for old_serial in replaced:
+                            reset = engine.teardown_run(serial=old_serial, force=True)
+                            resets.append({"serial": old_serial, "result": reset})
+                        failed = [
+                            item
+                            for item in resets
+                            if not _lease_cleanup_complete(item["result"])
+                        ]
+                        if failed:
+                            if serial not in previous:
+                                lease_mod.release(cache, serial, owner=owner)
+                            raise DeviceError(
+                                "the replacement device was reserved, but the previous device "
+                                "could not be cleaned; the original lease was kept",
+                                hint=(
+                                    "Run `aua teardown status`, fix the reported cleanup failure, "
+                                    "then retry the same `lease acquire … --replace` command."
+                                ),
+                            )
+                        unreleased = [
+                            old_serial
+                            for old_serial in replaced
+                            if not lease_mod.release(cache, old_serial, owner=owner)
+                        ]
+                        if unreleased:
+                            raise DeviceError(
+                                "cleaned but could not release previous lease(s): "
+                                f"{', '.join(unreleased)}",
+                                hint="Run `aua lease list`, then retry the replacement.",
+                            )
+                        if not lease_mod.promote_replacement(cache, serial, owner=owner):
+                            raise DeviceError(
+                                f"{serial} is reserved but could not be promoted",
+                                hint=(
+                                    f"Resume with `aua lease acquire {serial} --replace`; the old "
+                                    "device is already clean and no ordinary call will misroute."
+                                ),
+                            )
+                payload = {
+                    "ok": True,
+                    "action": "lease-acquire",
+                    "serial": serial,
+                    "owner": owner,
+                    "replaced": replaced,
+                    "resets": resets,
+                    "warning": (
+                        f"cleaned and released previous lease(s): {', '.join(replaced)}"
+                        if replaced
+                        else None
+                    ),
+                }
+            _echo_json(payload, fmt)
+            return
+
+        if verb == "transfer":
+            target = serial_arg or engine.config.device.serial
+            if not target:
+                raise UsageError(
+                    "`lease transfer` needs a serial",
+                    hint="e.g. `aua lease transfer emulator-5554`.",
+                )
+            handoff = lease_mod.create_handoff(cache, target, owner=owner)
+            token = str(handoff["token"])
             _echo_json(
-                {"ok": True, "action": "lease-acquire", "serial": serial, "owner": owner}, fmt
+                {
+                    "ok": True,
+                    "action": "lease-transfer",
+                    **handoff,
+                    "accept_call": f"aua lease accept {token}",
+                    "detail": (
+                        "Pass the one-time token to the receiving agent. The device stays reserved "
+                        "but frozen for the current owner until accept, cancel, or expiry."
+                    ),
+                },
+                fmt,
+            )
+            return
+
+        if verb == "cancel-transfer":
+            target = serial_arg or engine.config.device.serial
+            if not target:
+                raise UsageError(
+                    "`lease cancel-transfer` needs a serial",
+                    hint="e.g. `aua lease cancel-transfer emulator-5554`.",
+                )
+            cancelled = lease_mod.cancel_handoff(cache, target, owner=owner)
+            if not cancelled:
+                raise UsageError(
+                    f"{target} has no pending handoff owned by this agent",
+                    hint="Run `aua lease list` to confirm the current holder.",
+                )
+            _echo_json(
+                {
+                    "ok": True,
+                    "action": "lease-cancel-transfer",
+                    "serial": target,
+                    "owner": owner,
+                },
+                fmt,
+            )
+            return
+
+        if verb == "accept":
+            if not serial_arg:
+                raise UsageError(
+                    "`lease accept` needs the one-time token",
+                    hint="The current holder gets it from `aua lease transfer <serial>`.",
+                )
+            accepted = lease_mod.accept_handoff(cache, serial_arg, owner=owner)
+            _echo_json(
+                {
+                    "ok": True,
+                    "action": "lease-accept",
+                    **accepted,
+                    "detail": (
+                        "The lease now follows this agent process. Goal-session ownership was not "
+                        "transferred."
+                    ),
+                },
+                fmt,
             )
             return
 
@@ -6199,40 +6424,51 @@ def lease_cmd(
                 )
             return
         if verb == "release":
-            # `--force` passes owner=None, which skips the ownership check. The escape hatch
-            # exists because a lease can outlive the work it protected: a long-lived warm
-            # daemon keeps a finished client's lease alive, and while that client's pid is
-            # still around the entry never ages out — so the device stayed locked with no way
-            # for the operator to free it, against this command's own documented promise.
-            ok = lease_mod.release(cache, target, owner=None if force else owner)
             # Handing the device back means handing it back *clean*. Releasing the lease and
-            # leaving the device proxied is how the next agent inherits a screen that reports
-            # "Offline" for a reason that has nothing to do with the app under test.
-            reset: dict[str, Any] | None = None
-            if ok:
-                with contextlib.suppress(Exception):
-                    reset = engine.teardown_run(serial=target, force=True)
+            # then resetting it races the next acquirer; reset while it is still quarantined by
+            # this lease, and keep the lease if cleanup fails.
+            with lease_mod.device_transaction(cache, target):
+                owned = force or lease_mod.renew(cache, target, owner=owner)
+                if not owned:
+                    raise DeviceLeasedError(
+                        f"{target} is held by another agent",
+                        hint=(
+                            "An agent may only release its own lease. If a transfer is pending, "
+                            f"cancel it first with `aua lease cancel-transfer {target}`. Use "
+                            f"`aua lease release {target} --force` only for a known wedged run."
+                        ),
+                    )
+                reset = engine.teardown_run(serial=target, force=True)
+                if not _lease_cleanup_complete(reset):
+                    raise DeviceError(
+                        f"could not clean {target}; its lease was kept",
+                        hint=(
+                            "Run `aua teardown status`, fix the reported undo, then retry release."
+                        ),
+                    )
+                # `--force` skips ownership only after operator-authorized cleanup.
+                ok = lease_mod.release(cache, target, owner=None if force else owner)
             _echo_json(
                 {
                     "ok": ok,
                     "action": "lease-release",
                     "serial": target,
                     "forced": force,
-                    "reset": (reset or {}).get("reports"),
+                    "reset": reset.get("reports"),
                 },
                 fmt,
             )
             if not ok:
-                raise DeviceLeasedError(
-                    f"{target} is held by another agent",
-                    hint=(
-                        "An agent may only release its own lease. Use "
-                        f"`aua lease release {target} --force` to break a wedged one."
-                    ),
+                raise DeviceError(
+                    f"{target} was cleaned but its lease file could not be removed",
+                    hint="Run `aua lease list`, then retry release.",
                 )
             return
         raise UsageError(
-            f"unknown lease action {verb!r}", hint="Use list, acquire, renew or release."
+            f"unknown lease action {verb!r}",
+            hint=(
+                "Use list, acquire, renew, release, transfer, accept or cancel-transfer."
+            ),
         )
 
     _run(ctx, go)

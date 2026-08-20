@@ -249,6 +249,7 @@ def test_bootstrap_proof_recommends_only_session_finish(tmp_path: Path) -> None:
     assert started["goal_progress"]["done"] is True
     assert started["goal_progress"]["next_call"] is None
     assert started["recommended_call"]["kind"] == "session_finish"
+    assert started["recommended_call"]["cli"] == "aua session finish"
     assert started["recommended_call"]["mcp"] == {
         "tool": "session_finish",
         "arguments": {"session_id": started["session_id"]},

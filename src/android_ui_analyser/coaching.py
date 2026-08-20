@@ -311,12 +311,12 @@ def decorate_result(
     attach_caller_turn(engine, result)
     # Host-only flow metadata calls already know their explicit/leased serial. Do not connect
     # uiautomator2 merely to attach coaching or goal progress to an idempotent delete.
-    serial = getattr(engine, "_lease_serial", None) or getattr(
-        getattr(engine.config, "device", None), "serial", None
+    device = getattr(engine, "_device", None)
+    serial = (
+        getattr(engine, "_lease_serial", None)
+        or getattr(getattr(engine.config, "device", None), "serial", None)
+        or getattr(device, "serial", None)
     )
-    if not serial:
-        with contextlib.suppress(Exception):
-            serial = engine.device.serial
     try:
         from . import journal
 

@@ -167,6 +167,7 @@ def test_a_healthy_foreign_proxy_is_not_overwritten(tmp_path: Path) -> None:
         engine.proxy_start(install_ca=False)
 
     assert "cursor-77-x" in str(caught.value)
+    assert "aua teardown run --serial-target emulator-5554 --force" in (caught.value.hint or "")
     assert proxy.started == [], "the second proxy must not launch"
     assert proxy.state["emulator-5554"]["port"] == 40001, "the live owner keeps its port"
 

@@ -152,7 +152,8 @@ Prefer an already-running device when one is attached. Otherwise `aua` can boot 
 
 ```bash
 aua emulator list                   # marks Play Store vs rootable Google APIs
-aua emulator start --headless       # -no-window; Mac/Windows use -gpu host (not CPU SwiftShader)
+aua emulator start --headless       # provisioning only; returns <serial>
+aua lease acquire <serial>          # if unleased; add --replace to confirm a switch
 aua --format compact analyze
 # … drive the flow …
 aua emulator stop --mine            # agents: ALWAYS stop AVDs you started
@@ -160,7 +161,8 @@ aua emulator stop --mine            # agents: ALWAYS stop AVDs you started
 
 # Parallel agents on one host (each gets its own serial; tear down only yours):
 aua emulator start --headless --parallel --avd Pixel_7
-# → {serial, port, owner, …}; then: aua --serial <serial> analyze …
+# → serial; if unleased: aua lease acquire <serial>  (--replace switches explicitly)
+aua analyze                         # later device commands follow that sticky lease
 aua emulator stop --serial <serial> # or: AUA_OWNER=<owner> aua emulator stop --mine
 ```
 
@@ -177,7 +179,8 @@ id, poll that same process; do not launch a duplicate `emulator start`.
 ```bash
 aua emulator recommend-proxy        # suggests a small package (no download)
 aua emulator ensure-proxy --start   # downloads google_apis image + boots aua_proxy
-aua --serial <serial> proxy start   # needs: pip/uv install with [proxy]
+aua lease acquire <serial>          # only if unleased; --replace cleans/releases the old lease
+aua proxy start                     # needs: pip/uv install with [proxy]
 aua emulator stop --mine
 ```
 
@@ -388,14 +391,37 @@ aua --needs root,proxy lease acquire # reserve one that can do HTTPS interceptio
 aua lease list                       # who holds what, and how long they have been idle
 ```
 
-Asking for a device someone else holds fails with **exit 9 (`device_leased`)**, naming the
-holder and the free alternatives — that is routable, not fatal: drop `--serial` and one gets
-picked for you. `--needs` gets you a capable device or a refusal, never one that silently
-cannot do the job.
+Each normal owner gets exactly one device. After AUA assigns it, omit `--serial` from ordinary
+commands: the lease is the routing source, and repeating a physical serial adds stale state.
+Keep a serial for initial selection and intentional administration/fanout. Asking for another
+device first fails with `lease_switch_required` and changes nothing; acknowledge the switch with
+`aua lease acquire <new> --replace`, which cleans and releases the previous device.
+`aua fanout` preserves the same rule by giving each explicitly targeted worker its own stable,
+one-device logical owner scope.
+
+An orchestrator can delegate the same running emulator without resetting it:
+
+```bash
+# orchestrator: freezes its device and returns a five-minute, one-time token
+aua lease transfer <serial>
+# spawned agent: atomically becomes the lease owner; later commands omit --serial
+aua lease accept <token>
+# orchestrator can abort an unaccepted offer without releasing the device
+aua lease cancel-transfer <serial>
+```
+
+Lease transfer does not transfer goal-session or emulator-lifecycle ownership.
+
+Asking for a device someone else holds fails with **exit 9 (`device_leased`)**. Drop a serial only
+when it was a redundant stale pin and the existing assignment is acceptable. If the user named
+that target, never redirect: wait, provision another device with user intent, or reconcile the
+holder identity. `--needs` gets a capable device or a refusal, never a silent mismatch.
 
 The owner label and caller process identity travel separately, including through the warm daemon,
 so `AUA_OWNER` stays readable without becoming a 15-minute lock. A crashed agent is immediately
-treated as gone; PID reuse is rejected by the recorded process-start token.
+treated as gone; PID reuse is rejected by the recorded process-start token. The sole bounded
+exception is an explicit pending transfer: its reservation survives a source crash for at most
+five minutes so the spawned receiver cannot lose the device before accepting the token.
 `--no-lease` opts out entirely for single-agent scripts.
 
 ---
@@ -1091,7 +1117,8 @@ Security Config trusts **system CAs only** need a rootable emulator and a system
 
 ```bash
 aua emulator ensure-proxy --start
-aua --serial <serial> proxy start          # random high port + system CA by default
+aua lease acquire <serial>                 # only if unleased; --replace switches explicitly
+aua proxy start                            # random high port + system CA by default
 aua mock record start login_flow
 # … drive the app …
 aua mock record stop login_flow            # cassette under memory.dir/cassettes/
@@ -1550,7 +1577,7 @@ All action commands (`tap`, `long-press`, `input`, `clear`, `swipe`, `scroll-to`
 | `no device found` (exit 3) | Start an emulator or attach a phone; confirm with `adb devices`. Or `aua emulator start --headless`. |
 | Device shows as **`unauthorized`** | Accept the "Allow USB debugging" prompt on the device. If it never appears: `adb kill-server && adb start-server`, then reconnect. |
 | Device shows as **`offline`** | Re-plug the cable / cold-boot the emulator; `adb reconnect`. |
-| `multiple devices attached` | Pass `--serial <id>` (get the id from `aua devices`). |
+| `multiple devices attached` | Automatic leasing normally prevents this. If leasing is intentionally disabled, pass `--serial <id>` from `aua devices`. |
 | First command is slow / times out | `uiautomator2` is pushing its helper agent on first connect — retry once it settles, then use `aua daemon start` to keep the connection warm. |
 | `uiautomator2 is not installed` | Reinstall the package — `uiautomator2` is a base dependency, not an extra. |
 | `mic_grpc_unavailable` | Install the optional transport: `pip install 'android-ui-analyser[audio]'`. |

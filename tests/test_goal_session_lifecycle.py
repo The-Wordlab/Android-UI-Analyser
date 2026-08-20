@@ -135,7 +135,7 @@ def test_verified_environment_phase_advances_and_evidence_checkpoints_stay_order
     handoff = engine.session_progress(started["session_id"])["goal_progress"]["next_call"]
     assert handoff == {
         "kind": "refresh_observation",
-        "cli": f"aua --serial {engine.device.serial} analyze --source hierarchy",
+        "cli": "aua analyze --source hierarchy",
         "mcp": {"tool": "analyze_screen", "arguments": {"source": "hierarchy"}},
         "reason": (
             "The active UI phase began after a non-UI transition. Read one fresh hierarchy "
@@ -208,6 +208,7 @@ def test_engine_network_goal_runs_status_offline_then_finish_with_exact_calls(
         {"ok": True, "verified": True, "state": {"offline": True}},
     )
     assert offline["goal_progress"]["next_call"]["kind"] == "session_finish"
+    assert offline["goal_progress"]["next_call"]["cli"] == "aua session finish"
     assert offline["goal_progress"]["next_call"]["mcp"] == {
         "tool": "session_finish",
         "arguments": {"session_id": started["session_id"]},

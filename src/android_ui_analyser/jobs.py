@@ -358,6 +358,8 @@ class JobManager:
                 _write(self.cache_dir, state)
                 if self._active_id == job_id:
                     self._active_id = None
+            with contextlib.suppress(Exception):
+                self.engine.release_device_use()
             with contextlib.suppress(AttributeError):
                 del self.engine._job_context.cancel_event
 

@@ -737,6 +737,7 @@ def test_unfingerprinted_or_stale_observation_fails_closed_without_model_use(
     result = engine.session_start("Open Grammar or Mathematics", observation=stale)
 
     assert result["recommended_call"]["kind"] == "refresh_observation"
+    assert result["recommended_call"]["cli"] == "aua analyze --source hierarchy --no-cache"
     assert result["recommended_call"]["mcp"] == {
         "tool": "analyze_screen",
         "arguments": {"source": "hierarchy", "no_cache": True},
@@ -795,7 +796,10 @@ def test_named_loading_recommends_one_bounded_negative_await(tmp_path: Path) -> 
             "ignore_case": True,
         },
     }
-    assert "--observe" in call["cli"]
+    assert call["cli"] == (
+        "aua await-and-analyze '!text:Loading' --timeout-ms 15000 --poll-ms 200 "
+        "--ignore-case --observe"
+    )
 
 
 def test_unlabelled_progress_recommends_one_changed_frame_wait(tmp_path: Path) -> None:
@@ -821,7 +825,9 @@ def test_unlabelled_progress_recommends_one_changed_frame_wait(tmp_path: Path) -
         "tool": "wait_changed_and_analyze",
         "arguments": {"timeout_ms": 15000, "interval_ms": 150},
     }
-    assert "--changed" in call["cli"] and "--observe" in call["cli"]
+    assert call["cli"] == (
+        "aua wait-and-analyze --changed --timeout-ms 15000 --interval 150 --observe"
+    )
 
 
 def test_missing_target_on_app_scrollable_recommends_one_folded_scroll(tmp_path: Path) -> None:
@@ -848,7 +854,7 @@ def test_missing_target_on_app_scrollable_recommends_one_folded_scroll(tmp_path:
         "tool": "scroll_and_analyze",
         "arguments": {"direction": "up", "percent": 70},
     }
-    assert "scroll-and-analyze up" in call["cli"]
+    assert call["cli"] == "aua scroll-and-analyze up --pages 1 --percent 70"
 
 
 def test_system_scrollable_does_not_authorize_an_app_scroll(tmp_path: Path) -> None:

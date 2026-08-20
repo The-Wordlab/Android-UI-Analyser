@@ -83,7 +83,13 @@ Typical loop:
 ## 5. CLI specification (`aua`)
 
 Global options (apply to all commands; override config):
-- `--serial <id>` target device (default: only/first device, else error listing devices)
+- `--serial <id>` explicit target override. Each normal owner gets one automatic sticky lease, so
+  ordinary commands omit it. A different target first refuses with `lease_switch_required`; the
+  explicit `lease acquire <id> --replace` path cleans/releases the old device. `lease transfer`
+  plus one-time `lease accept` delegates the same running device without teardown. Serial remains
+  appropriate for initial selection, fanout, and targeted administration. Process death normally
+  frees a lease immediately; an explicitly pending transfer is the sole bounded exception and
+  reserves the target only until its five-minute token expires.
 - `--config <path>` explicit config file
 - `--format json|pretty|compact` output format (default `json`)
 - `--profile <name>` named config profile (e.g. `local`, `cloud`)

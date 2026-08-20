@@ -16,6 +16,7 @@ import json
 import logging
 import re
 import shlex
+import sys
 import threading
 import time
 import weakref
@@ -746,6 +747,15 @@ class Engine:
         self._lease_needs: list[str] | None = None
         self._lease_serial: str | None = None
         self._lease_owner_resolved: str | None = None
+        # Generation fences cached observations even when a lease leaves and later returns to
+        # the same long-lived process identity (so owner equality alone cannot detect the gap).
+        self._lease_generation_resolved: str | None = None
+        # True only inside the explicit `lease acquire --replace` reservation. Normal device
+        # commands may never leave one owner holding more than one sticky target.
+        self._lease_allow_replacement = False
+        # A warm Engine is shared across many daemon/MCP calls, and background jobs use another
+        # thread. Each executing thread therefore owns its own command-lifetime device fence.
+        self._device_use_context = threading.local()
         self._lease_wait_s: float = 0.0
         self._lease_waited_ms: int = 0
         # Serials whose helper setup has already been tried and refused. Without this a
@@ -837,11 +847,119 @@ class Engine:
             return list_devices()
         return self.platform.list_targets()
 
+    def _lease_target_id(self, serial: str | None) -> str | None:
+        """Map a connected runtime's canonical id back to the target AUA leased.
+
+        Adapters may accept an alias and return a runtime whose canonical id differs. The lease
+        remains keyed by the selected target, regardless of platform. A genuinely different id
+        still fails the one-command/one-device check below.
+        """
+
+        if (
+            serial is not None
+            and self._device is not None
+            and serial == self._device.serial
+            and self._lease_serial is not None
+        ):
+            return self._lease_serial
+        return serial
+
+    def begin_device_use(self, serial: str | None = None) -> None:
+        """Fence this thread's complete device command against release or lease transfer."""
+
+        if not getattr(self.config.lease, "enabled", True):
+            return
+        serial = self._lease_target_id(serial)
+        active = getattr(self._device_use_context, "guard", None)
+        if active is not None:
+            active_serial = getattr(self._device_use_context, "serial", None)
+            if serial is not None and active_serial != serial:
+                raise UsageError(
+                    f"one command cannot drive both {active_serial} and {serial}",
+                    code="device_transaction_mismatch",
+                )
+            return
+        target = serial
+        if target is None and self._device is not None:
+            target = self._device.serial
+        if target is None:
+            target = self._leased_serial()
+        owner = self._lease_owner_resolved
+        # Host-only calls and injected test Devices deliberately have no registry entry.
+        if not target or not owner:
+            return
+
+        from . import leases
+
+        guard = leases.device_command(self.config.cache.dir, target)
+        guard.__enter__()
+        try:
+            generation = leases.validate_use(
+                self.config.cache.dir,
+                target,
+                owner=owner,
+            )
+            previous_generation = self._lease_generation_resolved
+            if previous_generation is not None and generation != previous_generation:
+                self._reset_owner_transient_state()
+            self._lease_generation_resolved = generation
+        except BaseException:
+            guard.__exit__(*sys.exc_info())
+            raise
+        self._device_use_context.guard = guard
+        self._device_use_context.serial = target
+        self._device_use_context.generation = generation
+
+    @contextlib.contextmanager
+    def device_use_context(
+        self,
+        serial: str | None = None,
+        *,
+        owner: str | None = None,
+        generation: str | None = None,
+    ) -> Iterator[None]:
+        """Fence one short background read without claiming the foreground command mutex."""
+
+        if not getattr(self.config.lease, "enabled", True):
+            yield
+            return
+        target = self._lease_target_id(
+            serial or (self._device.serial if self._device is not None else None)
+        )
+        resolved_owner = owner or self._lease_owner_resolved
+        if not target or not resolved_owner:
+            yield
+            return
+        from . import leases
+
+        with leases.device_use(self.config.cache.dir, target):
+            leases.validate_use(
+                self.config.cache.dir,
+                target,
+                owner=resolved_owner,
+                expected_generation=generation,
+                renew=False,
+            )
+            yield
+
+    def release_device_use(self) -> None:
+        """Release this thread's command-lifetime device fence, if one was acquired."""
+
+        guard = getattr(self._device_use_context, "guard", None)
+        if guard is None:
+            return
+        for field in ("guard", "serial", "generation"):
+            with contextlib.suppress(AttributeError):
+                delattr(self._device_use_context, field)
+        guard.__exit__(None, None, None)
+
     @property
     def device(self) -> Device:
         """Lazily connect; doctor/devices/config work without ever touching this."""
+        target = self._device.serial if self._device is not None else self._leased_serial()
+        self.begin_device_use(target)
         if self._device is None:
-            self._device = self._connect_target(self._leased_serial())
+            self._device = self._connect_target(target)
             self._claim_memory_session()
             # First connect is the one moment we know which device is ours and that an adapter
             # exists: the cheapest place to hand back every *other* device a dead agent left
@@ -938,6 +1056,7 @@ class Engine:
                 candidates=candidates,
                 needs=needs,
                 ttl_s=int(getattr(cfg.lease, "ttl_s", leases.DEFAULT_TTL_S)),
+                allow_replacement=self._lease_allow_replacement,
                 wait_s=self._lease_wait_s,
             )
             self._lease_waited_ms = waited_ms
@@ -949,6 +1068,7 @@ class Engine:
                 candidates=initial,
                 needs=needs,
                 ttl_s=int(getattr(cfg.lease, "ttl_s", leases.DEFAULT_TTL_S)),
+                allow_replacement=self._lease_allow_replacement,
             )
             self._lease_waited_ms = 0
         self._lease_serial = serial
@@ -963,6 +1083,12 @@ class Engine:
         the previous owner look current to the next one even when both use the same emulator.
         Durable map knowledge stays shared; only invocation/session-local state is cleared.
         """
+        if not self._join_memory_writers(timeout_s=5.0):
+            raise UsageError(
+                "the previous owner's screen-map write is still running",
+                hint="Retry this call after the current device operation settles.",
+                code="owner_handoff_busy",
+            )
         self._last_activity = None
         self._pre_action_sig = None
         self._pre_action_tree_fp = None
@@ -1327,13 +1453,20 @@ class Engine:
         device = self._device
         platform = self.platform
         compressed = bool(self.config.device.compressed_hierarchy)
+        owner = self._lease_owner_resolved
+        generation = getattr(self._device_use_context, "generation", None)
         try:
             w, h = device.window_size()
         except Exception:  # pragma: no cover - device mid-disconnect
             return
 
         def dump() -> str:
-            return platform.dump_tree(device, compact=compressed)
+            with self.device_use_context(
+                device.serial,
+                owner=owner,
+                generation=generation,
+            ):
+                return platform.dump_tree(device, compact=compressed)
 
         def parse(raw_tree: str) -> tuple[list[Element], str | None]:
             normalized = platform.normalize_tree(
@@ -2481,7 +2614,8 @@ class Engine:
         """App versionName, fetched at most once per package (kept off the hot path)."""
         if package not in self._version_cache:
             try:
-                self._version_cache[package] = device.app_version(package)
+                with self.device_use_context(device.serial):
+                    self._version_cache[package] = device.app_version(package)
             except Exception:  # pragma: no cover - best effort
                 self._version_cache[package] = None
         return self._version_cache[package]
@@ -2589,13 +2723,18 @@ class Engine:
                 )
                 return self._last_known_screen, hints
 
+            # Fetch this while the foreground command still owns its lease generation. The
+            # async map writer must never wake after transfer and query the old Device as the
+            # newly adopted owner.
+            app_version = self._version_for(device, package)
+
             def _do_record() -> str | None:
                 return mem.observe_screen(
                     device.serial,
                     package=package,
                     elements=elements,
                     activity=activity,
-                    app_version=self._version_for(device, package),
+                    app_version=app_version,
                     tier=tier.value,
                     screen_height=height,
                     ocr_helped=ocr_helped,
@@ -3353,11 +3492,12 @@ class Engine:
         device = self._device
         if device is None:
             return None
-        if self.config.perf.capture_adb_screencap:
-            grab = getattr(device, "screencap_png", None)
-            if grab is not None:
-                return grab()
-        return device.screenshot()
+        with self.device_use_context(device.serial):
+            if self.config.perf.capture_adb_screencap:
+                grab = getattr(device, "screencap_png", None)
+                if grab is not None:
+                    return grab()
+            return device.screenshot()
 
     def _capture_screenshot_fn(self) -> Any:
         """The callable handed to :class:`CaptureBuffer`. Bound to the engine, never a device."""
@@ -3512,6 +3652,7 @@ class Engine:
         if serial is None:
             self._journal_helper("skipped", None, reason="no_target_serial")
             return 0
+        self.begin_device_use(serial)
         # Whether uiautomator2 is already attached is the single biggest factor in what this
         # costs (682ms if not, 2839ms if so), so record it: a run that looks disappointing is
         # usually one where something connected before the offload got a chance.
@@ -3701,6 +3842,7 @@ class Engine:
                 "no target device for recording",
                 hint="Connect a device or pass --serial.",
             )
+        self.begin_device_use(serial)
         if not agent.is_enabled(serial):
             if not agent.rootable(serial):
                 raise DeviceError(
@@ -7061,7 +7203,7 @@ class Engine:
                 *(["owned_emulator_stop"] if emulator_started else []),
             ],
             cleanup_call={
-                "cli": f"aua --serial {state.serial} session finish",
+                "cli": "aua session finish",
                 "mcp": {
                     "tool": "session_finish",
                     "arguments": {"session_id": state.session_id},
@@ -7101,7 +7243,7 @@ class Engine:
             # at the top level; the only remaining lifecycle action is the existing cleanup.
             out["recommended_call"] = {
                 "kind": "session_finish",
-                "cli": f"aua --serial {state.serial} session finish",
+                "cli": "aua session finish",
                 "mcp": {
                     "tool": "session_finish",
                     "arguments": {"session_id": state.session_id},
@@ -7862,7 +8004,7 @@ class Engine:
         if phase.kind == "cleanup" and getattr(phase, "satisfaction", None) != "fresh_assertions":
             return {
                 "kind": "session_finish",
-                "cli": f"aua --serial {state.serial} session finish",
+                "cli": "aua session finish",
                 "mcp": {
                     "tool": "session_finish",
                     "arguments": {"session_id": state.session_id},
@@ -7879,7 +8021,7 @@ class Engine:
             # next_call strands a fresh agent; replaying the pre-transition frame risks stale ids.
             return {
                 "kind": "refresh_observation",
-                "cli": f"aua --serial {state.serial} analyze --source hierarchy",
+                "cli": "aua analyze --source hierarchy",
                 "mcp": {"tool": "analyze_screen", "arguments": {"source": "hierarchy"}},
                 "reason": (
                     "The active UI phase began after a non-UI transition. Read one fresh "
@@ -7894,7 +8036,7 @@ class Engine:
         if observation.meta.stale_risk:
             return {
                 "kind": "refresh_observation",
-                "cli": f"aua --serial {state.serial} analyze --source hierarchy --no-cache",
+                "cli": "aua analyze --source hierarchy --no-cache",
                 "mcp": {
                     "tool": "analyze_screen",
                     "arguments": {"source": "hierarchy", "no_cache": True},
@@ -7926,8 +8068,8 @@ class Engine:
                 return {
                     "kind": "await_loading",
                     "cli": (
-                        f"aua --serial {state.serial} await-and-analyze "
-                        f"{shlex.quote(loading_predicate)} --timeout-ms 15000 --poll-ms 200 "
+                        f"aua await-and-analyze {shlex.quote(loading_predicate)} "
+                        "--timeout-ms 15000 --poll-ms 200 "
                         "--ignore-case --observe"
                     ),
                     "mcp": {
@@ -7948,7 +8090,7 @@ class Engine:
             return {
                 "kind": "wait_for_change",
                 "cli": (
-                    f"aua --serial {state.serial} wait-and-analyze --changed "
+                    "aua wait-and-analyze --changed "
                     "--timeout-ms 15000 --interval 150 --observe"
                 ),
                 "mcp": {
@@ -8144,9 +8286,7 @@ class Engine:
         ):
             return {
                 "kind": "scroll_action",
-                "cli": (
-                    f"aua --serial {state.serial} scroll-and-analyze up --pages 1 --percent 70"
-                ),
+                "cli": "aua scroll-and-analyze up --pages 1 --percent 70",
                 "mcp": {
                     "tool": "scroll_and_analyze",
                     "arguments": {"direction": "up", "percent": 70},
@@ -8890,21 +9030,28 @@ class Engine:
             self._policy_mode_override = None
 
     def _session_state(self, session_id: str | None = None) -> Any:
+        from . import leases
         from .session import load_session_state
 
         resolved = session_id or getattr(self, "_session_id", None)
         state = load_session_state(self.config.cache.dir, session_id=resolved) if resolved else None
         if state is None:
+            owner = getattr(self, "_lease_owner_resolved", None)
+            cached_device = getattr(self, "_device", None)
             serial = (
                 getattr(self, "_lease_serial", None)
                 or self.config.device.serial
-                or self.device.serial
+                or getattr(cached_device, "serial", None)
             )
-            state = load_session_state(
-                self.config.cache.dir,
-                serial=serial,
-                owner=getattr(self, "_lease_owner_resolved", None),
-            )
+            if serial is None and owner:
+                held = leases.primary_held_by(self.config.cache.dir, owner)
+                serial = held[0] if len(held) == 1 else None
+            if serial is not None:
+                state = load_session_state(
+                    self.config.cache.dir,
+                    serial=serial,
+                    owner=owner,
+                )
         if state is None:
             raise UsageError(
                 "no active AUA goal session",
@@ -9580,6 +9727,8 @@ class Engine:
                 dev.close()
             self._device = None
             self._claimed_instance_token = None
+        with contextlib.suppress(Exception):
+            self.release_device_use()
 
     def orient(self) -> dict[str, Any]:
         """What the tool already knows about the foreground app (for ``daemon start``).
@@ -14551,12 +14700,22 @@ class Engine:
             outcome="timeout",
         )
 
-    def hierarchy_fingerprint(self) -> str | None:
-        """Cheap SHA1 of the current hierarchy dump (no parse). Used by watch/push."""
-        device = self.device
+    def hierarchy_fingerprint(self, *, background: bool = False) -> str | None:
+        """Cheap SHA1 of the current hierarchy dump (no parse). Used by watch/push.
+
+        The push watcher is a long-lived background thread. It may observe through the shared
+        activity fence, but it must neither connect nor retain the foreground command mutex.
+        """
+        device = self._device if background else self.device
+        if device is None:
+            return None
         compressed = bool(self.config.device.compressed_hierarchy)
         try:
-            xml = self.platform.dump_tree(device, compact=compressed)
+            if background:
+                with self.device_use_context(device.serial):
+                    xml = self.platform.dump_tree(device, compact=compressed)
+            else:
+                xml = self.platform.dump_tree(device, compact=compressed)
         except Exception:  # pragma: no cover
             return None
         return hashlib.sha1(xml.encode()).hexdigest()
@@ -16148,7 +16307,7 @@ class Engine:
                     "its cassette would come out empty. Use the running proxy (`aua proxy status`, "
                     "`aua mock map …`), or start your own emulator with "
                     "`aua emulator start --headless --parallel`. If you know that holder is a "
-                    "dead run, `aua teardown run --serial "
+                    "dead run, `aua teardown run --serial-target "
                     f"{device.serial} --force` cleans it up first."
                 ),
             )
@@ -17874,7 +18033,7 @@ class Engine:
             return str(serial)
         if self._device is not None:
             with contextlib.suppress(Exception):
-                return str(self.device.serial)
+                return str(self._device.serial)
         root = Path(self.config.cache.dir).expanduser() / "captures"
         with contextlib.suppress(OSError):
             serial_dirs = [entry for entry in root.iterdir() if entry.is_dir()]

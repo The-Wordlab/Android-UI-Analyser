@@ -299,7 +299,13 @@ def _serialize(obj: Any) -> Any:
     return obj
 
 
-def _adopt_client_owner(engine: Engine, owner: str | None, caller: Any = None) -> None:
+def _adopt_client_owner(
+    engine: Engine,
+    owner: str | None,
+    caller: Any = None,
+    *,
+    claim_device: bool = True,
+) -> None:
     """Lease as the caller, not as this daemon.
 
     `resolve_owner` walks up to the first non-shell ancestor, so it answers a different name
@@ -319,12 +325,25 @@ def _adopt_client_owner(engine: Engine, owner: str | None, caller: Any = None) -
         return
     if leases.same_owner_identity(adopted_owner, getattr(engine, "_lease_owner_resolved", None)):
         return
+    reset = getattr(engine, "_reset_owner_transient_state", None)
+    if callable(reset):
+        # Finish device-free async map writes before changing the identity they may publish
+        # into. Clearing first also makes a refused rebind safe: only warm caches are lost.
+        reset()
     device = getattr(engine, "_device", None)
     connected_serial = getattr(device, "serial", None)
     config = getattr(engine, "config", None)
     bound_serial = connected_serial or getattr(getattr(config, "device", None), "serial", None)
     engine._lease_owner = adopted_owner
     engine._lease_serial = None
+    engine._leased_serial_resolved = None
+    engine._lease_generation_resolved = None
+    engine._lease_owner_resolved = adopted_owner
+    if not claim_device:
+        held = leases.primary_held_by(engine.config.cache.dir, adopted_owner)
+        if len(held) == 1:
+            engine._lease_serial = held[0]
+        return
     engine._lease_owner_resolved = None
     leased_serial = engine._lease_device()  # raises when this owner may not have it
     if bound_serial and leased_serial and leased_serial != bound_serial:
@@ -338,9 +357,29 @@ def _adopt_client_owner(engine: Engine, owner: str | None, caller: Any = None) -
             hint="Use the per-device daemon selected by the CLI, or pass --serial explicitly.",
             code="daemon_device_mismatch",
         )
-    reset = getattr(engine, "_reset_owner_transient_state", None)
-    if callable(reset):
-        reset()
+
+
+_LEASE_FREE_COMMANDS = frozenset(
+    {
+        "capture_explain",
+        "capture_export",
+        "capture_last",
+        "capture_status",
+        "flow_delete",
+        "flow_save",
+        "job_cancel",
+        "job_list",
+        "job_start",
+        "job_status",
+        "job_wait",
+        "list_devices",
+        "memory_update",
+        "ping",
+        "session_candidate_flow",
+        "session_progress",
+        "session_review",
+    }
+)
 
 
 def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
@@ -369,7 +408,12 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
                 "the warm daemon was started with a different local policy configuration",
                 hint="Restart it: `aua daemon stop && aua daemon start`.",
             )
-        _adopt_client_owner(engine, request.get("owner"), request.get("caller"))
+        _adopt_client_owner(
+            engine,
+            request.get("owner"),
+            request.get("caller"),
+            claim_device=cmd not in _LEASE_FREE_COMMANDS,
+        )
         # The CLI process learns between calls and the warm daemon reads that file. A cache
         # lasting for the daemon's lifetime made its enforced ceiling diverge from the value the
         # CLI reported after the first sample.
@@ -415,6 +459,12 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
             return _result_ok(manager_for(engine).list(limit=int(args.get("limit", 20))))
         if hasattr(engine, "config"):
             reject_if_active(engine, str(cmd))
+        # A warm Engine keeps its Device between requests. Revalidate the accepted lease and
+        # hold the physical-target fence before any command can reach that cached object.
+        if cmd not in _LEASE_FREE_COMMANDS:
+            begin_device_use = getattr(engine, "begin_device_use", None)
+            if callable(begin_device_use):
+                begin_device_use()
 
         if cmd == "analyze":
             result: Any = engine.analyze(**args)
@@ -826,6 +876,11 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 — generic fallback
         logger.exception("unhandled error in dispatch cmd=%r", cmd)
         return _result_err("internal_error", str(exc))
+    finally:
+        release_device_use = getattr(engine, "release_device_use", None)
+        if callable(release_device_use):
+            with contextlib.suppress(Exception):
+                release_device_use()
 
 
 # --------------------------------------------------------------------------- server
@@ -889,9 +944,15 @@ def serve(
         logger.info("daemon listening on %s", sock_path)
         write_pidfile(sock_path + ".pid")  # so `daemon stop` / `daemon reap` can find us
         if engine.config.capture.enabled:
-            with contextlib.suppress(Exception):
-                engine.capture_start()
-                logger.info("capture buffer started")
+            try:
+                with contextlib.suppress(Exception):
+                    engine.capture_start()
+                    logger.info("capture buffer started")
+            finally:
+                # Startup is outside dispatch's command-lifetime finally. The rolling sampler
+                # uses its own short background fence; do not retain this bootstrap claim.
+                with contextlib.suppress(Exception):
+                    engine.release_device_use()
         push_hub = None
         push_port = int(getattr(engine.config.daemon, "push_ws_port", 0) or 0)
         if push_port > 0:
@@ -901,9 +962,9 @@ def serve(
             with contextlib.suppress(Exception):
                 push_hub.start(push_port)
                 push_hub.start_watcher(
-                    engine.hierarchy_fingerprint,
+                    lambda: engine.hierarchy_fingerprint(background=True),
                     interval_ms=int(engine.config.daemon.watch_interval_ms),
-                    serial=getattr(engine.device, "serial", None)
+                    serial=getattr(engine._device, "serial", None)
                     if engine._device is not None
                     else engine.config.device.serial,
                 )
@@ -972,7 +1033,7 @@ def _journal_dispatch(
         return None
     serial = None
     with contextlib.suppress(Exception):
-        serial = getattr(engine.device, "serial", None) if engine._device is not None else None
+        serial = getattr(engine._device, "serial", None) if engine._device is not None else None
     if not serial:
         with contextlib.suppress(Exception):
             serial = engine.config.device.serial

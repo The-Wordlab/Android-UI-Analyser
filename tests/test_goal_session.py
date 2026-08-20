@@ -494,7 +494,7 @@ def test_session_start_uses_exactly_one_analyze(monkeypatch, tmp_path) -> None:
     assert result["recommended_call"]["mcp"] is None
     assert result["relevant_capabilities"]
     assert result["cleanup_call"] == {
-        "cli": "aua --serial goal-emulator session finish",
+        "cli": "aua session finish",
         "mcp": {
             "tool": "session_finish",
             "arguments": {"session_id": result["session_id"]},

@@ -91,6 +91,7 @@ def test_same_label_reclaims_only_when_structured_caller_changes(monkeypatch) ->
 def test_daemon_client_transports_caller_separately_from_label(monkeypatch) -> None:
     from android_ui_analyser import leases
 
+    monkeypatch.setattr(leases, "_proc_started", lambda pid: "three")
     owner = leases.LeaseOwner("friendly", pid=303, started="three")
     client = DaemonClient("/nonexistent.sock", owner=owner)
 

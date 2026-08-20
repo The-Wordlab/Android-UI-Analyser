@@ -1263,7 +1263,9 @@ def _tool_definitions() -> list[types.Tool]:
             "Use parallel=true when multiple agents share a host (unique port + read-only + owner). "
             "Automatically clears a confirmed unowned proxy black hole inherited from the AVD; "
             "reachable foreign and AUA-owned proxies are preserved. "
-            "Pin later tools with configure/device serial from the response. "
+            "This provisions an AVD but does not retarget an existing lease; prefer "
+            "session_start(start_emulator=true) for goal work. Ordinary device tools follow the "
+            "owner's one automatic sticky lease and do not repeat a serial. "
             "REQUIRED: call emulator_stop when done (or stop_mine) — orphaned AVDs burn CPU. "
             "Idle auto-stop is only a safety net.",
             inputSchema={
@@ -3240,6 +3242,42 @@ def _image_block(name: str, payload: Any) -> types.ImageContent | None:
 # Emulators started via MCP in this process — stopped on stdio exit if the agent forgot.
 _MCP_STARTED_SERIALS: set[str] = set()
 _MCP_STARTED_OWNERS: set[str] = set()
+_LEASE_FREE_TOOLS = frozenset(
+    {
+        "capabilities",
+        "capture_explain",
+        "capture_export",
+        "capture_last",
+        "capture_status",
+        "configure",
+        "emulator_list",
+        "emulator_start",
+        "emulator_status",
+        "emulator_stop",
+        "flow_delete",
+        "flow_list",
+        "flow_save",
+        "job_cancel",
+        "job_list",
+        "job_status",
+        "job_wait",
+        "knowledge_add",
+        "knowledge_list",
+        "knowledge_stale",
+        "list_devices",
+        "map_audit",
+        "map_find",
+        "policy_status",
+        "reconcile_apply",
+        "reconcile_plan",
+        "reconcile_rollback",
+        "reconcile_status",
+        "reconcile_submit",
+        "session_candidate_flow",
+        "session_progress",
+        "session_review",
+    }
+)
 
 
 def _mcp_started_serials() -> set[str]:
@@ -3257,7 +3295,12 @@ def cleanup_mcp_emulators(
     import contextlib
 
     if not _MCP_STARTED_SERIALS and not _MCP_STARTED_OWNERS:
-        return {"ok": True, "action": "mcp-emulator-cleanup", "stopped": []}
+        return {
+            "ok": True,
+            "action": "mcp-emulator-cleanup",
+            "stopped": [],
+            "preserved": [],
+        }
 
     from .config import load_config
     from .platforms import PlatformFactory
@@ -3266,9 +3309,28 @@ def cleanup_mcp_emulators(
     selected = platform or PlatformFactory(cfg).create()
     emulator_mod = selected.capability("virtual_devices")
     cache = cache_dir or cfg.cache.dir
+    from . import leases
+
     stopped: list[str] = []
+    preserved: list[str] = []
+    caller = leases.owner_caller(leases.resolve_owner()) or {}
+    caller_process = (caller.get("pid"), caller.get("started"))
     serials = list(_MCP_STARTED_SERIALS)
     for ser in serials:
+        lease = leases.read_lease(cache, ser)
+        lease_process = (
+            lease.get("owner_pid") if lease else None,
+            lease.get("owner_started") if lease else None,
+        )
+        if lease is not None and (
+            leases.pending_handoff(lease)
+            or (lease_process != (None, None) and lease_process != caller_process)
+        ):
+            # The orchestrator may have handed the running emulator to a child. Its lifecycle
+            # safety net must not tear down a device that now has a different live agent.
+            preserved.append(ser)
+            _MCP_STARTED_SERIALS.discard(ser)
+            continue
         with contextlib.suppress(Exception):
             out = emulator_mod.stop(serial=ser, cache_dir=cache)
             if isinstance(out, dict):
@@ -3276,12 +3338,18 @@ def cleanup_mcp_emulators(
         _MCP_STARTED_SERIALS.discard(ser)
     # Owner-scoped leftover (parallel) if serial kill missed a record.
     for owner in list(_MCP_STARTED_OWNERS):
-        with contextlib.suppress(Exception):
-            out = emulator_mod.stop(mine=True, owner=owner, cache_dir=cache)
-            if isinstance(out, dict):
-                stopped.extend(str(s) for s in (out.get("stopped") or []))
+        if not preserved:
+            with contextlib.suppress(Exception):
+                out = emulator_mod.stop(mine=True, owner=owner, cache_dir=cache)
+                if isinstance(out, dict):
+                    stopped.extend(str(s) for s in (out.get("stopped") or []))
         _MCP_STARTED_OWNERS.discard(owner)
-    return {"ok": True, "action": "mcp-emulator-cleanup", "stopped": stopped}
+    return {
+        "ok": True,
+        "action": "mcp-emulator-cleanup",
+        "stopped": stopped,
+        "preserved": preserved,
+    }
 
 
 def build_server(engine: Engine) -> Server:
@@ -3366,6 +3434,10 @@ def build_server(engine: Engine) -> Server:
                         warning = {"code": "annotation_failed", "message": str(err)}
                     warning["annotation"] = "phase_done"
                     annotation_warnings.append(warning)
+            # The long-lived MCP Engine may already cache a Device from a previous tool call.
+            # Revalidate and fence that lease before any new dispatch can touch it.
+            if name not in _LEASE_FREE_TOOLS:
+                engine.begin_device_use()
             _validate_until(name, args_in)
             payload = _dispatch(engine, name, args_in)
             payload = _fold_action_until(engine, name, args_in, payload)
@@ -3403,6 +3475,8 @@ def build_server(engine: Engine) -> Server:
             journal_call(ok=False, error={"code": "error", "message": str(err)})
             engine.close_caller_turn()
             raise
+        finally:
+            engine.release_device_use()
         from .coaching import emitted_fingerprint
 
         engine.close_caller_turn(emitted_fingerprint(payload))

@@ -159,6 +159,14 @@ def test_mcp_lists_core_tools() -> None:
     } <= set(names)
 
 
+def test_mcp_emulator_start_does_not_require_serial_pinning() -> None:
+    tool = next(item for item in _tool_definitions() if item.name == "emulator_start")
+
+    assert "automatic sticky lease" in (tool.description or "")
+    assert "do not repeat a serial" in (tool.description or "")
+    assert "configure/device serial" not in (tool.description or "")
+
+
 def test_mcp_back_until_contract_is_bounded_and_never_allows_package_change() -> None:
     tool = next(item for item in _tool_definitions() if item.name == "back_until_and_analyze")
     properties = tool.inputSchema["properties"]
@@ -272,6 +280,32 @@ def test_mcp_capabilities_progressively_discover_goal_features() -> None:
     data = anyio.run(run)
     ids = {item["id"] for item in data["capabilities"]}
     assert {"session", "goto", "flow", "network_offline", "action_until"} <= ids
+
+
+def test_mcp_host_only_capabilities_does_not_claim_or_connect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = Engine(make_config(cache={"dir": str(tmp_path)}))
+    device_access: list[str] = []
+
+    def unexpected_device_access(*_args: object, **_kwargs: object) -> None:
+        device_access.append("attempted")
+        raise AssertionError("host-only capability discovery touched a device")
+
+    monkeypatch.setattr(engine, "_lease_device", unexpected_device_access)
+    monkeypatch.setattr(engine, "_connect_target", unexpected_device_access)
+    server = build_server(engine)
+
+    async def run() -> dict:
+        async with create_connected_server_and_client_session(server) as client:
+            result = await client.call_tool("capabilities", {"goal": "inspect available tools"})
+            return json.loads(_first_text(result))
+
+    data = anyio.run(run)
+    assert data["capabilities"]
+    assert device_access == []
+    assert engine._device is None
+    assert not list((tmp_path / "leases").glob("*.json"))
 
 
 def test_mcp_session_and_reach_dispatch_contract(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1028,3 +1062,44 @@ def test_mcp_emulator_cleanup_tracks_serials(
     out = mcp.cleanup_mcp_emulators(tmp_path)
     assert "emulator-9998" in out["stopped"]
     assert "emulator-9998" not in mcp._MCP_STARTED_SERIALS
+
+
+def test_mcp_emulator_cleanup_preserves_a_transferred_live_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from android_ui_analyser import leases
+    from android_ui_analyser import mcp_server as mcp
+
+    starts = {111: "source", 222: "child"}
+    monkeypatch.setattr(leases, "_proc_started", lambda pid: starts.get(pid, ""))
+    monkeypatch.setattr(leases.os, "kill", lambda _pid, _signal: None)
+    source = leases.LeaseOwner("orchestrator", pid=111, started="source")
+    child = leases.LeaseOwner("child", pid=222, started="child")
+    serial = "emulator-9998"
+    assert leases.acquire(tmp_path, serial, owner=source)
+    offered = leases.create_handoff(tmp_path, serial, owner=source)
+    leases.accept_handoff(tmp_path, offered["token"], owner=child)
+    mcp._MCP_STARTED_SERIALS.clear()
+    mcp._MCP_STARTED_OWNERS.clear()
+    mcp._MCP_STARTED_SERIALS.add(serial)
+    mcp._MCP_STARTED_OWNERS.add("started-by-orchestrator")
+    stopped: list[dict[str, object]] = []
+
+    class EmulatorService:
+        def stop(self, **kwargs: object) -> dict[str, object]:
+            stopped.append(kwargs)
+            return {"ok": True, "stopped": [serial]}
+
+    class Platform:
+        def capability(self, name: str) -> EmulatorService:
+            assert name == "virtual_devices"
+            return EmulatorService()
+
+    result = mcp.cleanup_mcp_emulators(tmp_path, platform=Platform())
+
+    assert result["stopped"] == []
+    assert result["preserved"] == [serial]
+    assert stopped == []
+    assert leases.holder(tmp_path, serial) == "child"
+    assert not mcp._MCP_STARTED_SERIALS
+    assert not mcp._MCP_STARTED_OWNERS

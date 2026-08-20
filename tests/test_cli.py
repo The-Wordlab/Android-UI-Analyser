@@ -9,6 +9,7 @@ is required. Logs go to stderr; JSON results go to stdout — we assert both str
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -485,3 +486,353 @@ def test_lease_acquire_without_positional_serial_preserves_aua_serial(
     assert json.loads(result.stdout)["serial"] == "phone-123"
     assert leases.holder(isolated_cache, "phone-123") == "agent-a"
     assert leases.holder(isolated_cache, "emulator-5554") is None
+
+
+def test_lease_switch_requires_warning_then_cleans_and_replaces(
+    tmp_path: Path,
+    isolated_cache: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from android_ui_analyser import leases
+    from android_ui_analyser.schema import DeviceInfo
+
+    config = tmp_path / "config.yaml"
+    config.write_text("{}\n", encoding="utf-8")
+    monkeypatch.delenv("AUA_SERIAL", raising=False)
+    monkeypatch.setattr(
+        engine_mod,
+        "list_devices",
+        lambda: [
+            DeviceInfo(serial="emulator-5554", model="First", android_version="14"),
+            DeviceInfo(serial="emulator-5556", model="Second", android_version="14"),
+        ],
+    )
+    reset_calls: list[tuple[str, bool]] = []
+
+    def teardown(_engine: object, *, serial: str, force: bool) -> dict[str, object]:
+        reset_calls.append((serial, force))
+        return {"ok": True, "reports": []}
+
+    monkeypatch.setattr(engine_mod.Engine, "teardown_run", teardown)
+    prefix = ["--config", str(config), "--owner", "agent-a", "lease", "acquire"]
+    first = runner.invoke(app, [*prefix, "emulator-5554"])
+    assert first.exit_code == 0, first.stdout + first.stderr
+
+    warned = runner.invoke(app, [*prefix, "emulator-5556"])
+    assert warned.exit_code == 2
+    assert "lease_switch_required" in warned.stderr
+    assert "--replace" in warned.stderr
+    assert leases.holder(isolated_cache, "emulator-5554") == "agent-a"
+    assert leases.holder(isolated_cache, "emulator-5556") is None
+    assert reset_calls == []
+
+    replaced = runner.invoke(app, [*prefix, "emulator-5556", "--replace"])
+    assert replaced.exit_code == 0, replaced.stdout + replaced.stderr
+    payload = json.loads(replaced.stdout)
+    assert payload["serial"] == "emulator-5556"
+    assert payload["replaced"] == ["emulator-5554"]
+    assert reset_calls == [("emulator-5554", True)]
+    assert leases.holder(isolated_cache, "emulator-5554") is None
+    assert leases.holder(isolated_cache, "emulator-5556") == "agent-a"
+
+
+def test_lease_replace_keeps_old_lease_when_offline_cleanup_is_deferred(
+    isolated_cache: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from android_ui_analyser import leases
+    from android_ui_analyser.schema import DeviceInfo
+
+    owner = leases.resolve_owner("agent-a")
+    assert leases.acquire(isolated_cache, "emulator-5554", owner=owner)
+    monkeypatch.setattr(
+        engine_mod,
+        "list_devices",
+        lambda: [
+            DeviceInfo(serial="emulator-5554", model="First", android_version="14"),
+            DeviceInfo(serial="emulator-5556", model="Second", android_version="14"),
+        ],
+    )
+    monkeypatch.setattr(
+        engine_mod.Engine,
+        "teardown_run",
+        lambda *_args, **_kwargs: {
+            "ok": True,
+            "reports": [
+                {
+                    "serial": "emulator-5554",
+                    "skipped": "target unreachable; device-side undos deferred",
+                    "undone": [],
+                    "failed": [],
+                }
+            ],
+        },
+    )
+
+    replaced = runner.invoke(
+        app,
+        ["--owner", "agent-a", "lease", "acquire", "emulator-5556", "--replace"],
+    )
+
+    assert replaced.exit_code == 3
+    assert "could not be cleaned" in replaced.stderr
+    assert leases.holder(isolated_cache, "emulator-5554") == "agent-a"
+    assert leases.holder(isolated_cache, "emulator-5556") is None
+
+
+def test_lease_replace_recovers_multiple_legacy_primary_leases(
+    isolated_cache: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from android_ui_analyser import leases
+    from android_ui_analyser.schema import DeviceInfo
+
+    owner = leases.resolve_owner("agent-a")
+    assert leases.acquire(isolated_cache, "emulator-5554", owner=owner)
+    assert leases._acquire_unlocked(  # noqa: SLF001 - construct a pre-one-lease registry
+        isolated_cache,
+        "emulator-5556",
+        owner=owner,
+        role="primary",
+    )
+    monkeypatch.setattr(
+        engine_mod,
+        "list_devices",
+        lambda: [
+            DeviceInfo(serial="emulator-5554", model="First", android_version="14"),
+            DeviceInfo(serial="emulator-5556", model="Second", android_version="14"),
+        ],
+    )
+    monkeypatch.setattr(
+        engine_mod.Engine,
+        "teardown_run",
+        lambda *_args, **_kwargs: {"ok": True, "reports": []},
+    )
+
+    recovered = runner.invoke(
+        app,
+        ["--owner", "agent-a", "lease", "acquire", "emulator-5554", "--replace"],
+    )
+
+    assert recovered.exit_code == 0, recovered.stdout + recovered.stderr
+    assert leases.primary_held_by(isolated_cache, owner) == ["emulator-5554"]
+    assert leases.holder(isolated_cache, "emulator-5556") is None
+
+
+def test_lease_transfer_accept_replay_and_cancel_cli_contract(
+    isolated_cache: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from android_ui_analyser import leases
+
+    starts = {111: "source", 222: "child"}
+    current = [leases.LeaseOwner("source-process", pid=111, started="source")]
+    monkeypatch.setattr(leases, "_derived_owner", lambda: current[0])
+    monkeypatch.setattr(leases, "_proc_started", lambda pid: starts.get(pid, ""))
+    monkeypatch.setattr(leases.os, "kill", lambda _pid, _signal: None)
+    source = leases.resolve_owner("orchestrator")
+    serial = "emulator-5554"
+    assert leases.acquire(isolated_cache, serial, owner=source)
+
+    offered = runner.invoke(
+        app,
+        ["--owner", "orchestrator", "lease", "transfer", serial],
+    )
+    assert offered.exit_code == 0, offered.stdout + offered.stderr
+    offer_payload = json.loads(offered.stdout)
+    assert offer_payload["action"] == "lease-transfer"
+    token = str(offer_payload["token"])
+    assert offer_payload["accept_call"] == f"aua lease accept {token}"
+
+    current[0] = leases.LeaseOwner("child-process", pid=222, started="child")
+    accepted = runner.invoke(
+        app,
+        ["--owner", "child", "lease", "accept", token],
+    )
+    assert accepted.exit_code == 0, accepted.stdout + accepted.stderr
+    accepted_entry = leases.read_lease(isolated_cache, serial)
+    assert accepted_entry is not None
+    assert accepted_entry["owner"] == "child"
+    assert accepted_entry["owner_pid"] == 222
+
+    replayed = runner.invoke(
+        app,
+        ["--owner", "child", "lease", "accept", token],
+    )
+    assert replayed.exit_code == 2
+    assert "invalid, expired, or already used" in replayed.stderr
+
+    second_offer = runner.invoke(
+        app,
+        ["--owner", "child", "lease", "transfer", serial],
+    )
+    assert second_offer.exit_code == 0, second_offer.stdout + second_offer.stderr
+    cancelled = runner.invoke(
+        app,
+        ["--owner", "child", "lease", "cancel-transfer", serial],
+    )
+    assert cancelled.exit_code == 0, cancelled.stdout + cancelled.stderr
+    assert leases.pending_handoff(leases.read_lease(isolated_cache, serial) or {}) is None
+
+
+def test_lease_list_mine_requires_the_same_process_not_only_the_same_label(
+    isolated_cache: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from android_ui_analyser import leases
+    from android_ui_analyser.schema import DeviceInfo
+
+    starts = {111: "first", 222: "second"}
+    current = [leases.LeaseOwner("first-process", pid=111, started="first")]
+    monkeypatch.setattr(leases, "_derived_owner", lambda: current[0])
+    monkeypatch.setattr(leases, "_proc_started", lambda pid: starts.get(pid, ""))
+    monkeypatch.setattr(leases.os, "kill", lambda _pid, _signal: None)
+    assert leases.acquire(
+        isolated_cache,
+        "emulator-5554",
+        owner=leases.resolve_owner("shared-label"),
+    )
+    monkeypatch.setattr(
+        engine_mod,
+        "list_devices",
+        lambda: [
+            DeviceInfo(serial="emulator-5554", model="Emulator", android_version="14")
+        ],
+    )
+    current[0] = leases.LeaseOwner("second-process", pid=222, started="second")
+
+    listed = runner.invoke(app, ["--owner", "shared-label", "lease", "list"])
+
+    assert listed.exit_code == 0, listed.stdout + listed.stderr
+    row = json.loads(listed.stdout)["devices"][0]
+    assert row["owner"] == "shared-label"
+    assert row["mine"] is False
+
+
+def test_lease_release_keeps_ownership_when_cleanup_fails(
+    isolated_cache: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from android_ui_analyser import leases
+
+    owner = leases.resolve_owner("agent-a")
+    assert leases.acquire(isolated_cache, "emulator-5554", owner=owner)
+    monkeypatch.setattr(
+        engine_mod.Engine,
+        "teardown_run",
+        lambda *_args, **_kwargs: {"ok": False, "reports": [{"ok": False}]},
+    )
+
+    released = runner.invoke(
+        app,
+        ["--owner", "agent-a", "lease", "release", "emulator-5554"],
+    )
+
+    assert released.exit_code == 3
+    assert "could not clean" in released.stderr
+    assert leases.holder(isolated_cache, "emulator-5554") == "agent-a"
+
+
+def test_lease_release_keeps_ownership_when_offline_cleanup_is_deferred(
+    isolated_cache: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from android_ui_analyser import leases
+
+    owner = leases.resolve_owner("agent-a")
+    assert leases.acquire(isolated_cache, "emulator-5554", owner=owner)
+    monkeypatch.setattr(
+        engine_mod.Engine,
+        "teardown_run",
+        lambda *_args, **_kwargs: {
+            "ok": True,
+            "reports": [
+                {
+                    "serial": "emulator-5554",
+                    "skipped": "target unreachable; device-side undos deferred",
+                    "undone": [],
+                    "failed": [],
+                }
+            ],
+        },
+    )
+
+    released = runner.invoke(
+        app,
+        ["--owner", "agent-a", "lease", "release", "emulator-5554"],
+    )
+
+    assert released.exit_code == 3
+    assert "could not clean" in released.stderr
+    assert leases.holder(isolated_cache, "emulator-5554") == "agent-a"
+
+
+def test_lease_release_reports_unlink_failure_and_keeps_ownership(
+    isolated_cache: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from android_ui_analyser import leases
+
+    owner = leases.resolve_owner("agent-a")
+    assert leases.acquire(isolated_cache, "emulator-5554", owner=owner)
+    monkeypatch.setattr(
+        engine_mod.Engine,
+        "teardown_run",
+        lambda *_args, **_kwargs: {"ok": True, "reports": []},
+    )
+    lease_path = leases.lease_dir(isolated_cache) / "emulator-5554.json"
+    original_unlink = Path.unlink
+
+    def fail_lease_unlink(path: Path, *args: object, **kwargs: object) -> None:
+        if path == lease_path:
+            raise OSError("read-only lease store")
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_lease_unlink)
+    released = runner.invoke(
+        app,
+        ["--owner", "agent-a", "lease", "release", "emulator-5554"],
+    )
+
+    assert released.exit_code == 3
+    assert "could not be removed" in released.stderr
+    assert leases.holder(isolated_cache, "emulator-5554") == "agent-a"
+
+
+def test_fanout_uses_one_stable_scoped_owner_per_extra_target(
+    isolated_cache: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from android_ui_analyser import leases
+
+    owner = leases.resolve_owner("agent-a")
+    assert leases.acquire(isolated_cache, "emulator-5554", owner=owner)
+    calls: list[list[str]] = []
+    original_run = subprocess.run
+
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if not command or command[0] != "aua":
+            return original_run(command, **_kwargs)
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout='{"ok":true}\n', stderr="")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    result = runner.invoke(
+        app,
+        [
+            "--owner",
+            "agent-a",
+            "fanout",
+            "--serials",
+            "emulator-5554,emulator-5556",
+            "--serial",
+            "analyze",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert [row["lease_owner"] for row in payload["devices"]] == [
+        "agent-a",
+        "agent-a:fanout:emulator-5556",
+    ]
+    assert calls[0][:5] == ["aua", "--owner", "agent-a", "--serial", "emulator-5554"]
+    assert calls[1][:5] == [
+        "aua",
+        "--owner",
+        "agent-a:fanout:emulator-5556",
+        "--serial",
+        "emulator-5556",
+    ]

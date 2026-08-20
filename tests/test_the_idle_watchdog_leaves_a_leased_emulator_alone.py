@@ -99,15 +99,24 @@ def test_a_dead_owners_lease_frees_the_emulator_immediately(
     """No TTL wait: the pid check runs first, which is what makes a 2-minute timeout usable."""
     import os
 
-    pid = os.fork()
-    if pid == 0:  # pragma: no cover — child exits at once
-        os._exit(0)
-    os.waitpid(pid, 0)
-
     cache = tmp_path / "cache"
     _meta(cache, "pixel", serial="emulator-5554", idle_s=120, age_s=600)
-    owner = leases.LeaseOwner("ghost-agent", pid=pid, started="Jan1")
-    assert leases.acquire(cache, "emulator-5554", owner=owner, ttl_s=99_999)
+    read_end, write_end = os.pipe()
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover — child waits until the parent has acquired its lease
+        os.close(write_end)
+        os.read(read_end, 1)
+        os.close(read_end)
+        os._exit(0)
+    os.close(read_end)
+    try:
+        started = leases._proc_started(pid)
+        assert started
+        owner = leases.LeaseOwner("ghost-agent", pid=pid, started=started)
+        assert leases.acquire(cache, "emulator-5554", owner=owner, ttl_s=99_999)
+    finally:
+        os.close(write_end)
+        os.waitpid(pid, 0)
 
     assert emulator_watchdog.run_watchdog(cache_dir=str(cache), instance="pixel") == 0
     assert [s.get("serial") for s in _stub_runtime["stops"]] == ["emulator-5554"]

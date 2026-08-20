@@ -133,6 +133,18 @@ class DeviceLeasedError(AuaError):
     code = "device_leased"
 
 
+class LeaseSwitchRequiredError(UsageError):
+    """A caller already owns another device and must acknowledge replacing it."""
+
+    code = "lease_switch_required"
+
+
+class LeaseHandoffPendingError(UsageError):
+    """The current owner froze its lease while a one-time transfer is pending."""
+
+    code = "lease_handoff_pending"
+
+
 class ConfigError(AuaError):
     exit_code = ExitCode.CONFIG
     code = "config"

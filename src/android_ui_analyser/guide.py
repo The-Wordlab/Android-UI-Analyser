@@ -108,8 +108,10 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "same process — never issue a duplicate start. "
         "**Parallel agents on one host:** each boots with "
         "`aua emulator start --headless --parallel` (unique `-port` + `-read-only` + owner "
-        "tag); pin every later command with the returned `serial` "
-        "(`aua --serial …` / `AUA_SERIAL`); tear down only yours with "
+        "tag). Standalone start provisions but does not retarget. An agent with no lease may "
+        "select the returned instance once with `aua lease acquire <serial>`; an existing lease "
+        "requires the warned `--replace` handoff, which cleans and releases the old device. "
+        "After assignment, omit `--serial` from ordinary device commands. Tear down only yours with "
         "`aua emulator stop --serial <yours>` or `AUA_OWNER=… aua emulator stop --mine`.",
     ),
     (
@@ -493,17 +495,32 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "Lease selection happens before transport selection, so each serial gets its own daemon "
         "socket and a warm daemon is forbidden from claiming a different device than it drives. "
         "You need do nothing: no lease command and no owner prompt. By default AUA derives the "
-        "long-lived agent process, records its PID plus start token, and keeps that agent sticky "
+        "long-lived agent process, records its PID plus start token, and gives that normal owner "
+        "exactly one sticky device "
         "across its short-lived shell/runner commands. On the next device request, a dead owner "
         "or reused PID is immediately treated as free and another agent is assigned "
         "automatically; it does not wait out the TTL. Explicit `--owner <agent>` / `$AUA_OWNER` "
         "remain friendly labels, while AUA transports the caller PID plus start token separately, "
         "so those leases are process-bound too—even through a warm daemon. "
+        "Once leased, omit `--serial` from ordinary device commands: the lease is the routing "
+        "source, and repeating a physical target can become stale after reassignment. Use an "
+        "explicit serial only to select a user-requested target before acquisition or for an "
+        "administrative/fanout command that intentionally names one device. Asking for a different "
+        "target first returns `lease_switch_required` without changing either lease; only "
+        "`aua lease acquire <new> --replace` acknowledges cleaning and releasing the old device. "
+        "Fanout keeps this invariant by using one stable scoped logical owner per explicit target. "
+        "To delegate the same running device without resetting it, the holder runs `aua lease "
+        "transfer <serial>` and passes its one-time token to the child, which runs `aua lease "
+        "accept <token>`. The source is frozen until accept, cancel-transfer, or the five-minute "
+        "token expiry; goal-session ownership remains separate. That explicit pending transfer "
+        "is the sole exception to immediate process-death release: its reservation survives a "
+        "source crash only until the token expires, so the spawned child cannot lose the device. "
         "Ask for what the device must support with `--needs root,play,proxy` and you get a "
         "capable one or a refusal — never a device that silently cannot do it. "
-        "**Exit 9 (`device_leased`) means another agent holds it — that is routable, not "
-        "fatal:** drop `--serial` and one will be picked, or take a different emulator; the "
-        "hint lists which are free. `aua lease list` shows who holds what, `aua lease "
+        "**Exit 9 (`device_leased`) means another agent holds it.** If the serial was only a "
+        "redundant stale pin, omit it and stay on your existing assignment. If the user explicitly "
+        "requested that target, never redirect: wait, provision with user intent, or reconcile "
+        "the holder identity. `aua lease list` shows who holds what, and `aua lease "
         "release` hands one back early. A crashed agent therefore blocks nobody and "
         "there is nothing to clean up.",
     ),
@@ -560,11 +577,12 @@ BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
     ),
     (
         "Attach automatically and clean up only what you started",
-        "Run `aua devices`, then `aua daemon start` when several calls are coming. AUA leases one "
-        "compatible emulator to the calling agent process automatically: never ask the user for "
-        "a lease or manually steal one. A dead owner makes its device reusable. Prefer an "
-        "existing headed device; otherwise `session start --start-emulator` grants boot "
-        "permission (`--headed` displays it; `--audio` enables microphone injection). "
+        "AUA gives each agent one sticky lease; omit `--serial` from ordinary commands. "
+        "A new target needs warned `lease acquire --replace`; `lease transfer` / "
+        "`accept` delegates it. Never steal. Dead owners release immediately; a pending transfer "
+        "reserves for five minutes. Prefer an existing headed device; otherwise allow boot through "
+        "`session start --start-emulator` (`--headed` shows it; "
+        "`--audio` enables microphone input). "
         "`session finish` cleans up.",
     ),
     (
@@ -1416,7 +1434,8 @@ def render_markdown(*, brief: bool = False) -> str:
         "```bash\n"
         "aua devices                          # already have a device? use it\n"
         "aua emulator list                    # marks Play Store vs rootable\n"
-        "aua emulator start --headless        # -no-window; waits until adb is ready\n"
+        "aua emulator start --headless        # provisioning only; returns <serial>\n"
+        "aua lease acquire <serial>            # if unleased; --replace confirms a switch\n"
         "aua daemon start --quiet\n"
         "aua --format compact analyze         # same analyze path as a headed emulator\n"
         "# … drive the flow under test …\n"
@@ -1425,10 +1444,10 @@ def render_markdown(*, brief: bool = False) -> str:
         "**Parallel agents on one host** (each owns one emulator):\n"
         "```bash\n"
         "aua emulator start --headless --parallel --avd Pixel_7\n"
-        "# → {serial, port, owner}; pin: export AUA_SERIAL=<serial> AUA_OWNER=<owner>\n"
+        "# → serial; if unleased: aua lease acquire <serial>  (--replace switches)\n"
         "aua --format compact analyze\n"
         "# …\n"
-        'aua emulator stop --serial "$AUA_SERIAL"   # only yours — never bare stop --all\n'
+        "aua emulator stop --serial <serial>   # only yours — never bare stop --all\n"
         "```\n"
         "Sneak-peek all of them: `aua dashboard` (live device **grid** by default).\n"
         "Headless on Mac uses **host GPU** (Metal). **Always stop AVDs you started** before "
@@ -1438,7 +1457,8 @@ def render_markdown(*, brief: bool = False) -> str:
         "```bash\n"
         "aua emulator recommend-proxy         # package + why (no download)\n"
         "aua emulator ensure-proxy --start    # download google_apis image + boot aua_proxy\n"
-        "aua --serial <serial> proxy start\n"
+        "aua lease acquire <serial>            # only if unleased; --replace switches explicitly\n"
+        "aua proxy start\n"
         "aua emulator stop --mine             # cleanup when done\n"
         "```\n"
         "Analyze/tap/wait work identically; hierarchy + screenshots do not need a visible "
@@ -1772,8 +1792,8 @@ def render_skill_markdown() -> str:
     """Compact triggered instructions; deeper guidance stays in the CLI manual."""
     return """# Android UI Analyser
 
-Use `aua` for Android UI. Act on returned ids or stable selectors, never guessed coordinates;
-do not replace an AUA workflow with raw `adb`.
+Use `aua` for Android UI. Act on returned IDs or stable selectors, never pixels;
+do not substitute raw `adb`.
 
 ## Operating loop
 
@@ -1811,7 +1831,7 @@ on the same package/context/frame.
 
 ## Device and safety rules
 
-- AUA leases automatically. Never steal another agent's device; respect user-named boundaries.
+- One leased device stays implicit: omit `--serial`; switching or transfer is explicit.
 - Start an emulator only with explicit scope (`session start --start-emulator`); use `--headed`
   only when visibility is required. For voice input boot with `--audio`; use `mic inject` or
   macOS `mic speak`. Controls default to hold; `--control-mode toggle` requires an initially-off

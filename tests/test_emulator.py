@@ -120,6 +120,13 @@ def test_start_headless_waits_for_serial(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert out["gpu"] == "host" or out["gpu"] == "swiftshader" or out["gpu"] == "auto"
     assert out["idle_timeout_s"] == 1200.0
     assert out["watchdog_pid"] == 7777
+    assert "aua lease acquire emulator-5554" in out["hint"]
+    assert "Standalone start did not retarget" in out["hint"]
+    assert "--replace" in out["hint"]
+    assert "omit `--serial` from ordinary commands" in out["hint"]
+    assert "emulator stop --mine" in out["hint"]
+    assert "--serial emulator-5554" in out["hint"]
+    assert "Pin with" not in out["hint"]
     meta = json.loads((tmp_path / "emulator" / "only.json").read_text(encoding="utf-8"))
     assert meta["pid"] == 4242
     assert meta["watchdog_pid"] == 7777
@@ -133,6 +140,16 @@ def test_start_headless_waits_for_serial(monkeypatch: pytest.MonkeyPatch, tmp_pa
         ("emulator-5554", tmp_path),
     ]
     assert out["proxy_cleanup"]["cleared"] is True
+
+
+def test_emulator_start_help_explains_provisioning_vs_lease_selection() -> None:
+    result = runner.invoke(app, ["emulator", "start", "--help"])
+
+    assert result.exit_code == 0
+    help_text = " ".join(result.stdout.split())
+    assert "does not retarget an existing lease" in help_text
+    assert "lease acquire SERIAL --replace" in help_text
+    assert "Pin later commands" not in help_text
 
 
 def test_start_idle_stop_zero_skips_watchdog(

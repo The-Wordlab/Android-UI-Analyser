@@ -416,6 +416,9 @@ def test_a_capture_read_whose_restart_fails_degrades_to_disk_not_to_a_dead_end(
     engine._lease_owner = "agent-a"  # type: ignore[attr-defined]
     engine._lease_owner_resolved = "agent-a"  # type: ignore[attr-defined]
     engine._lease_device = lambda: "emulator-5562"  # type: ignore[attr-defined]
+    # This disk-fallback seam injects a synthetic Device and owner without creating a real
+    # registry entry. Keep it out of the production lease fence it is not exercising.
+    engine.config.lease.enabled = False
     engine.config.daemon.socket = cfg.daemon.socket
     engine.config.daemon.enabled = True
 

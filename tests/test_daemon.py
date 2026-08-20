@@ -116,6 +116,282 @@ def test_dispatch_analyze_returns_schema_keys() -> None:
     assert "meta" in result
 
 
+def test_dispatch_holds_device_fence_until_the_command_returns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from android_ui_analyser import leases
+
+    monkeypatch.setattr(leases, "_proc_started", lambda pid: "source" if pid == 111 else "")
+    monkeypatch.setattr(leases.os, "kill", lambda _pid, _signal: None)
+    source = leases.LeaseOwner("orchestrator", pid=111, started="source")
+    serial = "emulator-5554"
+    config = make_config(cache={"dir": str(tmp_path)})
+    engine = make_engine(config=config, device=FakeDevice(serial=serial))
+    assert leases.acquire(tmp_path, serial, owner=source)
+    engine._lease_owner = source
+    engine._lease_owner_resolved = source
+    engine._lease_serial = serial
+    engine._leased_serial_resolved = (True, serial)
+    command_started = threading.Event()
+    transfer_started = threading.Event()
+    let_command_finish = threading.Event()
+
+    class Result:
+        def model_dump(self, *, mode: str) -> dict[str, object]:
+            assert mode == "json"
+            return {"ok": True}
+
+    def analyze(**_kwargs: object) -> Result:
+        command_started.set()
+        assert let_command_finish.wait(timeout=2)
+        return Result()
+
+    monkeypatch.setattr(engine, "analyze", analyze)
+    response: list[dict[str, object]] = []
+    offered: list[dict[str, object]] = []
+
+    command = threading.Thread(
+        target=lambda: response.append(dispatch(engine, {"cmd": "analyze", "args": {}}))
+    )
+
+    def transfer() -> None:
+        transfer_started.set()
+        offered.append(leases.create_handoff(tmp_path, serial, owner=source))
+
+    handoff = threading.Thread(target=transfer)
+    command.start()
+    assert command_started.wait(timeout=2)
+    handoff.start()
+    assert transfer_started.wait(timeout=2)
+    assert not offered
+    let_command_finish.set()
+    command.join(timeout=2)
+    handoff.join(timeout=2)
+
+    assert response == [{"ok": True, "result": {"ok": True}}]
+    assert offered and offered[0]["serial"] == serial
+
+
+def test_daemon_journaling_does_not_reacquire_the_finished_command_fence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from android_ui_analyser import leases
+    from android_ui_analyser.daemon import _journal_dispatch
+
+    monkeypatch.setattr(leases, "_proc_started", lambda pid: "source" if pid == 111 else "")
+    monkeypatch.setattr(leases.os, "kill", lambda _pid, _signal: None)
+    source = leases.LeaseOwner("orchestrator", pid=111, started="source")
+    serial = "emulator-5554"
+    engine = make_engine(
+        config=make_config(cache={"dir": str(tmp_path)}),
+        device=FakeDevice(serial=serial),
+    )
+    assert leases.acquire(tmp_path, serial, owner=source)
+    engine._lease_owner = source
+    engine._lease_owner_resolved = source
+    engine._lease_serial = serial
+    engine._leased_serial_resolved = (True, serial)
+
+    class Result:
+        def model_dump(self, *, mode: str) -> dict[str, object]:
+            assert mode == "json"
+            return {"ok": True}
+
+    monkeypatch.setattr(engine, "analyze", lambda **_kwargs: Result())
+    request = {"cmd": "analyze", "args": {}, "owner": str(source)}
+    response = dispatch(engine, request)
+    _journal_dispatch(engine, request, response, duration_ms=1.0)
+
+    offered: list[dict[str, object]] = []
+    transfer = threading.Thread(
+        target=lambda: offered.append(leases.create_handoff(tmp_path, serial, owner=source))
+    )
+    transfer.start()
+    transfer.join(timeout=2)
+
+    assert offered and offered[0]["serial"] == serial
+
+
+def test_push_watcher_uses_background_fence_without_blocking_transfer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from android_ui_analyser import leases
+    from android_ui_analyser.push import PushHub
+
+    monkeypatch.setattr(leases, "_proc_started", lambda pid: "source" if pid == 111 else "")
+    monkeypatch.setattr(leases.os, "kill", lambda _pid, _signal: None)
+    source = leases.LeaseOwner("orchestrator", pid=111, started="source")
+    serial = "emulator-5554"
+    engine = make_engine(
+        config=make_config(cache={"dir": str(tmp_path)}),
+        device=FakeDevice(serial=serial),
+    )
+    assert leases.acquire(tmp_path, serial, owner=source)
+    engine._lease_owner = source
+    engine._lease_owner_resolved = source
+    engine._lease_serial = serial
+    engine._leased_serial_resolved = (True, serial)
+    sampled = threading.Event()
+
+    def dump_tree(_device: object, *, compact: bool) -> str:
+        assert isinstance(compact, bool)
+        sampled.set()
+        return "<hierarchy/>"
+
+    monkeypatch.setattr(engine.platform, "dump_tree", dump_tree)
+    hub = PushHub()
+    hub.start_watcher(
+        lambda: engine.hierarchy_fingerprint(background=True),
+        interval_ms=10,
+        serial=serial,
+    )
+    try:
+        assert sampled.wait(timeout=2)
+        offered: list[dict[str, object]] = []
+        transfer = threading.Thread(
+            target=lambda: offered.append(
+                leases.create_handoff(tmp_path, serial, owner=source)
+            )
+        )
+        transfer.start()
+        transfer.join(timeout=2)
+        assert offered and offered[0]["serial"] == serial
+    finally:
+        hub.stop()
+        if hub._watch_thread is not None:
+            hub._watch_thread.join(timeout=2)
+
+
+def test_dispatch_host_only_command_adopts_identity_without_claiming_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from android_ui_analyser import leases
+    from android_ui_analyser.engine import Engine
+
+    owner = leases.LeaseOwner("agent-a", pid=111, started="source")
+    monkeypatch.setattr(leases, "bind_owner_caller", lambda _owner, _caller: owner)
+    engine = Engine(make_config(cache={"dir": str(tmp_path)}))
+
+    def unexpected_device_access(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("host-only daemon command touched a device")
+
+    monkeypatch.setattr(engine, "_lease_device", unexpected_device_access)
+    monkeypatch.setattr(engine, "_connect_target", unexpected_device_access)
+    monkeypatch.setattr(
+        engine,
+        "capture_status",
+        lambda: {"ok": True, "action": "capture-status", "running": False},
+    )
+
+    response = dispatch(
+        engine,
+        {"cmd": "capture_status", "args": {}, "owner": "agent-a", "caller": {}},
+    )
+
+    assert response["ok"] is True
+    assert engine._lease_owner_resolved == owner
+    assert engine._device is None
+    assert not list((tmp_path / "leases").glob("*.json"))
+
+
+def test_owner_adoption_waits_for_old_async_memory_writer_before_clearing_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from android_ui_analyser import leases
+    from android_ui_analyser.daemon import _adopt_client_owner
+    from android_ui_analyser.engine import Engine
+
+    source = leases.LeaseOwner("source", pid=111, started="source")
+    child = leases.LeaseOwner("child", pid=222, started="child")
+    monkeypatch.setattr(leases, "bind_owner_caller", lambda _owner, _caller: child)
+    engine = Engine(make_config(cache={"dir": str(tmp_path)}))
+    engine._lease_owner = source
+    engine._lease_owner_resolved = source
+    writer_started = threading.Event()
+    release_writer = threading.Event()
+    join_started = threading.Event()
+
+    def old_writer() -> None:
+        writer_started.set()
+        assert release_writer.wait(timeout=2)
+        engine._last_known_screen = "old-owner-screen"
+        engine._last_mem_fp = "old-owner-fingerprint"
+
+    writer = threading.Thread(target=old_writer)
+    with engine._mem_threads_lock:
+        engine._mem_thread = writer
+        engine._mem_threads.append(writer)
+        writer.start()
+    assert writer_started.wait(timeout=2)
+    original_join = engine._join_memory_writers
+
+    def observed_join(*, timeout_s: float) -> bool:
+        join_started.set()
+        return original_join(timeout_s=timeout_s)
+
+    monkeypatch.setattr(engine, "_join_memory_writers", observed_join)
+    adoption_done = threading.Event()
+
+    def adopt() -> None:
+        _adopt_client_owner(engine, "child", {}, claim_device=False)
+        adoption_done.set()
+
+    adoption = threading.Thread(target=adopt)
+    adoption.start()
+    assert join_started.wait(timeout=2)
+    assert not adoption_done.is_set()
+    release_writer.set()
+    adoption.join(timeout=2)
+
+    assert adoption_done.is_set()
+    assert engine._lease_owner_resolved == child
+    assert engine._last_known_screen is None
+    assert engine._last_mem_fp is None
+
+
+def test_returned_lease_generation_clears_stale_state_for_the_same_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from android_ui_analyser import leases
+
+    starts = {111: "source", 222: "child"}
+    monkeypatch.setattr(leases, "_proc_started", lambda pid: starts.get(pid, ""))
+    monkeypatch.setattr(leases.os, "kill", lambda _pid, _signal: None)
+    source = leases.LeaseOwner("orchestrator", pid=111, started="source")
+    child = leases.LeaseOwner("child", pid=222, started="child")
+    serial = "emulator-5554"
+    device = FakeDevice(serial=serial)
+    engine = make_engine(
+        config=make_config(cache={"dir": str(tmp_path)}),
+        device=device,
+    )
+    assert leases.acquire(tmp_path, serial, owner=source)
+    engine._lease_owner = source
+    engine._lease_owner_resolved = source
+    engine._lease_serial = serial
+    engine._leased_serial_resolved = (True, serial)
+    engine.begin_device_use()
+    original_generation = engine._lease_generation_resolved
+    engine.release_device_use()
+    assert original_generation is not None
+    engine._last_known_screen = "stale-screen"
+    engine._last_mem_fp = "stale-fingerprint"
+
+    to_child = leases.create_handoff(tmp_path, serial, owner=source)
+    leases.accept_handoff(tmp_path, to_child["token"], owner=child)
+    to_source = leases.create_handoff(tmp_path, serial, owner=child)
+    leases.accept_handoff(tmp_path, to_source["token"], owner=source)
+
+    engine.begin_device_use()
+    try:
+        assert engine._lease_generation_resolved != original_generation
+        assert engine._last_known_screen is None
+        assert engine._last_mem_fp is None
+        assert engine._device is device
+    finally:
+        engine.release_device_use()
+
+
 def test_dispatch_ask_screen(monkeypatch) -> None:
     engine = make_engine(device=FakeDevice())
     monkeypatch.setattr(

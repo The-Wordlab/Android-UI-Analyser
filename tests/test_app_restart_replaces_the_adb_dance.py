@@ -39,7 +39,11 @@ _XML = """<?xml version="1.0" encoding="UTF-8"?>
 def calls(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     """Record what the CLI asks the engine to do, without touching a device."""
     recorded: list[dict[str, Any]] = []
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: FakeDevice(hierarchy_xml=_XML))
+    monkeypatch.setattr(
+        engine_mod,
+        "connect",
+        lambda serial=None: FakeDevice(hierarchy_xml=_XML, serial=serial or "fake-emulator-5554"),
+    )
     monkeypatch.setenv("AUA_DAEMON__ENABLED", "false")
 
     original = engine_mod.Engine.app
@@ -77,8 +81,9 @@ def test_restart_never_wipes_app_data(calls: list[dict[str, Any]]) -> None:
 
 
 def test_the_and_analyze_spelling_returns_the_screen(calls: list[dict[str, Any]]) -> None:
-    runner.invoke(app, ["app", "restart-and-analyze", "com.example.app"])
+    result = runner.invoke(app, ["app", "restart-and-analyze", "com.example.app"])
 
+    assert result.exit_code == 0, result.output + str(result.stderr or "")
     launch = next(c for c in calls if c["action"] == "launch")
     assert launch["observe"] is True, "the whole point is not needing a follow-up analyze"
 
