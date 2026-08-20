@@ -423,6 +423,9 @@ class HasResult(BaseModel):
     source: str | None = None  # "hierarchy" | "ocr"
     bounds: Bounds | None = None
     text: str | None = None
+    wait_clamped_from_ms: int | None = None
+    wait_ceiling_ms: int | None = None
+    wait_ceiling_mode: str | None = None
 
     def render(self, fmt: OutputFormat | str = OutputFormat.json) -> str:
         data = {k: v for k, v in self.model_dump(mode="json").items() if v is not None}

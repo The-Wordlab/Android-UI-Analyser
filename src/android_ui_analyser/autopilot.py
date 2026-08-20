@@ -84,7 +84,7 @@ def plan_waypoints(
     """
 
     done = _folded(completed)
-    passed = _folded(skipped)
+    _ = skipped  # retained in the public plan input for trace compatibility; never completion
     remaining_phases = [phase for phase in phases if str(getattr(phase, "status", "")) != "completed"]
     index = next(
         (
@@ -133,7 +133,7 @@ def plan_waypoints(
         pending = [
             waypoint
             for waypoint in authored
-            if " ".join(waypoint.casefold().split()) not in done | passed
+            if " ".join(waypoint.casefold().split()) not in done
         ]
         # A prior action may already have landed on the next authored waypoint. Only a
         # prefix can be consumed this way: a later waypoint normally lives behind an

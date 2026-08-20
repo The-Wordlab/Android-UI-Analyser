@@ -1596,7 +1596,7 @@ def complete_current_ui_phase_from_job(
         or job.owner != state.owner
         or not isinstance(job.result, dict)
         or job.result.get("ok") is not True
-        or job.result.get("await_outcome") != "satisfied"
+        or job.result.get("await_outcome") not in {"satisfied", "absence-satisfied"}
         or not str(job.args.get("predicate") or "").strip()
     ):
         return state

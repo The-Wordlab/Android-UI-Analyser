@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from pathlib import Path
@@ -111,6 +112,39 @@ def test_buffer_dedupes_identical_frames(tmp_path: Path) -> None:
     out = buf.last(since_ms=0)
     assert out["count"] == len(buf._entries)
     assert isinstance(out["summary"], list)
+
+
+def test_action_mark_is_durable_even_when_the_screen_does_not_change(tmp_path: Path) -> None:
+    shot = ScreenImage(_png_color(40, 40, (20, 20, 20)), width=40, height=40)
+    buf = CaptureBuffer(
+        root=tmp_path,
+        serial="emu",
+        cfg=CaptureCfgView(),
+        screenshot=lambda: shot,
+    )
+
+    buf.mark("tap:Continue")
+
+    records = [json.loads(line) for line in buf.index_path.read_text().splitlines()]
+    assert records == [
+        {"kind": "action", "t_ms": buf.last_action_ms(), "action": "tap:Continue"}
+    ]
+
+
+def test_consecutive_action_marks_are_not_collapsed(tmp_path: Path) -> None:
+    shot = ScreenImage(_png_color(40, 40, (20, 20, 20)), width=40, height=40)
+    buf = CaptureBuffer(
+        root=tmp_path,
+        serial="emu",
+        cfg=CaptureCfgView(),
+        screenshot=lambda: shot,
+    )
+
+    buf.mark("tap:First")
+    buf.mark("tap:Second")
+
+    records = [json.loads(line) for line in buf.index_path.read_text().splitlines()]
+    assert [record["action"] for record in records] == ["tap:First", "tap:Second"]
 
 
 def test_engine_capture_hint_after_burst(tmp_path: Path) -> None:
@@ -279,7 +313,7 @@ def test_suite_failure_attaches_capture(tmp_path: Path) -> None:
     with engine._acting("tap:Hello"):
         pass
     deadline = time.time() + 2.0
-    while time.time() < deadline and len(engine._capture._entries) < 1:  # type: ignore[union-attr]
+    while time.time() < deadline and not engine._capture.hint_ready():  # type: ignore[union-attr]
         time.sleep(0.04)
     suite = parse_suite(
         """

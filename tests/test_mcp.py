@@ -411,6 +411,30 @@ def test_mcp_analyze_screen_returns_schema_valid_json() -> None:
     assert len(parsed.elements) == 3
 
 
+def test_mcp_closes_each_caller_turn_and_compares_the_emitted_screen(tmp_path: Path) -> None:
+    cfg = make_config(
+        memory={"dir": str(tmp_path / "memory")},
+        cache={"dir": str(tmp_path / "cache")},
+    )
+    device = FakeDevice(hierarchy_xml=HIERARCHY_XML)
+    engine = Engine(cfg, device=device)
+    server = build_server(engine)
+
+    async def run() -> tuple[dict, dict]:  # type: ignore[type-arg]
+        async with create_connected_server_and_client_session(server) as client:
+            first_result = await client.call_tool("analyze_screen", {"source": "hierarchy"})
+            assert engine._caller_turn is None  # noqa: SLF001
+            device._xml = HIERARCHY_XML.replace("Hello", "Different screen")  # noqa: SLF001
+            second_result = await client.call_tool("analyze_screen", {"source": "hierarchy"})
+            assert engine._caller_turn is None  # noqa: SLF001
+            return json.loads(_first_text(first_result)), json.loads(_first_text(second_result))
+
+    first, second = anyio.run(run)
+
+    assert first["meta"]["fingerprint"] != second["meta"]["fingerprint"]
+    assert second["meta"]["caller"]["previous_screen_gone"] is True
+
+
 def test_mcp_network_offline_and_restore_roundtrip() -> None:
     server = build_server(_engine())
 

@@ -172,8 +172,8 @@ def test_the_device_is_told_how_long_each_check_may_wait(tmp_path: Path) -> None
         "assert-visible went to the device with no timeout, so it used the device default "
         "and waited where the host would not have"
     )
-    assert by_kind["wait-for"]["timeout_ms"] == 10000, (
-        "wait-for went to the device without the host's own 10s budget"
+    assert by_kind["wait-for"]["timeout_ms"] == engine.config.perf.max_wait_ms, (
+        "wait-for went to the device without the host's capped observation budget"
     )
 
 

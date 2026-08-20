@@ -40,6 +40,10 @@ PASSIVE_COST_NOTE_ON = (
     "policy.enabled=true, so every ordinary analyze and session-progress call runs the chain "
     "(measured ~20s per call); `aua session autopilot` does not need it"
 )
+PASSIVE_COST_NOTE_OFF = (
+    "policy.mode=off, so the chain is not consulted; policy.enabled has no inference cost in "
+    "this mode"
+)
 
 
 def install_command(extras: tuple[str, ...] | list[str]) -> str:
@@ -51,7 +55,12 @@ def install_command(extras: tuple[str, ...] | list[str]) -> str:
     the install target, so the receipt does.
     """
 
-    wanted = [e for e in POLICY_EXTRAS if e in set(extras)] or ["functiongemma"]
+    wanted = [e for e in POLICY_EXTRAS if e in set(extras)]
+    if not wanted:
+        return (
+            "No install.sh policy flag is known for this provider; use `aua policy status` "
+            "to identify its documented runtime."
+        )
     if "hybrid-policy" in wanted:
         # The installer's hybrid opt-in is cumulative — it installs the selector runtime too, so
         # say what the command actually does rather than only the extra that was asked about.
@@ -64,7 +73,7 @@ def install_command(extras: tuple[str, ...] | list[str]) -> str:
     )
 
 
-def _entry(status: dict[str, Any]) -> dict[str, Any]:
+def _entry(status: dict[str, Any], *, active: bool = True) -> dict[str, Any]:
     """Turn one provider's host-only status into a doctor row with a cause and a fix."""
 
     name = str(status.get("provider") or "?")
@@ -85,9 +94,20 @@ def _entry(status: dict[str, Any]) -> dict[str, Any]:
         "install_extra": extra,
         "mode_supported": mode_supported,
         "cause": "ok",
+        "ok": runnable,
     }
 
+    if not active:
+        entry.update(
+            ok=True,
+            cause="off",
+            reason="not checked while policy.mode=off",
+            remedy=None,
+        )
+        return entry
+
     if runnable:
+        entry["ok"] = True
         return entry
 
     if isinstance(health, dict) and health.get("usable") is False:
@@ -97,14 +117,9 @@ def _entry(status: dict[str, Any]) -> dict[str, Any]:
             "(`aua policy status` shows the per-provider rate)"
         )
         return entry
-    if not mode_supported:
-        entry["cause"] = "mode_unsupported"
-        entry["remedy"] = (
-            f"{name} does not authorize the configured `policy.mode`; see `aua policy status` "
-            "for the rollout its manifest allows"
-        )
-        return entry
     if runtime_ready is False:
+        if runtime_reason:
+            entry["reason"] = runtime_reason
         # The provider owns its platform contract. Do not infer that every unavailable local
         # runtime is unsupported merely because doctor itself happens to be running on Linux:
         # fake adapters and future non-MLX providers may be perfectly valid there. The real MLX
@@ -115,6 +130,13 @@ def _entry(status: dict[str, Any]) -> dict[str, Any]:
             return entry
         entry["cause"] = "runtime_missing"
         entry["remedy"] = install_command([extra] if extra else [])
+        return entry
+    if not mode_supported:
+        entry["cause"] = "mode_unsupported"
+        entry["remedy"] = (
+            f"{name} does not authorize the configured `policy.mode`; see `aua policy status` "
+            "for the rollout its manifest allows"
+        )
         return entry
     if runtime_ready is True:
         entry["cause"] = "artifacts"
@@ -134,9 +156,9 @@ def _entry(status: dict[str, Any]) -> dict[str, Any]:
 def policy_check(config: Any, *, factory: Any | None = None) -> dict[str, Any]:
     """Report the configured policy chain, what can run here, and the exact fix if not.
 
-    ``ok`` is False only when the policy is *in use* — ``mode`` is shadow/advisory, or the passive
-    switch is on — and nothing in its chain can run. An untouched optional feature is not
-    breakage, so the shipped default reports ``ok: True`` and stays quiet.
+    ``ok`` is False only when ``mode`` is shadow/advisory and nothing in its chain can run.
+    ``policy.enabled`` cannot consult a chain while mode is off, so that combination stays a
+    truthful zero-cost ``ok: True``. An untouched optional feature is not breakage.
     """
 
     from .policy import policy_status
@@ -145,8 +167,11 @@ def policy_check(config: Any, *, factory: Any | None = None) -> dict[str, Any]:
     mode = str(status.get("mode") or "off")
     enabled = bool(status.get("enabled"))
     chain = [str(name) for name in status.get("chain") or []]
-    configured = enabled or mode in {"shadow", "advisory"}
-    providers = [_entry(dict(value)) for value in status.get("providers") or []]
+    configured = mode in {"shadow", "advisory"}
+    providers = [
+        _entry(dict(value), active=configured)
+        for value in status.get("providers") or []
+    ]
     runnable = [p for p in providers if p["runnable"]]
     blocked = [p for p in providers if not p["runnable"]]
 
@@ -157,7 +182,11 @@ def policy_check(config: Any, *, factory: Any | None = None) -> dict[str, Any]:
         "mode": mode,
         "chain": chain,
         "providers": providers,
-        "cost": PASSIVE_COST_NOTE_ON if enabled else PASSIVE_COST_NOTE,
+        "cost": (
+            PASSIVE_COST_NOTE_OFF
+            if not configured
+            else (PASSIVE_COST_NOTE_ON if enabled else PASSIVE_COST_NOTE)
+        ),
     }
 
     if not configured:

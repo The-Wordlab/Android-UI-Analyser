@@ -1709,7 +1709,8 @@ def render_markdown(*, brief: bool = False) -> str:
         "false and `policy.mode` is off by default, so nothing loads until an operator turns it on."
     )
     p.append(
-        "To enable it: install the Apple-silicon runtime with `.[functiongemma]`, manually obtain "
+        "To enable it: from a checkout run `./install.sh --with-policy` to install the "
+        "Apple-silicon runtime into the same environment as `aua`, then manually obtain "
         "the pinned external MLX base, then set `policy.enabled: true`, `policy.mode: advisory`, and "
         "`models.functiongemma.model_path` to its absolute directory. Leave "
         "`models.functiongemma.adapter_path` null to use the packaged v10 LoRA. AUA bundles only "

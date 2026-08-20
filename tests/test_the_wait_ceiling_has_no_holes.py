@@ -113,6 +113,29 @@ def test_a_sixty_second_wait_for_text_returns_well_inside_the_ceiling() -> None:
     assert elapsed_ms < 3_000, f"a clamped 60s wait blocked {elapsed_ms:.0f}ms"
 
 
+def test_has_shares_one_ceiling_between_hierarchy_and_ocr(monkeypatch: pytest.MonkeyPatch) -> None:
+    dev = FakeDevice(hierarchy_xml=_XML)
+    eng = _engine(dev, ceiling_ms=150)
+    hierarchy_budgets: list[int] = []
+    ocr_budgets: list[int | None] = []
+
+    def miss_hierarchy(*args: object, timeout_ms: int, **kwargs: object) -> None:
+        hierarchy_budgets.append(timeout_ms)
+
+    def miss_ocr(*args: object, timeout_ms: int | None = None, **kwargs: object) -> None:
+        ocr_budgets.append(timeout_ms)
+
+    monkeypatch.setattr(dev, "wait_for", miss_hierarchy)
+    monkeypatch.setattr(eng, "_ocr_contains", miss_ocr)
+
+    result = eng.has("NeverThere", timeout_ms=60_000)
+
+    assert hierarchy_budgets == [150]
+    assert ocr_budgets and 0 < int(ocr_budgets[0] or 0) <= 150
+    assert result.wait_clamped_from_ms == 60_000
+    assert result.wait_ceiling_ms == 150
+
+
 def test_a_sixty_second_absent_wait_returns_well_inside_the_ceiling() -> None:
     dev = FakeDevice(hierarchy_xml=_XML, text_index={"Initial": (0, 0, 100, 60)})
     eng = _engine(dev, ceiling_ms=150)

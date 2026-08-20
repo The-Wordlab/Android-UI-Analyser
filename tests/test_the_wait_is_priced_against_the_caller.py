@@ -211,6 +211,31 @@ class TestTheCallerGapIsMeasuredNotGuessed:
         assert facts.profile.samples == 0
         assert facts.profile.gap_ms is None
 
+    def test_nonfinite_json_numbers_cannot_poison_the_caller_profile(self, tmp_path: Path) -> None:
+        clock = _Clock()
+        store = _store(tmp_path, clock)
+        store.path.parent.mkdir(parents=True, exist_ok=True)
+        store.path.write_text(
+            '{"ended_at":NaN,"ema_ms":Infinity,"spread_ms":-Infinity,"samples":9}',
+            encoding="utf-8",
+        )
+
+        facts = store.open_turn()
+
+        assert facts.profile.gap_ms is None
+        assert facts.profile.ema_ms is None
+        assert facts.profile.spread_ms == 0
+        assert facts.profile.recall_cost_ms == 0
+
+    def test_long_caller_names_with_the_same_prefix_do_not_share_a_file(self, tmp_path: Path) -> None:
+        clock = _Clock()
+        prefix = "agent-" + "x" * 140
+
+        first = _store(tmp_path, clock, key=prefix + "-one")
+        second = _store(tmp_path, clock, key=prefix + "-two")
+
+        assert first.path != second.path
+
     def test_a_warm_engine_does_not_price_one_agent_from_another(self) -> None:
         """The daemon's Engine outlives the client that built it, and adopts the next one.
 

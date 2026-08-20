@@ -26,6 +26,7 @@ Design notes
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Sequence
 from pathlib import Path
@@ -407,6 +408,8 @@ def _prefs_values(raw: dict[Any, Any], *, index: int) -> dict[str, Any]:
     for key, value in raw.items():
         if not isinstance(key, str) or not key.strip():
             raise _step_error(index, f"prefs_write key must be a non-empty string, got {key!r}")
+        if isinstance(value, float) and not math.isfinite(value):
+            raise _step_error(index, f"prefs_write value for {key!r} must be finite")
         if isinstance(value, bool | int | float | str):
             values[key] = value
             continue

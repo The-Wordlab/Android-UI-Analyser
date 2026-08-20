@@ -795,6 +795,10 @@ class Engine:
         # between device reads; the manager object is transport state, intentionally typed Any
         # here to avoid making the interface-agnostic Engine import its adapter.
         self._job_cancel_event: threading.Event | None = None
+        # The daemon serves foreground calls while a job waits in another thread. Job identity
+        # therefore belongs to the executing thread; a shared flag made every concurrent
+        # foreground wait inherit the background job's unlimited budget.
+        self._job_context = threading.local()
         self._aua_job_manager: Any = None
 
     def _effective_with_image(self, with_image: bool | str | None) -> bool | str | None:
@@ -3068,7 +3072,8 @@ class Engine:
         selectors = assertion.get("selectors")
         if axis not in {"horizontal", "vertical", "reading"} or not isinstance(selectors, list):
             return False, "invalid assert_order payload"
-        deadline = time.monotonic() + max(0, step.timeout_ms or 0) / 1000.0
+        timeout_ms, _clamped_from, _ceiling = self._bounded_wait_ms(step.timeout_ms or 0)
+        deadline = time.monotonic() + timeout_ms / 1000.0
         while True:
             raw_tree = self.platform.dump_tree(self.device)
             elements = self.platform.normalize_tree(
@@ -3082,7 +3087,7 @@ class Engine:
             detail = order.detail
             if time.monotonic() >= deadline:
                 return False, detail
-            self._job_sleep(0.25)
+            self._sleep_between_polls(250.0, deadline)
 
     # Step kinds the on-device helper can perform itself. Everything else — proxy, network
     # shaping, feature flags, launching apps, recursion into saved routes — is a host
@@ -3188,7 +3193,10 @@ class Engine:
         row = step.model_dump(exclude_none=True)
         default = self._HOST_STEP_TIMEOUT_MS.get(step.kind)
         if default is not None:
-            row["timeout_ms"] = step.timeout_ms or default
+            timeout_ms, _clamped_from, _ceiling = self._bounded_wait_ms(
+                step.timeout_ms or default
+            )
+            row["timeout_ms"] = timeout_ms
         return row
 
     def _device_runnable_run(
@@ -7450,7 +7458,7 @@ class Engine:
         # A one-word child must not be declared reached by a broader parent title such as
         # ``Network & internet``. Multi-word destinations retain the established title-evidence
         # lane because every discriminating term must be present.
-        return terms == title_terms if len(terms) == 1 else terms <= title_terms
+        return terms == title_terms
 
     @staticmethod
     def _restore_term_case(objective: str, terms: Sequence[str]) -> list[str]:
@@ -8390,6 +8398,15 @@ class Engine:
             if str(item.get("status")) == "provider_unusable":
                 providers.append(str(item.get("provider") or "?"))
                 reasons.append(f"{item.get('provider')}: {item.get('reason')}")
+            if (
+                str(item.get("status")) == "no_consensus"
+                and int(item.get("attempts") or 0) > 0
+                and int(item.get("invalid_attempts") or 0) >= int(item.get("attempts") or 0)
+            ):
+                providers.append(str(item.get("provider") or "?"))
+                reasons.append(
+                    f"{item.get('provider')}: every bounded selection attempt was invalid"
+                )
         if status in {"provider_unusable", "invalid_selection", "provider_error", "unavailable"}:
             providers.append(str(audit.get("provider") or "?"))
             reasons.append(f"{audit.get('provider')}: {audit.get('error') or status}")
@@ -8522,19 +8539,23 @@ class Engine:
         blocked: list[str] = []
         condemned: list[str] = []
         for provider in policy_chain.providers:
-            unusable = policy_health.unusable_reason(provider.name)
+            try:
+                provider_name = str(provider.name)
+            except Exception:
+                provider_name = type(provider).__name__
+            unusable = policy_health.unusable_reason(provider_name)
             if unusable:
-                condemned.append(f"{provider.name}: {unusable}")
-                blocked.append(f"{provider.name}: {unusable}")
+                condemned.append(f"{provider_name}: {unusable}")
+                blocked.append(f"{provider_name}: {unusable}")
                 continue
             try:
                 availability = provider.is_available()
             except Exception as exc:  # a broken provider must not mask the others
-                blocked.append(f"{provider.name}: {type(exc).__name__}: {exc}")
+                blocked.append(f"{provider_name}: {type(exc).__name__}: {exc}")
                 continue
             if availability.ok:
                 break
-            blocked.append(f"{provider.name}: {availability.reason}")
+            blocked.append(f"{provider_name}: {availability.reason}")
         else:
             if condemned and len(condemned) == len(blocked):
                 raise UsageError(
@@ -8626,8 +8647,21 @@ class Engine:
                 if not plan.can_steer:
                     terminal_reason = plan.blocked_reason or "navigation_complete"
                     detail = plan.blocked_detail
+                    trace.append(
+                        {
+                            "step": step_number,
+                            "active_phase": active_phase.id,
+                            "phase": plan.phase_id or active_phase.id,
+                            "crossed_phases": list(plan.crossed_phases),
+                            "arrived_waypoints": list(plan.arrived_waypoints),
+                            "executed": False,
+                            "stop_reason": terminal_reason,
+                        }
+                    )
                     break
-                objectives = list(plan.objectives)
+                # Authored waypoints are ordered. If the first is not visible, trying a later
+                # one crosses a navigation prerequisite without evidence.
+                objectives = list(plan.objectives[:1])
                 # The provenance anchor stays the *active* phase — that is where the run is, and
                 # `_policy_context_is_current` revalidates it after inference. The plan's phase is
                 # reported alongside it so a look-ahead is visible instead of implied.
@@ -8659,9 +8693,9 @@ class Engine:
                         chosen_objective = objective
                         break
                     if status == "no_candidate":
-                        step_skipped.append(objective)
-                        skipped_waypoints.append(objective)
-                        continue
+                        policy_result = candidate_result
+                        chosen_objective = objective
+                        break
                     policy_result = candidate_result
                     chosen_objective = objective
                     break
@@ -8713,6 +8747,8 @@ class Engine:
                             "step": step_number,
                             "active_phase": active_phase.id,
                             "phase": waypoint_phase,
+                            "crossed_phases": list(plan.crossed_phases),
+                            "skipped_waypoints": step_skipped,
                             "waypoint": chosen_objective,
                             "candidate_id": candidate_id,
                             "call": call,
@@ -8735,6 +8771,8 @@ class Engine:
                             "step": step_number,
                             "active_phase": active_phase.id,
                             "phase": waypoint_phase,
+                            "crossed_phases": list(plan.crossed_phases),
+                            "skipped_waypoints": step_skipped,
                             "waypoint": chosen_objective,
                             "candidate_id": candidate_id,
                             "call": call,
@@ -8799,6 +8837,15 @@ class Engine:
                     )
                     break
                 if chosen_objective:
+                    arrived = self._policy_waypoint_arrived(chosen_objective, observed)
+                    trace[-1]["waypoint_arrived"] = arrived
+                    if not arrived:
+                        terminal_reason = "waypoint_unverified"
+                        detail = (
+                            "The frame changed, but its passive title does not exactly prove "
+                            f"arrival at {chosen_objective!r}; AUA handed off without marking it complete."
+                        )
+                        break
                     completed_waypoints.append(chosen_objective)
             else:
                 terminal_reason = "step_limit"
@@ -9707,13 +9754,22 @@ class Engine:
 
     def _job_checkpoint(self) -> None:
         """Abort a supported background wait at the next safe device-read boundary."""
-        event = getattr(self, "_job_cancel_event", None)
+        event = self._current_job_cancel_event()
         if event is not None and event.is_set():
             raise JobCancelledError("background wait cancelled")
 
+    def _current_job_cancel_event(self) -> threading.Event | None:
+        """Cancellation state for the job running on this thread, if any."""
+        event = getattr(self._job_context, "cancel_event", None)
+        if event is not None:
+            return event
+        # Compatibility for callers/tests that explicitly mark a single-threaded Engine as a
+        # job. JobManager itself no longer writes this process-wide slot.
+        return getattr(self, "_job_cancel_event", None)
+
     def _job_sleep(self, seconds: float) -> None:
         """Sleep interruptibly when this Engine is executing a background job."""
-        event = getattr(self, "_job_cancel_event", None)
+        event = self._current_job_cancel_event()
         if event is None:
             time.sleep(seconds)
             return
@@ -9895,6 +9951,12 @@ class Engine:
         src = (source or "auto").lower()
 
         # T0: hierarchy selector (short-circuits on first hit)
+        clamped_from: int | None = None
+        ceiling_ms = 0
+        deadline: float | None = None
+        if timeout_ms and timeout_ms > 0:
+            timeout_ms, clamped_from, ceiling_ms = self._bounded_wait_ms(timeout_ms)
+            deadline = time.monotonic() + timeout_ms / 1000.0
         if src in ("auto", "hierarchy"):
             if timeout_ms and timeout_ms > 0:
                 bounds = device.wait_for(
@@ -9903,20 +9965,65 @@ class Engine:
             else:
                 bounds = device.find_text(text, match=mode, ignore_case=ignore_case, by=by)
             if bounds is not None:
-                return HasResult(found=True, source="hierarchy", bounds=bounds, text=text)
+                return self._has_wait_result(
+                    HasResult(found=True, source="hierarchy", bounds=bounds, text=text),
+                    clamped_from,
+                    ceiling_ms,
+                )
             if src == "hierarchy" or by == "id":
-                return HasResult(found=False, source="hierarchy")
+                return self._has_wait_result(
+                    HasResult(found=False, source="hierarchy"), clamped_from, ceiling_ms
+                )
 
         # T0→T3: OCR fallback (only on a hierarchy miss)
         if (src in ("auto", "vision")) and (ocr_fallback or src == "vision"):
-            hit = self._ocr_contains(device, text, mode, ignore_case)
+            remaining_ms = (
+                max(0, int((deadline - time.monotonic()) * 1000))
+                if deadline is not None
+                else None
+            )
+            hit = (
+                self._ocr_contains(
+                    device,
+                    text,
+                    mode,
+                    ignore_case,
+                    timeout_ms=remaining_ms,
+                )
+                if remaining_ms is None or remaining_ms > 0
+                else None
+            )
             if hit is not None:
-                return HasResult(found=True, source="ocr", bounds=hit, text=text)
+                return self._has_wait_result(
+                    HasResult(found=True, source="ocr", bounds=hit, text=text),
+                    clamped_from,
+                    ceiling_ms,
+                )
 
-        return HasResult(found=False, source="hierarchy" if src != "vision" else "ocr")
+        return self._has_wait_result(
+            HasResult(found=False, source="hierarchy" if src != "vision" else "ocr"),
+            clamped_from,
+            ceiling_ms,
+        )
+
+    def _has_wait_result(
+        self, result: HasResult, clamped_from: int | None, ceiling_ms: int
+    ) -> HasResult:
+        if clamped_from is None:
+            return result
+        result.wait_clamped_from_ms = clamped_from
+        result.wait_ceiling_ms = ceiling_ms
+        result.wait_ceiling_mode = getattr(self._job_context, "last_wait_ceiling_mode", None)
+        return result
 
     def _ocr_contains(
-        self, device: Device, text: str, mode: MatchMode, ignore_case: bool
+        self,
+        device: Device,
+        text: str,
+        mode: MatchMode,
+        ignore_case: bool,
+        *,
+        timeout_ms: int | None = None,
     ) -> tuple[int, int, int, int] | None:
         if not self.factory.is_enabled("ocr"):
             return None
@@ -9924,11 +10031,14 @@ class Engine:
         if not chain.providers:
             return None
         img = device.screenshot()
+        provider_timeout_ms = int(self.config.timeouts.vision_ms)
+        if timeout_ms is not None:
+            provider_timeout_ms = min(provider_timeout_ms, max(1, timeout_ms))
         try:
             boxes, _ = run_chain(
                 chain,
                 lambda p: p.recognize(img),  # type: ignore[attr-defined]
-                timeout_s=self.config.timeouts.vision_ms / 1000.0,
+                timeout_s=provider_timeout_ms / 1000.0,
             )
         except ProviderError as exc:
             logger.info("ocr fallback unavailable: %s", exc)
@@ -10649,14 +10759,21 @@ class Engine:
         which is the whole "previous screen gone" feature quietly never arming itself. The
         adapter has the answer either way, so it is the one asked.
         """
-        store = self._caller_latency_store()
-        if store is None:
+        if self._caller_turn is None:
             return
-        if fingerprint is None:
-            cached = self._last_analyze_result
-            fingerprint = cached.meta.fingerprint if cached is not None else None
-        with contextlib.suppress(Exception):
-            store.close_turn(fingerprint)
+        try:
+            store = self._caller_latency_store()
+            if store is None:
+                return
+            if fingerprint is None:
+                cached = self._last_analyze_result
+                fingerprint = cached.meta.fingerprint if cached is not None else None
+            with contextlib.suppress(Exception):
+                store.close_turn(fingerprint)
+        finally:
+            # A warm MCP engine serves many caller turns. Keeping this object made the next
+            # open a no-op and every later report describe the first call forever.
+            self._caller_turn = None
 
     def _caller_profile(self) -> Any:
         """The caller estimate this call should size its waits from.
@@ -10679,7 +10796,7 @@ class Engine:
         self._caller_profile_cache = profile
         return profile
 
-    def caller_turn_report(self) -> dict[str, Any] | None:
+    def caller_turn_report(self, current_fingerprint: str | None = None) -> dict[str, Any] | None:
         """The caller-facing summary attached to a response, or None with nothing to say.
 
         Returns None unless something was actually *measured* this turn — a gap since the last
@@ -10695,7 +10812,7 @@ class Engine:
         report: dict[str, Any] = {}
         with contextlib.suppress(Exception):
             report.update(turn.profile.as_response())
-        gone = self._previous_screen_gone()
+        gone = self._previous_screen_gone(current_fingerprint)
         if gone is not None:
             report["previous_screen_gone"] = gone
             if turn.previous_age_ms is not None:
@@ -10710,7 +10827,7 @@ class Engine:
             report["wait_ceiling_mode"] = mode
         return report
 
-    def _previous_screen_gone(self) -> bool | None:
+    def _previous_screen_gone(self, current_fingerprint: str | None = None) -> bool | None:
         """Has the screen described by the caller's previous result been replaced?
 
         Answered from fingerprints already in hand — the one stamped when the last call returned
@@ -10720,11 +10837,13 @@ class Engine:
         evidence either way.
         """
         turn = self._caller_turn
-        cached = self._last_analyze_result
-        if turn is None or cached is None:
+        if turn is None:
             return None
         previous = getattr(turn, "previous_fingerprint", None)
-        current = cached.meta.fingerprint
+        cached = self._last_analyze_result
+        current = current_fingerprint or (
+            cached.meta.fingerprint if cached is not None else None
+        )
         if not previous or not current:
             return None
         return previous != current
@@ -10772,8 +10891,11 @@ class Engine:
         # *into* the existing clamp rather than enforced beside it — two clamps that disagree
         # is worse than one that is occasionally too tight, because the tighter one wins
         # silently and the looser one reads as a guarantee it is not.
-        ceiling, _mode = self._wait_ceiling()
-        if is_provisioning_wait("job" if self._job_cancel_event is not None else "observation"):
+        ceiling, mode = self._wait_ceiling()
+        self._job_context.last_wait_ceiling_mode = mode
+        if is_provisioning_wait(
+            "job" if self._current_job_cancel_event() is not None else "observation"
+        ):
             # `None` keeps meaning "no budget stated, use the ceiling" here too, so an exempt
             # caller and a clamped one disagree only about the number they were given.
             return (ceiling if requested_ms is None else int(requested_ms)), None, ceiling
@@ -10804,8 +10926,7 @@ class Engine:
             return result
         result.wait_clamped_from_ms = clamped_from
         result.wait_ceiling_ms = ceiling
-        with contextlib.suppress(Exception):
-            result.wait_ceiling_mode = self._wait_ceiling()[1]
+        result.wait_ceiling_mode = getattr(self._job_context, "last_wait_ceiling_mode", None)
         hint = Engine._wait_ceiling_explanation(clamped_from, ceiling)
         result.note = f"{result.note} {hint}".strip() if result.note else hint
         return result
@@ -12570,6 +12691,10 @@ class Engine:
             back_binding = cached.element_by_id(back_id) if cached is not None else None
 
         started_at = time.monotonic()
+        requested_total_ms = max(0, step_timeout_ms) * max_steps
+        total_budget_ms, clamped_from, ceiling_ms = self._bounded_wait_ms(requested_total_ms)
+        operation_deadline = started_at + total_budget_ms / 1000.0
+        self._job_context.back_wait_clamp = (clamped_from, ceiling_ms)
         device = self.device
 
         def wait_destination(timeout_ms: int) -> ActionResult:
@@ -12671,6 +12796,16 @@ class Engine:
 
         steps_run: list[dict[str, Any]] = []
         for steps in range(1, max_steps + 1):
+            remaining_ms = max(0, int((operation_deadline - time.monotonic()) * 1000))
+            if requested_total_ms > 0 and remaining_ms == 0:
+                return self._back_until_result(
+                    current,
+                    ok=False,
+                    reason="wait_ceiling",
+                    detail="destination unmet before the command wait ceiling expired",
+                    steps_run=steps_run,
+                    started_at=started_at,
+                )
             before_observation = current.observation
             before = self._back_observation_identity(current.observation)
             requested_id: int | None = None
@@ -12796,8 +12931,11 @@ class Engine:
             else:
                 self.key("back", observe=False, _hierarchy_settle=True)
                 via = "hardware"
-            step_deadline = time.monotonic() + (step_timeout_ms / 1000.0)
-            current = wait_destination(step_timeout_ms)
+            step_budget_ms = min(step_timeout_ms, remaining_ms)
+            step_deadline = min(
+                operation_deadline, time.monotonic() + (step_budget_ms / 1000.0)
+            )
+            current = wait_destination(step_budget_ms)
 
             # `await_predicate` deliberately returns screen-changed before trusting terms from
             # a newly resumed Activity. Re-evaluate on that Activity before sending another
@@ -12953,6 +13091,7 @@ class Engine:
 
     def _await_known_screen(self, target: str, *, timeout_ms: int, poll_ms: int) -> ActionResult:
         """Observe hierarchy frames until memory recognizes *target*, within one Back step."""
+        timeout_ms, clamped_from, ceiling_ms = self._bounded_wait_ms(timeout_ms)
         started_at = time.monotonic()
         deadline = started_at + max(0.0, timeout_ms / 1000.0)
         checks = 0
@@ -12981,7 +13120,8 @@ class Engine:
             elapsed = int((time.monotonic() - started_at) * 1000)
             if satisfied or time.monotonic() >= deadline:
                 outcome = "satisfied" if satisfied else "timeout"
-                return ActionResult(
+                return self._say_the_wait_was_shortened(
+                    ActionResult(
                     ok=satisfied,
                     action="await",
                     detail=(
@@ -12999,8 +13139,11 @@ class Engine:
                         }
                     ],
                     elapsed_ms=elapsed,
+                    ),
+                    clamped_from,
+                    ceiling_ms,
                 )
-            time.sleep(max(0.01, poll_ms / 1000.0))
+            self._sleep_between_polls(max(10.0, float(poll_ms)), deadline)
 
     def _mapped_screen_state(self, observation: AnalyzeResult | None) -> str | None:
         """Return a recognized screen's remembered state without changing app memory."""
@@ -13181,8 +13324,8 @@ class Engine:
             "changed": bool(before and after and before != after),
         }
 
-    @staticmethod
     def _back_until_result(
+        self,
         current: ActionResult,
         *,
         ok: bool,
@@ -13205,6 +13348,9 @@ class Engine:
             meta = getattr(current.observation, "meta", None)
             if meta is not None:
                 current.known_screen = meta.known_screen
+        clamp = getattr(self._job_context, "back_wait_clamp", None)
+        if clamp is not None:
+            current = self._say_the_wait_was_shortened(current, clamp[0], clamp[1])
         return current
 
     def hide_keyboard(
@@ -15248,21 +15394,11 @@ class Engine:
         return Path(self.config.cache.dir).expanduser() / f"devopts_backup_{safe}.json"
 
     def _proxy_port(self) -> int | None:
-        """Listen port the *device* is actually pointed at, or ``None``.
+        """Listen port this AUA positively owns, or ``None``.
 
-        Three sources, in this order: the shared per-serial ownership record, then the device's
-        own ``http_proxy`` setting, then this agent's private cache sidecar.
-
-        The record wins because parallel agents are told to keep separate caches, so the port
-        agent A wrote into its cache is invisible to agent B — and B is the one that inherits
-        the emulator and has to un-point it. Reading only the private cache is why ``proxy
-        stop`` could clear the device setting while leaving the reverse tunnel behind.
-
-        The **device** comes before the cache, and that ordering is load-bearing: when there is
-        no record at all (a partial teardown, or ``proxy_start``'s suppressed ``write_state``)
-        this used to return ``None``, so ``proxy stop`` cleared ``http_proxy`` and left a stale
-        ``adb reverse`` tunnel behind with nothing naming it. The device is ground truth for
-        what it is pointed at; a private sidecar is only a guess about it.
+        The device setting names where traffic goes, not who owns the tunnel. Using it as an
+        ownership proof let ``proxy stop`` remove another process's reverse mapping. Unpointing
+        the device is always safe; removing a tunnel requires our per-device ownership record.
         """
         pm = self.platform.capability("proxy")
 
@@ -15271,10 +15407,7 @@ class Engine:
             state = pm.read_state(serial)
             if isinstance(state, dict) and int(state.get("port") or 0) > 0:
                 return int(state["port"])
-            target = pm.parse_proxy_target(pm.read_device_http_proxy(serial))
-            if isinstance(target, dict) and int(target.get("port") or 0) > 0:
-                return int(target["port"])
-        return pm.load_listen_port(Path(self.config.cache.dir).expanduser())
+        return None
 
     def dev_show(self) -> dict[str, Any]:
         devopts = self.platform.capability("developer_settings")
@@ -15679,9 +15812,22 @@ class Engine:
 
         device = self.device
         snapshot = prefs.snapshot_prefs(device, package, file)
-        backup = prefs.save_prefs_backup(self.config.cache.dir, device.serial, snapshot)
+        key = f"app_prefs:{snapshot.package}:{snapshot.file}"
+        backup: Path | None = None
+        # Repeated writes in one session must still undo to the state before the *first* write.
+        # The ledger is idempotent on key; overwriting its deterministic backup before replacing
+        # the entry made teardown restore only the immediately preceding intermediate value.
+        from . import device_ledger
+
+        for entry in device_ledger.read_ledger(device.serial):
+            candidate = Path(str(entry.args.get("backup_path") or ""))
+            if entry.key == key and entry.op == "restore_app_prefs" and candidate.is_file():
+                backup = candidate
+                break
+        if backup is None:
+            backup = prefs.save_prefs_backup(self.config.cache.dir, device.serial, snapshot)
         self.record_device_change(
-            key=f"app_prefs:{snapshot.package}:{snapshot.file}",
+            key=key,
             kind="app_prefs",
             op="restore_app_prefs",
             args={
@@ -15911,6 +16057,8 @@ class Engine:
         checks = report.get("checks") or {}
         tunnel = checks.get("tunnel")
         process = checks.get("process")
+        listener = checks.get("listener")
+        device_setting = checks.get("device_setting")
         port = report.get("port")
         safe_to_heal = bool(
             heal
@@ -15919,6 +16067,10 @@ class Engine:
             and not tunnel.get("ok")
             and process is not None
             and process.get("ok")
+            and listener is not None
+            and listener.get("ok")
+            and device_setting is not None
+            and device_setting.get("ok")
         )
         if safe_to_heal:
             self.record_device_change(
@@ -16011,7 +16163,7 @@ class Engine:
         raise. That is also what makes it safe to sweep serials the caller never pointed at:
         two adb reads per device, no writes.
 
-        Group ``ok`` is false only for ``blackholed`` and ``degraded``. An unproxied device is
+        Group ``ok`` is false for ``blackholed``, ``degraded``, and ``unknown``. An unproxied device is
         the normal case and must not fail doctor; a ``foreign`` proxy is someone else's working
         setup and gets a hint at most.
         """
@@ -16043,7 +16195,7 @@ class Engine:
                     entry[key] = health[key]
             devices.append(entry)
 
-        bad = [d for d in devices if d.get("state") in {"blackholed", "degraded"}]
+        bad = [d for d in devices if d.get("state") in {"blackholed", "degraded", "unknown"}]
         noteworthy = [d for d in devices if d.get("state") == "foreign"]
         if not devices:
             detail = "no attached target to check"
@@ -16086,8 +16238,8 @@ class Engine:
         to know before spending a whole flow on traffic that never arrives. Does not run on
         every proxy command: `proxy_start` just built everything fresh, and `mock list`/`mock
         rm`/`mock clear` do not touch the device at all, so a device round trip there would be
-        pure overhead for a question nobody asked. Self-heals a dropped tunnel where safe
-        (`proxy_status`'s own rule) and only speaks up if something is still broken afterward.
+        pure overhead for a question nobody asked. It is diagnostic only: arming a mock rule
+        must not mutate persistent device state as an incidental side effect.
 
         The gate is the *device's* setting, not an ownership record. It used to be the record,
         which meant this went silent in exactly the state it exists for: a device black-holed
@@ -16100,7 +16252,7 @@ class Engine:
         """
         status: dict[str, Any] | None = None
         with contextlib.suppress(Exception):
-            status = self.proxy_status(heal=True)
+            status = self.proxy_status(heal=False)
         if not isinstance(status, dict):
             return None
         state = status.get("state")
@@ -17455,6 +17607,13 @@ class Engine:
         if self._device is not None:
             with contextlib.suppress(Exception):
                 return str(self.device.serial)
+        root = Path(self.config.cache.dir).expanduser() / "captures"
+        with contextlib.suppress(OSError):
+            serial_dirs = [entry for entry in root.iterdir() if entry.is_dir()]
+            if len(serial_dirs) == 1:
+                # Directory names use the same sanitisation as the disk reader. This is the
+                # common unpinned/single-device fallback and stays host-only.
+                return serial_dirs[0].name
         return None
 
     def _capture_from_disk(self) -> Any:
@@ -17515,6 +17674,11 @@ class Engine:
         elif seconds is not None:
             cutoff = int(time.time() * 1000) - int(seconds * 1000)
             entries = [e for e in entries if e.t_ms >= cutoff]
+        if not entries:
+            raise UsageError(
+                "the capture index has no available frame in the requested window",
+                hint="Capture the action again with a live warm daemon; old/pruned pixels are not evidence.",
+            )
         from .capture import change_duration_ms, diff_summary
 
         return {
@@ -17532,15 +17696,9 @@ class Engine:
     def _disk_session_for(self, since: str | None) -> tuple[Any, int | None]:
         """Pick the session that can answer, and the window within it.
 
-        Without ``--since`` the newest recording is what "last" means. With it, the newest
-        recording is often the wrong one: the sampler is always on, so a daemon replaced for
-        version skew has a *fresh* session holding frames but no action mark, while the tap the
-        caller is asking about is marked in the session that restart superseded. So this walks
-        newest-first to the first session that actually carries a mark.
-
-        Crossing that boundary is only acceptable because it is declared: the returned session
-        is reported by id, with ``live: false`` and the age of its newest frame, so a caller can
-        see it is reading a superseded recording instead of the buffer it asked about.
+        Only the newest session may answer. Walking backward to an older mark turned a frame
+        from a previous daemon (and sometimes a previous action) into current post-action proof.
+        Missing or pruned evidence is an error; an old screenshot is not a degraded success.
         """
         from .capture import read_sessions_from_disk
 
@@ -17558,18 +17716,32 @@ class Engine:
                     "(capture.enabled) first — then re-run."
                 ),
             )
+        session = sessions[0]
+        ttl_ms = max(0, int(getattr(self.config.capture, "ttl_s", 180))) * 1000
+        age_ms = session.newest_frame_age_ms
+        if age_ms is None or (ttl_ms and age_ms > ttl_ms):
+            raise UsageError(
+                "the newest capture session has no current frame evidence",
+                hint="Start or resume the warm capture buffer and repeat the action.",
+            )
+        if not session.entries:
+            raise UsageError(
+                "the newest capture session has no available frames",
+                hint="Its JPEGs were pruned; repeat the action with a live capture buffer.",
+            )
         if not since:
-            return sessions[0], None
-        for session in sessions:
-            if session.last_action_ms is not None:
-                return session, session.last_action_ms
-        raise UsageError(
-            "no last-action mark in the capture buffer yet",
-            hint=(
-                f"{len(sessions)} recorded session(s) for this device, none carrying an action "
-                "mark. Perform a tap/input/swipe first, then retry."
-            ),
-        )
+            return session, None
+        if session.last_action_ms is None:
+            raise UsageError(
+                "no last-action mark in the current capture session",
+                hint="Perform a tap/input/swipe with the live buffer running, then retry.",
+            )
+        if not any(entry.t_ms >= session.last_action_ms for entry in session.entries):
+            raise UsageError(
+                "the current action has no available post-action frame",
+                hint="The screen did not change or its pixels were pruned; capture the action again.",
+            )
+        return session, session.last_action_ms
 
     def capture_status(self) -> dict[str, Any]:
         if self._capture is None:
@@ -17622,24 +17794,25 @@ class Engine:
         if since:
             since_ms = self._capture.last_action_ms()
             if since_ms is None:
-                # A live, current, correct — and empty — buffer. This is what a caller meets
-                # immediately after the daemon is replaced for version skew: the restart mints
-                # a new session, so the mark belonging to the tap that prompted this call is in
-                # the session the restart superseded. Refusing here reproduced the very outage
-                # the restart was meant to end, one error message further along. Serve the
-                # superseded recording from disk instead, labelled as not-live.
-                return self._capture_last_from_disk(
-                    seconds=seconds, since=since, region=region, where_rid=where_rid
+                raise UsageError(
+                    "no last-action mark in the live capture session",
+                    hint="Perform the action again; an older session cannot prove its result.",
                 )
         resolved_region = region
         if where_rid and not resolved_region:
             resolved_region = self._region_for_rid(where_rid)
-        return self._capture.last(
+        result = self._capture.last(
             seconds=seconds,
             since_ms=since_ms,
             region=resolved_region,
             where_rid=where_rid,
         )
+        if since_ms is not None and not result.get("count"):
+            raise UsageError(
+                "the current action has no live post-action frame",
+                hint="The screen did not change; capture the action again if pixel evidence is required.",
+            )
+        return result
 
     def _region_for_rid(self, rid: str) -> str | None:
         """Best-effort grid cell for a resource-id from the last analyze cache."""
@@ -17684,6 +17857,11 @@ class Engine:
             elif seconds is not None:
                 cutoff = int(time.time() * 1000) - int(seconds * 1000)
                 entries = [e for e in entries if e.t_ms >= cutoff]
+            if not entries:
+                raise UsageError(
+                    "the capture index has no available frame in the requested window",
+                    hint="Capture the action again with a live warm daemon.",
+                )
             from .capture import export_animation
 
             out = Path(path).expanduser()
@@ -17703,6 +17881,11 @@ class Engine:
         since_ms = None
         if since and since.lower().strip() in ("last-action", "last_action", "action"):
             since_ms = self._capture.last_action_ms()
+            if since_ms is None:
+                raise UsageError(
+                    "no last-action mark in the live capture session",
+                    hint="Perform the action again; an older session cannot prove its result.",
+                )
         try:
             return self._capture.export(path, seconds=seconds, since_ms=since_ms, fmt=fmt, fps=fps)
         except (ValueError, ImportError) as exc:
@@ -17731,7 +17914,17 @@ class Engine:
         since_ms = None
         if since and since.lower().strip() in ("last-action", "last_action", "action"):
             since_ms = self._capture.last_action_ms()
+            if since_ms is None:
+                raise UsageError(
+                    "no last-action mark in the live capture session",
+                    hint="Perform the action again; an older session cannot prove its result.",
+                )
         out = self._capture.explain_local(seconds=seconds, since_ms=since_ms)
+        if since_ms is not None and not out.get("count"):
+            raise UsageError(
+                "the current action has no live post-action frame",
+                hint="The screen did not change; capture the action again if pixel evidence is required.",
+            )
         if llm:
             out["llm"] = self._capture_explain_llm(out)
         return out

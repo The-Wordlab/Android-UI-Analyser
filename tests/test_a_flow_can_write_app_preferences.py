@@ -196,6 +196,14 @@ def test_a_malformed_step_is_refused_at_parse_time(body: str, expected: str) -> 
     assert expected in str(err.value)
 
 
+def test_a_nonfinite_float_is_refused_before_the_device_is_touched() -> None:
+    with pytest.raises(UsageError, match="finite"):
+        parse_flow_yaml(
+            HEAD + f"  - prefs_write: {{file: {PREFS_FILE}, values: {{ratio: .nan}}}}\n",
+            name="switch_backend",
+        )
+
+
 # --------------------------------------------------------------------------- destructiveness
 
 
@@ -349,6 +357,7 @@ def test_the_app_is_stopped_before_the_file_is_replaced(tmp_path: Path) -> None:
     engine.prefs_write(PKG, PREFS_FILE, {"backend_env": "staging"})
 
     names = [call[0] for call in device.calls]
+    assert names.index("stop_app") < names.index("shell"), "the pre-stop listing can be stale"
     assert names.index("stop_app") < names.index("write_app_file")
 
 
@@ -438,6 +447,27 @@ def test_the_registered_undo_puts_the_previous_preferences_back(tmp_path: Path) 
     assert device.prefs[PREFS_FILE]["backend_env"] == "production"
     assert device.prefs[PREFS_FILE]["keep_me"] == "yes"
     assert device_ledger.read_ledger(device.serial) == []
+
+
+def test_repeated_writes_keep_the_original_restore_point(tmp_path: Path) -> None:
+    device = _device({"backend_env": "production"})
+    engine = _engine(tmp_path, device)
+
+    engine.prefs_write(PKG, PREFS_FILE, {"backend_env": "staging"}, relaunch=False)
+    engine.prefs_write(PKG, PREFS_FILE, {"backend_env": "local"}, relaunch=False)
+    assert device.prefs[PREFS_FILE]["backend_env"] == "local"
+
+    outcome = device_ledger.replay(
+        device.serial,
+        context=device_ledger.UndoContext(
+            serial=device.serial,
+            device=device,
+            capability=lambda name: flags_mod if name == FEATURE_FLAGS else None,
+        ),
+    )
+
+    assert not outcome["failed"], outcome
+    assert device.prefs[PREFS_FILE]["backend_env"] == "production"
 
 
 def test_undoing_a_file_the_app_never_had_removes_it_rather_than_blanking_it(

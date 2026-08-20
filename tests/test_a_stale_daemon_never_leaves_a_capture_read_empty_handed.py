@@ -58,13 +58,15 @@ def _a_recorded_session(
     session_id: str,
     frames: int = 3,
     action_on: int | None = 1,
-    t0: int = 1_700_000_000_000,
+    t0: int | None = None,
 ) -> Path:
     """Write the on-disk artefacts a daemon leaves behind: JPEGs plus an append-only index.
 
     Deliberately written by hand rather than by driving a ``CaptureBuffer``: the point under
     test is that a process which never owned the buffer can still read it.
     """
+    if t0 is None:
+        t0 = int(time.time() * 1000) - max(0, frames - 1) * 100
     session = root / serial / session_id
     (session / "frames").mkdir(parents=True, exist_ok=True)
     lines = []
@@ -95,7 +97,12 @@ def test_the_index_is_readable_by_a_process_that_never_owned_the_buffer(tmp_path
     """The refusal claimed these frames were unreachable. Reach them."""
     from android_ui_analyser.capture import read_session_from_disk
 
-    _a_recorded_session(tmp_path, "emulator-5562", session_id="20260820-001938-e89b52")
+    _a_recorded_session(
+        tmp_path,
+        "emulator-5562",
+        session_id="20260820-001938-e89b52",
+        t0=1_700_000_000_000,
+    )
 
     found = read_session_from_disk(tmp_path, "emulator-5562")
 
@@ -168,7 +175,9 @@ def test_capture_last_answers_from_disk_instead_of_raising(tmp_path: Path) -> No
     """The old behaviour raised "capture buffer is not running" and stopped there."""
     engine = _engine_without_a_buffer(tmp_path)
     _a_recorded_session(
-        Path(engine.config.cache.dir) / "captures", "emulator-5562", session_id="s1"
+        Path(engine.config.cache.dir) / "captures",
+        "emulator-5562",
+        session_id="s1",
     )
 
     result = engine.capture_last()
@@ -188,7 +197,9 @@ def test_the_disk_answer_never_passes_itself_off_as_the_live_buffer(tmp_path: Pa
     """
     engine = _engine_without_a_buffer(tmp_path)
     _a_recorded_session(
-        Path(engine.config.cache.dir) / "captures", "emulator-5562", session_id="s1"
+        Path(engine.config.cache.dir) / "captures",
+        "emulator-5562",
+        session_id="s1",
     )
 
     result = engine.capture_last()
@@ -205,7 +216,10 @@ def test_capture_status_read_from_disk_does_not_claim_a_running_buffer(tmp_path:
     """A crashed daemon leaves a session dir that looks live. It is not live."""
     engine = _engine_without_a_buffer(tmp_path)
     _a_recorded_session(
-        Path(engine.config.cache.dir) / "captures", "emulator-5562", session_id="s1"
+        Path(engine.config.cache.dir) / "captures",
+        "emulator-5562",
+        session_id="s1",
+        t0=1_700_000_000_000,
     )
 
     result = engine.capture_status()
@@ -241,6 +255,20 @@ def test_a_capture_read_with_nothing_on_disk_still_says_so_plainly(tmp_path: Pat
 
     with pytest.raises(AuaError, match="capture buffer is not running"):
         engine.capture_last()
+
+
+def test_an_unpinned_reader_uses_the_only_recorded_device_without_connecting(
+    tmp_path: Path,
+) -> None:
+    cfg = make_config(cache={"dir": str(tmp_path / "cache")}, device={"serial": None})
+    root = Path(cfg.cache.dir) / "captures"
+    _a_recorded_session(root, "emulator-5562", session_id="only-session")
+    engine = Engine(cfg)
+
+    result = engine.capture_last()
+
+    assert result["session_id"] == "only-session"
+    assert engine._device is None, "disk fallback unexpectedly connected to a device"  # noqa: SLF001
 
 
 # --------------------------------------------------------------------- the routing order
@@ -337,14 +365,10 @@ def _pretend_a_job_is_under_way(cfg: Config, *, worker_pid: int) -> None:
     )
 
 
-def test_a_skewed_capture_read_makes_the_daemon_current_instead_of_refusing(
+def test_a_skewed_capture_read_preserves_the_live_daemons_authoritative_buffer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The ordering fix. Restart first; a warm correct answer beats a refusal.
-
-    This inverts ``test_a_capture_read_refuses_rather_than_restarting_its_own_answer_away``,
-    whose premise (frames die with the process) the disk-reader tests above disprove.
-    """
+    """A capture read must not restart away its live action mark and frame window."""
     cfg = _cfg(tmp_path)
     monkeypatch.setattr(daemon_mod, "DaemonClient", type("C", (_Client,), {"asked": []}))
     monkeypatch.setattr(daemon_mod, "is_running", lambda _cfg: True)
@@ -355,9 +379,7 @@ def test_a_skewed_capture_read_makes_the_daemon_current_instead_of_refusing(
 
     cli._route(_fake_engine(cfg), "capture_last")
 
-    assert [name for name, _ in steps] == ["stop", "start"], (
-        "a capture read must be allowed to heal the daemon it is asking"
-    )
+    assert steps == [], "the process holding the live buffer is authoritative for this read"
 
 
 def test_a_capture_read_whose_restart_fails_degrades_to_disk_not_to_a_dead_end(
@@ -370,7 +392,16 @@ def test_a_capture_read_whose_restart_fails_degrades_to_disk_not_to_a_dead_end(
     """
     cfg = _cfg(tmp_path)
     _pretend_a_job_is_under_way(cfg, worker_pid=_pretend_the_daemon_is_this_process(cfg))
-    monkeypatch.setattr(daemon_mod, "DaemonClient", type("C", (_Client,), {"asked": []}))
+    class NoLiveCaptureClient(_Client):
+        asked: list[str] = []
+
+        def call(self, cmd: str, **args: Any) -> dict[str, Any]:
+            if cmd == "capture_status":
+                type(self).asked.append(cmd)
+                return {"ok": True, "result": {"ok": True, "running": False}}
+            return super().call(cmd, **args)
+
+    monkeypatch.setattr(daemon_mod, "DaemonClient", NoLiveCaptureClient)
     monkeypatch.setattr(daemon_mod, "is_running", lambda _cfg: True)
     monkeypatch.setattr(
         daemon_mod, "running_policy_fingerprint", daemon_mod.policy_config_fingerprint
@@ -466,25 +497,10 @@ def test_a_restart_that_does_not_take_is_not_retried_on_every_single_call(
 # ------------------------------------------------- the restart's own session discontinuity
 
 
-def test_a_live_but_unmarked_buffer_still_finds_the_mark_the_restart_left_behind(
+def test_a_live_but_unmarked_buffer_never_reuses_a_superseded_action_mark(
     tmp_path: Path,
 ) -> None:
-    """Found live on emulator-5562 after the routing fix, and not caught by any test above.
-
-    Healing the daemon is not sufficient on its own. A restart mints a *new* capture session,
-    so immediately afterwards the buffer is live, correct and current -- and empty. A caller
-    that asked `capture last --since last-action` because it just tapped something therefore
-    still got nothing: not the old refusal, but "no last-action mark in the capture buffer
-    yet", which is the same outcome dressed differently.
-
-        $ aua --serial emulator-5562 capture last --since last-action
-        {"error": {"code": "usage",
-                   "message": "no last-action mark in the capture buffer yet", ...}}
-
-    The action did happen, and its mark is on disk in the session the restart superseded. So
-    the live path has to consult the index too when its own buffer cannot answer -- labelled,
-    because frames from a superseded recording are emphatically not the live buffer.
-    """
+    """An older session cannot prove what happened after the current process's action."""
     cfg = make_config(
         cache={"dir": str(tmp_path / "cache")},
         device={"serial": "emulator-5562"},
@@ -507,12 +523,10 @@ def test_a_live_but_unmarked_buffer_still_finds_the_mark_the_restart_left_behind
     engine._capture = live
     assert live.last_action_ms() is None, "the fresh session has no mark; that is the premise"
 
-    result = engine.capture_last(since="last-action")
+    from android_ui_analyser.errors import AuaError
 
-    assert result["count"] == 2, result
-    assert result["source"] == "disk-index", result
-    assert result["live"] is False, result
-    assert result["session_id"] == "20260820-002014-before", result
+    with pytest.raises(AuaError, match="live capture session"):
+        engine.capture_last(since="last-action")
 
 
 def test_an_unmarked_buffer_with_no_mark_anywhere_on_disk_still_refuses(
@@ -544,21 +558,10 @@ def test_an_unmarked_buffer_with_no_mark_anywhere_on_disk_still_refuses(
         engine.capture_last(since="last-action")
 
 
-def test_the_marked_session_wins_even_when_a_newer_unmarked_one_exists(
+def test_a_newer_unmarked_session_blocks_reuse_of_an_older_action_mark(
     tmp_path: Path,
 ) -> None:
-    """The realistic shape of the discontinuity, and the one that nearly slipped through.
-
-    A restarted daemon does not stay empty for long -- the sampler is always on, so within a
-    second the new session holds frames, just no *action* mark. "Newest session" then resolves
-    to a session that cannot answer `--since last-action`, and erroring there would once again
-    leave a caller who did tap something holding nothing.
-
-    Choosing the newest session that actually carries a mark is the useful answer, and it is
-    honest as long as it says so: `source`, `live: false`, the session id, and the age of its
-    newest frame are all on the payload, so a caller can see it is reading a superseded
-    recording rather than the buffer it asked about.
-    """
+    """Session recency is part of the evidence boundary, even when an older mark exists."""
     cfg = make_config(
         cache={"dir": str(tmp_path / "cache")},
         device={"serial": "emulator-5562"},
@@ -570,12 +573,10 @@ def test_the_marked_session_wins_even_when_a_newer_unmarked_one_exists(
     _a_recorded_session(root, "emulator-5562", session_id="unmarked-newer", action_on=None)
     engine = Engine(cfg, device=FakeDevice())
 
-    result = engine.capture_last(since="last-action")
+    from android_ui_analyser.errors import AuaError
 
-    assert result["session_id"] == "marked-earlier", result
-    assert result["count"] == 2, result
-    assert result["live"] is False and result["source"] == "disk-index", result
-    assert isinstance(result["newest_frame_age_ms"], int), result
+    with pytest.raises(AuaError, match="last-action"):
+        engine.capture_last(since="last-action")
 
 
 def test_a_plain_capture_last_still_reads_the_newest_session(tmp_path: Path) -> None:

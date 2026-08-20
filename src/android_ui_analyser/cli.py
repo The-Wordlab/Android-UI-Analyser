@@ -1123,6 +1123,9 @@ def _warm(engine: Engine) -> None:
 # Engine method name → daemon command name (they differ only for ``input``).
 _DAEMON_CMD = {"input_text": "input"}
 _HOST_ONLY_ROUTE_METHODS = frozenset({"flow_delete"})
+_CAPTURE_READ_METHODS = frozenset(
+    {"capture_status", "capture_last", "capture_export", "capture_explain"}
+)
 
 # Methods with NO durable representation outside the daemon process. For these an in-process
 # answer is not a slower answer, it is a wrong one, so a daemon that cannot be made current has
@@ -1276,12 +1279,21 @@ def _restart_hint(daemon_mod: Any, cfg: Any) -> str:
     return f"Restart it: `aua {pin}daemon stop && aua {pin}daemon start`."
 
 
-# Socket path → monotonic deadline before which another replacement must not be attempted.
-# A failed restart costs `stop` (up to 5s) plus `start` (up to 5s) and changes nothing, and the
-# next call used to pay it again from scratch — in a tree edited every few seconds, more than
-# the in-process fallback it exists to avoid.
+# A failed restart costs `stop` (up to 5s) plus `start` (up to 5s) and changes nothing. Persist
+# the retry deadline beside the socket: every CLI command is a new process, so a module dict
+# forgot the cooldown before the next invocation could benefit from it.
 _SKEW_RESTART_COOLDOWN_S = 30.0
-_skew_restart_backoff: dict[str, float] = {}
+
+
+def _skew_backoff_path(socket: str) -> Path:
+    return Path(socket + ".restart-backoff")
+
+
+def _skew_backoff_active(socket: str, now: float) -> bool:
+    try:
+        return float(_skew_backoff_path(socket).read_text(encoding="utf-8")) > now
+    except (OSError, ValueError):
+        return False
 
 
 def _replace_skewed_daemon(daemon_mod: Any, cfg: Any, ver: str) -> bool:
@@ -1315,18 +1327,24 @@ def _replace_skewed_daemon(daemon_mod: Any, cfg: Any, ver: str) -> bool:
     socket = ""
     with contextlib.suppress(Exception):
         socket = str(daemon_mod.socket_path(cfg))
-    now = time.monotonic()
-    if socket and _skew_restart_backoff.get(socket, 0.0) > now:
+    now = time.time()
+    if socket and _skew_backoff_active(socket, now):
         return False
     with contextlib.suppress(Exception):
         daemon_mod.stop(cfg)
         daemon_mod.start(cfg, serial=cfg.device.serial)
         if daemon_mod.running_version(cfg) == daemon_mod._aua_version():
-            _skew_restart_backoff.pop(socket, None)
+            with contextlib.suppress(OSError):
+                _skew_backoff_path(socket).unlink()
             logger.info("replaced a daemon running aua %s with %s", ver, daemon_mod._aua_version())
             return True
     if socket:
-        _skew_restart_backoff[socket] = now + _SKEW_RESTART_COOLDOWN_S
+        from .atomic import atomic_write_text
+
+        with contextlib.suppress(OSError):
+            atomic_write_text(
+                _skew_backoff_path(socket), str(now + _SKEW_RESTART_COOLDOWN_S)
+            )
         logger.info(
             "a skew restart of %s did not take; not retrying for %.0fs",
             socket,
@@ -1402,8 +1420,19 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
             # skewed daemon refused them forever, and the hint it printed
             # (`aua daemon stop && aua daemon start`, no serial) stopped a socket nobody used.
             # Everything else restarted and went warm on the very next line.
-            if skew and _replace_skewed_daemon(daemon_mod, cfg, str(ver)):
+            preserve_live_capture = bool(
+                skew
+                and method in _CAPTURE_READ_METHODS
+                and _capture_session_live(daemon_mod, cfg)
+            )
+            if skew and not preserve_live_capture and _replace_skewed_daemon(
+                daemon_mod, cfg, str(ver)
+            ):
                 ver = daemon_mod.running_version(cfg)
+                skew = False
+            elif preserve_live_capture:
+                # Ask the process that owns the current session. Restarting before a read
+                # destroys the only authoritative in-memory mark/window the caller requested.
                 skew = False
             restart_hint = _restart_hint(daemon_mod, cfg)
             if skew and method in _DAEMON_ONLY_METHODS:
@@ -5568,7 +5597,7 @@ def daemon(
                 # rather than made the default for a bare `stop`: agents run concurrently, one
                 # warm daemon per emulator, and stopping a colleague's device by omission
                 # would be worse than the trap this replaces.
-                out = {"ok": True, "action": "daemon-stop", **daemon_mod.stop_all(cfg)}
+                out = {"action": "daemon-stop", **daemon_mod.stop_all(cfg)}
             else:
                 result = daemon_mod.stop(cfg)
                 # Emit what `stop` actually returned. It reports `status` and
@@ -5577,8 +5606,10 @@ def daemon(
                 # the loop behind the skew refusal, whose hint said to run exactly this.
                 survivors = result.get("others_still_running") or []
                 stopped = result.get("status") == "stopped"
+                pinned = bool(daemon_mod.effective_serial(cfg))
                 out = {
-                    "ok": stopped or not survivors,
+                    "ok": result.get("status") in {"stopped", "not_running"}
+                    and (pinned or not survivors),
                     "action": "daemon-stop",
                     **result,
                 }
@@ -5627,6 +5658,8 @@ def daemon(
         indent = 2 if fmt is OutputFormat.pretty else None
         sep = None if indent else (",", ":")
         typer.echo(json.dumps(out, indent=indent, separators=sep, ensure_ascii=False, default=str))
+        if out.get("ok") is False:
+            raise typer.Exit(1)
 
     _run(ctx, go)
 
@@ -6115,7 +6148,7 @@ def _render_doctor_pretty(report: dict[str, Any]) -> str:
             # Named one per line even when unavailable: a configured provider that cannot run is
             # the finding, and summarising it away is how it read as "no providers at all".
             lines.append(
-                f"               [{mark(bool(entry.get('runnable')))}] "
+                f"               [{mark(bool(entry.get('ok', entry.get('runnable'))))}] "
                 f"{str(entry.get('name', '?')):<14} {entry.get('reason', '')}"
             )
             if entry.get("remedy"):

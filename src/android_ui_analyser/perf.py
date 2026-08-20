@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import os
 import threading
 import time
@@ -193,14 +194,21 @@ def wait_ceiling_ms(cap_ms: int, config: Any, profile: Any = None) -> tuple[int,
     pinned = os.environ.get(WAIT_CEILING_ENV)
     if pinned is not None:
         try:
-            return min(cap, max(0, int(float(pinned)))), "pinned"
-        except (TypeError, ValueError):
+            parsed = float(pinned)
+            if not math.isfinite(parsed):
+                raise ValueError("wait ceiling must be finite")
+            return min(cap, max(0, int(parsed))), "pinned"
+        except (OverflowError, TypeError, ValueError):
             logger.warning("ignoring non-numeric %s=%r", WAIT_CEILING_ENV, pinned)
     if str(getattr(perf, "wait_ceiling_mode", "adaptive") or "adaptive").lower() != "adaptive":
         return cap, "fixed"
     if profile is None or int(getattr(profile, "samples", 0) or 0) <= 0:
         return cap, "cold"
-    priced = int(getattr(profile, "recall_cost_ms", cap) or cap)
+    try:
+        raw_priced = float(getattr(profile, "recall_cost_ms", cap) or cap)
+        priced = int(raw_priced) if math.isfinite(raw_priced) else cap
+    except (OverflowError, TypeError, ValueError):
+        priced = cap
     return max(floor, min(priced, cap)), "adaptive"
 
 

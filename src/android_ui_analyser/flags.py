@@ -15,6 +15,7 @@ restore point, because a preference AUA writes outlives the agent that wrote it.
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Mapping
 from pathlib import Path
@@ -380,6 +381,11 @@ def _prefs_entry(key: str, value: Any) -> ElementTree.Element:
         tag = "int" if -_INT32 <= value < _INT32 else "long"
         return ElementTree.Element(tag, {"name": key, "value": str(value)})
     if isinstance(value, float):
+        if not math.isfinite(value):
+            raise UsageError(
+                f"shared_prefs float for {key!r} must be finite",
+                code="prefs_value_unsupported",
+            )
         return ElementTree.Element("float", {"name": key, "value": repr(value)})
     if isinstance(value, str):
         element = ElementTree.Element("string", {"name": key})
@@ -457,6 +463,15 @@ def snapshot_prefs(device: PrefsWriter, package: str, file: str) -> PrefsSnapsho
     if not package:
         raise UsageError("a prefs write needs a package")
     name = prefs_file_name(file)
+    try:
+        device.stop_app(package)
+    except Exception as exc:
+        raise DeviceError(
+            f"could not stop {package} before writing its preferences: {exc}",
+            hint="An unstopped app overwrites the file from memory, so the write is not "
+            "attempted at all.",
+            code="prefs_stop_failed",
+        ) from exc
     directory = prefs_dir(package)
     listing, failed = _run_as(device, package, ["ls", directory])
     if failed:
@@ -467,15 +482,6 @@ def snapshot_prefs(device: PrefsWriter, package: str, file: str) -> PrefsSnapsho
             code="prefs_access",
         )
     existed = name in {entry.strip() for entry in listing.split() if entry.strip()}
-    try:
-        device.stop_app(package)
-    except Exception as exc:
-        raise DeviceError(
-            f"could not stop {package} before writing its preferences: {exc}",
-            hint="An unstopped app overwrites the file from memory, so the write is not "
-            "attempted at all.",
-            code="prefs_stop_failed",
-        ) from exc
     xml: str | None = None
     if existed:
         try:

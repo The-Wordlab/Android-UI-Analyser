@@ -1674,6 +1674,30 @@ def _tool_definitions() -> list[types.Tool]:
                 "additionalProperties": False,
             },
         ),
+        # Compatibility aliases for clients generated before the clearer screen_* names. Keep
+        # them explicit and unmistakable; removing MCP tools breaks cached agent tool calls.
+        types.Tool(
+            name="record_start",
+            description=(
+                "Deprecated alias for screen_record_start. Starts MP4 SCREEN VIDEO, never HTTP "
+                "traffic; use mock_record for traffic."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="record_stop",
+            description="Deprecated alias for screen_record_stop; stops and pulls MP4 screen video.",
+            inputSchema={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+        ),
         types.Tool(
             name="capture_status",
             description="Status of the rolling screencap buffer (daemon-warm).",
@@ -2276,14 +2300,8 @@ def _tool_definitions() -> list[types.Tool]:
 
 
 def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
-    """Call the engine method for ``name``, bracketing it as one caller turn."""
-    # One MCP tool call is one caller turn: the gap since the last one returned is what the
-    # agent spent generating this one, and is what the wait ceiling is sized from.
-    engine.open_caller_turn()
-    try:
-        return _dispatch_tool(engine, name, args)
-    finally:
-        engine.close_caller_turn()
+    """Call the engine method for ``name``; the server brackets the complete response turn."""
+    return _dispatch_tool(engine, name, args)
 
 
 def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
@@ -2861,9 +2879,9 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         return _dump(engine.network_profile_restore(timeout_ms=int(args.get("timeout_ms", 20_000))))
     if name == "media_add":
         return _dump(engine.media_add(args["path"]))
-    if name == "screen_record_start":
+    if name in {"screen_record_start", "record_start"}:
         return _dump(engine.record_start(args.get("path")))
-    if name == "screen_record_stop":
+    if name in {"screen_record_stop", "record_stop"}:
         return _dump(engine.record_stop(args["path"]))
     if name == "clock_set":
         ms = args.get("ms", args.get("timestamp_ms"))
@@ -3242,6 +3260,10 @@ def build_server(engine: Engine) -> Server:
         started_at = time.monotonic()
         payload: Any = None
 
+        # One MCP tool call is one caller turn. Keep it open through folded waits and response
+        # decoration so the report can compare the fingerprint actually returned to the caller.
+        engine.open_caller_turn()
+
         def journal_call(*, ok: bool, error: dict[str, Any] | None = None) -> None:
             from . import leases
 
@@ -3326,10 +3348,15 @@ def build_server(engine: Engine) -> Server:
             error = err.to_dict().get("error")
             journal_call(ok=False, error=error if isinstance(error, dict) else None)
             text = json.dumps(err.to_dict(), ensure_ascii=False)
+            engine.close_caller_turn()
             return [types.TextContent(type="text", text=text)]
         except Exception as err:
             journal_call(ok=False, error={"code": "error", "message": str(err)})
+            engine.close_caller_turn()
             raise
+        from .coaching import emitted_fingerprint
+
+        engine.close_caller_turn(emitted_fingerprint(payload))
         journal_call(ok=not (isinstance(payload, dict) and payload.get("ok") is False))
         blocks: list[types.ContentBlock] = [types.TextContent(type="text", text=text)]
         image = _image_block(name, payload)

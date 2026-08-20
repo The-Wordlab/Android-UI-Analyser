@@ -639,13 +639,13 @@ def pid_alive(pid: int) -> bool:
 
 def port_listening(port: int, *, timeout: float = 0.25) -> bool:
     """Is something accepting connections on ``127.0.0.1:port`` right now?"""
-    if port <= 0:
+    if port <= 0 or port > 65535:
         return False
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         sock.settimeout(timeout)
         return sock.connect_ex(("127.0.0.1", int(port))) == 0
-    except OSError:
+    except (OSError, OverflowError):
         return False
     finally:
         with contextlib.suppress(OSError):
@@ -674,7 +674,7 @@ def orphan_reason(state: dict[str, Any] | None, *, boot_id: str | None) -> str |
     return None
 
 
-def reverse_tunnel_active(serial: str, port: int) -> bool:
+def reverse_tunnel_active(serial: str, port: int, *, local_port: int | None = None) -> bool:
     """Whether ``adb reverse`` still forwards the device's ``tcp:<port>`` to this host port.
 
     A dropped tunnel is invisible to both of the checks ``orphan_reason`` already made: the
@@ -690,13 +690,13 @@ def reverse_tunnel_active(serial: str, port: int) -> bool:
         return False
     if proc.returncode != 0:
         return False
-    needle = f"tcp:{int(port)}"
+    remote = f"tcp:{int(port)}"
+    local = f"tcp:{int(local_port)}" if local_port is not None else None
     for line in (proc.stdout or "").splitlines():
         parts = line.split()
-        # `adb reverse --list` prints "<serial> tcp:<remote> tcp:<local>" per active mapping —
-        # both sides carry the same port number here, since `device.reverse_port(p, p)` always
-        # maps device tcp:p to host tcp:p.
-        if len(parts) >= 3 and parts[-2] == needle and parts[-1] == needle:
+        # An unowned device endpoint is reachable through any local mapping. Owned AUA state
+        # passes ``local_port`` and requires its exact symmetric mapping.
+        if len(parts) >= 3 and parts[-2] == remote and (local is None or parts[-1] == local):
             return True
     return False
 
@@ -749,6 +749,7 @@ _EMULATOR_HOST_ALIASES = frozenset({"10.0.2.2"})
 TARGET_LOOPBACK = "loopback"
 TARGET_EMULATOR_HOST = "emulator_host"
 TARGET_EXTERNAL = "external"
+TARGET_INVALID = "invalid"
 
 
 def classify_proxy_host(host: str) -> str:
@@ -777,24 +778,28 @@ def parse_proxy_target(raw: str | None) -> dict[str, Any] | None:
     at*, so everything a black-hole diagnosis can know starts here. Android stores it as
     ``host:port``, but not only that: it prints the literal ``"null"`` when unset, ``":0"`` on
     some versions when it was never armed, and a value written by hand can carry a scheme.
-    Anything without a usable port is ``None`` — a host with no port is not a proxy a device
-    can reach, and reporting port ``0`` as a black hole would be noise.
+    ``None`` means genuinely unset. A non-empty malformed setting is returned as ``invalid``;
+    treating it as unset falsely reports a clean device while Android is configured with a
+    value callers cannot route through.
     """
     if raw is None:
         return None
     value = str(raw).strip()
     if not value or value.lower() == "null" or value == ":0":
         return None
+    def invalid(reason: str) -> dict[str, Any]:
+        return {"raw": value, "host": None, "port": None, "kind": TARGET_INVALID, "error": reason}
+
     body = value.split("://", 1)[1] if "://" in value else value
     body = body.split("/", 1)[0]
     if not body:
-        return None
+        return invalid("missing proxy endpoint")
     host = ""
     port_text = ""
     if body.startswith("["):  # bracketed IPv6, e.g. "[::1]:3128"
         close = body.find("]")
         if close == -1:
-            return None
+            return invalid("unclosed IPv6 address")
         host = body[1:close]
         rest = body[close + 1 :]
         port_text = rest[1:] if rest.startswith(":") else ""
@@ -803,13 +808,13 @@ def parse_proxy_target(raw: str | None) -> dict[str, Any] | None:
     else:
         # No port at all, or a bare (unbracketed) IPv6 literal — neither names a reachable
         # proxy endpoint, and inventing a port for it would invent the diagnosis too.
-        return None
+        return invalid("proxy endpoint must include one explicit port")
     try:
         port = int(port_text)
     except ValueError:
-        return None
-    if not host or port <= 0:
-        return None
+        return invalid("proxy port is not an integer")
+    if not host or port <= 0 or port > 65535:
+        return invalid("proxy host is empty or port is outside 1..65535")
     return {"raw": value, "host": host, "port": port, "kind": classify_proxy_host(host)}
 
 
@@ -874,7 +879,7 @@ def _self_proof(cache_dir: str | Path, port: int) -> int | None:
 #               but this session's mock rules are inert against it
 #   blackholed  the device is proxied, no aua owns it, and nothing can reach it — every app
 #               request fails, and no `aua teardown` will ever clean it up
-PROXY_STATES = ("unproxied", "healthy", "degraded", "foreign", "blackholed")
+PROXY_STATES = ("unproxied", "healthy", "degraded", "foreign", "blackholed", "unknown")
 
 
 def _owner_remedy(serial_hint: str = "<serial>") -> str:
@@ -904,9 +909,27 @@ def _unowned_health(
     nor whether the listener is a proxy at all (``port_listening`` is a ``connect_ex``; a dev
     server passes it). So the verdict word for a reachable one is ``foreign``, never *healthy*.
     """
+    kind = str(target["kind"])
+    if kind == TARGET_INVALID:
+        return {
+            "ok": False,
+            "state": "unknown",
+            "owned": False,
+            "intercepting": False,
+            "target": dict(target),
+            "port": None,
+            "pid": None,
+            "checks": {
+                "device_setting": {
+                    "ok": False,
+                    "detail": str(target.get("error") or "malformed http_proxy setting"),
+                }
+            },
+            "detail": f"device http_proxy is malformed: {target['raw']}",
+            "hint": "Clear the malformed setting with `aua --serial <serial> proxy stop`.",
+        }
     host = str(target["host"])
     port = int(target["port"])
-    kind = str(target["kind"])
     where = f"{host}:{port}"
     checks: dict[str, Any] = {}
 
@@ -935,8 +958,9 @@ def _unowned_health(
         }
 
     adoptable_pid = _self_proof(cache_dir, port) if kind == TARGET_LOOPBACK else None
-    reachable = all(bool(c["ok"]) for c in checks.values())
-    state = "foreign" if reachable else "blackholed"
+    know_reachability = bool(checks)
+    reachable = know_reachability and all(bool(c["ok"]) for c in checks.values())
+    state = "foreign" if reachable else ("blackholed" if know_reachability else "unknown")
     out: dict[str, Any] = {
         "ok": reachable,
         "state": state,
@@ -1050,19 +1074,20 @@ def proxy_health(
     when the target host makes them askable (see ``classify_proxy_host``). Never a fabricated
     red for something unknowable.
 
-    ``self_heal`` re-establishes a missing tunnel automatically, but only when the process and
-    the device setting both already check out: a dropped ``adb reverse`` is a normal
-    consequence of an adb restart or a device reconnect, not user error, and reconnecting a
-    tunnel to a process that is confirmed alive cannot make things worse. It never touches the
-    device when the process itself is gone, and it never touches an unowned proxy at all —
-    ``adb reverse``-ing to a port we cannot prove is ours would route real traffic (auth
-    headers, request bodies) into an unidentified host process, and would register an undo for
-    a tunnel we did not create, so our own teardown would later rip out a tunnel another agent
-    depends on. Adoption is the one exception and it requires positive self-proof; see
-    ``_self_proof`` and ``Engine.proxy_status``.
+    ``self_heal`` is retained for capability compatibility but this service is diagnostic.
+    Device mutation belongs to ``Engine.proxy_status``, which records the undo before asking
+    the adapter capability to restore a tunnel. Keeping the decision there also means CLI and
+    MCP use the same ledger-aware path.
     """
     state_rec = read_state(serial)
     target = parse_proxy_target(read_device_http_proxy(serial))
+
+    if target is not None and target.get("kind") == TARGET_INVALID:
+        stale = None
+        if isinstance(state_rec, dict):
+            with contextlib.suppress(TypeError, ValueError):
+                stale = int(state_rec.get("port") or 0) or None
+        return _unowned_health(serial, cache_dir, target, stale_record_port=stale)
 
     if not isinstance(state_rec, dict):
         if target is None:
@@ -1111,12 +1136,7 @@ def proxy_health(
         ),
     }
 
-    process_ok = pid_ok and listening_ok
-    tunnel_ok = bool(port) and reverse_tunnel_active(serial, port)
-    healed = False
-    if not tunnel_ok and self_heal and process_ok and port:
-        healed = ensure_reverse_tunnel(serial, port)
-        tunnel_ok = healed
+    tunnel_ok = bool(port) and reverse_tunnel_active(serial, port, local_port=port)
     tunnel_check: dict[str, Any] = {
         "ok": tunnel_ok,
         "detail": (
@@ -1126,14 +1146,16 @@ def proxy_health(
             "host proxy even though the setting points at it"
         ),
     }
-    if healed:
-        tunnel_check["healed"] = True
-        tunnel_check["detail"] += " (just re-established)"
     checks["tunnel"] = tunnel_check
 
     expected = f"127.0.0.1:{port}" if port else None
     device_proxy = target["raw"] if target else None
-    setting_ok = bool(port) and target is not None and target["port"] == port
+    setting_ok = bool(
+        port
+        and target is not None
+        and target.get("kind") == TARGET_LOOPBACK
+        and target["port"] == port
+    )
     setting_check: dict[str, Any] = {
         "ok": setting_ok,
         "detail": (

@@ -133,7 +133,12 @@ class CaptureBuffer:
         # A session that captured nothing (or deduped everything) must not leave a directory
         # behind for the next sweep to find.
         with contextlib.suppress(OSError):
-            if self.dir.is_dir() and not any((self.dir / "frames").glob("*.jpg")):
+            index_has_evidence = self.index_path.is_file() and self.index_path.stat().st_size > 0
+            if (
+                self.dir.is_dir()
+                and not any((self.dir / "frames").glob("*.jpg"))
+                and not index_has_evidence
+            ):
                 shutil.rmtree(self.dir, ignore_errors=True)
 
     def pause(self, reason: str = "manual", *, settle_s: float = 0.0) -> bool:
@@ -178,13 +183,21 @@ class CaptureBuffer:
         return self._paused
 
     def mark(self, action: str) -> None:
-        """Stamp the next kept frame with *action* and enter burst mode."""
+        """Durably stamp *action* now, then label the next changed frame too."""
         now = time.time()
         with self._lock:
             self._pending_action = action
             self._burst_until = now + max(0, self.cfg.burst_ms) / 1000.0
             self._last_action_ms = int(now * 1000)
             self._kept_since_action = 0
+            # An unchanged screen produces no new JPEG. Persisting the action only on the next
+            # changed frame therefore lost the mark entirely, and two quick actions collapsed
+            # into the last label. The marker is its own append-only record for exactly that
+            # reason; frame rows remain backwards compatible.
+            self.dir.mkdir(parents=True, exist_ok=True)
+            self._append_record(
+                {"kind": "action", "t_ms": self._last_action_ms, "action": action}
+            )
 
     def hint_ready(self) -> bool:
         """True when a post-action burst kept at least one non-deduped frame."""
@@ -390,8 +403,11 @@ class CaptureBuffer:
         self._prune()
 
     def _append_index(self, entry: FrameEntry) -> None:
+        self._append_record(entry.__dict__)
+
+    def _append_record(self, record: dict[str, Any]) -> None:
         with self.index_path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(entry.__dict__, ensure_ascii=False) + "\n")
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     def _disk_bytes(self) -> int:
         total = 0
@@ -449,9 +465,12 @@ class CaptureBuffer:
                 with contextlib.suppress(OSError):
                     newest = max(newest, p.stat().st_mtime)
             size = self._dir_bytes(session)
-            # An empty session (a run that captured nothing, deduped everything, or was
-            # already swept) has no reason to survive at all.
-            if not frames or newest < cutoff:
+            # An action marker is useful even without a changed frame: it lets a reader say
+            # "no post-action evidence" rather than reuse an older screenshot. Keep a recent
+            # marker-only index until the same TTL as pixels.
+            with contextlib.suppress(OSError):
+                newest = max(newest, (session / "index.jsonl").stat().st_mtime)
+            if newest <= 0 or newest < cutoff:
                 removed_bytes += size
                 removed_sessions += 1
                 shutil.rmtree(session, ignore_errors=True)
@@ -761,6 +780,8 @@ def _read_index(session: Path) -> DiskSession | None:
         return None
     indexed = 0
     entries: list[FrameEntry] = []
+    action_marks: list[int] = []
+    newest_indexed_frame_ms: int | None = None
     for line in raw.splitlines():
         line = line.strip()
         if not line:
@@ -769,25 +790,34 @@ def _read_index(session: Path) -> DiskSession | None:
             record = json.loads(line)
         except ValueError:
             continue
+        if record.get("kind") == "action":
+            mark_ms = record.get("t_ms")
+            if isinstance(mark_ms, int) and record.get("action"):
+                action_marks.append(mark_ms)
+            continue
         indexed += 1
         try:
             entry = FrameEntry(**record)
         except TypeError:
             continue
+        newest_indexed_frame_ms = max(newest_indexed_frame_ms or entry.t_ms, entry.t_ms)
+        if entry.action:
+            action_marks.append(entry.t_ms)  # legacy frame-attached marks
         if Path(entry.path).exists():
             entries.append(entry)
-    if not indexed:
+    if not indexed and not action_marks:
         return None
     entries.sort(key=lambda e: e.t_ms)
-    marks = [e.t_ms for e in entries if e.action]
     return DiskSession(
         session_id=session.name,
         dir=session,
         entries=entries,
         indexed=indexed,
         available=len(entries),
-        last_action_ms=marks[-1] if marks else None,
-        newest_frame_ms=entries[-1].t_ms if entries else None,
+        last_action_ms=max(action_marks) if action_marks else None,
+        # Staleness is about what was recorded, not which JPEGs survived pruning. Otherwise a
+        # gutted index claims it has no age and an old surviving file can look current.
+        newest_frame_ms=newest_indexed_frame_ms,
     )
 
 

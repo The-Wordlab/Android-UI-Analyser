@@ -481,8 +481,9 @@ def _selector_consensus(
     candidates: Sequence[PolicyCandidate],
     *,
     reviews: int,
+    record_health: bool,
 ) -> tuple[PolicyCandidate | int | None, dict[str, Any]]:
-    provider = str(getattr(selector, "name", type(selector).__name__))
+    provider = _provider_name(selector)
     votes: list[PolicyCandidate | int] = []
     vote_ids: list[int | None] = []
     invalid_attempts = 0
@@ -526,7 +527,8 @@ def _selector_consensus(
     selected: PolicyCandidate | int | None = votes[0] if unanimous else None
     # A malformed verdict is a measurement, not just a retry. Recording it here is what lets a
     # provider whose output is mostly unusable be refused instead of asked again forever.
-    policy_health.record(provider, attempts=attempts, invalid=invalid_attempts)
+    if record_health:
+        policy_health.record(provider, attempts=attempts, invalid=invalid_attempts)
     health = policy_health.report(provider)
     return selected, {
         "provider": provider,
@@ -589,7 +591,7 @@ def _evaluate_selective_policy(
     trace: list[Mapping[str, Any]] = []
     model_used = False
     for index, selector in enumerate(selectors):
-        provider = str(getattr(selector, "name", type(selector).__name__))
+        provider = _provider_name(selector)
         # Shadow mode exists to *measure* a provider, so it always calls it; refusing a
         # condemned provider is about not acting on one, and not paying for it per step.
         unusable = policy_health.unusable_reason(provider) if mode == "advisory" else None
@@ -612,6 +614,7 @@ def _evaluate_selective_policy(
             guarded_context,
             eligible,
             reviews=reviews,
+            record_health=mode == "advisory",
         )
         model_used = True
         attempt = dict(attempt)
@@ -666,7 +669,7 @@ def _evaluate_selective_policy(
         mode=mode,
         status="handoff",
         eligible_candidates=eligible,
-        provider=str(getattr(selectors[-1], "name", type(selectors[-1]).__name__)),
+        provider=_provider_name(selectors[-1]),
         model_used=model_used,
         error="no configured policy provider produced a trusted consensus",
         selection_strategy="selective_hybrid",
@@ -686,6 +689,15 @@ def _has_valid_call(candidate: PolicyCandidate) -> bool:
             return False
     model_arguments = candidate.model_arguments or {}
     return isinstance(model_arguments, Mapping) and set(model_arguments).issubset(arguments)
+
+
+def _provider_name(selector: Any) -> str:
+    """A diagnostic name must never be able to abort a fail-closed provider chain."""
+    try:
+        value = getattr(selector, "name", None)
+        return str(value or type(selector).__name__)
+    except Exception:
+        return type(selector).__name__
 
 
 def guard_candidates(
@@ -853,7 +865,7 @@ def evaluate_policy(
             error="no policy provider is configured",
         )
 
-    provider_name = str(getattr(selector, "name", type(selector).__name__))
+    provider_name = _provider_name(selector)
     supports_mode = getattr(selector, "supports_mode", None)
     if callable(supports_mode):
         try:
@@ -928,7 +940,8 @@ def evaluate_policy(
     try:
         selected_id = selector.select(guarded_context)
     except Exception:
-        policy_health.record(provider_name, attempts=1, invalid=1)
+        if mode == "advisory":
+            policy_health.record(provider_name, attempts=1, invalid=1)
         return PolicyDecision(
             mode=mode,
             status="provider_error",
@@ -938,7 +951,8 @@ def evaluate_policy(
             error="policy provider failed closed",
         )
     if not isinstance(selected_id, int) or isinstance(selected_id, bool):
-        policy_health.record(provider_name, attempts=1, invalid=1)
+        if mode == "advisory":
+            policy_health.record(provider_name, attempts=1, invalid=1)
         return PolicyDecision(
             mode=mode,
             status="invalid_selection",
@@ -949,7 +963,8 @@ def evaluate_policy(
         )
     if selected_id == POLICY_HANDOFF_ID:
         if not context.allow_handoff:
-            policy_health.record(provider_name, attempts=1, invalid=1)
+            if mode == "advisory":
+                policy_health.record(provider_name, attempts=1, invalid=1)
             return PolicyDecision(
                 mode=mode,
                 status="invalid_selection",
@@ -959,7 +974,8 @@ def evaluate_policy(
                 error="provider requested handoff without an authenticated handoff protocol",
             )
         # Declining every offered candidate is a usable answer, not a malformed one.
-        policy_health.record(provider_name, attempts=1, invalid=0)
+        if mode == "advisory":
+            policy_health.record(provider_name, attempts=1, invalid=0)
         return PolicyDecision(
             mode=mode,
             status="handoff",
@@ -971,7 +987,8 @@ def evaluate_policy(
         (candidate for candidate in eligible if candidate.candidate_id == selected_id), None
     )
     if selected is None:
-        policy_health.record(provider_name, attempts=1, invalid=1)
+        if mode == "advisory":
+            policy_health.record(provider_name, attempts=1, invalid=1)
         return PolicyDecision(
             mode=mode,
             status="invalid_selection",
@@ -980,7 +997,22 @@ def evaluate_policy(
             model_used=True,
             error="provider selected an ID outside the guarded candidate set",
         )
-    policy_health.record(provider_name, attempts=1, invalid=0)
+    requires_review, semantic_reason = selection_requires_review(
+        guarded_context, selected, eligible
+    )
+    if requires_review:
+        if mode == "advisory":
+            policy_health.record(provider_name, attempts=1, invalid=0)
+        return PolicyDecision(
+            mode=mode,
+            status="rejected_semantic",
+            eligible_candidates=eligible,
+            provider=provider_name,
+            model_used=True,
+            error=semantic_reason,
+        )
+    if mode == "advisory":
+        policy_health.record(provider_name, attempts=1, invalid=0)
     return PolicyDecision(
         mode=mode,
         status="selected",

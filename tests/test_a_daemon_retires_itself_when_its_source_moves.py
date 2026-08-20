@@ -42,6 +42,7 @@ class _Activity:
 
 def _engine(tmp_path: Path, *, active_job: Any = None) -> Any:
     cfg = make_config(cache={"dir": str(tmp_path)})
+    cfg.perf.auto_daemon = True
     cfg.daemon.idle_ttl_s = 0  # isolate source-skew retirement from the idle-TTL shutdown
     cfg.capture.idle_pause_s = 0
     return SimpleNamespace(
@@ -55,8 +56,9 @@ def test_an_idle_daemon_whose_source_moved_retires_itself(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(daemon_mod, "_source_fingerprint", lambda: "a-tree-that-moved-on")
+    monkeypatch.setattr(daemon_mod, "_last_source_check_at", 0.0)
 
-    assert daemon_mod._idle_tick(_engine(tmp_path), _Activity(1.0)) is True
+    assert daemon_mod._idle_tick(_engine(tmp_path), _Activity(3.0)) is True
 
 
 def test_a_daemon_whose_source_still_matches_stays_up(
@@ -64,8 +66,9 @@ def test_a_daemon_whose_source_still_matches_stays_up(
 ) -> None:
     """Guard the guard: retiring on every tick would make the daemon useless."""
     monkeypatch.setattr(daemon_mod, "_source_fingerprint", lambda: daemon_mod._LOADED_SOURCE)
+    monkeypatch.setattr(daemon_mod, "_last_source_check_at", 0.0)
 
-    assert daemon_mod._idle_tick(_engine(tmp_path), _Activity(1.0)) is False
+    assert daemon_mod._idle_tick(_engine(tmp_path), _Activity(3.0)) is False
 
 
 def test_a_daemon_with_a_job_in_flight_does_not_retire_however_stale_it_is(
@@ -73,6 +76,7 @@ def test_a_daemon_with_a_job_in_flight_does_not_retire_however_stale_it_is(
 ) -> None:
     """The job worker is a thread inside this process; retiring would abandon another agent."""
     monkeypatch.setattr(daemon_mod, "_source_fingerprint", lambda: "a-tree-that-moved-on")
+    monkeypatch.setattr(daemon_mod, "_last_source_check_at", 0.0)
     engine = _engine(tmp_path, active_job=SimpleNamespace(job_id="busy"))
 
     assert daemon_mod._idle_tick(engine, _Activity(3600.0)) is False
@@ -83,8 +87,9 @@ def test_retirement_is_reported_so_a_puzzled_agent_can_find_out_why(
 ) -> None:
     """Another agent's next call pays one cold start. It must be able to learn the reason."""
     monkeypatch.setattr(daemon_mod, "_source_fingerprint", lambda: "a-tree-that-moved-on")
+    monkeypatch.setattr(daemon_mod, "_last_source_check_at", 0.0)
 
     with caplog.at_level("INFO", logger="android_ui_analyser.daemon"):
-        assert daemon_mod._idle_tick(_engine(tmp_path), _Activity(1.0)) is True
+        assert daemon_mod._idle_tick(_engine(tmp_path), _Activity(3.0)) is True
 
     assert any("source" in record.getMessage() for record in caplog.records), caplog.text

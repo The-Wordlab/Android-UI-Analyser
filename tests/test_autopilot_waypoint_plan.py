@@ -118,14 +118,14 @@ def test_a_fully_reached_active_phase_lets_the_next_phase_run_and_records_the_cr
     assert plan.crossed_phases == ("phase_1",)
 
 
-def test_a_skipped_waypoint_is_not_offered_again_and_does_not_become_completed() -> None:
+def test_a_skipped_waypoint_is_offered_again_until_it_is_actually_reached() -> None:
     plan = _plan(
         [_Phase("phase_1", "open Catalog, then open Archive", status="active")],
         active="phase_1",
         skipped=("Catalog",),
     )
 
-    assert plan.objectives == ("Archive",)
+    assert plan.objectives == ("Catalog", "Archive")
     assert plan.arrived_waypoints == ()
 
 
@@ -169,11 +169,11 @@ def test_autopilot_refuses_when_the_active_phase_authors_no_navigation(
     assert selector.select_calls == before
 
 
-def test_autopilot_reports_a_passed_over_waypoint_as_skipped_not_completed(
+def test_autopilot_never_passes_over_an_unmatched_waypoint(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
-    """A waypoint nothing on screen matched was being filed as completed navigation."""
+    """A later visible control cannot bypass the first authored destination."""
 
     def choose(context: Any) -> int:
         return next(
@@ -226,13 +226,15 @@ def test_autopilot_reports_a_passed_over_waypoint_as_skipped_not_completed(
     result = engine.session_autopilot(started["session_id"], max_steps=2, observation=home)
 
     autopilot = result["autopilot"]
-    assert autopilot["skipped_waypoints"] == ["Catalog"]
-    assert "Catalog" not in autopilot["completed_waypoints"]
-    assert autopilot["trace"][0]["skipped_waypoints"] == ["Catalog"]
+    assert autopilot["steps_executed"] == 0
+    assert autopilot["skipped_waypoints"] == []
+    assert autopilot["completed_waypoints"] == []
+    assert autopilot["terminal_reason"] == "no_guard_approved_candidate"
+    assert autopilot["trace"][0]["waypoint"] == "Catalog"
     assert autopilot["trace"][0]["phase"] == "phase_1"
 
 
-def test_autopilot_records_the_phase_it_ran_ahead_into(
+def test_autopilot_crosses_a_phase_only_after_exact_waypoint_arrival(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
@@ -312,13 +314,14 @@ def test_autopilot_records_the_phase_it_ran_ahead_into(
     result = engine.session_autopilot(started["session_id"], max_steps=4, observation=home)
 
     trace = result["autopilot"]["trace"]
-    assert [item["waypoint"] for item in trace] == ["Settings", "Archive"]
-    assert trace[0]["phase"] == "phase_1"
-    assert trace[0]["crossed_phases"] == []
+    executed = [item for item in trace if item.get("executed") is True]
+    assert [item["waypoint"] for item in executed] == ["Settings", "Archive"]
+    assert executed[0]["phase"] == "phase_1"
+    assert executed[0]["crossed_phases"] == []
     # The second step follows phase 2's waypoint while phase 1 still awaits its proof, and says so.
-    assert trace[1]["active_phase"] == "phase_1"
-    assert trace[1]["phase"] == "phase_2"
-    assert trace[1]["crossed_phases"] == ["phase_1"]
+    assert executed[1]["active_phase"] == "phase_1"
+    assert executed[1]["phase"] == "phase_2"
+    assert executed[1]["crossed_phases"] == ["phase_1"]
 
 
 if __name__ == "__main__":  # pragma: no cover - convenience

@@ -52,7 +52,7 @@ def test_healthy_process_and_setting_with_a_dropped_tunnel_is_reported_unhealthy
     monkeypatch.setattr(pm, "port_listening", lambda port: port == PORT)
     monkeypatch.setattr(pm, "read_device_http_proxy", lambda serial: f"127.0.0.1:{PORT}")
     # The tunnel is gone — this is the one signal nothing checked before.
-    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port: False)
+    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port, **kw: False)
 
     report = pm.proxy_health(SERIAL, tmp_path, self_heal=False)
 
@@ -72,7 +72,7 @@ def test_all_three_signals_healthy_reports_fully_healthy(
     monkeypatch.setattr(pm, "pid_alive", lambda pid: True)
     monkeypatch.setattr(pm, "port_listening", lambda port: True)
     monkeypatch.setattr(pm, "read_device_http_proxy", lambda serial: f"127.0.0.1:{PORT}")
-    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port: True)
+    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port, **kw: True)
 
     report = pm.proxy_health(SERIAL, tmp_path, self_heal=False)
 
@@ -87,7 +87,7 @@ def test_a_dead_process_is_named_specifically_not_lumped_with_the_tunnel(
     monkeypatch.setattr(pm, "pid_alive", lambda pid: False)
     monkeypatch.setattr(pm, "port_listening", lambda port: False)
     monkeypatch.setattr(pm, "read_device_http_proxy", lambda serial: f"127.0.0.1:{PORT}")
-    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port: False)
+    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port, **kw: False)
 
     report = pm.proxy_health(SERIAL, tmp_path, self_heal=False)
 
@@ -110,7 +110,7 @@ def test_a_device_pointed_at_a_port_our_record_does_not_name_is_diagnosed_on_tha
     _arm_state(tmp_path)
     monkeypatch.setattr(pm, "pid_alive", lambda pid: True)
     monkeypatch.setattr(pm, "port_listening", lambda port, **kw: port == PORT)
-    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port: port == PORT)
+    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port, **kw: port == PORT)
     monkeypatch.setattr(pm, "read_device_http_proxy", lambda serial: "127.0.0.1:9999")
     monkeypatch.setattr(pm, "connect_failures_in_logcat", lambda *a, **k: 0)
 
@@ -147,7 +147,7 @@ def test_nothing_armed_at_all_is_reported_cleanly(tmp_path: Path, monkeypatch: p
 # --------------------------------------------------------------------------- self-healing
 
 
-def test_proxy_health_self_heals_a_dropped_tunnel_when_the_rest_is_fine(
+def test_proxy_health_is_diagnostic_even_when_self_heal_is_requested(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A dropped `adb reverse` is a normal consequence of an adb restart, not user error."""
@@ -158,7 +158,7 @@ def test_proxy_health_self_heals_a_dropped_tunnel_when_the_rest_is_fine(
 
     tunnel_state = {"active": False}
     monkeypatch.setattr(
-        pm, "reverse_tunnel_active", lambda serial, port: tunnel_state["active"]
+        pm, "reverse_tunnel_active", lambda serial, port, **kw: tunnel_state["active"]
     )
     ensure_calls: list[tuple[str, int]] = []
 
@@ -171,10 +171,9 @@ def test_proxy_health_self_heals_a_dropped_tunnel_when_the_rest_is_fine(
 
     report = pm.proxy_health(SERIAL, tmp_path, self_heal=True)
 
-    assert ensure_calls == [(SERIAL, PORT)], "self-heal must re-establish the exact dropped port"
-    assert report["checks"]["tunnel"]["ok"] is True
-    assert report["checks"]["tunnel"].get("healed") is True
-    assert report["ok"] is True
+    assert ensure_calls == [], "health checks cannot bypass Engine.record_device_change"
+    assert report["checks"]["tunnel"]["ok"] is False
+    assert report["ok"] is False
 
 
 def test_proxy_health_does_not_self_heal_when_the_process_is_also_dead(
@@ -185,7 +184,7 @@ def test_proxy_health_does_not_self_heal_when_the_process_is_also_dead(
     monkeypatch.setattr(pm, "pid_alive", lambda pid: False)
     monkeypatch.setattr(pm, "port_listening", lambda port: False)
     monkeypatch.setattr(pm, "read_device_http_proxy", lambda serial: f"127.0.0.1:{PORT}")
-    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port: False)
+    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port, **kw: False)
     ensure_calls: list[tuple[str, int]] = []
     monkeypatch.setattr(
         pm, "ensure_reverse_tunnel", lambda serial, port: ensure_calls.append((serial, port))
@@ -204,7 +203,7 @@ def test_proxy_health_self_heal_flag_can_be_disabled(
     monkeypatch.setattr(pm, "pid_alive", lambda pid: True)
     monkeypatch.setattr(pm, "port_listening", lambda port: True)
     monkeypatch.setattr(pm, "read_device_http_proxy", lambda serial: f"127.0.0.1:{PORT}")
-    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port: False)
+    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port, **kw: False)
     ensure_calls: list[tuple[str, int]] = []
     monkeypatch.setattr(
         pm, "ensure_reverse_tunnel", lambda serial, port: ensure_calls.append((serial, port))
@@ -231,6 +230,25 @@ def test_reverse_tunnel_active_parses_adb_reverse_list(monkeypatch: pytest.Monke
     monkeypatch.setattr(pm, "_adb", fake_adb)
     assert pm.reverse_tunnel_active(SERIAL, PORT) is True
     assert pm.reverse_tunnel_active(SERIAL, 9) is False
+
+
+def test_owned_reverse_check_rejects_an_asymmetric_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess
+
+    local = PORT + 1
+    monkeypatch.setattr(
+        pm,
+        "_adb",
+        lambda *a, **k: subprocess.CompletedProcess(
+            a, 0, stdout=f"{SERIAL} tcp:{PORT} tcp:{local}\n", stderr=""
+        ),
+    )
+
+    assert pm.reverse_tunnel_active(SERIAL, PORT) is True
+    assert pm.reverse_tunnel_active(SERIAL, PORT, local_port=PORT) is False
+    assert pm.reverse_tunnel_active(SERIAL, PORT, local_port=local) is True
 
 
 def test_reverse_tunnel_active_false_when_list_is_empty(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -274,7 +292,7 @@ def test_ensure_reverse_tunnel_issues_adb_reverse_and_reports_result(
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
     monkeypatch.setattr(pm, "_adb", fake_adb)
-    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port: True)
+    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port, **kw: True)
     assert pm.ensure_reverse_tunnel(SERIAL, PORT) is True
     assert ("reverse", f"tcp:{PORT}", f"tcp:{PORT}") in calls
 
@@ -296,7 +314,9 @@ def test_engine_proxy_status_reports_the_split_and_self_heals(
     monkeypatch.setattr(pm, "port_listening", lambda port: True)
     monkeypatch.setattr(pm, "read_device_http_proxy", lambda serial: f"127.0.0.1:{PORT}")
     tunnel_state = {"active": False}
-    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port: tunnel_state["active"])
+    monkeypatch.setattr(
+        pm, "reverse_tunnel_active", lambda serial, port, **kw: tunnel_state["active"]
+    )
 
     order: list[str] = []
 
@@ -342,7 +362,7 @@ def test_engine_proxy_status_never_touches_the_device_when_self_heal_is_unsafe(
     monkeypatch.setattr(pm, "pid_alive", lambda pid: False)
     monkeypatch.setattr(pm, "port_listening", lambda port: False)
     monkeypatch.setattr(pm, "read_device_http_proxy", lambda serial: None)
-    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port: False)
+    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port, **kw: False)
     ensure_calls: list[Any] = []
     monkeypatch.setattr(pm, "ensure_reverse_tunnel", lambda *a: ensure_calls.append(a))
 
@@ -487,7 +507,7 @@ def test_mock_map_warns_when_the_already_armed_proxy_is_actually_unreachable(
     monkeypatch.setattr(pm, "read_device_http_proxy", lambda serial: f"127.0.0.1:{PORT}")
     # Tunnel gone, and the process is NOT confirmed alive here either (pid mismatch via a
     # forced ensure failure) so self-heal cannot silently fix it — the warning must surface.
-    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port: False)
+    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port, **kw: False)
     monkeypatch.setattr(pm, "ensure_reverse_tunnel", lambda serial, port: False)
 
     engine = _engine(tmp_path)
@@ -569,7 +589,7 @@ def test_mock_record_start_warns_when_the_refreshed_proxy_is_still_unreachable(
     monkeypatch.setattr(pm, "stop_mitm", lambda _c: True)
     monkeypatch.setattr(pm, "pid_alive", lambda pid: pid == PID + 1)
     monkeypatch.setattr(pm, "port_listening", lambda port: True)
-    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port: False)
+    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port, **kw: False)
     monkeypatch.setattr(pm, "ensure_reverse_tunnel", lambda serial, port: False)
     monkeypatch.setattr(pm, "read_device_http_proxy", lambda serial: f"127.0.0.1:{PORT}")
     cache.mkdir(parents=True, exist_ok=True)

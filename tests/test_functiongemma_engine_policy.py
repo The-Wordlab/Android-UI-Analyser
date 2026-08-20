@@ -675,7 +675,13 @@ def test_ambiguous_target_candidates_receive_only_the_requested_target_goal(
 def test_ambiguous_target_preserves_only_safe_candidate_backed_qualifiers(
     tmp_path: Path,
 ) -> None:
-    selector = _Selector(lambda context: context.candidates[0].candidate_id)
+    selector = _Selector(
+        lambda context: next(
+            candidate.candidate_id
+            for candidate in context.candidates
+            if "Saved records" in candidate.purpose
+        )
+    )
     engine, _factory = _engine(tmp_path, "shadow", selector)
     observation = _observation(
         engine.device.serial,
@@ -1192,8 +1198,11 @@ def test_session_autopilot_executes_selected_calls_without_parent_round_trips(
     assert result["autopilot"]["steps_executed"] == 2
     assert result["autopilot"]["completed_waypoints"] == ["Settings", "Archive"]
     assert result["autopilot"]["terminal_reason"] in {"goal_complete", "navigation_complete"}
-    assert all(item["executed"] is True for item in result["autopilot"]["trace"])
-    assert all(item["call"]["tool"] == "tap_and_analyze" for item in result["autopilot"]["trace"])
+    executed_trace = [
+        item for item in result["autopilot"]["trace"] if item.get("executed") is True
+    ]
+    assert len(executed_trace) == 2
+    assert all(item["call"]["tool"] == "tap_and_analyze" for item in executed_trace)
     assert engine.device.calls == []
 
 

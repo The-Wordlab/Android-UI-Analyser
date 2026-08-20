@@ -54,7 +54,7 @@ def _unowned_target(
 ) -> None:
     """A device pointed at *raw* with NO ownership record — the orphan state, from fakes."""
     monkeypatch.setattr(pm, "read_device_http_proxy", lambda serial: raw)
-    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port: tunnel)
+    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port, **kw: tunnel)
     monkeypatch.setattr(pm, "port_listening", lambda port, **kw: listening)
     monkeypatch.setattr(pm, "pid_alive", lambda pid: False)
     monkeypatch.setattr(pm, "connect_failures_in_logcat", lambda *a, **k: 0)
@@ -136,7 +136,7 @@ def test_a_healthy_owned_proxy_reports_owned_and_intercepting(
     monkeypatch.setattr(pm, "pid_alive", lambda pid: pid == PID)
     monkeypatch.setattr(pm, "port_listening", lambda port, **kw: port == PORT)
     monkeypatch.setattr(pm, "read_device_http_proxy", lambda serial: f"127.0.0.1:{PORT}")
-    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port: True)
+    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port, **kw: True)
 
     report = pm.proxy_health(SERIAL, tmp_path, self_heal=False)
 
@@ -154,7 +154,7 @@ def test_a_broken_owned_proxy_is_degraded_and_names_the_owner_only_remedy(
     monkeypatch.setattr(pm, "pid_alive", lambda pid: False)
     monkeypatch.setattr(pm, "port_listening", lambda port, **kw: False)
     monkeypatch.setattr(pm, "read_device_http_proxy", lambda serial: f"127.0.0.1:{PORT}")
-    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port: False)
+    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port, **kw: False)
 
     report = pm.proxy_health(SERIAL, tmp_path, self_heal=False)
 
@@ -208,8 +208,8 @@ def test_an_off_host_proxy_target_is_reported_as_unknowable_not_broken(
 
     assert report["target"]["kind"] == "external"
     assert report["checks"] == {}
-    assert report["state"] == "foreign"
-    assert report["ok"] is True
+    assert report["state"] == "unknown"
+    assert report["ok"] is False
     assert "cannot tell from here" in report["detail"]
 
 
@@ -234,9 +234,21 @@ def test_the_target_parser_handles_the_shapes_android_stores(
     assert target["raw"] == raw
 
 
-@pytest.mark.parametrize("raw", [None, "", "  ", "null", ":0", "127.0.0.1:notaport"])
+@pytest.mark.parametrize("raw", [None, "", "  ", "null", ":0"])
 def test_the_target_parser_treats_androids_empty_shapes_as_no_proxy(raw: str | None) -> None:
     assert pm.parse_proxy_target(raw) is None
+
+
+def test_the_target_parser_preserves_a_malformed_nonempty_setting_as_unknown() -> None:
+    target = pm.parse_proxy_target("127.0.0.1:notaport")
+    assert target is not None
+    assert target["kind"] == "invalid"
+
+
+def test_the_target_parser_rejects_a_port_outside_the_tcp_range() -> None:
+    target = pm.parse_proxy_target("127.0.0.1:65536")
+    assert target is not None
+    assert target["kind"] == "invalid"
 
 
 # --------------------------------------------------------------- logcat corroboration
@@ -303,7 +315,7 @@ def test_a_record_naming_one_port_while_the_device_points_at_another_follows_the
     pm.write_state(SERIAL, {"pid": PID, "port": PORT, "boot_id": "boot-1"})
     monkeypatch.setattr(pm, "pid_alive", lambda pid: True)
     monkeypatch.setattr(pm, "port_listening", lambda port, **kw: False)
-    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port: False)
+    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port, **kw: False)
     monkeypatch.setattr(pm, "read_device_http_proxy", lambda serial: "127.0.0.1:55555")
     monkeypatch.setattr(pm, "connect_failures_in_logcat", lambda *a, **k: 0)
 
@@ -333,7 +345,7 @@ def test_our_own_orphaned_mitm_is_adoptable_via_its_sidecars(
     cache = tmp_path / "cache"
     _write_sidecars(cache, port=PORT, pid=PID)
     monkeypatch.setattr(pm, "read_device_http_proxy", lambda serial: f"127.0.0.1:{PORT}")
-    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port: False)
+    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port, **kw: False)
     monkeypatch.setattr(pm, "port_listening", lambda port, **kw: True)
     monkeypatch.setattr(pm, "pid_alive", lambda pid: pid == PID)
     monkeypatch.setattr(pm, "connect_failures_in_logcat", lambda *a, **k: 0)
@@ -365,7 +377,7 @@ def test_a_sidecar_for_a_different_port_is_not_self_proof(
     cache = tmp_path / "cache"
     _write_sidecars(cache, port=PORT, pid=PID)
     monkeypatch.setattr(pm, "read_device_http_proxy", lambda serial: "127.0.0.1:8081")
-    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port: True)
+    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port, **kw: True)
     monkeypatch.setattr(pm, "port_listening", lambda port, **kw: True)
     monkeypatch.setattr(pm, "pid_alive", lambda pid: True)
 
@@ -386,7 +398,7 @@ def test_engine_proxy_status_adopts_its_own_orphan_and_journals_before_writing(
     monkeypatch.setattr(pm, "pid_alive", lambda pid: pid == PID)
     monkeypatch.setattr(pm, "connect_failures_in_logcat", lambda *a, **k: 0)
     tunnel = {"up": False}
-    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port: tunnel["up"])
+    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port, **kw: tunnel["up"])
 
     order: list[str] = []
 
@@ -463,7 +475,7 @@ def test_engine_proxy_status_does_not_adopt_when_healing_is_declined(
     monkeypatch.setattr(pm, "read_device_http_proxy", lambda serial: f"127.0.0.1:{PORT}")
     monkeypatch.setattr(pm, "port_listening", lambda port, **kw: True)
     monkeypatch.setattr(pm, "pid_alive", lambda pid: pid == PID)
-    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port: True)
+    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port, **kw: True)
     writes: list[Any] = []
     monkeypatch.setattr(pm, "write_state", lambda s, st: writes.append((s, st)))
 
@@ -478,14 +490,14 @@ def test_engine_proxy_status_does_not_adopt_when_healing_is_declined(
 # --------------------------------------------------------------- _proxy_port / proxy stop
 
 
-def test_proxy_port_falls_back_to_the_device_setting_when_no_record_exists(
+def test_proxy_port_does_not_claim_an_unowned_device_setting(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Otherwise ``proxy stop`` clears the setting and leaves the tunnel behind."""
+    """A setting alone cannot prove which host-side tunnel belongs to this session."""
     monkeypatch.setattr(pm, "read_device_http_proxy", lambda serial: f"127.0.0.1:{PORT}")
     engine = _engine(tmp_path)
 
-    assert engine._proxy_port() == PORT
+    assert engine._proxy_port() is None
 
 
 def test_proxy_port_prefers_the_shared_record_over_the_device_setting(
@@ -498,7 +510,7 @@ def test_proxy_port_prefers_the_shared_record_over_the_device_setting(
     assert engine._proxy_port() == 40001
 
 
-def test_proxy_stop_removes_the_tunnel_of_an_unowned_orphan(
+def test_proxy_stop_does_not_remove_an_unowned_tunnel(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(pm, "read_device_http_proxy", lambda serial: f"127.0.0.1:{PORT}")
@@ -512,8 +524,8 @@ def test_proxy_stop_removes_the_tunnel_of_an_unowned_orphan(
     engine = _engine(tmp_path, device=device)
     out = engine.proxy_stop()
 
-    assert out["port"] == PORT
-    assert removed == [PORT], "the orphan's tunnel must come off too, not just the setting"
+    assert out["port"] is None
+    assert removed == [], "a device setting does not prove ownership of a host tunnel"
 
 
 # --------------------------------------------------------------- the other warning surfaces
@@ -618,7 +630,7 @@ def test_the_doctor_proxy_survey_never_mutates_a_device_it_was_not_pointed_at(
     monkeypatch.setattr(pm, "read_device_http_proxy", lambda serial: f"127.0.0.1:{PORT}")
     monkeypatch.setattr(pm, "port_listening", lambda port, **kw: True)
     monkeypatch.setattr(pm, "pid_alive", lambda pid: pid == PID)
-    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port: False)
+    monkeypatch.setattr(pm, "reverse_tunnel_active", lambda serial, port, **kw: False)
     monkeypatch.setattr(pm, "connect_failures_in_logcat", lambda *a, **k: 0)
     ensure_calls: list[Any] = []
     writes: list[Any] = []

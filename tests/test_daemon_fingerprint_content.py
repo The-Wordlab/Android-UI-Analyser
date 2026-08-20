@@ -69,17 +69,24 @@ class FakeClient:
 class FakeDaemonModule:
     """Stands in for the `daemon` module: records lifecycle calls, scripts the version."""
 
-    def __init__(self, *, capturing: bool = False, restart_matches: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        capturing: bool = False,
+        restart_matches: bool = True,
+        socket: str = "/tmp/fake.sock",
+    ) -> None:
         self.capturing = capturing
         self.restart_matches = restart_matches
         self.calls: list[str] = []
         self._restarted = False
+        self._socket = socket
 
     def DaemonClient(self, _path: object, timeout: float = 0.0) -> FakeClient:  # noqa: N802
         return FakeClient(self.capturing)
 
     def socket_path(self, _cfg: object) -> str:
-        return "/tmp/fake.sock"
+        return self._socket
 
     def read_pidfile(self, _path: object) -> tuple[int | None, str | None]:
         return None, None
@@ -107,13 +114,13 @@ class _Cfg:
         serial = None
 
 
-def test_a_skewed_daemon_is_restarted_rather_than_bypassed() -> None:
-    fake = FakeDaemonModule()
+def test_a_skewed_daemon_is_restarted_rather_than_bypassed(tmp_path: Path) -> None:
+    fake = FakeDaemonModule(socket=str(tmp_path / "daemon.sock"))
     assert cli._replace_skewed_daemon(fake, _Cfg(), "0.6.0+srcOLD") is True
     assert fake.calls == ["stop", "start"], "the warm path is restored, not abandoned"
 
 
-def test_the_always_on_capture_buffer_does_not_block_the_restart() -> None:
+def test_the_always_on_capture_buffer_does_not_block_the_restart(tmp_path: Path) -> None:
     """Reversed 2026-08-19; refusing here is what made the restart unreachable in practice.
 
     The refusal read as protecting recorded frames, but `capture.enabled` defaults to true and
@@ -124,14 +131,14 @@ def test_the_always_on_capture_buffer_does_not_block_the_restart() -> None:
     until the daemon is replaced. What a restart must genuinely not interrupt is a live
     background job, and that rule lives in `test_a_stale_daemon_does_not_tax_every_call.py`.
     """
-    fake = FakeDaemonModule(capturing=True)
+    fake = FakeDaemonModule(capturing=True, socket=str(tmp_path / "daemon.sock"))
     assert cli._replace_skewed_daemon(fake, _Cfg(), "0.6.0+srcOLD") is True
     assert fake.calls == ["stop", "start"], "the warm path is restored, not abandoned"
 
 
-def test_a_restart_that_does_not_resolve_skew_reports_failure() -> None:
+def test_a_restart_that_does_not_resolve_skew_reports_failure(tmp_path: Path) -> None:
     """If the replacement still serves other code, say so — the caller must fall back."""
-    fake = FakeDaemonModule(restart_matches=False)
+    fake = FakeDaemonModule(restart_matches=False, socket=str(tmp_path / "daemon.sock"))
     assert cli._replace_skewed_daemon(fake, _Cfg(), "0.6.0+srcOLD") is False
 
 

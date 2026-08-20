@@ -129,6 +129,26 @@ def test_evaluate_policy_counts_unparsable_and_off_list_output() -> None:
     assert policy_health.registry().unusable_reason("gemma_fixture") is not None
 
 
+def test_shadow_observations_do_not_condemn_a_provider_for_advisory_use() -> None:
+    class _Garbage:
+        name = "shadow_fixture"
+
+        def is_available(self) -> Availability:
+            return Availability(True, "ready")
+
+        def supports_mode(self, mode: str) -> bool:
+            return mode in {"shadow", "advisory"}
+
+        def select(self, _context: PolicyContext) -> Any:
+            return "not-an-id"
+
+    for _ in range(10):
+        assert evaluate_policy(_context(), _Garbage(), mode="shadow").status == "invalid_selection"
+
+    assert policy_health.registry().report("shadow_fixture")["attempts"] == 0
+    assert policy_health.registry().unusable_reason("shadow_fixture") is None
+
+
 def test_a_condemned_provider_is_not_consulted_again() -> None:
     calls = 0
 

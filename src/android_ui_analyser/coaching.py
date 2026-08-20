@@ -110,9 +110,15 @@ def attach_caller_turn(engine: Any, result: Any) -> Any:
     """
     report: dict[str, Any] | None = None
     with contextlib.suppress(Exception):
-        report = engine.caller_turn_report()
+        report = engine.caller_turn_report(emitted_fingerprint(result))
     if not report:
         return result
+    data = _payload(result) or {}
+    if data.get("wait_ceiling_ms") is not None:
+        # A clamped wait already reports these at top level. Repeating the same constants in
+        # the caller block spends tokens and lets two independently recomputed values drift.
+        report.pop("wait_ceiling_ms", None)
+        report.pop("wait_ceiling_mode", None)
     if isinstance(result, dict):
         if isinstance(result.get("screen"), dict) and isinstance(result.get("meta"), dict):
             result["meta"]["caller"] = report

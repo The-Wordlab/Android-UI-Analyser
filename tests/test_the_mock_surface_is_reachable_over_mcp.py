@@ -45,15 +45,17 @@ def test_mock_map_is_published_with_the_cli_arguments() -> None:
     assert set(tool.inputSchema.get("required") or []) >= {"method", "path"}
 
 
-def test_the_screen_video_recorder_cannot_be_mistaken_for_traffic_capture() -> None:
-    names = set(_tools())
+def test_the_screen_video_recorder_keeps_explicit_names_and_unambiguous_compatibility_aliases() -> None:
+    tools = _tools()
+    names = set(tools)
     assert {"screen_record_start", "screen_record_stop"} <= names, (
         "the MP4 screen recorder must say `screen` in its published name"
     )
-    # A description does not save a model at tool-selection time — that is the whole lesson
-    # behind `_ANALYZED_TOOL_NAMES`. The bare verbs read as "record traffic" next to mock_replay.
-    assert "record_start" not in names
-    assert "record_stop" not in names
+    assert {"record_start", "record_stop"} <= names, "renaming must not break existing clients"
+    for alias in ("record_start", "record_stop"):
+        description = tools[alias].description.lower()
+        assert "deprecated alias" in description
+        assert "screen" in description
 
 
 def test_dispatch_routes_the_mock_tools_to_the_engine(monkeypatch: Any) -> None:
@@ -80,3 +82,25 @@ def test_dispatch_routes_the_mock_tools_to_the_engine(monkeypatch: Any) -> None:
     assert calls[1][1] == ("GET", "/hub")
     assert calls[1][2]["status"] == 500
     assert calls[1][2]["body"] == "{}"
+
+
+def test_deprecated_record_aliases_reach_the_same_screen_video_engine_path(
+    monkeypatch: Any,
+) -> None:
+    engine = Engine(make_config(), device=FakeDevice(hierarchy_xml=_HIERARCHY))
+    calls: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(
+        engine,
+        "record_start",
+        lambda path=None: calls.append(("start", path)) or {"ok": True},
+    )
+    monkeypatch.setattr(
+        engine,
+        "record_stop",
+        lambda path: calls.append(("stop", path)) or {"ok": True},
+    )
+
+    _dispatch(engine, "record_start", {"path": "screen.mp4"})
+    _dispatch(engine, "record_stop", {"path": "screen.mp4"})
+
+    assert calls == [("start", "screen.mp4"), ("stop", "screen.mp4")]

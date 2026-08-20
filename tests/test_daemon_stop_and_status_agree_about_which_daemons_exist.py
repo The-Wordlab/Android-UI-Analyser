@@ -149,6 +149,20 @@ def test_status_enumerates_every_daemon_and_the_serial_each_one_serves(
         assert "stop_command" in entry, entry
 
 
+def test_live_socket_discovery_supports_a_custom_basename(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    base = Path(cfg.cache.dir) / "warm-agent"
+    cfg.daemon.socket = str(base)
+    sockets = [base, Path(str(base) + ".emulator-5562")]
+    for socket in sockets:
+        socket.write_bytes(b"")
+        Path(str(socket) + ".pid").write_text(
+            json.dumps({"pid": os.getpid(), "exe": sys.executable})
+        )
+
+    assert daemon_mod.live_sockets(cfg) == [str(socket) for socket in sockets]
+
+
 def test_a_pinned_status_is_still_not_answered_by_another_devices_daemon(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -215,14 +229,41 @@ def test_stop_all_reaches_the_per_serial_daemons_an_unpinned_stop_cannot(
     cache = _cli_env(tmp_path, monkeypatch)
     _pretend_a_daemon_serves(cache, "emulator-5562")
     _pretend_a_daemon_serves(cache, "emulator-5560")
-    killed: list[int] = []
-    monkeypatch.setattr(daemon_mod.os, "kill", lambda pid, sig: killed.append(pid))
+    stopped: list[str] = []
+
+    def fake_stop(_cfg: Config, **kwargs: object) -> dict[str, object]:
+        socket = str(kwargs["_socket_override"])
+        stopped.append(socket)
+        Path(socket).unlink()
+        return {"running": False, "socket": socket, "status": "stopped"}
+
+    monkeypatch.setattr(daemon_mod, "stop", fake_stop)
 
     result = runner.invoke(app, ["--format", "compact", "daemon", "stop", "--all"])
 
     assert result.exit_code == 0, result.stderr
     out = json.loads(result.stdout)
     assert len(out["stopped"]) == 2, out
+    assert sorted(stopped) == sorted(row["socket"] for row in out["stopped"])
+
+
+def test_a_signal_permission_failure_is_not_reported_as_a_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = _cli_env(tmp_path, monkeypatch)
+    _pretend_a_daemon_serves(cache, None)
+
+    def denied(_pid: int, _signal: int) -> None:
+        raise PermissionError("not ours")
+
+    monkeypatch.setattr(daemon_mod.os, "kill", denied)
+
+    result = runner.invoke(app, ["--format", "compact", "daemon", "stop"])
+
+    assert result.exit_code == 1
+    out = json.loads(result.stdout)
+    assert out["ok"] is False
+    assert out["status"] == "permission_denied"
 
 
 def test_a_pinned_stop_reports_the_success_it_actually_had(

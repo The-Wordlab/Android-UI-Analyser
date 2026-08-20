@@ -167,6 +167,9 @@ _SOCKET_BACKLOG = 5
 _START_POLL_INTERVAL = 0.1  # seconds between is_running checks
 _START_TIMEOUT = 5.0  # max seconds to wait after spawning
 _LOG_ROLL_BYTES = 8 * 1024 * 1024
+_SOURCE_CHECK_INTERVAL_S = 5.0
+_SOURCE_RETIRE_IDLE_S = 2.0
+_last_source_check_at = 0.0
 
 
 class _Activity:
@@ -200,8 +203,26 @@ def _idle_tick(engine: Engine, activity: _Activity) -> bool:
     jobs = getattr(engine, "_aua_job_manager", None)
     if jobs is not None and jobs.active() is not None:
         return False
+    idle = activity.idle_s()
+    capture = getattr(engine, "_capture", None)
+    capture_live = bool(
+        capture is not None
+        and getattr(capture, "running", False)
+        and not getattr(capture, "paused", False)
+    )
+    auto_daemon = bool(getattr(getattr(engine.config, "perf", None), "auto_daemon", True))
+    global _last_source_check_at
+    now = time.monotonic()
+    may_check_source = bool(
+        auto_daemon
+        and not capture_live
+        and idle >= _SOURCE_RETIRE_IDLE_S
+        and now - _last_source_check_at >= _SOURCE_CHECK_INTERVAL_S
+    )
+    if may_check_source:
+        _last_source_check_at = now
     with contextlib.suppress(Exception):
-        if _source_fingerprint() != _LOADED_SOURCE:
+        if may_check_source and _source_fingerprint() != _LOADED_SOURCE:
             # Logged, not silent: the next caller pays one cold start and has to be able to
             # find out why its warm daemon vanished.
             logger.info(
@@ -209,7 +230,6 @@ def _idle_tick(engine: Engine, activity: _Activity) -> bool:
                 "daemon loaded, so its answers would come from bytes the caller never wrote"
             )
             return True
-    idle = activity.idle_s()
     pause_after = int(getattr(engine.config.capture, "idle_pause_s", 0) or 0)
     if pause_after > 0 and idle >= pause_after:
         with contextlib.suppress(Exception):
@@ -350,6 +370,10 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
                 hint="Restart it: `aua daemon stop && aua daemon start`.",
             )
         _adopt_client_owner(engine, request.get("owner"), request.get("caller"))
+        # The CLI process learns between calls and the warm daemon reads that file. A cache
+        # lasting for the daemon's lifetime made its enforced ceiling diverge from the value the
+        # CLI reported after the first sample.
+        engine._caller_profile_cache = False
         if cmd == "ping":
             return _result_ok(
                 {
@@ -1567,11 +1591,14 @@ def live_sockets(config: Config) -> list[str]:
     supposed to have ended. That is how a daemon carrying older code survived a restart and
     answered as though the restart had worked.
     """
-    base = Path(socket_path(config))
+    override = os.environ.get("AUA_DAEMON_SOCKET")
+    base = Path(os.path.expanduser(override or config.daemon.socket))
     found = []
     with contextlib.suppress(OSError):
-        for path in sorted(base.parent.glob(base.name.split(".sock")[0] + ".sock*")):
-            if path.suffix == ".pid":
+        for path in sorted(base.parent.glob(base.name + "*")):
+            if path.name.endswith((".pid", ".restart-backoff")):
+                continue
+            if path != base and not path.name.startswith(base.name + "."):
                 continue
             if _socket_process_alive(str(path)) or _socket_alive(str(path)):
                 found.append(str(path))
@@ -1582,20 +1609,26 @@ def stop_all(config: Config) -> dict[str, Any]:
     """Stop every live daemon, whichever serial it was started for."""
     stopped = []
     for sock in live_sockets(config):
-        serial = sock.split(".sock.", 1)[1] if ".sock." in sock else None
-        result = stop(config if serial is None else config.model_copy(deep=True), serial=serial)
+        result = stop(config, _socket_override=sock)
         stopped.append({"socket": sock, **{k: result[k] for k in ("status",) if k in result}})
-    return {"stopped": stopped, "remaining": live_sockets(config)}
+    remaining = live_sockets(config)
+    return {
+        "ok": not remaining and all(row.get("status") == "stopped" for row in stopped),
+        "stopped": stopped,
+        "remaining": remaining,
+    }
 
 
-def stop(config: Config, *, serial: str | None = None) -> dict[str, Any]:
+def stop(
+    config: Config, *, serial: str | None = None, _socket_override: str | None = None
+) -> dict[str, Any]:
     """Stop the daemon by signalling its process, so it runs cleanup on the way out.
 
     SIGTERM is caught by the daemon and trips its stop-event; the accept loop exits and
     ``serve``'s finally releases the device + on-device uiautomator2 server (freeing the
     UiAutomation slot for adb/Maestro). Falls back to unlinking the socket if no pidfile.
     """
-    sock = socket_path(config, serial) if serial else socket_path(config)
+    sock = _socket_override or (socket_path(config, serial) if serial else socket_path(config))
     pid_file = sock + ".pid"
     if not (_socket_process_alive(sock) or _socket_alive(sock)):
         for path in (sock, pid_file):
@@ -1612,8 +1645,24 @@ def stop(config: Config, *, serial: str | None = None) -> dict[str, Any]:
         }
     pid, _ = read_pidfile(pid_file)
     if pid is not None:
-        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+        try:
             os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            return {
+                "running": True,
+                "socket": sock,
+                "status": "permission_denied",
+                "others_still_running": live_sockets(config),
+            }
+        except OSError:
+            return {
+                "running": True,
+                "socket": sock,
+                "status": "signal_failed",
+                "others_still_running": live_sockets(config),
+            }
         deadline = time.monotonic() + 5.0  # let it run engine.close() on the way out
         while time.monotonic() < deadline and _socket_process_alive(sock):
             time.sleep(0.1)
@@ -1672,17 +1721,26 @@ def serial_for_socket(sock: str) -> str | None:
     """
     name = Path(sock).name
     _, marker, tail = name.partition(".sock.")
-    return tail or None if marker else None
+    # socket_path sanitises unsupported serial characters to `_`; that transform is not
+    # reversible. Never print a sanitized value as a real device selector.
+    return (tail or None) if marker and "_" not in tail else None
 
 
 def describe_socket(sock: str) -> dict[str, Any]:
     """A live daemon, named together with the command that would stop *it* specifically."""
     serial = serial_for_socket(sock)
-    pin = f"--serial {serial} " if serial else ""
+    if serial:
+        stop_command = f"aua --serial {serial} daemon stop"
+    elif "." in Path(sock).name:
+        import shlex
+
+        stop_command = f"AUA_DAEMON_SOCKET={shlex.quote(sock)} aua daemon stop"
+    else:
+        stop_command = "aua daemon stop"
     return {
         "serial": serial,
         "socket": sock,
-        "stop_command": f"aua {pin}daemon stop",
+        "stop_command": stop_command,
     }
 
 

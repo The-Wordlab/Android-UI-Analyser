@@ -33,8 +33,10 @@ uses to avoid accusing you of someone else's command.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
+import math
 import re
 import time
 from collections.abc import Callable
@@ -71,7 +73,22 @@ _UNSAFE = re.compile(r"[^A-Za-z0-9_.-]+")
 def _safe_key(value: str) -> str:
     """One filename component per caller. Owner labels carry pids and process names."""
     cleaned = _UNSAFE.sub("-", (value or "").strip()).strip("-")
-    return (cleaned or "anonymous")[:120]
+    cleaned = cleaned or "anonymous"
+    if len(cleaned) <= 120:
+        return cleaned
+    # Keeping only a prefix made two long owner identities share one latency history.  The
+    # readable prefix remains useful in diagnostics; the digest makes the truncation injective
+    # for practical purposes without changing existing short-key filenames.
+    digest = hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()[:16]
+    return f"{cleaned[:103]}-{digest}"
+
+
+def _finite_number(value: Any) -> float | None:
+    """Return a finite numeric value, rejecting JSON's non-standard NaN/Infinity tokens."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    numeric = float(value)
+    return numeric if math.isfinite(numeric) else None
 
 
 @dataclass(frozen=True)
@@ -102,7 +119,7 @@ class CallerProfile:
         the time, and here being too short costs a whole round trip *plus* an observation the
         app has already moved past, while being too long costs tool time nobody was using.
         """
-        if self.ema_ms is None:
+        if self.ema_ms is None or not math.isfinite(self.ema_ms + self.spread_ms):
             return 0
         return int(round(self.ema_ms + self.spread_ms + RECALL_TOOL_MS))
 
@@ -172,9 +189,10 @@ class CallerLatencyStore:
             self._write(record)
         fp = record.get("fingerprint")
         fp_at = record.get("fingerprint_at")
+        finite_fp_at = _finite_number(fp_at)
         age_ms = (
-            int((now - float(fp_at)) * 1000.0)
-            if isinstance(fp_at, (int, float)) and now >= float(fp_at)
+            int((now - finite_fp_at) * 1000.0)
+            if finite_fp_at is not None and now >= finite_fp_at
             else None
         )
         return CallerTurnFacts(
@@ -229,9 +247,10 @@ class CallerLatencyStore:
 
 def _classify(ended_at: Any, now: float) -> tuple[int | None, str | None]:
     """``(gap_ms, why_it_was_ignored)`` for the interval since the last call returned."""
-    if not isinstance(ended_at, (int, float)):
+    finite_ended_at = _finite_number(ended_at)
+    if finite_ended_at is None or not math.isfinite(now):
         return None, None
-    gap_ms = int(round((now - float(ended_at)) * 1000.0))
+    gap_ms = int(round((now - finite_ended_at) * 1000.0))
     if gap_ms < 0:
         # An NTP correction or a restored snapshot. Believing it would poison the EMA with a
         # negative think time, and there is no way to tell how much of the gap was real.
@@ -244,12 +263,11 @@ def _classify(ended_at: Any, now: float) -> tuple[int | None, str | None]:
 def _learn(record: dict[str, Any], gap_ms: int) -> None:
     """Fold one accepted gap into the EMA and its spread, in place."""
     alpha = 2.0 / (HALF_LIFE_SAMPLES + 1.0)
-    previous = record.get("ema_ms")
-    if isinstance(previous, (int, float)):
-        deviation = abs(gap_ms - float(previous))
-        spread = record.get("spread_ms")
-        prior_spread = float(spread) if isinstance(spread, (int, float)) else 0.0
-        record["ema_ms"] = alpha * gap_ms + (1.0 - alpha) * float(previous)
+    previous = _finite_number(record.get("ema_ms"))
+    if previous is not None:
+        deviation = abs(gap_ms - previous)
+        prior_spread = _finite_number(record.get("spread_ms")) or 0.0
+        record["ema_ms"] = alpha * gap_ms + (1.0 - alpha) * previous
         record["spread_ms"] = alpha * deviation + (1.0 - alpha) * prior_spread
     else:
         record["ema_ms"] = float(gap_ms)
@@ -261,12 +279,12 @@ def _learn(record: dict[str, Any], gap_ms: int) -> None:
 def _profile(
     record: dict[str, Any], *, gap_ms: int | None, gap_ignored: str | None
 ) -> CallerProfile:
-    ema = record.get("ema_ms")
-    spread = record.get("spread_ms")
+    ema = _finite_number(record.get("ema_ms"))
+    spread = _finite_number(record.get("spread_ms"))
     samples = record.get("samples")
     return CallerProfile(
-        ema_ms=float(ema) if isinstance(ema, (int, float)) else None,
-        spread_ms=float(spread) if isinstance(spread, (int, float)) else 0.0,
+        ema_ms=ema,
+        spread_ms=spread or 0.0,
         samples=int(samples) if isinstance(samples, int) else 0,
         gap_ms=gap_ms,
         gap_ignored=gap_ignored,

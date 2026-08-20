@@ -290,7 +290,7 @@ class JobManager:
             state.started_ms = int(time.time() * 1000)
             _event(state, "running", "worker started")
             _write(self.cache_dir, state)
-        self.engine._job_cancel_event = self._cancel
+        self.engine._job_context.cancel_event = self._cancel
         try:
             result = _execute(self.engine, state.operation, state.args)
             from .coaching import decorate_result
@@ -358,7 +358,8 @@ class JobManager:
                 _write(self.cache_dir, state)
                 if self._active_id == job_id:
                     self._active_id = None
-            self.engine._job_cancel_event = None
+            with contextlib.suppress(AttributeError):
+                del self.engine._job_context.cancel_event
 
     def status(self, job_id: str, *, recent_output: bool = False) -> dict[str, Any]:
         return self._public(self._load(job_id), recent_output=recent_output)
