@@ -806,6 +806,81 @@ def _wait_for_boot(shell: Callable[[str], str], *, timeout_s: float = 90.0) -> b
     return False
 
 
+def _clear_inherited_blackholed_proxy(
+    serial: str, *, cache_dir: str | Path
+) -> dict[str, Any]:
+    """Clear a confirmed dead proxy inherited from an AVD's persisted device state.
+
+    A read-only/parallel boot inherits Android's global ``http_proxy`` setting from the base
+    image, but it cannot inherit the host process or ``adb reverse`` tunnel that made that
+    setting useful.  When no AUA ownership record claims the endpoint and both reachability
+    checks are red, preserving it only guarantees that every app starts offline.  Clear that
+    one proven-safe state before an app can launch; never touch an owned, reachable foreign,
+    or externally-addressed proxy.
+
+    This lives in the Android virtual-device service rather than in the CLI so direct CLI,
+    MCP, and ``session start --start-emulator`` boots share the same recovery.
+    """
+    from . import proxy_mock
+
+    try:
+        before = proxy_mock.proxy_health(serial, cache_dir, self_heal=False)
+    except Exception as exc:  # pragma: no cover - defensive; boot must still be attributable
+        return {
+            "ok": False,
+            "checked": False,
+            "cleared": False,
+            "detail": f"could not inspect inherited proxy state: {exc}",
+        }
+
+    state_before = str(before.get("state") or "unknown")
+    result: dict[str, Any] = {
+        "ok": bool(before.get("ok", False)),
+        "checked": True,
+        "cleared": False,
+        "state_before": state_before,
+        "state_after": state_before,
+    }
+    if state_before != "blackholed" or before.get("owned") is not False:
+        result["detail"] = "inherited proxy state needed no automatic cleanup"
+        return result
+
+    shell = _serial_shell(serial)
+    # Match Device.set_http_proxy(None): ':0' clears on modern Android and deleting the key is
+    # the fallback.  Verification below is authoritative; command stdout is not.
+    shell("settings put global http_proxy :0")
+    shell("settings delete global http_proxy")
+    # A mismatched stale record can accompany an unowned target.  It cannot describe the
+    # endpoint the device was actually using, so retaining it would make the clean device look
+    # owned/degraded on its next status call.
+    proxy_mock.clear_state(serial)
+
+    try:
+        after = proxy_mock.proxy_health(serial, cache_dir, self_heal=False)
+    except Exception as exc:  # pragma: no cover - defensive
+        result.update(
+            ok=False,
+            detail=f"cleared inherited proxy setting but could not verify recovery: {exc}",
+        )
+        return result
+
+    state_after = str(after.get("state") or "unknown")
+    cleared = state_after == "unproxied"
+    result.update(
+        ok=cleared,
+        cleared=cleared,
+        state_after=state_after,
+        detail=(
+            "cleared an unowned blackholed proxy inherited from the AVD"
+            if cleared
+            else "attempted to clear an unowned blackholed proxy, but verification failed"
+        ),
+    )
+    if cleared:
+        logger.warning("cleared inherited blackholed proxy on %s before app launch", serial)
+    return result
+
+
 def _adb_emu_kill(serial: str) -> None:
     """Terminate one emulator. A named seam, so a test can stub it and MEAN it.
 
@@ -1080,6 +1155,12 @@ def start(
     # normal used-port detection takes over from here.
     release_console_port(console_port)
 
+    # Check once as soon as adb exposes the serial. Some images publish their persisted global
+    # settings this early, and removing a dead proxy before NetworkMonitor's first probe avoids
+    # a transient offline classification. Android may restore the setting later in boot, though,
+    # so the settled check below remains authoritative.
+    _clear_inherited_blackholed_proxy(serial, cache_dir=cache_dir)
+
     meta["serial"] = serial
     meta["last_activity"] = time.time()
     watchdog_pid = None
@@ -1090,6 +1171,13 @@ def start(
         )
         meta["watchdog_pid"] = watchdog_pid
     meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+    shell = _serial_shell(serial)
+    # `adb state=device` precedes Android restoring persisted global settings. The live failure
+    # behind this recovery read unproxied here, then became blackholed seconds later. Always wait
+    # for the settled boot and check again; this is the result exposed to callers.
+    _wait_for_boot(shell, timeout_s=min(90.0, wait_s))
+    proxy_cleanup = _clear_inherited_blackholed_proxy(serial, cache_dir=cache_dir)
+
     # Animations off by default. Measured on a windowed AVD: a tap settles in 272ms instead
     # of 357ms, and the spread narrows from 225ms to 69ms — the predictability matters more
     # than the mean, because every wait-for-settle is sized by the worst case. Scoped to an
@@ -1101,11 +1189,6 @@ def start(
         with contextlib.suppress(Exception):
             from . import devopts
 
-            shell = _serial_shell(serial)
-            # Wait for sys.boot_completed, not just adb `state=device`. Those are ~15s apart,
-            # and a `settings put` made in between is undone as the system finishes booting —
-            # which looked like success while the scales stayed at 1.0.
-            _wait_for_boot(shell, timeout_s=min(90.0, wait_s))
             state = devopts.anim_off(shell, _pid_dir(cache_dir) / f"{inst}.anim.json")
             # Read back rather than assume: claiming this without checking is the same
             # false-success the wait above was hiding.
@@ -1137,6 +1220,7 @@ def start(
         "headless": headless,
         "gpu": gpu_mode,
         "animations_disabled": animations_disabled,
+        "proxy_cleanup": proxy_cleanup,
         "idle_timeout_s": idle_timeout_s,
         "watchdog_pid": watchdog_pid,
         "log": str(log_path),

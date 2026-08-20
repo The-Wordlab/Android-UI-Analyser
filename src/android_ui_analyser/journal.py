@@ -2,7 +2,9 @@
 
 Every daemon dispatch and every in-process CLI ``_route`` writes one line under
 ``cache.dir/journal/<serial_or_host>.jsonl``. Dashboard tails it for live agent I/O.
-Secrets in args are redacted (password/token/key/secret/text bodies truncated).
+The compact journal stays small for polling; a separate bounded detail journal keeps the full
+request and response for on-demand dashboard expansion. Secrets, typed input, SQL, parameters,
+microphone speech, and audio paths remain redacted in both.
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ import logging
 import os
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +37,8 @@ _REDACT_KEYS = frozenset(
 _MAX_STR = 400
 _MAX_RESULT = 1200
 _MAX_FILE_BYTES = 8 * 1024 * 1024  # rotate soft-cap per serial file
+_MAX_DETAIL_FILE_BYTES = 32 * 1024 * 1024
+_INPUT_COMMANDS = frozenset({"input", "input_text", "input_and_analyze"})
 
 
 def journal_dir(cache_dir: str | Path) -> Path:
@@ -42,11 +47,19 @@ def journal_dir(cache_dir: str | Path) -> Path:
     return d
 
 
-def journal_path(cache_dir: str | Path, serial: str | None) -> Path:
+def _serial_key(serial: str | None) -> str:
     safe = "host"
     if serial:
         safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in serial)
-    return journal_dir(cache_dir) / f"{safe}.jsonl"
+    return safe
+
+
+def journal_path(cache_dir: str | Path, serial: str | None) -> Path:
+    return journal_dir(cache_dir) / f"{_serial_key(serial)}.jsonl"
+
+
+def journal_detail_path(cache_dir: str | Path, serial: str | None) -> Path:
+    return journal_dir(cache_dir) / f"{_serial_key(serial)}.details.jsonl"
 
 
 def _truncate(val: Any, limit: int = _MAX_STR) -> Any:
@@ -60,34 +73,236 @@ def _truncate(val: Any, limit: int = _MAX_STR) -> Any:
 
 
 def redact_args(args: dict[str, Any] | None, *, cmd: str | None = None) -> dict[str, Any]:
-    out: dict[str, Any] = {}
-    mic_speech_keys: frozenset[str] = frozenset()
-    mic_path_keys: frozenset[str] = frozenset()
-    if cmd == "mic_speak":
-        mic_speech_keys = frozenset({"text"})
-    elif cmd == "mic_speak_and_analyze":
-        mic_speech_keys = frozenset({"speech"})
-    if cmd in {"mic_inject", "mic_inject_and_analyze"}:
-        mic_path_keys = frozenset({"path", "wav_path"})
-    for k, v in (args or {}).items():
-        lk = str(k).lower()
-        if lk in mic_speech_keys and isinstance(v, str):
-            out[k] = f"<redacted speech: {len(v)} chars>"
-        elif lk in mic_path_keys and isinstance(v, (str, Path)):
-            out[k] = "<redacted audio path>"
-        elif lk == "sql" and isinstance(v, str):
-            out[k] = f"<redacted SQL: {len(v)} chars>"
-        elif (
-            lk in ("params", "parameters")
-            or lk in _REDACT_KEYS
-            or any(p in lk for p in ("password", "secret", "token"))
+    source = args or {}
+    sensitive_literals = frozenset(_detail_sensitive_literals(source, cmd=cmd))
+    safe = _detail_value(
+        source,
+        cmd=cmd,
+        request=True,
+        sensitive_literals=sensitive_literals,
+    )
+    if not isinstance(safe, dict):
+        return {}
+    # Preserve the compact feed's tighter top-level prose preview in addition
+    # to its general 400-character/collection bounds.
+    for key, value in safe.items():
+        if key in {"text", "body", "value"} and isinstance(value, str) and len(value) > 80:
+            safe[key] = value[:80] + "…"
+    return _truncate(safe)
+
+
+def _redacted_key(key: object) -> bool:
+    lowered = str(key).lower()
+    return lowered in _REDACT_KEYS or any(
+        part in lowered for part in ("password", "secret", "token")
+    )
+
+
+def _detail_sensitive_literals(
+    value: Any,
+    *,
+    cmd: str | None,
+    key: object | None = None,
+    depth: int = 0,
+) -> set[str]:
+    """Collect values that must also be scrubbed if a response echoes them elsewhere."""
+
+    def string_literals(nested_value: Any) -> set[str]:
+        if isinstance(nested_value, (str, Path, int, float, bool)):
+            return {str(nested_value)} if str(nested_value) else set()
+        if isinstance(nested_value, dict):
+            return {
+                literal
+                for child in nested_value.values()
+                for literal in string_literals(child)
+            }
+        if isinstance(nested_value, (list, tuple)):
+            return {
+                literal for child in nested_value for literal in string_literals(child)
+            }
+        return set()
+
+    found: set[str] = set()
+    lowered = str(key).lower() if key is not None else ""
+    mic_speech = depth == 1 and ((cmd == "mic_speak" and lowered == "text") or (
+        cmd == "mic_speak_and_analyze" and lowered == "speech"
+    ))
+    mic_path = depth == 1 and cmd in {
+        "mic_inject",
+        "mic_inject_and_analyze",
+    } and lowered in {
+        "path",
+        "wav_path",
+    }
+    typed_input = depth == 1 and cmd in _INPUT_COMMANDS and lowered in {
+        "text",
+        "value",
+    }
+    if (
+        _redacted_key(lowered)
+        or lowered in {"params", "parameters", "sql"}
+        or mic_speech
+        or mic_path
+        or typed_input
+    ):
+        found.update(string_literals(value))
+        return found
+    if isinstance(value, dict):
+        for nested_key, nested in value.items():
+            found.update(
+                _detail_sensitive_literals(
+                    nested,
+                    cmd=cmd,
+                    key=nested_key,
+                    depth=depth + 1,
+                )
+            )
+    elif isinstance(value, (list, tuple)):
+        for nested in value:
+            found.update(_detail_sensitive_literals(nested, cmd=cmd, depth=depth + 1))
+    return found
+
+
+def _detail_value(
+    value: Any,
+    *,
+    cmd: str | None,
+    request: bool,
+    key: object | None = None,
+    sensitive_literals: frozenset[str] = frozenset(),
+    depth: int = 0,
+) -> Any:
+    """Return an untruncated JSON-safe value while retaining journal redaction guarantees."""
+
+    if hasattr(value, "model_dump"):
+        with contextlib.suppress(Exception):
+            value = value.model_dump(mode="json")
+    lowered = str(key).lower() if key is not None else ""
+    if lowered == "sql" and isinstance(value, str):
+        return f"<redacted SQL: {len(value)} chars>"
+    if lowered in {"params", "parameters"} or _redacted_key(lowered):
+        return "<redacted>"
+    if request:
+        if depth == 1 and cmd in _INPUT_COMMANDS and lowered in {"text", "value"}:
+            return f"<redacted input: {len(str(value))} chars>"
+        if depth == 1 and (
+            (cmd == "mic_speak" and lowered == "text")
+            or (cmd == "mic_speak_and_analyze" and lowered == "speech")
         ):
-            out[k] = "<redacted>"
-        elif k in ("text", "body", "value") and isinstance(v, str) and len(v) > 80:
-            out[k] = v[:80] + "…"
-        else:
-            out[k] = _truncate(v)
-    return out
+            return f"<redacted speech: {len(str(value))} chars>"
+        if depth == 1 and cmd in {"mic_inject", "mic_inject_and_analyze"} and lowered in {
+            "path",
+            "wav_path",
+        }:
+            return "<redacted audio path>"
+    if isinstance(value, dict):
+        return {
+            str(nested_key): _detail_value(
+                nested,
+                cmd=cmd,
+                request=request,
+                key=nested_key,
+                sensitive_literals=sensitive_literals,
+                depth=depth + 1,
+            )
+            for nested_key, nested in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [
+            _detail_value(
+                nested,
+                cmd=cmd,
+                request=request,
+                sensitive_literals=sensitive_literals,
+                depth=depth + 1,
+            )
+            for nested in value
+        ]
+    if isinstance(value, bytes):
+        return f"<binary: {len(value)} bytes>"
+    if isinstance(value, Path):
+        value = str(value)
+    if isinstance(value, str) and sensitive_literals:
+        for literal in sorted(sensitive_literals, key=len, reverse=True):
+            if literal:
+                value = value.replace(literal, "<redacted>")
+        return value
+    if isinstance(value, (int, float, bool)) and str(value) in sensitive_literals:
+        return "<redacted>"
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _detail_record(
+    *,
+    detail_id: str,
+    ts_ms: int,
+    serial: str | None,
+    source: str,
+    cmd: str,
+    args: dict[str, Any] | None,
+    ok: bool,
+    result: Any,
+    error: dict[str, Any] | None,
+) -> dict[str, Any]:
+    literals = frozenset(_detail_sensitive_literals(args or {}, cmd=cmd))
+    private_mic_command = cmd in {
+        "mic_speak",
+        "mic_speak_and_analyze",
+        "mic_inject",
+        "mic_inject_and_analyze",
+    }
+    response: dict[str, Any] = {"ok": ok}
+    if result is not None:
+        detail_result = summarize_result(result) if private_mic_command else result
+        response["result"] = _detail_value(
+            detail_result,
+            cmd=cmd,
+            request=False,
+            sensitive_literals=literals,
+        )
+    if error is not None:
+        detail_error = (
+            summarize_error(error, cmd=cmd, args=args) if private_mic_command else error
+        )
+        response["error"] = _detail_value(
+            detail_error,
+            cmd=cmd,
+            request=False,
+            sensitive_literals=literals,
+        )
+    return {
+        "detail_id": detail_id,
+        "ts_ms": ts_ms,
+        "serial": serial,
+        "source": source,
+        "request": {
+            "cmd": cmd,
+            "args": _detail_value(
+                args or {},
+                cmd=cmd,
+                request=True,
+                sensitive_literals=literals,
+            ),
+        },
+        "response": response,
+    }
+
+
+def _rotate(path: Path, max_bytes: int) -> None:
+    if not path.is_file() or path.stat().st_size <= max_bytes:
+        return
+    rotated = path.with_suffix(path.suffix + ".1")
+    with contextlib.suppress(OSError):
+        rotated.unlink(missing_ok=True)
+    path.rename(rotated)
+
+
+def _append_private(path: Path, line: str) -> None:
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(descriptor, "a", encoding="utf-8") as file:
+        file.write(line)
 
 
 def summarize_result(result: Any) -> Any:
@@ -122,6 +337,7 @@ def summarize_result(result: Any) -> Any:
             "recommended_call",
             "goal_progress",
             "advice",
+            "stale_risk",
             "verified",
             "finished",
             "errors",
@@ -208,7 +424,7 @@ def record(
     error: dict[str, Any] | None = None,
     extra: dict[str, Any] | None = None,
     owner: str | None = None,
-) -> None:
+) -> str | None:
     """Append one journal event (best-effort; never raises into the caller).
 
     ``owner`` is the lease holder that ran the command. The journal is per-device and every
@@ -218,9 +434,12 @@ def record(
     """
     try:
         path = journal_path(cache_dir, serial)
+        now = time.time()
+        ts_ms = int(now * 1000)
+        detail_id = uuid.uuid4().hex
         event: dict[str, Any] = {
-            "ts": time.time(),
-            "ts_ms": int(time.time() * 1000),
+            "ts": now,
+            "ts_ms": ts_ms,
             "source": source,
             "cmd": cmd,
             "args": redact_args(args, cmd=cmd),
@@ -245,29 +464,59 @@ def record(
                 event[key] = correlation[key]
         if duration_ms is not None:
             event["duration_ms"] = round(float(duration_ms), 1)
+        sensitive_literals = frozenset(_detail_sensitive_literals(args or {}, cmd=cmd))
         if error:
-            event["error"] = summarize_error(error, cmd=cmd, args=args)
+            event["error"] = _detail_value(
+                summarize_error(error, cmd=cmd, args=args),
+                cmd=cmd,
+                request=False,
+                sensitive_literals=sensitive_literals,
+            )
         if result is not None:
-            event["result"] = summarize_result(result)
+            event["result"] = _detail_value(
+                summarize_result(result),
+                cmd=cmd,
+                request=False,
+                sensitive_literals=sensitive_literals,
+            )
         if correlation:
             event["extra"] = _truncate(correlation, 200)
-        line = json.dumps(event, ensure_ascii=False, default=str) + "\n"
+        detail = _detail_record(
+            detail_id=detail_id,
+            ts_ms=ts_ms,
+            serial=serial,
+            source=source,
+            cmd=cmd,
+            args=args,
+            ok=ok,
+            result=result,
+            error=error,
+        )
         with _lock:
-            if path.is_file() and path.stat().st_size > _MAX_FILE_BYTES:
-                rotated = path.with_suffix(".jsonl.1")
-                with contextlib.suppress(OSError):
-                    rotated.unlink(missing_ok=True)
-                with contextlib.suppress(OSError):
-                    path.rename(rotated)
-            with path.open("a", encoding="utf-8") as fh:
-                fh.write(line)
+            detail_path = journal_detail_path(cache_dir, serial)
+            detail_written = False
+            try:
+                _rotate(detail_path, _MAX_DETAIL_FILE_BYTES)
+                _append_private(
+                    detail_path,
+                    json.dumps(detail, ensure_ascii=False, default=str) + "\n",
+                )
+                event["detail_id"] = detail_id
+                detail_written = True
+            except OSError as exc:
+                logger.debug("journal detail write failed: %s", exc)
+            with contextlib.suppress(OSError):
+                _rotate(path, _MAX_FILE_BYTES)
+            _append_private(path, json.dumps(event, ensure_ascii=False, default=str) + "\n")
         # Keep headless idle-watchdog from auto-stopping mid-session.
         with contextlib.suppress(Exception):
             from .emulator import touch_activity
 
             touch_activity(cache_dir, serial)
+        return detail_id if detail_written else None
     except Exception as exc:  # noqa: BLE001
         logger.debug("journal write failed: %s", exc)
+        return None
 
 
 def read_since(
@@ -307,6 +556,102 @@ def read_since(
                 events.append(row)
     events.sort(key=lambda e: int(e.get("ts_ms") or 0))
     return events[-limit:]
+
+
+def read_detail(
+    cache_dir: str | Path,
+    serial: str | None,
+    detail_id: str,
+) -> dict[str, Any] | None:
+    """Read one full redacted exchange without adding it to the dashboard polling feed."""
+
+    if not detail_id:
+        return None
+    current_paths = [journal_detail_path(cache_dir, serial)]
+    host = journal_detail_path(cache_dir, None)
+    if host not in current_paths:
+        current_paths.append(host)
+    paths: list[Path] = []
+    for current in current_paths:
+        paths.extend((current, current.with_suffix(current.suffix + ".1")))
+    for path in paths:
+        if not path.is_file():
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in reversed(lines):
+            with contextlib.suppress(json.JSONDecodeError, TypeError):
+                row = json.loads(line)
+                if not isinstance(row, dict) or row.get("detail_id") != detail_id:
+                    continue
+                if serial and row.get("serial") not in (None, serial, ""):
+                    continue
+                return row
+    return None
+
+
+def record_emitted_response(
+    *,
+    cache_dir: str | Path,
+    serial: str | None,
+    invocation_id: str,
+    detail_id: str | None,
+    cmd: str,
+    args: dict[str, Any] | None,
+    result: Any,
+) -> bool:
+    """Append the final CLI-visible response to an existing exchange detail.
+
+    CLI output may adopt a ``--until`` observation and project element fields after the
+    engine or daemon has journaled its transport response. The compact event remains the
+    streaming index; appending the same detail id makes on-demand reads return the final
+    agent-visible payload without duplicating a polling row.
+    """
+
+    if not invocation_id or not cmd:
+        return False
+    try:
+        if not detail_id:
+            for event in reversed(
+                read_since(cache_dir, serial, limit=200, include_dashboard=True)
+            ):
+                if event.get("invocation_id") != invocation_id or event.get("cmd") != cmd:
+                    continue
+                candidate = event.get("detail_id")
+                if isinstance(candidate, str) and candidate:
+                    detail_id = candidate
+                    break
+        if detail_id is None:
+            return False
+        result_value = result
+        if hasattr(result_value, "model_dump"):
+            with contextlib.suppress(Exception):
+                result_value = result_value.model_dump(mode="json")
+        ok = not (isinstance(result_value, dict) and result_value.get("ok") is False)
+        revised = _detail_record(
+            detail_id=detail_id,
+            ts_ms=int(time.time() * 1000),
+            serial=serial,
+            source="cli",
+            cmd=cmd,
+            args=args,
+            ok=ok,
+            result=result_value,
+            error=None,
+        )
+        with _lock:
+            path = journal_detail_path(cache_dir, serial)
+            _rotate(path, _MAX_DETAIL_FILE_BYTES)
+            _append_private(
+                path,
+                json.dumps(revised, ensure_ascii=False, default=str) + "\n",
+            )
+        return True
+    except Exception as exc:  # noqa: BLE001 — journaling never changes command output
+        logger.debug("journal emitted-response write failed: %s", exc)
+        return False
 
 
 def failure_stats(events: list[dict[str, Any]]) -> dict[str, Any]:

@@ -89,7 +89,29 @@ def test_start_headless_waits_for_serial(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
     monkeypatch.setattr(emu.subprocess, "Popen", lambda *a, **k: FakeProc())
     monkeypatch.setattr(emu.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(emu, "_wait_for_boot", lambda *_a, **_k: True)
     monkeypatch.setattr(emu, "_spawn_idle_watchdog", lambda **k: 7777)
+    cleanup_calls: list[tuple[str, Path]] = []
+    cleanup_results = iter(
+        [
+            {"ok": True, "checked": True, "cleared": False, "state_before": "unproxied"},
+            {
+                "ok": True,
+                "checked": True,
+                "cleared": True,
+                "state_before": "blackholed",
+                "state_after": "unproxied",
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        emu,
+        "_clear_inherited_blackholed_proxy",
+        lambda serial, *, cache_dir: (
+            cleanup_calls.append((serial, Path(cache_dir)))
+            or next(cleanup_results)
+        ),
+    )
 
     out = emu.start(headless=True, wait_s=5, cache_dir=tmp_path)
     assert out["serial"] == "emulator-5554"
@@ -106,6 +128,11 @@ def test_start_headless_waits_for_serial(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert "-gpu" in meta["cmd"]
     assert "swiftshader_indirect" not in meta["cmd"]
     assert meta.get("started_by_aua") is True
+    assert cleanup_calls == [
+        ("emulator-5554", tmp_path),
+        ("emulator-5554", tmp_path),
+    ]
+    assert out["proxy_cleanup"]["cleared"] is True
 
 
 def test_start_idle_stop_zero_skips_watchdog(
@@ -140,8 +167,14 @@ def test_start_idle_stop_zero_skips_watchdog(
     spawned: list[Any] = []
     monkeypatch.setattr(emu.subprocess, "Popen", lambda *a, **k: FakeProc())
     monkeypatch.setattr(emu.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(emu, "_wait_for_boot", lambda *_a, **_k: True)
     monkeypatch.setattr(
         emu, "_spawn_idle_watchdog", lambda **k: spawned.append(k) or 1
+    )
+    monkeypatch.setattr(
+        emu,
+        "_clear_inherited_blackholed_proxy",
+        lambda *_a, **_k: {"ok": True, "checked": True, "cleared": False},
     )
 
     out = emu.start(headless=True, wait_s=5, cache_dir=tmp_path, idle_timeout_s=0)
@@ -187,7 +220,13 @@ def test_start_parallel_allocates_port_and_owner(
 
     monkeypatch.setattr(emu.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(emu.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(emu, "_wait_for_boot", lambda *_a, **_k: True)
     monkeypatch.setattr(emu, "_spawn_idle_watchdog", lambda **k: 7777)
+    monkeypatch.setattr(
+        emu,
+        "_clear_inherited_blackholed_proxy",
+        lambda *_a, **_k: {"ok": True, "checked": True, "cleared": False},
+    )
 
     out = emu.start(
         headless=True,
@@ -264,7 +303,13 @@ def test_parallel_second_instance_gets_next_port(
 
     monkeypatch.setattr(emu.subprocess, "Popen", lambda *a, **k: FakeProc())
     monkeypatch.setattr(emu.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(emu, "_wait_for_boot", lambda *_a, **_k: True)
     monkeypatch.setattr(emu, "_spawn_idle_watchdog", lambda **k: None)
+    monkeypatch.setattr(
+        emu,
+        "_clear_inherited_blackholed_proxy",
+        lambda *_a, **_k: {"ok": True, "checked": True, "cleared": False},
+    )
 
     out = emu.start(
         headless=True,
@@ -278,6 +323,94 @@ def test_parallel_second_instance_gets_next_port(
     assert out["serial"] == "emulator-5556"
     assert out["owner"] == "agent-b"
     assert (tmp_path / "emulator" / "only.p5556.json").is_file()
+
+
+def test_startup_clears_a_confirmed_unowned_blackholed_proxy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from android_ui_analyser import emulator as emu
+    from android_ui_analyser import proxy_mock
+
+    reports = iter(
+        [
+            {
+                "ok": False,
+                "state": "blackholed",
+                "owned": False,
+                "target": {"raw": "127.0.0.1:49097"},
+            },
+            {
+                "ok": True,
+                "state": "unproxied",
+                "owned": False,
+                "target": None,
+            },
+        ]
+    )
+    monkeypatch.setattr(proxy_mock, "proxy_health", lambda *_a, **_k: next(reports))
+    cleared_states: list[str] = []
+    monkeypatch.setattr(proxy_mock, "clear_state", lambda serial: cleared_states.append(serial))
+    shell_calls: list[str] = []
+    monkeypatch.setattr(emu, "_serial_shell", lambda _serial: lambda cmd: shell_calls.append(cmd) or "")
+
+    out = emu._clear_inherited_blackholed_proxy("emulator-5554", cache_dir=tmp_path)
+
+    assert out == {
+        "ok": True,
+        "checked": True,
+        "cleared": True,
+        "state_before": "blackholed",
+        "state_after": "unproxied",
+        "detail": "cleared an unowned blackholed proxy inherited from the AVD",
+    }
+    assert shell_calls == [
+        "settings put global http_proxy :0",
+        "settings delete global http_proxy",
+    ]
+    assert cleared_states == ["emulator-5554"]
+
+
+@pytest.mark.parametrize(
+    ("state", "owned", "ok"),
+    [
+        ("healthy", True, True),
+        ("degraded", True, False),
+        ("foreign", False, True),
+        ("unknown", False, False),
+        ("unproxied", False, True),
+    ],
+)
+def test_startup_preserves_every_proxy_that_is_not_unowned_and_blackholed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    state: str,
+    owned: bool,
+    ok: bool,
+) -> None:
+    from android_ui_analyser import emulator as emu
+    from android_ui_analyser import proxy_mock
+
+    monkeypatch.setattr(
+        proxy_mock,
+        "proxy_health",
+        lambda *_a, **_k: {"ok": ok, "state": state, "owned": owned},
+    )
+    monkeypatch.setattr(
+        emu,
+        "_serial_shell",
+        lambda _serial: pytest.fail("a preserved proxy must not be changed"),
+    )
+    monkeypatch.setattr(
+        proxy_mock,
+        "clear_state",
+        lambda _serial: pytest.fail("a preserved proxy must keep its ownership record"),
+    )
+
+    out = emu._clear_inherited_blackholed_proxy("emulator-5554", cache_dir=tmp_path)
+
+    assert out["cleared"] is False
+    assert out["state_before"] == state
+    assert out["state_after"] == state
 
 
 def test_stop_mine_scoped_by_owner(

@@ -14,9 +14,10 @@ import logging
 import os
 import shlex
 import sys
+import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
@@ -327,6 +328,7 @@ def _run(ctx: typer.Context, fn: Callable[[Engine, OutputFormat], T]) -> T:
     try:
         global _INVOCATION_ID
         _INVOCATION_ID = uuid.uuid4().hex
+        _CLI_JOURNAL_CONTEXTS.clear()
         cfg_fmt = opts.fmt()
         # A global --until is logically part of the action, so validate it before constructing
         # the engine or applying any side effect.  Previously the parser lived only inside
@@ -704,6 +706,63 @@ _EXPECTED_ERROR_CODE: str | None = None
 _EMITTED_FINGERPRINT: str | None = None
 
 
+@dataclass(frozen=True)
+class _CliJournalContext:
+    cache_dir: str | Path
+    serial: str | None
+    invocation_id: str
+    detail_id: str | None
+    cmd: str
+    args: dict[str, Any]
+
+
+_CLI_JOURNAL_CONTEXTS: dict[int, _CliJournalContext] = {}
+
+
+def _remember_cli_journal(
+    result: Any,
+    *,
+    engine: Engine,
+    cmd: str,
+    args: dict[str, Any],
+    serial: str | None,
+    detail_id: str | None = None,
+) -> Any:
+    """Associate a routed result with the journal row that produced it."""
+
+    if _INVOCATION_ID:
+        _CLI_JOURNAL_CONTEXTS[id(result)] = _CliJournalContext(
+            cache_dir=engine.config.cache.dir,
+            serial=serial,
+            invocation_id=_INVOCATION_ID,
+            detail_id=detail_id,
+            cmd=cmd,
+            args=dict(args),
+        )
+    return result
+
+
+def _take_cli_journal(result: Any) -> _CliJournalContext | None:
+    return _CLI_JOURNAL_CONTEXTS.pop(id(result), None)
+
+
+def _record_cli_emitted(context: _CliJournalContext | None, result: Any) -> None:
+    if context is None:
+        return
+    with contextlib.suppress(Exception):
+        from . import journal as journal_mod
+
+        journal_mod.record_emitted_response(
+            cache_dir=context.cache_dir,
+            serial=context.serial,
+            invocation_id=context.invocation_id,
+            detail_id=context.detail_id,
+            cmd=context.cmd,
+            args=context.args,
+            result=result,
+        )
+
+
 def _set_no_meta_observation_view(fmt: OutputFormat, enabled: bool) -> None:
     """Apply the familiar analyze ``--no-meta`` flag to a folded observation."""
     if not enabled:
@@ -832,6 +891,9 @@ def _await_until(result: Any) -> Any:
             observe=True,
             adopt_action=True,
         )
+        # This wait is folded into the action response below; it is journaled as its own
+        # internal row but is not itself emitted by the CLI.
+        _take_cli_journal(awaited)
     except AuaError:
         raise
     except Exception:  # pragma: no cover - the action already happened; never lose its result
@@ -879,8 +941,14 @@ def _await_until(result: Any) -> Any:
     return result
 
 
-def _emit(result: Any, fmt: OutputFormat) -> None:
+def _emit(
+    result: Any,
+    fmt: OutputFormat,
+    *,
+    _journal_context: _CliJournalContext | None = None,
+) -> None:
     """Render a pydantic result (``.render``) or a plain dict (daemon path) to stdout."""
+    journal_context = _journal_context or _take_cli_journal(result)
     if isinstance(result, dict):
         result = _rehydrate(result)
     result = _await_until(result)
@@ -902,14 +970,31 @@ def _emit(result: Any, fmt: OutputFormat) -> None:
     if fmt is OutputFormat.tsv:
         payload = projected if projected is not None else _action_dict(result)
         if payload is not None:
+            journal_payload = dict(payload)
+            if projected is None:
+                journal_payload = trim_observation_payload(
+                    journal_payload,
+                    _OBSERVATION_VIEW,
+                    fmt=OutputFormat.json,
+                )
+            _record_cli_emitted(journal_context, journal_payload)
             typer.echo(render_action_tsv(payload, _OBSERVATION_VIEW))
             return
     if projected is not None:
+        _record_cli_emitted(journal_context, projected)
         _echo_json(projected, fmt)
         return
     if hasattr(result, "render"):
-        typer.echo(result.render(fmt))
+        rendered = result.render(fmt)
+        emitted: Any = result
+        with contextlib.suppress(Exception):
+            import json
+
+            emitted = json.loads(rendered)
+        _record_cli_emitted(journal_context, emitted)
+        typer.echo(rendered)
         return
+    _record_cli_emitted(journal_context, result)
     _echo_json(result, fmt)
 
 
@@ -1107,15 +1192,22 @@ def _analyze_payload(result: Any) -> dict[str, Any] | None:
 
 def _emit_analyze(result: Any, fmt: OutputFormat, view: Projection) -> None:
     """Emit an analyze result, through *view* when it asked for anything."""
+    journal_context = _take_cli_journal(result)
     result = _caller_turn(result)
     payload = _analyze_payload(result) if view.active else None
     if payload is None:
-        _emit(result, fmt)
+        _emit(result, fmt, _journal_context=journal_context)
         return
     if view.tsv:
+        _record_cli_emitted(
+            journal_context,
+            view.apply(payload, fmt=OutputFormat.json),
+        )
         typer.echo(view.render_tsv(payload))
         return
-    _echo_json(view.apply(payload, fmt=fmt), fmt)
+    emitted = view.apply(payload, fmt=fmt)
+    _record_cli_emitted(journal_context, emitted)
+    _echo_json(emitted, fmt)
 
 
 # --------------------------------------------------------------------------- daemon route
@@ -1350,10 +1442,8 @@ def _replace_skewed_daemon(daemon_mod: Any, cfg: Any, ver: str) -> bool:
     if socket:
         from .atomic import atomic_write_text
 
-        with contextlib.suppress(OSError):
-            atomic_write_text(
-                _skew_backoff_path(socket), str(now + _SKEW_RESTART_COOLDOWN_S)
-            )
+        with contextlib.suppress(Exception):
+            atomic_write_text(_skew_backoff_path(socket), str(now + _SKEW_RESTART_COOLDOWN_S))
         logger.info(
             "a skew restart of %s did not take; not retrying for %.0fs",
             socket,
@@ -1430,12 +1520,12 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
             # (`aua daemon stop && aua daemon start`, no serial) stopped a socket nobody used.
             # Everything else restarted and went warm on the very next line.
             preserve_live_capture = bool(
-                skew
-                and method in _CAPTURE_READ_METHODS
-                and _capture_session_live(daemon_mod, cfg)
+                skew and method in _CAPTURE_READ_METHODS and _capture_session_live(daemon_mod, cfg)
             )
-            if skew and not preserve_live_capture and _replace_skewed_daemon(
-                daemon_mod, cfg, str(ver)
+            if (
+                skew
+                and not preserve_live_capture
+                and _replace_skewed_daemon(daemon_mod, cfg, str(ver))
             ):
                 ver = daemon_mod.running_version(cfg)
                 skew = False
@@ -1500,16 +1590,30 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
                 resp = client.call(cmd, **kwargs)
                 if resp.get("ok"):
                     if resp.get("response_decorated") is True:
-                        return resp.get("result")
-                    from .coaching import decorate_result
+                        result = resp.get("result")
+                    else:
+                        from .coaching import decorate_result
 
-                    # Compatibility fallback for an older daemon that ignored the request flag.
-                    return decorate_result(
-                        engine,
-                        cmd,
-                        resp.get("result"),
+                        # Compatibility fallback for an older daemon that ignored the request
+                        # flag.
+                        result = decorate_result(
+                            engine,
+                            cmd,
+                            resp.get("result"),
+                            args=kwargs,
+                            invocation_id=_INVOCATION_ID,
+                        )
+                    daemon_serial = (
+                        getattr(engine, "_lease_serial", None) or cfg.device.serial
+                    )
+                    detail_id = resp.get("journal_detail_id")
+                    return _remember_cli_journal(
+                        result,
+                        engine=engine,
+                        cmd=cmd,
                         args=kwargs,
-                        invocation_id=_INVOCATION_ID,
+                        serial=daemon_serial,
+                        detail_id=detail_id if isinstance(detail_id, str) else None,
                     )
                 raise _daemon_error(resp.get("error", {}))
         except AuaError:
@@ -1539,8 +1643,20 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
         if not host_only:
             _warm(engine)
         result = getattr(engine, method)(**kwargs)
+        from .coaching import decorate_result
+
+        result = decorate_result(
+            engine,
+            _DAEMON_CMD.get(method, method),
+            result,
+            args=kwargs,
+            current_recorded=False,
+            invocation_id=_INVOCATION_ID,
+            duration_ms=(time.monotonic() - t0) * 1000.0,
+        )
+        detail_id = None
         with contextlib.suppress(Exception):
-            journal_mod.record(
+            detail_id = journal_mod.record(
                 cache_dir=cfg.cache.dir,
                 serial=serial,
                 source="cli",
@@ -1563,15 +1679,13 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
                     ),
                 },
             )
-        from .coaching import decorate_result
-
-        return decorate_result(
-            engine,
-            _DAEMON_CMD.get(method, method),
+        return _remember_cli_journal(
             result,
+            engine=engine,
+            cmd=_DAEMON_CMD.get(method, method),
             args=kwargs,
-            invocation_id=_INVOCATION_ID,
-            duration_ms=(time.monotonic() - t0) * 1000.0,
+            serial=serial,
+            detail_id=detail_id,
         )
     except AuaError as err:
         with contextlib.suppress(Exception):
@@ -4076,6 +4190,83 @@ def _emulator_emit(payload: dict[str, Any], ctx: typer.Context) -> None:
     typer.echo(json.dumps(payload, indent=indent, separators=sep, ensure_ascii=False))
 
 
+_EMULATOR_PROGRESS_INTERVAL_S = 10.0
+
+
+@contextlib.contextmanager
+def _emulator_start_progress(
+    *,
+    avd: str | None,
+    headless: bool,
+    wait_s: float,
+    action: str = "emulator-start",
+) -> Iterator[None]:
+    """Keep a long emulator bootstrap visibly alive without polluting result stdout.
+
+    Agent shells commonly yield control while a command is still running. With no output,
+    that non-terminal yield looks enough like a completed empty command that a caller may start
+    a duplicate and then broadly clean up both. Progress is therefore unconditional, sent to
+    stderr, and says exactly how to continue. The final machine result remains the one JSON
+    document on stdout.
+    """
+    import json
+
+    started = time.monotonic()
+    stopped = threading.Event()
+    interval = max(0.01, float(_EMULATOR_PROGRESS_INTERVAL_S))
+
+    def emit(stage: str, message: str) -> None:
+        payload = {
+            "action": action,
+            "stage": stage,
+            "avd": avd or "auto",
+            "mode": "headless" if headless else "windowed",
+            "elapsed_s": round(max(0.0, time.monotonic() - started), 1),
+            "message": message,
+        }
+        with contextlib.suppress(OSError):
+            typer.echo(
+                "AUA_PROGRESS " + json.dumps(payload, separators=(",", ":"), ensure_ascii=False),
+                err=True,
+            )
+
+    emit(
+        "starting",
+        f"command is running and may take up to {int(wait_s)}s; if your runner yields, "
+        "poll the same process and do not start another emulator",
+    )
+
+    def heartbeat() -> None:
+        while not stopped.wait(interval):
+            emit(
+                "waiting",
+                "command is still running; keep polling the same process and do not retry",
+            )
+
+    thread = threading.Thread(
+        target=heartbeat,
+        name="aua-emulator-start-progress",
+        daemon=True,
+    )
+    thread.start()
+    outcome = "failed"
+    try:
+        yield
+        outcome = "completed"
+    except KeyboardInterrupt:
+        outcome = "cancelled"
+        raise
+    finally:
+        stopped.set()
+        thread.join(timeout=min(0.2, interval))
+        if outcome == "completed":
+            emit("completed", "startup completed; the final result follows on stdout")
+        elif outcome == "cancelled":
+            emit("cancelled", "startup was interrupted; no final result will be emitted")
+        else:
+            emit("failed", "startup failed; the structured error follows on stderr")
+
+
 @emulator_app.command("list")
 def emulator_list_cmd(ctx: typer.Context) -> None:
     """List configured AVDs (marks Play Store vs rootable Google APIs)."""
@@ -4140,12 +4331,13 @@ def emulator_ensure_proxy_cmd(
     try:
         payload = emulator_mod.ensure_proxy_avd(name=name, api=api, force=force)
         if start_after:
-            boot = emulator_mod.start(
-                name,
-                headless=True,
-                wait_s=float(wait),
-                cache_dir=cfg.cache.dir,
-            )
+            with _emulator_start_progress(avd=name, headless=True, wait_s=float(wait)):
+                boot = emulator_mod.start(
+                    name,
+                    headless=True,
+                    wait_s=float(wait),
+                    cache_dir=cfg.cache.dir,
+                )
             payload["started"] = boot
             payload["hint"] = (
                 f"Booted {boot.get('serial')}. Next: "
@@ -4258,6 +4450,10 @@ def emulator_start_cmd(
 
     With ``--apk … --launch`` this is the whole bootstrap in one call: boot, install the build if
     it is not already there, open it, and return the first screen with usable element ids.
+    Startup progress and ten-second heartbeats go to stderr; the final JSON stays on stdout.
+    If a runner yields while this command is active, poll that process instead of retrying it.
+    A confirmed unowned proxy black hole inherited from the AVD is cleared before app launch;
+    reachable foreign proxies and AUA-owned proxies are preserved.
     """
     opts = _opts(ctx)
     cfg = opts.load()
@@ -4270,26 +4466,27 @@ def emulator_start_cmd(
         emit_error(err)
         raise typer.Exit(int(err.exit_code))
     try:
-        booted = emulator_mod.start(
-            avd,
-            headless=headless,
-            animations=animations,
-            audio=audio,
-            wait_s=float(wait),
-            cache_dir=cfg.cache.dir,
-            gpu=gpu,
-            # No `if headless` gate: a windowed AVD nobody has touched for the timeout is just
-            # as forgotten as a headless one, and it was the case with no safety net at all.
-            idle_timeout_s=float(
-                idle_stop
-                if idle_stop is not None
-                else getattr(cfg.teardown, "emulator_idle_stop_s", 1200.0)
-            ),
-            parallel=parallel,
-            port=port,
-            read_only=read_only,
-            owner=owner,
-        )
+        with _emulator_start_progress(avd=avd, headless=headless, wait_s=float(wait)):
+            booted = emulator_mod.start(
+                avd,
+                headless=headless,
+                animations=animations,
+                audio=audio,
+                wait_s=float(wait),
+                cache_dir=cfg.cache.dir,
+                gpu=gpu,
+                # No `if headless` gate: a windowed AVD nobody has touched for the timeout is just
+                # as forgotten as a headless one, and it was the case with no safety net at all.
+                idle_timeout_s=float(
+                    idle_stop
+                    if idle_stop is not None
+                    else getattr(cfg.teardown, "emulator_idle_stop_s", 1200.0)
+                ),
+                parallel=parallel,
+                port=port,
+                read_only=read_only,
+                owner=owner,
+            )
         if apk:
             booted["install"] = _install_on_booted_emulator(
                 ctx,
@@ -4563,10 +4760,19 @@ def app_cmd(
                     hint="e.g. `aua app restart-and-analyze com.example.app "
                     "--activity .LaunchActivity`",
                 )
-            engine.app("stop", package=package, confirmed=yes, observe=False)
+            _route(
+                engine,
+                "app",
+                action="stop",
+                package=package,
+                confirmed=yes,
+                observe=False,
+            )
             _emit(
-                engine.app(
-                    "launch",
+                _route(
+                    engine,
+                    "app",
+                    action="launch",
                     package=package,
                     activity=activity,
                     clear_state=False,
@@ -4585,8 +4791,10 @@ def app_cmd(
                 "Then re-apply flag overrides / re-login before asserting experiment UI.",
             )
         _emit(
-            engine.app(
-                a,
+            _route(
+                engine,
+                "app",
+                action=a,
                 package=package,
                 activity=activity,
                 clear_state=clear_state,

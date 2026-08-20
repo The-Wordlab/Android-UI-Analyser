@@ -379,6 +379,200 @@ def test_warm_daemon_decorates_once_before_the_client_returns(tmp_path: Path, mo
     assert cli_mod._route(engine, "analyze") is warm_result
 
 
+def test_warm_daemon_detail_is_revised_at_cli_emit_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from android_ui_analyser import journal
+    from android_ui_analyser.schema import OutputFormat
+
+    config = _policy_config(tmp_path)
+    config.device.serial = "fictional-5554"
+    config.perf.auto_daemon = False
+    expected = daemon_mod.policy_config_fingerprint(config)
+    warm_result = {"ok": True, "agent_visible": "daemon response"}
+
+    class Client:
+        def __init__(self, _socket: str, **_kwargs: Any) -> None:
+            pass
+
+        def call(self, _command: str, **_kwargs: Any) -> dict[str, Any]:
+            return {
+                "ok": True,
+                "result": warm_result,
+                "response_decorated": True,
+                "journal_detail_id": "daemon-detail-id",
+            }
+
+    engine = SimpleNamespace(
+        config=config,
+        _lease_serial="fictional-5554",
+        _lease_owner=None,
+        _lease_owner_resolved=None,
+    )
+    revised: dict[str, Any] = {}
+    monkeypatch.setattr(daemon_mod, "is_running", lambda _config: True)
+    monkeypatch.setattr(daemon_mod, "running_version", lambda _config: daemon_mod._aua_version())
+    monkeypatch.setattr(daemon_mod, "running_policy_fingerprint", lambda _config: expected)
+    monkeypatch.setattr(daemon_mod, "DaemonClient", Client)
+    monkeypatch.setattr(
+        journal,
+        "record_emitted_response",
+        lambda **kwargs: revised.update(kwargs) or True,
+    )
+    monkeypatch.setattr(cli_mod, "_INVOCATION_ID", "daemon-visible-response")
+    monkeypatch.setattr(cli_mod, "_ENGINE", None)
+    monkeypatch.setattr(cli_mod, "_UNTIL", None)
+    monkeypatch.setattr(cli_mod, "_OBSERVATION_VIEW", None)
+    monkeypatch.setattr(cli_mod, "_ANNOTATION_WARNINGS", [])
+    cli_mod._CLI_JOURNAL_CONTEXTS.clear()
+
+    result = cli_mod._route(engine, "analyze")
+    cli_mod._emit(result, OutputFormat.json)
+
+    assert json.loads(capsys.readouterr().out) == warm_result
+    assert revised["detail_id"] == "daemon-detail-id"
+    assert revised["invocation_id"] == "daemon-visible-response"
+    assert revised["cmd"] == "analyze"
+    assert revised["result"] == warm_result
+
+
+def test_in_process_route_journals_the_decorated_agent_response(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from android_ui_analyser import coaching, journal
+
+    config = Config()
+    config.daemon.enabled = False
+    config.cache.dir = str(tmp_path)
+    config.device.serial = "fictional-5554"
+    raw = {"ok": True, "raw": True}
+    decorated = {"ok": True, "raw": True, "agent_visible": "decorated"}
+    engine = SimpleNamespace(
+        config=config,
+        device=SimpleNamespace(serial="fictional-5554"),
+        _lease_serial="fictional-5554",
+        _lease_owner_resolved="agent-a",
+        analyze=lambda: raw,
+    )
+    captured: dict[str, Any] = {}
+
+    def decorate(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        assert kwargs["current_recorded"] is False
+        return decorated
+
+    monkeypatch.setattr(cli_mod, "_warm", lambda _engine: None)
+    monkeypatch.setattr(coaching, "decorate_result", decorate)
+    monkeypatch.setattr(journal, "record", lambda **kwargs: captured.update(kwargs))
+
+    result = cli_mod._route(engine, "analyze")
+
+    assert result is decorated
+    assert captured["result"] is decorated
+
+
+def test_cli_detail_matches_projected_until_response_emitted_to_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from android_ui_analyser import coaching, journal
+    from android_ui_analyser.projection import Projection
+    from android_ui_analyser.schema import (
+        ActionResult,
+        AnalyzeResult,
+        Element,
+        Meta,
+        OutputFormat,
+        Screen,
+    )
+
+    def observation(text: str) -> AnalyzeResult:
+        return AnalyzeResult(
+            screen=Screen(
+                width=1080,
+                height=2400,
+                package="com.example",
+                source="hierarchy",
+            ),
+            elements=[
+                Element(
+                    id=7,
+                    type="Button",
+                    text=text,
+                    resource_id="com.example:id/continue",
+                    clickable=True,
+                    bounds=[0, 100, 500, 200],
+                    center=[250, 150],
+                    window="app",
+                )
+            ],
+            meta=Meta(duration_ms=3, tier_used="hierarchy", path="hierarchy"),
+        )
+
+    early = ActionResult(
+        ok=True,
+        action="tap",
+        id=7,
+        observation=observation("Early"),
+        observation_present=True,
+    )
+    arrived = ActionResult(
+        ok=True,
+        action="await-predicate",
+        observation=observation("Arrived"),
+        observation_present=True,
+        await_outcome="satisfied",
+        await_terms=[{"term": "text:Arrived", "satisfied": True}],
+        elapsed_ms=25,
+    )
+    config = Config()
+    config.daemon.enabled = False
+    config.cache.dir = str(tmp_path)
+    config.device.serial = "fictional-5554"
+    engine = SimpleNamespace(
+        config=config,
+        device=SimpleNamespace(serial="fictional-5554"),
+        _lease_serial="fictional-5554",
+        _lease_owner_resolved="agent-a",
+        tap=lambda **_kwargs: early,
+        await_predicate=lambda **_kwargs: arrived,
+    )
+
+    monkeypatch.setattr(cli_mod, "_warm", lambda _engine: None)
+    monkeypatch.setattr(
+        coaching,
+        "decorate_result",
+        lambda _engine, _cmd, result, **_kwargs: result,
+    )
+    monkeypatch.setattr(cli_mod, "_INVOCATION_ID", "cli-visible-response")
+    monkeypatch.setattr(cli_mod, "_ENGINE", engine)
+    monkeypatch.setattr(cli_mod, "_UNTIL", ("text:Arrived", 1_000, 50))
+    monkeypatch.setattr(
+        cli_mod,
+        "_OBSERVATION_VIEW",
+        Projection.for_observation("id,text"),
+    )
+    monkeypatch.setattr(cli_mod, "_ANNOTATION_WARNINGS", [])
+    cli_mod._CLI_JOURNAL_CONTEXTS.clear()
+
+    result = cli_mod._route(engine, "tap", element_id=7, observe=True)
+    cli_mod._emit(result, OutputFormat.json)
+
+    emitted = json.loads(capsys.readouterr().out)
+    event = next(
+        row
+        for row in journal.read_since(tmp_path, "fictional-5554", limit=10)
+        if row["cmd"] == "tap"
+    )
+    detail = journal.read_detail(tmp_path, "fictional-5554", event["detail_id"])
+    assert detail is not None
+    assert detail["response"]["result"] == emitted
+    assert emitted["await_outcome"] == "satisfied"
+    assert emitted["observation"]["elements"] == [{"id": 7, "text": "Arrived"}]
+
+
 def test_daemon_response_decoration_uses_the_warm_engine(monkeypatch) -> None:
     engine = SimpleNamespace(config=Config())
     calls: list[tuple[str, Any]] = []

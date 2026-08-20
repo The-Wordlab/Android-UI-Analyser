@@ -164,6 +164,14 @@ aua emulator start --headless --parallel --avd Pixel_7
 aua emulator stop --serial <serial> # or: AUA_OWNER=<owner> aua emulator stop --mine
 ```
 
+Each AUA-started emulator checks the inherited Android proxy setting before app launch. A proxy
+that is both unowned and confirmed blackholed (no reachable listener/tunnel) is cleared
+automatically; reachable foreign proxies and AUA-owned proxies are left intact.
+
+Long emulator boots emit `AUA_PROGRESS` records and ten-second heartbeats on stderr while keeping
+stdout reserved for the single final JSON result. If an agent shell yields a live process/session
+id, poll that same process; do not launch a duplicate `emulator start`.
+
 **HTTPS proxy / mock** needs a *rootable* Google APIs image — Google Play AVDs refuse `adb root`, so the mitm CA cannot be installed as a system trust and HTTPS recording stays empty:
 
 ```bash
@@ -1115,6 +1123,12 @@ aua dashboard --grid     # force grid even with one device
 ```
 
 The page live-polls capture frames + recent action marks. In a device detail view, the
+**Agent I/O journal** keeps rows compact while they stream; expand any row to inspect the full
+agent request and AUA response. Full payloads load only on demand, and credentials, SQL, bind
+parameters, typed input, microphone speech, and audio paths remain redacted. Events recorded by an
+older AUA version expand to the compact payload that was retained at the time.
+
+In the same detail view, the
 **App database workspace** discovers databases for the foreground package, browses schema,
 runs bounded read-only SQL, creates/lists restore points, and exposes guarded mutation and
 restore actions. Mutation requires typing `MUTATE <database>`; restore requires typing

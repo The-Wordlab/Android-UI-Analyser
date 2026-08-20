@@ -956,12 +956,12 @@ def _journal_dispatch(
     *,
     duration_ms: float,
     source: str = "daemon",
-) -> None:
+) -> str | None:
     cmd = str(request.get("cmd") or "")
     if request.get("journal") is False:
-        return
+        return None
     if cmd in {"ping", "capture_status"}:
-        return
+        return None
     serial = None
     with contextlib.suppress(Exception):
         serial = getattr(engine.device, "serial", None) if engine._device is not None else None
@@ -983,7 +983,7 @@ def _journal_dispatch(
                 "expected_error_matched": actual_error_code == expected_error_code,
             }
         )
-    journal_mod.record(
+    return journal_mod.record(
         cache_dir=engine.config.cache.dir,
         serial=serial,
         source=source,
@@ -1087,13 +1087,16 @@ def _handle_connection(
                     response,
                     duration_ms=duration_ms,
                 )
+                journal_detail_id = None
                 with contextlib.suppress(Exception):
-                    _journal_dispatch(
+                    journal_detail_id = _journal_dispatch(
                         engine,
                         request if isinstance(request, dict) else {},
                         response,
                         duration_ms=duration_ms,
                     )
+                if journal_detail_id:
+                    response["journal_detail_id"] = journal_detail_id
 
                 resp_bytes = json.dumps(response, ensure_ascii=False).encode() + b"\n"
                 conn.sendall(resp_bytes)

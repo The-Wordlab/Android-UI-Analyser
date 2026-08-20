@@ -29,6 +29,17 @@ logger = logging.getLogger(__name__)
 _DEFAULT_PORT = 8765
 
 
+def _script_json(value: Any) -> str:
+    """Serialize trusted bootstrap data without allowing an inline-script end tag."""
+
+    return (
+        json.dumps(value, ensure_ascii=False)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
+
+
 def _safe_serial(serial: str) -> str:
     return str(serial).replace(":", "_").replace("/", "_")
 
@@ -306,6 +317,24 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   #journal .args { color: var(--muted); }
   #journal .dur { color: var(--warn); margin-left: 0.35rem; }
   #journal .err { color: var(--danger); display: block; margin-top: 0.15rem; font-size: 0.72rem; }
+  #journal details > summary { cursor: pointer; line-height: 1.35; }
+  #journal details > summary::marker { color: var(--accent); }
+  #journal details[open] > summary { margin-bottom: 0.55rem; }
+  #journal .exchange {
+    display: grid; gap: 0.6rem; padding: 0.55rem; border: 1px solid var(--border);
+    border-radius: 6px; background: #0e1118;
+  }
+  #journal .exchange-section h3 {
+    margin: 0 0 0.3rem; color: var(--accent); font: 600 0.68rem ui-sans-serif, system-ui;
+    text-transform: uppercase; letter-spacing: 0.06em;
+  }
+  #journal .exchange pre {
+    margin: 0; max-height: 28rem; overflow: auto; padding: 0.55rem;
+    border-radius: 5px; background: #090b10; color: #cdd2db; font: inherit;
+    font-size: 0.7rem; line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere;
+    user-select: text;
+  }
+  #journal .detail-note { color: var(--muted); font: 0.68rem ui-sans-serif, system-ui; }
   .lower {
     display: grid; grid-template-columns: 1fr 1fr 1fr;
     gap: 0.85rem; padding: 0 0.85rem 0.85rem; max-width: 1600px; margin: 0 auto;
@@ -569,8 +598,8 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 <script nonce="__DATABASE_TOKEN__">
 const POLL_MS = __POLL_MS__;
 const MAP_MS = Math.max(POLL_MS * 4, 2000);
-const BOOT_MODE = '__MODE__';
-const BOOT_SERIAL = '__SERIAL__';
+const BOOT_MODE = __MODE_JSON__;
+const BOOT_SERIAL = __SERIAL_JSON__;
 const DATABASE_TOKEN = '__DATABASE_TOKEN__';
 const params = new URLSearchParams(location.search);
 const focusSerial = params.get('serial') || (BOOT_MODE === 'detail' ? BOOT_SERIAL : '');
@@ -637,8 +666,86 @@ function errText(err) {
   if (typeof err === 'string') return err;
   return err.message || err.detail || JSON.stringify(err);
 }
+function addEventText(parent, className, value) {
+  const span = document.createElement('span');
+  span.className = className;
+  span.textContent = value;
+  parent.appendChild(span);
+  return span;
+}
+function storedExchange(e) {
+  const response = {ok: e.ok !== false};
+  if (Object.prototype.hasOwnProperty.call(e, 'result')) response.result = e.result;
+  if (Object.prototype.hasOwnProperty.call(e, 'error')) response.error = e.error;
+  return {
+    request: {cmd: e.cmd || '?', args: e.args || {}},
+    response: response,
+  };
+}
+function prettyJson(value) {
+  try { return JSON.stringify(value, null, 2); }
+  catch (error) { return String(value); }
+}
+function renderExchange(panel, exchange, note) {
+  panel.textContent = '';
+  const requestSection = document.createElement('section');
+  requestSection.className = 'exchange-section';
+  const requestHeading = document.createElement('h3');
+  requestHeading.textContent = 'Agent request';
+  const requestPayload = document.createElement('pre');
+  requestPayload.className = 'request-payload';
+  requestPayload.textContent = prettyJson(exchange.request);
+  requestSection.append(requestHeading, requestPayload);
+  const responseSection = document.createElement('section');
+  responseSection.className = 'exchange-section';
+  const responseHeading = document.createElement('h3');
+  responseHeading.textContent = 'AUA response';
+  const responsePayload = document.createElement('pre');
+  responsePayload.className = 'response-payload';
+  responsePayload.textContent = prettyJson(exchange.response);
+  responseSection.append(responseHeading, responsePayload);
+  panel.append(requestSection, responseSection);
+  if (note) {
+    const noteElement = document.createElement('div');
+    noteElement.className = 'detail-note';
+    noteElement.textContent = note;
+    panel.appendChild(noteElement);
+  }
+}
+async function loadEventExchange(e, panel) {
+  if (!e.detail_id) {
+    renderExchange(
+      panel,
+      storedExchange(e),
+      'This older event predates full detail capture; showing the compact journaled payload.'
+    );
+    return;
+  }
+  panel.textContent = 'Loading full request and response…';
+  try {
+    const response = await fetch('/api/event' + qSerial({detail_id: e.detail_id}), {
+      cache: 'no-store',
+      headers: {'X-AUA-Dashboard-Token': DATABASE_TOKEN},
+    });
+    const payload = await response.json();
+    if (!response.ok || payload.ok === false || !payload.detail) {
+      throw new Error(payload.error || 'journal detail unavailable');
+    }
+    renderExchange(
+      panel,
+      payload.detail,
+      'Credentials, typed input, SQL, parameters, microphone speech, and audio paths stay redacted.'
+    );
+  } catch (error) {
+    renderExchange(
+      panel,
+      storedExchange(e),
+      'Full detail could not be loaded; showing the compact journaled payload.'
+    );
+  }
+}
 function prependEvent(e) {
-  const key = (e.ts_ms || 0) + ':' + (e.cmd || '') + ':' + (e.source || '') + ':' + (e.pid || '');
+  const key = e.detail_id || ((e.ts_ms || 0) + ':' + (e.cmd || '') + ':' + (e.source || '') + ':' + (e.pid || ''));
   if (seenKeys.has(key)) return;
   seenKeys.add(key);
   const empty = journalEl.querySelector('.empty');
@@ -646,16 +753,27 @@ function prependEvent(e) {
   const li = document.createElement('li');
   const ok = e.ok !== false;
   li.className = ok ? '' : 'fail';
-  const badge = '<span class="badge ' + (ok ? 'ok' : 'fail') + '">' + (ok ? 'ok' : 'fail') + '</span>';
-  const dur = e.duration_ms != null ? '<span class="dur">' + e.duration_ms + 'ms</span>' : '';
-  const args = argsSummary(e.args);
-  const err = !ok ? '<span class="err">' + errText(e.error) + '</span>' : '';
-  li.innerHTML =
-    '<span class="t">' + fmtTime(e.ts_ms) + '</span>' +
-    badge +
-    '<span class="cmd">' + (e.cmd || '?') + '</span> ' +
-    '<span class="args">' + args + '</span>' +
-    dur + err;
+  const details = document.createElement('details');
+  if (e.detail_id) details.dataset.detailId = e.detail_id;
+  const summary = document.createElement('summary');
+  addEventText(summary, 't', fmtTime(e.ts_ms));
+  addEventText(summary, 'badge ' + (ok ? 'ok' : 'fail'), ok ? 'ok' : 'fail');
+  addEventText(summary, 'cmd', e.cmd || '?');
+  summary.appendChild(document.createTextNode(' '));
+  addEventText(summary, 'args', argsSummary(e.args));
+  if (e.duration_ms != null) addEventText(summary, 'dur', e.duration_ms + 'ms');
+  if (!ok && e.error) addEventText(summary, 'err', errText(e.error));
+  const exchange = document.createElement('div');
+  exchange.className = 'exchange';
+  exchange.textContent = 'Expand to load the full request and response.';
+  let loaded = false;
+  details.addEventListener('toggle', () => {
+    if (!details.open || loaded) return;
+    loaded = true;
+    loadEventExchange(e, exchange);
+  });
+  details.append(summary, exchange);
+  li.appendChild(details);
   journalEl.insertBefore(li, journalEl.firstChild);
   while (journalEl.children.length > 200) journalEl.removeChild(journalEl.lastChild);
 }
@@ -1262,6 +1380,17 @@ class _DashboardState:
         via = ens.get("via")
         return str(via) if via else None
 
+    def _scoped_serial(self, serial: str | None) -> str:
+        selected = serial or self.focus
+        if not selected:
+            raise UsageError("dashboard request needs a device serial")
+        if selected not in self.serials:
+            raise UsageError(
+                f"device {selected!r} is not part of this dashboard session",
+                code="dashboard_device_scope",
+            )
+        return selected
+
     def _daemon_call(self, serial: str, cmd: str, timeout: float = 1.5) -> dict[str, Any] | None:
         try:
             from . import daemon as daemon_mod
@@ -1426,11 +1555,24 @@ class _DashboardState:
     ) -> dict[str, Any]:
         from . import journal as journal_mod
 
-        ser = serial or self.focus
+        ser = self._scoped_serial(serial)
         events = journal_mod.read_since(self.cache_dir, ser, since_ms=since_ms, limit=limit)
         window = journal_mod.read_since(self.cache_dir, ser, since_ms=None, limit=400)
         stats = journal_mod.failure_stats(window)
         return {"events": events, "stats": stats}
+
+    def journal_detail(
+        self, detail_id: str, serial: str | None = None
+    ) -> dict[str, Any] | None:
+        from . import journal as journal_mod
+
+        if not detail_id or len(detail_id) > 128 or not all(
+            char.isalnum() or char in "-_." for char in detail_id
+        ):
+            raise UsageError("invalid dashboard journal detail id")
+        return journal_mod.read_detail(
+            self.cache_dir, self._scoped_serial(serial), detail_id
+        )
 
     def map_payload(self, serial: str | None = None) -> dict[str, Any]:
         ser = serial or self.focus
@@ -1524,21 +1666,24 @@ class _DashboardState:
         }
 
     def devices_payload(self) -> dict[str, Any]:
-        # Refresh online list so tiles appear/disappear as agents start/stop.
-        online = list_online_serials(self.config)
-        known = list(dict.fromkeys([*self.serials, *online]))
-        self.serials = known
-        for ser in online:
-            if ser not in self.ensures:
-                with contextlib.suppress(Exception):
-                    self.ensures[ser] = ensure_capture(
-                        serial=ser,
-                        config=self.config,
-                        allow_sidecar=False,
-                    )
+        known = list(self.serials)
+        if self.mode == "grid":
+            # Grid dashboards intentionally discover devices as they appear. A
+            # detail dashboard stays scoped to the serial it was started for.
+            online = list_online_serials(self.config)
+            known = list(dict.fromkeys([*known, *online]))
+            self.serials = known
+            for ser in online:
+                if ser not in self.ensures:
+                    with contextlib.suppress(Exception):
+                        self.ensures[ser] = ensure_capture(
+                            serial=ser,
+                            config=self.config,
+                            allow_sidecar=False,
+                        )
         return {
             "ok": True,
-            "mode": "grid",
+            "mode": self.mode,
             "devices": [self.device_tile(s) for s in known],
         }
 
@@ -1686,18 +1831,28 @@ def _make_handler(state: _DashboardState) -> type[BaseHTTPRequestHandler]:
             raw = (qs.get("serial") or [""])[0].strip()
             return raw or state.focus
 
+        def _scoped_qs_serial(self, qs: dict[str, list[str]]) -> str | None:
+            try:
+                return state._scoped_serial(self._qs_serial(qs))
+            except UsageError as exc:
+                self._json({"ok": False, "error": str(exc)}, 400)
+                return None
+
         def do_GET(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
             path = parsed.path
             qs = parse_qs(parsed.query)
             if path in ("/", "/index.html"):
                 focus = (qs.get("serial") or [""])[0].strip()
+                if focus and focus not in state.serials:
+                    self._send(404, b"device not part of this dashboard session", "text/plain")
+                    return
                 mode = "detail" if focus else state.mode
-                serial_boot = focus or (state.focus or "")
+                serial_boot = state.focus or ""
                 html = (
                     _DASHBOARD_HTML.replace("__POLL_MS__", str(state.poll_ms))
-                    .replace("__MODE__", mode if focus else state.mode)
-                    .replace("__SERIAL__", serial_boot)
+                    .replace("__MODE_JSON__", _script_json(mode if focus else state.mode))
+                    .replace("__SERIAL_JSON__", _script_json(serial_boot))
                     .replace("__DATABASE_TOKEN__", state.database_token)
                 )
                 self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
@@ -1706,14 +1861,22 @@ def _make_handler(state: _DashboardState) -> type[BaseHTTPRequestHandler]:
                 self._json(state.devices_payload())
                 return
             if path == "/api/status":
-                self._json(state.status(self._qs_serial(qs)))
+                ser = self._scoped_qs_serial(qs)
+                if ser is None:
+                    return
+                self._json(state.status(ser))
                 return
             if path == "/api/frame.jpg":
-                data, mime = state.frame_bytes(self._qs_serial(qs))
+                ser = self._scoped_qs_serial(qs)
+                if ser is None:
+                    return
+                data, mime = state.frame_bytes(ser)
                 self._send(200, data, mime)
                 return
             if path == "/api/events":
-                ser = self._qs_serial(qs)
+                ser = self._scoped_qs_serial(qs)
+                if ser is None:
+                    return
                 since_raw = (qs.get("since_ms") or [""])[0]
                 limit_raw = (qs.get("limit") or ["150"])[0]
                 since_ms = int(since_raw) if since_raw.isdigit() else None
@@ -1724,14 +1887,49 @@ def _make_handler(state: _DashboardState) -> type[BaseHTTPRequestHandler]:
                 try:
                     bundle = state.journal_bundle(ser, since_ms=since_ms, limit=limit)
                     self._json({"ok": True, **bundle})
+                except UsageError as exc:
+                    self._json({"ok": False, "events": [], "stats": {}, "error": str(exc)}, 400)
                 except Exception as exc:  # noqa: BLE001
                     self._json({"ok": False, "events": [], "stats": {}, "error": str(exc)})
                 return
+            if path == "/api/event":
+                supplied = self.headers.get("X-AUA-Dashboard-Token", "")
+                if not secrets.compare_digest(supplied, state.database_token):
+                    self._json(
+                        {
+                            "ok": False,
+                            "error": {
+                                "code": "dashboard_token",
+                                "message": "invalid dashboard request token",
+                            },
+                        },
+                        403,
+                    )
+                    return
+                detail_id = (qs.get("detail_id") or [""])[0].strip()
+                ser = self._scoped_qs_serial(qs)
+                if ser is None:
+                    return
+                try:
+                    detail = state.journal_detail(detail_id, ser)
+                except UsageError as exc:
+                    self._json({"ok": False, "error": str(exc)}, 400)
+                    return
+                if detail is None:
+                    self._json({"ok": False, "error": "journal detail not found"}, 404)
+                    return
+                self._json({"ok": True, "detail": detail})
+                return
             if path == "/api/map":
-                self._json(state.map_payload(self._qs_serial(qs)))
+                ser = self._scoped_qs_serial(qs)
+                if ser is None:
+                    return
+                self._json(state.map_payload(ser))
                 return
             if path == "/api/logcat":
-                ser = self._qs_serial(qs)
+                ser = self._scoped_qs_serial(qs)
+                if ser is None:
+                    return
                 lines_raw = (qs.get("lines") or ["80"])[0]
                 try:
                     n = max(1, min(int(lines_raw), 500))
@@ -1740,9 +1938,8 @@ def _make_handler(state: _DashboardState) -> type[BaseHTTPRequestHandler]:
                 self._json({"ok": True, "lines": state.log_lines(ser, n) if ser else []})
                 return
             if path.startswith("/api/file"):
-                ser = self._qs_serial(qs)
-                if not ser:
-                    self._send(404, b"not found", "text/plain")
+                ser = self._scoped_qs_serial(qs)
+                if ser is None:
                     return
                 rel = (qs.get("path") or [""])[0]
                 root = captures_root(state.cache_dir, ser).resolve()

@@ -20,7 +20,9 @@ import pytest
 from typer.testing import CliRunner
 
 import android_ui_analyser.engine as engine_mod
+from android_ui_analyser import cli as cli_mod
 from android_ui_analyser.cli import app
+from android_ui_analyser.schema import ActionResult
 from conftest import FakeDevice
 
 runner = CliRunner()
@@ -88,3 +90,26 @@ def test_restart_without_a_package_says_so(calls: list[dict[str, Any]]) -> None:
     combined = result.output + str(result.stderr or "")
     assert "package" in combined, combined
     assert not calls, "nothing should have been done to the device"
+
+
+def test_plain_app_lifecycle_commands_use_the_shared_routed_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CLI app calls must reach daemon journaling/coaching like MCP and analyzed actions do."""
+    routed: list[dict[str, Any]] = []
+
+    def route(_engine: Any, method: str, **kwargs: Any) -> ActionResult:
+        routed.append({"method": method, **kwargs})
+        return ActionResult(ok=True, action=f"app-{kwargs['action']}")
+
+    monkeypatch.setattr(cli_mod, "_route", route)
+
+    stopped = runner.invoke(app, ["app", "stop", "com.example.app"])
+    launched = runner.invoke(app, ["app", "launch", "com.example.app"])
+
+    assert stopped.exit_code == 0, stopped.output
+    assert launched.exit_code == 0, launched.output
+    assert [(item["method"], item["action"]) for item in routed] == [
+        ("app", "stop"),
+        ("app", "launch"),
+    ]

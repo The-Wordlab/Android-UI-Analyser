@@ -2054,6 +2054,23 @@ def _base_command(value: Any) -> str:
     return aliases.get(command, command)
 
 
+def _result_has_reusable_observation(value: Any) -> bool:
+    """Whether a prior observation is safe to reuse instead of waiting for readiness."""
+    result = _mapping(value)
+    observation = result.get("observation")
+    if not isinstance(observation, dict):
+        return False
+    meta = _mapping(observation.get("meta"))
+    contract = _mapping(result.get("observation_contract"))
+    return not (
+        result.get("stale_risk")
+        or meta.get("stale_risk")
+        or result.get("observation_empty")
+        or result.get("settled_unmet")
+        or contract.get("reusable") is False
+    )
+
+
 def review_session_events(state: SessionState, events: Sequence[dict[str, Any]]) -> dict[str, Any]:
     """Classify avoidable call patterns without conflating concurrent owners."""
     scoped = [
@@ -2143,7 +2160,7 @@ def review_session_events(state: SessionState, events: Sequence[dict[str, Any]])
         base = _base_command(cmd)
         counts[cmd] = counts.get(cmd, 0) + 1
         prior_result = (previous or {}).get("result")
-        prior_observed = isinstance(prior_result, dict) and bool(prior_result.get("observation"))
+        prior_observed = _result_has_reusable_observation(prior_result)
         if base == "analyze" and prior_observed:
             avoidable["redundant_analyze"].append(
                 {"ts_ms": event.get("ts_ms"), "after": (previous or {}).get("cmd")}

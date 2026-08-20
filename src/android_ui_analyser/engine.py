@@ -159,7 +159,9 @@ _FLAGS_FOREGROUND_TIMEOUT_S = 6.0  # how long the relaunched app gets to reach t
 # Foreground ownership can lead accessibility-window attachment briefly on a cold launch. Retry
 # only while the requested package demonstrably remains foreground, and never beyond this budget.
 _LAUNCH_HIERARCHY_SETTLE_S = 2.0
+_LAUNCH_CONTENT_SETTLE_S = 5.0
 _LAUNCH_HIERARCHY_POLL_S = 0.05
+_GENERIC_LAUNCH_SHELL_RIDS = frozenset({"action_bar_root", "actionbar_root", "content"})
 # Terms that describe the surrounding UI rather than a user's intended control. A single match
 # on one of these is not enough to turn a visible multi-word control into an execution proposal.
 _GENERIC_MANUAL_MATCH_TERMS = frozenset(
@@ -3193,9 +3195,7 @@ class Engine:
         row = step.model_dump(exclude_none=True)
         default = self._HOST_STEP_TIMEOUT_MS.get(step.kind)
         if default is not None:
-            timeout_ms, _clamped_from, _ceiling = self._bounded_wait_ms(
-                step.timeout_ms or default
-            )
+            timeout_ms, _clamped_from, _ceiling = self._bounded_wait_ms(step.timeout_ms or default)
             row["timeout_ms"] = timeout_ms
         return row
 
@@ -9978,9 +9978,7 @@ class Engine:
         # T0→T3: OCR fallback (only on a hierarchy miss)
         if (src in ("auto", "vision")) and (ocr_fallback or src == "vision"):
             remaining_ms = (
-                max(0, int((deadline - time.monotonic()) * 1000))
-                if deadline is not None
-                else None
+                max(0, int((deadline - time.monotonic()) * 1000)) if deadline is not None else None
             )
             hit = (
                 self._ocr_contains(
@@ -10148,6 +10146,77 @@ class Engine:
         return obs
 
     @staticmethod
+    def _launch_observation_is_transitional(observation: AnalyzeResult) -> bool:
+        """Whether a launch readback contains only framework shell nodes.
+
+        Foreground ownership is not readiness.  Android can attach the Activity window before
+        the app has published any text, control, scroll surface, or app-authored container.  A
+        pixel-idle sample of that frame is still a loading frame, and advertising it as a fresh
+        reusable observation sends the caller into either dead ids or an unexplained extra wait.
+
+        Keep the test deliberately semantic and app-agnostic.  A known screen, any labelled or
+        interactive app node, or any non-generic app resource id is meaningful.  A canvas with no
+        accessible/vision content remains unproven, which is the honest result: a quiet root node
+        alone cannot establish that the rendered experience is ready.
+        """
+        if observation.meta.known_screen:
+            return False
+        own = [
+            element
+            for element in app_elements(observation.elements)
+            if element.window not in {"system", "ime", "overlay"}
+        ]
+        if not own:
+            return True
+        for element in own:
+            if (element.text or "").strip() or (element.content_desc or "").strip():
+                return False
+            if (
+                element.clickable
+                or element.focused
+                or element.checkable is True
+                or element.scrollable is True
+                or element.long_clickable is True
+            ):
+                return False
+            rid = (_id_tail(element.resource_id) or "").casefold()
+            if rid and rid not in _GENERIC_LAUNCH_SHELL_RIDS:
+                return False
+        return True
+
+    def _await_meaningful_launch_observation(
+        self, initial: AnalyzeResult
+    ) -> tuple[AnalyzeResult, int]:
+        """Poll one short internal window for app content after a shell-only launch frame."""
+        package = initial.screen.package
+        if not package:
+            return initial, 0
+        started = time.monotonic()
+        deadline = started + _LAUNCH_CONTENT_SETTLE_S
+        last = initial
+        while self._launch_observation_is_transitional(last):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(_LAUNCH_HIERARCHY_POLL_S, remaining))
+            with contextlib.suppress(Exception):
+                candidate = self.analyze(
+                    source="hierarchy",
+                    with_ocr=False,
+                    no_cache=True,
+                    record=False,
+                )
+                # Never replace an app-owned hierarchy with a transition owned by SystemUI or
+                # another app.  Package attachment races are handled by the existing typed
+                # launch-observation recovery path.
+                if candidate.screen.package == package:
+                    last = candidate
+                    if not self._launch_observation_is_transitional(last):
+                        self._write_cache(last)
+                        break
+        return last, int((time.monotonic() - started) * 1000)
+
+    @staticmethod
     def _change_has_semantic_effect(change: dict[str, Any] | None) -> bool:
         """Whether the readback names an effect beyond node/layout churn."""
         if not change:
@@ -10187,6 +10256,7 @@ class Engine:
         record_screen: bool = False,
         hierarchy_only: bool = False,
         adopt_action: bool = False,
+        finalize: bool = True,
     ) -> ActionResult:
         """Attach the post-action screen so callers skip a separate ``analyze`` round-trip.
 
@@ -10286,6 +10356,13 @@ class Engine:
                     )
                 else:
                     obs = self._analyze_post_action(with_image, record_screen=record_screen)
+                launch_content_wait_ms = 0
+                if (
+                    result.action == "app-launch"
+                    and obs.screen.package
+                    and self._launch_observation_is_transitional(obs)
+                ):
+                    obs, launch_content_wait_ms = self._await_meaningful_launch_observation(obs)
                 change: dict[str, Any] | None = None
                 if not hierarchy_only:
                     with contextlib.suppress(Exception):
@@ -10324,6 +10401,26 @@ class Engine:
                     destination_confirmed=destination_confirmed,
                     semantic_change_confirmed=self._change_has_semantic_effect(change),
                 )
+                launch_transitional = bool(
+                    result.action == "app-launch" and self._launch_observation_is_transitional(obs)
+                )
+                launch_content_ready = bool(
+                    result.action == "app-launch"
+                    and launch_content_wait_ms
+                    and not launch_transitional
+                )
+                if launch_transitional:
+                    caveat = (
+                        "the app reached the foreground, but launch produced only framework shell "
+                        "nodes and no meaningful app content. This observation is transitional, "
+                        "not arrival evidence. Use `aua wait-and-analyze --after-change` or wait "
+                        "for an exact destination predicate."
+                    )
+                elif launch_content_ready:
+                    # The initial pixel settle may have called the framework shell unchanged.
+                    # The bounded package-owned poll subsequently found semantic app content,
+                    # which is newer and stronger evidence than that early frame.
+                    caveat = None
                 if caveat:
                     obs.meta.stale_risk = caveat
                     # Also at the top level of the action result, because a runner reading only the
@@ -10335,8 +10432,10 @@ class Engine:
                     result.stale_risk = caveat
                 launch_next_actions_unstable = bool(
                     result.action == "app-launch"
+                    and not launch_content_ready
                     and (
-                        ready is None
+                        launch_transitional
+                        or ready is None
                         or ready.get("timeout")
                         or not ready.get("changed")
                         # hierarchy-fast proves departure from the old tree with one sample. It
@@ -10365,7 +10464,11 @@ class Engine:
                         settle_report["confirmation_ms"] = ready["confirmation_ms"]
                     if ready.get("semantic_confirmation") is not None:
                         settle_report["semantic_confirmation"] = ready["semantic_confirmation"]
+                    if launch_content_wait_ms:
+                        settle_report["content_ms"] = launch_content_wait_ms
                     result.settle = settle_report
+                elif launch_content_wait_ms:
+                    result.settle = {"content_ms": launch_content_wait_ms}
                 result.observation_present = True
                 result.next_actions = (
                     None if launch_next_actions_unstable else self._next_actions(obs)
@@ -10375,7 +10478,14 @@ class Engine:
                 result.known_screen = obs.meta.known_screen
                 result.stable_elements = self._stable_elements(obs.elements)
                 result.action_diff_summary = self._compact_action_diff(obs.meta.element_diff)
-                if launch_next_actions_unstable:
+                if launch_transitional:
+                    result.note = (
+                        "The app is foreground, but its launch readback contains only framework "
+                        "shell nodes, so it is not a settled/reusable destination. Run `aua "
+                        "wait-and-analyze --after-change` or wait for an exact destination "
+                        "predicate; do not act on ids from this frame."
+                    )
+                elif launch_next_actions_unstable:
                     result.note = (
                         "The app is foreground, but its launch screen has not produced a stable "
                         "readback yet, so numeric next actions are withheld. Run `aua analyze` "
@@ -10412,8 +10522,12 @@ class Engine:
         hint = self._capture_hint()
         if hint:
             result.capture_hint = hint
-        # Both on the way out, so every action carries them regardless of which branch ran:
-        # an honest wall time, and a flag when the screen handed back was blank.
+        if finalize:
+            result = self._finalize_observed_action(result)
+        return result
+
+    def _finalize_observed_action(self, result: ActionResult) -> ActionResult:
+        """Attach final timing/emptiness and journal the response the caller will receive."""
         result = self._note_empty_observation(result)
         if result.wall_ms is None:
             result.wall_ms = self._wall_ms()
@@ -10639,6 +10753,40 @@ class Engine:
         launched.stale_risk = fresh.meta.stale_risk
         launched.note = "No separate analyze needed; state is in observation."
 
+    def _mark_transitional_launch_observation(self, launched: ActionResult) -> None:
+        """Keep package-recovery paths from certifying a same-app shell as arrival."""
+        observation = launched.observation
+        if observation is None or not self._launch_observation_is_transitional(observation):
+            return
+        risk = (
+            "the app reached the foreground, but launch produced only framework shell nodes and "
+            "no meaningful app content. This observation is transitional, not arrival evidence. "
+            "Use `aua wait-and-analyze --after-change` or wait for an exact destination predicate."
+        )
+        observation.meta.stale_risk = risk
+        launched.stale_risk = risk
+        launched.next_actions = None
+        launched.note = (
+            "The app is foreground, but its launch readback contains only framework shell nodes, "
+            "so it is not a settled/reusable destination. Run `aua wait-and-analyze "
+            "--after-change` or wait for an exact destination predicate; do not act on ids from "
+            "this frame."
+        )
+
+    def _finish_launch_content_observation(self, launched: ActionResult) -> None:
+        """Handle shell-only readbacks after package attribution/recovery has completed."""
+        observation = launched.observation
+        already_waited = bool((launched.settle or {}).get("content_ms"))
+        if (
+            observation is not None
+            and self._launch_observation_is_transitional(observation)
+            and not already_waited
+        ):
+            fresh, waited_ms = self._await_meaningful_launch_observation(observation)
+            self._adopt_recovered_launch_observation(launched, fresh)
+            launched.settle = {**(launched.settle or {}), "content_ms": waited_ms}
+        self._mark_transitional_launch_observation(launched)
+
     def _hand_back_what_is_on_screen(
         self,
         *,
@@ -10841,9 +10989,7 @@ class Engine:
             return None
         previous = getattr(turn, "previous_fingerprint", None)
         cached = self._last_analyze_result
-        current = current_fingerprint or (
-            cached.meta.fingerprint if cached is not None else None
-        )
+        current = current_fingerprint or (cached.meta.fingerprint if cached is not None else None)
         if not previous or not current:
             return None
         return previous != current
@@ -10859,7 +11005,9 @@ class Engine:
         """
         from .perf import wait_ceiling_ms
 
-        return wait_ceiling_ms(int(self.config.perf.max_wait_ms), self.config, self._caller_profile())
+        return wait_ceiling_ms(
+            int(self.config.perf.max_wait_ms), self.config, self._caller_profile()
+        )
 
     def _bounded_wait_ms(self, requested_ms: int | None) -> tuple[int, int | None, int]:
         """Bound one observation wait to the ceiling, which is at most ``perf.max_wait_ms``.
@@ -12932,9 +13080,7 @@ class Engine:
                 self.key("back", observe=False, _hierarchy_settle=True)
                 via = "hardware"
             step_budget_ms = min(step_timeout_ms, remaining_ms)
-            step_deadline = min(
-                operation_deadline, time.monotonic() + (step_budget_ms / 1000.0)
-            )
+            step_deadline = min(operation_deadline, time.monotonic() + (step_budget_ms / 1000.0))
             current = wait_destination(step_budget_ms)
 
             # `await_predicate` deliberately returns screen-changed before trusting terms from
@@ -13122,23 +13268,23 @@ class Engine:
                 outcome = "satisfied" if satisfied else "timeout"
                 return self._say_the_wait_was_shortened(
                     ActionResult(
-                    ok=satisfied,
-                    action="await",
-                    detail=(
-                        f"{outcome} after {elapsed}ms ({checks} checks)"
-                        + ("" if satisfied else f"; current screen: {actual or 'unknown'}")
-                    ),
-                    observation=observation,
-                    observation_present=True,
-                    await_outcome=outcome,
-                    await_terms=[
-                        {
-                            "term": f"screen:{resolved_target}",
-                            "present": satisfied,
-                            "satisfied": satisfied,
-                        }
-                    ],
-                    elapsed_ms=elapsed,
+                        ok=satisfied,
+                        action="await",
+                        detail=(
+                            f"{outcome} after {elapsed}ms ({checks} checks)"
+                            + ("" if satisfied else f"; current screen: {actual or 'unknown'}")
+                        ),
+                        observation=observation,
+                        observation_present=True,
+                        await_outcome=outcome,
+                        await_terms=[
+                            {
+                                "term": f"screen:{resolved_target}",
+                                "present": satisfied,
+                                "satisfied": satisfied,
+                            }
+                        ],
+                        elapsed_ms=elapsed,
                     ),
                     clamped_from,
                     ceiling_ms,
@@ -16663,7 +16809,10 @@ class Engine:
             # package reached the foreground, so this adds the *screen* to that proof — the same
             # act-and-observe contract every other action honours.
             launched = self._observe(
-                ActionResult(ok=True, action="app-launch", detail=detail), observe, with_image
+                ActionResult(ok=True, action="app-launch", detail=detail),
+                observe,
+                with_image,
+                finalize=False,
             )
             if (
                 observe
@@ -16705,11 +16854,12 @@ class Engine:
                 # only inside a small bound; a persistent mismatch stays a typed failure.
                 fresh = self._await_launch_hierarchy(package)
                 self._adopt_recovered_launch_observation(launched, fresh)
+            self._finish_launch_content_observation(launched)
             if launch_note:
                 # `_observe` owns `note` when it attaches a screen, so the ambiguity warning is
                 # prepended afterwards rather than passed in — it must not be silently dropped.
                 launched.note = f"{launch_note} {launched.note}" if launched.note else launch_note
-            return launched
+            return self._finalize_observed_action(launched)
         if a in ("kill", "force-stop"):
             if not package:
                 raise UsageError("app kill needs a package name")

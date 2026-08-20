@@ -163,6 +163,20 @@ def test_dashboard_database_view_is_in_detail_html() -> None:
     assert "__DATABASE_TOKEN__" in dash._DASHBOARD_HTML
 
 
+def test_dashboard_journal_rows_expand_request_and_response_as_text() -> None:
+    from android_ui_analyser import dashboard as dash
+
+    assert "document.createElement('details')" in dash._DASHBOARD_HTML
+    assert "Agent request" in dash._DASHBOARD_HTML
+    assert "AUA response" in dash._DASHBOARD_HTML
+    assert "requestPayload.textContent" in dash._DASHBOARD_HTML
+    assert "responsePayload.textContent" in dash._DASHBOARD_HTML
+    assert "'/api/event'" in dash._DASHBOARD_HTML
+    assert "X-AUA-Dashboard-Token" in dash._DASHBOARD_HTML
+    assert "</script>" not in dash._script_json("</script><script>alert(1)</script>")
+    assert "\\u003c/script\\u003e" in dash._script_json("</script>")
+
+
 def test_dashboard_database_operations_delegate_and_require_typed_confirmation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -356,6 +370,132 @@ def test_dashboard_database_http_requires_session_token(tmp_path: Path) -> None:
             "action": "list",
             "package": "com.example.debug",
         }
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_dashboard_journal_detail_is_token_protected_and_serial_scoped(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from android_ui_analyser import dashboard as dash
+    from android_ui_analyser import journal
+
+    state = _dashboard_state(tmp_path)
+    state.database_token = "dashboard-test-token"
+    full_only = "full response payload " * 40
+    journal.record(
+        cache_dir=tmp_path,
+        serial="emulator-5554",
+        source="mcp",
+        cmd="analyze",
+        args={"source": "auto"},
+        result={
+            "ok": True,
+            "full_only": full_only,
+            "elements": [{"id": 1, "text": "Ready"}],
+        },
+    )
+    journal.record(
+        cache_dir=tmp_path,
+        serial="emulator-9999",
+        source="mcp",
+        cmd="analyze",
+        args={"source": "auto"},
+        result={"ok": True, "other_device_private": "must stay scoped"},
+    )
+    event = state.journal_bundle(limit=1)["events"][0]
+    detail_id = event["detail_id"]
+    other_detail_id = journal.read_since(tmp_path, "emulator-9999", limit=1)[0][
+        "detail_id"
+    ]
+    assert "full_only" not in event["result"]
+    monkeypatch.setattr(
+        dash,
+        "list_online_serials",
+        lambda _config=None: ["emulator-5554", "emulator-9999"],
+    )
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), dash._make_handler(state))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    root_url = f"http://127.0.0.1:{server.server_port}/"
+    detail_url = (
+        root_url
+        + f"api/event?detail_id={detail_id}&serial=emulator-5554"
+    )
+    try:
+        with urllib.request.urlopen(
+            root_url + "api/events?serial=emulator-5554&limit=1", timeout=2
+        ) as response:
+            compact = json.loads(response.read())
+        assert compact["events"][0]["detail_id"] == detail_id
+        assert full_only not in json.dumps(compact)
+
+        with pytest.raises(urllib.error.HTTPError) as unauthorized:
+            urllib.request.urlopen(detail_url, timeout=2)
+        assert unauthorized.value.code == 403
+
+        authorized = urllib.request.Request(
+            detail_url,
+            headers={"X-AUA-Dashboard-Token": state.database_token},
+        )
+        with urllib.request.urlopen(authorized, timeout=2) as response:
+            payload = json.loads(response.read())
+        assert payload["detail"]["request"] == {
+            "cmd": "analyze",
+            "args": {"source": "auto"},
+        }
+        assert payload["detail"]["response"]["result"]["full_only"] == full_only
+        assert payload["detail"]["response"]["result"]["elements"] == [
+            {"id": 1, "text": "Ready"}
+        ]
+
+        with urllib.request.urlopen(root_url + "api/devices", timeout=2) as response:
+            devices = json.loads(response.read())
+        assert devices["mode"] == "detail"
+        assert [device["serial"] for device in devices["devices"]] == ["emulator-5554"]
+        assert state.serials == ["emulator-5554"]
+
+        wrong_serial = urllib.request.Request(
+            root_url
+            + f"api/event?detail_id={other_detail_id}&serial=emulator-9999",
+            headers={"X-AUA-Dashboard-Token": state.database_token},
+        )
+        with pytest.raises(urllib.error.HTTPError) as not_found:
+            urllib.request.urlopen(wrong_serial, timeout=2)
+        assert not_found.value.code == 400
+
+        with pytest.raises(urllib.error.HTTPError) as events_out_of_scope:
+            urllib.request.urlopen(
+                root_url + "api/events?serial=emulator-9999&limit=1", timeout=2
+            )
+        assert events_out_of_scope.value.code == 400
+
+        with pytest.raises(urllib.error.HTTPError) as logs_out_of_scope:
+            urllib.request.urlopen(
+                root_url + "api/logcat?serial=emulator-9999", timeout=2
+            )
+        assert logs_out_of_scope.value.code == 400
+
+        injected_serial = (
+            root_url
+            + "?serial=%27%3BglobalThis.SERIAL_XSS%3Dtrue%3B%2F%2F"
+        )
+        with pytest.raises(urllib.error.HTTPError) as injected:
+            urllib.request.urlopen(injected_serial, timeout=2)
+        assert injected.value.code == 404
+        assert state.database_token not in injected.value.read().decode()
+
+        malformed = urllib.request.Request(
+            root_url + "api/event?detail_id=..%2F..%2Fprivate",
+            headers={"X-AUA-Dashboard-Token": state.database_token},
+        )
+        with pytest.raises(urllib.error.HTTPError) as invalid:
+            urllib.request.urlopen(malformed, timeout=2)
+        assert invalid.value.code == 400
     finally:
         server.shutdown()
         server.server_close()

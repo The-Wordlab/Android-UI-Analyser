@@ -1261,6 +1261,8 @@ def _tool_definitions() -> list[types.Tool]:
             name="emulator_start",
             description="Boot an AVD headless (default) for unattended verify. "
             "Use parallel=true when multiple agents share a host (unique port + read-only + owner). "
+            "Automatically clears a confirmed unowned proxy black hole inherited from the AVD; "
+            "reachable foreign and AUA-owned proxies are preserved. "
             "Pin later tools with configure/device serial from the response. "
             "REQUIRED: call emulator_stop when done (or stop_mine) — orphaned AVDs burn CPU. "
             "Idle auto-stop is only a safety net.",
@@ -3254,6 +3256,7 @@ def build_server(engine: Engine) -> Server:
         from . import journal as journal_mod
 
         args_in = dict(arguments or {})
+        journal_args = dict(args_in)
         phase_done = args_in.pop("phase_done", None)
         expected_error_code = args_in.pop("expect_error", None)
         annotation_warnings: list[dict[str, Any]] = []
@@ -3291,7 +3294,7 @@ def build_server(engine: Engine) -> Server:
                     serial=serial,
                     source="mcp",
                     cmd=name,
-                    args=args_in,
+                    args=journal_args,
                     ok=ok,
                     duration_ms=(time.monotonic() - started_at) * 1000.0,
                     result=payload,

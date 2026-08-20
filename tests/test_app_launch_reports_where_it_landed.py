@@ -20,6 +20,17 @@ from android_ui_analyser.schema import ActionResult
 from conftest import FakeDevice
 from test_memory import APPS, P, _engine
 
+SHELL_ONLY = (
+    '<hierarchy rotation="0">'
+    f'<node class="android.widget.LinearLayout" package="{P}" text="" '
+    f'resource-id="{P}:id/action_bar_root" clickable="false" enabled="true" '
+    'bounds="[0,0][1080,1920]">'
+    f'<node class="android.view.View" package="{P}" text="" '
+    'resource-id="android:id/content" clickable="false" enabled="true" '
+    'bounds="[0,0][1080,1920]"/>'
+    "</node></hierarchy>"
+)
+
 
 def test_launch_folds_in_the_screen_it_landed_on(tmp_path: Path) -> None:
     dev = FakeDevice(hierarchy_xml=APPS, package=P, serial="emu-launch")
@@ -29,6 +40,83 @@ def test_launch_folds_in_the_screen_it_landed_on(tmp_path: Path) -> None:
     assert r.ok and r.action == "app-launch"
     assert r.observation_present is True, "launch must say whether it observed"
     assert r.observation is not None and r.observation.elements, "and return the screen"
+
+
+def test_launch_waits_inside_the_same_call_for_content_after_a_shell_only_frame(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    dev = FakeDevice(hierarchy_xml=SHELL_ONLY, package=P, serial="emu-launch-shell-heals")
+    eng = _engine(tmp_path, dev)
+    shell = eng.analyze(source="hierarchy", with_ocr=False)
+    meaningful = shell.model_copy(deep=True)
+    meaningful.elements[1].resource_id = f"{P}:id/catalog"
+    meaningful.elements[1].text = "Catalog"
+    meaningful.elements[1].clickable = True
+    waited: list[Any] = []
+    monkeypatch.setattr(eng, "_analyze_post_action", lambda *_args, **_kwargs: shell)
+    monkeypatch.setattr(
+        eng,
+        "_await_meaningful_launch_observation",
+        lambda initial: waited.append(initial) or (meaningful, 240),
+    )
+
+    result = eng.app("launch", package=P)
+
+    assert waited == [shell]
+    assert result.observation is meaningful
+    assert result.stale_risk is None
+    assert result.next_actions is not None
+    assert result.note == "No separate analyze needed; state is in observation."
+    assert result.settle is not None and result.settle["content_ms"] == 240
+
+
+def test_launch_shell_timeout_is_explicitly_non_reusable(monkeypatch: Any, tmp_path: Path) -> None:
+    dev = FakeDevice(hierarchy_xml=SHELL_ONLY, package=P, serial="emu-launch-shell-stays")
+    eng = _engine(tmp_path, dev)
+    shell = eng.analyze(source="hierarchy", with_ocr=False)
+    monkeypatch.setattr(eng, "_analyze_post_action", lambda *_args, **_kwargs: shell)
+    monkeypatch.setattr(
+        eng,
+        "_await_meaningful_launch_observation",
+        lambda initial: (initial, 2_000),
+    )
+
+    result = eng.app("launch", package=P)
+
+    assert result.observation is shell
+    assert result.stale_risk and "transitional" in result.stale_risk
+    assert result.observation.meta.stale_risk == result.stale_risk
+    assert result.next_actions is None
+    assert result.note and "wait-and-analyze --after-change" in result.note
+    assert result.settle is not None and result.settle["content_ms"] == 2_000
+
+
+def test_unattributed_launch_shell_is_bound_then_waited_in_the_same_call(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    dev = FakeDevice(hierarchy_xml=SHELL_ONLY, package=P, serial="emu-launch-unattributed")
+    eng = _engine(tmp_path, dev)
+    shell = eng.analyze(source="hierarchy", with_ocr=False)
+    shell.screen.package = None
+    meaningful = shell.model_copy(deep=True)
+    meaningful.screen.package = P
+    meaningful.elements[1].resource_id = f"{P}:id/library"
+    meaningful.elements[1].text = "Library"
+    waited_packages: list[str | None] = []
+    monkeypatch.setattr(eng, "_analyze_post_action", lambda *_args, **_kwargs: shell)
+    monkeypatch.setattr(
+        eng,
+        "_await_meaningful_launch_observation",
+        lambda initial: waited_packages.append(initial.screen.package) or (meaningful, 360),
+    )
+
+    result = eng.app("launch", package=P)
+
+    assert waited_packages == [P], "foreground ownership must be bound before readiness polling"
+    assert result.observation is meaningful
+    assert result.stale_risk is None
+    assert result.settle is not None and result.settle["content_ms"] == 360
+    assert result.wall_ms is not None
 
 
 def test_launch_can_opt_out_of_observing(tmp_path: Path) -> None:

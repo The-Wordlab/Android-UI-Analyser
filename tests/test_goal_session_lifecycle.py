@@ -707,6 +707,42 @@ def test_review_counts_folded_until_as_one_call_and_reports_its_timeout(
     assert review["advice"][-1]["id"] == "exact_arrival_predicate"
 
 
+def test_review_does_not_penalize_wait_after_transitional_launch_observation(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    engine = _engine(tmp_path, "goal-launch-transition")
+    started = _start(engine, monkeypatch)
+    common = {
+        "cache_dir": engine.config.cache.dir,
+        "serial": engine.device.serial,
+        "source": "cli",
+        "owner": None,
+    }
+    risk = "launch produced only framework shell nodes; observation is transitional"
+    journal.record(
+        **common,
+        cmd="app_launch",
+        ok=True,
+        result={
+            "ok": True,
+            "action": "app-launch",
+            "stale_risk": risk,
+            "observation": {"elements": [], "meta": {"stale_risk": risk}},
+        },
+    )
+    journal.record(
+        **common,
+        cmd="wait",
+        ok=True,
+        result={"ok": True, "action": "wait", "observation": {"elements": []}},
+    )
+
+    review = engine.session_review(started["session_id"])
+
+    assert "wait_after_observed_action" not in review["patterns"]
+    assert not any(item["id"] == "fold_until" for item in review["advice"])
+
+
 def test_review_succeeds_while_reporting_run_failures_without_poisoning_itself(
     tmp_path: Path, monkeypatch: Any
 ) -> None:

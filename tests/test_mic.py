@@ -1999,9 +1999,17 @@ def test_mic_journal_redacts_speech_paths_and_summarizes_uncertain_observation(
 
     events = journal.read_since(tmp_path, "emulator-5554", limit=5)
     serialized = json.dumps(events)
+    details = [
+        journal.read_detail(tmp_path, "emulator-5554", event["detail_id"])
+        for event in events
+    ]
+    serialized_details = json.dumps(details)
     assert private_speech not in serialized
     assert private_path not in serialized
     assert private_screen_text not in serialized
+    assert private_speech not in serialized_details
+    assert private_path not in serialized_details
+    assert private_screen_text not in serialized_details
     assert events[0]["args"]["speech"] == f"<redacted speech: {len(private_speech)} chars>"
     assert events[0]["error"]["result"]["observation"]["elements_count"] == 1
     assert events[1]["args"]["wav_path"] == "<redacted audio path>"

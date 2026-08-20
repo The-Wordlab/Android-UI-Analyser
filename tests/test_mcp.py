@@ -742,6 +742,13 @@ def test_mcp_top_level_call_is_redacted_and_journaled(
     assert event["args"]["parameters"] == "<redacted>"
     assert event["extra"]["invocation_id"]
     assert event["result"]["ok"] is True
+    detail = journal.read_detail(
+        eng.config.cache.dir, eng.device.serial, event["detail_id"]
+    )
+    assert detail is not None
+    assert detail["request"]["args"]["sql"].startswith("<redacted SQL:")
+    assert detail["request"]["args"]["parameters"] == "<redacted>"
+    assert detail["response"]["result"] == {"ok": True, "rows": [["value"]]}
 
 
 def test_mcp_journal_marks_only_an_exact_expected_error_match(
@@ -770,6 +777,11 @@ def test_mcp_journal_marks_only_an_exact_expected_error_match(
     assert event["ok"] is False
     assert event["extra"]["expected_error_code"] == "usage"
     assert event["extra"]["expected_error_matched"] is True
+    detail = journal.read_detail(
+        eng.config.cache.dir, eng.device.serial, event["detail_id"]
+    )
+    assert detail is not None
+    assert detail["request"]["args"]["expect_error"] == "usage"
 
 
 def test_mcp_map_audit_and_reconcile_plan_roundtrip() -> None:
