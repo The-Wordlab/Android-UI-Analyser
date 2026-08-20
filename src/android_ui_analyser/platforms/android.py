@@ -32,9 +32,11 @@ def _runtime_emulator_capabilities(target_id: str) -> dict[str, bool]:
     """Visibility/audio facts for an emulator process, conservative when attribution is unclear."""
 
     if not target_id.startswith("emulator-"):
-        # A physical target has its own display/audio hardware; AUA does not need to provision a
-        # host window for it.
-        return {"headed": True, "audio": True}
+        # These requirements describe host-controlled virtual-device facilities. A USB phone's
+        # own display must never satisfy ``--headed``: that flag promises the caller an emulator
+        # window, and treating the handset as equivalent can fresh-install a QA build on a real
+        # device before the caller has any visible window to stop it.
+        return {"emulator": False, "headed": False, "audio": False}
     try:
         port = int(target_id.rsplit("-", 1)[1])
         result = subprocess.run(  # noqa: S603
@@ -45,7 +47,7 @@ def _runtime_emulator_capabilities(target_id: str) -> dict[str, bool]:
             check=False,
         )
     except Exception:
-        return {"headed": False, "audio": False}
+        return {"emulator": True, "headed": False, "audio": False}
     port_pattern = re.compile(rf"(?:^|\s)-port\s+{port}(?:\s|$)")
     command = next(
         (
@@ -58,8 +60,9 @@ def _runtime_emulator_capabilities(target_id: str) -> dict[str, bool]:
     if not command:
         # A default-port emulator may not disclose ``-port``. Unknown is not proof that it can
         # satisfy a requested visible/audio session, so AUA will provision a known-good instance.
-        return {"headed": False, "audio": False}
+        return {"emulator": True, "headed": False, "audio": False}
     return {
+        "emulator": True,
         "headed": "-no-window" not in command,
         "audio": "-no-audio" not in command,
     }
