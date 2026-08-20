@@ -2465,10 +2465,29 @@ def screenshot(
     """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
+        def emit_captured(captured: Any) -> None:
+            journal_context = _take_cli_journal(captured)
+            ok = captured.get("ok") if isinstance(captured, dict) else captured.ok
+            action = (
+                captured.get("action") if isinstance(captured, dict) else captured.action
+            )
+            detail = (
+                captured.get("detail") if isinstance(captured, dict) else captured.detail
+            )
+            # Routing decoration belongs to the daemon/session journal, but screenshot's public
+            # response has always been the three-field ActionResult. Rebuild that response so
+            # fixing the transport does not silently change the CLI contract.
+            emitted = ActionResult(
+                ok=bool(ok),
+                action=str(action or "screenshot"),
+                detail=str(detail) if detail is not None else None,
+            )
+            _emit(emitted, fmt, _journal_context=journal_context)
+
         target = out or path
         narrowed = region is not None or scale is not None or max_width is not None
         if not narrowed:
-            _emit(engine.screenshot(target, annotate=annotate), fmt)
+            emit_captured(_route(engine, "screenshot", path=target, annotate=annotate))
             return
         if annotate:
             raise UsageError(
@@ -2476,15 +2495,26 @@ def screenshot(
                 hint="Marks are placed in full-screen coordinates; crop a plain screenshot.",
             )
         from . import imaging
+        from .providers.base import ScreenImage
 
         box = imaging.parse_region(region) if region else None
+        captured = _route(engine, "screenshot", path=target, annotate=False)
+        captured_path = (
+            captured.get("detail")
+            if isinstance(captured, dict)
+            else getattr(captured, "detail", None)
+        )
+        if not isinstance(captured_path, str) or not captured_path:
+            raise DeviceError("screenshot did not return a readable output path")
+        raw = Path(captured_path).read_bytes()
         view = imaging.crop_and_scale(
-            engine.device.screenshot(), region=box, scale=scale, max_width=max_width
+            ScreenImage(raw, path=captured_path),
+            region=box,
+            scale=scale,
+            max_width=max_width,
         )
-        saved = view.save(
-            target or imaging.capture_path(engine.config.cache.dir, engine.device.serial)
-        )
-        _emit(ActionResult(ok=True, action="screenshot", detail=saved), fmt)
+        view.save(captured_path)
+        emit_captured(captured)
 
     _run(ctx, go)
 
