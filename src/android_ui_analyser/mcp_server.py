@@ -494,8 +494,9 @@ def _tool_definitions() -> list[types.Tool]:
         types.Tool(
             name="session_finish",
             description=(
-                "Finish the session, restore session-owned reversible state, stop only emulators "
-                "started by it, and return the final efficiency review."
+                "Finish the session, restore session-owned reversible state, release its lease, "
+                "keep an AUA-started emulator warm until the lease-gated idle timeout, and return "
+                "the final efficiency review."
             ),
             inputSchema={
                 "type": "object",
@@ -2513,18 +2514,7 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         finish_kwargs: dict[str, Any] = {"session_id": args.get("session_id")}
         if "allow_incomplete" in args:
             finish_kwargs["allow_incomplete"] = bool(args["allow_incomplete"])
-        finished = _dump(_engine_method(engine, "session_finish")(**finish_kwargs))
-        if isinstance(finished, dict):
-            for item in finished.get("cleanup") or []:
-                if not isinstance(item, dict) or item.get("action") != "owned_emulator_stop":
-                    continue
-                result = item.get("result")
-                if not isinstance(result, dict):
-                    continue
-                for serial in result.get("stopped") or []:
-                    if isinstance(serial, str):
-                        _mcp_started_serials().discard(serial)
-        return finished
+        return _dump(_engine_method(engine, "session_finish")(**finish_kwargs))
     if name == "session_candidate_flow":
         return _dump(
             _engine_method(engine, "session_candidate_flow")(

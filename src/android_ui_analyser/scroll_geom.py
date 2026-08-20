@@ -120,3 +120,35 @@ def travel(before: Sample, after: Sample) -> tuple[int, int, bool]:
     dx = _median([b_pos[k][0] - a_pos[k][0] for k in shared]) if shared else 0
     dy = _median([b_pos[k][1] - a_pos[k][1] for k in shared]) if shared else 0
     return dx, dy, moved
+
+
+def scroll_movement(
+    before: Sample,
+    after: Sample,
+    direction: str,
+    *,
+    allow_content_turnover: bool = False,
+) -> tuple[int, bool, str | None]:
+    """Classify a post-swipe sample as ``(axis_distance, moved, evidence)``.
+
+    A measurable shift of shared labels is the strongest evidence. Some virtualized grids keep
+    sticky tabs/headings at fixed coordinates while replacing every visible card, though, so
+    their shared-label median is zero even after a real scroll. Inside a hierarchy-declared
+    scrollable container, removing and adding at least two labels is independent evidence of
+    content turnover. Requiring turnover on both sides keeps a one-off toast, loading badge, or
+    ripple from turning a no-op into a successful scroll.
+    """
+    dx, dy, changed = travel(before, after)
+    distance = dx if direction in ("left", "right") else dy
+    if distance:
+        return distance, True, "axis-shift"
+    if not changed or not allow_content_turnover:
+        return 0, False, None
+
+    before_labels = Counter(label for label, _x, _y in before)
+    after_labels = Counter(label for label, _x, _y in after)
+    removed = sum((before_labels - after_labels).values())
+    added = sum((after_labels - before_labels).values())
+    if removed >= 2 and added >= 2:
+        return 0, True, "content-turnover"
+    return 0, False, None

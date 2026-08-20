@@ -113,8 +113,8 @@ from .scroll_geom import (
     Sample,
     _contains,
     region_probe,
+    scroll_movement,
     scrollable_boxes,
-    travel,
 )
 from .selectors import (
     _MAX_CANDIDATES,
@@ -7331,7 +7331,7 @@ class Engine:
             cleanup=[
                 "network_restore",
                 "network_profile_restore",
-                *(["owned_emulator_stop"] if emulator_started else []),
+                *(["owned_emulator_handoff"] if emulator_started else []),
             ],
             cleanup_call={
                 "cli": "aua session finish",
@@ -7341,8 +7341,9 @@ class Engine:
                 },
                 "reason": (
                     "Run this once when finished. It restores only session-owned reversible "
-                    "state and returns the efficiency review; do not restore the network "
-                    "separately first."
+                    "state, releases the device lease, and returns the efficiency review. "
+                    "An AUA-started emulator remains warm until its lease-gated idle timeout; "
+                    "do not restore the network separately first."
                 ),
             },
             emulator_started=emulator_started,
@@ -9442,38 +9443,11 @@ class Engine:
             restore("network_restore", self.network_restore)
 
         lease_owner = getattr(self, "_lease_owner_resolved", None)
-        if state.emulator_started:
-            emulator_mod = self.platform.capability("virtual_devices")
-
-            # Network restoration above still needs the command's shared device fence. The
-            # stop below needs the exclusive transition fence so another process cannot
-            # acquire between its lease check and kill; release the shared fence first.
-            self.release_device_use()
-            stopped = restore(
-                "owned_emulator_stop",
-                lambda: emulator_mod.stop(
-                    serial=state.serial,
-                    cache_dir=self.config.cache.dir,
-                    requested_by="session-finish",
-                    # The session's own lease authorises this stop; a live lease held by
-                    # anyone else (e.g. after a handoff) makes the device untouchable.
-                    lease_registry_dir=self._lease_registry_dir,
-                    lease_owner=lease_owner or state.owner,
-                ),
-            )
-            stopped_serials = stopped.get("stopped", []) if stopped is not None else []
-            if (
-                state.serial in stopped_serials
-                and self._device is not None
-                and self._device.serial == state.serial
-            ):
-                # Closing is tied to the owned stop itself, not unrelated restore errors. A
-                # failed network cleanup must never leave a dead emulator cached in this Engine.
-                self.close()
-
         # A completed session is also the ownership boundary. Release after every device cleanup
         # action, and drop the command fence first so the lease transition can take its exclusive
         # lock. Failed cleanup deliberately keeps the lease, allowing the same process to retry.
+        # A healthy AUA-started emulator is handed to the warm pool rather than stopped here; its
+        # detached, lease-gated idle watchdog owns eventual retirement.
         lease_serial = getattr(self, "_lease_serial", None)
         if not errors and lease_serial == state.serial and lease_owner:
             from . import leases
@@ -9496,6 +9470,24 @@ class Engine:
                 self._leased_serial_resolved = None
                 self._lease_owner_resolved = None
                 self._lease_generation_resolved = None
+                if state.emulator_started:
+                    idle_stop_s = float(
+                        getattr(self.config.teardown, "emulator_idle_stop_s", 1200.0)
+                    )
+                    cleanup.append(
+                        {
+                            "action": "owned_emulator_handoff",
+                            "ok": True,
+                            "result": {
+                                "ok": True,
+                                "serial": state.serial,
+                                "retained": True,
+                                "leased": False,
+                                "auto_stop": idle_stop_s > 0,
+                                "idle_stop_s": idle_stop_s,
+                            },
+                        }
+                    )
             else:
                 errors.append(
                     {"action": "lease_release", "message": "session lease was not released"}
@@ -9519,9 +9511,11 @@ class Engine:
             "review": review,
             "hint": (
                 (
-                    "session completed; only session-owned reversible state was restored"
+                    "session completed; session-owned state was restored, the lease was "
+                    "released, and any AUA-started emulator was handed to the warm pool"
                     if progress["done"]
-                    else "session terminated and cleanup completed; unfinished goal phases remain incomplete"
+                    else "session terminated, cleanup completed, and the lease was released; "
+                    "unfinished goal phases remain incomplete"
                 )
                 if not errors
                 else "cleanup is incomplete; fix the reported device access and run session finish again"
@@ -12864,23 +12858,34 @@ class Engine:
     def _probe(self, box: Box) -> Sample:
         return region_probe(self._dump(), box, ignore_packages=self.config.memory.ignore_packages)
 
-    def _swipe_once(self, box: Box, direction: str, percent: int) -> tuple[int, bool]:
-        """One verified swipe inside *box*: ``(distance_along_axis, scrolled)``.
+    def _swipe_once(
+        self,
+        box: Box,
+        direction: str,
+        percent: int,
+        *,
+        allow_content_turnover: bool = False,
+    ) -> tuple[int, bool, str | None]:
+        """One verified swipe: ``(distance_along_axis, scrolled, evidence)``.
 
         ``travel``'s own ``moved`` is "the sample differs at all" — a repaint, a ripple, or an
         element appearing all set it, none of which mean the content scrolled. Reporting that
         as movement is how `scroll --direction down` came to answer ``moved steps=1`` with no
-        distance at the very top of a list, where scrolling further is impossible. The verdict
-        is therefore the measured shift ALONG THE AXIS the caller asked about; a changed sample
-        with zero shift is honestly "did not scroll".
+        distance at the very top of a list, where scrolling further is impossible. A measurable
+        shift along the requested axis remains the primary verdict. For hierarchy-declared
+        scrollable containers, substantial removal *and* addition of labels also proves a
+        virtualized grid turned over even when sticky labels keep the median shift at zero.
         """
         before = self._probe(box)
         x1, y1, x2, y2 = self._swipe_path(box, direction, percent)
         self.device.swipe(x1, y1, x2, y2)
         self._settle_after_swipe()
-        dx, dy, _changed = travel(before, self._probe(box))
-        distance = dx if direction in ("left", "right") else dy
-        return distance, bool(distance)
+        return scroll_movement(
+            before,
+            self._probe(box),
+            direction,
+            allow_content_turnover=allow_content_turnover,
+        )
 
     def swipe(
         self,
@@ -12926,7 +12931,12 @@ class Engine:
                 ActionResult(ok=True, action="swipe", target=[x1, y1, x2, y2]), observe, with_image
             )
         with self._acting(f"swipe:{d}"):
-            distance, moved = self._swipe_once(box, d, percent)
+            distance, moved, evidence = self._swipe_once(
+                box,
+                d,
+                percent,
+                allow_content_turnover=real,
+            )
         self._record_action_safe(step)
         # ok stays True — the gesture WAS performed, and a swipe is also used to dismiss or
         # page things where "the screen did not move" is the expected outcome. The verdict
@@ -12940,6 +12950,7 @@ class Engine:
                     "moved" if moved else "no-change",
                     dy=abs(distance) if moved and distance else None,
                     scrollable=str(real).lower(),
+                    evidence=evidence,
                 ),
             ),
             observe,
@@ -12981,13 +12992,21 @@ class Engine:
         step = self._step("scroll", arg=d)
         travelled = 0
         steps = 0
+        evidence: str | None = None
         with self._acting():
             for _ in range(limit):
-                dy, moved = self._swipe_once(box, d, percent)
+                dy, moved, swipe_evidence = self._swipe_once(
+                    box,
+                    d,
+                    percent,
+                    allow_content_turnover=real,
+                )
                 if not moved:
                     break
                 steps += 1
                 travelled += abs(dy)
+                if swipe_evidence == "content-turnover" or evidence is None:
+                    evidence = swipe_evidence
         self._record_action_safe(step)
         at_end = steps < limit
         if steps == 0:
@@ -13008,6 +13027,7 @@ class Engine:
                     dy=travelled or None,
                     direction=d,
                     scrollable=str(real).lower(),
+                    evidence=evidence,
                 ),
             ),
             observe,
@@ -13056,13 +13076,21 @@ class Engine:
         box, real = self._scroll_box()
         travelled = 0
         steps = 0
+        evidence: str | None = None
         exhausted = True
         with self._acting():
             for _ in range(max(1, max_swipes)):
-                dy, moved = self._swipe_once(box, direction, percent)
+                dy, moved, swipe_evidence = self._swipe_once(
+                    box,
+                    direction,
+                    percent,
+                    allow_content_turnover=real,
+                )
                 if moved:
                     steps += 1
                     travelled += abs(dy)
+                    if swipe_evidence == "content-turnover" or evidence is None:
+                        evidence = swipe_evidence
                 found = locate()
                 if found is not None or not moved:
                     exhausted = False
@@ -13084,6 +13112,7 @@ class Engine:
                     steps=steps,
                     dy=travelled or None,
                     scrollable=str(real).lower(),
+                    evidence=evidence,
                     exhausted="true" if (found is None and exhausted) else None,
                 ),
                 target=list(found) if found else None,

@@ -12,7 +12,7 @@ the end" from "scrolling is broken", so it keeps issuing swipes that will never 
 
 from __future__ import annotations
 
-from android_ui_analyser.scroll_geom import travel
+from android_ui_analyser.scroll_geom import scroll_movement, travel
 
 
 def test_travel_still_reports_a_changed_sample() -> None:
@@ -34,6 +34,59 @@ def test_a_changed_sample_with_no_shift_is_not_a_scroll() -> None:
     assert axis_distance == 0
     # This is the rule _swipe_once now applies: the verdict is the axis distance, not `changed`.
     assert bool(axis_distance) is False, "must not be reported as moved"
+
+
+def test_virtualized_grid_turnover_is_scroll_evidence_in_a_real_container() -> None:
+    """Sticky filters can stay fixed while the visible card window changes completely."""
+    before = [
+        ("All", 20, 180),
+        ("Fun", 160, 180),
+        ("First card", 20, 420),
+        ("Second card", 540, 420),
+        ("Third card", 20, 980),
+        ("Fourth card", 540, 980),
+    ]
+    after = [
+        ("All", 20, 180),
+        ("Fun", 160, 180),
+        ("Later card one", 20, 390),
+        ("Later card two", 540, 390),
+        ("Later card three", 20, 950),
+        ("Later card four", 540, 950),
+    ]
+
+    distance, moved, evidence = scroll_movement(
+        before,
+        after,
+        "up",
+        allow_content_turnover=True,
+    )
+
+    assert distance == 0, "the sticky labels still make the shared-label median zero"
+    assert moved is True
+    assert evidence == "content-turnover"
+
+
+def test_content_turnover_is_not_trusted_without_a_declared_scroll_container() -> None:
+    before = [("Old card one", 20, 420), ("Old card two", 540, 420)]
+    after = [("New card one", 20, 420), ("New card two", 540, 420)]
+
+    assert scroll_movement(before, after, "up", allow_content_turnover=False) == (
+        0,
+        False,
+        None,
+    )
+
+
+def test_one_transient_label_is_not_content_turnover() -> None:
+    before = [("Featured", 42, 1125), ("Blue notebook", 42, 1300)]
+    after = [*before, ("Toast", 500, 500)]
+
+    assert scroll_movement(before, after, "up", allow_content_turnover=True) == (
+        0,
+        False,
+        None,
+    )
 
 
 def test_a_real_scroll_has_a_measurable_shift() -> None:

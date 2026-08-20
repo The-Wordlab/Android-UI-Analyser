@@ -1143,7 +1143,7 @@ def test_daemon_exposes_the_same_goal_session_lifecycle() -> None:
     assert [name for name, _args in calls] == ["start", "review", "finish", "reach"]
 
 
-def test_explicit_session_emulator_start_is_owned_and_finished(
+def test_explicit_session_emulator_start_is_handed_to_the_warm_pool(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
     from android_ui_analyser import emulator
@@ -1194,11 +1194,20 @@ def test_explicit_session_emulator_start_is_owned_and_finished(
     assert started["emulator_started"] is True
     assert starts[0]["headless"] is False
     assert starts[0]["audio"] is True
-    assert stops[0]["serial"] == "emulator-5590"
+    assert stops == []
     assert finished["ok"] is True
+    assert [item["action"] for item in finished["cleanup"]] == [
+        "lease_release",
+        "owned_emulator_handoff",
+    ]
+    handoff = finished["cleanup"][-1]["result"]
+    assert handoff["serial"] == "emulator-5590"
+    assert handoff["retained"] is True
+    assert handoff["leased"] is False
+    assert handoff["idle_stop_s"] == 1200.0
 
 
-def test_owned_emulator_is_uncached_when_stop_succeeds_despite_restore_error(
+def test_restore_error_keeps_owned_emulator_cached_and_leased_for_retry(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
     from android_ui_analyser import emulator
@@ -1210,22 +1219,26 @@ def test_owned_emulator_is_uncached_when_stop_succeeds_despite_restore_error(
     engine = Engine(cfg)
     # The module-global seam is what `_list_targets` consults; a live host emulator must
     # never satisfy this test's selection (that is how the boot path went unexercised).
-    monkeypatch.setattr(engine_mod, "list_devices", lambda: [])
+    online: list[DeviceInfo] = []
+    monkeypatch.setattr(engine_mod, "list_devices", lambda: list(online))
     monkeypatch.setattr(emulator, "select_avd_for_session", lambda avd, **_kwargs: avd or "fake")
-    monkeypatch.setattr(
-        emulator,
-        "start",
-        lambda _avd, **_kwargs: {
+
+    def fake_start(_avd: str, **_kwargs: Any) -> dict[str, Any]:
+        online.append(
+            DeviceInfo(serial="emulator-5592", model="fake", android_version="14")
+        )
+        return {
             "ok": True,
             "serial": "emulator-5592",
             "instance": "fake.p5592",
             "pid": 4242,
-        },
-    )
+        }
+
+    monkeypatch.setattr(emulator, "start", fake_start)
     monkeypatch.setattr(
         emulator,
         "stop",
-        lambda **_kwargs: {"ok": True, "stopped": ["emulator-5592"]},
+        lambda **kwargs: pytest.fail(f"session finish must not stop the warm emulator: {kwargs}"),
     )
     monkeypatch.setattr(engine, "analyze", lambda **_kwargs: _observation("emulator-5592"))
 
@@ -1245,6 +1258,8 @@ def test_owned_emulator_is_uncached_when_stop_succeeds_despite_restore_error(
     finished = engine.session_finish(started["session_id"])
 
     assert finished["ok"] is False
-    assert closed == ["emulator-5592"]
-    stop = next(item for item in finished["cleanup"] if item["action"] == "owned_emulator_stop")
-    assert stop["result"]["stopped"] == ["emulator-5592"]
+    assert closed == []
+    assert all(item["action"] != "owned_emulator_handoff" for item in finished["cleanup"])
+    assert engine._device is not None
+    assert engine._device.serial == "emulator-5592"
+    assert engine._lease_owner_resolved is not None

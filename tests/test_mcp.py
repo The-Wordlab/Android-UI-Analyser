@@ -390,7 +390,7 @@ def test_mcp_session_and_reach_dispatch_contract(monkeypatch: pytest.MonkeyPatch
     ]
 
 
-def test_mcp_finish_forgets_the_stopped_serial_even_when_other_cleanup_failed(
+def test_mcp_finish_keeps_a_warm_handoff_tracked_for_process_exit_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     engine = _engine()
@@ -398,15 +398,20 @@ def test_mcp_finish_forgets_the_stopped_serial_even_when_other_cleanup_failed(
         engine,
         "session_finish",
         lambda **_kwargs: {
-            "ok": False,
+            "ok": True,
             "cleanup": [
                 {
-                    "action": "owned_emulator_stop",
+                    "action": "owned_emulator_handoff",
                     "ok": True,
-                    "result": {"ok": True, "stopped": ["emulator-5592"]},
+                    "result": {
+                        "ok": True,
+                        "serial": "emulator-5592",
+                        "retained": True,
+                        "leased": False,
+                    },
                 }
             ],
-            "errors": [{"action": "network_restore", "message": "still offline"}],
+            "errors": [],
         },
     )
     tracked = _mcp_started_serials()
@@ -422,8 +427,8 @@ def test_mcp_finish_forgets_the_stopped_serial_even_when_other_cleanup_failed(
 
     try:
         output = anyio.run(run)
-        assert output["ok"] is False
-        assert tracked == {"emulator-5594"}
+        assert output["ok"] is True
+        assert tracked == {"emulator-5592", "emulator-5594"}
     finally:
         tracked.clear()
         tracked.update(previous)

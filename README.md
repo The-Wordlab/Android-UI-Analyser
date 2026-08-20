@@ -156,7 +156,7 @@ Agents do not list, start, name an owner, or acquire a lease before goal work:
 aua session start --goal "verify the change"
 # re-use the returned observation; later commands follow the automatic sticky lease
 # … drive the flow …
-aua session finish                  # restores session state and stops its owned emulator
+aua session finish                  # restores state/releases lease; keeps its emulator warm
 
 # Capability-aware selection/provisioning:
 aua session start --goal "record HTTPS" --needs root,proxy

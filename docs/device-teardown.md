@@ -117,7 +117,7 @@ An emulator AUA did not start is never touched.
 
 #### Warm handoff between goal sessions
 
-Back-to-back goal sessions should not turn emulator boot into per-scenario setup. The intended
+Back-to-back goal sessions do not turn emulator boot into per-scenario setup. The normal
 session boundary restores every owned mutation and releases the process-bound lease, but leaves a
 healthy AUA-started emulator online and unleased. A later `session start` can then select that warm
 target; its fresh app install provides scenario isolation without requiring an emulator reboot.
@@ -127,10 +127,11 @@ The lease-gated idle watchdog above owns retirement. If no next session arrives 
 blocks retirement, and AUA never retires an emulator it did not start. Agents do not request, keep,
 or stop warm targets themselves.
 
-This is the required lifecycle, not the behavior of the current `session finish`: today a session
-that booted its emulator records `owned_emulator_stop` and stops it immediately. That cleanup step
-must become a warm-pool handoff before callers can rely on the behavior described here; callers must
-continue to invoke `session finish` exactly once in the meantime.
+`session finish` reports this as `owned_emulator_handoff` with the serial and configured idle
+timeout, after `lease_release` succeeds. A failed restore retains the lease so the same process can
+retry safely; it does not publish a warm target with dirty state. A failed `session start` still
+stops only the exact emulator instance that bootstrap created, and explicit emulator-stop or MCP
+process-exit cleanup remain immediate ownership boundaries.
 
 ## Adding a mutation
 

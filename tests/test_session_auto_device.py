@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from android_ui_analyser import daemon as daemon_mod
-from android_ui_analyser import emulator, leases
+from android_ui_analyser import emulator, leases, network
 from android_ui_analyser.config import Config
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.schema import DeviceInfo
@@ -404,24 +404,16 @@ def test_session_finish_failure_retains_the_lease_until_cleanup_succeeds(
         emulator_started=True,
     )
     monkeypatch.setattr(engine, "session_review", lambda _session_id: {"ok": True})
-    stop_results = iter(
+    backup = network.backup_path(cfg.cache.dir, serial)
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    backup.write_text("session-owned", encoding="utf-8")
+    restore_results = iter(
         [
-            {"ok": False, "detail": "device unreachable", "stopped": []},
-            {"ok": True, "stopped": [serial]},
+            {"ok": False, "detail": "device unreachable"},
+            {"ok": True},
         ]
     )
-
-    class VirtualDevices:
-        def stop(self, **kwargs: Any) -> dict[str, Any]:
-            return next(stop_results)
-
-    virtual = VirtualDevices()
-    real_capability = engine.platform.capability
-    monkeypatch.setattr(
-        engine.platform,
-        "capability",
-        lambda name: virtual if name == "virtual_devices" else real_capability(name),
-    )
+    monkeypatch.setattr(engine, "network_restore", lambda: next(restore_results))
 
     failed = engine.session_finish(state.session_id)
 
@@ -434,3 +426,14 @@ def test_session_finish_failure_retains_the_lease_until_cleanup_succeeds(
 
     assert retried["ok"] is True
     assert leases.read_lease(cfg.lease.registry_dir, serial) is None
+    handoff = next(
+        item for item in retried["cleanup"] if item["action"] == "owned_emulator_handoff"
+    )
+    assert handoff["result"] == {
+        "ok": True,
+        "serial": serial,
+        "retained": True,
+        "leased": False,
+        "auto_stop": True,
+        "idle_stop_s": 1200.0,
+    }
