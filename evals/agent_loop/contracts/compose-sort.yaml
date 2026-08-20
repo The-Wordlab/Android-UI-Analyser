@@ -1,0 +1,22 @@
+version: 1
+checkpoints:
+  - id: price_sorted
+    description: Confirm the Compose product cards and prices are paired in ascending order
+    assertions:
+      - assert_order:
+          axis: reading
+          selectors:
+            - {rid: compose_item_cedar_notebook}
+            - {rid: compose_item_alpine_mug}
+            - {rid: compose_item_beacon_lamp}
+            - {rid: compose_item_drift_puzzle}
+      - assert:
+          rid: compose_item_cedar_notebook
+          contains_all: [{text: Cedar Notebook}, {text: "$4.25"}]
+      - assert:
+          rid: compose_item_drift_puzzle
+          contains_all: [{text: Drift Puzzle}, {text: "$18.00"}]
+cleanup:
+  description: Restore the fixture home
+  assertions:
+    - assert: {rid: fixture_home, exists: true}

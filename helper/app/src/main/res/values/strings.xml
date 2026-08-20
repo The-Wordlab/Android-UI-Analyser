@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AUA Helper</string>
+    <string name="aua_helper_description">Development helper for android-ui-analyser. Streams screen-change events and reads the view hierarchy for automated UI testing on a development device.</string>
+</resources>

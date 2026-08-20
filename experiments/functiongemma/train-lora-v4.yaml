@@ -1,0 +1,33 @@
+# One bounded continuation cycle from the validation-selected v3 adapter.
+# The runner still receives the exact local base snapshot and parent adapter on
+# the command line, recording both identities in run-metadata.json.
+model: mlx-community/functiongemma-270m-it-bf16
+train: true
+test: false
+fine_tune_type: lora
+optimizer: adamw
+optimizer_config:
+  adamw:
+    weight_decay: 0.01
+
+data: runs/functiongemma/data-v4
+adapter_path: runs/functiongemma/adapters/lora-r16-v4-cycle
+seed: 43
+num_layers: -1
+batch_size: 8
+grad_accumulation_steps: 4
+iters: 512
+learning_rate: 1.0e-6
+steps_per_report: 10
+steps_per_eval: 64
+save_every: 128
+val_batches: 64
+max_seq_length: 1024
+mask_prompt: true
+grad_checkpoint: false
+report_to: null
+
+lora_parameters:
+  rank: 16
+  scale: 32.0
+  dropout: 0.05

@@ -1,0 +1,122 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "android-ui-analyser"
+version = "0.11.1"
+description = "Fast, configurable CLI that gives an AI agent structured 'what's on screen and where' for Android UI testing — hierarchy-first, with pluggable vision/OCR/grounding fallbacks."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "Eiliya" }]
+maintainers = [{ name = "Eiliya" }]
+keywords = ["android", "ui-testing", "uiautomator2", "set-of-marks", "accessibility", "ocr", "agent"]
+
+# Base install is intentionally light. Heavy perception backends live in extras and
+# are lazy-imported, so a missing optional dep never breaks the core CLI.
+dependencies = [
+    # <0.26: typer 0.26+ stopped accepting `--emit-skill` with no value, so the documented
+    # bare `aua guide --emit-skill` breaks (verified broken on 0.26.8 and 0.27.0, fine on
+    # 0.25.1). The real fix is to declare that option so a bare flag still works on modern
+    # typer; until then this bound holds the line. Bounds matter even with uv.lock committed —
+    # `install.sh` uses `uv tool install <repo>`, which resolves fresh and ignores the lock.
+    "typer>=0.12,<0.26",
+    "pydantic>=2.6",
+    "pyyaml>=6.0",
+    "httpx>=0.27",
+    "pillow>=10.0",
+    "numpy>=1.26",
+    "uiautomator2>=3.0",
+    # <2: mcp 2.0 dropped mcp.shared.memory.create_connected_server_and_client_session,
+    # which the server and its tests are written against. Moving to 2.x is a deliberate
+    # port, not something a fresh resolve should do silently.
+    "mcp>=1.2,<2",
+]
+
+[project.optional-dependencies]
+# --- OCR engines ---
+apple = ["pyobjc-framework-Vision>=10.0; sys_platform == 'darwin'", "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'"]
+rapidocr = ["rapidocr-onnxruntime>=1.3", "onnxruntime>=1.17"]
+paddle = ["paddleocr>=2.7", "paddlepaddle>=2.6"]
+tesseract = ["pytesseract>=0.3.10"]
+easyocr = ["easyocr>=1.7"]
+# --- Emulator audio input ---
+audio = ["grpcio>=1.64"]
+# --- Detection ---
+yolo = ["ultralytics>=8.2", "torch>=2.2"]
+omniparser = ["ultralytics>=8.2", "torch>=2.2", "huggingface-hub>=0.23"]
+# --- Optional local next-call policy (external base; small adapter bundled) ---
+functiongemma = ["mlx-lm==0.31.3; sys_platform == 'darwin' and platform_machine == 'arm64'"]
+hybrid-policy = [
+    "mlx-lm==0.31.3; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "mlx-vlm==0.6.14; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+# --- Dev / test ---
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    # The suite is mostly wait, not compute: serially it held ~41% of a single core for 5m16s.
+    # Sharded across cores it is ~25s, and it shards cleanly because every test already gets
+    # its own state dir (the autouse `_aua_isolate_state` fixture) and socket tests set their
+    # own `AUA_DAEMON_SOCKET`. `-n auto` is in addopts below; `-n0` opts back out.
+    "pytest-xdist>=3.6",
+    "respx>=0.21",
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "types-PyYAML>=6.0",
+]
+all = [
+    "android-ui-analyser[apple,rapidocr,paddle,tesseract,easyocr,audio,yolo,omniparser,proxy,lxml]",
+]
+# --- Headless HTTP mock / record-replay ---
+proxy = ["mitmproxy>=10.0"]
+# --- Faster XML parse for huge hierarchy dumps ---
+lxml = ["lxml>=5.0"]
+
+
+[project.scripts]
+aua = "android_ui_analyser.cli:run"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/android_ui_analyser"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "W", "C4", "SIM"]
+ignore = [
+    "E501",   # line length handled by formatter; long strings/URLs allowed
+    "UP042",  # `class X(str, Enum)` is intentional (explicit .value, pydantic-friendly)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]
+
+[tool.ruff.lint.flake8-bugbear]
+# Typer declares CLI options as argument defaults; B008 only trips on the mutable-annotated
+# ones (a repeatable `list[str]` option), which is the same idiom, not a real bug.
+extend-immutable-calls = ["typer.Option", "typer.Argument"]
+
+[tool.mypy]
+python_version = "3.11"
+packages = ["android_ui_analyser"]
+mypy_path = "src"
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+disallow_untyped_defs = false
+check_untyped_defs = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Sharded by default: the suite is wait-bound, so one worker per core turns 5m16s into ~25s.
+# Add `-n0` to run in a single process — needed when you want live `print()`/`-s` output,
+# a debugger, or `--durations` you can trust. Do NOT use `-p no:xdist`: that unloads the
+# plugin and then `-n auto` here becomes an unrecognized argument.
+addopts = "-q -n auto"
+filterwarnings = ["ignore::DeprecationWarning"]

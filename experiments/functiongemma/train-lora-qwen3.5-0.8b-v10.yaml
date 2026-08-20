@@ -1,0 +1,47 @@
+# Capacity challenger for V10: does a larger sub-1B base generalise where 270M memorises?
+#
+# The previous capacity test (Qwen3-0.6B on the v7 corpus) concluded that more parameters did not
+# justify replacing FunctionGemma. That comparison could not actually discriminate: both models
+# scored ~99.9% because the v7 corpus was easy enough to saturate. V10 removes the shortcuts that
+# made saturation possible — a constant proof register, cardinality decorrelated from the label,
+# mirrored directions, and 168 goal templates — so this is the first corpus on which a capacity
+# difference could show up at all.
+#
+# Learning rate follows the earlier Qwen run (1.0e-5) rather than FunctionGemma's 2.0e-6: the
+# previous cycle established that scale for this base, and changing base and schedule together
+# would confound the comparison.
+model: mlx-community/Qwen3.5-0.8B-MLX-bf16
+train: true
+test: false
+fine_tune_type: lora
+optimizer: adamw
+optimizer_config:
+  adamw:
+    weight_decay: 0.01
+
+data: runs/functiongemma/data-v10
+adapter_path: runs/functiongemma/adapters/lora-r32-qwen35-v10
+seed: 103
+num_layers: -1
+# 0.8B at sequence length 1024 exhausts a 48 GB L40S even at micro-batch 4; the earlier 0.6B
+# cycle fit only because it landed on an 80 GB H100. This run pins an 80 GB card and keeps the
+# original micro-batch, so the effective batch stays 32 and the comparison against FunctionGemma
+# is unchanged. Gradient checkpointing trades recomputation for activation memory, which is what
+# actually overflowed: LoRA covers every layer and activations were being retained for all of them.
+batch_size: 8
+grad_accumulation_steps: 4
+iters: 8192
+learning_rate: 1.0e-5
+steps_per_report: 20
+steps_per_eval: 512
+save_every: 512
+val_batches: 160
+max_seq_length: 1024
+mask_prompt: true
+grad_checkpoint: true
+report_to: null
+
+lora_parameters:
+  rank: 32
+  scale: 64.0
+  dropout: 0.05

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  typeAllMask is deliberate: the host decides which events matter, because the
+  interesting set differs per feature (settle wants content changes, flow recording
+  wants clicks and scrolls, toast capture wants notification state).
+
+  canRetrieveWindowContent + flagRetrieveInteractiveWindows are what make `ui.tree`
+  possible without adb. flagReportViewIds keeps resource ids in the tree, which AUA
+  needs for stable selectors.
+
+  canPerformGestures is what makes dispatchGesture work. Without it the framework accepts
+  the gesture and then never calls back at all, so every swipe, scroll and tap-point simply
+  waited out its timeout and reported "not delivered" — a silent capability gap rather than
+  an error.
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeAllMask"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagReportViewIds|flagIncludeNotImportantViews|flagRetrieveInteractiveWindows"
+    android:canPerformGestures="true"
+    android:canRetrieveWindowContent="true"
+    android:description="@string/aua_helper_description"
+    android:notificationTimeout="0" />

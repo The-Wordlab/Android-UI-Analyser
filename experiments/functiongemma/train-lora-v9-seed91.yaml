@@ -1,0 +1,43 @@
+# V9 trains fresh from the base FunctionGemma checkpoint on the autopilot curriculum.
+#
+# What changed from V8, and why the hyper-parameters barely move:
+#   * The corpus grew from 5 semantic families to 22, and from ~46.6k to 66k train rows.
+#     Coverage, not repetition, is the lever — every family is counterbalanced across opaque
+#     candidate IDs and list positions, so neither shortcut survives.
+#   * The model now drives session autopilot, so handoff and authorization families carry
+#     the safety weight. Checkpoint selection must maximise the WORST family under perfect
+#     protocol with zero unsafe, unauthorized, redundant, or premature-finish selections —
+#     never loss and never aggregate accuracy.
+#   * Sequence length is unchanged: the rendered rows top out at 679 tokens.
+#
+# 8192 iters x batch 8 x grad-accum 4 = 262,144 samples, roughly four passes over 66k rows.
+model: mlx-community/functiongemma-270m-it-bf16
+train: true
+test: false
+fine_tune_type: lora
+optimizer: adamw
+optimizer_config:
+  adamw:
+    weight_decay: 0.01
+
+data: runs/functiongemma/data-v9
+adapter_path: runs/functiongemma/adapters/lora-r32-v9-seed91
+seed: 91
+num_layers: -1
+batch_size: 8
+grad_accumulation_steps: 4
+iters: 8192
+learning_rate: 2.0e-6
+steps_per_report: 20
+steps_per_eval: 512
+save_every: 512
+val_batches: 160
+max_seq_length: 1024
+mask_prompt: true
+grad_checkpoint: false
+report_to: null
+
+lora_parameters:
+  rank: 32
+  scale: 64.0
+  dropout: 0.05

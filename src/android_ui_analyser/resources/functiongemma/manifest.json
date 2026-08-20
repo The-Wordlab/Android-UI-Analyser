@@ -1,0 +1,112 @@
+{
+ "adapter": {
+  "bytes": 30403414,
+  "config": "adapter_config.json",
+  "config_sha256": "3ea9f44466b15292e8b9e61389f829f429ae9a8455e9a6a43466bafd4423fc28",
+  "dropout": 0.05,
+  "fine_tune_type": "lora",
+  "rank": 32,
+  "scale": 64.0,
+  "sha256": "349413cfe24e664e614f15f3c12a3e53621bb858cd55c5909db23464672ec2a5",
+  "training_output_sha256": "69b1a360af4aa75b070ec085d196ab2cae62db40317ee8dcd1367a0986204b8f",
+  "weights": "adapters.safetensors"
+ },
+ "artifact_kind": "mlx-lora",
+ "base_model": {
+  "conversion": "mlx-community/functiongemma-270m-it-bf16",
+  "conversion_tool": "mlx-lm 0.28.4",
+  "files": {
+   "chat_template.jinja": {
+    "bytes": 13792,
+    "sha256": "db61fb01017bd82401d3ffca4f8e066cd56ff6d38d2a30c4058770c0bf7ab49b"
+   },
+   "config.json": {
+    "bytes": 1539,
+    "sha256": "c60d3e4c9a04dcb53fae5e616d2d76a75f3eeecdc6e82f9b805904fc11724608"
+   },
+   "generation_config.json": {
+    "bytes": 176,
+    "sha256": "f3f694d69c044000d84e777938fe314137af2ae06014c552332d1c82f5e1b13d"
+   },
+   "model.safetensors": {
+    "bytes": 536222768,
+    "sha256": "fb64bf18b2911fcaa59d44c1b7d5842a011a874530be9dc5bc9d307e82b4edee"
+   },
+   "model.safetensors.index.json": {
+    "bytes": 17220,
+    "sha256": "419991d2afa817203a4941777d0511cc736c7c38912e33021366ba7b7a2bb83b"
+   },
+   "tokenizer.json": {
+    "bytes": 33378493,
+    "sha256": "3b83627b470a2b3eeb6cbd480490191e50f21549cb3de1d0fcc1a001a48c6c04"
+   },
+   "tokenizer_config.json": {
+    "bytes": 828,
+    "sha256": "9ffb9b4c29d60699a0c50b00abce43379640678852e442b1dec36a0421003a42"
+   }
+  },
+  "hash_scope": "sorted runtime-required relative path and content SHA-256 pairs; unrelated files are ignored",
+  "name": "FunctionGemma 270M IT BF16 for MLX",
+  "revision": "bb327a9ad61044e1496a2bee2365a6b6a6684c72",
+  "sha256": "76aabb2800b6b9e6da9160028dfb233bbfa723d8c33e21623022ca87a8fa9fd5",
+  "upstream": "google/functiongemma-270m-it"
+ },
+ "description": "LoRA adapter for selecting one opaque, AUA-authored candidate. Trained on the V10 command-surface curriculum: 87 fictional families over 67 AUA commands, candidate count decorrelated from the label, mirrored action directions so that a tap can be the correct answer, and 168 goal templates so no single phrasing can be memorised.",
+ "evaluation": {
+  "device": {
+   "navigations": "5/5",
+   "refusals": "2/2, one under a deliberately rephrased goal",
+   "wrong_taps": 0
+  },
+  "probe": "independently authored; scenarios derive from the CLI surface rather than the training generators, because a probe sharing its generator's phrasing measures that phrasing instead of the model",
+  "probe_accuracy_best_checkpoint": 0.6,
+  "probe_accuracy_mean_over_16_checkpoints": 0.471,
+  "probe_jobs": 150,
+  "probe_refusal_best_checkpoint": "18/38",
+  "reference_same_jobs": {
+   "qwen3_1_7b_best": 0.667,
+   "v8": 0.387,
+   "v9": 0.62
+  },
+  "verdict": "advisory permitted; not promoted. One seed, no live gates, and refusal is unstable across checkpoints (0, 2, 0, 5, 4, 18, 0, 3, 8, 11, 1, 1, 5), so checkpoint 18432 is the high-water mark of a noisy process rather than a converged capability."
+ },
+ "modifications": {
+  "description": "MLX LoRA fine-tuning for guarded AUA candidate selection; Safetensors distribution metadata added at packaging time.",
+  "modified_at": "2026-08-19",
+  "modified_by": "The Wordlab"
+ },
+ "modified_derivative": true,
+ "name": "aua-functiongemma-candidate-policy-v10",
+ "prompt_schema": {
+  "candidate_counts": [
+   2,
+   3,
+   4
+  ],
+  "candidate_ids": "dense opaque integers 0 through candidate_count minus 1",
+  "handoff_candidate_id": -1,
+  "name": "functiongemma-aua-candidate-policy-v3"
+ },
+ "rollout": {
+  "max_mode": "advisory"
+ },
+ "schema_version": 1,
+ "terms": {
+  "agreement": "LICENSE",
+  "notice": "NOTICE",
+  "prohibited_use_policy": "GEMMA_PROHIBITED_USE_POLICY.md"
+ },
+ "training": {
+  "code": "../../../../experiments/functiongemma",
+  "dataset_format": "aua-functiongemma-dataset-v10",
+  "dataset_manifest_sha256": "4de3cc6c13a263ba04a20c64de18f44df97e5f923f6e9496ffd956bb5cb77026",
+  "dataset_sha256": "4fc4452cf7246c6abc000039d76d6f64ad8808e28e575aed642f3e4041fdb5b4",
+  "iters": 32768,
+  "passes_over_corpus": 4,
+  "seed": 103,
+  "selected_checkpoint": 18432,
+  "test_sha256": "e1246113da851c87759083fa77c8a5159bd439bb0cfd1f2dd1e6338aa17f7546",
+  "train_sha256": "68e09c68a0ddc9039417373333b46a0eec7059fcadc409bfc66af4f03cb7244d",
+  "valid_sha256": "650815251e7622a57484d4788478cfd6fb84231083a1e5a05d1f4413c19988e9"
+ }
+}

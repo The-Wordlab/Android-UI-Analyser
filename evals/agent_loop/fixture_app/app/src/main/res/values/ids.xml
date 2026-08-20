@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <item name="fixture_home" type="id" />
+    <item name="fixture_reset" type="id" />
+    <item name="open_classic_grid" type="id" />
+    <item name="open_compose_grid" type="id" />
+    <item name="open_async_recovery" type="id" />
+    <item name="open_canvas_lab" type="id" />
+    <item name="open_notification_permission" type="id" />
+    <item name="classic_grid" type="id" />
+    <item name="classic_sort_name" type="id" />
+    <item name="classic_sort_price" type="id" />
+    <item name="classic_item_card" type="id" />
+    <item name="classic_item_name" type="id" />
+    <item name="classic_item_price" type="id" />
+    <item name="async_status" type="id" />
+    <item name="async_retry" type="id" />
+    <item name="canvas_webview" type="id" />
+    <item name="notification_request" type="id" />
+</resources>

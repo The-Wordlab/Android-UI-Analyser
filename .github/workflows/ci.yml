@@ -1,0 +1,58 @@
+name: CI
+
+# Until now nothing checked a pull request: the only gate was a local pre-commit hook, which
+# `--no-verify` skips and which a contributor who never ran `git config core.hooksPath .githooks`
+# does not have at all. The suite is ~25s sharded, so there is no reason for that to stay true.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# A second push to the same branch makes the first run's answer irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: ruff + mypy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      # `--frozen` refuses to silently re-resolve: a dependency added to pyproject.toml without
+      # relocking fails here instead of giving every later run a different environment.
+      - run: uv sync --frozen --extra dev
+      - run: uv run ruff check .
+      # mypy is the only check that catches a call to a method that does not exist when it sits
+      # inside one of ~150 blanket `except`/`suppress` blocks — the failure that kept the
+      # learned per-control timing feature dead from the commit that introduced it.
+      - run: uv run mypy
+
+  test:
+    name: tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      # Exactly the extras the suite asserts against: tests/test_ocr.py requires paddleocr,
+      # tesseract, and easyocr to report *unavailable*, so `--all-extras` would fail it. The
+      # `apple` extra is marker-gated to darwin and installs nothing on Linux, where those
+      # provider tests skip instead.
+      - run: uv sync --frozen --extra dev --extra apple --extra rapidocr --extra audio
+      # `-n auto` comes from pyproject addopts; runners are small, so cap the shard count to
+      # avoid oversubscribing two cores.
+      - run: uv run pytest -n 2

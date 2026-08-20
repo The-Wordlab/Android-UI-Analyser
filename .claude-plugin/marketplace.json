@@ -1,0 +1,19 @@
+{
+  "name": "the-wordlab",
+  "owner": {
+    "name": "AUA maintainers"
+  },
+  "description": "Claude Code plugin for the `aua` CLI",
+  "plugins": [
+    {
+      "name": "android-ui-analyser",
+      "source": "./",
+      "displayName": "Android UI Analyser",
+      "description": "Drive and inspect an Android app's UI via the `aua` CLI — act on stable element IDs, not pixels. Hierarchy-first, with OCR/detection/grounding vision fallbacks.",
+      "version": "0.11.1",
+      "author": {
+        "name": "Eiliya"
+      }
+    }
+  ]
+}

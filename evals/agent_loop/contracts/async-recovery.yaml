@@ -1,0 +1,10 @@
+version: 1
+checkpoints:
+  - id: expedition_ready
+    description: Confirm the retry reached the ready expedition state
+    assertions:
+      - assert: {rid: async_status, text_contains: "Expedition ready"}
+cleanup:
+  description: Restore the fixture home
+  assertions:
+    - assert: {rid: fixture_home, exists: true}

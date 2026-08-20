@@ -1,0 +1,14 @@
+# The helper APK's guard hashes source bytes, so line endings are load-bearing.
+#
+# tests/test_helper_apk_matches_its_source.py recomputes a sha256 over helper/'s Java, XML and
+# gradle files and compares it to a stamp inside the committed APK. That check is a hard
+# failure by design. If git rewrote line endings on checkout — which it does by default on
+# Windows with core.autocrlf=true — the digest would differ from the one the APK was built
+# with, and a contributor who changed nothing would be told to rebuild an APK they may have no
+# toolchain for. Pinning the bytes is what keeps the guard honest rather than flaky.
+helper/** -text
+
+# Binaries git must never touch or try to diff.
+*.apk binary -diff
+*.png binary -diff
+*.jpg binary -diff

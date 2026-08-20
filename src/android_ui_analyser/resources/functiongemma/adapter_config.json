@@ -1,0 +1,11 @@
+{
+  "_modified_notice": "Modified by the Android UI Analyser project: LoRA fine-tuned for guarded AUA candidate selection.",
+  "model": "mlx-community/functiongemma-270m-it-bf16@bb327a9ad61044e1496a2bee2365a6b6a6684c72",
+  "fine_tune_type": "lora",
+  "num_layers": -1,
+  "lora_parameters": {
+    "rank": 32,
+    "scale": 64.0,
+    "dropout": 0.05
+  }
+}

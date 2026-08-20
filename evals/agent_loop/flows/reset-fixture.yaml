@@ -1,0 +1,7 @@
+name: reset-fixture
+app: dev.aua.fixture
+description: Deterministically clear fixture preferences and return to its home screen.
+steps:
+  - launch_app: dev.aua.fixture
+  - tap: {id: fixture_reset}
+  - assert: {rid: fixture_home, exists: true}

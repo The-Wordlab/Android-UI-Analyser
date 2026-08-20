@@ -1,0 +1,31 @@
+# V7 seed 71: identical training contract, independently shuffled initialization.
+model: mlx-community/functiongemma-270m-it-bf16
+train: true
+test: false
+fine_tune_type: lora
+optimizer: adamw
+optimizer_config:
+  adamw:
+    weight_decay: 0.01
+
+data: runs/functiongemma/data-v7
+adapter_path: runs/functiongemma/adapters/lora-r32-v7
+seed: 71
+num_layers: -1
+batch_size: 8
+grad_accumulation_steps: 4
+iters: 6144
+learning_rate: 2.0e-6
+steps_per_report: 20
+steps_per_eval: 1024
+save_every: 1024
+val_batches: 128
+max_seq_length: 1024
+mask_prompt: true
+grad_checkpoint: false
+report_to: null
+
+lora_parameters:
+  rank: 32
+  scale: 64.0
+  dropout: 0.05

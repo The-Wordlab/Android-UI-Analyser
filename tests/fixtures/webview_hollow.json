@@ -1,0 +1,188 @@
+[
+  {
+    "id": 0,
+    "type": "WebView",
+    "text": null,
+    "resource_id": null,
+    "content_desc": null,
+    "bounds": [
+      0,
+      216,
+      1080,
+      2400
+    ],
+    "center": [
+      540,
+      1308
+    ],
+    "clickable": false,
+    "enabled": true,
+    "focused": false,
+    "checkable": false,
+    "checked": false,
+    "selected": false,
+    "scrollable": true,
+    "long_clickable": false,
+    "password": false,
+    "source": "hierarchy",
+    "confidence": null,
+    "stable_key": "geo:WebView:q52:1a72b22ddd",
+    "window": "app",
+    "parent": null
+  },
+  {
+    "id": 1,
+    "type": "View",
+    "text": "Sign in",
+    "resource_id": null,
+    "content_desc": null,
+    "bounds": [
+      80,
+      420,
+      1000,
+      510
+    ],
+    "center": [
+      540,
+      465
+    ],
+    "clickable": false,
+    "enabled": true,
+    "focused": false,
+    "checkable": false,
+    "checked": false,
+    "selected": false,
+    "scrollable": false,
+    "long_clickable": false,
+    "password": false,
+    "source": "hierarchy",
+    "confidence": null,
+    "stable_key": "tx:9d2b9d1d9c",
+    "window": "app",
+    "parent": 0
+  },
+  {
+    "id": 2,
+    "type": "View",
+    "text": null,
+    "resource_id": null,
+    "content_desc": null,
+    "bounds": [
+      80,
+      600,
+      1000,
+      900
+    ],
+    "center": [
+      540,
+      750
+    ],
+    "clickable": false,
+    "enabled": true,
+    "focused": false,
+    "checkable": false,
+    "checked": false,
+    "selected": false,
+    "scrollable": false,
+    "long_clickable": false,
+    "password": false,
+    "source": "hierarchy",
+    "confidence": null,
+    "stable_key": "geo:View:q32:1ea821d438",
+    "window": "app",
+    "parent": 0
+  },
+  {
+    "id": 3,
+    "type": "View",
+    "text": null,
+    "resource_id": null,
+    "content_desc": null,
+    "bounds": [
+      80,
+      940,
+      1000,
+      1240
+    ],
+    "center": [
+      540,
+      1090
+    ],
+    "clickable": false,
+    "enabled": true,
+    "focused": false,
+    "checkable": false,
+    "checked": false,
+    "selected": false,
+    "scrollable": false,
+    "long_clickable": false,
+    "password": false,
+    "source": "hierarchy",
+    "confidence": null,
+    "stable_key": "geo:View:q52:f89e9c8732",
+    "window": "app",
+    "parent": 0
+  },
+  {
+    "id": 4,
+    "type": "View",
+    "text": null,
+    "resource_id": null,
+    "content_desc": null,
+    "bounds": [
+      80,
+      1280,
+      1000,
+      1580
+    ],
+    "center": [
+      540,
+      1430
+    ],
+    "clickable": false,
+    "enabled": true,
+    "focused": false,
+    "checkable": false,
+    "checked": false,
+    "selected": false,
+    "scrollable": false,
+    "long_clickable": false,
+    "password": false,
+    "source": "hierarchy",
+    "confidence": null,
+    "stable_key": "geo:View:q52:dfb6100438",
+    "window": "app",
+    "parent": 0
+  },
+  {
+    "id": 5,
+    "type": "View",
+    "text": null,
+    "resource_id": null,
+    "content_desc": null,
+    "bounds": [
+      80,
+      1620,
+      1000,
+      1920
+    ],
+    "center": [
+      540,
+      1770
+    ],
+    "clickable": false,
+    "enabled": true,
+    "focused": false,
+    "checkable": false,
+    "checked": false,
+    "selected": false,
+    "scrollable": false,
+    "long_clickable": false,
+    "password": false,
+    "source": "hierarchy",
+    "confidence": null,
+    "stable_key": "geo:View:q52:b57f1eb85b",
+    "window": "app",
+    "parent": 0
+  }
+]

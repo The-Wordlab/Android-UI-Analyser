@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- The channel binds to loopback only; the host reaches it through `adb forward`.
+         INTERNET is required even for a loopback ServerSocket. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Not a feature: a foreground service is the only supported way to keep this process
+         out of the cached state, and Android freezes cached processes. See KeepAliveService
+         for the failure this prevents. POST_NOTIFICATIONS only affects whether the required
+         notification is visible; the service runs either way. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application
+        android:allowBackup="false"
+        android:label="AUA Helper"
+        android:supportsRtl="true">
+
+        <service
+            android:name=".HelperService"
+            android:exported="true"
+            android:label="AUA Helper"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/aua_helper_a11y" />
+        </service>
+
+        <service
+            android:name=".KeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps this UI-automation helper unfrozen so its accessibility service stays attached while a host drives it." />
+        </service>
+    </application>
+</manifest>

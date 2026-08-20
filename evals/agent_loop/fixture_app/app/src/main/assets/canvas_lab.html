@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Canvas Lab</title>
+  <style>
+    html,body { margin:0; background:#f7f7fc; color:#202124; font-family:sans-serif; }
+    h1,p { margin:18px; }
+    canvas { display:block; margin:18px; width:calc(100% - 36px); height:300px; }
+  </style>
+</head>
+<body>
+  <h1>Canvas Lab</h1>
+  <p>The control and its result below are painted pixels, not DOM elements.</p>
+  <canvas id="lab" aria-hidden="true"></canvas>
+  <script>
+    const canvas = document.getElementById('lab');
+    const ctx = canvas.getContext('2d');
+    let revealed = false;
+
+    function render() {
+      const ratio = window.devicePixelRatio || 1;
+      const width = canvas.clientWidth;
+      const height = canvas.clientHeight;
+      canvas.width = width * ratio;
+      canvas.height = height * ratio;
+      ctx.scale(ratio, ratio);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, width, height);
+      ctx.fillStyle = '#4255c5';
+      ctx.fillRect(32, 36, width - 64, 72);
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 20px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('Reveal token', width / 2, 72);
+      if (revealed) {
+        ctx.fillStyle = '#202124';
+        ctx.font = 'bold 28px monospace';
+        ctx.fillText('ORBIT-27', width / 2, 180);
+      }
+    }
+
+    canvas.addEventListener('click', event => {
+      const rect = canvas.getBoundingClientRect();
+      const y = event.clientY - rect.top;
+      if (y >= 36 && y <= 108) {
+        revealed = true;
+        render();
+      }
+    });
+    window.addEventListener('resize', render);
+    render();
+  </script>
+</body>
+</html>

@@ -1,0 +1,43 @@
+# V10 trains fresh from the base FunctionGemma checkpoint on the merged corpus:
+# the frozen V8 foundations plus the V10 command-surface families.
+#
+# Sizing note. The first V10 run used 8192 iterations, one pass over 262,584 rows, and scored
+# 0.513 on the independent probe against V9's 0.620 — but that comparison was confounded. V9's
+# 66,000 rows at the same iteration budget received roughly four passes, so V10 was measured at a
+# quarter of the exposure per example. This run matches epochs rather than iterations: 32,768
+# iterations is four passes over the larger corpus, which is the only way to attribute a
+# difference to the curriculum instead of to training length.
+#
+# Checkpoints every 2048 steps keep the artifact count at sixteen. Selection still maximises the
+# worst family under perfect protocol, never loss: the first run's validation loss sat at 0.001
+# while the model refused 0 of 38 handoff cells.
+model: mlx-community/functiongemma-270m-it-bf16
+train: true
+test: false
+fine_tune_type: lora
+optimizer: adamw
+optimizer_config:
+  adamw:
+    weight_decay: 0.01
+
+data: runs/functiongemma/data-v10
+adapter_path: runs/functiongemma/adapters/lora-r32-v10-seed103-long
+seed: 103
+num_layers: -1
+batch_size: 8
+grad_accumulation_steps: 4
+iters: 32768
+learning_rate: 2.0e-6
+steps_per_report: 20
+steps_per_eval: 2048
+save_every: 2048
+val_batches: 160
+max_seq_length: 1024
+mask_prompt: true
+grad_checkpoint: false
+report_to: null
+
+lora_parameters:
+  rank: 32
+  scale: 64.0
+  dropout: 0.05

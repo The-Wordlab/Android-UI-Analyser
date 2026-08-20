@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.gradle/
+.coverage
+# pytest-cov writes one file per worker as `.coverage.<host>.<pid>.<rand>`,
+# which a bare `.coverage` does not match — they showed up as untracked junk.
+.coverage.*
+htmlcov/
+
+# Runtime / model caches
+*.png
+!tests/**/*.png
+runs/
+# Local policy/perception weights and generated checkpoints stay out of Git. The
+# one reviewed 15 MB FunctionGemma LoRA below is the narrow exception; base weights
+# and every other model format remain ignored.
+*.safetensors
+!src/android_ui_analyser/resources/functiongemma/adapters.safetensors
+*.gguf
+*.ckpt
+*.pth
+*.pt
+
+# Local, machine-specific config (may opt into AGPL / enable paid providers).
+# Kept out of version control so the shipped defaults stay license-clean.
+.android-ui-analyser.yaml
+
+# Secrets — never commit. Keys live in env vars only (see README).
+.env
+
+# Built AOT thin client
+native/aua-fast/aua-fast
+
+# local git worktrees
+.worktree/
+
+# Agent worktrees are other sessions working copies, each its own git repo. `git add -A`
+# swept six of them in as gitlinks once; ignoring them makes that impossible to repeat.
+.claude/worktrees/

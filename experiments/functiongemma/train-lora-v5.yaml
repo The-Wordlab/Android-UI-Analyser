@@ -1,0 +1,35 @@
+# Recovery-focused v5 starts from the base FunctionGemma checkpoint.
+# Train past one corpus pass so validation-selected checkpoints can show whether
+# the recovery curriculum is still improving or has started to overfit. The
+# RunPod cycle evaluates safety and worst-family accuracy independently;
+# aggregate validation loss alone never authorizes promotion.
+model: mlx-community/functiongemma-270m-it-bf16
+train: true
+test: false
+fine_tune_type: lora
+optimizer: adamw
+optimizer_config:
+  adamw:
+    weight_decay: 0.01
+
+data: runs/functiongemma/data-v5
+adapter_path: runs/functiongemma/adapters/lora-r16-v5
+seed: 47
+num_layers: -1
+batch_size: 8
+grad_accumulation_steps: 4
+iters: 6144
+learning_rate: 2.0e-6
+steps_per_report: 20
+steps_per_eval: 512
+save_every: 256
+val_batches: 128
+max_seq_length: 1024
+mask_prompt: true
+grad_checkpoint: false
+report_to: null
+
+lora_parameters:
+  rank: 16
+  scale: 32.0
+  dropout: 0.05
