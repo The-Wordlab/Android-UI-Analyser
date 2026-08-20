@@ -1178,14 +1178,28 @@ def _same_caller(engine: Engine, previous: dict[str, Any]) -> bool:
 _SAME_TURN_MS = 120_000
 
 
+def _journal_serial_without_device(engine: Engine) -> str | None:
+    """Return this caller's selected serial without connecting to the target.
+
+    Soft lints run around daemon-routed commands.  Reading ``engine.device`` here creates a
+    second local device user after the daemon has already produced the real response; that
+    process can then wait behind the daemon's capture/command fence merely to print optional
+    advice.  Routing has already resolved the lease into ``_lease_serial`` and the config, so
+    either value is enough to choose the per-device journal without opening the device.
+    """
+    leased = getattr(engine, "_lease_serial", None)
+    if isinstance(leased, str) and leased:
+        return leased
+    configured = getattr(getattr(engine.config, "device", None), "serial", None)
+    return configured if isinstance(configured, str) and configured else None
+
+
 def _warn_if_redundant_analyze(engine: Engine, args: dict[str, Any] | None = None) -> None:
     """Soft lint: `analyze` immediately after an observed action usually re-reads the same state."""
     if args is not None and args.get("cmd") != "analyze":
         return
     cfg = engine.config
-    serial = None
-    with contextlib.suppress(Exception):
-        serial = engine.device.serial
+    serial = _journal_serial_without_device(engine)
     try:
         from . import journal as journal_mod
 
@@ -1246,9 +1260,7 @@ def _warn_if_wait_could_have_been_until(engine: Engine, waited_for: str | None) 
     `--for`/`--for-stable`/`--changed` but not the global flag that replaces them here.
     """
     cfg = engine.config
-    serial = None
-    with contextlib.suppress(Exception):
-        serial = engine.device.serial
+    serial = _journal_serial_without_device(engine)
     try:
         from . import journal as journal_mod
 
