@@ -2053,6 +2053,66 @@ def _tool_definitions() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="mock_rewrite",
+            description=(
+                "Arm one HTTP rule that lets the request REACH the server and then patches "
+                "the real response — status, headers, or individual JSON fields. Use this "
+                "instead of mock_map to reproduce a server-side condition (a 429, a missing "
+                "field) on real data. A rule with no host and a catch-all path is refused: "
+                "it would also intercept the platform's connectivity probes and the device "
+                "would look offline."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "method": {
+                        "type": "string",
+                        "description": "HTTP method, for example GET or POST. `*` matches any.",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Request path to match, for example /v1/hub.",
+                    },
+                    "host": {
+                        "type": "string",
+                        "description": "Restrict the rule to one host.",
+                    },
+                    "status": {
+                        "type": "integer",
+                        "description": "Replace the response status code.",
+                    },
+                    "headers": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                        "description": "Response headers to set.",
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "Replace the whole response body.",
+                    },
+                    "set_json": {
+                        "type": "object",
+                        "description": (
+                            "JSON fields to set, keyed by path: `items[0].title` or "
+                            "`items.0.title`, values as-is."
+                        ),
+                    },
+                    "delete_json": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "JSON field paths to delete.",
+                    },
+                    "times": {
+                        "type": "integer",
+                        "default": 0,
+                        "description": "Fire at most N times; 0 means every time.",
+                    },
+                },
+                "required": ["method", "path"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
             name="app",
             description="Inspect or control the foreground app "
             "(foreground|stop|kill|clear|grant|current). Use app_launch_and_analyze to launch.",
@@ -3097,6 +3157,21 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 str(args["path"]),
                 status=int(args.get("status", 200)),
                 body=args.get("body"),
+            )
+        )
+    if name == "mock_rewrite":
+        raw_status = args.get("status")
+        return _dump(
+            engine.mock_rewrite(
+                str(args["method"]),
+                str(args["path"]),
+                host=args.get("host"),
+                status=int(raw_status) if raw_status is not None else None,
+                headers=args.get("headers") or None,
+                body=args.get("body"),
+                set_json=args.get("set_json") or None,
+                delete_json=args.get("delete_json") or None,
+                times=int(args.get("times", 0)),
             )
         )
     if name == "app":

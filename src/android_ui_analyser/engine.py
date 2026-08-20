@@ -16352,7 +16352,7 @@ class Engine:
             pm.clear_state(self.device.serial)
         return {"ok": True, "action": "proxy-stop", "stopped": stopped, "port": p}
 
-    def proxy_status(self, *, heal: bool = True) -> dict[str, Any]:
+    def proxy_status(self, *, heal: bool = True, serial: str | None = None) -> dict[str, Any]:
         """Is the proxy an agent thinks is armed ACTUALLY working end to end — not just one of
         the pieces that have to hold together for it to be.
 
@@ -16374,15 +16374,19 @@ class Engine:
         record that may otherwise have gone stale.
         """
         pm = self.platform.capability("proxy")
-        device = self.device
         cache = Path(self.config.cache.dir).expanduser()
+        # An explicit *serial* is how a read-only observer (the dashboard) asks this
+        # question. Connecting would attach uiautomator2 and take the UiAutomation slot
+        # away from whichever agent is actually driving the device, to learn a string the
+        # caller already had.
+        target = serial or self.device.serial
 
-        report = pm.proxy_health(device.serial, cache, self_heal=False)
+        report = pm.proxy_health(target, cache, self_heal=False)
         adopted = False
         if heal and report.get("adoptable"):
-            self._adopt_own_proxy(pm, device, cache, report)
+            self._adopt_own_proxy(pm, self.device, cache, report)
             adopted = True
-            report = pm.proxy_health(device.serial, cache, self_heal=False)
+            report = pm.proxy_health(target, cache, self_heal=False)
         checks = report.get("checks") or {}
         tunnel = checks.get("tunnel")
         process = checks.get("process")
@@ -16413,8 +16417,8 @@ class Engine:
                 ),
             )
             with contextlib.suppress(Exception):
-                pm.ensure_reverse_tunnel(device.serial, port)
-            report = pm.proxy_health(device.serial, cache, self_heal=False)
+                pm.ensure_reverse_tunnel(target, port)
+            report = pm.proxy_health(target, cache, self_heal=False)
             healed_tunnel = (report.get("checks") or {}).get("tunnel")
             if healed_tunnel is not None and healed_tunnel.get("ok"):
                 healed_tunnel["healed"] = True
@@ -16558,7 +16562,7 @@ class Engine:
             if isinstance(state, dict) and int(state.get("port") or 0) == int(port):
                 pm.write_state(serial, {**state, "pid": int(pid), "port": int(port)})
 
-    def _proxy_health_warning(self) -> str | None:
+    def _proxy_health_warning(self, serial: str | None = None) -> str | None:
         """A one-line warning when the armed proxy is not actually reachable, else ``None``.
 
         Called only from the two points an agent is most likely to be misled by a clean
@@ -16581,7 +16585,7 @@ class Engine:
         """
         status: dict[str, Any] | None = None
         with contextlib.suppress(Exception):
-            status = self.proxy_status(heal=False)
+            status = self.proxy_status(heal=False, serial=serial)
         if not isinstance(status, dict):
             return None
         state = status.get("state")
@@ -16590,14 +16594,21 @@ class Engine:
         message = status.get("hint") or status.get("warning") or status.get("detail")
         return f"proxy health check: {message}" if message else None
 
-    def mock_map(
+    def _arm_mock_rule(
         self,
-        method: str,
-        path: str,
+        rule: dict[str, Any],
         *,
-        status: int = 200,
-        body: str | None = None,
+        action: str,
+        detail: str,
+        serial: str | None = None,
     ) -> dict[str, Any]:
+        """Append one built rule to the armed set, undo journalled first.
+
+        Shared by :meth:`mock_map` and :meth:`mock_rewrite` so a stub and a rewrite are
+        armed, owned, journalled and warned about identically — the two differ only in
+        the rule they build, and letting that difference leak into the arming step is how
+        one of them ends up without an undo record.
+        """
         from . import leases
 
         pm = self.platform.capability("proxy")
@@ -16616,7 +16627,6 @@ class Engine:
                 "run `aua mock list` to inspect them, or `aua mock clear` to start clean."
             )
             logger.warning(warning)
-        rule = pm.map_rule(method, path, status=status, body=body)
         rules = existing + [rule]
         doc["rules"] = rules
         doc["owner"] = doc.get("owner") or owner
@@ -16628,11 +16638,11 @@ class Engine:
             kind="mock_rules",
             op="clear_mock_rules",
             args={"cache_dir": str(cache)},
-            detail=f"mock stub rule armed via `aua mock map` ({method} {path})",
+            detail=detail,
         )
         pm.save_doc(rules_file, doc)
-        out: dict[str, Any] = {"ok": True, "action": "mock-map", "rule": rule, "count": len(rules)}
-        health_warning = self._proxy_health_warning()
+        out: dict[str, Any] = {"ok": True, "action": action, "rule": rule, "count": len(rules)}
+        health_warning = self._proxy_health_warning(serial)
         if warning and health_warning:
             warning = f"{warning} Also: {health_warning}"
         elif health_warning:
@@ -16640,6 +16650,75 @@ class Engine:
         if warning:
             out["warning"] = warning
         return out
+
+    def mock_map(
+        self,
+        method: str,
+        path: str,
+        *,
+        status: int = 200,
+        body: str | None = None,
+        serial: str | None = None,
+    ) -> dict[str, Any]:
+        pm = self.platform.capability("proxy")
+
+        rule = pm.map_rule(method, path, status=status, body=body)
+        return self._arm_mock_rule(
+            rule,
+            action="mock-map",
+            detail=f"mock stub rule armed via `aua mock map` ({method} {path})",
+            serial=serial,
+        )
+
+    def mock_rewrite(
+        self,
+        method: str,
+        path: str,
+        *,
+        host: str | None = None,
+        query: str | None = None,
+        request_body: str | None = None,
+        status: int | None = None,
+        headers: dict[str, str] | None = None,
+        body: Any = None,
+        set_json: dict[str, Any] | None = None,
+        delete_json: list[str] | None = None,
+        replace: list[tuple[str, str]] | None = None,
+        times: int = 0,
+        serial: str | None = None,
+    ) -> dict[str, Any]:
+        """Arm a rule that lets the request reach the server, then patches the response.
+
+        The complement to :meth:`mock_map`. A stub answers from the rule and the server
+        never hears about it; a rewrite is how you keep the real exchange and change one
+        thing about the answer — the status an app sees, a header, a JSON field — which is
+        what you want when reproducing a server-side condition you cannot trigger on demand.
+        """
+        pm = self.platform.capability("proxy")
+
+        rule = pm.rewrite_rule(
+            host=host,
+            method=method,
+            path=path,
+            query=query,
+            request_body=request_body,
+            status=status,
+            headers=headers,
+            body=body,
+            set_json=set_json,
+            delete_json=delete_json,
+            replace=replace,
+            times=times,
+        )
+        # A rewrite with no host and a catch-all path matches Android's own connectivity
+        # probes as well as the app's traffic, and the device just looks offline.
+        pm.guard_rule_scope(rule)
+        return self._arm_mock_rule(
+            rule,
+            action="mock-rewrite",
+            detail=f"mock rewrite rule armed via `aua mock rewrite` ({method} {path})",
+            serial=serial,
+        )
 
     def mock_list(self) -> dict[str, Any]:
         pm = self.platform.capability("proxy")

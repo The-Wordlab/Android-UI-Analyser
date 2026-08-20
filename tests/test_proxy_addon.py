@@ -350,3 +350,106 @@ def test_mode_flips_without_restarting_the_proxy(
     pm.set_mode(pm.rules_path(tmp_path), "record")
     _exchange(addon, path="/b")
     assert [e["request"]["path"] for e in pm.load_record(tmp_path)] == ["/b"]
+
+
+# ------------------------------------------------- the loop from caller to addon
+
+
+def test_a_rule_armed_through_the_engine_is_applied_by_the_addon(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Close the loop the dashboard and `aua mock rewrite` both depend on.
+
+    Every other test here writes the rules file itself, so nothing proved that the file
+    the *engine* writes is the file the addon can act on. Two things could silently break
+    that: the engine stamps `mode` while arming, and a rewrite is picked on the response
+    hook rather than the request hook — either could leave an armed rule permanently inert
+    while every surface cheerfully reported `count: 1`.
+    """
+    from android_ui_analyser.engine import Engine
+    from conftest import FakeDevice, make_config
+
+    cache = tmp_path / "cache"
+    engine = Engine(
+        make_config(cache={"dir": str(cache)}, memory={"dir": str(tmp_path / "mem")}),
+        device=FakeDevice(),
+    )
+    armed = engine.mock_rewrite(
+        "GET",
+        "/v1/feed",
+        host="api.example.com",
+        status=429,
+        headers={"Retry-After": "30"},
+        set_json={"items[0].title": "patched"},
+    )
+    rule_id = armed["rule"]["id"]
+
+    addon = _load(monkeypatch, cache)
+    flow = _exchange(
+        addon,
+        path="/v1/feed",
+        upstream=_Response(200, text='{"items":[{"title":"real"}]}'),
+    )
+
+    assert flow.response.status_code == 429
+    assert flow.response.headers.get("Retry-After") == "30"
+    assert json.loads(flow.response.text)["items"][0]["title"] == "patched"
+    assert flow.metadata["aua_action"] == "rewrite"
+    assert flow.metadata["aua_rule"] == rule_id
+
+    # And the panel's "which rules actually fired" signal comes from this same log line.
+    logged = pm.read_flows_since(cache, 0)
+    assert [(e["action"], e["rule"]) for e in logged] == [("rewrite", rule_id)]
+
+
+def test_an_engine_armed_stub_is_also_applied_by_the_addon(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from android_ui_analyser.engine import Engine
+    from conftest import FakeDevice, make_config
+
+    cache = tmp_path / "cache"
+    engine = Engine(
+        make_config(cache={"dir": str(cache)}, memory={"dir": str(tmp_path / "mem")}),
+        device=FakeDevice(),
+    )
+    engine.mock_map("POST", "/v1/pay", status=402, body='{"reason":"stubbed"}')
+
+    addon = _load(monkeypatch, cache)
+    flow = _exchange(addon, method="POST", path="/v1/pay")
+
+    assert flow.response.status_code == 402
+    assert json.loads(flow.response.text)["reason"] == "stubbed"
+    assert flow.metadata["aua_action"] == "stub"
+
+
+def test_bracket_and_dot_json_paths_both_reach_the_same_field(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`items[0].title` used to parse as one literal key and silently change nothing.
+
+    That is the worst shape a mock can fail in: the rule matched, the flow log recorded it
+    as applied, and the response came back untouched — so the app under test looked like
+    it ignored the mock.
+    """
+    addon = _load(monkeypatch, tmp_path)
+    body = '{"items":[{"title":"real"}],"meta":{"cursor":"abc"}}'
+
+    _rules(tmp_path, [pm.rewrite_rule(method="GET", path="/v1/feed",
+                                      set_json={"items[0].title": "bracket"})])
+    flow = _exchange(addon, path="/v1/feed", upstream=_Response(200, text=body))
+    assert json.loads(flow.response.text)["items"][0]["title"] == "bracket"
+
+    _rules(tmp_path, [pm.rewrite_rule(method="GET", path="/v1/feed",
+                                      set_json={"items.0.title": "dotted"})])
+    flow = _exchange(addon, path="/v1/feed", upstream=_Response(200, text=body))
+    assert json.loads(flow.response.text)["items"][0]["title"] == "dotted"
+
+    # The `$.` JSONPath prefix and bracket deletion work the same way.
+    _rules(tmp_path, [pm.rewrite_rule(method="GET", path="/v1/feed",
+                                      set_json={"$.items[0].title": "prefixed"},
+                                      delete_json=["meta.cursor"])])
+    flow = _exchange(addon, path="/v1/feed", upstream=_Response(200, text=body))
+    patched = json.loads(flow.response.text)
+    assert patched["items"][0]["title"] == "prefixed"
+    assert "cursor" not in patched["meta"]

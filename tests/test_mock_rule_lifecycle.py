@@ -189,3 +189,64 @@ def test_the_catalogued_mock_rules_undo_actually_clears_the_file(tmp_path: Path)
 
     doc = pm.load_doc(pm.rules_path(cache))
     assert doc["rules"] == []
+
+
+# --------------------------------------------------------------------- rewrite rules
+
+
+def test_mock_rewrite_arms_a_response_patch_and_journals_its_undo(tmp_path: Path) -> None:
+    """`rewrite_rule` was implemented and addon-tested but had no engine or CLI surface,
+    so the whole patch-the-real-response half of the proxy was unreachable to a caller."""
+    engine = _engine(tmp_path)
+
+    out = engine.mock_rewrite(
+        "GET",
+        "/api/v1/widgets",
+        host="api.example.test",
+        status=429,
+        headers={"Retry-After": "30"},
+        set_json={"quota.remaining": 0},
+        times=1,
+    )
+
+    assert out["ok"] is True
+    assert out["action"] == "mock-rewrite"
+    rule = out["rule"]
+    assert rule["action"] == "rewrite"
+    assert rule["match"] == {"method": "GET", "path": "/api/v1/widgets", "host": "api.example.test"}
+    assert rule["rewrite"]["status"] == 429
+    assert rule["rewrite"]["headers"] == {"Retry-After": "30"}
+    assert rule["rewrite"]["set_json"] == {"quota.remaining": 0}
+    assert rule["times"] == 1
+
+    # Same ledger key as a stub, so one `clear_mock_rules` undo retracts either kind.
+    assert any(
+        e.kind == "mock_rules" for e in device_ledger.read_ledger(engine.device.serial)
+    )
+
+
+def test_mock_rewrite_and_mock_map_share_one_armed_set(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    engine.mock_map("GET", "/api/v1/widgets", status=200)
+    engine.mock_rewrite("POST", "/api/v1/gadgets", status=500)
+
+    listed = engine.mock_list()
+    assert listed["count"] == 2
+    assert sorted(r["action"] for r in listed["rules"]) == ["rewrite", "stub"]
+    assert engine.mock_clear()["removed"] == 2
+
+
+def test_mock_rewrite_refuses_a_rule_that_matches_every_request(tmp_path: Path) -> None:
+    """An unhosted catch-all also intercepts Android's connectivity probes, and the device
+    then looks offline rather than mocked."""
+    engine = _engine(tmp_path)
+    with pytest.raises(UsageError, match="every request"):
+        engine.mock_rewrite("*", "*", status=500)
+    # Scoping it to a host makes the same rule legitimate.
+    assert engine.mock_rewrite("*", "*", host="api.example.test", status=500)["ok"] is True
+
+
+def test_mock_rewrite_requires_an_actual_change(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    with pytest.raises(UsageError, match="must change something"):
+        engine.mock_rewrite("GET", "/api/v1/widgets")

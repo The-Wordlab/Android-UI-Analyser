@@ -10,6 +10,7 @@ import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -49,23 +50,6 @@ def test_recent_marks_reads_index(tmp_path: Path) -> None:
     marks = dash.recent_marks(tmp_path, "emulator-5554")
     assert len(marks) == 1
     assert marks[0]["action"] == "tap:4"
-
-
-def test_resolve_serial_requires_choice(monkeypatch: pytest.MonkeyPatch) -> None:
-    from android_ui_analyser import dashboard as dash
-
-    class D:
-        def __init__(self, serial: str) -> None:
-            self.serial = serial
-            self.state = "device"
-
-    monkeypatch.setattr(
-        "android_ui_analyser.device.list_devices",
-        lambda: [D("emulator-5554"), D("emulator-5556")],
-    )
-    with pytest.raises(DeviceError, match="multiple"):
-        dash.resolve_serial(None)
-    assert dash.resolve_serial("emulator-5554") == "emulator-5554"
 
 
 def test_resolve_dashboard_targets_grid_by_default(
@@ -597,3 +581,443 @@ def test_dashboard_journal_detail_is_token_protected_and_serial_scoped(
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_dashboard_opens_an_empty_grid_when_no_device_is_attached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`aua dashboard` is a watcher, not a device command: it must open regardless."""
+    from android_ui_analyser import dashboard as dash
+
+    monkeypatch.setattr(dash, "list_online_serials", lambda *a, **k: [])
+    grid = dash.resolve_dashboard_targets(None)
+    assert grid["mode"] == "grid"
+    assert grid["serials"] == []
+    assert grid["focus"] is None
+    assert grid["discovery_error"] is None
+    # --detail with nothing to focus still opens; the grid discovers devices later.
+    detail = dash.resolve_dashboard_targets(None, grid=False)
+    assert detail["mode"] == "grid"
+    assert detail["serials"] == []
+
+
+def test_dashboard_opens_when_device_discovery_itself_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from android_ui_analyser import dashboard as dash
+
+    def boom(*_a: object, **_k: object) -> list[str]:
+        raise DeviceError("adb server would not start")
+
+    monkeypatch.setattr(dash, "list_online_serials", boom)
+    out = dash.resolve_dashboard_targets(None)
+    assert out["mode"] == "grid"
+    assert out["serials"] == []
+    assert "adb server would not start" in str(out["discovery_error"])
+    # A pinned serial is still watchable when discovery is broken.
+    pinned = dash.resolve_dashboard_targets("emulator-5554")
+    assert pinned["mode"] == "detail"
+    assert pinned["focus"] == "emulator-5554"
+
+
+def test_devices_payload_reports_an_empty_grid_and_its_discovery_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from android_ui_analyser import dashboard as dash
+
+    state = _dashboard_state(tmp_path)
+    state.mode = "grid"
+    state.serials = []
+    state.focus = None
+    monkeypatch.setattr(dash, "list_online_serials", lambda *a, **k: [])
+    payload = state.devices_payload()
+    assert payload["ok"] is True
+    assert payload["devices"] == []
+    assert payload["discovery_error"] is None
+
+    def boom(*_a: object, **_k: object) -> list[str]:
+        raise DeviceError("adb went away")
+
+    monkeypatch.setattr(dash, "list_online_serials", boom)
+    broken = state.devices_payload()
+    assert broken["devices"] == []
+    assert "adb went away" in str(broken["discovery_error"])
+
+
+def test_frame_token_tracks_the_frame_actually_served(tmp_path: Path) -> None:
+    """The tile cache key must change exactly when the served bytes change."""
+    from android_ui_analyser import dashboard as dash  # noqa: F401
+
+    state = _dashboard_state(tmp_path)
+    frames = tmp_path / "captures" / "emulator-5554" / "s1" / "frames"
+    frames.mkdir(parents=True)
+    shot = frames / "1.jpg"
+    shot.write_bytes(b"first")
+    state.note_capture_live("emulator-5554", True)
+
+    first = state.frame_token("emulator-5554")
+    assert state.frame_token("emulator-5554") == first  # deduped screen → no refetch
+    time.sleep(0.02)
+    shot.write_bytes(b"second")
+    os.utime(shot, None)
+    assert state.frame_token("emulator-5554") != first
+
+
+def test_frame_token_advances_while_capture_is_not_running(tmp_path: Path) -> None:
+    """No live capture means the bytes come from a screencap, so the tile must refetch."""
+    state = _dashboard_state(tmp_path)
+    state.note_capture_live("emulator-5554", False)
+    first = state.frame_token("emulator-5554")
+    time.sleep(0.02)
+    assert state.frame_token("emulator-5554") != first
+
+
+def test_grid_tiles_refetch_the_frame_instead_of_pinning_a_constant_url() -> None:
+    from android_ui_analyser import dashboard as dash
+
+    html = dash._DASHBOARD_HTML
+    # The old cache key stripped its own timestamp, so it never changed and the tile
+    # image was fetched exactly once for the lifetime of the page.
+    assert "src.indexOf('&t=')" not in html
+    assert "d.frame_token" in html
+    assert "s.frame_token" in html
+
+
+def test_frame_bytes_screencaps_past_a_dead_capture(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state = _dashboard_state(tmp_path)
+    frames = tmp_path / "captures" / "emulator-5554" / "s1" / "frames"
+    frames.mkdir(parents=True)
+    shot = frames / "1.jpg"
+    shot.write_bytes(b"stale-jpeg")
+    long_ago = time.time() - 300
+    os.utime(shot, (long_ago, long_ago))
+
+    live_png = b"\x89PNG\r\n\x1a\nlive-bytes"
+
+    class _Img:
+        png_bytes = live_png
+
+    class _Dev:
+        def screenshot(self) -> _Img:
+            return _Img()
+
+    monkeypatch.setattr(state.platform, "connect", lambda _ser: _Dev())
+
+    state.note_capture_live("emulator-5554", False)
+    data, mime = state.frame_bytes("emulator-5554")
+    assert data == live_png
+    assert mime == "image/png"
+
+    # A healthy capture dedupes unchanged screens, so an old file is still correct.
+    state._fallback.clear()
+    state.note_capture_live("emulator-5554", True)
+    assert state.frame_bytes("emulator-5554")[0] == b"stale-jpeg"
+
+
+def test_dashboard_serves_with_no_devices_attached(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from android_ui_analyser import dashboard as dash
+    from android_ui_analyser.config import Config
+
+    monkeypatch.setattr(dash, "list_online_serials", lambda *a, **k: [])
+    cfg = Config()
+    cfg.cache.dir = str(tmp_path)
+    info = dash.run(
+        port=0,
+        cache_dir=tmp_path,
+        config=cfg,
+        open_browser=False,
+        block=False,
+        grid=True,
+    )
+    assert info["ok"] is True
+    assert info["mode"] == "grid"
+    assert info["serials"] == []
+    try:
+        with urllib.request.urlopen(info["url"], timeout=2) as response:
+            assert response.status == 200
+        with urllib.request.urlopen(info["url"] + "api/devices", timeout=2) as response:
+            payload = json.loads(response.read())
+        assert payload["devices"] == []
+    finally:
+        dash.shutdown(info)
+
+
+# --------------------------------------------------------------------------
+# proxy panel
+# --------------------------------------------------------------------------
+
+
+class _FakeProxyService:
+    """Just the members of the PROXY capability contract the panel actually reads."""
+
+    def __init__(self, tmp_path: Path) -> None:
+        self.root = tmp_path
+        self.health: dict[str, Any] = {
+            "ok": True,
+            "state": "healthy",
+            "port": 8080,
+            "intercepting": True,
+            "checks": {},
+        }
+        self.doc: dict[str, Any] = {"mode": "off", "owner": "agent-a", "rules": []}
+        self.flows: list[dict[str, Any]] = []
+        self.bodies: list[dict[str, Any]] = []
+
+    def proxy_health(self, serial: str, cache_dir: Any, *, self_heal: bool = False) -> dict:
+        assert self_heal is False, "the dashboard must never heal the device"
+        return dict(self.health, serial=serial)
+
+    def rules_path(self, cache_dir: Any) -> Path:
+        return self.root / "mock_rules.json"
+
+    def load_doc(self, path: Path) -> dict[str, Any]:
+        return {k: (list(v) if isinstance(v, list) else v) for k, v in self.doc.items()}
+
+    def backfill_rule_ids(self, rules: list[dict]) -> tuple[list[dict], bool]:
+        return list(rules), False
+
+    def read_flows_since(self, cache_dir: Any, since_ts: float) -> list[dict]:
+        return [f for f in self.flows if float(f.get("ts") or 0) > since_ts]
+
+    def read_flow_bodies(self, cache_dir: Any) -> list[dict]:
+        return list(self.bodies)
+
+
+def _proxy_state(tmp_path: Path, service: Any):
+    state = _dashboard_state(tmp_path)
+    state._proxy_service = lambda: service  # type: ignore[method-assign]
+    return state
+
+
+def test_proxy_payload_reports_health_rules_and_live_traffic(tmp_path: Path) -> None:
+    from typing import Any  # noqa: F401
+
+    svc = _FakeProxyService(tmp_path)
+    svc.doc["rules"] = [
+        {"id": "r1", "action": "stub", "request": {"method": "GET", "path": "/v1/me"}},
+        {"id": "r2", "action": "rewrite", "match": {"method": "GET", "path": "/v1/feed"}},
+    ]
+    svc.health["state"] = "healthy"
+    state = _proxy_state(tmp_path, svc)
+    before = state._proxy_opened_at - 100
+    svc.flows = [
+        {"n": 1, "ts": before, "method": "GET", "path": "/earlier", "status": 200},
+        {"n": 2, "ts": time.time() + 1, "method": "GET", "path": "/v1/me", "status": 200,
+         "action": "stub", "rule": "r1"},
+        {"n": 3, "ts": time.time() + 1, "method": "POST", "path": "/v1/track", "status": 204},
+    ]
+
+    out = state.proxy_payload("emulator-5554")
+    assert out["ok"] is True and out["supported"] is True
+    assert out["on"] is True and out["intercepting"] is True and out["port"] == 8080
+    # Traffic from before the page opened is the whole point — it is what the agent did.
+    assert [f["n"] for f in out["flows"]] == [1, 2, 3]
+    assert [f["live"] for f in out["flows"]] == [False, True, True]
+    assert out["flow_count"] == 3
+    assert out["manipulated"] == 1
+    by_id = {r["id"]: r for r in out["rules"]}
+    assert by_id["r1"]["fired"] == 1
+    assert by_id["r2"]["fired"] == 0
+
+
+def test_proxy_payload_does_not_call_a_clean_unproxied_device_proxied(tmp_path: Path) -> None:
+    """`proxy_health` reports ok for an unproxied device too — its network path is fine.
+    Reading that as "proxy on" made the panel claim interception on a clean device."""
+    svc = _FakeProxyService(tmp_path)
+    svc.health = {"ok": True, "state": "unproxied", "intercepting": False, "port": None}
+    state = _proxy_state(tmp_path, svc)
+    out = state.proxy_payload("emulator-5554")
+    assert out["on"] is False
+    assert out["intercepting"] is False
+    assert out["state"] == "unproxied"
+
+
+def test_proxy_payload_survives_a_platform_without_a_proxy(tmp_path: Path) -> None:
+    from android_ui_analyser.errors import UnsupportedPlatformCapabilityError
+
+    state = _dashboard_state(tmp_path)
+
+    def refuse() -> Any:
+        raise UnsupportedPlatformCapabilityError("fake", "proxy")
+
+    state._proxy_service = refuse  # type: ignore[method-assign]
+    out = state.proxy_payload("emulator-5554")
+    assert out["ok"] is False
+    assert out["supported"] is False
+    assert "error" in out
+
+
+def test_proxy_payload_survives_a_broken_health_probe(tmp_path: Path) -> None:
+    svc = _FakeProxyService(tmp_path)
+
+    def boom(*_a: object, **_k: object) -> dict:
+        raise OSError("adb reverse blew up")
+
+    svc.proxy_health = boom  # type: ignore[assignment]
+    state = _proxy_state(tmp_path, svc)
+    out = state.proxy_payload("emulator-5554")
+    assert out["ok"] is True
+    assert out["health"] is None
+    assert out["on"] is False
+
+
+def test_proxy_flow_detail_returns_the_captured_exchange(tmp_path: Path) -> None:
+    svc = _FakeProxyService(tmp_path)
+    svc.bodies = [
+        {"n": 7, "method": "POST", "path": "/v1/chat", "request_body": "{}"},
+        {"n": 8, "method": "GET", "path": "/v1/feed", "response_body": "[]"},
+    ]
+    state = _proxy_state(tmp_path, svc)
+    found = state.proxy_flow_detail(8)
+    assert found["ok"] is True
+    assert found["flow"]["path"] == "/v1/feed"
+    missing = state.proxy_flow_detail(99)
+    assert missing["ok"] is False
+    assert missing["error"]["code"] == "proxy_flow_body_missing"
+
+
+def test_proxy_operation_routes_through_the_engine(tmp_path: Path) -> None:
+    state = _dashboard_state(tmp_path)
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    class _FakeEngine:
+        def mock_list(self) -> dict:
+            calls.append(("list", {}))
+            return {"ok": True, "action": "mock-list"}
+
+        def mock_clear(self) -> dict:
+            calls.append(("clear", {}))
+            return {"ok": True, "action": "mock-clear"}
+
+        def mock_rm(self, rule_id: str) -> dict:
+            calls.append(("rm", {"id": rule_id}))
+            return {"ok": True, "action": "mock-rm"}
+
+        def mock_map(self, method: str, path: str, **kw: Any) -> dict:
+            calls.append(("stub", {"method": method, "path": path, **kw}))
+            return {"ok": True, "action": "mock-map"}
+
+        def mock_rewrite(self, method: str, path: str, **kw: Any) -> dict:
+            calls.append(("rewrite", {"method": method, "path": path, **kw}))
+            return {"ok": True, "action": "mock-rewrite"}
+
+    state._engine = _FakeEngine()
+
+    assert state.proxy_operation("list", {})["action"] == "mock-list"
+    state.proxy_operation("rm", {"id": "r9"})
+    state.proxy_operation(
+        "stub", {"method": "get", "path": "/v1/me", "status": 402, "body": '{"x":1}'}
+    )
+    state.proxy_operation(
+        "rewrite",
+        {
+            "method": "GET",
+            "path": "/v1/feed",
+            "host": "api.example.com",
+            "status": 429,
+            "set_json": {"items[0].title": "patched"},
+            "delete_json": ["meta.cursor"],
+            "times": 2,
+        },
+    )
+    kinds = [c[0] for c in calls]
+    assert kinds == ["list", "rm", "stub", "rewrite"]
+    stub = dict(calls[2][1])
+    assert stub["status"] == 402
+    assert stub["serial"] == "emulator-5554"
+    rewrite = dict(calls[3][1])
+    assert rewrite["host"] == "api.example.com"
+    assert rewrite["set_json"] == {"items[0].title": "patched"}
+    assert rewrite["delete_json"] == ["meta.cursor"]
+    assert rewrite["times"] == 2
+
+    with pytest.raises(UsageError):
+        state.proxy_operation("drop-tables", {})
+
+
+def test_proxy_operation_omits_status_when_the_browser_left_it_blank(tmp_path: Path) -> None:
+    """A rewrite with no status must not silently become a 200."""
+    state = _dashboard_state(tmp_path)
+    seen: dict[str, Any] = {}
+
+    class _FakeEngine:
+        def mock_rewrite(self, method: str, path: str, **kw: Any) -> dict:
+            seen.update(kw)
+            return {"ok": True}
+
+    state._engine = _FakeEngine()
+    state.proxy_operation(
+        "rewrite", {"method": "GET", "path": "/v1/feed", "status": "", "set_json": {"a": 1}}
+    )
+    assert seen["status"] is None
+
+
+def test_proxy_operation_rejects_a_device_outside_this_session(tmp_path: Path) -> None:
+    state = _dashboard_state(tmp_path)
+    state._engine = object()
+    with pytest.raises(UsageError) as err:
+        state.proxy_operation("list", {"serial": "emulator-9999"})
+    assert err.value.to_dict()["error"]["code"] == "dashboard_device_scope"
+
+
+def test_proxy_http_views_are_serial_scoped_and_writes_need_the_token(tmp_path: Path) -> None:
+    from android_ui_analyser import dashboard as dash
+
+    svc = _FakeProxyService(tmp_path)
+    state = _proxy_state(tmp_path, svc)
+    state.database_token = "dashboard-test-token"
+
+    class _FakeEngine:
+        def mock_list(self) -> dict:
+            return {"ok": True, "action": "mock-list", "rules": []}
+
+    state._engine = _FakeEngine()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), dash._make_handler(state))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    root = f"http://127.0.0.1:{server.server_port}/"
+    try:
+        with urllib.request.urlopen(root + "api/proxy?serial=emulator-5554", timeout=2) as r:
+            payload = json.loads(r.read())
+        assert payload["ok"] is True and payload["supported"] is True
+
+        with pytest.raises(urllib.error.HTTPError) as scoped:
+            urllib.request.urlopen(root + "api/proxy?serial=emulator-9999", timeout=2)
+        assert scoped.value.code in (400, 404)
+
+        body = json.dumps({}).encode()
+        unauthorized = urllib.request.Request(root + "api/proxy/list", data=body, method="POST")
+        with pytest.raises(urllib.error.HTTPError) as denied:
+            urllib.request.urlopen(unauthorized, timeout=2)
+        assert denied.value.code == 403
+
+        authorized = urllib.request.Request(
+            root + "api/proxy/list",
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "X-AUA-Dashboard-Token": state.database_token,
+            },
+        )
+        with urllib.request.urlopen(authorized, timeout=2) as r:
+            assert json.loads(r.read())["action"] == "mock-list"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_proxy_panel_is_in_the_detail_html() -> None:
+    from android_ui_analyser import dashboard as dash
+
+    html = dash._DASHBOARD_HTML
+    assert 'id="px-flows"' in html
+    assert 'id="px-rulelist"' in html
+    assert "/api/proxy/" in html
+    # The panel is detail-only: a grid tile has no serial to scope these calls to.
+    assert "if (isGrid) return;" in html

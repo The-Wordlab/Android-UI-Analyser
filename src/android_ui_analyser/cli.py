@@ -8474,6 +8474,95 @@ def mock_map_cmd(
     _run(ctx, go)
 
 
+@mock_app.command("rewrite")
+def mock_rewrite_cmd(
+    ctx: typer.Context,
+    method: str = typer.Argument(..., help="HTTP method (GET|POST|…), or `*` for any."),
+    path: str = typer.Argument(..., help="Path to match (prefix or exact)."),
+    host: str | None = typer.Option(None, "--host", help="Restrict to one host."),
+    query: str | None = typer.Option(None, "--query", help="Substring the query must contain."),
+    request_body: str | None = typer.Option(
+        None, "--request-body", help="Substring the request body must contain."
+    ),
+    status: int | None = typer.Option(None, "--status", help="Replace the response status."),
+    header: list[str] = typer.Option(
+        [], "--header", help="Set a response header, `Name: value` (repeatable)."
+    ),
+    body: str | None = typer.Option(None, "--body", help="Replace the whole response body."),
+    set_json: list[str] = typer.Option(
+        [], "--set", help="Set a JSON field, `a.b[0]=<json>` (repeatable)."
+    ),
+    delete_json: list[str] = typer.Option(
+        [], "--delete", help="Delete a JSON field by path (repeatable)."
+    ),
+    replace: list[str] = typer.Option(
+        [], "--replace", help="Literal body substitution, `old=>new` (repeatable)."
+    ),
+    times: int = typer.Option(0, "--times", help="Fire at most N times (0 = unlimited)."),
+) -> None:
+    """Patch the REAL response instead of stubbing it (reloaded by the mitmproxy addon).
+
+    `mock map` answers from the rule and the server never sees the request. This lets the
+    request through and edits what comes back — the status an app sees, a header, a JSON
+    field — which is how you reproduce a server-side condition you cannot trigger on demand.
+    """
+    import json
+
+    headers: dict[str, str] = {}
+    for item in header:
+        name, sep, value = item.partition(":")
+        if not sep or not name.strip():
+            raise UsageError(
+                f"--header {item!r} is not `Name: value`",
+                hint="Example: --header 'Retry-After: 30'.",
+            )
+        headers[name.strip()] = value.strip()
+
+    sets: dict[str, Any] = {}
+    for item in set_json:
+        field, sep, raw = item.partition("=")
+        if not sep or not field.strip():
+            raise UsageError(
+                f"--set {item!r} is not `path=value`",
+                hint='Example: --set \'items[0].title="hi"\' or --set enabled=false.',
+            )
+        try:
+            sets[field.strip()] = json.loads(raw)
+        except json.JSONDecodeError:
+            sets[field.strip()] = raw  # a bare string is the common case
+
+    pairs: list[tuple[str, str]] = []
+    for item in replace:
+        old, sep, new = item.partition("=>")
+        if not sep:
+            raise UsageError(
+                f"--replace {item!r} is not `old=>new`",
+                hint="Example: --replace 'premium=>free'.",
+            )
+        pairs.append((old, new))
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(
+            engine.mock_rewrite(
+                method,
+                path,
+                host=host,
+                query=query,
+                request_body=request_body,
+                status=status,
+                headers=headers or None,
+                body=body,
+                set_json=sets or None,
+                delete_json=[d.strip() for d in delete_json] or None,
+                replace=pairs or None,
+                times=times,
+            ),
+            fmt,
+        )
+
+    _run(ctx, go)
+
+
 @mock_app.command("record")
 def mock_record_cmd(
     ctx: typer.Context,

@@ -104,3 +104,45 @@ def test_deprecated_record_aliases_reach_the_same_screen_video_engine_path(
     _dispatch(engine, "record_stop", {"path": "screen.mp4"})
 
     assert calls == [("start", "screen.mp4"), ("stop", "screen.mp4")]
+
+
+def test_mock_rewrite_is_published_so_the_write_side_is_not_stub_only() -> None:
+    """`rewrite_rule` shipped implemented and addon-tested with no caller-facing surface
+    at all, so an agent could stub an endpoint but never patch a real response."""
+    tool = _tools().get("mock_rewrite")
+    assert tool is not None, "MCP has no mock_rewrite tool; response patching is unreachable"
+    props = tool.inputSchema["properties"]
+    for field in ("method", "path", "host", "status", "headers", "set_json", "delete_json"):
+        assert field in props, f"mock_rewrite must accept {field!r}"
+    assert tool.inputSchema["required"] == ["method", "path"]
+
+
+def test_mock_rewrite_dispatches_to_the_same_engine_method_as_the_cli(
+    monkeypatch: Any, tmp_path: Any
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake(self: Engine, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+        seen.update({"method": method, "path": path, **kwargs})
+        return {"ok": True, "action": "mock-rewrite"}
+
+    monkeypatch.setattr(Engine, "mock_rewrite", fake)
+    engine = Engine(make_config(cache={"dir": str(tmp_path)}), device=FakeDevice())
+    _dispatch(
+        engine,
+        "mock_rewrite",
+        {
+            "method": "GET",
+            "path": "/v1/feed",
+            "host": "api.example.test",
+            "status": 429,
+            "set_json": {"items[0].title": "patched"},
+        },
+    )
+    assert seen["host"] == "api.example.test"
+    assert seen["status"] == 429
+    assert seen["set_json"] == {"items[0].title": "patched"}
+    # Unset options must arrive as None, not as an empty dict the rule builder would
+    # read as "the caller asked for no headers".
+    assert seen["headers"] is None
+    assert seen["delete_json"] is None

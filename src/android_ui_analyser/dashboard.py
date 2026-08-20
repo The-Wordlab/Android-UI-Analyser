@@ -22,11 +22,27 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from .errors import AuaError, DeviceError, UsageError
+from .errors import AuaError, UsageError
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_PORT = 8765
+
+# A capture file older than this is only trusted while capture is known to be alive:
+# the ring dedupes unchanged screens, so an old frame is normal there and a lie once
+# whatever was writing it has stopped.
+_FRAME_STALE_S = 3.0
+
+# url -> (server, thread) for dashboards started with block=False, so callers that
+# do not own the serve loop can still stop one.
+_SERVERS: dict[str, tuple[ThreadingHTTPServer, threading.Thread]] = {}
+
+# 1x1 black PNG - served when a device has neither a capture file nor a screencap.
+_PLACEHOLDER_PNG = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+    b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\x00\x01"
+    b"\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+)
 
 
 def _script_json(value: Any) -> str:
@@ -53,23 +69,18 @@ def list_online_serials(config: Any | None = None) -> list[str]:
     return [d.serial for d in platform.list_targets() if d.state == "device"]
 
 
-def resolve_serial(serial: str | None, *, config: Any | None = None) -> str:
-    """Resolve a single device serial (detail view / legacy callers)."""
-    if serial:
-        return serial
-    online = list_online_serials() if config is None else list_online_serials(config)
-    if not online:
-        raise DeviceError(
-            "no device found for dashboard",
-            hint="Start a headless AVD (`aua emulator start --headless`) or pass --serial.",
-        )
-    if len(online) > 1:
-        listing = ", ".join(online)
-        raise DeviceError(
-            f"multiple devices attached ({listing})",
-            hint="Pass --serial <id>; unpinned `aua dashboard` watches all in a grid.",
-        )
-    return online[0]
+def discover_online_serials(config: Any | None = None) -> tuple[list[str], str | None]:
+    """Online serials plus the reason discovery failed, if it did.
+
+    The dashboard only watches; it never drives a device. A missing or unreadable
+    device list is therefore something to display, not a reason to refuse to open.
+    """
+    try:
+        online = list_online_serials() if config is None else list_online_serials(config)
+    except Exception as exc:  # noqa: BLE001 - the page still has to come up
+        logger.warning("dashboard device discovery failed: %s", exc)
+        return [], str(exc)
+    return online, None
 
 
 def resolve_dashboard_targets(
@@ -80,22 +91,44 @@ def resolve_dashboard_targets(
     * Explicit ``--serial`` → detail for that device.
     * Unpinned/default ``--grid`` → grid that can discover later devices.
     * Explicit ``--detail`` with no serial → detail for the first online device.
+
+    Nothing attached is not an error. With no serial to pin there is nothing to detail
+    yet, so the empty grid opens and picks devices up as they boot - which is the
+    useful order when you start the dashboard before the emulator.
     """
-    online = list_online_serials() if config is None else list_online_serials(config)
+    online, discovery_error = discover_online_serials(config)
     if serial:
         if serial not in online and online:
             # Still allow watching a serial that briefly dropped offline.
             logger.warning("serial %s not currently online; dashboard will retry frames", serial)
-        return {"mode": "detail", "serials": [serial], "focus": serial}
+        return {
+            "mode": "detail",
+            "serials": [serial],
+            "focus": serial,
+            "discovery_error": discovery_error,
+        }
     if not online:
-        raise DeviceError(
-            "no device found for dashboard",
-            hint="Start headless AVDs (`aua emulator start --headless --parallel`) "
-            "or pass --serial.",
-        )
+        if not grid:
+            logger.info("no device to focus; opening the discovering grid instead")
+        return {
+            "mode": "grid",
+            "serials": [],
+            "focus": None,
+            "discovery_error": discovery_error,
+        }
     if grid:
-        return {"mode": "grid", "serials": online, "focus": None}
-    return {"mode": "detail", "serials": online, "focus": online[0]}
+        return {
+            "mode": "grid",
+            "serials": online,
+            "focus": None,
+            "discovery_error": discovery_error,
+        }
+    return {
+        "mode": "detail",
+        "serials": online,
+        "focus": online[0],
+        "discovery_error": discovery_error,
+    }
 
 
 def _emulator_meta_for_serial(
@@ -447,6 +480,11 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   footer { padding: 0.4rem 1.1rem 1rem; color: var(--muted); font-size: 0.72rem; }
   .empty { color: var(--muted); font-size: 0.78rem; padding: 0.4rem 0; }
   /* --- grid mode --- */
+  .grid-empty {
+    padding: 1.6rem 1.1rem; color: var(--muted); font-size: 0.82rem;
+    max-width: 1800px; margin: 0 auto; line-height: 1.5;
+  }
+  .grid-empty.bad { color: var(--danger); }
   .device-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
@@ -480,6 +518,38 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   }
   .tile .tile-runtime .held { color: var(--accent); }
   .tile .tile-runtime .down { color: var(--danger); }
+  /* --- proxy workspace --- */
+  .proxy-workspace { max-width: 1600px; margin: 0 auto 0.85rem; padding: 0 0.85rem; }
+  .proxy-head { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+  .proxy-head h2 { margin-right: auto; }
+  .proxy-grid { display: grid; grid-template-columns: 1.25fr 1fr; gap: 0.85rem; }
+  @media (max-width: 1100px) { .proxy-grid { grid-template-columns: 1fr; } }
+  .flow-table { width: 100%; border-collapse: collapse; font-size: 0.72rem; }
+  .flow-table th {
+    text-align: left; color: var(--muted); font-weight: 500; position: sticky; top: 0;
+    background: var(--panel2); padding: 0.25rem 0.4rem;
+  }
+  .flow-table td { padding: 0.22rem 0.4rem; border-top: 1px solid var(--border); }
+  .flow-table tbody tr { cursor: pointer; }
+  .flow-table tbody tr:hover { background: var(--panel2); }
+  .flow-table tr.touched td { color: var(--accent); }
+  .flow-table .num { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .flow-table .meth { font-weight: 600; }
+  .flow-table .upath {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere;
+  }
+  .rule-row {
+    display: flex; gap: 0.45rem; align-items: baseline; flex-wrap: wrap;
+    padding: 0.3rem 0; border-top: 1px solid var(--border); font-size: 0.72rem;
+  }
+  .rule-row .rid {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted);
+  }
+  .rule-row .spec { overflow-wrap: anywhere; flex: 1; }
+  .proxy-form { display: grid; gap: 0.45rem; margin-top: 0.5rem; }
+  .proxy-form .row { display: flex; gap: 0.45rem; flex-wrap: wrap; align-items: end; }
+  .proxy-note { color: var(--muted); font-size: 0.72rem; line-height: 1.45; margin: 0 0 0.5rem; }
+  .proxy-warn { color: var(--danger); }
   .database-workspace { max-width: 1600px; margin: 0 auto 0.85rem; padding: 0 0.85rem; }
   .db-toolbar, .db-actions {
     display: flex; gap: 0.55rem; align-items: end; flex-wrap: wrap;
@@ -550,6 +620,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 </header>
 
 <div id="grid-view" class="hidden">
+  <p id="grid-empty" class="grid-empty hidden"></p>
   <div class="device-grid" id="tiles"></div>
   <footer>
     Multi-agent grid — one tile per online emulator. Click a tile for journal / map / logcat.
@@ -609,6 +680,86 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     <ul id="marks" class="scroll sm"><li class="empty">—</li></ul>
   </section>
 </div>
+<div class="proxy-workspace">
+  <section class="panel">
+    <div class="proxy-head">
+      <h2>Proxy</h2>
+      <span id="px-state" class="pill">proxy …</span>
+      <span id="px-port" class="pill hidden">port —</span>
+      <span id="px-rules" class="pill hidden">0 rules</span>
+      <span id="px-touched" class="pill hidden">0 manipulated</span>
+    </div>
+    <p class="proxy-note" id="px-note">
+      Live HTTP exchanges through the AUA proxy, which rules are armed, and which of them
+      actually fired. Click a request to inspect it and arm a rule from what you just saw:
+      <strong>stub</strong> answers from the rule and the server never sees it,
+      <strong>rewrite</strong> lets it through and patches the real response. Rules apply to
+      the <em>next</em> matching request — re-trigger it in the app to see the effect.
+    </p>
+    <div class="proxy-grid">
+      <section class="db-subpanel">
+        <div class="db-actions">
+          <h3 style="margin-right:auto">Live traffic</h3>
+          <span id="px-count" class="db-status">—</span>
+        </div>
+        <div class="scroll md">
+          <table class="flow-table" id="px-flows">
+            <thead><tr><th>#</th><th>method</th><th>path</th><th>status</th><th>rule</th></tr></thead>
+            <tbody><tr><td colspan="5" class="empty">No traffic seen yet.</td></tr></tbody>
+          </table>
+        </div>
+        <div id="px-detail" class="scroll sm" style="margin-top:0.5rem">
+          <div class="empty">Select a request to see headers and bodies.</div>
+        </div>
+      </section>
+      <section class="db-subpanel">
+        <div class="db-actions">
+          <h3 style="margin-right:auto">Armed rules</h3>
+          <button id="px-clear" class="db-button">Clear all</button>
+        </div>
+        <div id="px-rulelist" class="scroll sm"><div class="empty">No rules armed.</div></div>
+        <div class="proxy-form">
+          <div class="row">
+            <label class="db-field" style="width:6.5rem">Action
+              <select id="px-action" class="db-select">
+                <option value="rewrite">rewrite</option>
+                <option value="stub">stub</option>
+              </select>
+            </label>
+            <label class="db-field" style="width:6rem">Method
+              <input id="px-method" class="db-input" placeholder="GET" autocomplete="off"/>
+            </label>
+            <label class="db-field grow">Path
+              <input id="px-path" class="db-input" placeholder="/v1/feed" autocomplete="off"/>
+            </label>
+          </div>
+          <div class="row">
+            <label class="db-field grow">Host (optional, but scopes the rule)
+              <input id="px-host" class="db-input" placeholder="api.example.com" autocomplete="off"/>
+            </label>
+            <label class="db-field" style="width:6rem">Status
+              <input id="px-status" class="db-input" placeholder="429" autocomplete="off"/>
+            </label>
+            <label class="db-field" style="width:6rem">Times
+              <input id="px-times" class="db-input" placeholder="0" autocomplete="off"/>
+            </label>
+          </div>
+          <label class="db-field">Body (whole replacement response; JSON or raw)
+            <textarea id="px-body" class="db-sql" style="min-height:4rem" spellcheck="false"></textarea>
+          </label>
+          <label class="db-field">Set JSON fields (rewrite only) — one <code>path=value</code> per line
+            <textarea id="px-set" class="db-sql" style="min-height:3rem" spellcheck="false" placeholder="items[0].title=&quot;patched&quot;"></textarea>
+          </label>
+          <div class="row">
+            <button id="px-arm" class="db-button">Arm rule</button>
+            <span id="px-status-line" class="db-status">Rules apply immediately, no confirmation.</span>
+          </div>
+        </div>
+      </section>
+    </div>
+  </section>
+</div>
+
 <div class="database-workspace">
   <section class="panel">
     <h2>App database workspace</h2>
@@ -961,12 +1112,13 @@ function ensureTile(d) {
     watchdog.managed && watchdog.enabled && !watchdog.running ? ' down' : ''
   );
   const img = a.querySelector('img');
-  if (d.has_frame) {
-    const src = '/api/frame.jpg?serial=' + encodeURIComponent(d.serial) + '&t=' + Date.now();
-    if (tileSrc[d.serial] !== src.slice(0, src.indexOf('&t='))) {
-      img.src = src;
-      tileSrc[d.serial] = src.slice(0, src.indexOf('&t='));
-    }
+  // The token changes exactly when the served bytes do, so this both refreshes the
+  // tile and skips the transfer while the screen is unchanged. Do not gate it on
+  // has_frame: with no capture running the bytes come from a live screencap.
+  const token = d.frame_token || '';
+  if (tileSrc[d.serial] !== token) {
+    img.src = '/api/frame.jpg?serial=' + encodeURIComponent(d.serial) + '&t=' + encodeURIComponent(token);
+    tileSrc[d.serial] = token;
   }
   return a;
 }
@@ -977,6 +1129,13 @@ async function tickGrid() {
     const d = await r.json();
     const list = d.devices || [];
     document.getElementById('count').textContent = list.length + ' device' + (list.length === 1 ? '' : 's');
+    const emptyEl = document.getElementById('grid-empty');
+    emptyEl.className = 'grid-empty' + (list.length ? ' hidden' : (d.discovery_error ? ' bad' : ''));
+    emptyEl.textContent = list.length
+      ? ''
+      : (d.discovery_error
+          ? ('Cannot list devices: ' + d.discovery_error)
+          : 'No device attached yet. Start one with `aua emulator start` \u2014 it appears here on its own.');
     const seen = new Set();
     list.forEach(dev => {
       seen.add(dev.serial);
@@ -989,6 +1148,211 @@ async function tickGrid() {
   } catch (e) {
     document.getElementById('count').textContent = 'error';
     document.getElementById('count').className = 'pill bad';
+  }
+}
+
+let pxSelected = null;
+
+function pxRuleSpec(rule) {
+  const m = rule.match || rule.request || {};
+  const where = [m.method || '*', m.path || '*'].join(' ') + (m.host ? (' @' + m.host) : '');
+  if (rule.action === 'stub') {
+    const r = rule.response || {};
+    return where + '  \u2192 ' + (r.status != null ? r.status : 200);
+  }
+  const w = rule.rewrite || {};
+  const bits = [];
+  if (w.status != null) bits.push('status ' + w.status);
+  if (w.headers) bits.push('headers ' + Object.keys(w.headers).join(','));
+  if (w.set_json) bits.push('set ' + Object.keys(w.set_json).join(','));
+  if (w.delete_json) bits.push('delete ' + w.delete_json.join(','));
+  if (w.replace) bits.push(w.replace.length + ' replacement(s)');
+  if (w.body !== undefined) bits.push('body');
+  return where + '  \u2192 ' + (bits.join(' \u00b7 ') || 'unchanged');
+}
+
+function pxRenderRules(rules) {
+  const host = document.getElementById('px-rulelist');
+  host.innerHTML = '';
+  if (!rules.length) {
+    host.innerHTML = '<div class="empty">No rules armed.</div>';
+    return;
+  }
+  rules.forEach(rule => {
+    const row = document.createElement('div');
+    row.className = 'rule-row';
+    const id = document.createElement('span');
+    id.className = 'rid';
+    id.textContent = rule.id || '?';
+    const act = document.createElement('span');
+    act.className = 'pill';
+    act.textContent = rule.action || 'rule';
+    const spec = document.createElement('span');
+    spec.className = 'spec';
+    spec.textContent = pxRuleSpec(rule);
+    const fired = document.createElement('span');
+    fired.className = 'pill' + (rule.fired ? '' : ' ok');
+    fired.textContent = rule.fired ? ('fired ' + rule.fired + '\u00d7') : 'armed';
+    const rm = document.createElement('button');
+    rm.className = 'db-button';
+    rm.textContent = 'remove';
+    rm.addEventListener('click', () => pxPost('rm', {id: rule.id}));
+    row.append(id, act, spec, fired, rm);
+    host.appendChild(row);
+  });
+}
+
+function pxRenderFlows(flows) {
+  const body = document.querySelector('#px-flows tbody');
+  body.innerHTML = '';
+  if (!flows.length) {
+    body.innerHTML = '<tr><td colspan="5" class="empty">No traffic seen yet.</td></tr>';
+    return;
+  }
+  flows.slice().reverse().forEach(f => {
+    const tr = document.createElement('tr');
+    if (f.action) tr.className = 'touched';
+    const cells = [
+      ['num', f.n],
+      ['meth', f.method || ''],
+      ['upath', (f.host ? f.host : '') + (f.path || '')],
+      ['num', f.status || ''],
+      ['', f.action ? (f.action + ' ' + (f.rule || '')) : ''],
+    ];
+    cells.forEach(([cls, text]) => {
+      const td = document.createElement('td');
+      td.className = cls;
+      td.textContent = String(text);
+      tr.appendChild(td);
+    });
+    tr.addEventListener('click', () => pxSelectFlow(f));
+    body.appendChild(tr);
+  });
+}
+
+async function pxSelectFlow(f) {
+  pxSelected = f;
+  document.getElementById('px-method').value = f.method || '';
+  document.getElementById('px-path').value = f.path || '';
+  document.getElementById('px-host').value = f.host || '';
+  const box = document.getElementById('px-detail');
+  box.innerHTML = '<div class="empty">Loading\u2026</div>';
+  try {
+    const r = await fetch('/api/proxy/flow' + qSerial({n: f.n}), {cache: 'no-store'});
+    const d = await r.json();
+    if (!d.ok) {
+      box.innerHTML = '';
+      const p = document.createElement('div');
+      p.className = 'empty';
+      p.textContent = (d.error && d.error.message) || 'no detail';
+      box.appendChild(p);
+      return;
+    }
+    const pre = document.createElement('pre');
+    pre.style.whiteSpace = 'pre-wrap';
+    pre.style.overflowWrap = 'anywhere';
+    pre.style.fontSize = '0.7rem';
+    pre.textContent = JSON.stringify(d.flow, null, 2);
+    box.innerHTML = '';
+    box.appendChild(pre);
+  } catch (e) {
+    box.innerHTML = '<div class="empty">detail request failed</div>';
+  }
+}
+
+function pxParseSet(text) {
+  const out = {};
+  (text || '').split('\n').forEach(line => {
+    const t = line.trim();
+    if (!t) return;
+    const i = t.indexOf('=');
+    if (i < 1) return;
+    const key = t.slice(0, i).trim();
+    const raw = t.slice(i + 1).trim();
+    try { out[key] = JSON.parse(raw); } catch (e) { out[key] = raw; }
+  });
+  return Object.keys(out).length ? out : null;
+}
+
+async function pxPost(action, payload) {
+  const line = document.getElementById('px-status-line');
+  line.className = 'db-status';
+  line.textContent = 'Working\u2026';
+  try {
+    const r = await fetch('/api/proxy/' + action, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-AUA-Dashboard-Token': DATABASE_TOKEN},
+      body: JSON.stringify(Object.assign({serial: focusSerial}, payload || {})),
+    });
+    const d = await r.json();
+    if (!d.ok) {
+      line.className = 'db-status proxy-warn';
+      line.textContent = (d.error && d.error.message) || 'request failed';
+    } else {
+      line.textContent = d.warning ? ('Done \u2014 ' + d.warning) : 'Done.';
+      if (d.warning) line.className = 'db-status proxy-warn';
+    }
+    tickProxy();
+  } catch (e) {
+    line.className = 'db-status proxy-warn';
+    line.textContent = 'request failed';
+  }
+}
+
+function pxArm() {
+  const action = document.getElementById('px-action').value;
+  const statusRaw = document.getElementById('px-status').value.trim();
+  const payload = {
+    method: document.getElementById('px-method').value.trim() || '*',
+    path: document.getElementById('px-path').value.trim(),
+    host: document.getElementById('px-host').value.trim() || null,
+    body: document.getElementById('px-body').value.trim() || null,
+    times: parseInt(document.getElementById('px-times').value, 10) || 0,
+  };
+  if (statusRaw) payload.status = parseInt(statusRaw, 10);
+  if (action === 'rewrite') payload.set_json = pxParseSet(document.getElementById('px-set').value);
+  if (!payload.path) {
+    const line = document.getElementById('px-status-line');
+    line.className = 'db-status proxy-warn';
+    line.textContent = 'A path is required.';
+    return;
+  }
+  pxPost(action, payload);
+}
+
+async function tickProxy() {
+  if (isGrid) return;
+  try {
+    const r = await fetch('/api/proxy' + qSerial(), {cache: 'no-store'});
+    const d = await r.json();
+    const state = document.getElementById('px-state');
+    if (!d.supported) {
+      state.textContent = 'proxy unsupported';
+      state.className = 'pill';
+      return;
+    }
+    state.textContent = d.intercepting ? 'intercepting' : (d.on ? 'on' : (d.state || 'off'));
+    state.className = 'pill' + (d.intercepting ? ' ok' : (d.on ? '' : ' bad'));
+    const port = document.getElementById('px-port');
+    if (d.port) { port.textContent = 'port ' + d.port; port.classList.remove('hidden'); }
+    else port.classList.add('hidden');
+    const rules = d.rules || [];
+    const rp = document.getElementById('px-rules');
+    rp.textContent = rules.length + ' rule' + (rules.length === 1 ? '' : 's');
+    rp.classList.remove('hidden');
+    const tp = document.getElementById('px-touched');
+    tp.textContent = (d.manipulated || 0) + ' manipulated';
+    tp.className = 'pill' + (d.manipulated ? ' ok' : '');
+    tp.classList.remove('hidden');
+    const live = (d.flows || []).filter(f => f.live).length;
+    document.getElementById('px-count').textContent =
+      (d.flow_count || 0) + ' exchange(s) logged' + (live ? (', ' + live + ' while watching') : '');
+    pxRenderRules(rules);
+    pxRenderFlows(d.flows || []);
+  } catch (e) {
+    const state = document.getElementById('px-state');
+    state.textContent = 'proxy error';
+    state.className = 'pill bad';
   }
 }
 
@@ -1072,9 +1436,10 @@ async function tickStatus() {
       slowUl.appendChild(li);
     });
 
-    if (s.has_frame) {
-      const src = '/api/frame.jpg' + qSerial({t: Date.now()});
-      if (src !== lastSrc) { frame.src = src; lastSrc = src; }
+    const frameToken = s.frame_token || '';
+    if (frameToken !== lastSrc) {
+      frame.src = '/api/frame.jpg' + qSerial({t: frameToken});
+      lastSrc = frameToken;
     }
   } catch (e) {
     document.getElementById('capture').textContent = 'error';
@@ -1503,6 +1868,12 @@ if (isGrid) {
   tickStatus(); tickEvents(); tickMap(); tickLogcat();
   setInterval(() => { tickStatus(); tickEvents(); }, POLL_MS);
   setInterval(() => { tickMap(); tickLogcat(); }, MAP_MS);
+  if (!isGrid) {
+    document.getElementById('px-arm').addEventListener('click', pxArm);
+    document.getElementById('px-clear').addEventListener('click', () => pxPost('clear', {}));
+    tickProxy();
+    setInterval(tickProxy, MAP_MS);
+  }
 }
 </script>
 </body>
@@ -1534,11 +1905,21 @@ class _DashboardState:
         self.platform = PlatformFactory(config).create()
         self._fallback: dict[str, tuple[bytes, float]] = {}
         self._fallback_lock = threading.Lock()
+        # serial -> True/False when we have an authoritative capture state, absent
+        # when we do not know yet and should keep trusting the capture file.
+        self._capture_live: dict[str, bool] = {}
+        self.discovery_error: str | None = None
         self._pkg_cache: dict[str, tuple[str | None, float]] = {}
         self._map_cache: dict[str, tuple[dict[str, Any], float]] = {}
         self._runtime_cache: dict[str, tuple[dict[str, Any], float]] = {}
         self.database_token = secrets.token_urlsafe(32)
         self._database_lock = threading.Lock()
+        self._proxy_lock = threading.Lock()
+        self._engine: Any = None
+        # When this dashboard opened. Not a filter — the whole point of the panel is to
+        # show what an agent already did, so a run that finished before you opened the
+        # page must still be here. It only labels which exchanges you have watched live.
+        self._proxy_opened_at = time.time()
 
     @property
     def serial(self) -> str | None:
@@ -1548,6 +1929,48 @@ class _DashboardState:
         ens = self.ensures.get(serial) or {}
         via = ens.get("via")
         return str(via) if via else None
+
+    def note_capture_live(self, serial: str, live: bool | None) -> None:
+        """Record whether something is writing capture frames for *serial* right now.
+
+        ``_served_frame`` needs this and cannot infer it from frame age: the capture
+        ring dedupes unchanged screens, so an old file means "nothing moved" while
+        capture is alive and "this is a corpse" once it is not. ``None`` means we have
+        no authoritative answer, in which case the file is still trusted.
+        """
+        if live is None:
+            self._capture_live.pop(serial, None)
+        else:
+            self._capture_live[serial] = bool(live)
+
+    def _served_frame(self, serial: str) -> Path | None:
+        """The capture file ``frame_bytes`` will serve, or None when it must screencap."""
+        frame = latest_frame(self.cache_dir, serial)
+        if frame is None or not frame.is_file():
+            return None
+        if self._capture_live.get(serial) is not False:
+            return frame
+        try:
+            fresh = (time.time() - frame.stat().st_mtime) <= _FRAME_STALE_S
+        except OSError:
+            return None
+        return frame if fresh else None
+
+    def frame_token(self, serial: str) -> str:
+        """Cache key for the bytes ``/api/frame.jpg`` will return for *serial*.
+
+        While capture is alive this is the frame's mtime, so an unchanged screen costs
+        no transfer. Otherwise the bytes come from a live screencap and the token has
+        to advance with the clock — a key that never changed is what pinned every grid
+        tile to the first frame it ever drew.
+        """
+        frame = self._served_frame(serial)
+        if frame is not None:
+            try:
+                return f"f{int(frame.stat().st_mtime * 1000)}"
+            except OSError:
+                pass
+        return f"s{int(time.time() * 1000)}"
 
     def _scoped_serial(self, serial: str | None) -> str:
         selected = serial or self.focus
@@ -1830,10 +2253,15 @@ class _DashboardState:
             age_ms = int((time.time() - frame.stat().st_mtime) * 1000)
         via = self._ensure_via(serial)
         capture_running = frame is not None and (age_ms is not None and age_ms < 15_000)
+        # Only a daemon (or the absence of any writer) is authoritative; frame age is
+        # not, because an idle screen is deduped rather than re-written.
+        live: bool | None = False if via in (None, "screencap") else None
         if via == "daemon":
             detail = self._daemon_call(serial, "capture_status")
             if isinstance(detail, dict):
                 capture_running = bool(detail.get("running")) and not detail.get("paused")
+                live = capture_running
+        self.note_capture_live(serial, live)
         pkg = None
         with contextlib.suppress(Exception):
             pkg = self.foreground_package(serial)
@@ -1846,6 +2274,7 @@ class _DashboardState:
             "via": via,
             "capture_running": capture_running,
             "has_frame": frame is not None or serial in self._fallback,
+            "frame_token": self.frame_token(serial),
             "frame_age_ms": age_ms,
         }
 
@@ -1854,7 +2283,7 @@ class _DashboardState:
         if self.mode == "grid":
             # Grid dashboards intentionally discover devices as they appear. A
             # detail dashboard stays scoped to the serial it was started for.
-            online = list_online_serials(self.config)
+            online, self.discovery_error = discover_online_serials(self.config)
             known = list(dict.fromkeys([*known, *online]))
             self.serials = known
             for ser in online:
@@ -1869,6 +2298,7 @@ class _DashboardState:
             "ok": True,
             "mode": self.mode,
             "devices": [self.device_tile(s) for s in known],
+            "discovery_error": self.discovery_error,
         }
 
     def status(self, serial: str | None = None) -> dict[str, Any]:
@@ -1884,6 +2314,8 @@ class _DashboardState:
         marks = recent_marks(self.cache_dir, ser)
         via = self._ensure_via(ser)
         capture_running = frame is not None and (age_ms is not None and age_ms < 15_000)
+        # Frame age cannot decide this: the capture ring dedupes unchanged screens.
+        live: bool | None = False if via in (None, "screencap") else None
         detail: dict[str, Any] | None = None
         try:
             if via == "sidecar":
@@ -1894,13 +2326,16 @@ class _DashboardState:
                     detail = cs.call(sock, "status")
                     capture_running = bool(detail.get("running")) and not detail.get("paused")
                     session_id = detail.get("session_id") or session_id
+                    live = capture_running
             elif via == "daemon":
                 detail = self._daemon_call(ser, "capture_status")
                 if isinstance(detail, dict):
                     capture_running = bool(detail.get("running")) and not detail.get("paused")
                     session_id = detail.get("session_id") or session_id
+                    live = capture_running
         except Exception as exc:  # noqa: BLE001
             detail = {"error": str(exc)}
+        self.note_capture_live(ser, live)
 
         pkg = None
         with contextlib.suppress(Exception):
@@ -1921,6 +2356,7 @@ class _DashboardState:
             "package": pkg,
             "capture_running": capture_running,
             "has_frame": frame is not None or ser in self._fallback,
+            "frame_token": self.frame_token(ser),
             "frame_age_ms": age_ms,
             "frame_path": str(frame) if frame else None,
             "session_id": session_id,
@@ -1938,18 +2374,186 @@ class _DashboardState:
             "mode": self.mode,
         }
 
+    def _proxy_service(self) -> Any:
+        """The platform's proxy capability, or a typed refusal on a platform without one."""
+        return self.platform.capability("proxy")
+
+    def _proxy_engine(self) -> Any:
+        """A lazily built engine for the *write* half of the panel.
+
+        Reads go straight to the proxy capability, but arming or removing a rule changes
+        state the device keeps until something clears it, and only the engine knows how to
+        journal that undo first. None of the mock methods it is used for connect to the
+        device, so this never competes with a running agent for the UiAutomation slot.
+        """
+        if self._engine is None:
+            from .engine import Engine
+
+            self._engine = Engine(self.config)
+        return self._engine
+
+    def proxy_payload(self, serial: str | None = None, *, limit: int = 60) -> dict[str, Any]:
+        """Proxy health, armed rules and the live traffic feed for one device."""
+        ser = serial or self.focus
+        try:
+            pm = self._proxy_service()
+        except AuaError as exc:
+            return {"ok": False, "supported": False, **exc.to_dict()}
+
+        out: dict[str, Any] = {"ok": True, "supported": True, "serial": ser}
+
+        health: dict[str, Any] | None = None
+        if ser:
+            with contextlib.suppress(Exception):
+                health = pm.proxy_health(ser, self.cache_dir, self_heal=False)
+        out["health"] = health
+        state_name = str((health or {}).get("state") or "unknown")
+        # `ok` is not "a proxy is on": proxy_health reports ok for a clean *unproxied*
+        # device too, because its network path is sane. The state is the real answer.
+        out["on"] = bool(health) and state_name != "unproxied"
+        out["intercepting"] = bool(health and health.get("intercepting"))
+        out["port"] = (health or {}).get("port")
+        out["state"] = (health or {}).get("state")
+
+        rules: list[dict[str, Any]] = []
+        mode = "off"
+        owner = None
+        with contextlib.suppress(Exception):
+            doc = pm.load_doc(pm.rules_path(self.cache_dir))
+            rules, _changed = pm.backfill_rule_ids(doc["rules"])
+            mode = str(doc.get("mode") or "off")
+            owner = doc.get("owner")
+        out["mode"] = mode
+        out["rules_owner"] = owner
+
+        flows: list[dict[str, Any]] = []
+        with contextlib.suppress(Exception):
+            flows = pm.read_flows_since(self.cache_dir, 0)
+        # Which rules have actually fired, so an armed rule reads differently from a spent
+        # one. The addon spends a rule's `times` budget in its own process and deliberately
+        # never writes it back, so the flow log is the only place this is knowable.
+        fired: dict[str, int] = {}
+        for entry in flows:
+            rid = entry.get("rule")
+            if rid:
+                fired[str(rid)] = fired.get(str(rid), 0) + 1
+        out["rules"] = [dict(rule, fired=fired.get(str(rule.get("id")), 0)) for rule in rules]
+        out["flows"] = [
+            dict(f, live=float(f.get("ts") or 0) > self._proxy_opened_at)
+            for f in flows[-max(1, min(int(limit), 500)) :]
+        ]
+        out["flow_count"] = len(flows)
+        out["manipulated"] = sum(1 for f in flows if f.get("action"))
+        return out
+
+    def proxy_flow_detail(self, n: int) -> dict[str, Any]:
+        """Full headers and bodies for one logged exchange, when body capture was on."""
+        pm = self._proxy_service()
+        bodies: list[dict[str, Any]] = []
+        with contextlib.suppress(Exception):
+            bodies = pm.read_flow_bodies(self.cache_dir)
+        for entry in reversed(bodies):
+            if int(entry.get("n") or 0) == int(n):
+                return {"ok": True, "flow": entry}
+        return {
+            "ok": False,
+            "error": {
+                "code": "proxy_flow_body_missing",
+                "message": f"no captured body for flow {n}",
+                "hint": "Bodies are only kept while the proxy runs with body capture on.",
+            },
+        }
+
+    def proxy_operation(self, action: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Arm or remove a mock rule from the browser, through the engine that owns undo."""
+        engine = self._proxy_engine()
+        serial = self._database_text(payload, "serial") if payload.get("serial") else self.focus
+        if serial and serial not in self.serials:
+            raise UsageError(
+                f"device {serial!r} is not part of this dashboard session",
+                code="dashboard_device_scope",
+            )
+        with self._proxy_lock:
+            if action == "list":
+                return engine.mock_list()
+            if action == "clear":
+                return engine.mock_clear()
+            if action == "rm":
+                return engine.mock_rm(self._database_text(payload, "id"))
+            if action == "stub":
+                return engine.mock_map(
+                    self._database_text(payload, "method"),
+                    self._database_text(payload, "path"),
+                    status=self._database_int(payload, "status", 200, maximum=599),
+                    body=self._proxy_optional_text(payload, "body"),
+                    serial=serial,
+                )
+            if action == "rewrite":
+                status_raw = payload.get("status")
+                return engine.mock_rewrite(
+                    self._database_text(payload, "method"),
+                    self._database_text(payload, "path"),
+                    host=self._proxy_optional_text(payload, "host"),
+                    status=(
+                        self._database_int(payload, "status", 200, maximum=599)
+                        if status_raw not in (None, "")
+                        else None
+                    ),
+                    headers=self._proxy_mapping(payload, "headers"),
+                    body=self._proxy_optional_text(payload, "body"),
+                    set_json=self._proxy_mapping(payload, "set_json"),
+                    delete_json=self._proxy_string_list(payload, "delete_json"),
+                    times=self._proxy_count(payload, "times", maximum=10_000),
+                    serial=serial,
+                )
+        raise UsageError(f"unknown dashboard proxy action {action!r}")
+
+    @staticmethod
+    def _proxy_count(payload: dict[str, Any], field: str, *, maximum: int) -> int:
+        """A non-negative bound. Unlike the database helper, 0 is meaningful here: it is
+        how a rule says "fire every time", which is the default a caller sends."""
+        value = payload.get(field, 0)
+        if value in (None, ""):
+            return 0
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise UsageError(f"dashboard proxy field {field!r} must be a non-negative integer")
+        return min(value, maximum)
+
+    @staticmethod
+    def _proxy_optional_text(payload: dict[str, Any], field: str) -> str | None:
+        value = payload.get(field)
+        if value in (None, ""):
+            return None
+        if not isinstance(value, str):
+            raise UsageError(f"dashboard proxy field {field!r} must be a string")
+        return value
+
+    @staticmethod
+    def _proxy_mapping(payload: dict[str, Any], field: str) -> dict[str, Any] | None:
+        value = payload.get(field)
+        if value in (None, {}, ""):
+            return None
+        if not isinstance(value, dict) or not all(isinstance(k, str) for k in value):
+            raise UsageError(f"dashboard proxy field {field!r} must be an object of strings")
+        return dict(value)
+
+    @staticmethod
+    def _proxy_string_list(payload: dict[str, Any], field: str) -> list[str] | None:
+        value = payload.get(field)
+        if value in (None, [], ""):
+            return None
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            raise UsageError(f"dashboard proxy field {field!r} must be a list of strings")
+        return [v for v in value if v.strip()]
+
     def frame_bytes(self, serial: str | None = None) -> tuple[bytes, str]:
         ser = serial or self.focus
         if not ser:
-            placeholder = (
-                b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
-                b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\x00\x01"
-                b"\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
-            )
-            return placeholder, "image/png"
-        path = latest_frame(self.cache_dir, ser)
-        if path is not None and path.is_file():
-            return path.read_bytes(), "image/jpeg"
+            return _PLACEHOLDER_PNG, "image/png"
+        path = self._served_frame(ser)
+        if path is not None:
+            with contextlib.suppress(OSError):
+                return path.read_bytes(), "image/jpeg"
         with self._fallback_lock:
             hit = self._fallback.get(ser)
             if hit and (time.time() - hit[1]) < 0.8:
@@ -1971,12 +2575,12 @@ class _DashboardState:
                 return data, mime
         except Exception as exc:  # noqa: BLE001
             logger.debug("fallback screencap failed: %s", exc)
-        placeholder = (
-            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
-            b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\x00\x01"
-            b"\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
-        )
-        return placeholder, "image/png"
+        # Screencap is gone too - a stale frame still says more than a blank tile.
+        stale = latest_frame(self.cache_dir, ser)
+        if stale is not None and stale.is_file():
+            with contextlib.suppress(OSError):
+                return stale.read_bytes(), "image/jpeg"
+        return _PLACEHOLDER_PNG, "image/png"
 
     def log_lines(self, serial: str, lines: int = 80) -> list[str]:
         n = max(1, min(int(lines), 500))
@@ -2045,6 +2649,34 @@ def _make_handler(state: _DashboardState) -> type[BaseHTTPRequestHandler]:
                 return
             if path == "/api/devices":
                 self._json(state.devices_payload())
+                return
+            if path == "/api/proxy":
+                ser = self._scoped_qs_serial(qs)
+                if ser is None:
+                    return
+                self._json(state.proxy_payload(ser))
+                return
+            if path == "/api/proxy/flow":
+                ser = self._scoped_qs_serial(qs)
+                if ser is None:
+                    return
+                raw = (qs.get("n") or [""])[0]
+                if not raw.isdigit():
+                    self._json(
+                        {
+                            "ok": False,
+                            "error": {
+                                "code": "dashboard_request",
+                                "message": "flow number must be a positive integer",
+                            },
+                        },
+                        400,
+                    )
+                    return
+                try:
+                    self._json(state.proxy_flow_detail(int(raw)))
+                except AuaError as exc:
+                    self._json({"ok": False, **exc.to_dict()}, 400)
                 return
             if path == "/api/status":
                 ser = self._scoped_qs_serial(qs)
@@ -2140,8 +2772,12 @@ def _make_handler(state: _DashboardState) -> type[BaseHTTPRequestHandler]:
 
         def do_POST(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
-            prefix = "/api/database/"
-            if not parsed.path.startswith(prefix):
+            prefix = ""
+            for candidate in ("/api/database/", "/api/proxy/"):
+                if parsed.path.startswith(candidate):
+                    prefix = candidate
+                    break
+            if not prefix:
                 self._send(404, b"not found", "text/plain")
                 return
             supplied = self.headers.get("X-AUA-Dashboard-Token", "")
@@ -2176,9 +2812,12 @@ def _make_handler(state: _DashboardState) -> type[BaseHTTPRequestHandler]:
             try:
                 payload = json.loads(self.rfile.read(length))
                 if not isinstance(payload, dict):
-                    raise UsageError("dashboard database request body must be a JSON object")
+                    raise UsageError("dashboard request body must be a JSON object")
                 action = parsed.path[len(prefix) :]
-                result = state.database_operation(action, payload)
+                if prefix == "/api/proxy/":
+                    result = state.proxy_operation(action, payload)
+                else:
+                    result = state.database_operation(action, payload)
                 self._json(result)
             except (json.JSONDecodeError, UnicodeDecodeError) as exc:
                 self._json(
@@ -2234,6 +2873,7 @@ def run(
     mode = str(targets["mode"])
     serials: list[str] = list(targets["serials"])
     focus: str | None = targets.get("focus")
+    discovery_error: str | None = targets.get("discovery_error")
     cache = Path(cache_dir or cfg.cache.dir).expanduser()
 
     # Multi-device: prefer per-serial daemons; skip the single-process sidecar so we
@@ -2254,8 +2894,11 @@ def run(
         poll_ms=max(200, int(poll_ms)),
         config=cfg,
     )
+    state.discovery_error = discovery_error
     handler = _make_handler(state)
     httpd = ThreadingHTTPServer(("127.0.0.1", listen), handler)
+    # port=0 lets the OS choose, so report what we actually bound rather than the ask.
+    listen = int(httpd.server_address[1])
     url = f"http://127.0.0.1:{listen}/"
     primary_via = (ensures.get(focus or (serials[0] if serials else "")) or {}).get("via")
     info = {
@@ -2267,9 +2910,12 @@ def run(
         "serials": serials,
         "via": primary_via,
         "port": listen,
+        "discovery_error": discovery_error,
         "hint": (
             (
-                f"Grid of {len(serials)} device(s). Click a tile for detail. "
+                "No device attached yet — the grid picks one up as soon as it boots. "
+                if mode == "grid" and not serials
+                else f"Grid of {len(serials)} device(s). Click a tile for detail. "
                 if mode == "grid"
                 else f"Watching {focus} via {primary_via}. "
             )
@@ -2303,4 +2949,19 @@ def run(
     t = threading.Thread(target=_serve, name="aua-dashboard", daemon=True)
     t.start()
     info["thread"] = True
+    _SERVERS[url] = (httpd, t)
     return info
+
+
+def shutdown(info: dict[str, Any]) -> None:
+    """Stop a dashboard started with ``block=False``."""
+
+    entry = _SERVERS.pop(str(info.get("url") or ""), None)
+    if entry is None:
+        return
+    httpd, thread = entry
+    with contextlib.suppress(Exception):
+        httpd.shutdown()
+    with contextlib.suppress(Exception):
+        httpd.server_close()
+    thread.join(timeout=2)

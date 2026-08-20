@@ -599,3 +599,34 @@ def test_mock_record_start_warns_when_the_refreshed_proxy_is_still_unreachable(
 
     assert out["ok"] is True, "the recording itself started fine — only the warning differs"
     assert "warning" in out
+
+
+def test_proxy_status_with_an_explicit_serial_never_connects_to_the_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The dashboard polls this while an agent is driving the device.
+
+    Connecting would attach uiautomator2 and take the UiAutomation slot away from that
+    agent — to learn a serial the caller already passed in.
+    """
+    _arm_state(tmp_path)
+    cfg = make_config(cache={"dir": str(tmp_path)})
+    engine = Engine(cfg)
+
+    def refuse() -> Any:
+        raise AssertionError("proxy_status(serial=...) must not connect to the device")
+
+    monkeypatch.setattr(type(engine), "device", property(lambda self: refuse()))
+    seen: list[str] = []
+
+    def fake_health(serial: str, cache_dir: Any, *, self_heal: bool = False) -> dict[str, Any]:
+        seen.append(serial)
+        return {"ok": True, "state": "healthy", "port": PORT, "checks": {}}
+
+    monkeypatch.setattr(pm, "proxy_health", fake_health)
+
+    out = engine.proxy_status(heal=False, serial=SERIAL)
+
+    assert seen == [SERIAL]
+    assert out["action"] == "proxy-status"
+    assert out["ok"] is True

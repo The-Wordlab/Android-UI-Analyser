@@ -963,8 +963,11 @@ KEY_FLAGS: list[tuple[str, str]] = [
     (
         "dashboard",
         "`dashboard [--serial …] [--grid|--detail] [--port 8765] [--no-open] [--poll-ms 500]` — "
-        "localhost sneak-peek; defaults to a live device **grid** that discovers later "
-        "emulators and shows lease/idle-watchdog state (click a tile for journal/map); "
+        "localhost sneak-peek; defaults to a live device **grid** that opens with or without "
+        "a device attached, discovers later emulators and shows lease/idle-watchdog "
+        "state (click a tile for journal/map); the detail view has a proxy panel — health, "
+        "live exchanges, which rules are armed and which fired, and click-a-request-to-arm "
+        "a stub or rewrite from what it just saw; "
         "the detail view browses debuggable app "
         "databases, schema, bounded queries, restore points, and guarded writes; enables "
         "capture; does not stop the agent (Ctrl-C closes the dashboard only)",
@@ -994,7 +997,15 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "proxy / mock",
         "`proxy start|stop`, `proxy status [--no-heal]`, "
         "`mock map METHOD PATH [--status N --body '{…}']`, "
+        "`mock rewrite METHOD PATH [--host H --status N --header 'K: v' --set a.b=<json> "
+        "--delete a.b --replace old=>new --times N]`, "
         "`mock record start|stop NAME`, `mock replay NAME` (optional `[proxy]` extra). "
+        "**map vs rewrite**: `map` answers from the rule and the server never sees the "
+        "request; `rewrite` lets the request through and patches the real response, which "
+        "is how you reproduce a server-side condition (a 429, a missing field) you cannot "
+        "trigger on demand. A `rewrite` with no `--host` and a catch-all path is refused: "
+        "it would also intercept the platform's own connectivity probes and the device "
+        "would just look offline. "
         "`proxy status` answers *is interception actually working* with a `state` of "
         "`unproxied` (clean device) / `healthy` / `degraded` (yours, broken) / `foreign` "
         "(someone else's working proxy — your mock rules are inert against it) / `blackholed` "

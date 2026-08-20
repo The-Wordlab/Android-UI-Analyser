@@ -56,6 +56,7 @@ from __future__ import annotations
 import fnmatch
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -173,12 +174,22 @@ def _consume(rule):
     _APPLIED[key] = _APPLIED.get(key, 0) + 1
 
 
+_INDEX_BRACKET = re.compile(r"\\[\\s*(-?\\d+)\\s*\\]")
+
+
 def _path_parts(path):
+    """Split a JSON path into segments, accepting `a.b[0].c` as well as `a.b.0.c`.
+
+    Bracket indices are the form anyone writing a JSON path reaches for first. Without
+    this they parsed as one literal key named `b[0]`, which matches nothing — so the rule
+    matched, fired, logged itself as applied, and changed not one byte of the response.
+    """
     text = str(path)
     if text.startswith("$."):
         text = text[2:]
     elif text.startswith("$"):
         text = text[1:]
+    text = _INDEX_BRACKET.sub(r".\\1", text)
     return [p for p in text.split(".") if p != ""]
 
 
