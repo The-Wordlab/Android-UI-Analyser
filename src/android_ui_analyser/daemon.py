@@ -367,6 +367,19 @@ def _adopt_client_owner(
             engine._lease_serial = held[0]
         return
     engine._lease_owner_resolved = None
+    registry = getattr(getattr(config, "lease", None), "registry_dir", None)
+    if bound_serial and config is not None:
+        # A device-bound daemon claims for exactly its device. Letting the selection roam
+        # here used to *acquire a different free emulator* for the caller and then refuse
+        # to use it below — leaving that stray lease held for its full TTL, blocking other
+        # agents from a device the caller never touched.
+        with contextlib.suppress(AttributeError):
+            if not config.device.serial:
+                config.device.serial = bound_serial
+    held_before: set[str] = set()
+    if registry is not None:
+        with contextlib.suppress(Exception):
+            held_before = set(leases.held_by(registry, adopted_owner))
     leased_serial = engine._lease_device()  # raises when this owner may not have it
     if bound_serial and leased_serial and leased_serial != bound_serial:
         # A warm Engine cannot be rebound by changing only its lease metadata: its Device
@@ -374,6 +387,11 @@ def _adopt_client_owner(
         # Refuse rather than claim one emulator and operate on another.
         engine._lease_serial = None
         engine._lease_owner_resolved = None
+        if registry is not None and leased_serial not in held_before:
+            # Hand back only a lease this very call created; one the caller already held
+            # belongs to their other session and must survive the refusal.
+            with contextlib.suppress(Exception):
+                leases.release(registry, leased_serial, owner=adopted_owner)
         raise UsageError(
             f"this daemon is bound to {bound_serial}, but owner {owner!r} leased {leased_serial}",
             hint="Use the per-device daemon selected by the CLI, or pass --serial explicitly.",

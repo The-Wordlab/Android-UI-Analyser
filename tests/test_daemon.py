@@ -199,8 +199,17 @@ def test_daemon_journaling_does_not_reacquire_the_finished_command_fence(
             return {"ok": True}
 
     monkeypatch.setattr(engine, "analyze", lambda **_kwargs: Result())
-    request = {"cmd": "analyze", "args": {}, "owner": str(source)}
+    # A real DaemonClient always transports the structured caller beside the label. Omitting
+    # it here made the daemon treat the request as an unproven same-label stranger and re-run
+    # selection — which, on a host with live emulators, leased a real device into this test.
+    request = {
+        "cmd": "analyze",
+        "args": {},
+        "owner": str(source),
+        "caller": leases.owner_caller(source),
+    }
     response = dispatch(engine, request)
+    assert response.get("ok") is True, response
     _journal_dispatch(engine, request, response, duration_ms=1.0)
 
     offered: list[dict[str, object]] = []

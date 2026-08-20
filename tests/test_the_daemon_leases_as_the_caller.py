@@ -167,3 +167,67 @@ def test_a_pinned_caller_is_never_offered_someone_elses_device(tmp_path: Any) ->
     assert "omit --serial" not in hint
     assert "aua emulator start" in hint, "bring-your-own is the recovery that always works"
     assert "idle" in hint, "waiting it out has to stay actionable"
+
+
+def _configured_engine(tmp_path: Any, *, bound: str = "emulator-5554") -> _FakeEngine:
+    from types import SimpleNamespace
+
+    engine = _FakeEngine(resolved="daemon-self:1")
+    engine._device = type("Device", (), {"serial": bound})()
+    engine.config = SimpleNamespace(  # type: ignore[attr-defined]
+        device=SimpleNamespace(serial=""),
+        lease=SimpleNamespace(registry_dir=str(tmp_path)),
+    )
+    return engine
+
+
+def test_a_bound_daemon_claims_for_exactly_its_device(tmp_path: Any) -> None:
+    """Selection must not roam: the stray lease it acquired blocked a device for 900s."""
+    engine = _configured_engine(tmp_path)
+    claimed_explicit: list[str | None] = []
+
+    def lease_device() -> str:
+        claimed_explicit.append(engine.config.device.serial)  # type: ignore[attr-defined]
+        return "emulator-5554"
+
+    engine._lease_device = lease_device  # type: ignore[method-assign]
+
+    _adopt_client_owner(engine, "cli-caller:2")
+
+    assert claimed_explicit == ["emulator-5554"], (
+        "the bound serial must be the explicit claim target, never an open selection"
+    )
+
+
+def test_a_refused_mismatch_releases_only_the_lease_it_just_created(tmp_path: Any) -> None:
+    engine = _configured_engine(tmp_path)
+
+    def roaming_claim() -> str:
+        acquire(tmp_path, "emulator-5558", owner="cli-caller:2", ttl_s=DEFAULT_TTL_S)
+        return "emulator-5558"
+
+    engine._lease_device = roaming_claim  # type: ignore[method-assign]
+
+    with pytest.raises(UsageError, match="bound to emulator-5554"):
+        _adopt_client_owner(engine, "cli-caller:2")
+
+    from android_ui_analyser.leases import read_lease
+
+    assert read_lease(tmp_path, "emulator-5558") is None, (
+        "the stray lease this refused call created must be handed back"
+    )
+
+
+def test_a_refused_mismatch_preserves_a_lease_the_caller_already_held(tmp_path: Any) -> None:
+    acquire(tmp_path, "emulator-5558", owner="cli-caller:2", ttl_s=DEFAULT_TTL_S)
+    engine = _configured_engine(tmp_path)
+    engine._lease_device = lambda: "emulator-5558"  # type: ignore[method-assign]
+
+    with pytest.raises(UsageError, match="bound to emulator-5554"):
+        _adopt_client_owner(engine, "cli-caller:2")
+
+    from android_ui_analyser.leases import holder
+
+    assert holder(tmp_path, "emulator-5558") == "cli-caller:2", (
+        "a pre-existing lease belongs to the caller's other session and must survive"
+    )
