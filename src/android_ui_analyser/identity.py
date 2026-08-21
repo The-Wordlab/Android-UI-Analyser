@@ -88,11 +88,55 @@ def stable_key(el: Element | dict) -> str:
     return f"geo:{typ}:{q}:{digest}"
 
 
+#: Separates a base key from the ordinal that makes it unique on one screen (``rid:row#2``).
+#:
+#: ``#`` and not ``_``: an Android resource id may legitimately be named ``row_1``, so an
+#: underscore suffix would be indistinguishable from the name it is attached to — and
+#: disambiguating one screen by silently mis-addressing another is worse than the ambiguity it
+#: set out to fix. ``#`` cannot occur in a resource id, in a hex digest, or in any key prefix.
+KEY_ORDINAL_SEP = "#"
+
+
+def base_stable_key(key: str | None) -> str | None:
+    """*key* without its screen-uniqueness ordinal (``rid:row#2`` → ``rid:row``)."""
+    if key is None:
+        return None
+    head, sep, tail = key.rpartition(KEY_ORDINAL_SEP)
+    return head if sep and tail.isdigit() else key
+
+
+def _uniquify(pairs: Sequence[tuple[Element, str]]) -> dict[int, str]:
+    """Map element id → a key unique among *pairs*, suffixing only where one collides.
+
+    Additive by construction: a key that occurs once is returned untouched, so every key ever
+    published for a non-repeating element stays byte-identical.
+
+    Colliding keys are numbered by position on screen — top-to-bottom, then left-to-right —
+    never by tree order. A reader that sees ``#2`` can count to it down the screen, and the
+    numbering is reproducible across a re-analyze, which tree order is not: the accessibility
+    tree reorders siblings between reads while the pixels stay put.
+    """
+    counts: dict[str, int] = {}
+    for _el, key in pairs:
+        counts[key] = counts.get(key, 0) + 1
+    ordered = sorted(pairs, key=lambda pair: (pair[0].bounds[1], pair[0].bounds[0], pair[0].id))
+    seen: dict[str, int] = {}
+    out: dict[int, str] = {}
+    for el, key in ordered:
+        if counts[key] == 1:
+            out[el.id] = key
+            continue
+        seen[key] = seen.get(key, 0) + 1
+        out[el.id] = f"{key}{KEY_ORDINAL_SEP}{seen[key]}"
+    return out
+
+
 def attach_stable_keys(elements: Sequence[Element]) -> list[Element]:
-    """Return copies of *elements* with ``stable_key`` filled in."""
+    """Return copies of *elements* with a screen-unique ``stable_key`` filled in."""
+    unique = _uniquify([(el, base_stable_key(el.stable_key) or stable_key(el)) for el in elements])
     out: list[Element] = []
     for el in elements:
-        key = el.stable_key or stable_key(el)
+        key = unique[el.id]
         out.append(el if el.stable_key == key else el.model_copy(update={"stable_key": key}))
     return out
 
@@ -185,12 +229,23 @@ def attach_visual_stable_keys(
     *,
     screen_size: tuple[int, int] | None = None,
 ) -> list[Element]:
-    """Replace geometry-only keys with visual fingerprints from one shared screenshot."""
-    out: list[Element] = []
+    """Replace geometry-only keys with visual fingerprints from one shared screenshot.
+
+    Uniqueness is re-applied here rather than inherited: a pixel fingerprint can *create* a
+    collision the geometry keys did not have — two identical icons in a row hash to the same
+    ``px:`` value by design — so the screen would leave this function less addressable than it
+    entered it.
+    """
+    resolved: list[tuple[Element, str]] = []
     for el in elements:
         key = pixel_stable_key(el, image, screen_size=screen_size)
         if key is None:
-            key = el.stable_key or stable_key(el)
+            key = base_stable_key(el.stable_key) or stable_key(el)
+        resolved.append((el, key))
+    unique = _uniquify(resolved)
+    out: list[Element] = []
+    for el in elements:
+        key = unique[el.id]
         out.append(el if el.stable_key == key else el.model_copy(update={"stable_key": key}))
     return out
 
@@ -277,6 +332,18 @@ def find_by_stable_key(elements: Sequence[Element], key: str) -> list[Element]:
             exact.append(el)
     if exact:
         return exact
+
+    # A key saved before the ordinal existed — or one a caller wrote by hand meaning "the row,
+    # you disambiguate it" — must not become a silent miss now that repeats are suffixed. A
+    # bare needle matches the whole group and the caller's bounds decide; a suffixed needle
+    # already matched exactly above. A miss is the most dangerous answer this module can give,
+    # so it is reserved for genuinely absent elements.
+    if KEY_ORDINAL_SEP not in needle:
+        group = [
+            el for el in elements if base_stable_key(el.stable_key or stable_key(el)) == needle
+        ]
+        if group:
+            return group
 
     if needle.startswith("geo:"):
         return [el for el in elements if stable_key(el) == needle]
