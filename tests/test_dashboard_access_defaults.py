@@ -83,6 +83,11 @@ def test_no_flags_at_all_resolves_to_that_default() -> None:
 def test_an_unauthenticated_network_dashboard_always_says_what_it_exposes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    # Pin the bind decision: this test is about what an unauthenticated start *says*, and the
+    # portless URL only holds when port 80 was actually claimed. Left to the real kernel it
+    # asserts a fact about the host instead — it fails on Linux without CAP_NET_BIND_SERVICE,
+    # and on any machine where something already holds :80, including another AUA dashboard.
+    monkeypatch.setattr(dash, "_can_bind", lambda host, port: True)
     result, cmd = _start(monkeypatch, tmp_path, lan=True, hostname="aua", auth=False)
     assert result["authenticated"] is False
     assert "--no-auth" in cmd

@@ -304,6 +304,11 @@ def test_a_named_start_claims_port_80_and_forwards_the_name_to_the_detached_chil
 ) -> None:
     monkeypatch.setattr(dash, "service_status", lambda *a, **k: {"running": False})
     monkeypatch.setattr(dash, "_dashboard_health", lambda port: {"pid": 4242, "name": "aua"})
+    # Pin the bind decision. The claim under test is "a named start asks for 80 and forwards the
+    # name", which is a decision this code makes; whether the kernel grants :80 is a fact about
+    # the host, and the deliberate fallback to DEFAULT_DASHBOARD_PORT is covered separately in
+    # tests/test_dashboard_access_defaults.py.
+    monkeypatch.setattr(dash, "_can_bind", lambda host, port: True)
     seen: dict[str, Any] = {}
 
     class _Proc:
