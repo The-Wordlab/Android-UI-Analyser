@@ -1323,7 +1323,13 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .lc-line.warn { background: rgba(224,168,74,0.07); }
   .lc-date { color: #5f6b7d; }
   .lc-time { color: var(--tok-key); }
+  .lc-ms { color: #687487; }
   .lc-pid, .lc-tid { color: var(--muted); font-variant-numeric: tabular-nums; }
+  #logcat:not(.full-metadata) .lc-date,
+  #logcat:not(.full-metadata) .lc-ms,
+  #logcat:not(.full-metadata) .lc-meta-sp,
+  #logcat:not(.full-metadata) .lc-pid,
+  #logcat:not(.full-metadata) .lc-tid { display: none; }
   .lc-tag { color: var(--tok-num); font-weight: 600; }
   .lc-pkg { color: var(--tok-str); }
   .lc-sep { color: var(--tok-dim); }
@@ -1944,6 +1950,9 @@ if (new URLSearchParams(window.location.search).has('token')) {
         </select>
       </label>
       <label class="pill"><input id="logcat-wrap" type="checkbox"/>wrap</label>
+      <label class="pill" title="Show date, milliseconds, PID, and TID">
+        <input id="logcat-metadata" type="checkbox"/>full metadata
+      </label>
       <label class="pill"><input id="logcat-follow" type="checkbox" checked/>follow newest</label>
       <span id="logcat-shown" class="db-status">—</span>
     </div>
@@ -2288,7 +2297,12 @@ function logcatTokens(line) {
   if (!m) return [['raw', src]];
   const out = [];
   if (m[1]) out.push(['date', m[1]]);
-  out.push(['time', m[2]], ['sp', m[3]], ['pid', m[4]], ['sp', m[5]]);
+  const millisecondAt = m[2].lastIndexOf('.');
+  const seconds = millisecondAt >= 0 ? m[2].slice(0, millisecondAt) : m[2];
+  const milliseconds = millisecondAt >= 0 ? m[2].slice(millisecondAt) : '';
+  out.push(['time', seconds]);
+  if (milliseconds) out.push(['ms', milliseconds]);
+  out.push(['meta-sp', m[3]], ['pid', m[4]], ['meta-sp', m[5]]);
   out.push(['tid', m[6]], ['sp', m[7]], ['lvl', m[8]], ['sp', m[9]]);
   out.push(['tag', m[10]], ['sep', m[11]]);
   // Package names are the thing you actually scan a log for, so they get their own
@@ -3951,6 +3965,7 @@ const logcatFilter = document.getElementById('logcat-filter');
 const logcatAppFilter = document.getElementById('logcat-app-filter');
 const logcatLevel = document.getElementById('logcat-level');
 const logcatFollow = document.getElementById('logcat-follow');
+const logcatMetadata = document.getElementById('logcat-metadata');
 let logcatLines = [];
 let logcatAppTouched = false;
 let logcatAppTimer = null;
@@ -4048,6 +4063,9 @@ logcatFollow.addEventListener('change', () => {
 });
 document.getElementById('logcat-wrap').addEventListener('change', event => {
   logcatEl.classList.toggle('wrap', event.target.checked);
+});
+logcatMetadata.addEventListener('change', () => {
+  logcatEl.classList.toggle('full-metadata', logcatMetadata.checked);
 });
 
 async function tickLogcat() {

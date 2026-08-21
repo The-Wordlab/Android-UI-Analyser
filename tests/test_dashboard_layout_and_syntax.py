@@ -185,6 +185,16 @@ def test_logcat_renders_newest_first_and_follows_the_top() -> None:
     assert "scrollTop = logcatView.scrollHeight" not in html
 
 
+def test_logcat_is_compact_by_default_and_can_reveal_full_metadata() -> None:
+    html = _page()
+    assert 'id="logcat-metadata" type="checkbox"/>full metadata' in html
+    assert "#logcat:not(.full-metadata) .lc-date" in html
+    assert "#logcat:not(.full-metadata) .lc-ms" in html
+    assert "#logcat:not(.full-metadata) .lc-pid" in html
+    assert "#logcat:not(.full-metadata) .lc-tid" in html
+    assert "logcatEl.classList.toggle('full-metadata', logcatMetadata.checked)" in html
+
+
 def test_navigation_library_expands_goto_routes_and_groups_every_saved_flow() -> None:
     html = _page()
     assert 'class="knowledge-workspace"' in html
@@ -421,7 +431,8 @@ def test_logcat_tokens_split_a_threadtime_line_into_its_parts() -> None:
     kinds: dict[str, str] = {}
     for kind, value in tokens:
         kinds.setdefault(kind, value)
-    assert kinds["time"] == "10:21:40.758"
+    assert kinds["time"] == "10:21:40"
+    assert kinds["ms"] == ".758"
     assert kinds["date"].strip() == "08-21"
     assert kinds["pid"] == "745"
     assert kinds["tid"] == "760"
