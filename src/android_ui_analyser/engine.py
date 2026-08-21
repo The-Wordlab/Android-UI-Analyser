@@ -819,6 +819,10 @@ class Engine:
         self._last_analyze_elements: list[Element] | None = None
         self._last_hierarchy_hash: str | None = None
         self._last_analyze_result: AnalyzeResult | None = None
+        # Screenshot whose pixels produced the current analyze's px: element identities.
+        # The outer --with-image wrapper saves this exact frame instead of taking a second,
+        # potentially different screenshot after identity assignment.
+        self._last_analyze_image: ScreenImage | None = None
         # Set only for the duration of an explicit `session autopilot` run; see
         # `_session_policy_mode`.
         self._policy_mode_override: PolicyMode | None = None
@@ -1996,6 +2000,41 @@ class Engine:
             return False, True, False
         return False, False, False
 
+    @staticmethod
+    def _attach_visual_identity(
+        device: Device,
+        elements: list[Element],
+        image: ScreenImage | None,
+        width: int,
+        height: int,
+    ) -> tuple[list[Element], ScreenImage | None, bool]:
+        """Give unlabeled actionable controls pixel keys from one shared screenshot.
+
+        ``Device.screenshot`` is the platform-neutral runtime contract used by every other
+        perception path. A capture failure must degrade to the existing geometry key rather
+        than turn a hierarchy analysis into an error.
+        """
+        from .identity import attach_visual_stable_keys, needs_visual_stable_key
+
+        needed = any(needs_visual_stable_key(element) for element in elements)
+        if not needed:
+            return elements, image, False
+        if image is None:
+            try:
+                image = device.screenshot()
+            except Exception as exc:
+                logger.info("visual element identity could not capture a screenshot: %s", exc)
+                return elements, None, True
+        try:
+            return (
+                attach_visual_stable_keys(elements, image, screen_size=(width, height)),
+                image,
+                True,
+            )
+        except Exception as exc:
+            logger.info("visual element identity could not fingerprint crops: %s", exc)
+            return elements, image, True
+
     def analyze(
         self,
         *,
@@ -2026,7 +2065,9 @@ class Engine:
                     with_image=False,  # already applying session/per-call image below
                 ),
                 wi,
+                image=self._last_analyze_image,
             )
+        self._last_analyze_image = None
         ceiling = routing.resolve_ceiling(self.config.routing.max_tier, cheap=cheap, deep=deep)
         force_hier, force_vis, pin_grounding = self._resolve_pins(source, strategy)
         # An explicit --strategy pin is a per-call opt-in: raise the ceiling so the pinned
@@ -2097,6 +2138,10 @@ class Engine:
             package = hierarchy_observation.package
             xml_hash = hierarchy_observation.xml_hash
             img = hierarchy_observation.image
+            elements, img, visual_identity_needed = self._attach_visual_identity(
+                device, elements, img, w, h
+            )
+            hierarchy_elements = elements[: len(hierarchy_elements)]
             if hierarchy_observation.ocr_provider:
                 providers_used.append(hierarchy_observation.ocr_provider)
                 screen_source = ScreenSource.mixed
@@ -2114,6 +2159,14 @@ class Engine:
                 # Identical accessibility XML does not imply identical pixels (canvas,
                 # charts, video, custom rendering). Current OCR must reach the caller.
                 and not hierarchy_observation.ocr_provider
+                # XML equality cannot reuse visual identities when an unlabeled control's
+                # crop changed underneath the same hierarchy. Exact keys need not match for
+                # later fuzzy remapping, but a changed key must run the normal result path.
+                and (
+                    not visual_identity_needed
+                    or tuple(element.stable_key for element in elements)
+                    == tuple(element.stable_key for element in self._last_analyze_result.elements)
+                )
             ):
                 prev = self._last_analyze_result
                 # Reusing the PAYLOAD is fine — the tree really is identical — but the memory
@@ -2184,9 +2237,11 @@ class Engine:
                 # cached analyze result". The ids are only usable because analyze persists them.
                 if not no_cache:
                     self._write_cache(reused)
+                self._last_analyze_image = img
                 return reused
         else:
             xml_hash = None
+            visual_identity_needed = False
 
         use_vision = force_vision
         xml_dump: str | None = None
@@ -2278,6 +2333,12 @@ class Engine:
                 screen_source = ScreenSource.vision
             tier_used = Tier.vision
             path = PathKind.vision
+
+        # WebView enrichment and vision can add controls after the first hierarchy pass. Reuse
+        # its screenshot when possible and fingerprint only the metadata-empty actionable ones.
+        elements, img, _visual_identity_needed = self._attach_visual_identity(
+            device, elements, img, w, h
+        )
 
         if record:
             ocr_helped: bool | None = None
@@ -2381,6 +2442,7 @@ class Engine:
         if xml_hash:
             self._last_hierarchy_hash = xml_hash
         self._last_analyze_result = result
+        self._last_analyze_image = img
         if not no_cache:
             self._write_cache(result)
         if self.config.perf.prefetch:
@@ -2625,6 +2687,9 @@ class Engine:
         hints: NavHints | None = None,
     ) -> AnalyzeResult:
         elements = [element] if element is not None else []
+        elements, img, _visual_identity_needed = self._attach_visual_identity(
+            device, elements, img, w, h
+        )
         annotated = self._maybe_annotate(annotate, device, elements, img)
         result = AnalyzeResult(
             screen=Screen(
@@ -2653,6 +2718,7 @@ class Engine:
         )
         if not no_cache:
             self._write_cache(result)
+        self._last_analyze_image = img
         return result
 
     # ----------------------------------------------------------------- query match
@@ -18479,8 +18545,14 @@ class Engine:
 
     # ----------------------------------------------------------------- annotate
 
-    def _with_raw_image(self, result: AnalyzeResult, with_image: bool | str) -> AnalyzeResult:
-        img = self._screenshot(max_reuse_ms=80.0)
+    def _with_raw_image(
+        self,
+        result: AnalyzeResult,
+        with_image: bool | str,
+        *,
+        image: ScreenImage | None = None,
+    ) -> AnalyzeResult:
+        img = image or self._screenshot(max_reuse_ms=80.0)
         out = (
             with_image
             if isinstance(with_image, str)

@@ -26,6 +26,7 @@ _SCRIPT = re.compile(r"<script[^>]*>(.*?)</script>", re.S)
 def _inline_scripts() -> list[str]:
     html = dash._DASHBOARD_HTML.replace("__POLL_MS__", "500")
     html = html.replace("__MODE_JSON__", '"grid"').replace("__SERIAL_JSON__", '""')
+    html = html.replace("__PHONE_ACCESS_URL_JSON__", '""')
     html = html.replace("__DATABASE_TOKEN__", "test-token")
     return [body for body in _SCRIPT.findall(html) if body.strip()]
 

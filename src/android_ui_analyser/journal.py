@@ -81,6 +81,23 @@ def journal_detail_path(cache_dir: str | Path, serial: str | None) -> Path:
     return journal_dir(cache_dir) / f"{_serial_key(serial)}.details.jsonl"
 
 
+def clear(cache_dir: str | Path, serial: str | None, *, include_host: bool = True) -> list[Path]:
+    """Remove compact and detailed journal files visible in one dashboard scope."""
+
+    roots = [journal_path(cache_dir, serial), journal_detail_path(cache_dir, serial)]
+    if include_host and serial is not None:
+        roots.extend((journal_path(cache_dir, None), journal_detail_path(cache_dir, None)))
+    deleted: list[Path] = []
+    for root in dict.fromkeys(roots):
+        for path in (root, root.with_suffix(root.suffix + ".1")):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                continue
+            deleted.append(path)
+    return deleted
+
+
 def detail_revision(cache_dir: str | Path, serial: str | None) -> str:
     """Return a cheap change token for detail rows visible to one dashboard scope."""
 

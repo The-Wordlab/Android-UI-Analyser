@@ -10,10 +10,21 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 from .schema import Element
 
+if TYPE_CHECKING:
+    from .providers.base import ScreenImage
+
 _ID_TAIL = re.compile(r"(?:.*/)?([^/]+)$")
+_PIXEL_KEY = re.compile(r"^px:([^:]+):([0-9a-f]{16})$")
+
+# A compact 8x8 difference hash gives 64 visual bits. Six changed bits tolerates a measured
+# one-pixel bounds/render shift after edge normalization while still refusing distinct shapes.
+PIXEL_HASH_SIDE = 8
+PIXEL_MAX_DISTANCE = 6
+PIXEL_MIN_INFORMATION_BITS = 3
 
 
 def id_tail(resource_id: str | None) -> str | None:
@@ -43,7 +54,11 @@ def stable_key(el: Element | dict) -> str:
     Format:
     - ``rid:<tail>`` when a resource-id exists (most stable)
     - ``cd:<hash>`` / ``tx:<hash>`` for labeled nodes without rid
-    - ``geo:<type>:<quadrant>:<hash>`` last resort (type + coarse position)
+    - ``geo:<type>:<quadrant>:<hash>`` metadata-only last resort
+
+    ``attach_visual_stable_keys`` upgrades an actionable ``geo:`` element to ``px:`` when
+    the engine has a screenshot. Keeping geometry generation here preserves offline hierarchy
+    parsing and a backward-compatible alias for old caches.
     """
     if isinstance(el, dict):
         rid = el.get("resource_id")
@@ -82,20 +97,149 @@ def attach_stable_keys(elements: Sequence[Element]) -> list[Element]:
     return out
 
 
+def needs_visual_stable_key(el: Element | dict) -> bool:
+    """Whether an element has no semantic identity and can actually receive an action."""
+    if isinstance(el, dict):
+        rid = el.get("resource_id")
+        text = el.get("text")
+        desc = el.get("content_desc")
+        bounds = tuple(el.get("bounds") or (0, 0, 0, 0))
+        actionable = any(
+            bool(el.get(name))
+            for name in ("clickable", "long_clickable", "checkable", "scrollable")
+        )
+    else:
+        rid = el.resource_id
+        text = el.text
+        desc = el.content_desc
+        bounds = tuple(el.bounds)
+        actionable = any((el.clickable, el.long_clickable, el.checkable, el.scrollable))
+    x1, y1, x2, y2 = bounds
+    return bool(
+        actionable
+        and not id_tail(rid)
+        and not _norm(desc)
+        and not _norm(text)
+        and x2 - x1 >= 2
+        and y2 - y1 >= 2
+    )
+
+
+def _pixel_type(value: str | None) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", (value or "unknown").strip())
+    return (cleaned or "unknown")[:48]
+
+
+def pixel_stable_key(
+    el: Element | dict,
+    image: ScreenImage,
+    *,
+    screen_size: tuple[int, int] | None = None,
+) -> str | None:
+    """Fingerprint one unlabeled actionable element from its normalized screenshot crop.
+
+    The crop is contrast-normalized and reduced to edges before hashing. That deliberately
+    values the control's shape over its colour/background, which is important for transparent
+    toolbar icons rendered over changing artwork. The result is a candidate identity, not an
+    exact-pixel assertion; resolution compares hashes by Hamming distance.
+    """
+    if not needs_visual_stable_key(el):
+        return None
+    typ = el.get("type") if isinstance(el, dict) else el.type
+    bounds = tuple(el.get("bounds") or (0, 0, 0, 0)) if isinstance(el, dict) else el.bounds
+    source_w, source_h = screen_size or (image.width, image.height)
+    if source_w <= 0 or source_h <= 0:
+        return None
+    scale_x = image.width / source_w
+    scale_y = image.height / source_h
+    x1, y1, x2, y2 = bounds
+    left = max(0, min(image.width, round(x1 * scale_x)))
+    top = max(0, min(image.height, round(y1 * scale_y)))
+    right = max(0, min(image.width, round(x2 * scale_x)))
+    bottom = max(0, min(image.height, round(y2 * scale_y)))
+    if right - left < 2 or bottom - top < 2:
+        return None
+
+    from PIL import ImageFilter, ImageOps
+
+    from .imaging import dhash_pil
+
+    crop = image.pil().crop((left, top, right, bottom)).convert("L")
+    normalized = ImageOps.autocontrast(crop).filter(ImageFilter.FIND_EDGES)
+    # FIND_EDGES gives the crop border artificial contrast. Remove it when the crop is large
+    # enough so a one-pixel bounds change does not become the element's strongest feature.
+    if normalized.width > 4 and normalized.height > 4:
+        normalized = normalized.crop((1, 1, normalized.width - 1, normalized.height - 1))
+    fingerprint = dhash_pil(normalized, side=PIXEL_HASH_SIDE)
+    information = fingerprint.bit_count()
+    if information < PIXEL_MIN_INFORMATION_BITS or information > 64 - PIXEL_MIN_INFORMATION_BITS:
+        # A nearly uniform crop cannot identify itself; geometry is more honest than a hash
+        # shared by every blank/solid control on the screen.
+        return None
+    return f"px:{_pixel_type(typ)}:{fingerprint:016x}"
+
+
+def attach_visual_stable_keys(
+    elements: Sequence[Element],
+    image: ScreenImage,
+    *,
+    screen_size: tuple[int, int] | None = None,
+) -> list[Element]:
+    """Replace geometry-only keys with visual fingerprints from one shared screenshot."""
+    out: list[Element] = []
+    for el in elements:
+        key = pixel_stable_key(el, image, screen_size=screen_size)
+        if key is None:
+            key = el.stable_key or stable_key(el)
+        out.append(el if el.stable_key == key else el.model_copy(update={"stable_key": key}))
+    return out
+
+
+def _pixel_parts(key: str | None) -> tuple[str, int] | None:
+    match = _PIXEL_KEY.fullmatch((key or "").strip())
+    if match is None:
+        return None
+    return match.group(1), int(match.group(2), 16)
+
+
+def _identity_distance(previous: Element, current: Element) -> int | None:
+    """Zero for exact/legacy identity, positive for a close visual fingerprint."""
+    previous_key = previous.stable_key or stable_key(previous)
+    current_key = current.stable_key or stable_key(current)
+    if previous_key == current_key:
+        return 0
+
+    # Migration in either direction: a cached geo key remains resolvable after px keys begin
+    # shipping, and a screenshot failure can still bind a prior px element by unchanged bounds.
+    previous_geometry = stable_key(previous)
+    current_geometry = stable_key(current)
+    if previous_key == current_geometry or current_key == previous_geometry:
+        return 0
+
+    previous_pixel = _pixel_parts(previous_key)
+    current_pixel = _pixel_parts(current_key)
+    if previous_pixel is None or current_pixel is None or previous_pixel[0] != current_pixel[0]:
+        return None
+    distance = (previous_pixel[1] ^ current_pixel[1]).bit_count()
+    return distance if distance <= PIXEL_MAX_DISTANCE else None
+
+
 def remap_ids(
     previous: Sequence[Element],
     current: Sequence[Element],
 ) -> dict[int, int]:
-    """Map previous-frame ids → current-frame ids via ``stable_key`` (exact match)."""
-    by_key: dict[str, list[Element]] = {}
-    for el in current:
-        key = el.stable_key or stable_key(el)
-        by_key.setdefault(key, []).append(el)
-
+    """Map previous-frame ids → current-frame ids via exact or perceptually-close identity."""
     mapping: dict[int, int] = {}
     for prev in previous:
-        key = prev.stable_key or stable_key(prev)
-        cands = by_key.get(key) or []
+        scored = [
+            (distance, candidate)
+            for candidate in current
+            if (distance := _identity_distance(prev, candidate)) is not None
+        ]
+        if not scored:
+            continue
+        best_distance = min(distance for distance, _candidate in scored)
+        cands = [candidate for distance, candidate in scored if distance == best_distance]
         if len(cands) == 1:
             mapping[prev.id] = cands[0].id
         elif len(cands) > 1:
@@ -106,9 +250,9 @@ def remap_ids(
             # onto the system nav bar's Home button twice, silently backgrounding the app under a
             # scenario that then had to explain a "crash" that never happened.
             #
-            # Two of the three key kinds make that easy to hit: rid: carries no position at all and
-            # cd:/tx: carry only a coarse quadrant, so same-key candidates can sit anywhere on
-            # screen. (geo: hashes exact bounds, so its candidates always overlap perfectly.)
+            # rid: carries no position at all, cd:/tx: carry only a coarse quadrant, and two
+            # visually identical px: controls may sit anywhere on screen. Same-key candidates
+            # therefore still need spatial evidence; geo: alone hashes exact bounds.
             #
             # With several same-key candidates and no overlap anywhere, there is simply no evidence
             # for choosing one. Decline, and let the caller raise ElementNotFoundError: recovery is
@@ -124,14 +268,34 @@ def remap_ids(
 
 
 def find_by_stable_key(elements: Sequence[Element], key: str) -> list[Element]:
-    """Elements whose stable_key equals *key* (exact)."""
+    """Elements matching *key*, including close ``px:`` and legacy ``geo:`` identities."""
     needle = key.strip()
-    hits: list[Element] = []
+    exact: list[Element] = []
     for el in elements:
         sk = el.stable_key or stable_key(el)
         if sk == needle:
-            hits.append(el)
-    return hits
+            exact.append(el)
+    if exact:
+        return exact
+
+    if needle.startswith("geo:"):
+        return [el for el in elements if stable_key(el) == needle]
+
+    wanted = _pixel_parts(needle)
+    if wanted is None:
+        return []
+    scored: list[tuple[int, Element]] = []
+    for el in elements:
+        candidate = _pixel_parts(el.stable_key or stable_key(el))
+        if candidate is None or candidate[0] != wanted[0]:
+            continue
+        distance = (candidate[1] ^ wanted[1]).bit_count()
+        if distance <= PIXEL_MAX_DISTANCE:
+            scored.append((distance, el))
+    if not scored:
+        return []
+    best = min(distance for distance, _el in scored)
+    return [el for distance, el in scored if distance == best]
 
 
 def _iou(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
@@ -151,8 +315,11 @@ def _iou(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
 
 __all__ = [
     "attach_stable_keys",
+    "attach_visual_stable_keys",
     "find_by_stable_key",
     "id_tail",
+    "needs_visual_stable_key",
+    "pixel_stable_key",
     "remap_ids",
     "stable_key",
 ]

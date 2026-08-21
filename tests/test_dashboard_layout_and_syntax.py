@@ -33,6 +33,10 @@ _SCRIPT = re.compile(r"<script[^>]*>(.*?)</script>", re.S)
 def _page() -> str:
     html = dash._DASHBOARD_HTML.replace("__POLL_MS__", "500")
     html = html.replace("__MODE_JSON__", '"detail"').replace("__SERIAL_JSON__", '"emulator-5554"')
+    html = html.replace(
+        "__PHONE_ACCESS_URL_JSON__",
+        '"http://192.0.2.10:48765/?token=test-access"',
+    )
     return html.replace("__DATABASE_TOKEN__", "test-token")
 
 
@@ -122,6 +126,11 @@ def test_live_frame_can_analyze_overlay_ids_and_tap_the_exact_analysis() -> None
         "element-overlay",
         "inspection-status",
         "inspection-raw",
+        "inspection-raw-details",
+        "inspection-json-search",
+        "inspection-json-search-count",
+        "inspection-json-prev",
+        "inspection-json-next",
         "inspection-clickable-only",
         "inspection-live",
     ):
@@ -131,8 +140,16 @@ def test_live_frame_can_analyze_overlay_ids_and_tap_the_exact_analysis() -> None
     assert "inspection_id: currentInspectionId" in html
     assert "element_id: Number(elementId)" in html
     assert "element.bounds.map(Number)" in html
+    assert "element.stable_key || ''" in html
+    assert "keyBadge.className = 'element-key'" in html
+    assert 'id="inspection-clickable-only" type="checkbox" checked' in html
+    assert 'id="element-overlay" class="element-overlay clickable-only"' in html
     assert "frame.src = data.frame_url" in html
-    assert "JSON.stringify(data.result || {}, null, 2)" in html
+    assert "renderInspectionRaw(data.result || {}, elements)" in html
+    assert "function focusInspectionJson(elementId)" in html
+    assert "focusInspectionJson(element.id)" in html
+    assert "line.dataset.elementId = String(owner.id)" in html
+    assert "updateInspectionJsonSearch(event.shiftKey ? -1 : 1)" in html
     assert "!inspectionFrameActive && frameToken !== lastSrc" in html
 
 
@@ -176,9 +193,56 @@ def test_navigation_library_expands_goto_routes_and_groups_every_saved_flow() ->
     assert 'id="flow-groups"' in html
     assert "function knowledgeItem(" in html
     assert "function knowledgeSteps(" in html
-    assert "knowledgeCommand('Run', 'aua goto" in html
-    assert "knowledgeCommand('Run', 'aua flow run" in html
+    assert "label: 'Run goto', action: 'goto'" in html
+    assert "label: 'Run flow', action: 'flow-run'" in html
+    assert "label: 'Clear', action: 'route-delete'" in html
+    assert "label: 'Clear', action: 'flow-delete'" in html
+    assert 'id="map-clear"' in html
+    assert 'id="flows-clear"' in html
+    assert 'id="knowledge-clear-all"' in html
+    assert "dashboardControlPost('navigation'" in html
     assert "const app = flow.app || 'App-agnostic'" in html
+
+
+def test_agent_journal_has_a_confirmed_clear_logs_action() -> None:
+    html = _page()
+    assert 'id="journal-clear"' in html
+    assert "dashboardControlPost('journal', 'clear'" in html
+    assert "confirmation: 'CLEAR JOURNAL ' + focusSerial" in html
+
+
+def test_phone_layout_prioritizes_the_live_screen_and_touch_controls() -> None:
+    html = _page()
+    assert "@media (max-width: 700px)" in html
+    assert "max-height: calc(100svh - 12.5rem)" in html
+    assert "touch-action: manipulation" in html
+    assert ".db-button, .analyze-button { min-height: 2.6rem" in html
+    assert ".detail-status:nth-child(1), .detail-status:nth-child(3) { display: flex; }" in html
+    assert "@media (max-height: 520px) and (orientation: landscape)" in html
+
+
+def test_lan_dashboard_has_a_phone_qr_dialog() -> None:
+    html = _page()
+    for element_id in (
+        "phone-qr-button",
+        "phone-qr-dialog",
+        "phone-qr-image",
+        "phone-qr-url",
+        "phone-qr-copy",
+        "phone-qr-close",
+    ):
+        assert f'id="{element_id}"' in html
+    assert "const PHONE_ACCESS_URL =" in html
+    assert "'/api/dashboard-access-qr.svg'" in html
+    assert "phoneQrDialog.showModal()" in html
+
+
+def test_detached_detail_returns_to_grid_and_explains_the_removal() -> None:
+    html = _page()
+    assert 'id="device-notice"' in html
+    assert "if (s.detached)" in html
+    assert "window.location.replace('/?detached='" in html
+    assert "disconnected and was removed from the dashboard" in html
 
 
 def test_local_model_workspace_controls_the_shared_runtime_and_shows_full_exchanges() -> None:
@@ -391,7 +455,9 @@ def _chrome() -> str | None:
 _PROBE = r"""
 <script>
 window.setInterval = function () { return 0; };
+window.inspectionTapRequests = 0;
 window.fetch = function (url) {
+  if (String(url).includes('/api/inspect/tap')) window.inspectionTapRequests += 1;
   const body = FIXTURES[String(url).split('?')[0]] || {ok: true};
   return Promise.resolve({ok: true, status: 200, json: () => Promise.resolve(body)});
 };
@@ -473,6 +539,30 @@ window.addEventListener('load', function () {
       document.querySelector('#logcat .lc-line').textContent.indexOf('newest') >= 0,
       document.querySelector('#logcat .lc-line').textContent);
 
+  const inspectedElement = {
+    id: 26, type: 'View', text: null, resource_id: null, content_desc: null,
+    bounds: [21, 63, 147, 189], center: [84, 126], clickable: true,
+    stable_key: 'geo:View:q00:f0415f9da6'
+  };
+  renderInspection({
+    inspection_id: 'probe', frame_url: 'data:image/gif;base64,R0lGODlhAQABAAAAACw=',
+    view: {screen: {width: 666, height: 1536}, elements: [inspectedElement]},
+    result: {ok: true, elements: [inspectedElement]}
+  }, null);
+  const idChip = document.querySelector('[data-element-id="26"] .element-label');
+  idChip.click();
+  say('id chip does not tap', window.inspectionTapRequests === 0,
+      'tap requests=' + window.inspectionTapRequests);
+  say('id chip opens the raw object', inspectionRawDetails.open &&
+      inspectionJsonSearch.value === '"id": 26', inspectionJsonSearch.value);
+  say('raw object is highlighted',
+      inspectionRaw.querySelectorAll('[data-element-id="26"].element-current').length > 1,
+      inspectionRaw.querySelectorAll('[data-element-id="26"].element-current').length + ' lines');
+  inspectionJsonSearch.value = 'f0415f9da6';
+  updateInspectionJsonSearch();
+  say('raw search finds stable keys', inspectionJsonMatches.length === 1,
+      inspectionJsonMatches.length + ' match');
+
   const node = document.createElement('pre');
   node.id = 'verdict';
   node.textContent = out.join('\n');
@@ -533,6 +623,6 @@ def test_the_journal_viewport_holds_still_in_a_real_browser(tmp_path: pathlib.Pa
     assert verdict, f"the page never reached its checks (dom was {len(dom)} bytes)"
     lines = verdict.group(1).replace("&gt;", ">").replace("&lt;", "<").splitlines()
     # Exact: a check that quietly stops running must fail here, not pass silently.
-    assert len(lines) == 13, lines
+    assert len(lines) == 17, lines
     failures = [line for line in lines if not line.startswith("PASS")]
     assert not failures, "\n".join(lines)

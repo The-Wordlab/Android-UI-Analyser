@@ -26,6 +26,7 @@ Design notes
 
 from __future__ import annotations
 
+import builtins
 import math
 import re
 from collections.abc import Sequence
@@ -2086,6 +2087,18 @@ class FlowStore:
             raise self._ambiguous(ref, matches)
         matches[0].unlink()
         return True
+
+    def clear(self) -> builtins.list[Path]:
+        """Delete every indexed flow and return the exact files removed."""
+
+        deleted: builtins.list[Path] = []
+        for path in self.files():
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                continue
+            deleted.append(path)
+        return deleted
 
     def _declared_app(self, path: Path) -> str | None:
         """The ``app:`` a stored flow declares — None when it declares none or cannot be read."""

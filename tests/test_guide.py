@@ -100,6 +100,7 @@ def test_brief_prefers_stable_selectors_and_current_playbook_facts() -> None:
     brief = guide.render_brief()
     for claim in [
         "stable_key",
+        "`px:` perceptual crop fingerprint",
         "prefer `--rid",
         "numeric id after its frame changed",
         "knowledge stale",

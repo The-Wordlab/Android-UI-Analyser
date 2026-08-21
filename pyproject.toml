@@ -26,6 +26,7 @@ dependencies = [
     "pyyaml>=6.0",
     "httpx>=0.27",
     "pillow>=10.0",
+    "qrcode>=8.1,<9",
     "numpy>=1.26",
     "uiautomator2>=3.0",
     # <2: mcp 2.0 dropped mcp.shared.memory.create_connected_server_and_client_session,

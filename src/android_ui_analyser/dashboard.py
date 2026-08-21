@@ -8,25 +8,42 @@ the agent I/O journal, app map, logcat, and capture marks. Bind 127.0.0.1 only.
 from __future__ import annotations
 
 import contextlib
+import http.cookies
+import io
 import json
 import logging
 import mimetypes
 import os
 import secrets
+import signal
 import socket
+import subprocess
+import sys
 import threading
 import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.request import urlopen
 
 from .errors import AuaError, DaemonOutcomeUnknownError, UsageError
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_PORT = 8765
+# One deliberately fixed port for the detached dashboard. Service mode never walks to a
+# neighbouring port: a bookmark on a phone must remain valid, and an occupied port must not be
+# mistaken for a healthy AUA dashboard. Foreground ``run()`` retains its legacy nearby-port
+# behaviour unless ``exact_port=True`` is requested.
+DEFAULT_DASHBOARD_PORT = 48765
+_DEFAULT_PORT = DEFAULT_DASHBOARD_PORT
+_SERVICE_ID = "aua-dashboard-v1"
+_SERVICE_STATE_NAME = "dashboard-service.json"
+_SERVICE_LOG_NAME = "dashboard.log"
+_SERVICE_START_TIMEOUT_S = 5.0
+_ACCESS_COOKIE = "AUA_DASHBOARD_ACCESS"
 
 # A capture file older than this is only trusted while capture is known to be alive:
 # the ring dedupes unchanged screens, so an old frame is normal there and a lie once
@@ -475,6 +492,357 @@ def _pick_free_port(preferred: int) -> int:
     raise UsageError(f"no free port near {preferred}", hint="Pass --port explicitly.")
 
 
+def _service_state_path(cache_dir: str | Path) -> Path:
+    return Path(cache_dir).expanduser() / _SERVICE_STATE_NAME
+
+
+def _service_log_path(cache_dir: str | Path) -> Path:
+    return Path(cache_dir).expanduser() / _SERVICE_LOG_NAME
+
+
+def _read_service_state(cache_dir: str | Path) -> dict[str, Any]:
+    path = _service_state_path(cache_dir)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _write_service_state(cache_dir: str | Path, value: dict[str, Any]) -> Path:
+    """Write dashboard ownership and its LAN credential as a user-private file."""
+    path = _service_state_path(cache_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = json.dumps(value, ensure_ascii=False, indent=2).encode("utf-8")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
+    with contextlib.suppress(OSError):
+        os.chmod(path, 0o600)
+    return path
+
+
+def _dashboard_health(port: int) -> dict[str, Any] | None:
+    try:
+        with urlopen(f"http://127.0.0.1:{int(port)}/api/health", timeout=0.35) as response:
+            payload = json.loads(response.read())
+    except (HTTPError, URLError, OSError, ValueError, TypeError):
+        return None
+    if not isinstance(payload, dict) or payload.get("service") != _SERVICE_ID:
+        return None
+    return payload
+
+
+def _port_is_open(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.2)
+        return sock.connect_ex(("127.0.0.1", int(port))) == 0
+
+
+def _lan_addresses() -> list[str]:
+    """Best-effort private/LAN IPv4 addresses suitable for a phone URL."""
+    found: set[str] = set()
+    with contextlib.suppress(OSError):
+        for item in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            address = str(item[4][0])
+            if address and not address.startswith("127.") and address != "0.0.0.0":
+                found.add(address)
+    # Hostnames on macOS do not always resolve to the active Wi-Fi interface. Connecting a UDP
+    # socket chooses a route but sends no packet, and gives us the source address for that route.
+    with contextlib.suppress(OSError), socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.connect(("192.0.2.1", 9))
+        address = str(sock.getsockname()[0])
+        if address and not address.startswith("127.") and address != "0.0.0.0":
+            found.add(address)
+    return sorted(found)
+
+
+def _service_urls(*, port: int, lan: bool, access_token: str | None) -> dict[str, Any]:
+    local_url = f"http://127.0.0.1:{int(port)}/"
+    hosts = _lan_addresses() if lan else []
+    lan_urls = [f"http://{host}:{int(port)}/" for host in hosts]
+    token_suffix = f"?token={access_token}" if access_token else ""
+    return {
+        "url": local_url,
+        "access_url": local_url + token_suffix,
+        "lan_urls": lan_urls,
+        "lan_access_urls": [url + token_suffix for url in lan_urls],
+    }
+
+
+def _qr_svg(value: str) -> bytes:
+    import qrcode
+    import qrcode.image.svg
+
+    code = qrcode.QRCode(
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=10,
+        border=4,
+        image_factory=qrcode.image.svg.SvgPathFillImage,
+    )
+    code.add_data(value)
+    code.make(fit=True)
+    image = code.make_image()
+    return image.to_string(encoding="utf-8")
+
+
+def _qr_png(value: str) -> bytes:
+    import qrcode
+
+    code = qrcode.QRCode(
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=12,
+        border=4,
+    )
+    code.add_data(value)
+    code.make(fit=True)
+    image = code.make_image(fill_color="black", back_color="white")
+    out = io.BytesIO()
+    image.save(out, format="PNG")
+    return out.getvalue()
+
+
+def create_access_qr(
+    config: Any,
+    *,
+    port: int = DEFAULT_DASHBOARD_PORT,
+    output: str | Path | None = None,
+) -> dict[str, Any]:
+    """Write a user-private QR image for the running dashboard's authenticated LAN URL."""
+    status = service_status(config, port=port)
+    if not status.get("running"):
+        raise UsageError("dashboard is not running", hint="Run `aua dashboard start --lan`.")
+    urls = status.get("lan_access_urls") or []
+    if not urls:
+        raise UsageError(
+            "dashboard is local-only, so it has no phone URL",
+            hint="Run `aua dashboard stop`, then `aua dashboard start --lan`.",
+        )
+    access_url = str(urls[0])
+    path = (
+        Path(output).expanduser()
+        if output
+        else Path(config.cache.dir).expanduser() / "dashboard-access.png"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = _qr_png(access_url)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
+    with contextlib.suppress(OSError):
+        os.chmod(path, 0o600)
+    return {
+        "ok": True,
+        "action": "dashboard-qr",
+        "port": int(port),
+        "url": access_url,
+        "path": str(path.resolve()),
+    }
+
+
+def service_status(
+    config: Any, *, port: int = DEFAULT_DASHBOARD_PORT
+) -> dict[str, Any]:
+    """Return detached-dashboard status without adopting an arbitrary port owner."""
+    cache = Path(config.cache.dir).expanduser()
+    state = _read_service_state(cache)
+    health = _dashboard_health(port)
+    if health is not None:
+        lan = bool(health.get("lan"))
+        token = str(state.get("access_token") or "") if lan else ""
+        return {
+            "ok": True,
+            "action": "dashboard-status",
+            "running": True,
+            "status": "running",
+            "pid": health.get("pid"),
+            "port": int(port),
+            "bind": health.get("bind"),
+            "lan": lan,
+            "authenticated": bool(health.get("authenticated")),
+            **_service_urls(port=port, lan=lan, access_token=token or None),
+        }
+    occupied = _port_is_open(port)
+    return {
+        "ok": not occupied,
+        "action": "dashboard-status",
+        "running": False,
+        "status": "port_occupied" if occupied else "not_running",
+        "port": int(port),
+        "hint": (
+            f"Port {port} is occupied by a process that is not the AUA dashboard."
+            if occupied
+            else "Start it with `aua dashboard start`."
+        ),
+    }
+
+
+def start_service(
+    config: Any,
+    *,
+    serial: str | None = None,
+    port: int = DEFAULT_DASHBOARD_PORT,
+    lan: bool = False,
+    poll_ms: int = 500,
+    grid: bool = True,
+    explicit_config: str | None = None,
+    profile: str | None = None,
+    platform: str | None = None,
+) -> dict[str, Any]:
+    """Start one idempotent detached dashboard on an exact localhost/LAN port."""
+    current = service_status(config, port=port)
+    if current.get("running"):
+        if bool(current.get("lan")) != bool(lan):
+            raise UsageError(
+                "dashboard is already running with a different network scope",
+                hint="Run `aua dashboard stop`, then start it again with or without `--lan`.",
+            )
+        return {**current, "action": "dashboard-start", "status": "already_running"}
+    if current.get("status") == "port_occupied":
+        raise UsageError(
+            f"dashboard port {port} is already owned by another process",
+            hint=f"Stop that process or choose one dedicated port with `--port`; AUA will not move away from {port} automatically.",
+        )
+
+    cache = Path(config.cache.dir).expanduser()
+    cache.mkdir(parents=True, exist_ok=True)
+    token = secrets.token_urlsafe(32) if lan else ""
+    initial_state = {
+        "service": _SERVICE_ID,
+        "pid": None,
+        "port": int(port),
+        "bind": "0.0.0.0" if lan else "127.0.0.1",
+        "lan": bool(lan),
+        "access_token": token,
+        "started_at_ms": int(time.time() * 1000),
+    }
+    state_path = _write_service_state(cache, initial_state)
+    log_path = _service_log_path(cache)
+    cmd = [
+        sys.executable,
+        "-m",
+        "android_ui_analyser.dashboard",
+        "--serve-service",
+        "--state-file",
+        str(state_path),
+        "--port",
+        str(int(port)),
+        "--bind",
+        "0.0.0.0" if lan else "127.0.0.1",
+        "--poll-ms",
+        str(max(200, int(poll_ms))),
+        "--cache-dir",
+        str(cache),
+    ]
+    cmd.append("--grid" if grid else "--detail")
+    if serial:
+        cmd += ["--serial", serial]
+    if explicit_config:
+        cmd += ["--config", str(Path(explicit_config).expanduser().resolve())]
+    if profile:
+        cmd += ["--profile", profile]
+    if platform:
+        cmd += ["--platform", platform]
+
+    with open(log_path, "a", encoding="utf-8") as log_fh:  # noqa: SIM115
+        proc = subprocess.Popen(
+            cmd,
+            stdout=log_fh,
+            stderr=log_fh,
+            start_new_session=True,
+            close_fds=True,
+        )
+    initial_state["pid"] = proc.pid
+    _write_service_state(cache, initial_state)
+
+    deadline = time.monotonic() + _SERVICE_START_TIMEOUT_S
+    while time.monotonic() < deadline:
+        health = _dashboard_health(port)
+        if health is not None:
+            return {
+                "ok": True,
+                "action": "dashboard-start",
+                "running": True,
+                "status": "started",
+                "pid": proc.pid,
+                "port": int(port),
+                "bind": initial_state["bind"],
+                "lan": bool(lan),
+                "authenticated": bool(lan),
+                "log": str(log_path),
+                **_service_urls(port=port, lan=lan, access_token=token or None),
+            }
+        if proc.poll() is not None:
+            break
+        time.sleep(0.1)
+    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+        os.kill(proc.pid, signal.SIGTERM)
+    raise UsageError(
+        "dashboard service did not become ready",
+        hint=f"See {log_path}.",
+    )
+
+
+def stop_service(config: Any, *, port: int = DEFAULT_DASHBOARD_PORT) -> dict[str, Any]:
+    """Stop only the dashboard process proven by both health and its private state file."""
+    cache = Path(config.cache.dir).expanduser()
+    health = _dashboard_health(port)
+    if health is None:
+        occupied = _port_is_open(port)
+        return {
+            "ok": not occupied,
+            "action": "dashboard-stop",
+            "running": False,
+            "status": "port_occupied" if occupied else "not_running",
+            "port": int(port),
+        }
+    state = _read_service_state(cache)
+    pid = health.get("pid")
+    if not isinstance(pid, int) or state.get("pid") != pid or state.get("port") != int(port):
+        raise UsageError(
+            "refusing to stop a dashboard without matching ownership state",
+            hint=f"Expected private state at {_service_state_path(cache)}.",
+        )
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    except (PermissionError, OSError) as exc:
+        raise UsageError(f"could not stop dashboard process {pid}: {exc}") from exc
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and _dashboard_health(port) is not None:
+        time.sleep(0.1)
+    running = _dashboard_health(port) is not None
+    if not running:
+        with contextlib.suppress(OSError):
+            _service_state_path(cache).unlink()
+    return {
+        "ok": not running,
+        "action": "dashboard-stop",
+        "running": running,
+        "status": "stopping" if running else "stopped",
+        "pid": pid,
+        "port": int(port),
+    }
+
+
+def open_service(config: Any, *, port: int = DEFAULT_DASHBOARD_PORT) -> dict[str, Any]:
+    status = service_status(config, port=port)
+    if not status.get("running"):
+        raise UsageError(
+            "dashboard is not running",
+            hint="Start it with `aua dashboard start`.",
+        )
+    candidates = status.get("lan_access_urls") or [status["access_url"]]
+    target = str(candidates[0])
+    opened = bool(webbrowser.open(target))
+    return {**status, "action": "dashboard-open", "opened": opened, "opened_url": target}
+
+
 _DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -527,6 +895,26 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .header-title { margin-right: auto; }
   .header-live { display: inline-flex; align-items: center; gap: 0.4rem; color: var(--accent); font-size: 0.68rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
   .header-live::before { content: ''; width: 0.42rem; height: 0.42rem; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 0.24rem rgba(99, 230, 190, 0.12), 0 0 0.8rem var(--accent); }
+  .phone-qr-button {
+    display: inline-flex; align-items: center; gap: 0.38rem; min-height: 2.15rem;
+    padding: 0.4rem 0.62rem; color: var(--text); background: rgba(140,123,255,0.1);
+    border: 1px solid rgba(140,123,255,0.34); border-radius: 9px; cursor: pointer;
+    font: 700 0.65rem ui-sans-serif, system-ui;
+  }
+  .phone-qr-button:hover { color: var(--accent); border-color: rgba(99,230,190,0.5); }
+  .phone-qr-dialog {
+    width: min(390px, calc(100vw - 2rem)); padding: 0; overflow: hidden;
+    color: var(--text); background: #111626; border: 1px solid var(--border-strong);
+    border-radius: 18px; box-shadow: 0 28px 90px rgba(0,0,0,0.62);
+  }
+  .phone-qr-dialog::backdrop { background: rgba(3,5,11,0.78); backdrop-filter: blur(7px); }
+  .phone-qr-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; padding: 1rem 1.1rem 0; }
+  .phone-qr-head h2 { margin: 0; font-size: 0.95rem; }
+  .phone-qr-head p { margin: 0.28rem 0 0; color: var(--muted); font-size: 0.68rem; line-height: 1.45; }
+  .phone-qr-close { color: var(--muted); background: transparent; border: 0; cursor: pointer; font-size: 1.25rem; }
+  .phone-qr-image { display: block; width: min(78vw, 290px); margin: 1rem auto 0.75rem; padding: 0.55rem; background: #fff; border-radius: 13px; }
+  .phone-qr-url { display: block; margin: 0 1rem; padding: 0.62rem; overflow-wrap: anywhere; color: var(--accent); background: rgba(3,6,14,0.72); border: 1px solid var(--border); border-radius: 9px; font: 0.58rem/1.45 ui-monospace, monospace; }
+  .phone-qr-actions { display: flex; justify-content: flex-end; gap: 0.5rem; padding: 0.8rem 1rem 1rem; }
   header a.back {
     display: inline-flex; align-items: center; gap: 0.4rem; color: var(--muted);
     text-decoration: none; font-size: 0.72rem; font-weight: 650; white-space: nowrap;
@@ -621,13 +1009,25 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .element-box.clickable { border-color: rgba(106, 232, 194, 0.94); background: rgba(49, 205, 157, 0.09); }
   .element-box:hover, .element-box:focus-visible { z-index: 1000 !important; outline: none; border-width: 2px; background: rgba(116, 176, 255, 0.22); box-shadow: 0 0 0 2px rgba(4, 8, 18, 0.72), 0 0 14px rgba(90, 163, 255, 0.55); }
   .element-box.clickable:hover, .element-box.clickable:focus-visible { background: rgba(49, 205, 157, 0.2); box-shadow: 0 0 0 2px rgba(4, 8, 18, 0.72), 0 0 14px rgba(106, 232, 194, 0.55); }
+  .element-label {
+    position: absolute; top: -1px; left: -1px; display: inline-flex; align-items: stretch;
+    max-width: 8rem; padding: 0; border: 0; border-radius: 3px 0 5px 0; overflow: hidden;
+    color: inherit; background: transparent; pointer-events: auto; cursor: zoom-in;
+    box-shadow: 0 1px 4px rgba(1, 5, 12, 0.42);
+  }
+  .element-label:hover, .element-label:focus-visible { outline: 1px solid #fff; outline-offset: 1px; }
   .element-id {
-    position: absolute; top: -1px; left: -1px; min-width: 1.25rem; padding: 0.11rem 0.28rem;
-    border-radius: 3px 0 5px 0; color: #06120e; background: var(--accent);
+    flex: 0 0 auto; min-width: 1.25rem; padding: 0.11rem 0.28rem;
+    color: #06120e; background: var(--accent);
     font: 800 0.56rem ui-monospace, SFMono-Regular, Menlo, monospace; line-height: 1;
-    pointer-events: none;
   }
   .element-box:not(.clickable) .element-id { color: #07101d; background: #74b0ff; }
+  .element-key {
+    min-width: 0; max-width: 6.35rem; padding: 0.12rem 0.24rem; overflow: hidden;
+    color: rgba(218, 231, 250, 0.82); background: rgba(6, 12, 24, 0.9);
+    font: 650 0.42rem ui-monospace, SFMono-Regular, Menlo, monospace; line-height: 1;
+    text-overflow: ellipsis; white-space: nowrap;
+  }
   .element-overlay.clickable-only .element-box:not(.clickable) { display: none; }
   .inspection-status { margin-top: 0.55rem; min-height: 1rem; color: var(--muted); font-size: 0.66rem; line-height: 1.4; }
   .inspection-status.bad { color: var(--danger); }
@@ -636,7 +1036,16 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .inspection-count { color: var(--accent); font: 720 0.62rem ui-monospace, SFMono-Regular, Menlo, monospace; }
   .inspection-filter { display: inline-flex; align-items: center; gap: 0.35rem; color: var(--muted); font-size: 0.61rem; cursor: pointer; }
   .inspection-raw summary { padding: 0.55rem 0.62rem; color: var(--muted); cursor: pointer; font-size: 0.64rem; font-weight: 720; }
+  .inspection-json-tools { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 0.35rem; padding: 0.48rem 0.58rem; border-top: 1px solid var(--border); background: rgba(8, 13, 25, 0.72); }
+  .inspection-json-search { position: relative; min-width: 0; }
+  .inspection-json-search .db-input { width: 100%; padding-right: 4rem; background: rgba(3, 7, 15, 0.82); }
+  .inspection-json-search span { position: absolute; right: 0.5rem; top: 50%; transform: translateY(-50%); color: var(--faint); font: 0.56rem ui-monospace, SFMono-Regular, Menlo, monospace; pointer-events: none; }
   .inspection-raw pre { max-width: min(38vw, 470px); max-height: 23rem; margin: 0; padding: 0.7rem; overflow: auto; border-top: 1px solid var(--border); color: #c9d6ef; background: rgba(2, 4, 10, 0.72); font: 0.61rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; }
+  .inspection-json-line { display: block; min-height: 1.5em; margin: 0 -0.35rem; padding: 0 0.35rem; border-left: 2px solid transparent; }
+  .inspection-json-line.element-object { background: rgba(116, 176, 255, 0.025); }
+  .inspection-json-line.search-match { background: rgba(255, 205, 92, 0.1); }
+  .inspection-json-line.search-current { background: rgba(255, 205, 92, 0.25); border-left-color: #ffcd5c; }
+  .inspection-json-line.element-current { background: rgba(106, 232, 194, 0.16); border-left-color: var(--accent); }
   @media (max-width: 980px) {
     .stage img { width: 100%; height: auto; max-width: 100%; max-height: 62vh; }
     .inspection-raw pre { max-width: 100%; }
@@ -819,6 +1228,24 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .knowledge-head h2 { margin: 0 0 0.25rem; color: var(--text); font-size: 0.78rem; }
   .knowledge-head p { margin: 0; color: var(--muted); font-size: 0.7rem; }
   .knowledge-head code { color: var(--accent); }
+  .knowledge-head-actions, .knowledge-column-controls, .knowledge-actions {
+    display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;
+  }
+  .knowledge-head-actions { justify-content: flex-end; }
+  .knowledge-column-controls { justify-content: flex-end; min-width: 0; }
+  .knowledge-head .db-button, .knowledge-column-head .db-button, .knowledge-actions .db-button {
+    padding: 0.3rem 0.5rem; font-size: 0.61rem;
+  }
+  .knowledge-action-status {
+    display: none; margin: 0; padding: 0.55rem 1rem; border-bottom: 1px solid var(--border);
+    color: var(--muted); background: rgba(4, 7, 15, 0.56); font-size: 0.66rem;
+  }
+  .knowledge-action-status.visible { display: block; }
+  .knowledge-action-status.ok { color: var(--accent); }
+  .knowledge-action-status.bad { color: var(--danger); }
+  .knowledge-action-result { margin: 0; border-bottom: 1px solid var(--border); background: rgba(3,5,11,0.72); }
+  .knowledge-action-result summary { padding: 0.45rem 1rem; color: var(--muted); cursor: pointer; font-size: 0.62rem; }
+  .knowledge-action-result pre { margin: 0; max-height: 20rem; padding: 0.65rem 1rem; overflow: auto; color: #cdd2db; font: 0.6rem/1.45 ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
   .knowledge-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .knowledge-column { min-width: 0; padding: 1rem; }
   .knowledge-column + .knowledge-column { border-left: 1px solid var(--border); }
@@ -840,7 +1267,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .knowledge-summary-main { min-width: 0; display: grid; gap: 0.18rem; }
   .knowledge-summary-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font: 700 0.7rem ui-monospace, SFMono-Regular, Menlo, monospace; }
   .knowledge-summary-subtitle { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 0.62rem; }
-  .knowledge-badges { display: flex; align-items: center; gap: 0.3rem; flex: 0 0 auto; }
+  .knowledge-badges { display: flex; align-items: center; justify-content: flex-end; gap: 0.3rem; flex: 0 1 auto; flex-wrap: wrap; }
   .knowledge-badge { padding: 0.18rem 0.36rem; border-radius: 6px; color: var(--muted); background: rgba(255,255,255,0.04); border: 1px solid var(--border); font-size: 0.56rem; white-space: nowrap; }
   .knowledge-badge.ok { color: var(--accent); border-color: rgba(99,230,190,0.26); }
   .knowledge-badge.bad { color: var(--danger); border-color: rgba(255,123,142,0.26); }
@@ -929,6 +1356,11 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   }
   .grid-empty-foot { margin: 1rem 0 0; color: var(--faint); font-size: 0.7rem; }
   .grid-empty.bad .grid-empty-kicker, .grid-empty.bad h2 { color: var(--danger); }
+  .device-notice {
+    width: min(760px, calc(100% - 2rem)); margin: 1rem auto 0; padding: 0.72rem 0.9rem;
+    color: #ffd9df; text-align: center; background: rgba(132, 42, 58, 0.24);
+    border: 1px solid rgba(255,123,142,0.38); border-radius: 11px; font-size: 0.72rem;
+  }
   .device-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(280px, 340px));
@@ -1188,10 +1620,67 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .flow-table th { background: rgba(30,36,61,0.9); }
   footer { padding: 0.7rem clamp(1rem, 3vw, 2.4rem) 1.5rem; text-align: center; color: var(--faint); }
   @media (max-width: 700px) {
-    header { padding: 0.75rem 1rem; }
+    body { padding-bottom: env(safe-area-inset-bottom); }
+    header {
+      padding: calc(0.58rem + env(safe-area-inset-top)) 0.7rem 0.58rem;
+      gap: 0.45rem;
+    }
+    .brand-mark { width: 2rem; height: 2rem; }
+    header h1 { font-size: 0.88rem; }
+    header h1 span { display: none; }
+    .header-live { font-size: 0.58rem; }
+    .phone-qr-button { min-width: 2.5rem; justify-content: center; padding: 0.48rem; }
+    .phone-qr-button span { display: none; }
+    header a.back { padding: 0.48rem; margin: 0; min-height: 2.5rem; }
+    header a.back span { display: none; }
     header .pill { order: 3; }
-    .layout, .lower { padding-left: 0.65rem; padding-right: 0.65rem; }
-    .panel { border-radius: 14px; padding: 0.85rem; }
+    .detail-overview { gap: 0.5rem; padding: 0.55rem 0.5rem 0; }
+    .detail-device { padding: 0.65rem 0.8rem; border-radius: 12px; }
+    .detail-eyebrow, #pkg { display: none; }
+    #serial { font-size: 0.78rem; }
+    .detail-health { grid-template-columns: repeat(2, minmax(0, 1fr)); border-radius: 12px; }
+    .detail-status { display: none; padding: 0.58rem 0.7rem; border-top: 0 !important; }
+    .detail-status:nth-child(1), .detail-status:nth-child(3) { display: flex; }
+    .detail-status:nth-child(3) { border-left: 1px solid var(--border); }
+    .layout { gap: 0.6rem; padding: 0.55rem 0.5rem 0.7rem; }
+    .lower { padding-left: 0.5rem; padding-right: 0.5rem; }
+    .panel { border-radius: 13px; padding: 0.78rem; }
+    .stage { padding: 0.62rem; }
+    .stage-heading { margin-bottom: 0.52rem; }
+    .stage-heading h2 { font-size: 0.62rem; }
+    .frame-shell { margin-inline: auto; }
+    .stage img {
+      width: auto; height: auto; min-width: 0; max-width: 100%;
+      max-height: calc(100svh - 12.5rem); border-radius: 10px;
+    }
+    .element-overlay { border-radius: 10px; }
+    .element-label { max-width: 6.5rem; }
+    .element-id { min-width: 1.4rem; padding: 0.16rem 0.32rem; font-size: 0.62rem; }
+    .element-key { display: none; }
+    button, a, summary, input, select, textarea { touch-action: manipulation; }
+    .db-button, .analyze-button { min-height: 2.6rem; padding: 0.55rem 0.72rem; }
+    .db-input, input, select, textarea { font-size: 16px; }
+    .inspection-toolbar { align-items: flex-start; flex-direction: column; }
+    .inspection-toolbar > div { width: 100%; justify-content: space-between; }
+    .inspection-json-tools { grid-template-columns: minmax(0, 1fr) 2.6rem 2.6rem; }
+    .inspection-raw pre { max-height: 52svh; font-size: 0.66rem; }
+    .journal-tools { padding: 0.7rem; }
+    .journal-actions, .journal-button-group { width: 100%; }
+    .journal-actions { justify-content: space-between; }
+    #journal details > summary { gap: 0.38rem; padding: 0.72rem 0.58rem; }
+    #journal .exchange { padding: 0.5rem; }
+    .scroll { max-height: 72svh; }
+    .knowledge-head, .knowledge-column-head { align-items: flex-start; flex-direction: column; }
+    .knowledge-package { max-width: 100%; }
+    .model-sample-row, .model-trace-body { grid-template-columns: minmax(0, 1fr); }
+    .model-chat { height: 52svh; }
+    .logcat-scroll { height: 62svh; }
+  }
+  @media (max-height: 520px) and (orientation: landscape) {
+    .detail-overview { display: none; }
+    .layout { grid-template-columns: auto minmax(0, 1fr); align-items: start; }
+    .stage img { height: calc(100svh - 5.4rem); width: auto; max-width: 42vw; }
+    .scroll { max-height: calc(100svh - 5.4rem); }
   }
 </style>
 </head>
@@ -1203,12 +1692,24 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="header-title"><h1>AuA Dashboard <span>runtime observability</span></h1></div>
   </div>
   <div class="header-actions">
+    <button id="phone-qr-button" class="phone-qr-button hidden" type="button" title="Connect a phone">▦ <span>Phone QR</span></button>
     <span class="header-live">live</span>
     <span id="count" class="pill hidden">0 devices</span>
   </div>
 </header>
 
+<dialog id="phone-qr-dialog" class="phone-qr-dialog">
+  <div class="phone-qr-head">
+    <div><h2>Open on your phone</h2><p>Scan while your phone is on the same trusted network.</p></div>
+    <button id="phone-qr-close" class="phone-qr-close" type="button" aria-label="Close">×</button>
+  </div>
+  <img id="phone-qr-image" class="phone-qr-image" alt="Authenticated dashboard QR code"/>
+  <code id="phone-qr-url" class="phone-qr-url"></code>
+  <div class="phone-qr-actions"><button id="phone-qr-copy" class="db-button" type="button">Copy link</button></div>
+</dialog>
+
 <div id="grid-view" class="hidden">
+  <div id="device-notice" class="device-notice hidden" role="status"></div>
   <section id="grid-empty" class="grid-empty hidden" aria-live="polite">
     <img class="grid-empty-logo" src="/assets/aua-dashboard-logo.png" alt="" aria-hidden="true"/>
     <p class="grid-empty-kicker">Device monitor</p>
@@ -1244,20 +1745,30 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
     <div id="frame-shell" class="frame-shell">
       <img id="frame" alt="device frame" src=""/>
-      <div id="element-overlay" class="element-overlay" aria-label="AUA element bounds"></div>
+      <div id="element-overlay" class="element-overlay clickable-only" aria-label="AUA element bounds"></div>
     </div>
     <div id="inspection-status" class="inspection-status">Analyze to inspect AUA's raw response and element IDs.</div>
     <div id="inspection-output" class="inspection-output hidden">
       <div class="inspection-toolbar">
         <span id="inspection-count" class="inspection-count">0 elements</span>
         <div style="display:flex;align-items:center;gap:.5rem">
-          <label class="inspection-filter"><input id="inspection-clickable-only" type="checkbox"/>Interactive only</label>
+          <label class="inspection-filter"><input id="inspection-clickable-only" type="checkbox" checked/>Interactive only</label>
           <button id="inspection-live" class="db-button" type="button">Live</button>
         </div>
       </div>
-      <details class="inspection-raw" open>
+      <details id="inspection-raw-details" class="inspection-raw" open>
         <summary>Raw AUA response</summary>
-        <pre id="inspection-raw">{}</pre>
+        <div class="inspection-json-tools">
+          <div class="inspection-json-search">
+            <input id="inspection-json-search" class="db-input" type="search"
+                   placeholder="Search id, text, stable key…" aria-label="Search raw AUA response"
+                   autocomplete="off" spellcheck="false"/>
+            <span id="inspection-json-search-count">0</span>
+          </div>
+          <button id="inspection-json-prev" class="db-button" type="button" title="Previous match">↑</button>
+          <button id="inspection-json-next" class="db-button" type="button" title="Next match">↓</button>
+        </div>
+        <pre id="inspection-raw" tabindex="0">{}</pre>
       </details>
     </div>
     <div class="meta">
@@ -1277,13 +1788,14 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
                aria-label="Search journal" autocomplete="off" spellcheck="false"/>
         <kbd>/</kbd>
       </div>
-      <div class="journal-actions">
-        <label class="journal-toggle"><input id="journal-fails-only" type="checkbox"/>Failures only</label>
-        <div class="journal-button-group">
-          <button id="journal-expand" class="db-button" type="button">Expand visible</button>
-          <button id="journal-collapse" class="db-button" type="button">Collapse all</button>
-        </div>
-        <button id="journal-jump" class="hidden" type="button">Newest ↑</button>
+    <div class="journal-actions">
+      <label class="journal-toggle"><input id="journal-fails-only" type="checkbox"/>Failures only</label>
+      <div class="journal-button-group">
+        <button id="journal-expand" class="db-button" type="button">Expand visible</button>
+        <button id="journal-collapse" class="db-button" type="button">Collapse all</button>
+      </div>
+      <button id="journal-clear" class="db-button danger" type="button">Clear logs</button>
+      <button id="journal-jump" class="hidden" type="button">Newest ↑</button>
       </div>
     </div>
     <div class="scroll" id="journal-wrap">
@@ -1319,13 +1831,23 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
         <h2>Navigation library</h2>
         <p>What AuA knows, what <code>goto</code> can target, and every saved flow available to agents.</p>
       </div>
-      <span id="knowledge-total" class="pill">loading…</span>
+      <div class="knowledge-head-actions">
+        <span id="knowledge-total" class="pill">loading…</span>
+        <button id="knowledge-clear-all" class="db-button danger" type="button">Clear all</button>
+      </div>
     </div>
+    <div id="knowledge-action-status" class="knowledge-action-status"></div>
+    <details id="knowledge-action-result" class="knowledge-action-result hidden">
+      <summary>Last navigation result</summary><pre>{}</pre>
+    </details>
     <div class="knowledge-grid">
       <section class="knowledge-column">
         <div class="knowledge-column-head">
           <div><span class="knowledge-eyebrow">Current app</span><h3>App map</h3></div>
-          <span id="map-pkg" class="knowledge-package">package —</span>
+          <div class="knowledge-column-controls">
+            <span id="map-pkg" class="knowledge-package">package —</span>
+            <button id="map-clear" class="db-button danger" type="button" disabled>Clear map</button>
+          </div>
         </div>
         <div class="knowledge-section-head"><h4>Screens</h4><span>Goto targets</span></div>
         <div id="map-screens" class="knowledge-list"><div class="empty">—</div></div>
@@ -1335,7 +1857,10 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       <section class="knowledge-column">
         <div class="knowledge-column-head">
           <div><span class="knowledge-eyebrow">All apps</span><h3>Saved flows</h3></div>
-          <span id="flow-count" class="knowledge-package">0 flows</span>
+          <div class="knowledge-column-controls">
+            <span id="flow-count" class="knowledge-package">0 flows</span>
+            <button id="flows-clear" class="db-button danger" type="button" disabled>Clear flows</button>
+          </div>
         </div>
         <div id="flow-groups" class="knowledge-list flow-list"><div class="empty">—</div></div>
       </section>
@@ -1610,6 +2135,14 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
   </section>
 </div>
+<dialog id="knowledge-confirm-dialog" class="db-dialog">
+  <h3 id="knowledge-confirm-title">Confirm action</h3>
+  <p id="knowledge-confirm-message" class="db-note"></p>
+  <div class="db-actions" style="justify-content:flex-end;margin-top:0.8rem">
+    <button id="knowledge-confirm-cancel" class="db-button">Cancel</button>
+    <button id="knowledge-confirm-submit" class="db-button danger">Confirm</button>
+  </div>
+</dialog>
 <dialog id="db-confirm-dialog" class="db-dialog">
   <h3 id="db-confirm-title">Confirm database operation</h3>
   <p id="db-confirm-message" class="db-note"></p>
@@ -1721,9 +2254,11 @@ const POLL_MS = __POLL_MS__;
 const MAP_MS = Math.max(POLL_MS * 4, 2000);
 const BOOT_MODE = __MODE_JSON__;
 const BOOT_SERIAL = __SERIAL_JSON__;
+const PHONE_ACCESS_URL = __PHONE_ACCESS_URL_JSON__;
 const DATABASE_TOKEN = '__DATABASE_TOKEN__';
 const params = new URLSearchParams(location.search);
 const focusSerial = params.get('serial') || (BOOT_MODE === 'detail' ? BOOT_SERIAL : '');
+const detachedSerial = params.get('detached') || '';
 const isGrid = !focusSerial && BOOT_MODE === 'grid';
 
 const gridView = document.getElementById('grid-view');
@@ -1746,7 +2281,13 @@ const inspectionStatus = document.getElementById('inspection-status');
 const inspectionOutput = document.getElementById('inspection-output');
 const inspectionCount = document.getElementById('inspection-count');
 const inspectionRaw = document.getElementById('inspection-raw');
+const inspectionRawDetails = document.getElementById('inspection-raw-details');
+const inspectionJsonSearch = document.getElementById('inspection-json-search');
+const inspectionJsonSearchCount = document.getElementById('inspection-json-search-count');
 const inspectionClickableOnly = document.getElementById('inspection-clickable-only');
+const knowledgeActionStatus = document.getElementById('knowledge-action-status');
+const knowledgeActionResult = document.getElementById('knowledge-action-result');
+const knowledgeConfirmDialog = document.getElementById('knowledge-confirm-dialog');
 const journalEl = document.getElementById('journal');
 const journalWrap = document.getElementById('journal-wrap');
 const journalJump = document.getElementById('journal-jump');
@@ -1765,6 +2306,10 @@ const tileSrc = {};
 let currentInspectionId = '';
 let inspectionFrameActive = false;
 let inspectionBusy = false;
+let inspectionJsonMatches = [];
+let inspectionJsonMatchIndex = -1;
+let knowledgeBusy = false;
+let pendingKnowledgeConfirmation = null;
 
 function qSerial(extra) {
   const p = new URLSearchParams(extra || {});
@@ -1796,6 +2341,127 @@ function inspectionElementLabel(element) {
     element.rid || element.type || ('element ' + element.id);
 }
 
+function inspectionObjectRange(lines, element) {
+  const idText = '"id": ' + Number(element.id);
+  const stableText = element.stable_key ? JSON.stringify(String(element.stable_key)) : '';
+  for (let pivot = 0; pivot < lines.length; pivot += 1) {
+    if (lines[pivot].trim().replace(/,$/, '') !== idText) continue;
+    let start = pivot;
+    while (start >= 0 && lines[start].trim() !== '{') start -= 1;
+    if (start < 0) continue;
+    const indent = lines[start].length - lines[start].trimStart().length;
+    let end = start;
+    for (let index = start + 1; index < lines.length; index += 1) {
+      const trimmed = lines[index].trim();
+      const lineIndent = lines[index].length - lines[index].trimStart().length;
+      if (lineIndent === indent && /^},?$/.test(trimmed)) {
+        end = index;
+        break;
+      }
+    }
+    if (end <= start) continue;
+    if (stableText && !lines.slice(start, end + 1).some(line => line.includes(stableText))) {
+      continue;
+    }
+    return {start: start, end: end};
+  }
+  return null;
+}
+
+function scrollInspectionJsonLine(line) {
+  if (!line) return;
+  inspectionRaw.scrollTop = Math.max(
+    0,
+    line.offsetTop - inspectionRaw.clientHeight / 2 + line.offsetHeight / 2
+  );
+}
+
+function updateInspectionJsonSearch(step = 0) {
+  inspectionRaw.querySelectorAll('.search-match, .search-current').forEach(line => {
+    line.classList.remove('search-match', 'search-current');
+  });
+  const query = inspectionJsonSearch.value.trim().toLocaleLowerCase();
+  if (!query) {
+    inspectionJsonMatches = [];
+    inspectionJsonMatchIndex = -1;
+    inspectionJsonSearchCount.textContent = '0';
+    return;
+  }
+  const nextMatches = Array.from(inspectionRaw.querySelectorAll('.inspection-json-line')).filter(
+    line => line.textContent.toLocaleLowerCase().includes(query)
+  );
+  const sameMatches = nextMatches.length === inspectionJsonMatches.length &&
+    nextMatches.every((line, index) => line === inspectionJsonMatches[index]);
+  inspectionJsonMatches = nextMatches;
+  if (!inspectionJsonMatches.length) {
+    inspectionJsonMatchIndex = -1;
+    inspectionJsonSearchCount.textContent = '0';
+    return;
+  }
+  if (!sameMatches || inspectionJsonMatchIndex < 0 || step === 0) {
+    inspectionJsonMatchIndex = 0;
+  } else {
+    inspectionJsonMatchIndex =
+      (inspectionJsonMatchIndex + step + inspectionJsonMatches.length) % inspectionJsonMatches.length;
+  }
+  inspectionJsonMatches.forEach(line => line.classList.add('search-match'));
+  const current = inspectionJsonMatches[inspectionJsonMatchIndex];
+  current.classList.add('search-current');
+  inspectionJsonSearchCount.textContent =
+    (inspectionJsonMatchIndex + 1) + '/' + inspectionJsonMatches.length;
+  scrollInspectionJsonLine(current);
+}
+
+function renderInspectionRaw(result, elements) {
+  const lines = JSON.stringify(result || {}, null, 2).split('\\n');
+  const owners = new Map();
+  elements.forEach(element => {
+    const range = inspectionObjectRange(lines, element);
+    if (!range) return;
+    for (let line = range.start; line <= range.end; line += 1) {
+      owners.set(line, {id: element.id, start: line === range.start});
+    }
+  });
+  inspectionRaw.textContent = '';
+  lines.forEach((text, index) => {
+    const line = document.createElement('span');
+    line.className = 'inspection-json-line';
+    const owner = owners.get(index);
+    if (owner) {
+      line.classList.add('element-object');
+      line.dataset.elementId = String(owner.id);
+      if (owner.start) line.dataset.elementStart = 'true';
+    }
+    highlightJson(line, text || ' ');
+    inspectionRaw.appendChild(line);
+  });
+  inspectionJsonMatches = [];
+  inspectionJsonMatchIndex = -1;
+  updateInspectionJsonSearch();
+}
+
+function focusInspectionJson(elementId) {
+  inspectionRawDetails.open = true;
+  const id = String(elementId);
+  inspectionRaw.querySelectorAll('.element-current').forEach(line => {
+    line.classList.remove('element-current');
+  });
+  inspectionJsonSearch.value = '"id": ' + id;
+  updateInspectionJsonSearch();
+  const objectLines = Array.from(
+    inspectionRaw.querySelectorAll('.inspection-json-line[data-element-id="' + id + '"]')
+  );
+  objectLines.forEach(line => line.classList.add('element-current'));
+  const start = objectLines.find(line => line.dataset.elementStart === 'true') || objectLines[0];
+  if (start) {
+    scrollInspectionJsonLine(start);
+    inspectionRaw.focus({preventScroll: true});
+    inspectionStatus.className = 'inspection-status';
+    inspectionStatus.textContent =
+      'Located #' + id + ' in the raw AUA response · click the outlined control body to tap it.';
+  }
+}
+
 function renderInspection(data, tappedId) {
   const view = data.view || {};
   const screen = view.screen || {};
@@ -1806,7 +2472,7 @@ function renderInspection(data, tappedId) {
   inspectionFrameActive = true;
   lastSrc = 'inspection:' + currentInspectionId;
   frame.src = data.frame_url + '&t=' + encodeURIComponent(Date.now());
-  inspectionRaw.textContent = JSON.stringify(data.result || {}, null, 2);
+  renderInspectionRaw(data.result || {}, elements);
   inspectionOutput.classList.remove('hidden');
   elementOverlay.innerHTML = '';
 
@@ -1825,9 +2491,10 @@ function renderInspection(data, tappedId) {
   });
   bounded.forEach((element, index) => {
     const bounds = element.bounds.map(Number);
-    const box = document.createElement('button');
-    box.type = 'button';
+    const box = document.createElement('div');
     box.className = 'element-box' + (element.clickable ? ' clickable' : '');
+    box.tabIndex = 0;
+    box.setAttribute('role', 'button');
     box.dataset.elementId = String(element.id);
     box.style.left = (100 * bounds[0] / width) + '%';
     box.style.top = (100 * bounds[1] / height) + '%';
@@ -1835,14 +2502,37 @@ function renderInspection(data, tappedId) {
     box.style.height = (100 * Math.max(1, bounds[3] - bounds[1]) / height) + '%';
     box.style.zIndex = String(index + 1);
     const label = inspectionElementLabel(element);
-    box.title = '#' + element.id + ' · ' + label +
+    const stableKey = String(element.stable_key || '');
+    box.title = '#' + element.id + (stableKey ? ' · ' + stableKey : '') + ' · ' + label +
       (element.clickable ? ' · clickable' : ' · AUA will resolve the acting control');
     box.setAttribute('aria-label', 'Tap and analyze element ' + element.id + ': ' + label);
-    const badge = document.createElement('span');
-    badge.className = 'element-id';
-    badge.textContent = String(element.id);
+    const badge = document.createElement('button');
+    badge.type = 'button';
+    badge.className = 'element-label';
+    badge.title = 'Locate #' + element.id + ' in the raw AUA response' +
+      (stableKey ? ' · ' + stableKey : '');
+    badge.setAttribute('aria-label', 'Locate element ' + element.id + ' in raw AUA response');
+    const idBadge = document.createElement('span');
+    idBadge.className = 'element-id';
+    idBadge.textContent = String(element.id);
+    badge.appendChild(idBadge);
+    if (stableKey) {
+      const keyBadge = document.createElement('span');
+      keyBadge.className = 'element-key';
+      keyBadge.textContent = stableKey;
+      badge.appendChild(keyBadge);
+    }
     box.appendChild(badge);
+    badge.addEventListener('click', event => {
+      event.stopPropagation();
+      focusInspectionJson(element.id);
+    });
     box.addEventListener('click', () => tapInspectionElement(element.id, label));
+    box.addEventListener('keydown', event => {
+      if (event.target !== box || (event.key !== 'Enter' && event.key !== ' ')) return;
+      event.preventDefault();
+      tapInspectionElement(element.id, label);
+    });
     elementOverlay.appendChild(box);
   });
   const clickable = elements.filter(element => element && element.clickable).length;
@@ -1868,7 +2558,7 @@ async function analyzeScreen() {
     inspectionStatus.textContent = error.message;
     if (error.payload) {
       inspectionOutput.classList.remove('hidden');
-      inspectionRaw.textContent = JSON.stringify(error.payload, null, 2);
+      renderInspectionRaw(error.payload, []);
     }
   } finally {
     inspectionBusy = false;
@@ -1895,7 +2585,7 @@ async function tapInspectionElement(elementId, label) {
     inspectionStatus.textContent = error.message + ' · Analyze again before choosing another id.';
     currentInspectionId = '';
     elementOverlay.innerHTML = '';
-    if (error.payload) inspectionRaw.textContent = JSON.stringify(error.payload, null, 2);
+    if (error.payload) renderInspectionRaw(error.payload, []);
   } finally {
     inspectionBusy = false;
     screenAnalyze.disabled = false;
@@ -1908,6 +2598,7 @@ function resumeLiveFrame() {
   inspectionFrameActive = false;
   elementOverlay.innerHTML = '';
   inspectionOutput.classList.add('hidden');
+  inspectionJsonSearch.value = '';
   inspectionStatus.className = 'inspection-status';
   inspectionStatus.textContent = 'Live frame resumed. Analyze to inspect AUA element IDs.';
   screenAnalyze.textContent = 'Analyze';
@@ -2275,6 +2966,36 @@ document.getElementById('journal-collapse').addEventListener('click', () => {
   journalPending = 0;
   journalWrap.scrollTop = 0;
   updateJournalFollow();
+});
+document.getElementById('journal-clear').addEventListener('click', async () => {
+  const confirmed = await confirmKnowledgeAction(
+    'Clear Agent I/O journal?',
+    'Clear compact and full-detail journal logs visible for ' + focusSerial +
+      '. This cannot be undone.',
+    'Clear logs'
+  );
+  if (!confirmed) return;
+  const button = document.getElementById('journal-clear');
+  button.disabled = true;
+  try {
+    await dashboardControlPost('journal', 'clear', {
+      confirmation: 'CLEAR JOURNAL ' + focusSerial,
+    });
+    sinceMs = 0;
+    detailRevision = '';
+    seenKeys.clear();
+    journalPending = 0;
+    journalFollow = true;
+    journalEl.innerHTML = '<li class="empty">journal cleared</li>';
+    journalShown.textContent = '0 events';
+    journalWrap.scrollTop = 0;
+    updateJournalFollow();
+    tickStatus();
+  } catch (error) {
+    journalShown.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
 });
 
 async function refreshOpenEventExchanges() {
@@ -2659,6 +3380,11 @@ async function tickStatus() {
   try {
     const r = await fetch('/api/status' + qSerial(), {cache: 'no-store'});
     const s = await r.json();
+    if (s.detached) {
+      window.location.replace('/?detached=' + encodeURIComponent(s.serial || focusSerial));
+      return;
+    }
+    if (!r.ok || s.ok === false) throw new Error(s.error || 'Device status failed');
     document.getElementById('serial').textContent = s.serial || '—';
     const cap = document.getElementById('capture');
     cap.textContent = s.capture_running ? 'Active' : 'Inactive';
@@ -2777,6 +3503,130 @@ async function tickEvents() {
 
 let knowledgeSignature = '';
 
+async function dashboardControlPost(scope, action, payload) {
+  const body = Object.assign({}, payload || {});
+  if (focusSerial) body.serial = focusSerial;
+  const response = await fetch('/api/' + scope + '/' + action, {
+    method: 'POST',
+    cache: 'no-store',
+    headers: {'Content-Type': 'application/json', 'X-AUA-Dashboard-Token': DATABASE_TOKEN},
+    body: JSON.stringify(body),
+  });
+  const data = await response.json();
+  if (!response.ok || data.ok === false) {
+    const error = data.error || {};
+    throw new Error(typeof error === 'string' ? error : (error.message || 'Dashboard action failed'));
+  }
+  return data;
+}
+
+function confirmKnowledgeAction(title, message, confirmLabel) {
+  if (pendingKnowledgeConfirmation) pendingKnowledgeConfirmation(false);
+  document.getElementById('knowledge-confirm-title').textContent = title;
+  document.getElementById('knowledge-confirm-message').textContent = message;
+  document.getElementById('knowledge-confirm-submit').textContent = confirmLabel || 'Confirm';
+  knowledgeConfirmDialog.showModal();
+  return new Promise(resolve => { pendingKnowledgeConfirmation = resolve; });
+}
+
+function closeKnowledgeConfirmation(confirmed) {
+  const resolve = pendingKnowledgeConfirmation;
+  pendingKnowledgeConfirmation = null;
+  knowledgeConfirmDialog.close();
+  if (resolve) resolve(Boolean(confirmed));
+}
+
+function setKnowledgeActionStatus(message, kind, result) {
+  knowledgeActionStatus.textContent = message;
+  knowledgeActionStatus.className = 'knowledge-action-status visible' + (kind ? (' ' + kind) : '');
+  if (result === undefined) return;
+  knowledgeActionResult.classList.remove('hidden');
+  const pre = knowledgeActionResult.querySelector('pre');
+  pre.textContent = prettyJson(result);
+  highlightJson(pre);
+}
+
+function navigationResultMessage(action, data) {
+  const result = data.result || {};
+  if (action === 'goto') {
+    if (result.arrived || result.already_there) return 'Goto reached ' + (result.target || data.target) + '.';
+    return 'Goto stopped safely: ' + (result.code || result.status || 'destination not verified') + '.';
+  }
+  if (action === 'flow-run') {
+    return result.ok === false
+      ? 'Flow stopped: ' + (result.code || result.status || 'journey not completed') + '.'
+      : 'Flow ' + data.flow + ' finished.';
+  }
+  if (action === 'flow-delete') return 'Flow ' + data.flow + ' cleared.';
+  if (action === 'route-delete') return data.deleted ? 'Route cleared.' : 'Route was already absent.';
+  if (action === 'map-clear') return data.deleted ? 'App map cleared.' : 'App map was already absent.';
+  if (action === 'flows-clear') return data.deleted + ' flow' + (data.deleted === 1 ? '' : 's') + ' cleared.';
+  if (action === 'clear-all') return data.maps_deleted + ' maps and ' + data.flows_deleted + ' flows cleared.';
+  return 'Action completed.';
+}
+
+async function runNavigationAction(action, payload, confirmation) {
+  if (knowledgeBusy) return;
+  if (confirmation) {
+    const confirmed = await confirmKnowledgeAction(
+      confirmation.title,
+      confirmation.message,
+      confirmation.label
+    );
+    if (!confirmed) return;
+    payload = Object.assign({}, payload, {confirmation: confirmation.phrase});
+  }
+  knowledgeBusy = true;
+  document.querySelectorAll('.knowledge-workspace .db-button').forEach(button => {
+    button.disabled = true;
+  });
+  setKnowledgeActionStatus(action === 'goto' ? 'Running goto…' : 'Running navigation action…');
+  try {
+    const data = await dashboardControlPost('navigation', action, payload);
+    setKnowledgeActionStatus(navigationResultMessage(action, data), 'ok', data.result || data);
+    knowledgeSignature = '';
+    await tickMap();
+    if (action === 'goto' || action === 'flow-run') {
+      resumeLiveFrame();
+      tickStatus();
+      tickEvents();
+    }
+  } catch (error) {
+    setKnowledgeActionStatus(error.message, 'bad');
+  } finally {
+    knowledgeBusy = false;
+    document.querySelectorAll('.knowledge-workspace .knowledge-actions .db-button').forEach(button => {
+      button.disabled = button.dataset.initiallyDisabled === 'true';
+    });
+    const mapData = window.__auaKnowledgeData || {};
+    document.getElementById('map-clear').disabled = !mapData.known;
+    document.getElementById('flows-clear').disabled = !(mapData.flows || []).length;
+    document.getElementById('knowledge-clear-all').disabled =
+      !Number(mapData.map_count || 0) && !(mapData.flows || []).length;
+  }
+}
+
+function knowledgeActions(actions) {
+  const row = document.createElement('div');
+  row.className = 'knowledge-actions';
+  actions.forEach(action => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'db-button' + (action.danger ? ' danger' : '') +
+      (action.primary ? ' primary' : '');
+    button.textContent = action.label;
+    button.disabled = Boolean(action.disabled);
+    button.dataset.initiallyDisabled = action.disabled ? 'true' : 'false';
+    button.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      runNavigationAction(action.action, Object.assign({}, action.payload), action.confirmation);
+    });
+    row.appendChild(button);
+  });
+  return row;
+}
+
 function knowledgeBadge(text, kind = '') {
   const badge = document.createElement('span');
   badge.className = 'knowledge-badge' + (kind ? (' ' + kind) : '');
@@ -2835,7 +3685,7 @@ function knowledgeSteps(steps, emptyMessage) {
   return list;
 }
 
-function knowledgeItem(titleText, subtitleText, badges, bodyNodes) {
+function knowledgeItem(titleText, subtitleText, badges, bodyNodes, actions) {
   const details = document.createElement('details');
   details.className = 'knowledge-item';
   const summary = document.createElement('summary');
@@ -2851,6 +3701,7 @@ function knowledgeItem(titleText, subtitleText, badges, bodyNodes) {
   const badgeHost = document.createElement('span');
   badgeHost.className = 'knowledge-badges';
   badges.forEach(badge => badgeHost.appendChild(badge));
+  if (actions) badgeHost.appendChild(actions);
   summary.append(main, badgeHost);
   const body = document.createElement('div');
   body.className = 'knowledge-detail';
@@ -2863,10 +3714,15 @@ function renderKnowledge(d) {
   const screens = d.screens || [];
   const routes = d.routes || [];
   const flows = d.flows || [];
+  window.__auaKnowledgeData = d;
   document.getElementById('map-pkg').textContent =
     (d.package || 'No foreground package') + (d.known ? '' : ' · no map yet');
   document.getElementById('knowledge-total').textContent =
     screens.length + ' screens · ' + routes.length + ' routes · ' + flows.length + ' flows';
+  document.getElementById('map-clear').disabled = !d.known || !d.package;
+  document.getElementById('flows-clear').disabled = !flows.length;
+  document.getElementById('knowledge-clear-all').disabled =
+    !Number(d.map_count || 0) && !flows.length;
 
   const screenHost = document.getElementById('map-screens');
   screenHost.textContent = '';
@@ -2884,7 +3740,13 @@ function renderKnowledge(d) {
       name,
       (screen.activity || 'No activity recorded') + (screen.stale ? ' · stale' : ''),
       [knowledgeBadge('goto target', 'ok'), knowledgeBadge((screen.visit_count || 0) + ' visits')],
-      [knowledgeCommand('Run', 'aua goto "' + name + '"'), knowledgeJson(bodyData)]
+      [
+        knowledgeCommand('CLI', 'aua goto "' + name + '"'),
+        knowledgeJson(bodyData),
+      ],
+      knowledgeActions([{
+        label: 'Run goto', action: 'goto', payload: {target: name}, primary: true,
+      }])
     ));
   });
 
@@ -2912,7 +3774,19 @@ function renderKnowledge(d) {
         knowledgeCommand('Goto target', 'aua goto "' + to + '"'),
         knowledgeSteps(route.steps || [], 'Legacy route: no structured steps were recorded.'),
         knowledgeJson(meta),
-      ]
+      ],
+      knowledgeActions([
+        {label: 'Run goto', action: 'goto', payload: {target: to}, primary: true},
+        {
+          label: 'Clear', action: 'route-delete', danger: true, disabled: !route.id,
+          payload: {package: d.package, route_id: route.id},
+          confirmation: {
+            title: 'Clear recorded route?',
+            message: from + ' → ' + to + ' will be removed from ' + d.package + '.',
+            label: 'Clear route', phrase: 'DELETE ROUTE ' + route.id,
+          },
+        },
+      ])
     ));
   });
 
@@ -2951,21 +3825,46 @@ function renderKnowledge(d) {
     head.append(heading, count);
     section.appendChild(head);
     groups.get(app).forEach(flow => {
-      const ref = flow.ref || ((flow.app ? (flow.app + ':') : '') + (flow.storage_name || flow.name));
+      const ref = flow.ref || '';
+      const displayRef = ref || (flow.storage_name || flow.name || 'unaddressable flow');
       const meta = Object.assign({}, flow);
       delete meta.steps_detail;
       section.appendChild(knowledgeItem(
         flow.name || flow.storage_name || '?',
-        flow.description || ref,
+        flow.description || displayRef,
         [
           knowledgeBadge((flow.steps_detail || []).length + ' steps'),
           knowledgeBadge(flow.arrival_status || 'unverified', flow.arrival_status === 'mapped' ? 'ok' : ''),
         ],
         [
-          knowledgeCommand('Run', 'aua flow run "' + ref + '"'),
+          knowledgeCommand(
+            ref ? 'CLI' : 'Unavailable',
+            ref ? ('aua flow run "' + ref + '"') : 'This flow needs a unique storage reference.'
+          ),
           knowledgeSteps(flow.steps_detail || [], flow.error || 'No steps recorded.'),
           knowledgeJson(meta),
-        ]
+        ],
+        knowledgeActions([
+          {
+            label: 'Run flow', action: 'flow-run', primary: true, disabled: !ref,
+            payload: {ref: ref},
+            confirmation: {
+              title: 'Run authored flow?',
+              message: 'Run ' + ref + ' on ' + focusSerial +
+                '? Authored flows may change app or device state.',
+              label: 'Run flow', phrase: 'RUN FLOW ' + ref,
+            },
+          },
+          {
+            label: 'Clear', action: 'flow-delete', danger: true, disabled: !ref,
+            payload: {ref: ref},
+            confirmation: {
+              title: 'Clear saved flow?',
+              message: ref + ' will be permanently removed from the flow library.',
+              label: 'Clear flow', phrase: 'DELETE FLOW ' + ref,
+            },
+          },
+        ])
       ));
     });
     flowHost.appendChild(section);
@@ -2976,7 +3875,9 @@ async function tickMap() {
   try {
     const r = await fetch('/api/map' + qSerial(), {cache: 'no-store'});
     const d = await r.json();
-    const signature = JSON.stringify([d.package, d.known, d.screens, d.routes, d.flows]);
+    const signature = JSON.stringify([
+      d.package, d.known, d.map_count, d.screens, d.routes, d.flows,
+    ]);
     if (signature === knowledgeSignature) return;
     knowledgeSignature = signature;
     renderKnowledge(d);
@@ -3812,6 +4713,55 @@ document.getElementById('model-clear').addEventListener('click', async () => {
 renderModelChat(modelChatProvider.value);
 updateModelRequestShape(false);
 
+document.getElementById('knowledge-confirm-cancel').addEventListener(
+  'click', () => closeKnowledgeConfirmation(false)
+);
+document.getElementById('knowledge-confirm-submit').addEventListener(
+  'click', () => closeKnowledgeConfirmation(true)
+);
+knowledgeConfirmDialog.addEventListener('cancel', event => {
+  event.preventDefault();
+  closeKnowledgeConfirmation(false);
+});
+document.getElementById('map-clear').addEventListener('click', () => {
+  const data = window.__auaKnowledgeData || {};
+  if (!data.package || !data.known) return;
+  runNavigationAction(
+    'map-clear',
+    {package: data.package},
+    {
+      title: 'Clear this app map?',
+      message: 'All learned screens and routes for ' + data.package + ' will be removed.',
+      label: 'Clear map',
+      phrase: 'CLEAR MAP ' + data.package,
+    }
+  );
+});
+document.getElementById('flows-clear').addEventListener('click', () => {
+  runNavigationAction(
+    'flows-clear',
+    {},
+    {
+      title: 'Clear every saved flow?',
+      message: 'Every indexed flow for every app will be permanently removed.',
+      label: 'Clear flows',
+      phrase: 'CLEAR ALL FLOWS',
+    }
+  );
+});
+document.getElementById('knowledge-clear-all').addEventListener('click', () => {
+  runNavigationAction(
+    'clear-all',
+    {},
+    {
+      title: 'Clear the navigation library?',
+      message: 'All app maps, recorded routes, and saved flows will be permanently removed.',
+      label: 'Clear everything',
+      phrase: 'CLEAR ALL NAVIGATION',
+    }
+  );
+});
+
 document.getElementById('db-refresh').addEventListener('click', loadDatabases);
 document.getElementById('db-schema-button').addEventListener('click', loadSchema);
 document.getElementById('db-query-button').addEventListener('click', runDatabaseQuery);
@@ -3840,11 +4790,51 @@ updateDatabaseControls();
 
 screenAnalyze.addEventListener('click', analyzeScreen);
 document.getElementById('inspection-live').addEventListener('click', resumeLiveFrame);
+inspectionJsonSearch.addEventListener('input', () => updateInspectionJsonSearch());
+inspectionJsonSearch.addEventListener('keydown', event => {
+  if (event.key !== 'Enter') return;
+  event.preventDefault();
+  updateInspectionJsonSearch(event.shiftKey ? -1 : 1);
+});
+document.getElementById('inspection-json-prev').addEventListener(
+  'click', () => updateInspectionJsonSearch(-1)
+);
+document.getElementById('inspection-json-next').addEventListener(
+  'click', () => updateInspectionJsonSearch(1)
+);
 inspectionClickableOnly.addEventListener('change', () => {
   elementOverlay.classList.toggle('clickable-only', inspectionClickableOnly.checked);
 });
 
+const phoneQrButton = document.getElementById('phone-qr-button');
+const phoneQrDialog = document.getElementById('phone-qr-dialog');
+const phoneQrCopy = document.getElementById('phone-qr-copy');
+document.getElementById('phone-qr-close').addEventListener('click', () => phoneQrDialog.close());
+phoneQrDialog.addEventListener('click', event => {
+  if (event.target === phoneQrDialog) phoneQrDialog.close();
+});
+if (PHONE_ACCESS_URL) {
+  document.getElementById('phone-qr-url').textContent = PHONE_ACCESS_URL;
+  document.getElementById('phone-qr-image').src = '/api/dashboard-access-qr.svg';
+  phoneQrButton.classList.remove('hidden');
+  phoneQrButton.addEventListener('click', () => phoneQrDialog.showModal());
+  phoneQrCopy.addEventListener('click', async () => {
+    const copied = await copyText(PHONE_ACCESS_URL);
+    phoneQrCopy.textContent = copied ? 'Copied' : 'Copy failed';
+    setTimeout(() => { phoneQrCopy.textContent = 'Copy link'; }, 1600);
+  });
+}
+
 if (isGrid) {
+  if (detachedSerial) {
+    const notice = document.getElementById('device-notice');
+    notice.textContent = detachedSerial + ' disconnected and was removed from the dashboard.';
+    notice.classList.remove('hidden');
+    const clean = new URL(window.location.href);
+    clean.searchParams.delete('detached');
+    history.replaceState({}, '', clean.pathname + clean.search);
+    setTimeout(() => notice.classList.add('hidden'), 7000);
+  }
   tickGrid();
   setInterval(tickGrid, Math.max(POLL_MS, 800));
 } else {
@@ -3879,14 +4869,21 @@ class _DashboardState:
         ensures: dict[str, dict[str, Any]],
         poll_ms: int,
         config: Any,
+        bind_host: str = "127.0.0.1",
+        require_auth: bool = False,
+        access_token: str | None = None,
     ) -> None:
         self.serials = list(serials)
+        self._online_serials = set(serials)
         self.focus = focus or (serials[0] if serials else None)
         self.mode = mode  # "grid" | "detail"
         self.cache_dir = cache_dir
         self.ensures = ensures
         self.poll_ms = poll_ms
         self.config = config
+        self.bind_host = bind_host
+        self.require_auth = bool(require_auth)
+        self.access_token = access_token or ""
         from .platforms import PlatformFactory
 
         self.platform = PlatformFactory(config).create()
@@ -3993,6 +4990,44 @@ class _DashboardState:
             )
         return selected
 
+    def _forget_detached_runtime(self, serials: set[str]) -> None:
+        """Drop only live/runtime state for targets discovery proved are offline."""
+        if not serials:
+            return
+        from . import leases
+
+        for serial in serials:
+            self.ensures.pop(serial, None)
+            self._fallback.pop(serial, None)
+            self._capture_live.pop(serial, None)
+            self._pkg_cache.pop(serial, None)
+            self._map_cache.pop(serial, None)
+            self._runtime_cache.pop(serial, None)
+            with self._inspection_lock:
+                self._inspections.pop(serial, None)
+            # Analyze/tap operations use a process-bound dashboard owner. If the emulator dies,
+            # keeping that live owner's lease would block the same serial after it boots again.
+            with contextlib.suppress(Exception):
+                leases.release(self.cache_dir, serial, owner=self._inspection_owner)
+
+    def _require_online(self, serial: str) -> None:
+        """Refuse a device action when authoritative discovery says it detached."""
+        online, error = discover_online_serials(self.config)
+        self.discovery_error = error
+        if error is not None:
+            return
+        detached = self._online_serials.difference(online)
+        self._online_serials = set(online)
+        self._forget_detached_runtime(detached)
+        self.serials = list(dict.fromkeys([*self.serials, *online]))
+        if serial in online:
+            return
+        raise UsageError(
+            f"device {serial!r} disconnected and was removed from the dashboard",
+            code="dashboard_device_detached",
+            hint="Return to All devices; it will reappear automatically if it reconnects.",
+        )
+
     def _daemon_call(
         self,
         serial: str,
@@ -4074,7 +5109,7 @@ class _DashboardState:
             "timeout": timeout,
             "journal": True,
             "owner": self._inspection_owner,
-            "uncertain_is_error": cmd == "tap",
+            "uncertain_is_error": cmd in {"tap", "goto", "flow_run"},
             **args,
         }
         result = self._daemon_call(serial, cmd, **call_args)
@@ -4142,7 +5177,11 @@ class _DashboardState:
     def inspection_operation(self, action: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Analyze one exact frame, or consume its id once for a guarded tap-and-analyze."""
 
-        ser = self._scoped_serial(payload.get("serial"))
+        requested = payload.get("serial") or self.focus
+        if not isinstance(requested, str) or not requested:
+            raise UsageError("dashboard inspection needs a device serial")
+        self._require_online(requested)
+        ser = self._scoped_serial(requested)
         inspection_id = secrets.token_urlsafe(12)
         frame_path = self._inspection_path(ser, inspection_id)
         if action == "analyze":
@@ -4514,6 +5553,7 @@ class _DashboardState:
             "screens": [],
             "routes": [],
             "flows": [],
+            "map_count": 0,
             "serial": ser,
         }
         try:
@@ -4537,15 +5577,16 @@ class _DashboardState:
                 out["flows"].append(detail)
             out["flow_count"] = len(flow_entries)
 
+            from .memory import AppMemoryStore
+
+            store = AppMemoryStore(self.config.memory)
+            out["map_count"] = len(store.list_apps())
             pkg = self.foreground_package(ser)
             out["package"] = pkg
             if not pkg:
                 if ser:
                     self._map_cache[ser] = (out, now)
                 return out
-            from .memory import AppMemoryStore
-
-            store = AppMemoryStore(self.config.memory)
             app = store.load(pkg)
             if app is None:
                 if ser:
@@ -4603,6 +5644,121 @@ class _DashboardState:
             self._map_cache[ser] = (out, now)
         return out
 
+    @staticmethod
+    def _navigation_text(payload: dict[str, Any], field: str, *, maximum: int = 300) -> str:
+        value = payload.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise UsageError(f"navigation action needs a non-empty {field}")
+        clean = value.strip()
+        if len(clean) > maximum:
+            raise UsageError(f"navigation action {field} exceeds {maximum} characters")
+        return clean
+
+    @staticmethod
+    def _require_navigation_confirmation(payload: dict[str, Any], phrase: str) -> None:
+        if payload.get("confirmation") != phrase:
+            raise UsageError(
+                f"confirm this navigation-library action with {phrase!r}",
+                code="navigation_confirmation_required",
+            )
+
+    def navigation_operation(self, action: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Run shared navigation commands or explicitly prune their host-side library."""
+
+        ser = self._scoped_serial(payload.get("serial"))
+        if action == "goto":
+            target = self._navigation_text(payload, "target")
+            result = self._inspection_daemon_call(ser, "goto", timeout=300.0, goal=target)
+            self._inspection_error(result)
+            return {"ok": True, "action": "goto", "target": target, "result": result}
+        if action == "flow-run":
+            ref = self._navigation_text(payload, "ref")
+            self._require_navigation_confirmation(payload, f"RUN FLOW {ref}")
+            result = self._inspection_daemon_call(ser, "flow_run", timeout=300.0, name=ref)
+            self._inspection_error(result)
+            return {"ok": True, "action": "flow-run", "flow": ref, "result": result}
+        if action == "flow-delete":
+            ref = self._navigation_text(payload, "ref")
+            self._require_navigation_confirmation(payload, f"DELETE FLOW {ref}")
+            result = self._inspection_daemon_call(ser, "flow_delete", timeout=30.0, name=ref)
+            self._inspection_error(result)
+            self._map_cache.clear()
+            return {"ok": True, "action": "flow-delete", "flow": ref, "result": result}
+
+        from .flows import FlowStore
+        from .memory import AppMemoryStore
+
+        memory = AppMemoryStore(self.config.memory)
+        flows = FlowStore(self.config.memory)
+        if action == "route-delete":
+            package = self._navigation_text(payload, "package", maximum=255)
+            route_id = self._navigation_text(payload, "route_id", maximum=255)
+            current = self.map_payload(ser).get("package")
+            if current != package:
+                raise UsageError(
+                    "the foreground app changed; refresh before deleting this route",
+                    code="dashboard_stale_map",
+                )
+            self._require_navigation_confirmation(payload, f"DELETE ROUTE {route_id}")
+            forgotten = memory.forget_route(package, route_id).get("forgot")
+            self._map_cache.clear()
+            return {
+                "ok": True,
+                "action": "route-delete",
+                "package": package,
+                "route_id": route_id,
+                "deleted": forgotten is not None,
+            }
+        if action == "map-clear":
+            package = self._navigation_text(payload, "package", maximum=255)
+            current = self.map_payload(ser).get("package")
+            if current != package:
+                raise UsageError(
+                    "the foreground app changed; refresh before clearing its map",
+                    code="dashboard_stale_map",
+                )
+            self._require_navigation_confirmation(payload, f"CLEAR MAP {package}")
+            map_deleted = memory.forget(package).get("forgot") is not None
+            self._map_cache.clear()
+            return {
+                "ok": True,
+                "action": "map-clear",
+                "package": package,
+                "deleted": map_deleted,
+            }
+        if action == "flows-clear":
+            self._require_navigation_confirmation(payload, "CLEAR ALL FLOWS")
+            deleted_flows = flows.clear()
+            self._map_cache.clear()
+            return {"ok": True, "action": "flows-clear", "deleted": len(deleted_flows)}
+        if action == "clear-all":
+            self._require_navigation_confirmation(payload, "CLEAR ALL NAVIGATION")
+            packages = memory.list_apps()
+            maps_deleted = sum(
+                memory.forget(package).get("forgot") is not None for package in packages
+            )
+            flows_deleted = len(flows.clear())
+            self._map_cache.clear()
+            return {
+                "ok": True,
+                "action": "clear-all",
+                "maps_deleted": maps_deleted,
+                "flows_deleted": flows_deleted,
+            }
+        raise UsageError(f"unknown dashboard navigation action {action!r}")
+
+    def journal_operation(self, action: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Clear the compact and detailed journal files visible in this device view."""
+
+        if action != "clear":
+            raise UsageError(f"unknown dashboard journal action {action!r}")
+        ser = self._scoped_serial(payload.get("serial"))
+        self._require_navigation_confirmation(payload, f"CLEAR JOURNAL {ser}")
+        from . import journal as journal_mod
+
+        deleted = journal_mod.clear(self.cache_dir, ser, include_host=True)
+        return {"ok": True, "action": "journal-clear", "serial": ser, "deleted": len(deleted)}
+
     def device_tile(self, serial: str) -> dict[str, Any]:
         frame = latest_frame(self.cache_dir, serial)
         age_ms = None
@@ -4636,25 +5792,41 @@ class _DashboardState:
         }
 
     def devices_payload(self) -> dict[str, Any]:
-        known = list(self.serials)
+        known = (
+            [serial for serial in self.serials if serial in self._online_serials]
+            if self.mode == "grid"
+            else list(self.serials)
+        )
+        detached: list[str] = []
         if self.mode == "grid":
             # Grid dashboards intentionally discover devices as they appear. A
-            # detail dashboard stays scoped to the serial it was started for.
+            # successful discovery is authoritative in both directions: keeping the
+            # old union here left dead emulators visible forever. On discovery failure,
+            # preserve the last good list instead of mistaking an ADB outage for every
+            # device disconnecting at once.
             online, self.discovery_error = discover_online_serials(self.config)
-            known = list(dict.fromkeys([*known, *online]))
-            self.serials = known
-            for ser in online:
-                if ser not in self.ensures:
-                    with contextlib.suppress(Exception):
-                        self.ensures[ser] = ensure_capture(
-                            serial=ser,
-                            config=self.config,
-                            allow_sidecar=False,
-                        )
+            if self.discovery_error is None:
+                detached = [serial for serial in known if serial not in online]
+                self._forget_detached_runtime(set(detached))
+                known = online
+                self._online_serials = set(online)
+                # Keep the ever-seen set for request scoping and historical journal reads;
+                # only ``known`` is rendered. Reconnected serials are ensured again because
+                # detached runtime state was cleared above.
+                self.serials = list(dict.fromkeys([*self.serials, *online]))
+                for ser in online:
+                    if ser not in self.ensures:
+                        with contextlib.suppress(Exception):
+                            self.ensures[ser] = ensure_capture(
+                                serial=ser,
+                                config=self.config,
+                                allow_sidecar=False,
+                            )
         return {
             "ok": True,
             "mode": self.mode,
             "devices": [self.device_tile(s) for s in known],
+            "detached_serials": detached,
             "discovery_error": self.discovery_error,
         }
 
@@ -4662,6 +5834,21 @@ class _DashboardState:
         ser = serial or self.focus
         if not ser:
             return {"ok": False, "error": "no serial"}
+        online, discovery_error = discover_online_serials(self.config)
+        self.discovery_error = discovery_error
+        if discovery_error is None and ser not in online:
+            self._online_serials = set(online)
+            self._forget_detached_runtime({ser})
+            return {
+                "ok": False,
+                "detached": True,
+                "serial": ser,
+                "online_serials": online,
+                "error": f"device {ser!r} is no longer attached",
+            }
+        if discovery_error is None:
+            self._online_serials = set(online)
+            self.serials = list(dict.fromkeys([*self.serials, *online]))
         frame = latest_frame(self.cache_dir, ser)
         age_ms = None
         session_id = None
@@ -4999,9 +6186,86 @@ def _make_handler(state: _DashboardState) -> type[BaseHTTPRequestHandler]:
             body = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
             self._send(code, body, "application/json; charset=utf-8")
 
+        def _redirect(self, location: str) -> None:
+            self.send_response(303)
+            self.send_header("Location", location)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.end_headers()
+
+        def _cookie_access_token(self) -> str:
+            raw = self.headers.get("Cookie", "")
+            try:
+                cookie = http.cookies.SimpleCookie(raw)
+            except http.cookies.CookieError:
+                return ""
+            morsel = cookie.get(_ACCESS_COOKIE)
+            return morsel.value if morsel is not None else ""
+
+        def _has_dashboard_access(self) -> bool:
+            if not state.require_auth:
+                return True
+            supplied = self.headers.get("X-AUA-Dashboard-Access", "")
+            if not supplied:
+                supplied = self._cookie_access_token()
+            return bool(supplied) and secrets.compare_digest(supplied, state.access_token)
+
+        def _authorize_get(self, parsed: Any, qs: dict[str, list[str]]) -> bool:
+            if self._has_dashboard_access():
+                return True
+            supplied = (qs.get("token") or [""])[0]
+            if supplied and secrets.compare_digest(supplied, state.access_token):
+                clean_qs = {key: value for key, value in qs.items() if key != "token"}
+                location = parsed.path or "/"
+                if clean_qs:
+                    location += "?" + urlencode(clean_qs, doseq=True)
+                self.send_response(303)
+                self.send_header("Location", location)
+                self.send_header(
+                    "Set-Cookie",
+                    f"{_ACCESS_COOKIE}={state.access_token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000",
+                )
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Referrer-Policy", "no-referrer")
+                self.end_headers()
+                return False
+            if parsed.path.startswith("/api/"):
+                self._json(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "dashboard_auth",
+                            "message": "dashboard access token required",
+                        },
+                    },
+                    401,
+                )
+            else:
+                body = (
+                    b"<!doctype html><meta name=viewport content='width=device-width'>"
+                    b"<title>AuA Dashboard</title><style>body{margin:0;min-height:100vh;display:grid;"
+                    b"place-items:center;background:#090b14;color:#e8edf7;font:16px system-ui}"
+                    b"main{max-width:28rem;padding:2rem;text-align:center}p{color:#9aa5b7;line-height:1.5}"
+                    b"</style><main><h1>AuA Dashboard</h1><p>This network dashboard needs its "
+                    b"private access link. Run <code>aua dashboard status</code> on the laptop to "
+                    b"print it.</p></main>"
+                )
+                self._send(401, body, "text/html; charset=utf-8")
+            return False
+
         def _qs_serial(self, qs: dict[str, list[str]]) -> str | None:
             raw = (qs.get("serial") or [""])[0].strip()
             return raw or state.focus
+
+        def _phone_access_url(self) -> str:
+            if state.bind_host != "0.0.0.0":
+                return ""
+            urls = _service_urls(
+                port=int(getattr(self.server, "server_port", DEFAULT_DASHBOARD_PORT)),
+                lan=True,
+                access_token=state.access_token,
+            )
+            return str((urls.get("lan_access_urls") or [""])[0])
 
         def _scoped_qs_serial(self, qs: dict[str, list[str]]) -> str | None:
             try:
@@ -5014,23 +6278,65 @@ def _make_handler(state: _DashboardState) -> type[BaseHTTPRequestHandler]:
             parsed = urlparse(self.path)
             path = parsed.path
             qs = parse_qs(parsed.query)
+            if path == "/api/health":
+                self._json(
+                    {
+                        "ok": True,
+                        "service": _SERVICE_ID,
+                        "pid": os.getpid(),
+                        "bind": state.bind_host,
+                        "lan": state.bind_host == "0.0.0.0",
+                        "authenticated": state.require_auth,
+                    }
+                )
+                return
+            if not self._authorize_get(parsed, qs):
+                return
             if path in ("/", "/index.html"):
                 focus = (qs.get("serial") or [""])[0].strip()
                 if focus and focus not in state.serials:
-                    self._send(404, b"device not part of this dashboard session", "text/plain")
-                    return
+                    safe_focus = len(focus) <= 255 and all(
+                        char.isalnum() or char in "._:-" for char in focus
+                    )
+                    online, error = discover_online_serials(state.config)
+                    if safe_focus and error is None and focus not in online:
+                        self._redirect("/?" + urlencode({"detached": focus}))
+                        return
+                    if focus in online:
+                        state.serials.append(focus)
+                        state._online_serials.add(focus)
+                    else:
+                        self._send(404, b"device not part of this dashboard session", "text/plain")
+                        return
                 mode = "detail" if focus else state.mode
                 serial_boot = state.focus or ""
                 html = (
                     _DASHBOARD_HTML.replace("__POLL_MS__", str(state.poll_ms))
                     .replace("__MODE_JSON__", _script_json(mode if focus else state.mode))
                     .replace("__SERIAL_JSON__", _script_json(serial_boot))
+                    .replace("__PHONE_ACCESS_URL_JSON__", _script_json(self._phone_access_url()))
                     .replace("__DATABASE_TOKEN__", state.database_token)
                 )
                 self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
                 return
             if path == "/assets/aua-dashboard-logo.png":
                 self._send(200, _DASHBOARD_LOGO.read_bytes(), "image/png")
+                return
+            if path == "/api/dashboard-access-qr.svg":
+                phone_url = self._phone_access_url()
+                if not phone_url:
+                    self._json(
+                        {
+                            "ok": False,
+                            "error": {
+                                "code": "dashboard_local_only",
+                                "message": "phone QR is available after starting with --lan",
+                            },
+                        },
+                        404,
+                    )
+                    return
+                self._send(200, _qr_svg(phone_url), "image/svg+xml; charset=utf-8")
                 return
             if path == "/api/devices":
                 self._json(state.devices_payload())
@@ -5071,8 +6377,9 @@ def _make_handler(state: _DashboardState) -> type[BaseHTTPRequestHandler]:
                     self._json({"ok": False, **exc.to_dict()}, 400)
                 return
             if path == "/api/status":
-                ser = self._scoped_qs_serial(qs)
-                if ser is None:
+                ser = self._qs_serial(qs)
+                if not ser:
+                    self._json({"ok": False, "error": "no serial"}, 400)
                     return
                 self._json(state.status(ser))
                 return
@@ -5193,12 +6500,26 @@ def _make_handler(state: _DashboardState) -> type[BaseHTTPRequestHandler]:
 
         def do_POST(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
+            if not self._has_dashboard_access():
+                self._json(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "dashboard_auth",
+                            "message": "dashboard access token required",
+                        },
+                    },
+                    401,
+                )
+                return
             prefix = ""
             for candidate in (
                 "/api/database/",
                 "/api/proxy/",
                 "/api/models/",
                 "/api/inspect/",
+                "/api/navigation/",
+                "/api/journal/",
             ):
                 if parsed.path.startswith(candidate):
                     prefix = candidate
@@ -5229,7 +6550,7 @@ def _make_handler(state: _DashboardState) -> type[BaseHTTPRequestHandler]:
                         "ok": False,
                         "error": {
                             "code": "dashboard_request",
-                            "message": "database request body must be between 1 byte and 1 MB",
+                            "message": "dashboard request body must be between 1 byte and 1 MB",
                         },
                     },
                     400,
@@ -5246,6 +6567,10 @@ def _make_handler(state: _DashboardState) -> type[BaseHTTPRequestHandler]:
                     result = state.model_operation(action, payload)
                 elif prefix == "/api/inspect/":
                     result = state.inspection_operation(action, payload)
+                elif prefix == "/api/navigation/":
+                    result = state.navigation_operation(action, payload)
+                elif prefix == "/api/journal/":
+                    result = state.journal_operation(action, payload)
                 else:
                     result = state.database_operation(action, payload)
                 self._json(result)
@@ -5288,6 +6613,11 @@ def run(
     poll_ms: int = 500,
     block: bool = True,
     grid: bool = False,
+    bind_host: str = "127.0.0.1",
+    exact_port: bool = False,
+    require_auth: bool = False,
+    access_token: str | None = None,
+    announce: bool = True,
 ) -> dict[str, Any]:
     """Ensure capture, serve the dashboard, optionally open a browser.
 
@@ -5314,7 +6644,11 @@ def run(
         with contextlib.suppress(Exception):
             ensures[ser] = ensure_capture(serial=ser, config=cfg, allow_sidecar=allow_sidecar)
 
-    listen = _pick_free_port(port)
+    listen = int(port) if exact_port else _pick_free_port(port)
+    if bind_host not in {"127.0.0.1", "0.0.0.0"}:
+        raise UsageError("dashboard bind host must be 127.0.0.1 or 0.0.0.0")
+    if require_auth and not access_token:
+        raise UsageError("network dashboard requires an access token")
     state = _DashboardState(
         serials=serials,
         focus=focus,
@@ -5323,10 +6657,19 @@ def run(
         ensures=ensures,
         poll_ms=max(200, int(poll_ms)),
         config=cfg,
+        bind_host=bind_host,
+        require_auth=require_auth,
+        access_token=access_token,
     )
     state.discovery_error = discovery_error
     handler = _make_handler(state)
-    httpd = ThreadingHTTPServer(("127.0.0.1", listen), handler)
+    try:
+        httpd = ThreadingHTTPServer((bind_host, listen), handler)
+    except OSError as exc:
+        raise UsageError(
+            f"dashboard could not bind {bind_host}:{listen}: {exc}",
+            hint="The detached dashboard uses one exact port and never silently moves.",
+        ) from exc
     # port=0 lets the OS choose, so report what we actually bound rather than the ask.
     listen = int(httpd.server_address[1])
     url = f"http://127.0.0.1:{listen}/"
@@ -5340,6 +6683,9 @@ def run(
         "serials": serials,
         "via": primary_via,
         "port": listen,
+        "bind": bind_host,
+        "lan": bind_host == "0.0.0.0",
+        "authenticated": require_auth,
         "discovery_error": discovery_error,
         "hint": (
             (
@@ -5349,7 +6695,11 @@ def run(
                 if mode == "grid"
                 else f"Watching {focus} via {primary_via}. "
             )
-            + "Leave this running; stop with Ctrl-C. Agent work is unaffected."
+            + (
+                "Background service is ready; stop it with `aua dashboard stop`."
+                if not announce
+                else "Leave this running; stop with Ctrl-C. Agent work is unaffected."
+            )
         ),
         "ensures": {
             k: {kk: vv for kk, vv in v.items() if kk in ("via", "ok", "hint")}
@@ -5361,12 +6711,14 @@ def run(
         with httpd:
             httpd.serve_forever(poll_interval=0.5)
 
+    browser_url = url + (f"?token={access_token}" if require_auth and access_token else "")
     if open_browser:
-        threading.Timer(0.4, lambda: webbrowser.open(url)).start()
+        threading.Timer(0.4, lambda: webbrowser.open(browser_url)).start()
 
     if block:
         logger.info("dashboard on %s (mode=%s serials=%s)", url, mode, ",".join(serials))
-        print(json.dumps(info, indent=2, ensure_ascii=False), flush=True)
+        if announce:
+            print(json.dumps(info, indent=2, ensure_ascii=False), flush=True)
         try:
             _serve()
         except KeyboardInterrupt:
@@ -5395,3 +6747,80 @@ def shutdown(info: dict[str, Any]) -> None:
     with contextlib.suppress(Exception):
         httpd.server_close()
     thread.join(timeout=2)
+
+
+def _service_main(argv: list[str] | None = None) -> int:
+    """Private detached-process entrypoint used by :func:`start_service`."""
+    import argparse
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--serve-service", action="store_true")
+    parser.add_argument("--state-file", required=True)
+    parser.add_argument("--port", required=True, type=int)
+    parser.add_argument("--bind", choices=("127.0.0.1", "0.0.0.0"), required=True)
+    parser.add_argument("--poll-ms", type=int, default=500)
+    parser.add_argument("--cache-dir", required=True)
+    parser.add_argument("--serial")
+    parser.add_argument("--config")
+    parser.add_argument("--profile")
+    parser.add_argument("--platform")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--grid", action="store_true")
+    mode.add_argument("--detail", action="store_true")
+    args = parser.parse_args(argv)
+    if not args.serve_service:
+        return 2
+
+    state_path = Path(args.state_file).expanduser()
+    try:
+        launch_state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as exc:
+        logger.error("cannot read dashboard service state: %s", exc)
+        return 2
+    access_token = str(launch_state.get("access_token") or "")
+
+    from .config import load_config
+
+    overrides: dict[str, Any] = {"cache": {"dir": args.cache_dir}}
+    if args.platform:
+        overrides["device"] = {"platform": args.platform}
+    cfg = load_config(
+        explicit_path=args.config,
+        profile=args.profile,
+        cli_overrides=overrides,
+    )
+
+    # Raise into ``run``'s normal finally path so the listening socket closes immediately.
+    def _terminate(_signum: int, _frame: Any) -> None:
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _terminate)
+    try:
+        run(
+            serial=args.serial,
+            port=args.port,
+            cache_dir=args.cache_dir,
+            config=cfg,
+            open_browser=False,
+            poll_ms=args.poll_ms,
+            block=True,
+            grid=not args.detail,
+            bind_host=args.bind,
+            exact_port=True,
+            require_auth=args.bind == "0.0.0.0",
+            access_token=access_token or None,
+            announce=False,
+        )
+    except AuaError as exc:
+        logger.error("dashboard service failed: %s", exc)
+        return 1
+    finally:
+        current = _read_service_state(args.cache_dir)
+        if current.get("pid") == os.getpid():
+            with contextlib.suppress(OSError):
+                state_path.unlink()
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised through detached CLI integration
+    raise SystemExit(_service_main())

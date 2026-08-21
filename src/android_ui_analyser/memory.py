@@ -3787,6 +3787,19 @@ class AppMemoryStore:
             return {"forgot": f"{package}/{screen}"}
         return {"forgot": None}
 
+    def forget_route(self, package: str, route_id: str) -> dict[str, str | None]:
+        """Forget exactly one recorded route without disturbing its endpoint screens."""
+
+        app = self.load(package)
+        if app is None:
+            return {"forgot": None}
+        retained = [edge for edge in app.routes if edge.id != route_id]
+        if len(retained) == len(app.routes):
+            return {"forgot": None}
+        app.routes = retained
+        self.save(app)
+        return {"forgot": f"{package}/route/{route_id}"}
+
 
 def _suggest_deeplinks(app: AppMap, cap: int) -> list[str]:
     """Ready-to-run deeplink shortcuts for inline `analyze` hints — concrete URIs only

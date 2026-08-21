@@ -23,6 +23,8 @@ from typing import TYPE_CHECKING, cast
 from .errors import UsageError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from PIL.Image import Image as PILImage
+
     from .providers.base import ScreenImage
 
 Bounds = tuple[int, int, int, int]
@@ -38,9 +40,14 @@ HASH_BITS = HASH_SIDE * HASH_SIDE
 DEFAULT_STABLE_DISTANCE = 8
 
 
-def dhash(image: ScreenImage, *, side: int = HASH_SIDE) -> int:
-    """Return a difference-hash of *image* as an integer of ``side*side`` bits."""
-    pil = image.pil().convert("L").resize((side + 1, side), _RESAMPLE)
+def dhash_pil(image: PILImage, *, side: int = HASH_SIDE) -> int:
+    """Return a difference-hash for a Pillow image without re-encoding it.
+
+    Element identity crops already live inside one decoded screenshot.  Keeping this small
+    helper beside :func:`dhash` lets every crop reuse those pixels instead of taking a PNG
+    encode/decode round trip merely to satisfy ``ScreenImage``'s transport wrapper.
+    """
+    pil = image.convert("L").resize((side + 1, side), _RESAMPLE)
     # Row-major grayscale samples (avoids PixelAccess typing); compare each to its
     # right neighbour → 1 bit per pixel.
     px = list(pil.getdata())
@@ -53,6 +60,11 @@ def dhash(image: ScreenImage, *, side: int = HASH_SIDE) -> int:
             bits |= (1 if px[row + x] < px[row + x + 1] else 0) << pos
             pos += 1
     return bits
+
+
+def dhash(image: ScreenImage, *, side: int = HASH_SIDE) -> int:
+    """Return a difference-hash of *image* as an integer of ``side*side`` bits."""
+    return dhash_pil(image.pil(), side=side)
 
 
 def hamming(a: int, b: int) -> int:

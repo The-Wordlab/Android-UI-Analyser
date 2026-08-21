@@ -1131,19 +1131,33 @@ CA) — not “no traffic”.
 
 ## Dashboard (sneak-peek headless runs)
 
-Agents often drive a **headless** emulator with no window. To watch live without interrupting
-them, run a separate process:
+Agents often drive a **headless** emulator with no window. The dashboard is a detached service on
+one exact port, so it keeps running after the command returns and phone bookmarks remain valid:
 
 ```bash
-# One agent / one device:
-aua dashboard --serial emulator-5554
-# → opens http://127.0.0.1:8765  (enables capture via daemon or sidecar)
+# Start/reuse the localhost dashboard on the dedicated port 48765:
+aua dashboard start
+aua dashboard status
+aua dashboard open
+aua dashboard stop
 
-# Live grid (default, including with one device):
-aua dashboard            # later emulators appear automatically
-aua dashboard --detail   # optionally focus the first online device
-# Click a tile → detail (journal / map / logcat) for that serial
+# Watch and control from a phone on the same trusted private network:
+aua dashboard start --lan
+# → prints an authenticated http://<laptop-ip>:48765/?token=… access URL
+aua dashboard qr
+# → writes and opens a QR code for that authenticated phone URL
+
+# Compatibility and foreground debugging:
+aua dashboard                         # alias for `dashboard start`
+aua dashboard start --detail          # focus the first online device
+aua dashboard run                     # foreground; Ctrl-C stops it
 ```
+
+Service mode never tries a nearby port. If `48765` belongs to another process, startup fails and
+names the collision. `--lan` binds all laptop interfaces, but every page, frame, journal, log, and
+control endpoint requires the generated access token. The browser exchanges the one-time URL token
+for an HttpOnly cookie and removes it from the address bar. LAN mode uses HTTP, so use it only on a
+trusted private network; do not expose the port through a router or public Wi-Fi.
 
 The page live-polls capture frames + recent action marks. In a device detail view, the
 **Agent I/O journal** keeps rows compact while they stream; expand any row to inspect the full
@@ -1164,8 +1178,9 @@ In the same detail view, the
 runs bounded read-only SQL, creates/lists restore points, and exposes guarded mutation and
 restore actions. Mutation requires typing `MUTATE <database>`; restore requires typing
 `RESTORE <backup-id>`. Both keep the same server-side backup and integrity protections as
-the CLI. Ctrl-C stops only the dashboard. If no warm daemon is present, aua starts the
-capture **sidecar** (single-device) or uses adb screencap per tile (grid).
+the CLI. The phone layout prioritizes the live screen, enlarges touch targets, and keeps element
+overlays tappable. If no warm daemon is present, aua starts the capture **sidecar** (single-device)
+or uses platform screencap per tile (grid).
 
 ---
 
@@ -1547,7 +1562,7 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 | `aua proxy start\|stop` / `aua mock …` | HTTPS mitm record/map/replay (`[proxy]` extra) |
 | `aua capture …` | Session capture / export / explain |
 | `aua helper status\|enable\|remove` | Optional on-device helper APK — runs a long flow on the device (rootable targets, off by default) |
-| `aua dashboard` | Live browser grid of emulator tiles by default; works with headless devices |
+| `aua dashboard start|status|open|qr|stop|run` | Persistent fixed-port browser grid; optional authenticated phone access and QR with `--lan` |
 | `aua logcat` / `aua suite` | Device-clock log windows / scripted suites |
 | `aua dev` / `aua a11y` | Dev options helpers / a11y scroll |
 | `aua map` | Show the active-context map (`--all-contexts`, `--audit`, or `--find "<goal>"`) |

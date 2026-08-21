@@ -612,10 +612,11 @@ BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
         "Observe once and use stable selectors",
         "Reuse the compact observation returned by session start. Without a goal session, use "
         "`aua --format tsv analyze --fields id,text,rid,clickable`. Integer ids belong "
-        "only to that observation frame. On dynamic screens, prefer `--rid <resource-id>` or an "
-        "element's `stable_key`; after any state change, use the action's returned observation or "
-        "`aua resolve <stable_key>` instead of replaying an old numeric id. A numeric id is fine "
-        "only while its frame is still current. Numeric taps and long-presses refuse to redirect "
+        "only to that frame; prefer `--rid <resource-id>` or `stable_key`. An unlabeled actionable "
+        "control may expose a `px:` perceptual crop fingerprint with rendering tolerance and a "
+        "legacy geometry fallback. After state changes, consume the returned observation or use "
+        "`aua resolve <stable_key>`; never replay an old numeric id. Numeric taps and long-presses "
+        "refuse to redirect "
         "a caption into a sibling control subtree; name the actual acting control instead. "
         "Inline `--answers` / `--phase-done` are bookkeeping: an invalid annotation is returned "
         "as `annotation_warnings` and never cancels the requested device action.",
@@ -979,21 +980,21 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "export PATH.gif|explain [--llm]|on|off|prune|sidecar start|stop` — always-on "
         "rolling screencap with the daemon (deduped frames + diff summary / GIF); see "
         "`meta.capture_hint` / action `capture_hint` after fast transitions; suite failures "
-        "attach `capture last --since last-action`. Sneak-peek a headless agent live: "
-        "`aua dashboard` (separate process — enables capture via daemon or sidecar, "
-        "opens http://127.0.0.1:8765 in a live device **grid** by default)",
+        "attach `capture last --since last-action`. Sneak-peek a headless agent live with "
+        "`aua dashboard start` (detached fixed-port device **grid**)",
     ),
     (
         "dashboard",
-        "`dashboard [--serial …] [--grid|--detail] [--port 8765] [--no-open] [--poll-ms 500]` — "
-        "localhost sneak-peek; defaults to a live device **grid** that opens with or without "
-        "a device attached, discovers later emulators and shows lease/idle-watchdog "
+        "`dashboard start|status|open|qr|stop|run`; `start [--lan] [--serial …] "
+        "[--grid|--detail] [--port 48765]` — detached exact-port grid; `--lan` prints a "
+        "token-authenticated phone URL (trusted private networks only); `dashboard qr` opens "
+        "a scannable copy. Opens with or without "
+        "a device, discovers later emulators and shows lease/idle-watchdog "
         "state (click a tile for journal/map); the detail view has a proxy panel — health, "
         "live exchanges, which rules are armed and which fired, and click-a-request-to-arm "
         "a stub or rewrite from what it just saw; "
         "the detail view browses debuggable app "
-        "databases, schema, bounded queries, restore points, and guarded writes; enables "
-        "capture; does not stop the agent (Ctrl-C closes the dashboard only)",
+        "databases, schema, bounded queries, restore points, and guarded writes; enables capture",
     ),
     (
         "dev",

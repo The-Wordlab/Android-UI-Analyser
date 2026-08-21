@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import socket
+import stat
 import threading
 import time
 import urllib.error
 import urllib.request
+from http.cookiejar import CookieJar
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -15,6 +18,188 @@ from typing import Any
 import pytest
 
 from android_ui_analyser.errors import DeviceError, UsageError
+
+
+def test_dashboard_service_uses_one_exact_dedicated_port(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from android_ui_analyser import dashboard as dash
+    from android_ui_analyser.config import Config
+
+    assert dash.DEFAULT_DASHBOARD_PORT == 48765
+    monkeypatch.setattr(dash, "list_online_serials", lambda *a, **k: [])
+    cfg = Config()
+    cfg.cache.dir = str(tmp_path)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as occupied:
+        occupied.bind(("127.0.0.1", 0))
+        occupied.listen()
+        port = int(occupied.getsockname()[1])
+        with pytest.raises(UsageError, match="could not bind"):
+            dash.run(
+                port=port,
+                open_browser=False,
+                block=False,
+                grid=True,
+                exact_port=True,
+                config=cfg,
+            )
+
+
+def test_dashboard_service_state_is_private(tmp_path: Path) -> None:
+    from android_ui_analyser import dashboard as dash
+
+    path = dash._write_service_state(tmp_path, {"access_token": "private-token"})
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert json.loads(path.read_text(encoding="utf-8"))["access_token"] == "private-token"
+
+
+def test_dashboard_access_qr_is_private_and_uses_the_authenticated_lan_url(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from android_ui_analyser import dashboard as dash
+    from android_ui_analyser.config import Config
+
+    cfg = Config()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.cache.dir = "~/.aua-test-cache"
+    access_url = "http://192.0.2.10:48765/?token=private-token"
+    monkeypatch.setattr(
+        dash,
+        "service_status",
+        lambda *a, **k: {
+            "ok": True,
+            "running": True,
+            "lan_access_urls": [access_url],
+        },
+    )
+
+    result = dash.create_access_qr(cfg)
+
+    path = Path(result["path"])
+    assert result["url"] == access_url
+    assert path.parent == tmp_path / ".aua-test-cache"
+    assert path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_dashboard_access_qr_requires_a_running_lan_dashboard(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from android_ui_analyser import dashboard as dash
+    from android_ui_analyser.config import Config
+
+    cfg = Config()
+    cfg.cache.dir = str(tmp_path)
+    monkeypatch.setattr(dash, "service_status", lambda *a, **k: {"running": False})
+    with pytest.raises(UsageError, match="dashboard is not running"):
+        dash.create_access_qr(cfg)
+
+    monkeypatch.setattr(
+        dash,
+        "service_status",
+        lambda *a, **k: {"running": True, "lan_access_urls": []},
+    )
+    with pytest.raises(UsageError, match="local-only"):
+        dash.create_access_qr(cfg)
+
+
+def test_dashboard_service_start_is_idempotent_but_network_scope_is_explicit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from android_ui_analyser import dashboard as dash
+    from android_ui_analyser.config import Config
+
+    cfg = Config()
+    cfg.cache.dir = str(tmp_path)
+    running = {
+        "ok": True,
+        "running": True,
+        "status": "running",
+        "lan": False,
+        "access_url": "http://127.0.0.1:48765/",
+    }
+    monkeypatch.setattr(dash, "service_status", lambda *a, **k: dict(running))
+    result = dash.start_service(cfg)
+    assert result["status"] == "already_running"
+    with pytest.raises(UsageError, match="different network scope"):
+        dash.start_service(cfg, lan=True)
+
+
+def test_dashboard_status_does_not_adopt_an_unrelated_port_owner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from android_ui_analyser import dashboard as dash
+    from android_ui_analyser.config import Config
+
+    cfg = Config()
+    cfg.cache.dir = str(tmp_path)
+    monkeypatch.setattr(dash, "_dashboard_health", lambda _port: None)
+    monkeypatch.setattr(dash, "_port_is_open", lambda _port: True)
+    result = dash.service_status(cfg, port=48765)
+    assert result["running"] is False
+    assert result["ok"] is False
+    assert result["status"] == "port_occupied"
+
+
+def test_dashboard_stop_requires_matching_private_ownership(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from android_ui_analyser import dashboard as dash
+    from android_ui_analyser.config import Config
+
+    cfg = Config()
+    cfg.cache.dir = str(tmp_path)
+    dash._write_service_state(tmp_path, {"pid": 111, "port": 48765})
+    monkeypatch.setattr(
+        dash,
+        "_dashboard_health",
+        lambda _port: {"service": "aua-dashboard-v1", "pid": 222},
+    )
+    with pytest.raises(UsageError, match="matching ownership"):
+        dash.stop_service(cfg)
+
+
+def test_dashboard_cli_exposes_background_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
+    from typer.testing import CliRunner
+
+    from android_ui_analyser import dashboard as dash
+    from android_ui_analyser.cli import app
+
+    monkeypatch.setattr(
+        dash,
+        "service_status",
+        lambda *a, **k: {
+            "ok": True,
+            "running": True,
+            "status": "running",
+            "port": 48765,
+        },
+    )
+    runner = CliRunner()
+    status = runner.invoke(app, ["dashboard", "status"])
+    assert status.exit_code == 0
+    assert json.loads(status.output)["port"] == 48765
+
+    help_result = runner.invoke(app, ["dashboard", "--help"])
+    assert help_result.exit_code == 0
+    for command in ("start", "status", "open", "qr", "stop", "run"):
+        assert command in help_result.output
+
+    qr_path = Path("/tmp/aua-dashboard-test-qr.png")
+    monkeypatch.setattr(
+        dash,
+        "create_access_qr",
+        lambda *a, **k: {
+            "ok": True,
+            "action": "dashboard-qr",
+            "port": 48765,
+            "url": "http://192.0.2.10:48765/?token=secret",
+            "path": str(qr_path),
+        },
+    )
+    qr = runner.invoke(app, ["dashboard", "qr", "--no-open"])
+    assert qr.exit_code == 0
+    assert json.loads(qr.output)["action"] == "dashboard-qr"
 
 
 def test_latest_frame_picks_newest(tmp_path: Path) -> None:
@@ -169,6 +354,7 @@ def test_ensure_capture_falls_back_to_sidecar(
 
     cfg = Config()
     cfg.cache.dir = str(tmp_path)
+    cfg.memory.dir = str(tmp_path)
     cfg.daemon.socket = str(tmp_path / "no-daemon.sock")
 
     import android_ui_analyser.capture_sidecar as cs
@@ -194,6 +380,7 @@ def _dashboard_state(tmp_path: Path):
 
     cfg = Config()
     cfg.cache.dir = str(tmp_path)
+    cfg.memory.dir = str(tmp_path)
     return dash._DashboardState(
         serials=["emulator-5554"],
         focus="emulator-5554",
@@ -309,8 +496,16 @@ def test_dashboard_device_health_ping_never_adopts_the_action_owner(
     assert owners == [None, "dashboard-owner"]
 
 
-def test_dashboard_never_retries_a_tap_with_an_unknown_daemon_outcome(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize(
+    ("cmd", "args"),
+    [
+        ("tap", {"element_id": 4}),
+        ("goto", {"goal": "Settings"}),
+        ("flow_run", {"name": "sign-in"}),
+    ],
+)
+def test_dashboard_never_retries_a_device_action_with_an_unknown_daemon_outcome(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cmd: str, args: dict[str, Any]
 ) -> None:
     from android_ui_analyser import daemon as daemon_mod
     from android_ui_analyser.errors import DaemonOutcomeUnknownError
@@ -318,23 +513,26 @@ def test_dashboard_never_retries_a_tap_with_an_unknown_daemon_outcome(
     state = _dashboard_state(tmp_path)
 
     def uncertain(*_args: Any, **_kwargs: Any) -> Any:
-        raise DaemonOutcomeUnknownError("the tap may have arrived")
+        raise DaemonOutcomeUnknownError("the action may have arrived")
 
     monkeypatch.setattr(state, "_daemon_call", uncertain)
     monkeypatch.setattr(
         daemon_mod,
         "start",
-        lambda *_args, **_kwargs: pytest.fail("an uncertain tap must never start and retry"),
+        lambda *_args, **_kwargs: pytest.fail("an uncertain action must never start and retry"),
     )
 
     with pytest.raises(DaemonOutcomeUnknownError, match="may have arrived"):
-        state._inspection_daemon_call("emulator-5554", "tap", element_id=4)
+        state._inspection_daemon_call("emulator-5554", cmd, **args)
 
 
 def test_dashboard_analyze_returns_one_exact_overlay_frame(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    from android_ui_analyser import dashboard as dash
+
     state = _dashboard_state(tmp_path)
+    monkeypatch.setattr(dash, "list_online_serials", lambda *a, **k: ["emulator-5554"])
     calls: list[tuple[str, str, dict[str, Any]]] = []
     analyzed = {
         "schema_version": 1,
@@ -372,7 +570,10 @@ def test_dashboard_analyze_returns_one_exact_overlay_frame(
 def test_dashboard_overlay_id_is_consumed_by_tap_and_analyze(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    from android_ui_analyser import dashboard as dash
+
     state = _dashboard_state(tmp_path)
+    monkeypatch.setattr(dash, "list_online_serials", lambda *a, **k: ["emulator-5554"])
     analyzed = {
         "screen": {"width": 100, "height": 200},
         "elements": [{"id": 4, "bounds": [10, 20, 80, 60], "clickable": True}],
@@ -524,6 +725,9 @@ def test_map_payload_contains_expandable_route_steps_and_all_app_flows(
             assert package == "com.example.notes"
             return app
 
+        def list_apps(self) -> list[str]:
+            return ["com.example.notes"]
+
     monkeypatch.setattr(flows_mod, "FlowStore", FakeFlowStore)
     monkeypatch.setattr(memory_mod, "AppMemoryStore", FakeAppMemoryStore)
     state = _dashboard_state(tmp_path)
@@ -537,6 +741,158 @@ def test_map_payload_contains_expandable_route_steps_and_all_app_flows(
     assert payload["flows"][0]["steps_detail"][0]["text"] == "<redacted>"
     assert payload["flows"][0]["steps_detail"][0]["data"]["token"] == "<redacted>"
     assert all("path" not in flow for flow in payload["flows"])
+
+
+def test_dashboard_navigation_actions_use_the_shared_daemon_engine_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state = _dashboard_state(tmp_path)
+    calls: list[tuple[str, str, dict[str, Any]]] = []
+
+    def fake_call(serial: str, cmd: str, **args: Any) -> dict[str, Any]:
+        calls.append((serial, cmd, args))
+        if cmd == "goto":
+            return {"ok": True, "arrived": True, "target": args["goal"]}
+        if cmd == "flow_run":
+            return {"ok": True, "steps_run": 2}
+        return {"ok": True, "deleted": True}
+
+    monkeypatch.setattr(state, "_inspection_daemon_call", fake_call)
+
+    goto = state.navigation_operation(
+        "goto", {"serial": "emulator-5554", "target": "Settings"}
+    )
+    assert goto["result"]["arrived"] is True
+
+    with pytest.raises(UsageError, match="confirm this navigation-library action"):
+        state.navigation_operation(
+            "flow-run", {"serial": "emulator-5554", "ref": "com.example:sign-in"}
+        )
+    flow = state.navigation_operation(
+        "flow-run",
+        {
+            "serial": "emulator-5554",
+            "ref": "com.example:sign-in",
+            "confirmation": "RUN FLOW com.example:sign-in",
+        },
+    )
+    deleted = state.navigation_operation(
+        "flow-delete",
+        {
+            "serial": "emulator-5554",
+            "ref": "com.example:sign-in",
+            "confirmation": "DELETE FLOW com.example:sign-in",
+        },
+    )
+
+    assert flow["result"]["steps_run"] == 2
+    assert deleted["result"]["deleted"] is True
+    assert calls == [
+        ("emulator-5554", "goto", {"timeout": 300.0, "goal": "Settings"}),
+        (
+            "emulator-5554",
+            "flow_run",
+            {"timeout": 300.0, "name": "com.example:sign-in"},
+        ),
+        (
+            "emulator-5554",
+            "flow_delete",
+            {"timeout": 30.0, "name": "com.example:sign-in"},
+        ),
+    ]
+
+
+def test_dashboard_can_clear_one_route_and_the_whole_navigation_library(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from android_ui_analyser.flows import FlowStore
+    from android_ui_analyser.memory import AppMap, AppMemoryStore, RouteEdge
+
+    state = _dashboard_state(tmp_path)
+    memory = AppMemoryStore(state.config.memory)
+    memory.save(
+        AppMap(
+            package="com.example.notes",
+            routes=[
+                RouteEdge(
+                    id="route-home-settings",
+                    from_screen="Home",
+                    to_screen="Settings",
+                    action="tap Settings",
+                    last_seen="2026-08-21T14:00:00Z",
+                )
+            ],
+        )
+    )
+    monkeypatch.setattr(
+        state,
+        "map_payload",
+        lambda _serial: {"package": "com.example.notes", "known": True},
+    )
+
+    route = state.navigation_operation(
+        "route-delete",
+        {
+            "serial": "emulator-5554",
+            "package": "com.example.notes",
+            "route_id": "route-home-settings",
+            "confirmation": "DELETE ROUTE route-home-settings",
+        },
+    )
+    assert route["deleted"] is True
+    assert memory.load("com.example.notes").routes == []  # type: ignore[union-attr]
+
+    memory.save(AppMap(package="com.example.second"))
+    flow_root = FlowStore(state.config.memory).flows_dir()
+    (flow_root / "com.example.notes").mkdir(parents=True)
+    (flow_root / "global.yaml").write_text("name: global\nsteps: []\n", encoding="utf-8")
+    (flow_root / "com.example.notes" / "open.yaml").write_text(
+        "name: open\napp: com.example.notes\nsteps: []\n", encoding="utf-8"
+    )
+
+    with pytest.raises(UsageError, match="CLEAR ALL NAVIGATION"):
+        state.navigation_operation("clear-all", {"serial": "emulator-5554"})
+    cleared = state.navigation_operation(
+        "clear-all",
+        {"serial": "emulator-5554", "confirmation": "CLEAR ALL NAVIGATION"},
+    )
+
+    assert cleared["maps_deleted"] == 2
+    assert cleared["flows_deleted"] == 2
+    assert memory.list_apps() == []
+    assert FlowStore(state.config.memory).files() == []
+
+
+def test_dashboard_clear_journal_removes_compact_details_and_rotations(tmp_path: Path) -> None:
+    from android_ui_analyser import journal
+
+    state = _dashboard_state(tmp_path)
+    roots = [
+        journal.journal_path(tmp_path, "emulator-5554"),
+        journal.journal_detail_path(tmp_path, "emulator-5554"),
+        journal.journal_path(tmp_path, None),
+        journal.journal_detail_path(tmp_path, None),
+    ]
+    for root in roots:
+        root.write_text("{}\n", encoding="utf-8")
+        root.with_suffix(root.suffix + ".1").write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(UsageError, match="CLEAR JOURNAL emulator-5554"):
+        state.journal_operation("clear", {"serial": "emulator-5554"})
+    result = state.journal_operation(
+        "clear",
+        {
+            "serial": "emulator-5554",
+            "confirmation": "CLEAR JOURNAL emulator-5554",
+        },
+    )
+
+    assert result["deleted"] == 8
+    assert not any(
+        path.exists()
+        for root in roots
+        for path in (root, root.with_suffix(root.suffix + ".1"))
+    )
 
 
 def test_dashboard_database_view_is_in_detail_html() -> None:
@@ -765,6 +1121,44 @@ def test_dashboard_database_http_requires_session_token(tmp_path: Path) -> None:
         thread.join(timeout=2)
 
 
+def test_dashboard_serves_the_authenticated_phone_qr(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from android_ui_analyser import dashboard as dash
+
+    state = _dashboard_state(tmp_path)
+    state.bind_host = "0.0.0.0"
+    state.require_auth = True
+    state.access_token = "private-access-token"
+    monkeypatch.setattr(dash, "_lan_addresses", lambda: ["192.0.2.10"])
+    encoded: list[str] = []
+
+    def fake_svg(value: str) -> bytes:
+        encoded.append(value)
+        return b"<svg>phone qr</svg>"
+
+    monkeypatch.setattr(dash, "_qr_svg", fake_svg)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), dash._make_handler(state))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    root_url = f"http://127.0.0.1:{server.server_port}/"
+    phone_url = f"http://192.0.2.10:{server.server_port}/?token=private-access-token"
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(CookieJar()))
+    try:
+        with opener.open(root_url + "?token=private-access-token", timeout=2) as response:
+            html = response.read().decode()
+        assert phone_url in html
+
+        with opener.open(root_url + "api/dashboard-access-qr.svg", timeout=2) as response:
+            assert response.headers["Content-Type"] == "image/svg+xml; charset=utf-8"
+            assert response.read() == b"<svg>phone qr</svg>"
+        assert encoded == [phone_url]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
 def test_dashboard_journal_detail_is_token_protected_and_serial_scoped(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -959,6 +1353,79 @@ def test_devices_payload_reports_an_empty_grid_and_its_discovery_error(
     assert "adb went away" in str(broken["discovery_error"])
 
 
+def test_grid_removes_detached_devices_and_does_not_resurrect_them_on_discovery_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from android_ui_analyser import dashboard as dash
+
+    state = _dashboard_state(tmp_path)
+    state.mode = "grid"
+    state.serials = ["emulator-5554", "emulator-5556"]
+    state._online_serials = {"emulator-5554", "emulator-5556"}
+    state.ensures = {
+        "emulator-5554": {"ok": True, "via": "daemon"},
+        "emulator-5556": {"ok": True, "via": "daemon"},
+    }
+    monkeypatch.setattr(dash, "list_online_serials", lambda *a, **k: ["emulator-5554"])
+    monkeypatch.setattr(
+        state,
+        "device_tile",
+        lambda serial: {"serial": serial},
+    )
+
+    payload = state.devices_payload()
+    assert payload["devices"] == [{"serial": "emulator-5554"}]
+    assert payload["detached_serials"] == ["emulator-5556"]
+    assert "emulator-5556" not in state.ensures
+
+    def boom(*_a: object, **_k: object) -> list[str]:
+        raise DeviceError("temporary discovery failure")
+
+    monkeypatch.setattr(dash, "list_online_serials", boom)
+    retry = state.devices_payload()
+    assert retry["devices"] == [{"serial": "emulator-5554"}]
+    assert "temporary discovery failure" in str(retry["discovery_error"])
+
+
+def test_detail_status_reports_detached_before_touching_stale_device_runtime(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from android_ui_analyser import dashboard as dash
+
+    state = _dashboard_state(tmp_path)
+    monkeypatch.setattr(dash, "list_online_serials", lambda *a, **k: [])
+    monkeypatch.setattr(
+        state,
+        "foreground_package",
+        lambda *_a, **_k: pytest.fail("detached status must not connect to the device"),
+    )
+    result = state.status("emulator-5554")
+    assert result == {
+        "ok": False,
+        "detached": True,
+        "serial": "emulator-5554",
+        "online_serials": [],
+        "error": "device 'emulator-5554' is no longer attached",
+    }
+
+
+def test_analyze_refuses_a_detached_device_before_calling_the_daemon(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from android_ui_analyser import dashboard as dash
+
+    state = _dashboard_state(tmp_path)
+    monkeypatch.setattr(dash, "list_online_serials", lambda *a, **k: [])
+    monkeypatch.setattr(
+        state,
+        "_inspection_daemon_call",
+        lambda *_a, **_k: pytest.fail("detached Analyze must not reach the daemon"),
+    )
+    with pytest.raises(UsageError) as raised:
+        state.inspection_operation("analyze", {"serial": "emulator-5554"})
+    assert raised.value.to_dict()["error"]["code"] == "dashboard_device_detached"
+
+
 def test_frame_token_tracks_the_frame_actually_served(tmp_path: Path) -> None:
     """The tile cache key must change exactly when the served bytes change."""
     from android_ui_analyser import dashboard as dash  # noqa: F401
@@ -1059,6 +1526,73 @@ def test_dashboard_serves_with_no_devices_attached(
         assert payload["devices"] == []
     finally:
         dash.shutdown(info)
+
+
+def test_lan_dashboard_requires_token_then_uses_an_http_only_cookie(tmp_path: Path) -> None:
+    from android_ui_analyser import dashboard as dash
+
+    state = _dashboard_state(tmp_path)
+    state.bind_host = "0.0.0.0"
+    state.require_auth = True
+    state.access_token = "phone-access-token"
+    server = ThreadingHTTPServer(("127.0.0.1", 0), dash._make_handler(state))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    root = f"http://127.0.0.1:{server.server_address[1]}/"
+    try:
+        with urllib.request.urlopen(root + "api/health", timeout=2) as response:
+            health = json.loads(response.read())
+        assert health["service"] == "aua-dashboard-v1"
+        assert health["authenticated"] is True
+
+        with pytest.raises(urllib.error.HTTPError) as unauthorized:
+            urllib.request.urlopen(root, timeout=2)
+        assert unauthorized.value.code == 401
+
+        jar = CookieJar()
+        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+        with opener.open(root + "?token=phone-access-token", timeout=2) as response:
+            assert response.status == 200
+            assert "token=" not in response.geturl()
+        cookie = next(iter(jar))
+        assert cookie.name == "AUA_DASHBOARD_ACCESS"
+        assert cookie.has_nonstandard_attr("HttpOnly")
+        with opener.open(root + "api/devices", timeout=2) as response:
+            assert json.loads(response.read())["ok"] is True
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_detached_detail_url_and_status_return_to_the_live_grid(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from android_ui_analyser import dashboard as dash
+
+    state = _dashboard_state(tmp_path)
+    state.mode = "grid"
+    state.serials = []
+    state._online_serials = set()
+    monkeypatch.setattr(dash, "list_online_serials", lambda *a, **k: [])
+    server = ThreadingHTTPServer(("127.0.0.1", 0), dash._make_handler(state))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    root = f"http://127.0.0.1:{server.server_address[1]}/"
+    try:
+        with urllib.request.urlopen(root + "?serial=emulator-5556", timeout=2) as response:
+            assert "detached=emulator-5556" in response.geturl()
+            assert response.status == 200
+        with urllib.request.urlopen(
+            root + "api/status?serial=emulator-5556", timeout=2
+        ) as response:
+            payload = json.loads(response.read())
+        assert payload["detached"] is True
+        assert payload["serial"] == "emulator-5556"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 # --------------------------------------------------------------------------

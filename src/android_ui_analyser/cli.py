@@ -6048,8 +6048,54 @@ def orient(ctx: typer.Context) -> None:
     _run(ctx, go)
 
 
-@app.command()
-def dashboard(
+dashboard_app = typer.Typer(
+    help="Persistent browser dashboard: start, status, open, QR, stop, or foreground run.",
+    invoke_without_command=True,
+    no_args_is_help=False,
+)
+app.add_typer(dashboard_app, name="dashboard")
+
+
+def _dashboard_start(
+    ctx: typer.Context,
+    *,
+    serial: str | None,
+    grid: bool,
+    port: int,
+    lan: bool,
+    open_browser: bool,
+    poll_ms: int,
+) -> None:
+    from . import dashboard as dash
+
+    opts = _opts(ctx)
+    cfg = opts.load()
+    if serial:
+        cfg.device.serial = serial
+    try:
+        result = dash.start_service(
+            cfg,
+            serial=serial,
+            port=port,
+            poll_ms=poll_ms,
+            grid=grid,
+            lan=lan,
+            explicit_config=opts.config,
+            profile=opts.profile,
+            platform=opts.platform,
+        )
+        if open_browser:
+            import webbrowser
+
+            result["opened"] = bool(webbrowser.open(str(result["access_url"])))
+        _echo_json(result, opts.fmt())
+    except AuaError as err:
+        emit_error(err)
+        raise typer.Exit(int(err.exit_code)) from err
+
+
+@dashboard_app.callback(invoke_without_command=True)
+def dashboard_cmd(
     ctx: typer.Context,
     serial: str | None = typer.Option(
         None, "--serial", help="Pin the detail view to one device serial."
@@ -6060,28 +6106,160 @@ def dashboard(
         help="Start with the live device grid (default); --detail focuses the first device.",
     ),
     port: int = typer.Option(
-        8765, "--port", help="Preferred localhost port (tries nearby if busy)."
+        48765, "--port", help="Dedicated exact dashboard port; never shifts if occupied."
+    ),
+    lan: bool = typer.Option(
+        False,
+        "--lan/--local",
+        help="Expose to this private network with token authentication (default: localhost only).",
+    ),
+    open_browser: bool = typer.Option(
+        True, "--open/--no-open", help="Open the detached dashboard in your default browser."
+    ),
+    poll_ms: int = typer.Option(500, "--poll-ms", help="Browser live-frame poll interval."),
+) -> None:
+    """Start the persistent dashboard (compatibility alias for ``dashboard start``)."""
+    if ctx.invoked_subcommand is not None:
+        return
+    _dashboard_start(
+        ctx,
+        serial=serial,
+        grid=grid,
+        port=port,
+        lan=lan,
+        open_browser=open_browser,
+        poll_ms=poll_ms,
+    )
+
+
+@dashboard_app.command("start")
+def dashboard_start_cmd(
+    ctx: typer.Context,
+    serial: str | None = typer.Option(None, "--serial", help="Pin detail to one device."),
+    grid: bool = typer.Option(True, "--grid/--detail", help="Grid or one-device detail view."),
+    port: int = typer.Option(48765, "--port", help="Dedicated exact dashboard port."),
+    lan: bool = typer.Option(
+        False, "--lan/--local", help="Allow authenticated access from your private network."
+    ),
+    open_browser: bool = typer.Option(
+        True, "--open/--no-open", help="Open the dashboard after ensuring it is running."
+    ),
+    poll_ms: int = typer.Option(500, "--poll-ms", help="Browser live-frame poll interval."),
+) -> None:
+    """Start once in the background; repeated calls reuse the same dashboard."""
+    _dashboard_start(
+        ctx,
+        serial=serial,
+        grid=grid,
+        port=port,
+        lan=lan,
+        open_browser=open_browser,
+        poll_ms=poll_ms,
+    )
+
+
+@dashboard_app.command("status")
+def dashboard_status_cmd(
+    ctx: typer.Context,
+    port: int = typer.Option(48765, "--port", help="Dedicated dashboard port."),
+) -> None:
+    """Show process, network scope, and authenticated phone URLs."""
+    from . import dashboard as dash
+
+    opts = _opts(ctx)
+    _echo_json(dash.service_status(opts.load(), port=port), opts.fmt())
+
+
+@dashboard_app.command("open")
+def dashboard_open_cmd(
+    ctx: typer.Context,
+    port: int = typer.Option(48765, "--port", help="Dedicated dashboard port."),
+) -> None:
+    """Open the already-running dashboard in the default browser."""
+    from . import dashboard as dash
+
+    opts = _opts(ctx)
+    try:
+        _echo_json(dash.open_service(opts.load(), port=port), opts.fmt())
+    except AuaError as err:
+        emit_error(err)
+        raise typer.Exit(int(err.exit_code)) from err
+
+
+@dashboard_app.command("qr")
+def dashboard_qr_cmd(
+    ctx: typer.Context,
+    port: int = typer.Option(48765, "--port", help="Dedicated dashboard port."),
+    output: Path | None = typer.Option(
+        None,
+        "--output",
+        "-o",
+        dir_okay=False,
+        help="PNG destination (default: the private AUA cache).",
+    ),
+    open_image: bool = typer.Option(
+        True,
+        "--open/--no-open",
+        help="Open the generated QR image after writing it.",
+    ),
+) -> None:
+    """Generate the authenticated phone-access QR for a running LAN dashboard."""
+    import webbrowser
+
+    from . import dashboard as dash
+
+    opts = _opts(ctx)
+    try:
+        result = dash.create_access_qr(opts.load(), port=port, output=output)
+        if open_image:
+            result["opened"] = bool(webbrowser.open(Path(result["path"]).as_uri()))
+        _echo_json(result, opts.fmt())
+    except AuaError as err:
+        emit_error(err)
+        raise typer.Exit(int(err.exit_code)) from err
+
+
+@dashboard_app.command("stop")
+def dashboard_stop_cmd(
+    ctx: typer.Context,
+    port: int = typer.Option(48765, "--port", help="Dedicated dashboard port."),
+) -> None:
+    """Stop the owned background dashboard without touching another port owner."""
+    from . import dashboard as dash
+
+    opts = _opts(ctx)
+    try:
+        _echo_json(dash.stop_service(opts.load(), port=port), opts.fmt())
+    except AuaError as err:
+        emit_error(err)
+        raise typer.Exit(int(err.exit_code)) from err
+
+
+@dashboard_app.command("run")
+def dashboard_run_cmd(
+    ctx: typer.Context,
+    serial: str | None = typer.Option(None, "--serial", help="Pin detail to one device."),
+    grid: bool = typer.Option(True, "--grid/--detail", help="Grid or one-device detail view."),
+    port: int = typer.Option(48765, "--port", help="Exact foreground dashboard port."),
+    lan: bool = typer.Option(
+        False, "--lan/--local", help="Allow authenticated access from your private network."
     ),
     open_browser: bool = typer.Option(
         True, "--open/--no-open", help="Open the page in your default browser."
     ),
-    poll_ms: int = typer.Option(
-        500, "--poll-ms", help="Browser refresh interval for the live frame."
-    ),
+    poll_ms: int = typer.Option(500, "--poll-ms", help="Browser live-frame poll interval."),
 ) -> None:
-    """Sneak-peek a headless agent run in the browser (separate process).
+    """Run in the foreground for debugging; Ctrl-C stops it."""
+    import secrets
 
-    Enables capture if needed (warm daemon buffer, or host sidecar), then serves a
-    localhost page with live frames + recent action marks. It opens a **grid** of
-    screens by default and discovers emulators started later; click a tile for its
-    journal/map. Does not stop the agent. Ctrl-C exits the dashboard only.
-    """
     from . import dashboard as dash
 
     opts = _opts(ctx)
     cfg = opts.load()
-    if serial:
-        cfg.device.serial = serial
+    token = secrets.token_urlsafe(32) if lan else None
+    if lan:
+        urls = dash._service_urls(port=port, lan=True, access_token=token)
+        _echo_json({"ok": True, "action": "dashboard-run", **urls}, opts.fmt())
     try:
         dash.run(
             serial=serial,
@@ -6091,6 +6269,10 @@ def dashboard(
             poll_ms=poll_ms,
             grid=grid,
             block=True,
+            bind_host="0.0.0.0" if lan else "127.0.0.1",
+            exact_port=True,
+            require_auth=lan,
+            access_token=token,
         )
     except AuaError as err:
         emit_error(err)
