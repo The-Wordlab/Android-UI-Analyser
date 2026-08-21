@@ -1547,7 +1547,7 @@ def test_dashboard_serves_with_no_devices_attached(
         dash.shutdown(info)
 
 
-def test_lan_dashboard_requires_token_then_uses_an_http_only_cookie(tmp_path: Path) -> None:
+def test_lan_dashboard_serves_token_entry_then_uses_an_http_only_cookie(tmp_path: Path) -> None:
     from android_ui_analyser import dashboard as dash
 
     state = _dashboard_state(tmp_path)
@@ -1572,7 +1572,10 @@ def test_lan_dashboard_requires_token_then_uses_an_http_only_cookie(tmp_path: Pa
         opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
         with opener.open(root + "?token=phone-access-token", timeout=2) as response:
             assert response.status == 200
-            assert "token=" not in response.geturl()
+            assert "token=phone-access-token" in response.geturl()
+            html = response.read().decode()
+        assert "cleanAccessUrl.searchParams.delete('token')" in html
+        assert "window.history.replaceState" in html
         cookie = next(iter(jar))
         assert cookie.name == "AUA_DASHBOARD_ACCESS"
         assert cookie.has_nonstandard_attr("HttpOnly")

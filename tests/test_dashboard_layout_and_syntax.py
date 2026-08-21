@@ -221,6 +221,22 @@ def test_phone_layout_prioritizes_the_live_screen_and_touch_controls() -> None:
     assert "@media (max-height: 520px) and (orientation: landscape)" in html
 
 
+def test_phone_layout_stacks_dense_workspaces_without_page_overflow() -> None:
+    html = _page()
+    mobile = html.split("@media (max-width: 700px) {", 1)[1].split(
+        "@media (max-height: 520px)", 1
+    )[0]
+    assert "html, body { max-width: 100%; overflow-x: clip; }" in mobile
+    assert ".lower.summary-row { grid-template-columns: minmax(0, 1fr); }" in mobile
+    assert ".db-toolbar { display: grid; grid-template-columns: minmax(0, 1fr);" in mobile
+    assert ".model-head { align-items: stretch; flex-direction: column; }" in mobile
+    assert ".model-compose-row {" in mobile
+    assert "grid-template-columns: minmax(0, 1fr) minmax(6.5rem, 0.42fr);" in mobile
+    assert ".model-compose-row .db-button { grid-column: 1 / -1; width: 100%; }" in mobile
+    assert ".flow-table th:nth-child(1), .flow-table td:nth-child(1)," in mobile
+    assert ".flow-table .upath { overflow: hidden; text-overflow: ellipsis;" in mobile
+
+
 def test_lan_dashboard_has_a_phone_qr_dialog() -> None:
     html = _page()
     for element_id in (
@@ -234,6 +250,7 @@ def test_lan_dashboard_has_a_phone_qr_dialog() -> None:
         assert f'id="{element_id}"' in html
     assert "const PHONE_ACCESS_URL =" in html
     assert "'/api/dashboard-access-qr.svg'" in html
+    assert "if (!phoneQrImage.getAttribute('src'))" in html
     assert "phoneQrDialog.showModal()" in html
 
 

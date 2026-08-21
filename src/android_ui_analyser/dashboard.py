@@ -924,7 +924,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .phone-qr-head h2 { margin: 0; font-size: 0.95rem; }
   .phone-qr-head p { margin: 0.28rem 0 0; color: var(--muted); font-size: 0.68rem; line-height: 1.45; }
   .phone-qr-close { color: var(--muted); background: transparent; border: 0; cursor: pointer; font-size: 1.25rem; }
-  .phone-qr-image { display: block; width: min(78vw, 290px); margin: 1rem auto 0.75rem; padding: 0.55rem; background: #fff; border-radius: 13px; }
+  .phone-qr-image { display: block; width: min(78vw, 290px); aspect-ratio: 1; object-fit: contain; margin: 1rem auto 0.75rem; padding: 0.55rem; background: #fff; border-radius: 13px; }
   .phone-qr-url { display: block; margin: 0 1rem; padding: 0.62rem; overflow-wrap: anywhere; color: var(--accent); background: rgba(3,6,14,0.72); border: 1px solid var(--border); border-radius: 9px; font: 0.58rem/1.45 ui-monospace, monospace; }
   .phone-qr-actions { display: flex; justify-content: flex-end; gap: 0.5rem; padding: 0.8rem 1rem 1rem; }
   header a.back {
@@ -1632,6 +1632,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .flow-table th { background: rgba(30,36,61,0.9); }
   footer { padding: 0.7rem clamp(1rem, 3vw, 2.4rem) 1.5rem; text-align: center; color: var(--faint); }
   @media (max-width: 700px) {
+    html, body { max-width: 100%; overflow-x: clip; }
     body { padding-bottom: env(safe-area-inset-bottom); }
     header {
       padding: calc(0.58rem + env(safe-area-inset-top)) 0.7rem 0.58rem;
@@ -1655,7 +1656,10 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     .detail-status:nth-child(1), .detail-status:nth-child(3) { display: flex; }
     .detail-status:nth-child(3) { border-left: 1px solid var(--border); }
     .layout { gap: 0.6rem; padding: 0.55rem 0.5rem 0.7rem; }
-    .lower { padding-left: 0.5rem; padding-right: 0.5rem; }
+    .lower, .knowledge-workspace, .proxy-workspace, .database-workspace, .model-workspace {
+      padding-left: 0.5rem; padding-right: 0.5rem;
+    }
+    .lower.summary-row { grid-template-columns: minmax(0, 1fr); }
     .panel { border-radius: 13px; padding: 0.78rem; }
     .stage { padding: 0.62rem; }
     .stage-heading { margin-bottom: 0.52rem; }
@@ -1679,12 +1683,45 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     .journal-tools { padding: 0.7rem; }
     .journal-actions, .journal-button-group { width: 100%; }
     .journal-actions { justify-content: space-between; }
+    .journal-button-group { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
     #journal details > summary { gap: 0.38rem; padding: 0.72rem 0.58rem; }
     #journal .exchange { padding: 0.5rem; }
     .scroll { max-height: 72svh; }
     .knowledge-head, .knowledge-column-head { align-items: flex-start; flex-direction: column; }
+    .knowledge-head-actions, .knowledge-column-controls { width: 100%; justify-content: flex-start; }
     .knowledge-package { max-width: 100%; }
+    .knowledge-item > summary { align-items: flex-start; }
+    .knowledge-badges { max-width: 48%; }
+    .logcat-tools .logcat-app-filter { flex-basis: 100%; min-width: 0; }
+    .flow-table { table-layout: fixed; }
+    .flow-table th:nth-child(1), .flow-table td:nth-child(1),
+    .flow-table th:nth-child(5), .flow-table td:nth-child(5) { display: none; }
+    .flow-table th:nth-child(2), .flow-table td:nth-child(2) { width: 4.4rem; }
+    .flow-table th:nth-child(4), .flow-table td:nth-child(4) { width: 3.8rem; }
+    .flow-table .upath { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .proxy-form .db-field.grow { flex-basis: 100%; width: 100%; }
+    .db-toolbar { display: grid; grid-template-columns: minmax(0, 1fr); align-items: stretch; }
+    .db-toolbar > *, .db-toolbar .db-select { width: 100%; min-width: 0; }
+    .db-actions .db-button { flex: 1 1 10rem; }
+    .db-table-wrap { max-width: 100%; overscroll-behavior-inline: contain; }
+    table.db-results { min-width: 34rem; }
+    .model-head { align-items: stretch; flex-direction: column; }
+    .model-master { width: 100%; justify-content: space-between; }
+    .model-master-copy { text-align: left; }
+    .model-section-head { align-items: flex-start; flex-direction: column; }
     .model-sample-row, .model-trace-body { grid-template-columns: minmax(0, 1fr); }
+    .model-compose-row {
+      display: grid; grid-template-columns: minmax(0, 1fr) minmax(6.5rem, 0.42fr);
+      align-items: end;
+    }
+    .model-compose-row .db-field,
+    .model-compose-row .db-select,
+    .model-compose-row .db-input { width: 100%; min-width: 0; }
+    .model-compose-row .db-button { grid-column: 1 / -1; width: 100%; }
+    .model-trace > summary { grid-template-columns: auto minmax(0, 1fr); }
+    .model-trace-metrics {
+      grid-column: 2; justify-self: start; max-width: 100%; white-space: normal;
+    }
     .model-chat { height: 52svh; }
     .logcat-scroll { height: 62svh; }
   }
@@ -1697,6 +1734,15 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 </style>
 </head>
 <body>
+<script nonce="__DATABASE_TOKEN__">
+// Some mobile browsers do not persist a cookie set on an HTTP redirect from a QR URL.
+// The token-bearing request is therefore served directly, then scrubbed from browser history.
+if (new URLSearchParams(window.location.search).has('token')) {
+  const cleanAccessUrl = new URL(window.location.href);
+  cleanAccessUrl.searchParams.delete('token');
+  window.history.replaceState(null, '', cleanAccessUrl.pathname + cleanAccessUrl.search + cleanAccessUrl.hash);
+}
+</script>
 <header>
   <div class="header-brand">
     <a id="back" class="back hidden" href="/">← <span>All devices</span></a>
@@ -4821,15 +4867,19 @@ inspectionClickableOnly.addEventListener('change', () => {
 const phoneQrButton = document.getElementById('phone-qr-button');
 const phoneQrDialog = document.getElementById('phone-qr-dialog');
 const phoneQrCopy = document.getElementById('phone-qr-copy');
+const phoneQrImage = document.getElementById('phone-qr-image');
 document.getElementById('phone-qr-close').addEventListener('click', () => phoneQrDialog.close());
 phoneQrDialog.addEventListener('click', event => {
   if (event.target === phoneQrDialog) phoneQrDialog.close();
 });
 if (PHONE_ACCESS_URL) {
   document.getElementById('phone-qr-url').textContent = PHONE_ACCESS_URL;
-  document.getElementById('phone-qr-image').src = '/api/dashboard-access-qr.svg';
   phoneQrButton.classList.remove('hidden');
-  phoneQrButton.addEventListener('click', () => phoneQrDialog.showModal());
+  phoneQrButton.addEventListener('click', () => {
+    // Load only after the token-entry navigation has finished committing its cookie.
+    if (!phoneQrImage.getAttribute('src')) phoneQrImage.src = '/api/dashboard-access-qr.svg';
+    phoneQrDialog.showModal();
+  });
   phoneQrCopy.addEventListener('click', async () => {
     const copied = await copyText(PHONE_ACCESS_URL);
     phoneQrCopy.textContent = copied ? 'Copied' : 'Copy failed';
@@ -6177,6 +6227,13 @@ def _make_handler(state: _DashboardState) -> type[BaseHTTPRequestHandler]:
             self.send_response(code)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
+            if getattr(self, "_issue_access_cookie", False):
+                self.send_header(
+                    "Set-Cookie",
+                    f"{_ACCESS_COOKIE}={state.access_token}; Path=/; HttpOnly; "
+                    "SameSite=Strict; Max-Age=2592000",
+                )
+                self._issue_access_cookie = False
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("X-Frame-Options", "DENY")
@@ -6227,20 +6284,11 @@ def _make_handler(state: _DashboardState) -> type[BaseHTTPRequestHandler]:
                 return True
             supplied = (qs.get("token") or [""])[0]
             if supplied and secrets.compare_digest(supplied, state.access_token):
-                clean_qs = {key: value for key, value in qs.items() if key != "token"}
-                location = parsed.path or "/"
-                if clean_qs:
-                    location += "?" + urlencode(clean_qs, doseq=True)
-                self.send_response(303)
-                self.send_header("Location", location)
-                self.send_header(
-                    "Set-Cookie",
-                    f"{_ACCESS_COOKIE}={state.access_token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000",
-                )
-                self.send_header("Cache-Control", "no-store")
-                self.send_header("Referrer-Policy", "no-referrer")
-                self.end_headers()
-                return False
+                # Serve the token-bearing request itself and let the page remove the token
+                # with history.replaceState. Android Chrome can discard Set-Cookie when the
+                # QR entry response is a 303, leaving the redirected page unauthorized.
+                self._issue_access_cookie = True
+                return True
             if parsed.path.startswith("/api/"):
                 self._json(
                     {
