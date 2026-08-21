@@ -7,6 +7,8 @@ arguments. It loads only an existing absolute MLX model directory and never down
 
 from __future__ import annotations
 
+import contextlib
+import gc
 import hashlib
 import importlib.util
 import json
@@ -14,10 +16,13 @@ import platform
 import re
 import sys
 import threading
+import time
+import uuid
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from ...model_control import model_context_window
 from ...policy import POLICY_HANDOFF_ID, PolicyContext, compile_policy_context, guard_candidates
 from ..base import Availability, PolicyProvider
 from ..registry import register_policy
@@ -157,6 +162,7 @@ class Gemma4PolicySelector(PolicyProvider):
             "available": available.ok,
             "reason": available.reason,
             "loaded": self._model is not None,
+            "context_window": model_context_window(self.settings),
             "supported_candidate_counts": [2, 3, 4],
             "supports_handoff": True,
             # Reported apart from `available` so a caller can tell "the runtime is not installed
@@ -200,6 +206,129 @@ class Gemma4PolicySelector(PolicyProvider):
             self._model, self._processor = loaded[:2]
         return self._model, self._processor
 
+    def load_model(self) -> dict[str, Any]:
+        operation_id = uuid.uuid4().hex
+        started = time.perf_counter()
+        self.emit_model_event({"id": operation_id, "source": "dashboard", "phase": "loading"})
+        try:
+            self._ensure_loaded()
+        except Exception as exc:
+            self.emit_model_event(
+                {
+                    "id": operation_id,
+                    "source": "dashboard",
+                    "phase": "error",
+                    "operation": "load",
+                    "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+            raise
+        duration = round((time.perf_counter() - started) * 1000, 1)
+        self.emit_model_event(
+            {
+                "id": operation_id,
+                "source": "dashboard",
+                "phase": "complete",
+                "operation": "load",
+                "duration_ms": duration,
+            }
+        )
+        return {"ok": True, "provider": self.name, "loaded": True, "duration_ms": duration}
+
+    def unload_model(self) -> dict[str, Any]:
+        with self._load_lock:
+            self._model = None
+            self._processor = None
+        gc.collect()
+        with contextlib.suppress(Exception):
+            import mlx.core as mx
+
+            mx.clear_cache()
+        self.emit_model_event({"source": "dashboard", "phase": "complete", "operation": "unload"})
+        return {"ok": True, "provider": self.name, "loaded": False}
+
+    @staticmethod
+    def _token_count(processor: Any, text: str) -> int | None:
+        tokenizer = getattr(processor, "tokenizer", processor)
+        encode = getattr(tokenizer, "encode", None)
+        if not callable(encode):
+            return None
+        try:
+            return len(encode(text))
+        except Exception:
+            return None
+
+    def interact(
+        self, messages: list[dict[str, str]], *, max_tokens: int | None = None
+    ) -> dict[str, Any]:
+        operation_id = uuid.uuid4().hex
+        budget = max(1, min(int(max_tokens or self._max_tokens()), 1024))
+        started = time.perf_counter()
+        self.emit_model_event(
+            {
+                "id": operation_id,
+                "source": "playground",
+                "phase": "running",
+                "input": messages,
+                "max_tokens": budget,
+                "context_window": model_context_window(self.settings),
+            }
+        )
+        try:
+            model, processor = self._ensure_loaded()
+            prompt = processor.apply_chat_template(
+                messages,
+                add_generation_prompt=True,
+                tokenize=False,
+                enable_thinking=True,
+            )
+            generator = self._generator
+            if generator is None:
+                raise RuntimeError("Gemma 4 generator is unavailable")
+            seed = int.from_bytes(hashlib.sha256(prompt.encode()).digest()[:4], "big")
+            with self._generation_lock:
+                generated = generator(
+                    model,
+                    processor,
+                    prompt,
+                    max_tokens=budget,
+                    temperature=1.0,
+                    top_p=0.95,
+                    top_k=64,
+                    enable_thinking=True,
+                    verbose=False,
+                    seed=seed,
+                )
+            output = str(getattr(generated, "text", generated))
+            output_tokens = getattr(generated, "generation_tokens", None)
+            input_tokens = self._token_count(processor, prompt)
+        except Exception as exc:
+            self.emit_model_event(
+                {
+                    "id": operation_id,
+                    "source": "playground",
+                    "phase": "error",
+                    "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+            raise
+        result = {
+            "ok": True,
+            "provider": self.name,
+            "output": output,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "max_tokens": budget,
+            "context_window": model_context_window(self.settings),
+            "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+        }
+        self.emit_model_event(
+            {"id": operation_id, "source": "playground", "phase": "complete", **result}
+        )
+        return result
+
     @staticmethod
     def _review_state(context: PolicyContext) -> dict[str, Any]:
         compiled = compile_policy_context(context)
@@ -224,6 +353,10 @@ class Gemma4PolicySelector(PolicyProvider):
         }
 
     def select(self, context: PolicyContext) -> int | None:
+        operation_id = uuid.uuid4().hex
+        started = time.perf_counter()
+        messages: list[dict[str, str]] | None = None
+        output: str | None = None
         try:
             guarded = guard_candidates(
                 context,
@@ -252,6 +385,17 @@ class Gemma4PolicySelector(PolicyProvider):
                 add_generation_prompt=True,
                 tokenize=False,
                 enable_thinking=True,
+            )
+            self.emit_model_event(
+                {
+                    "id": operation_id,
+                    "source": "agent",
+                    "phase": "running",
+                    "input": messages,
+                    "input_tokens": self._token_count(processor, prompt),
+                    "max_tokens": self._max_tokens(),
+                    "context_window": model_context_window(self.settings),
+                }
             )
             seed = int.from_bytes(hashlib.sha256(prompt.encode()).digest()[:4], "big")
             generator = self._generator
@@ -289,6 +433,18 @@ class Gemma4PolicySelector(PolicyProvider):
                     "verdict_markers": output.count(_FINAL_MARKER),
                 }
                 self.last_error = f"{type(exc).__name__}: {exc}"
+                self.emit_model_event(
+                    {
+                        "id": operation_id,
+                        "source": "agent",
+                        "phase": "error",
+                        "input": messages,
+                        "output": output,
+                        "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+                        "error": self.last_error,
+                        **self.last_selection,
+                    }
+                )
                 return None
             offered = {candidate.candidate_id for candidate in guarded}
             if selected_id != POLICY_HANDOFF_ID and selected_id not in offered:
@@ -299,8 +455,34 @@ class Gemma4PolicySelector(PolicyProvider):
                 "generation_tokens": generated,
             }
             self.last_error = None
+            self.emit_model_event(
+                {
+                    "id": operation_id,
+                    "source": "agent",
+                    "phase": "complete",
+                    "input": messages,
+                    "output": output,
+                    "input_tokens": self._token_count(processor, prompt),
+                    "output_tokens": generated,
+                    "max_tokens": self._max_tokens(),
+                    "context_window": model_context_window(self.settings),
+                    "selected_id": selected_id,
+                    "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+                }
+            )
             return selected_id
         except Exception as exc:
             self.last_error = f"{type(exc).__name__}: {exc}"
             self.last_selection = {"parsed": False, "error": type(exc).__name__}
+            self.emit_model_event(
+                {
+                    "id": operation_id,
+                    "source": "agent",
+                    "phase": "error",
+                    "input": messages,
+                    "output": output,
+                    "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+                    "error": self.last_error,
+                }
+            )
             return None

@@ -175,9 +175,7 @@ def runtime_config_fingerprint(config: Config) -> str:
     payload = json.dumps(
         {
             "cache_dir": str(Path(config.cache.dir).expanduser().resolve()),
-            "lease_registry_dir": str(
-                Path(config.lease.registry_dir).expanduser().resolve()
-            ),
+            "lease_registry_dir": str(Path(config.lease.registry_dir).expanduser().resolve()),
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -414,6 +412,10 @@ _LEASE_FREE_COMMANDS = frozenset(
         "job_wait",
         "list_devices",
         "memory_update",
+        "model_action",
+        "model_agent_test",
+        "model_chat",
+        "model_status",
         "ping",
         "session_candidate_flow",
         "session_progress",
@@ -479,6 +481,15 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
                     "runtime_fingerprint": runtime_config_fingerprint(engine.config),
                 }
             )
+
+        if cmd == "model_status":
+            return _result_ok(engine.model_control_status(**args))
+        if cmd == "model_action":
+            return _result_ok(engine.model_control_action(**args))
+        if cmd == "model_agent_test":
+            return _result_ok(engine.model_control_agent_test(**args))
+        if cmd == "model_chat":
+            return _result_ok(engine.model_control_chat(**args))
 
         from .jobs import manager_for, reject_if_active
 
@@ -1155,9 +1166,7 @@ def _journal_dispatch(
         extra=extra or None,
         owner=request.get("owner") or getattr(engine, "_lease_owner_resolved", None),
         privacy_cmd=(
-            str(request["journal_privacy_cmd"])
-            if request.get("journal_privacy_cmd")
-            else None
+            str(request["journal_privacy_cmd"]) if request.get("journal_privacy_cmd") else None
         ),
     )
 

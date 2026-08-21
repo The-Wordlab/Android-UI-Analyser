@@ -296,6 +296,31 @@ class PolicyProvider(Provider):
 
     kind: ClassVar[str] = "policy"
 
+    def __init__(self, settings: Mapping[str, Any] | None = None) -> None:
+        super().__init__(settings)
+        self._model_monitor: Any = None
+
+    def set_model_monitor(self, monitor: Any) -> None:
+        """Attach the daemon-local observer used by the dashboard model workspace."""
+
+        self._model_monitor = monitor
+
+    def emit_model_event(self, event: Mapping[str, Any]) -> None:
+        monitor = self._model_monitor
+        if callable(monitor):
+            monitor({"provider": self.name, **dict(event)})
+
+    def load_model(self) -> dict[str, Any]:
+        raise NotImplementedError(f"{self.name} does not expose model loading")
+
+    def unload_model(self) -> dict[str, Any]:
+        raise NotImplementedError(f"{self.name} does not expose model unloading")
+
+    def interact(
+        self, messages: list[dict[str, str]], *, max_tokens: int | None = None
+    ) -> dict[str, Any]:
+        raise NotImplementedError(f"{self.name} does not expose direct interaction")
+
     def supports_candidate_count(self, count: int) -> bool:
         """Whether this provider accepts the guarded candidate cardinality."""
 

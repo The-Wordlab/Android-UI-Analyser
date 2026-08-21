@@ -10,16 +10,21 @@ policy core.
 
 from __future__ import annotations
 
+import contextlib
+import gc
 import hashlib
 import importlib.util
 import json
 import platform
 import re
 import sys
+import time
+import uuid
 from collections.abc import Callable, Mapping
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from ...model_control import model_context_window
 from ...policy import (
     POLICY_HANDOFF_ID,
     PolicyContext,
@@ -789,6 +794,7 @@ class FunctionGemmaPolicySelector(PolicyProvider):
             "available": available,
             "reason": reason,
             "loaded": self._model is not None,
+            "context_window": model_context_window(self.settings),
             "supported_candidate_counts": list(self._supported_candidate_counts()),
             "supports_handoff": self.supports_handoff(),
             "rollout": rollout,
@@ -842,6 +848,122 @@ class FunctionGemmaPolicySelector(PolicyProvider):
         self._sampler = self._sampler_factory(temp=0.0)
         return self._model, self._tokenizer
 
+    def load_model(self) -> dict[str, Any]:
+        operation_id = uuid.uuid4().hex
+        started = time.perf_counter()
+        self.emit_model_event({"id": operation_id, "source": "dashboard", "phase": "loading"})
+        try:
+            self._ensure_loaded()
+        except Exception as exc:
+            self.emit_model_event(
+                {
+                    "id": operation_id,
+                    "source": "dashboard",
+                    "phase": "error",
+                    "operation": "load",
+                    "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+            raise
+        duration = round((time.perf_counter() - started) * 1000, 1)
+        self.emit_model_event(
+            {
+                "id": operation_id,
+                "source": "dashboard",
+                "phase": "complete",
+                "operation": "load",
+                "duration_ms": duration,
+            }
+        )
+        return {"ok": True, "provider": self.name, "loaded": True, "duration_ms": duration}
+
+    def unload_model(self) -> dict[str, Any]:
+        self._model = None
+        self._tokenizer = None
+        self._sampler = None
+        gc.collect()
+        with contextlib.suppress(Exception):
+            import mlx.core as mx
+
+            mx.clear_cache()
+        self.emit_model_event({"source": "dashboard", "phase": "complete", "operation": "unload"})
+        return {"ok": True, "provider": self.name, "loaded": False}
+
+    @staticmethod
+    def _token_count(tokenizer: Any, text: str) -> int | None:
+        encode = getattr(tokenizer, "encode", None)
+        if not callable(encode):
+            return None
+        try:
+            return len(encode(text))
+        except Exception:
+            return None
+
+    def interact(
+        self, messages: list[dict[str, str]], *, max_tokens: int | None = None
+    ) -> dict[str, Any]:
+        operation_id = uuid.uuid4().hex
+        budget = max(1, min(int(max_tokens or self._max_tokens()), 256))
+        started = time.perf_counter()
+        self.emit_model_event(
+            {
+                "id": operation_id,
+                "source": "playground",
+                "phase": "running",
+                "input": messages,
+                "max_tokens": budget,
+                "context_window": model_context_window(self.settings),
+            }
+        )
+        try:
+            model, tokenizer = self._ensure_loaded()
+            prompt = tokenizer.apply_chat_template(
+                messages,
+                add_generation_prompt=True,
+                tokenize=True,
+                return_dict=False,
+            )
+            if self._generator is None:
+                raise RuntimeError("FunctionGemma generator is unavailable")
+            output = str(
+                self._generator(
+                    model,
+                    tokenizer,
+                    prompt,
+                    max_tokens=budget,
+                    sampler=self._sampler,
+                    verbose=False,
+                )
+            )
+            output_tokens = self._token_count(tokenizer, output)
+            input_tokens = len(prompt)
+        except Exception as exc:
+            self.emit_model_event(
+                {
+                    "id": operation_id,
+                    "source": "playground",
+                    "phase": "error",
+                    "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+            raise
+        result = {
+            "ok": True,
+            "provider": self.name,
+            "output": output,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "max_tokens": budget,
+            "context_window": model_context_window(self.settings),
+            "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+        }
+        self.emit_model_event(
+            {"id": operation_id, "source": "playground", "phase": "complete", **result}
+        )
+        return result
+
     def select(self, context: PolicyContext) -> int | None:
         """Select one offered ID without exposing, rewriting, or executing its call."""
 
@@ -868,15 +990,32 @@ class FunctionGemmaPolicySelector(PolicyProvider):
             )
             return None
 
+        operation_id = uuid.uuid4().hex
+        started = time.perf_counter()
+        model_input: Any = None
+        output: Any = None
         try:
             model, tokenizer = self._ensure_loaded()
             tools = policy_tools(allow_handoff=context.allow_handoff)
+            model_input = policy_messages(context, guarded)
             prompt = tokenizer.apply_chat_template(
-                policy_messages(context, guarded),
+                model_input,
                 tools=tools,
                 add_generation_prompt=True,
                 tokenize=True,
                 return_dict=False,
+            )
+            self.emit_model_event(
+                {
+                    "id": operation_id,
+                    "source": "agent",
+                    "phase": "running",
+                    "input": model_input,
+                    "tools": tools,
+                    "input_tokens": len(prompt),
+                    "max_tokens": max_tokens,
+                    "context_window": model_context_window(self.settings),
+                }
             )
             assert self._generator is not None
             output = self._generator(
@@ -895,6 +1034,32 @@ class FunctionGemmaPolicySelector(PolicyProvider):
                 raise SelectionProtocolError("model selected an ID that was not offered")
         except Exception as exc:
             self.last_error = f"{type(exc).__name__}: {exc}"
+            self.emit_model_event(
+                {
+                    "id": operation_id,
+                    "source": "agent",
+                    "phase": "error",
+                    "input": model_input,
+                    "output": output,
+                    "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+                    "error": self.last_error,
+                }
+            )
             return None
         self.last_error = None
+        self.emit_model_event(
+            {
+                "id": operation_id,
+                "source": "agent",
+                "phase": "complete",
+                "input": model_input,
+                "output": output,
+                "input_tokens": len(prompt),
+                "output_tokens": self._token_count(tokenizer, str(output)),
+                "max_tokens": max_tokens,
+                "context_window": model_context_window(self.settings),
+                "selected_id": selected_id,
+                "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+            }
+        )
         return selected_id

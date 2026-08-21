@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from types import SimpleNamespace
 
 import pytest
 
@@ -169,6 +170,51 @@ def test_android_capabilities_are_lazy_and_memoized(monkeypatch: pytest.MonkeyPa
     assert platform.capability("virtual_devices") is sentinel
     assert platform.capability("virtual-devices") is sentinel
     assert loaded == ["android_ui_analyser.emulator"]
+
+
+def test_android_recent_logs_uses_the_app_process_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    platform = AndroidPlatform(Config())
+    calls: list[list[str]] = []
+
+    def run(args: list[str], **_kwargs: object) -> SimpleNamespace:
+        calls.append(args)
+        if "pidof" in args:
+            return SimpleNamespace(stdout="4312 4313\n")
+        return SimpleNamespace(
+            stdout="08-21 11:50:00.000  4312  4312 I Notes: app-scoped line\n"
+        )
+
+    monkeypatch.setattr(platform, "prepare_host", lambda: None)
+    monkeypatch.setattr("android_ui_analyser.platforms.android.subprocess.run", run)
+
+    lines = platform.recent_logs(
+        "emulator-5554", limit=50, app_id="com.example.notes"
+    )
+
+    assert lines == ["08-21 11:50:00.000  4312  4312 I Notes: app-scoped line"]
+    assert calls[0] == [
+        "adb",
+        "-s",
+        "emulator-5554",
+        "shell",
+        "pidof",
+        "com.example.notes",
+    ]
+    assert calls[1] == [
+        "adb",
+        "-s",
+        "emulator-5554",
+        "logcat",
+        "-d",
+        "-v",
+        "threadtime",
+        "--pid",
+        "4312",
+        "-t",
+        "50",
+    ]
 
 
 def test_android_services_satisfy_every_common_capability_contract(

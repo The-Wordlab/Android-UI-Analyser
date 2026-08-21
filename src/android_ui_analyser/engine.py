@@ -84,6 +84,7 @@ from .providers.base import (
     OcrProvider,
     PlannerProvider,
     Point,
+    PolicyProvider,
     ScreenAnalysisResult,
     ScreenImage,
     TextBox,
@@ -130,7 +131,7 @@ from .selectors import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from .policy import PolicyMode, PolicySelector
+    from .policy import PolicyContext, PolicyDecision, PolicyMode, PolicySelector
 
 logger = logging.getLogger("android_ui_analyser.engine")
 
@@ -716,6 +717,14 @@ class Engine:
         self._platform = platform
         self._platform_factory = PlatformFactory(config)
         self.factory = factory or ProviderFactory(config)
+        if hasattr(self.factory, "model_control"):
+            self.model_control = self.factory.model_control
+        else:
+            # Small injected test/plugin factories predate the dashboard control plane. Keep
+            # their policy behavior unchanged while still giving Engine one shared switch API.
+            from .model_control import ModelControlStore
+
+            self.model_control = ModelControlStore(config)
         self._mem: AppMemoryStore | None = None
         self._version_cache: dict[str, str | None] = {}
         self._flag_context_checked_at: dict[str, float] = {}
@@ -1149,9 +1158,7 @@ class Engine:
             selected_avd = emulator_mod.select_avd_for_session(
                 avd,
                 needs=[
-                    need
-                    for need in (self._lease_needs or [])
-                    if need in {"root", "play", "proxy"}
+                    need for need in (self._lease_needs or []) if need in {"root", "play", "proxy"}
                 ],
             )
             boot_owner = leases.resolve_owner(getattr(self, "_lease_owner", None))
@@ -7428,14 +7435,333 @@ class Engine:
         # without also taxing every unrelated analyze, and the observed outcome was the policy
         # being switched off entirely, which then made autopilot refuse with "set enabled=true".
         # Typing the command is the opt-in; the flag governs the passive advice, not this.
+        operator_override = self.model_control.intercept_override()
+        if operator_override is False:
+            return "off"
         override = self._policy_mode_override
         if override is not None:
             return override
         section = getattr(self.config, "policy", None)
-        if section is None or not bool(getattr(section, "enabled", False)):
+        if section is None or (
+            operator_override is not True and not bool(getattr(section, "enabled", False))
+        ):
             return "off"
         mode = str(getattr(section, "mode", "off") or "off").strip().casefold()
         return cast("PolicyMode", mode) if mode in {"off", "shadow", "advisory"} else "off"
+
+    def model_control_status(self, *, limit: int = 100) -> dict[str, Any]:
+        """Return the shared operator switches, resident state, and recent model exchanges."""
+
+        from .model_control import MODEL_NAMES, model_context_window
+
+        control = self.model_control
+        state = control.read_state()
+        providers: list[dict[str, Any]] = []
+        for name in MODEL_NAMES:
+            try:
+                provider = self.factory.create("policy", name)
+                status_method = getattr(provider, "status", None)
+                availability = provider.is_available()
+                value = (
+                    dict(status_method())
+                    if callable(status_method)
+                    else {
+                        "provider": name,
+                        "available": availability.ok,
+                        "reason": availability.reason,
+                    }
+                )
+                value["context_window"] = value.get("context_window") or model_context_window(
+                    provider.settings
+                )
+                value["enabled"] = control.provider_enabled(name)
+            except Exception as exc:
+                value = {
+                    "provider": name,
+                    "available": False,
+                    "loaded": False,
+                    "enabled": control.provider_enabled(name),
+                    "reason": f"{type(exc).__name__}: {exc}",
+                    "context_window": None,
+                }
+            providers.append(value)
+        return {
+            "ok": True,
+            "control": state,
+            "configured_mode": self._configured_policy_mode(),
+            "configured_chain": list(getattr(self.config.policy, "chain", []) or []),
+            "strategy": str(getattr(self.config.policy, "strategy", "single")),
+            "providers": providers,
+            "events": control.events(limit=limit),
+        }
+
+    def model_control_action(
+        self,
+        action: str,
+        *,
+        provider: str | None = None,
+        enabled: bool | None = None,
+    ) -> dict[str, Any]:
+        """Apply one host-local model operation without touching the Android device."""
+
+        from .model_control import MODEL_NAMES
+
+        control = self.model_control
+        if action == "set_intercept":
+            if not isinstance(enabled, bool):
+                raise UsageError("model intercept action requires enabled=true or false")
+            control.update(intercept_enabled=enabled)
+            control.record(
+                {
+                    "source": "dashboard",
+                    "phase": "complete",
+                    "operation": "intercept_on" if enabled else "intercept_off",
+                }
+            )
+            return self.model_control_status()
+        if action == "clear_events":
+            control.clear_events()
+            return self.model_control_status()
+        if provider not in MODEL_NAMES:
+            raise UsageError(f"unknown local model {provider!r}")
+        if action == "set_provider":
+            if not isinstance(enabled, bool):
+                raise UsageError("model provider action requires enabled=true or false")
+            control.update(provider=provider, provider_enabled=enabled)
+            control.record(
+                {
+                    "provider": provider,
+                    "source": "dashboard",
+                    "phase": "complete",
+                    "operation": "enable" if enabled else "disable",
+                }
+            )
+            return self.model_control_status()
+        instance = cast("PolicyProvider", self.factory.create("policy", provider))
+        if action == "load":
+            result = instance.load_model()
+        elif action == "unload":
+            result = instance.unload_model()
+        else:
+            raise UsageError(f"unknown model control action {action!r}")
+        return {**result, "status": self.model_control_status()}
+
+    def model_control_chat(
+        self,
+        provider: str,
+        messages: list[dict[str, str]],
+        *,
+        max_tokens: int | None = None,
+    ) -> dict[str, Any]:
+        """Run a bounded direct local-model exchange on the same resident daemon instance."""
+
+        from .model_control import MODEL_NAMES
+
+        if provider not in MODEL_NAMES:
+            raise UsageError(f"unknown local model {provider!r}")
+        if not self.model_control.provider_enabled(provider):
+            raise UsageError(f"local model {provider!r} is disabled in the dashboard")
+        if not isinstance(messages, list) or not 1 <= len(messages) <= 30:
+            raise UsageError("model playground needs between 1 and 30 messages")
+        clean: list[dict[str, str]] = []
+        total_chars = 0
+        for message in messages:
+            if not isinstance(message, dict):
+                raise UsageError("each model message must be an object")
+            role = message.get("role")
+            content = message.get("content")
+            if role not in {"system", "user", "assistant"} or not isinstance(content, str):
+                raise UsageError("model messages need a system, user, or assistant role and text")
+            total_chars += len(content)
+            if total_chars > 100_000:
+                raise UsageError("model playground context exceeds 100000 characters")
+            clean.append({"role": role, "content": content})
+        instance = cast("PolicyProvider", self.factory.create("policy", provider))
+        return instance.interact(clean, max_tokens=max_tokens)
+
+    def _evaluate_policy_context(
+        self,
+        context: PolicyContext,
+        *,
+        mode: PolicyMode,
+    ) -> tuple[PolicyContext, PolicyDecision, tuple[PolicySelector, ...]]:
+        """Run the configured agent policy evaluator for an already-compiled context."""
+
+        from .policy import (
+            evaluate_policy,
+            evaluate_selective_policy,
+            guard_candidates,
+        )
+
+        max_candidates = max(1, int(getattr(self.config.policy, "max_candidates", 4)))
+        eligible = guard_candidates(context, max_candidates=max_candidates)
+        selector: PolicySelector | None = None
+        selectors: tuple[PolicySelector, ...] = ()
+        if len(eligible) > 1:
+            chain = self.factory.build_chain("policy")
+            selectors = tuple(cast("PolicySelector", provider) for provider in chain.providers)
+            selector = selectors[0] if selectors else None
+            supports_handoff = getattr(selector, "supports_handoff", None)
+            if callable(supports_handoff):
+                # This is an authenticated provider capability, not caller-controlled input.
+                with contextlib.suppress(Exception):
+                    context = dataclass_replace(
+                        context,
+                        allow_handoff=bool(supports_handoff()),
+                    )
+        if getattr(self.config.policy, "strategy", "single") == "selective_hybrid":
+            decision = evaluate_selective_policy(
+                context,
+                selectors,
+                mode=mode,
+                max_candidates=max_candidates,
+                primary_reviews=int(getattr(self.config.policy, "primary_reviews", 3)),
+                reviewer_reviews=int(getattr(self.config.policy, "reviewer_reviews", 3)),
+            )
+        else:
+            decision = evaluate_policy(
+                context,
+                selector,
+                mode=mode,
+                max_candidates=max_candidates,
+            )
+        return context, decision, selectors
+
+    def model_control_agent_test(
+        self,
+        provider: str,
+        request: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Evaluate a synthetic request through the same policy path as an agent turn."""
+
+        from .policy import PolicyCandidate, PolicyContext, compile_policy_context, policy_tools
+
+        if provider != "agent_chain":
+            raise UsageError("agent model tests must use the configured agent policy chain")
+        if not isinstance(request, dict):
+            raise UsageError("agent model test request must be a JSON object")
+
+        def bounded_text(name: str, value: Any, *, maximum: int, required: bool = True) -> str:
+            if not isinstance(value, str) or (required and not value.strip()):
+                raise UsageError(f"agent model test field {name!r} must be text")
+            clean = value.strip()
+            if len(clean) > maximum:
+                raise UsageError(f"agent model test field {name!r} exceeds {maximum} characters")
+            return clean
+
+        goal = bounded_text("goal", request.get("goal"), maximum=500)
+        phase = bounded_text("phase", request.get("phase", "Choose the next action"), maximum=200)
+        raw_candidates = request.get("candidates")
+        if not isinstance(raw_candidates, list) or not 2 <= len(raw_candidates) <= 4:
+            raise UsageError("agent model test needs between 2 and 4 candidates")
+        fingerprint = "dashboard-agent-model-test-v1"
+        package = "dashboard.sample"
+        candidates: list[PolicyCandidate] = []
+        for index, raw in enumerate(raw_candidates):
+            if not isinstance(raw, dict):
+                raise UsageError("each agent model test candidate must be an object")
+            candidate_id = raw.get("id", index)
+            if (
+                isinstance(candidate_id, bool)
+                or not isinstance(candidate_id, int)
+                or candidate_id != index
+            ):
+                raise UsageError("agent model test candidate ids must be dense integers from 0")
+            label = bounded_text("candidate.label", raw.get("label"), maximum=200)
+            purpose = bounded_text(
+                "candidate.purpose", raw.get("purpose", f"Tap {label}"), maximum=300
+            )
+            proof = bounded_text(
+                "candidate.proof",
+                raw.get("proof", f"Visible current-frame control labelled {label}"),
+                maximum=300,
+            )
+            arguments = {"element_id": candidate_id}
+            candidates.append(
+                PolicyCandidate(
+                    candidate_id=candidate_id,
+                    call={"tool": "tap_and_analyze", "arguments": arguments},
+                    model_arguments=arguments,
+                    purpose=purpose,
+                    proof=proof,
+                    phase=phase,
+                    observation_fingerprint=fingerprint,
+                    package=package,
+                )
+            )
+        constraints_raw = request.get("constraints", [])
+        if not isinstance(constraints_raw, list) or len(constraints_raw) > 8:
+            raise UsageError("agent model test constraints must be a list of at most 8 strings")
+        constraints = tuple(
+            bounded_text("constraint", value, maximum=300) for value in constraints_raw
+        )
+        observation_raw = request.get("observation", {})
+        if not isinstance(observation_raw, dict):
+            raise UsageError("agent model test observation must be an object")
+        observation = {
+            "fresh": bool(observation_raw.get("fresh", True)),
+            "known_screen": bounded_text(
+                "observation.known_screen",
+                observation_raw.get("known_screen", "sample_screen"),
+                maximum=200,
+            ),
+            "element_count": len(candidates),
+            "source": bounded_text(
+                "observation.source",
+                observation_raw.get("source", "hierarchy"),
+                maximum=50,
+            ),
+        }
+        allow_handoff = request.get("allow_handoff", True)
+        if not isinstance(allow_handoff, bool):
+            raise UsageError("agent model test allow_handoff must be true or false")
+        context = PolicyContext(
+            goal=goal,
+            phase=phase,
+            candidates=tuple(candidates),
+            observation=observation,
+            constraints=constraints,
+            observation_fingerprint=fingerprint,
+            package=package,
+            allow_handoff=allow_handoff,
+        )
+        started_ms = int(time.time() * 1000)
+        evaluated_context, decision, selectors = self._evaluate_policy_context(
+            context,
+            mode="advisory",
+        )
+        provider_names = [
+            str(getattr(selector, "name", type(selector).__name__)) for selector in selectors
+        ]
+        exchanges = [
+            event
+            for event in self.model_control.events(limit=200)
+            if event.get("provider") in provider_names
+            and event.get("source") == "agent"
+            and int(event.get("timestamp_ms") or 0) >= started_ms - 5
+            and event.get("phase") in {"complete", "error"}
+        ]
+        exchange = exchanges[-1] if exchanges else None
+        selected = decision.selected_candidate
+        selected_id = selected.candidate_id if selected is not None else None
+        selected_candidate = selected.as_model_value() if selected is not None else None
+        decision_json = decision.as_json()
+        return {
+            "ok": True,
+            "provider": decision.provider,
+            "providers": provider_names,
+            "status": decision.status,
+            "selected_id": selected_id,
+            "selected_candidate": selected_candidate,
+            "decision": decision_json,
+            "compiled_context": compile_policy_context(evaluated_context),
+            "tool_schema": policy_tools(allow_handoff=evaluated_context.allow_handoff)
+            if "functiongemma" in provider_names
+            else [],
+            "exchange": exchange,
+            "exchanges": exchanges,
+            "provider_error": decision.error,
+        }
 
     @staticmethod
     def _policy_selector_arguments(
@@ -7972,12 +8298,7 @@ class Engine:
             return {"policy": audit}
 
         try:
-            from .policy import (
-                PolicyContext,
-                evaluate_policy,
-                evaluate_selective_policy,
-                guard_candidates,
-            )
+            from .policy import PolicyContext
 
             compiler_audit: dict[str, Any] = {}
             candidates = self._policy_tap_candidates(
@@ -8023,44 +8344,20 @@ class Engine:
                 observation_fingerprint=observation.meta.fingerprint,
                 package=observation.screen.package,
             )
-            max_candidates = max(1, int(getattr(self.config.policy, "max_candidates", 4)))
-            eligible = guard_candidates(context, max_candidates=max_candidates)
-            selector: PolicySelector | None = None
-            selectors: list[PolicySelector] = []
-            if len(eligible) > 1:
-                chain = self.factory.build_chain("policy")
-                selectors = [cast("PolicySelector", provider) for provider in chain.providers]
-                selector = selectors[0] if selectors else None
-                supports_handoff = getattr(selector, "supports_handoff", None)
-                if callable(supports_handoff):
-                    # Handoff is an authenticated optional capability. Any provenance or
-                    # provider failure leaves the legacy supplied-candidate protocol intact.
-                    with contextlib.suppress(Exception):
-                        context = dataclass_replace(
-                            context,
-                            allow_handoff=bool(supports_handoff()),
-                        )
-            if getattr(self.config.policy, "strategy", "single") == "selective_hybrid":
-                decision = evaluate_selective_policy(
-                    context,
-                    selectors,
-                    mode=mode,
-                    max_candidates=max_candidates,
-                    primary_reviews=int(getattr(self.config.policy, "primary_reviews", 3)),
-                    reviewer_reviews=int(getattr(self.config.policy, "reviewer_reviews", 3)),
-                )
-            else:
-                decision = evaluate_policy(
-                    context,
-                    selector,
-                    mode=mode,
-                    max_candidates=max_candidates,
-                )
+            context, decision, _selectors = self._evaluate_policy_context(context, mode=mode)
             audit = decision.as_json()
             audit["compiler"] = compiler_audit
             # Exact calls belong only in the separate advisory field, never in shadow/audit.
             audit.pop("recommended_call", None)
             selected = decision.selected_candidate
+            # The dashboard switch is out-of-band specifically so an operator can kill a bad
+            # model while the serialized daemon is still inside MLX. Generation itself may finish,
+            # but a result completed after OFF must never become advice or an autopilot action.
+            if self.model_control.intercept_override() is False:
+                selected = None
+                audit["status"] = "discarded_operator_disabled"
+                audit["model_used"] = bool(decision.model_used)
+                audit.pop("selected_candidate_id", None)
             suggestion = None
             if selected is not None:
                 current, stale_reason = self._policy_context_is_current(
@@ -8233,8 +8530,7 @@ class Engine:
             return {
                 "kind": "wait_for_change",
                 "cli": (
-                    "aua wait-and-analyze --changed "
-                    "--timeout-ms 15000 --interval 150 --observe"
+                    "aua wait-and-analyze --changed --timeout-ms 15000 --interval 150 --observe"
                 ),
                 "mcp": {
                     "tool": "wait_changed_and_analyze",
@@ -17062,9 +17358,7 @@ class Engine:
             # `proxy_mock.diagnose_empty_recording`.
             log = cache / "mitmdump.log"
             log_offset = log.stat().st_size if log.is_file() else 0
-            pm.save_record_window(
-                cache, since_ts=time.time(), log_offset=log_offset, serial=target
-            )
+            pm.save_record_window(cache, since_ts=time.time(), log_offset=log_offset, serial=target)
             # Clean JSONL seed: the addon appends one `json.dumps(entry) + "\n"` per completed
             # flow directly to disk as it happens (see `AuaMock.response()`), so there is
             # nothing to lose here — this only has to not corrupt that stream (see
@@ -17088,9 +17382,7 @@ class Engine:
             # Keep the same listen port when one is already bound so adb reverse stays valid.
             prev = pm.load_listen_port(cache)
             pm.stop_mitm(cache)
-            pid, listen = pm.start_mitm(
-                cache_dir=cache, port=prev, mode="record", serial=target
-            )
+            pid, listen = pm.start_mitm(cache_dir=cache, port=prev, mode="record", serial=target)
             self._refresh_proxy_ownership_pid(pm, listen, pid)
             with contextlib.suppress(Exception):
                 self.device.reverse_port(listen, listen)

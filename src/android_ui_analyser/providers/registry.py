@@ -155,9 +155,12 @@ class ProviderFactory:
     """
 
     def __init__(self, config: Config) -> None:
+        from ..model_control import ModelControlStore
+
         self.config = config
         self._instances: dict[tuple[str, str], Provider] = {}
         self._lock = threading.Lock()
+        self.model_control = ModelControlStore(config)
 
     def _settings_for(self, name: str) -> dict[str, Any]:
         models = getattr(self.config, "models", {}) or {}
@@ -171,6 +174,10 @@ class ProviderFactory:
             if inst is None:
                 cls = get_provider_class(kind, name)
                 inst = cls(self._settings_for(name))
+                if kind == "policy":
+                    set_monitor = getattr(inst, "set_model_monitor", None)
+                    if callable(set_monitor):
+                        set_monitor(self.model_control.record)
                 self._instances[key] = inst
             return inst
 
@@ -186,6 +193,8 @@ class ProviderFactory:
         load_providers(kind)
         providers: list[Provider] = []
         for name in self.chain_names(kind):
+            if kind == "policy" and not self.model_control.provider_enabled(name):
+                continue
             if name not in _REGISTRY.get(kind, {}):
                 logger.warning("unknown %s provider '%s' in chain; skipping", kind, name)
                 continue

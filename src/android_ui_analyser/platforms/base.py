@@ -102,8 +102,13 @@ class PlatformAdapter(ABC):
 
         return runtime.dump_hierarchy(compressed=compact)
 
-    def recent_logs(self, target_id: str, *, limit: int = 80) -> list[str]:
-        """Return recent target log lines without exposing a native logging command."""
+    def recent_logs(
+        self, target_id: str, *, limit: int = 80, app_id: str | None = None
+    ) -> list[str]:
+        """Return recent target logs, optionally scoped to one app's current process."""
+
+        if app_id:
+            raise UnsupportedPlatformCapabilityError(self.name, "app_scoped_logs")
 
         count = max(1, int(limit))
         text = self.connect(target_id).logcat()

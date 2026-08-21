@@ -61,6 +61,43 @@ def _run_in_node(driver: str) -> str:
     return result.stdout
 
 
+def test_dashboard_branding_uses_the_real_logo_and_consistent_title() -> None:
+    html = _page()
+    assert "<title>AuA Dashboard</title>" in html
+    assert "<h1>AuA Dashboard " in html
+    assert html.count("/assets/aua-dashboard-logo.png") == 3
+    assert dash._DASHBOARD_LOGO.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_grid_empty_state_is_a_centered_card_without_a_redundant_mode_badge() -> None:
+    html = _page()
+    assert 'id="grid-empty-title"' in html
+    assert 'id="grid-empty-copy"' in html
+    assert 'id="grid-empty-command"' in html
+    assert 'id="modepill"' not in html
+    assert 'id="grid-footer"' not in html
+
+
+def test_detail_header_uses_clear_navigation_and_labeled_device_statuses() -> None:
+    html = _page()
+    assert "<span>All devices</span>" in html
+    assert "← grid" not in html
+    assert 'class="detail-overview"' in html
+    for label in ("Capture", "Source", "Lease", "Auto-stop", "Frame age", "Failures"):
+        assert f'class="detail-status-label">{label}</span>' in html
+
+
+def test_device_tiles_use_the_frame_as_the_card_with_status_overlays() -> None:
+    html = _page()
+    tile = html.split("function ensureTile(d) {", 1)[1].split("\nfunction ", 1)[0]
+    assert 'class="tile-screen"' in tile
+    assert 'class="tile-overlay tile-overlay-top"' in tile
+    assert 'class="tile-overlay tile-overlay-bottom"' in tile
+    assert 'class="tile-stats"' in tile
+    assert 'class="tile-inspect"' in tile
+    assert 'class="tile-meta"' not in tile
+
+
 def test_the_live_frame_column_is_sized_by_the_frame_and_not_by_a_fixed_fraction() -> None:
     html = _page()
     layout = re.search(r"\.layout \{(.*?)\}", html, re.S)
@@ -77,6 +114,28 @@ def test_the_live_frame_column_is_sized_by_the_frame_and_not_by_a_fixed_fraction
     assert re.search(r"height:\s*min\(", stage.group(1)), stage.group(1)
 
 
+def test_live_frame_can_analyze_overlay_ids_and_tap_the_exact_analysis() -> None:
+    html = _page()
+    for element_id in (
+        "screen-analyze",
+        "frame-shell",
+        "element-overlay",
+        "inspection-status",
+        "inspection-raw",
+        "inspection-clickable-only",
+        "inspection-live",
+    ):
+        assert f'id="{element_id}"' in html
+    assert "inspectionPost('analyze'" in html
+    assert "inspectionPost('tap'" in html
+    assert "inspection_id: currentInspectionId" in html
+    assert "element_id: Number(elementId)" in html
+    assert "element.bounds.map(Number)" in html
+    assert "frame.src = data.frame_url" in html
+    assert "JSON.stringify(data.result || {}, null, 2)" in html
+    assert "!inspectionFrameActive && frameToken !== lastSrc" in html
+
+
 def test_the_journal_and_logcat_each_get_a_wide_row_of_their_own() -> None:
     html = _page()
     # Logcat is no longer one third of a three-column strip.
@@ -88,6 +147,67 @@ def test_the_journal_and_logcat_each_get_a_wide_row_of_their_own() -> None:
     journal = re.search(r"#journal-wrap \{(.*?)\}", html, re.S)
     assert journal, "the journal viewport has no sizing rule"
     assert re.search(r"height:\s*min\(", journal.group(1)), journal.group(1)
+
+
+def test_logcat_can_request_device_logs_for_one_app_id() -> None:
+    html = _page()
+    assert 'id="logcat-app-filter"' in html
+    assert 'aria-label="Filter Logcat by App ID"' in html
+    assert "if (appId) params.app_id = appId" in html
+    assert "logcatAppFilter.value = s.package" in html
+    assert "setTimeout(tickLogcat, 250)" in html
+
+
+def test_logcat_renders_newest_first_and_follows_the_top() -> None:
+    html = _page()
+    assert 'id="logcat-follow" type="checkbox" checked/>follow newest' in html
+    assert "lines.slice().reverse().forEach" in html
+    assert "function logcatAnchor(" in html
+    assert "const anchor = !logcatFollow.checked && !atTop ? logcatAnchor() : null" in html
+    assert "if (logcatFollow.checked) logcatView.scrollTop = 0" in html
+    assert "scrollTop = logcatView.scrollHeight" not in html
+
+
+def test_navigation_library_expands_goto_routes_and_groups_every_saved_flow() -> None:
+    html = _page()
+    assert 'class="knowledge-workspace"' in html
+    assert 'id="map-screens"' in html
+    assert 'id="map-routes"' in html
+    assert 'id="flow-groups"' in html
+    assert "function knowledgeItem(" in html
+    assert "function knowledgeSteps(" in html
+    assert "knowledgeCommand('Run', 'aua goto" in html
+    assert "knowledgeCommand('Run', 'aua flow run" in html
+    assert "const app = flow.app || 'App-agnostic'" in html
+
+
+def test_local_model_workspace_controls_the_shared_runtime_and_shows_full_exchanges() -> None:
+    html = _page()
+    for element_id in (
+        "model-intercept",
+        "model-card-functiongemma",
+        "model-card-gemma4",
+        "model-chat",
+        "model-prompt",
+        "model-request-kind",
+        "model-request-sample",
+        "model-prompt-guide",
+        "model-traces",
+    ):
+        assert f'id="{element_id}"' in html
+    assert "OFF discards in-flight results" in html
+    assert "async function tickModels(" in html
+    assert "async function sendModelMessage(" in html
+    assert "modelPost('set-intercept'" in html
+    assert "modelPost('set-provider'" in html
+    assert "modelPost('chat'" in html
+    assert "modelPost('agent-test'" in html
+    assert "const MODEL_AGENT_SAMPLES" in html
+    assert "Uses the exact configured agent policy chain" in html
+    assert '<option value="agent_chain" hidden>Configured agent chain</option>' in html
+    assert "No candidate matches → handoff" in html
+    assert "inputTitle.textContent = 'Model input'" in html
+    assert "outputTitle.textContent = event.error ? 'Error' : 'Model output'" in html
 
 
 def test_the_journal_anchors_its_scroll_instead_of_letting_new_rows_shove_it_down() -> None:
@@ -122,12 +242,41 @@ def test_the_journal_can_be_filtered_without_a_round_trip() -> None:
     assert "li.dataset.search" in html
 
 
+def test_journal_rows_and_controls_have_scan_friendly_structure() -> None:
+    html = _page()
+    assert 'class="journal-search"' in html
+    assert 'class="journal-button-group"' in html
+    assert 'class="journal-toggle"' in html
+    assert "addEventText(summary, 'event-chevron', '›')" in html
+    assert "main.className = 'event-main'" in html
+    assert "Number(e.duration_ms) >= 1500" in html
+    assert "journalFilter.focus()" in html
+    assert re.search(r"#journal details > summary \{[^}]*grid-template-columns:", html, re.S)
+    assert re.search(r"#journal \.exchange \{[^}]*grid-template-columns:\s*repeat\(2", html, re.S)
+
+
 def test_expanded_journal_payloads_do_not_nest_a_second_scrollbar() -> None:
     """A scroll area inside a scroll area is the thing that made the journal awful."""
     html = _page()
     pre = re.search(r"#journal \.exchange pre \{(.*?)\}", html, re.S)
     assert pre, "the payload rule is gone"
     assert "max-height: none" in pre.group(1), pre.group(1)
+
+
+def test_expanded_journal_action_stays_visible_while_its_payload_scrolls() -> None:
+    html = _page()
+    opened = re.search(r"#journal details\[open\] > summary \{(.*?)\}", html, re.S)
+    assert opened, "the expanded event summary has no dedicated style"
+    assert "position: sticky" in opened.group(1), opened.group(1)
+    assert re.search(r"top:\s*0", opened.group(1)), opened.group(1)
+    assert "z-index:" in opened.group(1), opened.group(1)
+    assert "box-shadow:" in opened.group(1), opened.group(1)
+
+    row = re.search(r"#journal li \{(.*?)\}", html, re.S)
+    assert row
+    # `overflow: hidden` becomes the sticky element's inert scroll ancestor and prevents
+    # it from following #journal-wrap. `clip` keeps the rounded card without that trap.
+    assert "overflow: clip" in row.group(1), row.group(1)
 
 
 def test_payload_and_logcat_token_classes_are_styled_in_both_panels() -> None:
@@ -158,8 +307,7 @@ def test_an_armed_proxy_rule_expands_to_the_response_it_will_actually_return() -
 def test_json_tokens_separate_keys_from_string_values() -> None:
     payload = json.dumps({"cmd": "tap", "id": 12, "ok": True, "err": None}, indent=2)
     out = _run_in_node(
-        "const t = jsonTokens(" + json.dumps(payload) + ");"
-        "console.log(JSON.stringify(t));"
+        "const t = jsonTokens(" + json.dumps(payload) + ");console.log(JSON.stringify(t));"
     )
     tokens = json.loads(out)
     kinds = {value: kind for kind, value in tokens}
@@ -176,9 +324,7 @@ def test_json_tokens_separate_keys_from_string_values() -> None:
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
 def test_json_tokens_do_not_mistake_a_colon_inside_a_string_for_a_key() -> None:
     payload = '{"note": "a:b", "url": "http://x/y"}'
-    out = _run_in_node(
-        "console.log(JSON.stringify(jsonTokens(" + json.dumps(payload) + ")));"
-    )
+    out = _run_in_node("console.log(JSON.stringify(jsonTokens(" + json.dumps(payload) + ")));")
     tokens = json.loads(out)
     assert ["str", '"a:b"'] in tokens
     assert ["str", '"http://x/y"'] in tokens
@@ -189,9 +335,7 @@ def test_json_tokens_do_not_mistake_a_colon_inside_a_string_for_a_key() -> None:
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
 def test_logcat_tokens_split_a_threadtime_line_into_its_parts() -> None:
     line = "08-21 10:21:40.758   745   760 D WindowManager: captureDisplay for com.example.app"
-    out = _run_in_node(
-        "console.log(JSON.stringify(logcatTokens(" + json.dumps(line) + ")));"
-    )
+    out = _run_in_node("console.log(JSON.stringify(logcatTokens(" + json.dumps(line) + ")));")
     tokens = json.loads(out)
     kinds: dict[str, str] = {}
     for kind, value in tokens:
@@ -209,9 +353,7 @@ def test_logcat_tokens_split_a_threadtime_line_into_its_parts() -> None:
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
 def test_a_line_that_is_not_threadtime_survives_untouched() -> None:
     line = "--------- beginning of system"
-    out = _run_in_node(
-        "console.log(JSON.stringify(logcatTokens(" + json.dumps(line) + ")));"
-    )
+    out = _run_in_node("console.log(JSON.stringify(logcatTokens(" + json.dumps(line) + ")));")
     assert json.loads(out) == [["raw", line]]
 
 
@@ -325,6 +467,12 @@ window.addEventListener('load', function () {
   say('a scrolled logcat is not slammed back to the top',
       document.getElementById('logcat-view').scrollTop === 0, 'nothing to scroll yet');
 
+  renderLogcat(['08-21 10:21:41.402  9114  9160 I FeedRepository: older',
+                '08-21 10:21:42.402  9114  9160 I FeedRepository: newest']);
+  say('logcat renders newest first',
+      document.querySelector('#logcat .lc-line').textContent.indexOf('newest') >= 0,
+      document.querySelector('#logcat .lc-line').textContent);
+
   const node = document.createElement('pre');
   node.id = 'verdict';
   node.textContent = out.join('\n');
@@ -360,8 +508,12 @@ def test_the_journal_viewport_holds_still_in_a_real_browser(tmp_path: pathlib.Pa
     with dom_file.open("wb") as sink:
         proc = subprocess.Popen(  # noqa: S603
             [
-                str(_chrome()), "--headless=new", "--disable-gpu", "--no-sandbox",
-                "--dump-dom", "--window-size=1500,1000",
+                str(_chrome()),
+                "--headless=new",
+                "--disable-gpu",
+                "--no-sandbox",
+                "--dump-dom",
+                "--window-size=1500,1000",
                 "--user-data-dir=" + str(tmp_path / "profile"),
                 page_file.as_uri(),
             ],
@@ -381,6 +533,6 @@ def test_the_journal_viewport_holds_still_in_a_real_browser(tmp_path: pathlib.Pa
     assert verdict, f"the page never reached its checks (dom was {len(dom)} bytes)"
     lines = verdict.group(1).replace("&gt;", ">").replace("&lt;", "<").splitlines()
     # Exact: a check that quietly stops running must fail here, not pass silently.
-    assert len(lines) == 12, lines
+    assert len(lines) == 13, lines
     failures = [line for line in lines if not line.startswith("PASS")]
     assert not failures, "\n".join(lines)

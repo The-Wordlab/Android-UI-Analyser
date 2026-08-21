@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from .errors import AuaError, UsageError
+from .errors import AuaError, DaemonOutcomeUnknownError, UsageError
 
 logger = logging.getLogger(__name__)
 
@@ -60,8 +60,17 @@ _SECRET_HEADERS = frozenset(
 
 # Body keys whose value is a credential. Matched case-insensitively as a substring, so
 # `streamToken`, `access_token` and `refreshToken` are all caught by "token".
-_SECRET_BODY_KEYS = ("token", "password", "secret", "api_key", "apikey", "authorization",
-                     "credential", "session_id", "cookie")
+_SECRET_BODY_KEYS = (
+    "token",
+    "password",
+    "secret",
+    "api_key",
+    "apikey",
+    "authorization",
+    "credential",
+    "session_id",
+    "cookie",
+)
 
 _REDACTED = "<redacted>"
 
@@ -69,9 +78,7 @@ _REDACTED = "<redacted>"
 def _redact_headers(headers: Any) -> Any:
     if not isinstance(headers, dict):
         return headers
-    return {
-        k: (_REDACTED if str(k).lower() in _SECRET_HEADERS else v) for k, v in headers.items()
-    }
+    return {k: (_REDACTED if str(k).lower() in _SECRET_HEADERS else v) for k, v in headers.items()}
 
 
 def _redact_body(value: Any, depth: int = 0) -> Any:
@@ -129,6 +136,22 @@ def _redact_query(query: str) -> str:
             parts.append(chunk)
     return "&".join(parts)
 
+
+def _dashboard_step_payload(step: Any) -> dict[str, Any]:
+    """Human-inspectable route/flow step without screenshot-prone private values."""
+
+    raw = step.model_dump(exclude_none=True) if hasattr(step, "model_dump") else dict(step)
+    for field in ("origin_package", "capture_segment", "capture_order", "arrival_proof"):
+        raw.pop(field, None)
+    if "text" in raw:
+        raw["text"] = _REDACTED
+    if isinstance(raw.get("data"), dict):
+        raw["data"] = _redact_body(raw["data"])
+    if isinstance(raw.get("substeps"), list):
+        raw["substeps"] = [_dashboard_step_payload(item) for item in raw["substeps"]]
+    return raw
+
+
 # url -> (server, thread) for dashboards started with block=False, so callers that
 # do not own the serve loop can still stop one.
 _SERVERS: dict[str, tuple[ThreadingHTTPServer, threading.Thread]] = {}
@@ -139,6 +162,8 @@ _PLACEHOLDER_PNG = (
     b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\x00\x01"
     b"\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
 )
+
+_DASHBOARD_LOGO = Path(__file__).parent / "data" / "aua-dashboard-logo.png"
 
 
 def _script_json(value: Any) -> str:
@@ -227,9 +252,7 @@ def resolve_dashboard_targets(
     }
 
 
-def _emulator_meta_for_serial(
-    cache_dir: str | Path, serial: str
-) -> dict[str, Any] | None:
+def _emulator_meta_for_serial(cache_dir: str | Path, serial: str) -> dict[str, Any] | None:
     """Return the newest AUA emulator record for *serial*, ignoring sidecar metadata."""
 
     root = Path(cache_dir).expanduser() / "emulator"
@@ -457,19 +480,25 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>aua dashboard</title>
+<title>AuA Dashboard</title>
+<link rel="icon" type="image/png" href="/assets/aua-dashboard-logo.png"/>
 <style>
   :root {
-    --bg: #0c0e12;
-    --panel: #151820;
-    --panel2: #1a1e28;
-    --text: #e6e8ec;
-    --muted: #8b929e;
-    --accent: #3ddc84;
-    --border: #2a303c;
-    --danger: #ef6b5a;
-    --warn: #e0a84a;
+    --bg: #080a12;
+    --bg-raised: #0d1020;
+    --panel: rgba(18, 22, 39, 0.88);
+    --panel2: rgba(24, 29, 50, 0.9);
+    --text: #f2f4ff;
+    --muted: #8d96b2;
+    --faint: #626b87;
+    --accent: #63e6be;
+    --accent-2: #8c7bff;
+    --border: rgba(142, 157, 211, 0.18);
+    --border-strong: rgba(142, 157, 211, 0.32);
+    --danger: #ff7b8e;
+    --warn: #f5c76b;
     --wide: 1900px;
+    --shadow: 0 18px 60px rgba(0, 0, 0, 0.28);
     --tok-key: #7fd3ff;
     --tok-str: #b7e08a;
     --tok-num: #f0b26a;
@@ -479,23 +508,72 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   * { box-sizing: border-box; }
   body {
     margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
-    background: var(--bg); color: var(--text); min-height: 100vh;
+    background:
+      radial-gradient(circle at 8% -10%, rgba(140, 123, 255, 0.18), transparent 32rem),
+      radial-gradient(circle at 94% 6%, rgba(99, 230, 190, 0.09), transparent 26rem),
+      linear-gradient(145deg, #080a12 0%, #0b0e1a 52%, #090b14 100%);
+    color: var(--text); min-height: 100vh; letter-spacing: 0.005em;
   }
   header {
-    display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;
-    padding: 0.65rem 1.1rem; border-bottom: 1px solid var(--border);
-    background: var(--panel); position: sticky; top: 0; z-index: 2;
+    display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+    padding: 0.85rem clamp(1rem, 3vw, 2.4rem); border-bottom: 1px solid var(--border);
+    background: rgba(10, 13, 25, 0.78); backdrop-filter: blur(22px);
+    position: sticky; top: 0; z-index: 2; box-shadow: 0 10px 36px rgba(0, 0, 0, 0.16);
   }
-  header h1 { font-size: 0.95rem; font-weight: 600; margin: 0; letter-spacing: 0.02em; }
+  .header-brand, .header-actions { display: flex; align-items: center; gap: 0.7rem; min-width: 0; }
+  header h1 { font-size: 1rem; font-weight: 750; margin: 0; letter-spacing: -0.02em; }
+  header h1 span { display: block; color: var(--muted); font-size: 0.62rem; font-weight: 550; letter-spacing: 0.08em; text-transform: uppercase; margin-top: 0.12rem; }
+  .brand-mark { width: 2.35rem; height: 2.35rem; display: block; object-fit: contain; filter: drop-shadow(0 0 12px rgba(99, 230, 190, 0.28)); }
+  .header-title { margin-right: auto; }
+  .header-live { display: inline-flex; align-items: center; gap: 0.4rem; color: var(--accent); font-size: 0.68rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
+  .header-live::before { content: ''; width: 0.42rem; height: 0.42rem; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 0.24rem rgba(99, 230, 190, 0.12), 0 0 0.8rem var(--accent); }
   header a.back {
-    color: var(--accent); text-decoration: none; font-size: 0.78rem; margin-right: 0.25rem;
+    display: inline-flex; align-items: center; gap: 0.4rem; color: var(--muted);
+    text-decoration: none; font-size: 0.72rem; font-weight: 650; white-space: nowrap;
+    padding: 0.42rem 0.62rem; margin-right: 0.2rem; border: 1px solid var(--border);
+    border-radius: 9px; background: rgba(255,255,255,0.025); transition: 0.15s ease;
   }
+  header a.back:hover { color: var(--accent); border-color: rgba(99,230,190,0.4); background: rgba(99,230,190,0.07); }
   .pill {
-    font-size: 0.72rem; padding: 0.18rem 0.5rem; border-radius: 999px;
+    font-size: 0.68rem; padding: 0.28rem 0.58rem; border-radius: 999px;
     border: 1px solid var(--border); color: var(--muted); white-space: nowrap;
+    background: rgba(255,255,255,0.025);
   }
   .pill.ok { color: var(--accent); border-color: #2a6b4f; }
   .pill.bad { color: var(--danger); border-color: #7a3a35; }
+  .detail-overview {
+    display: grid; grid-template-columns: minmax(230px, 0.75fr) minmax(0, 2fr); gap: 1rem;
+    align-items: stretch; padding: 1.15rem 0.85rem 0; max-width: var(--wide); margin: 0 auto;
+  }
+  .detail-device, .detail-health {
+    background: linear-gradient(150deg, rgba(25,30,52,0.82), rgba(13,17,31,0.86));
+    border: 1px solid var(--border); border-radius: 16px; box-shadow: 0 14px 40px rgba(0,0,0,0.2);
+  }
+  .detail-device { display: flex; flex-direction: column; justify-content: center; padding: 1rem 1.1rem; min-width: 0; position: relative; overflow: hidden; }
+  .detail-device::before { content: ''; position: absolute; inset: 0 auto 0 0; width: 2px; background: linear-gradient(var(--accent), var(--accent-2)); }
+  .detail-eyebrow { color: var(--accent); font-size: 0.6rem; font-weight: 750; letter-spacing: 0.13em; text-transform: uppercase; margin-bottom: 0.35rem; }
+  .detail-serial-row { display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
+  .detail-device-dot { width: 0.48rem; height: 0.48rem; flex: 0 0 auto; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0.75rem var(--accent); }
+  #serial { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font: 750 1rem ui-monospace, SFMono-Regular, Menlo, monospace; }
+  #pkg { margin-top: 0.42rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font: 0.68rem ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .detail-health { display: grid; grid-template-columns: repeat(6, minmax(110px, 1fr)); overflow: hidden; }
+  .detail-status { min-width: 0; padding: 0.85rem 0.9rem; border-left: 1px solid var(--border); display: flex; flex-direction: column; justify-content: center; gap: 0.3rem; }
+  .detail-status:first-child { border-left: 0; }
+  .detail-status-label { color: var(--faint); font-size: 0.56rem; font-weight: 750; letter-spacing: 0.1em; text-transform: uppercase; }
+  .detail-status-value { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: 0.7rem; font-weight: 650; }
+  .detail-status-value.ok { color: var(--accent); }
+  .detail-status-value.bad { color: var(--danger); }
+  @media (max-width: 1250px) {
+    .detail-overview { grid-template-columns: 1fr; }
+    .detail-health { grid-template-columns: repeat(3, minmax(120px, 1fr)); }
+    .detail-status:nth-child(4) { border-left: 0; }
+    .detail-status:nth-child(n+4) { border-top: 1px solid var(--border); }
+  }
+  @media (max-width: 650px) {
+    .detail-health { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .detail-status:nth-child(odd) { border-left: 0; }
+    .detail-status:nth-child(n+3) { border-top: 1px solid var(--border); }
+  }
   .layout {
     display: grid;
     /* `auto` sizes the stage column to the frame itself. A fractional column handed the
@@ -508,20 +586,60 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   }
   @media (max-width: 980px) { .layout { grid-template-columns: minmax(0, 1fr); } }
   .panel {
-    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
-    padding: 0.7rem 0.85rem; min-height: 0;
+    background: linear-gradient(150deg, rgba(25, 30, 52, 0.92), rgba(14, 18, 32, 0.9));
+    border: 1px solid var(--border); border-radius: 18px;
+    padding: 1rem 1.1rem; min-height: 0; box-shadow: var(--shadow);
   }
   .panel h2 {
-    font-size: 0.72rem; margin: 0 0 0.55rem; color: var(--muted); font-weight: 600;
-    text-transform: uppercase; letter-spacing: 0.07em;
+    font-size: 0.69rem; margin: 0 0 0.7rem; color: var(--muted); font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.12em;
   }
+  .stage-heading { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.7rem; }
+  .stage-heading h2 { margin: 0; }
+  .analyze-button {
+    display: inline-flex; align-items: center; gap: 0.42rem; border-color: rgba(106, 232, 194, 0.42);
+    color: #d9fff4; background: rgba(42, 126, 108, 0.2); font-weight: 760;
+  }
+  .analyze-button::before { content: '⌗'; color: var(--accent); font-size: 0.86rem; }
+  .analyze-button:hover { border-color: var(--accent); background: rgba(42, 126, 108, 0.32); }
+  .analyze-button:disabled { opacity: 0.62; cursor: wait; }
+  .frame-shell { position: relative; display: block; width: fit-content; max-width: 100%; }
   .stage img {
     display: block; height: min(74vh, 880px); width: auto;
     min-width: 210px; max-width: min(38vw, 470px);
-    object-fit: contain; background: #000; border-radius: 6px;
+    object-fit: contain; background: #030408; border-radius: 13px; border: 1px solid var(--border-strong);
+    box-shadow: 0 14px 34px rgba(0, 0, 0, 0.42);
   }
+  .element-overlay { position: absolute; inset: 0; overflow: hidden; border-radius: 13px; pointer-events: none; }
+  .element-overlay.busy .element-box { pointer-events: none; opacity: 0.5; }
+  .element-box {
+    position: absolute; display: block; min-width: 0; min-height: 0; padding: 0;
+    border: 1px solid rgba(116, 176, 255, 0.72); border-radius: 3px;
+    background: rgba(65, 126, 220, 0.055); color: #fff; pointer-events: auto; cursor: pointer;
+    box-shadow: inset 0 0 0 1px rgba(3, 7, 18, 0.28); transition: 0.12s ease;
+  }
+  .element-box.clickable { border-color: rgba(106, 232, 194, 0.94); background: rgba(49, 205, 157, 0.09); }
+  .element-box:hover, .element-box:focus-visible { z-index: 1000 !important; outline: none; border-width: 2px; background: rgba(116, 176, 255, 0.22); box-shadow: 0 0 0 2px rgba(4, 8, 18, 0.72), 0 0 14px rgba(90, 163, 255, 0.55); }
+  .element-box.clickable:hover, .element-box.clickable:focus-visible { background: rgba(49, 205, 157, 0.2); box-shadow: 0 0 0 2px rgba(4, 8, 18, 0.72), 0 0 14px rgba(106, 232, 194, 0.55); }
+  .element-id {
+    position: absolute; top: -1px; left: -1px; min-width: 1.25rem; padding: 0.11rem 0.28rem;
+    border-radius: 3px 0 5px 0; color: #06120e; background: var(--accent);
+    font: 800 0.56rem ui-monospace, SFMono-Regular, Menlo, monospace; line-height: 1;
+    pointer-events: none;
+  }
+  .element-box:not(.clickable) .element-id { color: #07101d; background: #74b0ff; }
+  .element-overlay.clickable-only .element-box:not(.clickable) { display: none; }
+  .inspection-status { margin-top: 0.55rem; min-height: 1rem; color: var(--muted); font-size: 0.66rem; line-height: 1.4; }
+  .inspection-status.bad { color: var(--danger); }
+  .inspection-output { margin-top: 0.65rem; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: rgba(3, 6, 14, 0.52); }
+  .inspection-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 0.7rem; padding: 0.48rem 0.58rem; border-bottom: 1px solid var(--border); }
+  .inspection-count { color: var(--accent); font: 720 0.62rem ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .inspection-filter { display: inline-flex; align-items: center; gap: 0.35rem; color: var(--muted); font-size: 0.61rem; cursor: pointer; }
+  .inspection-raw summary { padding: 0.55rem 0.62rem; color: var(--muted); cursor: pointer; font-size: 0.64rem; font-weight: 720; }
+  .inspection-raw pre { max-width: min(38vw, 470px); max-height: 23rem; margin: 0; padding: 0.7rem; overflow: auto; border-top: 1px solid var(--border); color: #c9d6ef; background: rgba(2, 4, 10, 0.72); font: 0.61rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; }
   @media (max-width: 980px) {
     .stage img { width: 100%; height: auto; max-width: 100%; max-height: 62vh; }
+    .inspection-raw pre { max-width: 100%; }
   }
   .meta { font-size: 0.75rem; color: var(--muted); display: flex; gap: 0.9rem; flex-wrap: wrap; margin-top: 0.4rem; }
   /* `contain` keeps a wheel gesture inside the panel it started in: without it, hitting
@@ -529,20 +647,52 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .scroll { overflow: auto; max-height: 68vh; overscroll-behavior: contain; }
   .scroll.sm { max-height: 14rem; }
   .scroll.md { max-height: 18rem; }
-  .panel.journal { display: flex; flex-direction: column; min-width: 0; }
-  .journal-tools, .logcat-tools {
+  .panel.journal { display: flex; flex-direction: column; min-width: 0; padding: 0; overflow: hidden; }
+  .journal-tools {
+    display: grid; grid-template-columns: minmax(170px, auto) minmax(240px, 1fr) auto;
+    align-items: center; gap: 0.75rem; padding: 0.8rem 0.9rem;
+    border-bottom: 1px solid var(--border); background: rgba(10,14,26,0.72);
+  }
+  .journal-title { display: flex; align-items: center; gap: 0.6rem; min-width: 0; }
+  .journal-title h2 { margin: 0; white-space: nowrap; }
+  .journal-title #journal-shown { margin: 0; min-height: 0; white-space: nowrap; font-size: 0.65rem; }
+  .journal-search { position: relative; min-width: 0; }
+  .journal-search::before { content: '⌕'; position: absolute; left: 0.62rem; top: 50%; transform: translateY(-52%); color: var(--faint); font-size: 0.9rem; pointer-events: none; }
+  .journal-search .db-input { width: 100%; padding: 0.45rem 2.3rem 0.45rem 1.75rem; background: rgba(4,7,15,0.76); }
+  .journal-search kbd { position: absolute; right: 0.55rem; top: 50%; transform: translateY(-50%); color: var(--faint); border: 1px solid var(--border); border-radius: 5px; padding: 0.05rem 0.3rem; font: 0.58rem ui-monospace, monospace; pointer-events: none; }
+  .journal-actions { display: flex; align-items: center; gap: 0.4rem; }
+  .journal-toggle { display: inline-flex; align-items: center; gap: 0.35rem; color: var(--muted); font-size: 0.66rem; white-space: nowrap; cursor: pointer; }
+  .journal-toggle input {
+    appearance: none; width: 1.8rem; height: 1rem; margin: 0; padding: 0.1rem;
+    border: 1px solid var(--border-strong); border-radius: 999px; background: rgba(4,7,15,0.76);
+    cursor: pointer; transition: 0.15s ease;
+  }
+  .journal-toggle input::after {
+    content: ''; display: block; width: 0.68rem; height: 0.68rem; border-radius: 50%;
+    background: var(--muted); transition: transform 0.15s ease, background 0.15s ease;
+  }
+  .journal-toggle input:checked { background: rgba(255,123,142,0.16); border-color: rgba(255,123,142,0.5); }
+  .journal-toggle input:checked::after { transform: translateX(0.78rem); background: var(--danger); }
+  .journal-button-group { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .journal-button-group .db-button { border: 0; border-radius: 0; border-left: 1px solid var(--border); }
+  .journal-button-group .db-button:first-child { border-left: 0; }
+  .logcat-tools {
     display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;
     margin-bottom: 0.45rem;
   }
-  .journal-tools h2, .logcat-tools h2 { margin: 0 0.35rem 0 0; }
-  .journal-tools .grow, .logcat-tools .grow { flex: 1 1 8rem; min-width: 0; }
+  .logcat-tools h2 { margin: 0 0.35rem 0 0; }
+  .logcat-tools .grow { flex: 1 1 8rem; min-width: 0; }
   .journal-tools .db-button, .logcat-tools .db-button {
-    padding: 0.2rem 0.45rem; font-size: 0.7rem;
+    padding: 0.32rem 0.5rem; font-size: 0.64rem;
   }
-  .journal-tools .db-input, .logcat-tools .db-input, .logcat-tools .db-select {
+  .logcat-tools .db-input, .logcat-tools .db-select {
     padding: 0.24rem 0.45rem; font-size: 0.74rem;
   }
-  .journal-tools .pill, .logcat-tools .pill {
+  .logcat-tools .logcat-app-filter {
+    flex: 0 1 20rem; min-width: 13rem;
+    color: var(--accent); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .logcat-tools .pill {
     display: inline-flex; align-items: center; gap: 0.3rem; cursor: pointer;
   }
   #journal-wrap {
@@ -556,50 +706,69 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   }
   #journal-jump {
     color: #06130c; background: var(--accent); border: 1px solid var(--accent);
-    border-radius: 999px; padding: 0.16rem 0.6rem; font: 600 0.7rem inherit;
+    border-radius: 999px; padding: 0.3rem 0.62rem; font: 700 0.64rem inherit;
     cursor: pointer; white-space: nowrap;
   }
   #journal li.filtered { display: none; }
   #journal, #marks, #fail-list, #slow { list-style: none; margin: 0; padding: 0; font-size: 0.78rem; }
-  #journal li, #marks li, #fail-list li, #slow li {
+  #journal { display: grid; gap: 0.38rem; padding: 0.55rem; }
+  #journal li {
+    padding: 0; border: 1px solid rgba(142,157,211,0.13); border-radius: 11px;
+    background: rgba(8,11,21,0.34); overflow: clip; transition: border-color 0.15s, background 0.15s;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  #marks li, #fail-list li, #slow li {
     padding: 0.4rem 0.35rem; border-bottom: 1px solid var(--border);
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   }
-  #journal li.fail { background: rgba(239,107,90,0.08); border-left: 2px solid var(--danger); }
+  #journal li:hover { border-color: rgba(99,230,190,0.28); background: rgba(99,230,190,0.025); }
+  #journal li.fail { background: rgba(255,123,142,0.065); border-color: rgba(255,123,142,0.28); }
   #journal .t, #marks .t, #fail-list .t, #slow .t {
-    color: var(--muted); margin-right: 0.45rem;
+    color: var(--muted);
   }
   #journal .badge {
-    display: inline-block; min-width: 2.4rem; font-size: 0.65rem;
-    padding: 0.05rem 0.3rem; border-radius: 4px; margin-right: 0.35rem;
+    display: inline-flex; justify-content: center; min-width: 2.7rem; font-size: 0.56rem;
+    font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase;
+    padding: 0.18rem 0.35rem; border-radius: 6px;
   }
   #journal .badge.ok { color: var(--accent); background: rgba(61,220,132,0.12); }
   #journal .badge.fail { color: var(--danger); background: rgba(239,107,90,0.15); }
-  #journal .cmd { color: var(--text); font-weight: 600; }
-  #journal .args { color: var(--muted); }
-  #journal .dur { color: var(--warn); margin-left: 0.35rem; }
-  #journal .err { color: var(--danger); display: block; margin-top: 0.15rem; font-size: 0.72rem; }
-  #journal details > summary { cursor: pointer; line-height: 1.35; }
-  #journal details > summary::marker { color: var(--accent); }
-  #journal details[open] > summary { margin-bottom: 0.55rem; }
-  #journal .exchange {
-    display: grid; gap: 0.6rem; padding: 0.55rem; border: 1px solid var(--border);
-    border-radius: 6px; background: #0e1118;
+  #journal .event-main { min-width: 0; display: grid; gap: 0.18rem; }
+  #journal .cmd { color: var(--text); font-weight: 700; font-size: 0.73rem; }
+  #journal .args { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.65rem; }
+  #journal .dur { color: var(--warn); padding: 0.22rem 0.4rem; border-radius: 6px; background: rgba(245,199,107,0.08); font-size: 0.62rem; font-variant-numeric: tabular-nums; }
+  #journal .dur.slow { color: var(--danger); background: rgba(255,123,142,0.1); }
+  #journal .err { color: var(--danger); display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.64rem; }
+  #journal details > summary { display: grid; grid-template-columns: auto 5.8rem auto minmax(0,1fr) auto; align-items: center; gap: 0.55rem; padding: 0.62rem 0.7rem; cursor: pointer; line-height: 1.3; list-style: none; }
+  #journal details > summary::-webkit-details-marker { display: none; }
+  #journal .event-chevron { color: var(--faint); font: 1rem ui-sans-serif, system-ui; transition: transform 0.15s, color 0.15s; }
+  #journal details[open] .event-chevron { color: var(--accent); transform: rotate(90deg); }
+  #journal details[open] > summary {
+    position: sticky; top: 0; z-index: 4;
+    background: linear-gradient(100deg, #1a2035, #14192b);
+    border-bottom: 1px solid var(--border-strong);
+    box-shadow: 0 8px 20px rgba(2,4,10,0.34);
   }
+  #journal .exchange {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.65rem;
+    padding: 0.7rem; border: 0; border-radius: 0; background: rgba(5,8,16,0.62);
+  }
+  #journal .exchange-section { min-width: 0; border: 1px solid var(--border); border-radius: 9px; overflow: hidden; background: rgba(8,11,21,0.52); }
   #journal .exchange-section h3 {
-    margin: 0 0 0.3rem; color: var(--accent); font: 600 0.68rem ui-sans-serif, system-ui;
+    margin: 0; color: var(--accent); font: 700 0.62rem ui-sans-serif, system-ui;
     text-transform: uppercase; letter-spacing: 0.06em;
   }
-  #journal .exchange-head { display: flex; align-items: baseline; gap: 0.5rem; }
+  #journal .exchange-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; padding: 0.5rem 0.6rem; border-bottom: 1px solid var(--border); }
   #journal .exchange pre {
     /* One scroll surface per panel. A capped, independently scrollable pre nested inside
        the scrollable journal meant a wheel gesture went to whichever of the two the
        pointer happened to be over, and reaching the end of a payload stalled dead. */
-    margin: 0; max-height: none; overflow: visible; padding: 0.55rem;
-    border-radius: 5px; background: #090b10; color: #cdd2db; font: inherit;
+    margin: 0; max-height: none; overflow: visible; padding: 0.7rem;
+    border-radius: 0; background: rgba(3,5,11,0.56); color: #cdd2db; font: inherit;
     font-size: 0.7rem; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere;
     user-select: text;
   }
+  #journal .exchange > .detail-note { grid-column: 1 / -1; padding: 0.35rem 0.2rem 0; }
   .copy-button {
     color: var(--muted); background: transparent; border: 1px solid var(--border);
     border-radius: 5px; padding: 0.04rem 0.36rem; font: inherit; font-size: 0.62rem;
@@ -614,11 +783,21 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .tok-null { color: var(--muted); font-style: italic; }
   .tok-punc { color: var(--tok-dim); }
   #journal .detail-note { color: var(--muted); font: 0.68rem ui-sans-serif, system-ui; }
+  @media (max-width: 1200px) {
+    .journal-tools { grid-template-columns: 1fr; }
+    .journal-actions { flex-wrap: wrap; }
+    #journal .exchange { grid-template-columns: minmax(0, 1fr); }
+  }
+  @media (max-width: 720px) {
+    #journal details > summary { grid-template-columns: auto auto minmax(0,1fr) auto; }
+    #journal .t { display: none; }
+  }
   .lower {
     display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 0.85rem; padding: 0 0.85rem 0.85rem; max-width: var(--wide); margin: 0 auto;
   }
   .lower.wide { grid-template-columns: minmax(0, 1fr); }
+  .lower.summary-row { grid-template-columns: minmax(0, 1.3fr) minmax(280px, 0.7fr); }
   @media (max-width: 1100px) { .lower { grid-template-columns: minmax(0, 1fr); } }
   .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; }
   @media (max-width: 600px) { .stats-grid { grid-template-columns: 1fr; } }
@@ -631,12 +810,61 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   }
   table.cmdstats th { color: var(--muted); font-weight: 500; }
   table.cmdstats .failc { color: var(--danger); }
-  #map-screens, #map-routes { list-style: none; margin: 0; padding: 0; font-size: 0.78rem; }
-  #map-screens li, #map-routes li {
-    padding: 0.3rem 0; border-bottom: 1px solid var(--border);
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  .knowledge-workspace { max-width: var(--wide); margin: 0 auto; padding: 0 0.85rem 0.85rem; }
+  .knowledge-panel { padding: 0; overflow: hidden; }
+  .knowledge-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+    padding: 1rem 1.1rem; border-bottom: 1px solid var(--border); background: rgba(10,14,26,0.58);
   }
-  #map-pkg { font-size: 0.78rem; color: var(--muted); margin-bottom: 0.5rem; }
+  .knowledge-head h2 { margin: 0 0 0.25rem; color: var(--text); font-size: 0.78rem; }
+  .knowledge-head p { margin: 0; color: var(--muted); font-size: 0.7rem; }
+  .knowledge-head code { color: var(--accent); }
+  .knowledge-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .knowledge-column { min-width: 0; padding: 1rem; }
+  .knowledge-column + .knowledge-column { border-left: 1px solid var(--border); }
+  .knowledge-column-head { display: flex; align-items: end; justify-content: space-between; gap: 1rem; margin-bottom: 0.9rem; }
+  .knowledge-column-head h3 { margin: 0.18rem 0 0; font-size: 1rem; }
+  .knowledge-eyebrow { color: var(--accent); font-size: 0.58rem; font-weight: 750; letter-spacing: 0.11em; text-transform: uppercase; }
+  .knowledge-package { max-width: 58%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font: 0.65rem ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .knowledge-section-head { display: flex; align-items: center; justify-content: space-between; margin: 0.7rem 0 0.4rem; }
+  .knowledge-section-head h4 { margin: 0; color: var(--text); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.09em; }
+  .knowledge-section-head span { color: var(--faint); font-size: 0.62rem; }
+  .knowledge-section-head.routes-head { margin-top: 1rem; }
+  .knowledge-list { display: grid; gap: 0.4rem; max-height: 24rem; overflow: auto; overscroll-behavior: contain; scrollbar-color: rgba(140,123,255,0.45) transparent; scrollbar-width: thin; }
+  .flow-list { max-height: 52rem; }
+  .knowledge-item { border: 1px solid rgba(142,157,211,0.15); border-radius: 10px; background: rgba(7,10,20,0.42); overflow: hidden; }
+  .knowledge-item > summary { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; padding: 0.65rem 0.7rem; cursor: pointer; list-style: none; }
+  .knowledge-item > summary::-webkit-details-marker { display: none; }
+  .knowledge-item > summary:hover { background: rgba(99,230,190,0.035); }
+  .knowledge-item[open] > summary { border-bottom: 1px solid var(--border); background: rgba(140,123,255,0.05); }
+  .knowledge-summary-main { min-width: 0; display: grid; gap: 0.18rem; }
+  .knowledge-summary-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font: 700 0.7rem ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .knowledge-summary-subtitle { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 0.62rem; }
+  .knowledge-badges { display: flex; align-items: center; gap: 0.3rem; flex: 0 0 auto; }
+  .knowledge-badge { padding: 0.18rem 0.36rem; border-radius: 6px; color: var(--muted); background: rgba(255,255,255,0.04); border: 1px solid var(--border); font-size: 0.56rem; white-space: nowrap; }
+  .knowledge-badge.ok { color: var(--accent); border-color: rgba(99,230,190,0.26); }
+  .knowledge-badge.bad { color: var(--danger); border-color: rgba(255,123,142,0.26); }
+  .knowledge-detail { display: grid; gap: 0.65rem; padding: 0.7rem; }
+  .knowledge-command { display: flex; align-items: center; gap: 0.55rem; padding: 0.5rem 0.6rem; border-radius: 8px; background: rgba(4,7,15,0.74); border: 1px solid var(--border); }
+  .knowledge-command span { color: var(--faint); font-size: 0.58rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; }
+  .knowledge-command code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--accent); font-size: 0.66rem; }
+  .knowledge-json { margin: 0; padding: 0.65rem; border-radius: 8px; background: rgba(3,5,11,0.72); color: #cdd2db; font: 0.62rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .knowledge-steps { display: grid; gap: 0.35rem; margin: 0; padding: 0; list-style: none; }
+  .knowledge-step { display: grid; grid-template-columns: 1.6rem minmax(0,1fr); gap: 0.45rem; padding: 0.5rem; border-radius: 8px; border: 1px solid rgba(142,157,211,0.12); background: rgba(255,255,255,0.018); }
+  .knowledge-step-index { color: var(--faint); font: 0.6rem ui-monospace, monospace; }
+  .knowledge-step-main { min-width: 0; display: grid; gap: 0.2rem; }
+  .knowledge-step-kind { color: var(--accent); font: 700 0.65rem ui-monospace, monospace; }
+  .knowledge-step-data { color: var(--muted); font: 0.6rem/1.45 ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .flow-group { display: grid; gap: 0.4rem; }
+  .flow-group + .flow-group { margin-top: 0.9rem; }
+  .flow-group-title { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; padding: 0 0.15rem; }
+  .flow-group-title h4 { margin: 0; max-width: 80%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font: 700 0.63rem ui-monospace, monospace; }
+  .flow-group-title span { color: var(--faint); font-size: 0.58rem; }
+  @media (max-width: 1100px) {
+    .knowledge-grid { grid-template-columns: minmax(0, 1fr); }
+    .knowledge-column + .knowledge-column { border-left: 0; border-top: 1px solid var(--border); }
+    .flow-list { max-height: 36rem; }
+  }
   .logcat-scroll {
     /* Logcat is evidence, not a footnote: a whole row of its own, and real height. One
        third of a three-column strip with `word-break: break-all` chopped identifiers
@@ -671,43 +899,94 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .empty { color: var(--muted); font-size: 0.78rem; padding: 0.4rem 0; }
   /* --- grid mode --- */
   .grid-empty {
-    padding: 1.6rem 1.1rem; color: var(--muted); font-size: 0.82rem;
-    max-width: 1800px; margin: 0 auto; line-height: 1.5;
+    width: min(520px, calc(100% - 2rem)); margin: clamp(3rem, 12vh, 8rem) auto;
+    padding: clamp(1.8rem, 5vw, 2.7rem); color: var(--muted); text-align: center;
+    background: linear-gradient(145deg, rgba(25,30,52,0.9), rgba(12,16,29,0.94));
+    border: 1px solid var(--border-strong); border-radius: 22px; box-shadow: var(--shadow);
+    position: relative; overflow: hidden;
   }
-  .grid-empty.bad { color: var(--danger); }
+  .grid-empty::before {
+    content: ''; position: absolute; inset: 0 0 auto; height: 1px;
+    background: linear-gradient(90deg, transparent, var(--accent), var(--accent-2), transparent);
+  }
+  .grid-empty.bad { border-color: rgba(255,123,142,0.38); }
+  .grid-empty.bad::before { background: linear-gradient(90deg, transparent, var(--danger), transparent); }
+  .grid-empty-logo {
+    width: 4.2rem; height: 4.2rem; object-fit: contain; margin-bottom: 0.9rem;
+    filter: drop-shadow(0 0 18px rgba(99,230,190,0.25));
+  }
+  .grid-empty-kicker {
+    margin: 0 0 0.45rem; color: var(--accent); font-size: 0.66rem; font-weight: 750;
+    letter-spacing: 0.14em; text-transform: uppercase;
+  }
+  .grid-empty h2 { margin: 0; color: var(--text); font-size: clamp(1.25rem, 4vw, 1.65rem); letter-spacing: -0.025em; }
+  .grid-empty-copy { margin: 0.75rem auto 1.15rem; max-width: 38rem; font-size: 0.86rem; line-height: 1.65; }
+  .grid-empty-command {
+    display: inline-flex; align-items: center; padding: 0.58rem 0.85rem; color: var(--accent);
+    background: rgba(4,8,16,0.7); border: 1px solid rgba(99,230,190,0.24);
+    border-radius: 10px; font: 600 0.78rem ui-monospace, SFMono-Regular, Menlo, monospace;
+    box-shadow: inset 0 1px rgba(255,255,255,0.04);
+  }
+  .grid-empty-foot { margin: 1rem 0 0; color: var(--faint); font-size: 0.7rem; }
+  .grid-empty.bad .grid-empty-kicker, .grid-empty.bad h2 { color: var(--danger); }
   .device-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-    gap: 0.85rem; padding: 0.85rem; max-width: 1800px; margin: 0 auto;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 340px));
+    justify-content: center; align-items: start;
+    gap: 1.25rem; padding: clamp(1.4rem, 4vw, 3rem); max-width: 1600px; margin: 0 auto;
   }
   .tile {
-    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
-    padding: 0.55rem 0.65rem 0.7rem; cursor: pointer; transition: border-color 0.15s;
-    text-decoration: none; color: inherit; display: block;
+    background: #02040a; border: 1px solid var(--border-strong); border-radius: 20px;
+    cursor: pointer; text-decoration: none; color: inherit; display: block; overflow: hidden;
+    box-shadow: 0 24px 70px rgba(0,0,0,0.42);
+    transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
   }
-  .tile:hover { border-color: var(--accent); }
-  .tile-head {
-    display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center;
-    margin-bottom: 0.45rem; font-size: 0.72rem;
+  .tile:hover {
+    border-color: rgba(99,230,190,0.64); transform: translateY(-5px);
+    box-shadow: 0 30px 80px rgba(0,0,0,0.52), 0 0 0 1px rgba(99,230,190,0.12);
   }
-  .tile-head .ser {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-weight: 600; color: var(--text);
+  .tile-screen { position: relative; aspect-ratio: 9 / 20; overflow: hidden; background: #02040a; }
+  .tile-screen::before, .tile-screen::after {
+    content: ''; position: absolute; z-index: 1; inset-inline: 0; pointer-events: none;
   }
-  .tile img {
-    width: 100%; aspect-ratio: 9/16; object-fit: contain; background: #000;
-    border-radius: 6px; display: block;
+  .tile-screen::before { top: 0; height: 24%; background: linear-gradient(to bottom, rgba(3,6,14,0.88), transparent); }
+  .tile-screen::after { bottom: 0; height: 52%; background: linear-gradient(to top, rgba(3,6,14,0.98) 14%, rgba(3,6,14,0.76) 58%, transparent); }
+  .tile img { width: 100%; height: 100%; object-fit: cover; display: block; transition: transform 0.35s ease; }
+  .tile:hover img { transform: scale(1.012); }
+  .tile-overlay { position: absolute; z-index: 2; left: 0; right: 0; padding: 1rem; }
+  .tile-overlay-top { top: 0; display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
+  .tile-identity { min-width: 0; display: flex; align-items: center; gap: 0.5rem; }
+  .tile-device-dot { width: 0.48rem; height: 0.48rem; flex: 0 0 auto; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0.75rem var(--accent); }
+  .tile .ser {
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font: 700 0.78rem ui-monospace, SFMono-Regular, Menlo, monospace; color: #fff;
+    text-shadow: 0 1px 8px rgba(0,0,0,0.8);
   }
-  .tile .tile-meta {
-    margin-top: 0.4rem; font-size: 0.7rem; color: var(--muted);
-    display: flex; gap: 0.6rem; flex-wrap: wrap;
+  .tile .cap {
+    flex: 0 0 auto; padding: 0.28rem 0.5rem; border-radius: 999px;
+    color: var(--muted); background: rgba(8,11,21,0.72); border: 1px solid rgba(255,255,255,0.16);
+    font-size: 0.62rem; font-weight: 750; letter-spacing: 0.08em; text-transform: uppercase;
+    backdrop-filter: blur(12px);
   }
-  .tile .tile-runtime {
-    margin-top: 0.4rem; display: grid; gap: 0.18rem;
-    color: var(--muted); font-size: 0.68rem; overflow-wrap: anywhere;
+  .tile .cap.ok { color: var(--accent); border-color: rgba(99,230,190,0.36); }
+  .tile-overlay-bottom { bottom: 0; }
+  .tile-app-label { display: block; color: rgba(255,255,255,0.52); font-size: 0.6rem; font-weight: 700; letter-spacing: 0.11em; text-transform: uppercase; margin-bottom: 0.25rem; }
+  .tile .pkg {
+    display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    color: #fff; font: 600 0.74rem ui-monospace, SFMono-Regular, Menlo, monospace;
   }
-  .tile .tile-runtime .held { color: var(--accent); }
-  .tile .tile-runtime .down { color: var(--danger); }
+  .tile-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 0.45rem; margin-top: 0.8rem; }
+  .tile-stat { min-width: 0; padding: 0.55rem 0.6rem; border: 1px solid rgba(255,255,255,0.1); border-radius: 10px; background: rgba(12,16,29,0.64); backdrop-filter: blur(12px); }
+  .tile-stat-label { display: block; color: rgba(255,255,255,0.46); font-size: 0.56rem; font-weight: 700; letter-spacing: 0.09em; text-transform: uppercase; margin-bottom: 0.2rem; }
+  .tile-stat-value { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: rgba(255,255,255,0.86); font-size: 0.66rem; }
+  .tile-stat-value.held { color: var(--accent); }
+  .tile-stat-value.down { color: var(--danger); }
+  .tile-card-footer { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-top: 0.8rem; padding-top: 0.7rem; border-top: 1px solid rgba(255,255,255,0.1); }
+  .tile .owner { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: rgba(255,255,255,0.52); font-size: 0.62rem; }
+  .tile-inspect { flex: 0 0 auto; color: var(--accent); font-size: 0.66rem; font-weight: 750; }
+  @media (max-width: 520px) {
+    .device-grid { grid-template-columns: minmax(0, 360px); padding: 1rem; }
+  }
   /* --- proxy workspace --- */
   .proxy-workspace { max-width: 1600px; margin: 0 auto 0.85rem; padding: 0 0.85rem; }
   .proxy-head { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
@@ -759,8 +1038,8 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .db-field { display: grid; gap: 0.2rem; color: var(--muted); font-size: 0.68rem; }
   .db-field.grow { flex: 1 1 260px; }
   .db-input, .db-select, .db-sql {
-    color: var(--text); background: #0e1118; border: 1px solid var(--border);
-    border-radius: 6px; padding: 0.42rem 0.52rem; font: inherit; min-width: 0;
+    color: var(--text); background: rgba(5, 8, 17, 0.72); border: 1px solid var(--border);
+    border-radius: 9px; padding: 0.48rem 0.58rem; font: inherit; min-width: 0;
   }
   .db-input:focus, .db-select:focus, .db-sql:focus {
     outline: 1px solid var(--accent); border-color: var(--accent);
@@ -771,10 +1050,11 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace; line-height: 1.4;
   }
   .db-button {
-    color: var(--text); background: var(--panel2); border: 1px solid var(--border);
-    border-radius: 6px; padding: 0.43rem 0.65rem; cursor: pointer; font: inherit;
+    color: var(--text); background: rgba(255,255,255,0.045); border: 1px solid var(--border);
+    border-radius: 9px; padding: 0.48rem 0.72rem; cursor: pointer; font: inherit;
+    transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
   }
-  .db-button:hover:not(:disabled) { border-color: var(--accent); }
+  .db-button:hover:not(:disabled) { border-color: var(--accent); background: rgba(99,230,190,0.09); transform: translateY(-1px); }
   .db-button.primary { color: #06130c; background: var(--accent); border-color: var(--accent); font-weight: 650; }
   .db-button.danger { color: #fff; background: #873a34; border-color: var(--danger); }
   .db-button:disabled { opacity: 0.45; cursor: not-allowed; }
@@ -802,39 +1082,184 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   dialog.db-dialog::backdrop { background: rgba(0,0,0,0.72); }
   .db-dialog h3 { margin-top: 0; }
   .db-dialog code { color: var(--warn); }
+  .model-workspace { max-width: var(--wide); margin: 0 auto 1rem; padding: 0 0.85rem; }
+  .model-panel { padding: 0; overflow: hidden; }
+  .model-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+    padding: 1rem 1.1rem; border-bottom: 1px solid var(--border);
+    background: linear-gradient(100deg, rgba(21,27,48,0.96), rgba(13,18,34,0.92));
+  }
+  .model-head h2 { margin: 0 0 0.25rem; color: var(--text); font-size: 0.82rem; }
+  .model-head p { margin: 0; color: var(--muted); font-size: 0.68rem; }
+  .model-master { display: flex; align-items: center; gap: 0.75rem; }
+  .model-master-copy { text-align: right; }
+  .model-master-copy strong { display: block; font-size: 0.7rem; }
+  .model-master-copy span { color: var(--muted); font-size: 0.6rem; }
+  .model-switch {
+    appearance: none; width: 3.2rem; height: 1.65rem; margin: 0; padding: 0.18rem;
+    border: 1px solid var(--border-strong); border-radius: 999px; background: #080b14;
+    cursor: pointer; transition: 0.18s ease;
+  }
+  .model-switch::after {
+    content: ''; display: block; width: 1.18rem; height: 1.18rem; border-radius: 50%;
+    background: var(--muted); transition: 0.18s ease;
+  }
+  .model-switch:checked { background: rgba(99,230,190,0.18); border-color: var(--accent); }
+  .model-switch:checked::after { transform: translateX(1.5rem); background: var(--accent); box-shadow: 0 0 15px rgba(99,230,190,0.48); }
+  .model-cards { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 0.75rem; padding: 0.9rem; }
+  .model-card {
+    min-width: 0; padding: 0.85rem; border: 1px solid var(--border); border-radius: 13px;
+    background: radial-gradient(circle at top right, rgba(140,123,255,0.1), transparent 44%), rgba(7,10,20,0.54);
+  }
+  .model-card.busy { border-color: rgba(245,199,107,0.55); box-shadow: inset 0 0 24px rgba(245,199,107,0.05); }
+  .model-card-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.7rem; }
+  .model-card h3 { margin: 0; font-size: 0.9rem; }
+  .model-card-sub { margin-top: 0.2rem; color: var(--muted); font-size: 0.62rem; }
+  .model-state { padding: 0.24rem 0.45rem; border-radius: 7px; border: 1px solid var(--border); color: var(--muted); font: 700 0.58rem ui-monospace,monospace; text-transform: uppercase; }
+  .model-state.ready { color: var(--accent); border-color: rgba(99,230,190,0.35); }
+  .model-state.busy { color: var(--warn); border-color: rgba(245,199,107,0.4); }
+  .model-state.bad { color: var(--danger); border-color: rgba(255,123,142,0.4); }
+  .model-metrics { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 0.45rem; margin: 0.75rem 0; }
+  .model-metric { padding: 0.5rem; border: 1px solid rgba(142,157,211,0.12); border-radius: 9px; background: rgba(3,6,13,0.46); }
+  .model-metric span { display: block; color: var(--faint); font-size: 0.54rem; text-transform: uppercase; letter-spacing: 0.08em; }
+  .model-metric strong { display: block; margin-top: 0.18rem; overflow: hidden; text-overflow: ellipsis; color: var(--text); font: 0.67rem ui-monospace,monospace; }
+  .model-card-actions { display: flex; align-items: center; gap: 0.45rem; }
+  .model-card-actions .journal-toggle { margin-left: auto; }
+  .model-body { display: grid; grid-template-columns: minmax(320px,0.82fr) minmax(0,1.18fr); border-top: 1px solid var(--border); }
+  .model-lab, .model-monitor { min-width: 0; padding: 0.9rem; }
+  .model-monitor { border-left: 1px solid var(--border); }
+  .model-section-head { display: flex; align-items: center; justify-content: space-between; gap: 0.7rem; margin-bottom: 0.7rem; }
+  .model-section-head h3 { margin: 0; font-size: 0.75rem; }
+  .model-chat { height: 20rem; overflow: auto; display: grid; align-content: start; gap: 0.5rem; padding: 0.55rem; border: 1px solid var(--border); border-radius: 10px; background: rgba(3,5,11,0.58); }
+  .model-message { max-width: 92%; padding: 0.55rem 0.65rem; border-radius: 10px; white-space: pre-wrap; overflow-wrap: anywhere; font: 0.66rem/1.45 ui-monospace,monospace; }
+  .model-message.user { justify-self: end; color: var(--text); background: rgba(140,123,255,0.15); border: 1px solid rgba(140,123,255,0.24); }
+  .model-message.assistant { justify-self: start; color: #d7fdeb; background: rgba(99,230,190,0.08); border: 1px solid rgba(99,230,190,0.2); }
+  .model-message.meta { max-width: 100%; color: var(--muted); background: transparent; padding: 0.2rem; }
+  .model-compose { display: grid; gap: 0.5rem; margin-top: 0.6rem; }
+  .model-compose textarea { min-height: 5rem; resize: vertical; }
+  .model-compose-row { display: flex; align-items: end; gap: 0.5rem; }
+  .model-sample-row { display: grid; grid-template-columns: minmax(150px,0.7fr) minmax(220px,1.3fr); gap: 0.5rem; }
+  .model-prompt-guide { margin: -0.12rem 0 0; color: var(--muted); font-size: 0.61rem; line-height: 1.45; }
+  .model-prompt-guide code { color: var(--accent); font-family: ui-monospace,monospace; }
+  .model-traces { height: 29rem; overflow: auto; display: grid; align-content: start; gap: 0.45rem; }
+  .model-trace { border: 1px solid var(--border); border-radius: 10px; overflow: clip; background: rgba(5,8,16,0.55); }
+  .model-trace > summary { display: grid; grid-template-columns: auto minmax(0,1fr) auto; gap: 0.55rem; align-items: center; padding: 0.58rem 0.65rem; cursor: pointer; list-style: none; }
+  .model-trace > summary::-webkit-details-marker { display: none; }
+  .model-trace-title { min-width: 0; display: grid; gap: 0.12rem; }
+  .model-trace-title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 0.68rem ui-monospace,monospace; }
+  .model-trace-title span { color: var(--muted); font-size: 0.58rem; }
+  .model-trace-metrics { color: var(--warn); font: 0.58rem ui-monospace,monospace; white-space: nowrap; }
+  .model-trace-body { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 0.55rem; padding: 0.6rem; border-top: 1px solid var(--border); }
+  .model-trace-pane { min-width: 0; }
+  .model-trace-pane h4 { margin: 0 0 0.3rem; color: var(--accent); font-size: 0.56rem; text-transform: uppercase; letter-spacing: 0.08em; }
+  .model-trace-pane pre { margin: 0; max-height: 20rem; overflow: auto; padding: 0.55rem; border-radius: 8px; background: #05070d; color: #cdd2db; font: 0.6rem/1.45 ui-monospace,monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+  @media (max-width: 1050px) {
+    .model-body, .model-cards { grid-template-columns: minmax(0,1fr); }
+    .model-monitor { border-left: 0; border-top: 1px solid var(--border); }
+  }
   .hidden { display: none !important; }
+
+  /* --- visual system: quiet depth, clear hierarchy, and generous reading surfaces --- */
+  .layout, .lower { gap: 1rem; }
+  .layout { padding-top: 1.35rem; }
+  .lower { padding-bottom: 1rem; }
+  .stage, .journal, .lower > .panel, .proxy-workspace > .panel, .database-workspace > .panel, .model-workspace > .panel {
+    position: relative; overflow: hidden;
+  }
+  .stage::before, .journal::before, .proxy-workspace > .panel::before, .database-workspace > .panel::before, .model-workspace > .panel::before {
+    content: ''; position: absolute; inset: 0 0 auto; height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(99,230,190,0.72), rgba(140,123,255,0.62), transparent);
+    opacity: 0.8;
+  }
+  .stage h2::before, .journal-tools h2::before, .logcat-tools h2::before {
+    content: ''; display: inline-block; width: 0.42rem; height: 0.42rem; margin: 0 0.42rem 0.08rem 0;
+    border-radius: 50%; background: var(--accent); box-shadow: 0 0 0.7rem rgba(99,230,190,0.8);
+  }
+  .meta span { padding: 0.3rem 0.48rem; border: 1px solid var(--border); border-radius: 7px; background: rgba(255,255,255,0.025); }
+  #marks li, #fail-list li, #slow li { padding: 0.55rem 0.5rem; border-bottom-color: rgba(142,157,211,0.11); }
+  #marks li:hover, #fail-list li:hover, #slow li:hover { background: rgba(140,123,255,0.06); }
+  #journal .exchange pre, #logcat, .rule-body pre { background: rgba(3,5,12,0.7); }
+  .scroll, .logcat-scroll, .db-table-wrap { scrollbar-color: rgba(140,123,255,0.45) transparent; scrollbar-width: thin; }
+  .scroll::-webkit-scrollbar, .logcat-scroll::-webkit-scrollbar, .db-table-wrap::-webkit-scrollbar { width: 7px; height: 7px; }
+  .scroll::-webkit-scrollbar-thumb, .logcat-scroll::-webkit-scrollbar-thumb, .db-table-wrap::-webkit-scrollbar-thumb { background: rgba(140,123,255,0.42); border-radius: 999px; }
+  .proxy-workspace, .database-workspace, .model-workspace { margin-bottom: 1rem; }
+  .proxy-grid, .db-grid { gap: 1rem; }
+  .db-subpanel { border-radius: 12px; background: rgba(7,10,20,0.36); }
+  .flow-table th { background: rgba(30,36,61,0.9); }
+  footer { padding: 0.7rem clamp(1rem, 3vw, 2.4rem) 1.5rem; text-align: center; color: var(--faint); }
+  @media (max-width: 700px) {
+    header { padding: 0.75rem 1rem; }
+    header .pill { order: 3; }
+    .layout, .lower { padding-left: 0.65rem; padding-right: 0.65rem; }
+    .panel { border-radius: 14px; padding: 0.85rem; }
+  }
 </style>
 </head>
 <body>
 <header>
-  <a id="back" class="back hidden" href="/">← grid</a>
-  <h1>aua dashboard</h1>
-  <span id="modepill" class="pill">—</span>
-  <span id="serial" class="pill">—</span>
-  <span id="capture" class="pill">capture …</span>
-  <span id="via" class="pill">via …</span>
-  <span id="lease" class="pill">lease …</span>
-  <span id="watchdog" class="pill">auto-stop …</span>
-  <span id="age" class="pill">frame …</span>
-  <span id="failpill" class="pill hidden">fails 0</span>
-  <span id="pkg" class="pill hidden">pkg …</span>
-  <span id="count" class="pill hidden">0 devices</span>
+  <div class="header-brand">
+    <a id="back" class="back hidden" href="/">← <span>All devices</span></a>
+    <img class="brand-mark" src="/assets/aua-dashboard-logo.png" alt="" aria-hidden="true"/>
+    <div class="header-title"><h1>AuA Dashboard <span>runtime observability</span></h1></div>
+  </div>
+  <div class="header-actions">
+    <span class="header-live">live</span>
+    <span id="count" class="pill hidden">0 devices</span>
+  </div>
 </header>
 
 <div id="grid-view" class="hidden">
-  <p id="grid-empty" class="grid-empty hidden"></p>
+  <section id="grid-empty" class="grid-empty hidden" aria-live="polite">
+    <img class="grid-empty-logo" src="/assets/aua-dashboard-logo.png" alt="" aria-hidden="true"/>
+    <p class="grid-empty-kicker">Device monitor</p>
+    <h2 id="grid-empty-title">No devices online</h2>
+    <p id="grid-empty-copy" class="grid-empty-copy">Start an emulator and it will appear here automatically.</p>
+    <code id="grid-empty-command" class="grid-empty-command">aua emulator start</code>
+    <p id="grid-empty-foot" class="grid-empty-foot">This dashboard keeps watching in the background.</p>
+  </section>
   <div class="device-grid" id="tiles"></div>
-  <footer>
-    Multi-agent grid — one tile per online emulator. Click a tile for journal / map / logcat.
-    Capture uses each agent's daemon when present; otherwise adb screencap per tile.
-  </footer>
 </div>
 
 <div id="detail-view" class="hidden">
+<section class="detail-overview">
+  <div class="detail-device">
+    <span class="detail-eyebrow">Device details</span>
+    <div class="detail-serial-row"><span class="detail-device-dot"></span><span id="serial">—</span></div>
+    <span id="pkg">—</span>
+  </div>
+  <div class="detail-health">
+    <div class="detail-status"><span class="detail-status-label">Capture</span><span id="capture" class="detail-status-value">—</span></div>
+    <div class="detail-status"><span class="detail-status-label">Source</span><span id="via" class="detail-status-value">—</span></div>
+    <div class="detail-status"><span class="detail-status-label">Lease</span><span id="lease" class="detail-status-value">—</span></div>
+    <div class="detail-status"><span class="detail-status-label">Auto-stop</span><span id="watchdog" class="detail-status-value">—</span></div>
+    <div class="detail-status"><span class="detail-status-label">Frame age</span><span id="age" class="detail-status-value">—</span></div>
+    <div class="detail-status"><span class="detail-status-label">Failures</span><span id="failpill" class="detail-status-value">0</span></div>
+  </div>
+</section>
 <div class="layout">
   <section class="panel stage">
-    <h2>Live frame</h2>
-    <img id="frame" alt="device frame" src=""/>
+    <div class="stage-heading">
+      <h2>Live frame</h2>
+      <button id="screen-analyze" class="db-button analyze-button" type="button">Analyze</button>
+    </div>
+    <div id="frame-shell" class="frame-shell">
+      <img id="frame" alt="device frame" src=""/>
+      <div id="element-overlay" class="element-overlay" aria-label="AUA element bounds"></div>
+    </div>
+    <div id="inspection-status" class="inspection-status">Analyze to inspect AUA's raw response and element IDs.</div>
+    <div id="inspection-output" class="inspection-output hidden">
+      <div class="inspection-toolbar">
+        <span id="inspection-count" class="inspection-count">0 elements</span>
+        <div style="display:flex;align-items:center;gap:.5rem">
+          <label class="inspection-filter"><input id="inspection-clickable-only" type="checkbox"/>Interactive only</label>
+          <button id="inspection-live" class="db-button" type="button">Live</button>
+        </div>
+      </div>
+      <details class="inspection-raw" open>
+        <summary>Raw AUA response</summary>
+        <pre id="inspection-raw">{}</pre>
+      </details>
+    </div>
     <div class="meta">
       <span id="session">session —</span>
       <span id="fps">poll —</span>
@@ -842,21 +1267,31 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   </section>
   <aside class="panel journal">
     <div class="journal-tools">
-      <h2>Agent I/O journal</h2>
-      <input id="journal-filter" class="db-input grow" placeholder="filter cmd, args, error…"
-             autocomplete="off" spellcheck="false"/>
-      <label class="pill"><input id="journal-fails-only" type="checkbox"/>fails only</label>
-      <button id="journal-expand" class="db-button" type="button">expand</button>
-      <button id="journal-collapse" class="db-button" type="button">collapse</button>
-      <span id="journal-shown" class="db-status">—</span>
-      <button id="journal-jump" class="hidden" type="button">newest ↑</button>
+      <div class="journal-title">
+        <h2>Agent I/O journal</h2>
+        <span id="journal-shown" class="db-status">—</span>
+      </div>
+      <div class="journal-search">
+        <input id="journal-filter" class="db-input" type="search"
+               placeholder="Search commands, arguments, or errors…"
+               aria-label="Search journal" autocomplete="off" spellcheck="false"/>
+        <kbd>/</kbd>
+      </div>
+      <div class="journal-actions">
+        <label class="journal-toggle"><input id="journal-fails-only" type="checkbox"/>Failures only</label>
+        <div class="journal-button-group">
+          <button id="journal-expand" class="db-button" type="button">Expand visible</button>
+          <button id="journal-collapse" class="db-button" type="button">Collapse all</button>
+        </div>
+        <button id="journal-jump" class="hidden" type="button">Newest ↑</button>
+      </div>
     </div>
     <div class="scroll" id="journal-wrap">
       <ul id="journal"><li class="empty">waiting for events…</li></ul>
     </div>
   </aside>
 </div>
-<div class="lower">
+<div class="lower summary-row">
   <section class="panel">
     <h2>Usage stats</h2>
     <div class="stats-grid">
@@ -873,16 +1308,38 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
   </section>
   <section class="panel">
-    <h2>App map</h2>
-    <div id="map-pkg">package —</div>
-    <h2>screens</h2>
-    <ul id="map-screens" class="scroll sm"><li class="empty">—</li></ul>
-    <h2 style="margin-top:0.55rem">routes</h2>
-    <ul id="map-routes" class="scroll sm"><li class="empty">—</li></ul>
-  </section>
-  <section class="panel">
     <h2>Capture marks</h2>
     <ul id="marks" class="scroll sm"><li class="empty">—</li></ul>
+  </section>
+</div>
+<div class="knowledge-workspace">
+  <section class="panel knowledge-panel">
+    <div class="knowledge-head">
+      <div>
+        <h2>Navigation library</h2>
+        <p>What AuA knows, what <code>goto</code> can target, and every saved flow available to agents.</p>
+      </div>
+      <span id="knowledge-total" class="pill">loading…</span>
+    </div>
+    <div class="knowledge-grid">
+      <section class="knowledge-column">
+        <div class="knowledge-column-head">
+          <div><span class="knowledge-eyebrow">Current app</span><h3>App map</h3></div>
+          <span id="map-pkg" class="knowledge-package">package —</span>
+        </div>
+        <div class="knowledge-section-head"><h4>Screens</h4><span>Goto targets</span></div>
+        <div id="map-screens" class="knowledge-list"><div class="empty">—</div></div>
+        <div class="knowledge-section-head routes-head"><h4>Routes</h4><span>Recorded edges</span></div>
+        <div id="map-routes" class="knowledge-list"><div class="empty">—</div></div>
+      </section>
+      <section class="knowledge-column">
+        <div class="knowledge-column-head">
+          <div><span class="knowledge-eyebrow">All apps</span><h3>Saved flows</h3></div>
+          <span id="flow-count" class="knowledge-package">0 flows</span>
+        </div>
+        <div id="flow-groups" class="knowledge-list flow-list"><div class="empty">—</div></div>
+      </section>
+    </div>
   </section>
 </div>
 <div class="lower wide">
@@ -891,6 +1348,9 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       <h2>Logcat</h2>
       <input id="logcat-filter" class="db-input grow" placeholder="filter tag or message…"
              autocomplete="off" spellcheck="false"/>
+      <input id="logcat-app-filter" class="db-input logcat-app-filter" type="search"
+             placeholder="App ID / package…" aria-label="Filter Logcat by App ID"
+             autocomplete="off" autocapitalize="none" spellcheck="false"/>
       <label class="pill">min level
         <select id="logcat-level" class="db-select" style="min-width:4.5rem">
           <option value="V">V</option>
@@ -901,7 +1361,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
         </select>
       </label>
       <label class="pill"><input id="logcat-wrap" type="checkbox"/>wrap</label>
-      <label class="pill"><input id="logcat-follow" type="checkbox" checked/>follow</label>
+      <label class="pill"><input id="logcat-follow" type="checkbox" checked/>follow newest</label>
       <span id="logcat-shown" class="db-status">—</span>
     </div>
     <div class="logcat-scroll" id="logcat-view"><pre id="logcat">…</pre></div>
@@ -1048,6 +1508,108 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
   </section>
 </div>
+
+<div class="model-workspace" id="models">
+  <section class="panel model-panel">
+    <div class="model-head">
+      <div>
+        <h2>Local Model Control</h2>
+        <p>Load, test, and watch the exact privacy-screened policy context seen by local models.</p>
+      </div>
+      <div class="model-master">
+        <div class="model-master-copy">
+          <strong id="model-intercept-label">Agent interception off</strong>
+          <span>OFF discards in-flight results and restores deterministic AUA</span>
+        </div>
+        <input id="model-intercept" class="model-switch" type="checkbox"
+               aria-label="Intercept policy-eligible agent decisions with local models"/>
+      </div>
+    </div>
+    <div class="model-cards">
+      <article id="model-card-functiongemma" class="model-card" data-provider="functiongemma">
+        <div class="model-card-top">
+          <div><h3>FunctionGemma v10</h3><div class="model-card-sub">Fast guarded candidate selector</div></div>
+          <span class="model-state">checking</span>
+        </div>
+        <div class="model-metrics">
+          <div class="model-metric"><span>Context</span><strong data-field="context">—</strong></div>
+          <div class="model-metric"><span>Runtime</span><strong data-field="runtime">—</strong></div>
+          <div class="model-metric"><span>Last call</span><strong data-field="latency">—</strong></div>
+        </div>
+        <div class="model-card-actions">
+          <button class="db-button model-load" data-action="load">Load</button>
+          <button class="db-button model-unload" data-action="unload">Unload</button>
+          <label class="journal-toggle">enabled <input class="model-provider-toggle" type="checkbox" checked/></label>
+        </div>
+      </article>
+      <article id="model-card-gemma4" class="model-card" data-provider="gemma4">
+        <div class="model-card-top">
+          <div><h3>Gemma 4</h3><div class="model-card-sub">Deep semantic policy reviewer</div></div>
+          <span class="model-state">checking</span>
+        </div>
+        <div class="model-metrics">
+          <div class="model-metric"><span>Context</span><strong data-field="context">—</strong></div>
+          <div class="model-metric"><span>Runtime</span><strong data-field="runtime">—</strong></div>
+          <div class="model-metric"><span>Last call</span><strong data-field="latency">—</strong></div>
+        </div>
+        <div class="model-card-actions">
+          <button class="db-button model-load" data-action="load">Load</button>
+          <button class="db-button model-unload" data-action="unload">Unload</button>
+          <label class="journal-toggle">enabled <input class="model-provider-toggle" type="checkbox" checked/></label>
+        </div>
+      </article>
+    </div>
+    <div class="model-body">
+      <section class="model-lab">
+        <div class="model-section-head">
+          <h3>Model playground</h3>
+          <span id="model-chat-status" class="db-status">Resident daemon session</span>
+        </div>
+        <div id="model-chat" class="model-chat"><div class="model-message meta">Choose a model and send a message. FunctionGemma is selector-tuned, so its raw replies may be tool-shaped.</div></div>
+        <div class="model-compose">
+          <div class="model-sample-row">
+            <label class="db-field">Request shape
+              <select id="model-request-kind" class="db-select">
+                <option value="direct">Direct message</option>
+                <option value="agent">Agent request</option>
+              </select>
+            </label>
+            <label class="db-field">Sample
+              <select id="model-request-sample" class="db-select">
+                <option value="">Choose a sample…</option>
+                <option value="settings">Choose the matching control</option>
+                <option value="next_step">Choose the next waypoint</option>
+                <option value="handoff">No candidate matches → handoff</option>
+              </select>
+            </label>
+          </div>
+          <textarea id="model-prompt" class="db-sql" placeholder="Message the local model…" spellcheck="false"></textarea>
+          <p id="model-prompt-guide" class="model-prompt-guide">Plain text sends a normal chat message and returns raw text.</p>
+          <div class="model-compose-row">
+            <label class="db-field grow"><span id="model-provider-label">Model</span>
+              <select id="model-chat-provider" class="db-select">
+                <option value="functiongemma">FunctionGemma v10</option>
+                <option value="gemma4">Gemma 4</option>
+                <option value="agent_chain" hidden>Configured agent chain</option>
+              </select>
+            </label>
+            <label class="db-field">Max tokens
+              <input id="model-max-tokens" class="db-input" type="number" min="1" max="1024" value="128" style="width:6.5rem"/>
+            </label>
+            <button id="model-send" class="db-button primary">Send</button>
+          </div>
+        </div>
+      </section>
+      <section class="model-monitor">
+        <div class="model-section-head">
+          <div><h3>Live model exchanges</h3><span id="model-trace-count" class="db-status">—</span></div>
+          <button id="model-clear" class="db-button">Clear</button>
+        </div>
+        <div id="model-traces" class="model-traces"><div class="empty">No model activity yet.</div></div>
+      </section>
+    </div>
+  </section>
+</div>
 <dialog id="db-confirm-dialog" class="db-dialog">
   <h3 id="db-confirm-title">Confirm database operation</h3>
   <p id="db-confirm-message" class="db-note"></p>
@@ -1167,28 +1729,24 @@ const isGrid = !focusSerial && BOOT_MODE === 'grid';
 const gridView = document.getElementById('grid-view');
 const detailView = document.getElementById('detail-view');
 const back = document.getElementById('back');
-document.getElementById('modepill').textContent = isGrid ? 'grid' : 'detail';
 if (isGrid) {
   gridView.classList.remove('hidden');
   document.getElementById('count').classList.remove('hidden');
-  document.getElementById('failpill').classList.add('hidden');
-  document.getElementById('pkg').classList.add('hidden');
-  document.getElementById('serial').classList.add('hidden');
-  document.getElementById('capture').classList.add('hidden');
-  document.getElementById('via').classList.add('hidden');
-  document.getElementById('lease').classList.add('hidden');
-  document.getElementById('watchdog').classList.add('hidden');
-  document.getElementById('age').classList.add('hidden');
 } else {
   detailView.classList.remove('hidden');
-  document.getElementById('failpill').classList.remove('hidden');
-  document.getElementById('pkg').classList.remove('hidden');
   if (BOOT_MODE === 'grid' || params.get('from') === 'grid') {
     back.classList.remove('hidden');
   }
 }
 
 const frame = document.getElementById('frame');
+const screenAnalyze = document.getElementById('screen-analyze');
+const elementOverlay = document.getElementById('element-overlay');
+const inspectionStatus = document.getElementById('inspection-status');
+const inspectionOutput = document.getElementById('inspection-output');
+const inspectionCount = document.getElementById('inspection-count');
+const inspectionRaw = document.getElementById('inspection-raw');
+const inspectionClickableOnly = document.getElementById('inspection-clickable-only');
 const journalEl = document.getElementById('journal');
 const journalWrap = document.getElementById('journal-wrap');
 const journalJump = document.getElementById('journal-jump');
@@ -1204,12 +1762,157 @@ let sinceMs = 0;
 const seenKeys = new Set();
 let detailRevision = '';
 const tileSrc = {};
+let currentInspectionId = '';
+let inspectionFrameActive = false;
+let inspectionBusy = false;
 
 function qSerial(extra) {
   const p = new URLSearchParams(extra || {});
   if (focusSerial) p.set('serial', focusSerial);
   const s = p.toString();
   return s ? ('?' + s) : '';
+}
+
+async function inspectionPost(action, payload) {
+  const body = Object.assign({}, payload || {});
+  if (focusSerial) body.serial = focusSerial;
+  const response = await fetch('/api/inspect/' + action, {
+    method: 'POST',
+    cache: 'no-store',
+    headers: {'Content-Type': 'application/json', 'X-AUA-Dashboard-Token': DATABASE_TOKEN},
+    body: JSON.stringify(body),
+  });
+  const data = await response.json();
+  if (!response.ok || !data.ok) {
+    const error = data.error || {};
+    const message = typeof error === 'string' ? error : (error.message || 'AUA inspection failed');
+    throw Object.assign(new Error(message), {payload: data});
+  }
+  return data;
+}
+
+function inspectionElementLabel(element) {
+  return element.text || element.content_desc || element.desc || element.resource_id ||
+    element.rid || element.type || ('element ' + element.id);
+}
+
+function renderInspection(data, tappedId) {
+  const view = data.view || {};
+  const screen = view.screen || {};
+  const width = Number(screen.width || 0);
+  const height = Number(screen.height || 0);
+  const elements = Array.isArray(view.elements) ? view.elements.slice() : [];
+  currentInspectionId = data.inspection_id || '';
+  inspectionFrameActive = true;
+  lastSrc = 'inspection:' + currentInspectionId;
+  frame.src = data.frame_url + '&t=' + encodeURIComponent(Date.now());
+  inspectionRaw.textContent = JSON.stringify(data.result || {}, null, 2);
+  inspectionOutput.classList.remove('hidden');
+  elementOverlay.innerHTML = '';
+
+  const bounded = elements.filter(element => {
+    const b = element && element.bounds;
+    return Array.isArray(b) && b.length === 4 && width > 0 && height > 0 &&
+      b.every(value => Number.isFinite(Number(value)));
+  });
+  // Containers go down first; smaller, more specific controls remain clickable above them.
+  bounded.sort((a, b) => {
+    const aa = Math.max(0, Number(a.bounds[2]) - Number(a.bounds[0])) *
+      Math.max(0, Number(a.bounds[3]) - Number(a.bounds[1]));
+    const ba = Math.max(0, Number(b.bounds[2]) - Number(b.bounds[0])) *
+      Math.max(0, Number(b.bounds[3]) - Number(b.bounds[1]));
+    return ba - aa;
+  });
+  bounded.forEach((element, index) => {
+    const bounds = element.bounds.map(Number);
+    const box = document.createElement('button');
+    box.type = 'button';
+    box.className = 'element-box' + (element.clickable ? ' clickable' : '');
+    box.dataset.elementId = String(element.id);
+    box.style.left = (100 * bounds[0] / width) + '%';
+    box.style.top = (100 * bounds[1] / height) + '%';
+    box.style.width = (100 * Math.max(1, bounds[2] - bounds[0]) / width) + '%';
+    box.style.height = (100 * Math.max(1, bounds[3] - bounds[1]) / height) + '%';
+    box.style.zIndex = String(index + 1);
+    const label = inspectionElementLabel(element);
+    box.title = '#' + element.id + ' · ' + label +
+      (element.clickable ? ' · clickable' : ' · AUA will resolve the acting control');
+    box.setAttribute('aria-label', 'Tap and analyze element ' + element.id + ': ' + label);
+    const badge = document.createElement('span');
+    badge.className = 'element-id';
+    badge.textContent = String(element.id);
+    box.appendChild(badge);
+    box.addEventListener('click', () => tapInspectionElement(element.id, label));
+    elementOverlay.appendChild(box);
+  });
+  const clickable = elements.filter(element => element && element.clickable).length;
+  inspectionCount.textContent = elements.length + ' elements · ' + clickable + ' interactive';
+  inspectionStatus.className = 'inspection-status';
+  inspectionStatus.textContent = tappedId == null
+    ? 'Analysis ready · click any outlined item to run tap-and-analyze with its AUA id.'
+    : 'Tapped #' + tappedId + ' · overlays and raw JSON now describe the fresh result screen.';
+  screenAnalyze.textContent = 'Analyze again';
+}
+
+async function analyzeScreen() {
+  if (inspectionBusy) return;
+  inspectionBusy = true;
+  screenAnalyze.disabled = true;
+  elementOverlay.classList.add('busy');
+  inspectionStatus.className = 'inspection-status';
+  inspectionStatus.textContent = 'Analyzing the current device frame…';
+  try {
+    renderInspection(await inspectionPost('analyze', {}), null);
+  } catch (error) {
+    inspectionStatus.className = 'inspection-status bad';
+    inspectionStatus.textContent = error.message;
+    if (error.payload) {
+      inspectionOutput.classList.remove('hidden');
+      inspectionRaw.textContent = JSON.stringify(error.payload, null, 2);
+    }
+  } finally {
+    inspectionBusy = false;
+    screenAnalyze.disabled = false;
+    elementOverlay.classList.remove('busy');
+  }
+}
+
+async function tapInspectionElement(elementId, label) {
+  if (inspectionBusy || !currentInspectionId) return;
+  inspectionBusy = true;
+  screenAnalyze.disabled = true;
+  elementOverlay.classList.add('busy');
+  inspectionStatus.className = 'inspection-status';
+  inspectionStatus.textContent = 'Tapping #' + elementId + ' · ' + label + '…';
+  try {
+    const data = await inspectionPost('tap', {
+      inspection_id: currentInspectionId,
+      element_id: Number(elementId),
+    });
+    renderInspection(data, elementId);
+  } catch (error) {
+    inspectionStatus.className = 'inspection-status bad';
+    inspectionStatus.textContent = error.message + ' · Analyze again before choosing another id.';
+    currentInspectionId = '';
+    elementOverlay.innerHTML = '';
+    if (error.payload) inspectionRaw.textContent = JSON.stringify(error.payload, null, 2);
+  } finally {
+    inspectionBusy = false;
+    screenAnalyze.disabled = false;
+    elementOverlay.classList.remove('busy');
+  }
+}
+
+function resumeLiveFrame() {
+  currentInspectionId = '';
+  inspectionFrameActive = false;
+  elementOverlay.innerHTML = '';
+  inspectionOutput.classList.add('hidden');
+  inspectionStatus.className = 'inspection-status';
+  inspectionStatus.textContent = 'Live frame resumed. Analyze to inspect AUA element IDs.';
+  screenAnalyze.textContent = 'Analyze';
+  lastSrc = '';
+  frame.src = '/api/frame.jpg' + qSerial({t: Date.now()});
 }
 function fmtAge(ms) {
   if (ms == null) return 'no frame yet';
@@ -1467,15 +2170,22 @@ function buildEventRow(e) {
   const details = document.createElement('details');
   if (e.detail_id) details.dataset.detailId = e.detail_id;
   const summary = document.createElement('summary');
+  addEventText(summary, 'event-chevron', '›');
   addEventText(summary, 't', fmtTime(e.ts_ms));
   addEventText(summary, 'badge ' + (ok ? 'ok' : 'fail'), ok ? 'ok' : 'fail');
-  addEventText(summary, 'cmd', e.cmd || '?');
-  summary.appendChild(document.createTextNode(' '));
+  const main = document.createElement('span');
+  main.className = 'event-main';
+  addEventText(main, 'cmd', e.cmd || '?');
   const args = argsSummary(e.args);
-  addEventText(summary, 'args', args);
-  if (e.duration_ms != null) addEventText(summary, 'dur', e.duration_ms + 'ms');
+  if (args) addEventText(main, 'args', args);
   const failure = ok ? '' : errText(e.error);
-  if (!ok && e.error) addEventText(summary, 'err', failure);
+  if (!ok && e.error) addEventText(main, 'err', failure);
+  summary.appendChild(main);
+  if (e.duration_ms != null) {
+    addEventText(summary, 'dur' + (Number(e.duration_ms) >= 1500 ? ' slow' : ''), e.duration_ms + 'ms');
+  } else {
+    addEventText(summary, 'dur', '—');
+  }
   const exchange = document.createElement('div');
   exchange.className = 'exchange';
   exchange.textContent = 'Expand to load the full request and response.';
@@ -1541,6 +2251,19 @@ journalFailsOnly.addEventListener('change', () => {
   applyJournalFilter();
   journalWrap.scrollTop = 0;
 });
+document.addEventListener('keydown', event => {
+  const target = event.target;
+  const isTyping = target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName);
+  if (event.key === '/' && !isTyping) {
+    event.preventDefault();
+    journalFilter.focus();
+    journalFilter.select();
+  } else if (event.key === 'Escape' && document.activeElement === journalFilter) {
+    journalFilter.value = '';
+    applyJournalFilter();
+    journalFilter.blur();
+  }
+});
 document.getElementById('journal-expand').addEventListener('click', () => {
   // Capped: every expansion is a fetch, and 300 rows would be 300 of them.
   const rows = journalEl.querySelectorAll('li:not(.filtered) > details:not([open])');
@@ -1571,39 +2294,50 @@ function ensureTile(d) {
     a.id = 'tile-' + d.serial;
     a.href = '/?serial=' + encodeURIComponent(d.serial) + '&from=grid';
     a.innerHTML =
-      '<div class="tile-head">' +
-        '<span class="ser"></span>' +
-        '<span class="pill owner"></span>' +
-        '<span class="pill cap"></span>' +
-      '</div>' +
-      '<img alt="frame" src=""/>' +
-      '<div class="tile-meta">' +
-        '<span class="age"></span>' +
-        '<span class="pkg"></span>' +
-      '</div>' +
-      '<div class="tile-runtime">' +
-        '<span class="lease"></span>' +
-        '<span class="watchdog"></span>' +
+      '<div class="tile-screen">' +
+        '<img alt="device frame" src=""/>' +
+        '<div class="tile-overlay tile-overlay-top">' +
+          '<span class="tile-identity"><span class="tile-device-dot"></span><span class="ser"></span></span>' +
+          '<span class="cap"></span>' +
+        '</div>' +
+        '<div class="tile-overlay tile-overlay-bottom">' +
+          '<div class="tile-app"><span class="tile-app-label">Foreground app</span><span class="pkg"></span></div>' +
+          '<div class="tile-stats">' +
+            '<div class="tile-stat"><span class="tile-stat-label">Frame</span><span class="tile-stat-value age"></span></div>' +
+            '<div class="tile-stat"><span class="tile-stat-label">Lease</span><span class="tile-stat-value lease"></span></div>' +
+            '<div class="tile-stat"><span class="tile-stat-label">Auto-stop</span><span class="tile-stat-value watchdog"></span></div>' +
+            '<div class="tile-stat"><span class="tile-stat-label">Capture</span><span class="tile-stat-value capture-detail"></span></div>' +
+          '</div>' +
+          '<div class="tile-card-footer"><span class="owner"></span><span class="tile-inspect">Inspect →</span></div>' +
+        '</div>' +
       '</div>';
     tiles.appendChild(a);
   }
   a.querySelector('.ser').textContent = d.serial;
   const own = a.querySelector('.owner');
-  if (d.owner) { own.textContent = 'started ' + d.owner; own.classList.remove('hidden'); }
-  else { own.textContent = ''; own.classList.add('hidden'); }
+  if (d.owner) { own.textContent = 'Owner · ' + d.owner; own.classList.remove('hidden'); }
+  else { own.textContent = 'Available'; own.classList.remove('hidden'); }
   const cap = a.querySelector('.cap');
   cap.textContent = d.capture_running ? 'live' : (d.has_frame ? 'frame' : 'idle');
-  cap.className = 'pill cap ' + (d.capture_running ? 'ok' : '');
+  cap.className = 'cap ' + (d.capture_running ? 'ok' : '');
+  a.querySelector('.capture-detail').textContent =
+    d.capture_running ? 'Streaming' : (d.has_frame ? 'Snapshot' : 'Waiting');
   a.querySelector('.age').textContent = fmtAge(d.frame_age_ms);
-  a.querySelector('.pkg').textContent = d.package ? ('pkg ' + d.package) : '';
+  a.querySelector('.pkg').textContent = d.package || 'No foreground package';
   const lease = d.lease || {};
-  const leaseEl = a.querySelector('.tile-runtime .lease');
-  leaseEl.textContent = leaseText(lease);
-  leaseEl.className = 'lease' + (lease.held ? ' held' : '');
+  const leaseEl = a.querySelector('.lease');
+  leaseEl.textContent = lease.held ? 'Held' : 'Available';
+  leaseEl.className = 'tile-stat-value lease' + (lease.held ? ' held' : '');
   const watchdog = d.watchdog || {};
-  const watchdogEl = a.querySelector('.tile-runtime .watchdog');
-  watchdogEl.textContent = watchdogText(watchdog, lease);
-  watchdogEl.className = 'watchdog' + (
+  const watchdogEl = a.querySelector('.watchdog');
+  watchdogEl.textContent = !watchdog.managed
+    ? 'External device'
+    : (!watchdog.enabled
+        ? 'Disabled'
+        : (lease.held
+            ? 'Paused by lease'
+            : (watchdog.running ? ('In ' + fmtDuration(watchdog.remaining_s)) : 'Watchdog offline')));
+  watchdogEl.className = 'tile-stat-value watchdog' + (
     watchdog.managed && watchdog.enabled && !watchdog.running ? ' down' : ''
   );
   const img = a.querySelector('img');
@@ -1626,11 +2360,19 @@ async function tickGrid() {
     document.getElementById('count').textContent = list.length + ' device' + (list.length === 1 ? '' : 's');
     const emptyEl = document.getElementById('grid-empty');
     emptyEl.className = 'grid-empty' + (list.length ? ' hidden' : (d.discovery_error ? ' bad' : ''));
-    emptyEl.textContent = list.length
-      ? ''
-      : (d.discovery_error
-          ? ('Cannot list devices: ' + d.discovery_error)
-          : 'No device attached yet. Start one with `aua emulator start` \u2014 it appears here on its own.');
+    if (!list.length && d.discovery_error) {
+      document.getElementById('grid-empty-title').textContent = 'Device discovery failed';
+      document.getElementById('grid-empty-copy').textContent = d.discovery_error;
+      document.getElementById('grid-empty-command').classList.add('hidden');
+      document.getElementById('grid-empty-foot').textContent = 'AuA will retry automatically.';
+    } else if (!list.length) {
+      document.getElementById('grid-empty-title').textContent = 'No devices online';
+      document.getElementById('grid-empty-copy').textContent =
+        'Start an emulator and it will appear here automatically.';
+      document.getElementById('grid-empty-command').classList.remove('hidden');
+      document.getElementById('grid-empty-foot').textContent =
+        'This dashboard keeps watching in the background.';
+    }
     const seen = new Set();
     list.forEach(dev => {
       seen.add(dev.serial);
@@ -1643,6 +2385,13 @@ async function tickGrid() {
   } catch (e) {
     document.getElementById('count').textContent = 'error';
     document.getElementById('count').className = 'pill bad';
+    const emptyEl = document.getElementById('grid-empty');
+    emptyEl.className = 'grid-empty bad';
+    document.getElementById('grid-empty-title').textContent = 'Dashboard connection lost';
+    document.getElementById('grid-empty-copy').textContent =
+      'The dashboard could not refresh its device list.';
+    document.getElementById('grid-empty-command').classList.add('hidden');
+    document.getElementById('grid-empty-foot').textContent = 'AuA will retry automatically.';
   }
 }
 
@@ -1912,25 +2661,35 @@ async function tickStatus() {
     const s = await r.json();
     document.getElementById('serial').textContent = s.serial || '—';
     const cap = document.getElementById('capture');
-    cap.textContent = s.capture_running ? 'capture on' : 'capture off';
-    cap.className = 'pill ' + (s.capture_running ? 'ok' : 'bad');
-    document.getElementById('via').textContent = 'via ' + (s.via || '—');
+    cap.textContent = s.capture_running ? 'Active' : 'Inactive';
+    cap.className = 'detail-status-value ' + (s.capture_running ? 'ok' : 'bad');
+    document.getElementById('via').textContent = s.via || '—';
     const lease = s.lease || {};
     const leasePill = document.getElementById('lease');
-    leasePill.textContent = leaseText(lease);
-    leasePill.className = 'pill' + (lease.held ? ' ok' : '');
+    leasePill.textContent = lease.held ? (lease.owner || 'Held') : 'Available';
+    leasePill.className = 'detail-status-value' + (lease.held ? ' ok' : '');
     const watchdog = s.watchdog || {};
     const watchdogPill = document.getElementById('watchdog');
-    watchdogPill.textContent = watchdogText(watchdog, lease);
-    watchdogPill.className = 'pill' + (
+    watchdogPill.textContent = !watchdog.managed
+      ? 'External device'
+      : (!watchdog.enabled
+          ? 'Disabled'
+          : (lease.held
+              ? 'Paused by lease'
+              : (watchdog.running ? ('In ' + fmtDuration(watchdog.remaining_s)) : 'Offline')));
+    watchdogPill.className = 'detail-status-value' + (
       watchdog.managed && watchdog.enabled && !watchdog.running ? ' bad' : ''
     );
     document.getElementById('age').textContent = fmtAge(s.frame_age_ms);
     const fc = (s.stats && s.stats.fail_count) || 0;
     const fp = document.getElementById('failpill');
-    fp.textContent = 'fails ' + fc;
-    fp.className = 'pill ' + (fc ? 'bad' : 'ok');
-    document.getElementById('pkg').textContent = 'pkg ' + (s.package || '—');
+    fp.textContent = String(fc);
+    fp.className = 'detail-status-value ' + (fc ? 'bad' : 'ok');
+    document.getElementById('pkg').textContent = s.package || 'No foreground package';
+    if (s.package && !logcatAppTouched && logcatAppFilter.value !== s.package) {
+      logcatAppFilter.value = s.package;
+      tickLogcat();
+    }
     if (s.package && !dbPackage.value && !databaseBootstrapped) {
       dbPackage.value = s.package;
       databaseBootstrapped = true;
@@ -1987,7 +2746,7 @@ async function tickStatus() {
     });
 
     const frameToken = s.frame_token || '';
-    if (frameToken !== lastSrc) {
+    if (!inspectionFrameActive && frameToken !== lastSrc) {
       frame.src = '/api/frame.jpg' + qSerial({t: frameToken});
       lastSrc = frameToken;
     }
@@ -2016,50 +2775,246 @@ async function tickEvents() {
   } catch (e) {}
 }
 
+let knowledgeSignature = '';
+
+function knowledgeBadge(text, kind = '') {
+  const badge = document.createElement('span');
+  badge.className = 'knowledge-badge' + (kind ? (' ' + kind) : '');
+  badge.textContent = text;
+  return badge;
+}
+
+function knowledgeCommand(label, command) {
+  const row = document.createElement('div');
+  row.className = 'knowledge-command';
+  const title = document.createElement('span');
+  title.textContent = label;
+  const code = document.createElement('code');
+  code.textContent = command;
+  row.append(title, code);
+  return row;
+}
+
+function knowledgeJson(value) {
+  const pre = document.createElement('pre');
+  pre.className = 'knowledge-json';
+  pre.textContent = prettyJson(value);
+  highlightJson(pre);
+  return pre;
+}
+
+function knowledgeSteps(steps, emptyMessage) {
+  if (!steps || !steps.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = emptyMessage;
+    return empty;
+  }
+  const list = document.createElement('ol');
+  list.className = 'knowledge-steps';
+  steps.forEach((step, index) => {
+    const item = document.createElement('li');
+    item.className = 'knowledge-step';
+    const number = document.createElement('span');
+    number.className = 'knowledge-step-index';
+    number.textContent = String(index + 1).padStart(2, '0');
+    const main = document.createElement('div');
+    main.className = 'knowledge-step-main';
+    const kind = document.createElement('span');
+    kind.className = 'knowledge-step-kind';
+    kind.textContent = step.kind || 'step';
+    const data = document.createElement('span');
+    data.className = 'knowledge-step-data';
+    const detail = Object.assign({}, step);
+    delete detail.kind;
+    data.textContent = Object.keys(detail).length ? prettyJson(detail) : 'No additional arguments';
+    main.append(kind, data);
+    item.append(number, main);
+    list.appendChild(item);
+  });
+  return list;
+}
+
+function knowledgeItem(titleText, subtitleText, badges, bodyNodes) {
+  const details = document.createElement('details');
+  details.className = 'knowledge-item';
+  const summary = document.createElement('summary');
+  const main = document.createElement('span');
+  main.className = 'knowledge-summary-main';
+  const title = document.createElement('span');
+  title.className = 'knowledge-summary-title';
+  title.textContent = titleText;
+  const subtitle = document.createElement('span');
+  subtitle.className = 'knowledge-summary-subtitle';
+  subtitle.textContent = subtitleText || 'Expand for full details';
+  main.append(title, subtitle);
+  const badgeHost = document.createElement('span');
+  badgeHost.className = 'knowledge-badges';
+  badges.forEach(badge => badgeHost.appendChild(badge));
+  summary.append(main, badgeHost);
+  const body = document.createElement('div');
+  body.className = 'knowledge-detail';
+  bodyNodes.forEach(node => body.appendChild(node));
+  details.append(summary, body);
+  return details;
+}
+
+function renderKnowledge(d) {
+  const screens = d.screens || [];
+  const routes = d.routes || [];
+  const flows = d.flows || [];
+  document.getElementById('map-pkg').textContent =
+    (d.package || 'No foreground package') + (d.known ? '' : ' · no map yet');
+  document.getElementById('knowledge-total').textContent =
+    screens.length + ' screens · ' + routes.length + ' routes · ' + flows.length + ' flows';
+
+  const screenHost = document.getElementById('map-screens');
+  screenHost.textContent = '';
+  if (!screens.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = 'No learned screens for the foreground app.';
+    screenHost.appendChild(empty);
+  }
+  screens.forEach(screen => {
+    const name = screen.name || '?';
+    const bodyData = Object.assign({}, screen);
+    delete bodyData.name;
+    screenHost.appendChild(knowledgeItem(
+      name,
+      (screen.activity || 'No activity recorded') + (screen.stale ? ' · stale' : ''),
+      [knowledgeBadge('goto target', 'ok'), knowledgeBadge((screen.visit_count || 0) + ' visits')],
+      [knowledgeCommand('Run', 'aua goto "' + name + '"'), knowledgeJson(bodyData)]
+    ));
+  });
+
+  const routeHost = document.getElementById('map-routes');
+  routeHost.textContent = '';
+  if (!routes.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = 'No recorded routes for the foreground app.';
+    routeHost.appendChild(empty);
+  }
+  routes.forEach(route => {
+    const from = route.from || route.from_screen || '?';
+    const to = route.to || route.to_screen || '?';
+    const meta = Object.assign({}, route);
+    delete meta.steps;
+    routeHost.appendChild(knowledgeItem(
+      from + ' → ' + to,
+      route.action || 'No action label',
+      [
+        knowledgeBadge(route.status || 'unknown', route.status === 'verified' ? 'ok' : ''),
+        knowledgeBadge((route.steps || []).length + ' steps'),
+      ],
+      [
+        knowledgeCommand('Goto target', 'aua goto "' + to + '"'),
+        knowledgeSteps(route.steps || [], 'Legacy route: no structured steps were recorded.'),
+        knowledgeJson(meta),
+      ]
+    ));
+  });
+
+  const flowHost = document.getElementById('flow-groups');
+  flowHost.textContent = '';
+  document.getElementById('flow-count').textContent =
+    flows.length + ' flow' + (flows.length === 1 ? '' : 's');
+  const groups = new Map();
+  flows.forEach(flow => {
+    const app = flow.app || 'App-agnostic';
+    if (!groups.has(app)) groups.set(app, []);
+    groups.get(app).push(flow);
+  });
+  const packages = Array.from(groups.keys()).sort((a, b) => {
+    if (a === d.package) return -1;
+    if (b === d.package) return 1;
+    if (a === 'App-agnostic') return -1;
+    if (b === 'App-agnostic') return 1;
+    return a.localeCompare(b);
+  });
+  if (!packages.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = 'No saved flows found.';
+    flowHost.appendChild(empty);
+  }
+  packages.forEach(app => {
+    const section = document.createElement('section');
+    section.className = 'flow-group';
+    const head = document.createElement('div');
+    head.className = 'flow-group-title';
+    const heading = document.createElement('h4');
+    heading.textContent = app;
+    const count = document.createElement('span');
+    count.textContent = groups.get(app).length + ' flow' + (groups.get(app).length === 1 ? '' : 's');
+    head.append(heading, count);
+    section.appendChild(head);
+    groups.get(app).forEach(flow => {
+      const ref = flow.ref || ((flow.app ? (flow.app + ':') : '') + (flow.storage_name || flow.name));
+      const meta = Object.assign({}, flow);
+      delete meta.steps_detail;
+      section.appendChild(knowledgeItem(
+        flow.name || flow.storage_name || '?',
+        flow.description || ref,
+        [
+          knowledgeBadge((flow.steps_detail || []).length + ' steps'),
+          knowledgeBadge(flow.arrival_status || 'unverified', flow.arrival_status === 'mapped' ? 'ok' : ''),
+        ],
+        [
+          knowledgeCommand('Run', 'aua flow run "' + ref + '"'),
+          knowledgeSteps(flow.steps_detail || [], flow.error || 'No steps recorded.'),
+          knowledgeJson(meta),
+        ]
+      ));
+    });
+    flowHost.appendChild(section);
+  });
+}
+
 async function tickMap() {
   try {
     const r = await fetch('/api/map' + qSerial(), {cache: 'no-store'});
     const d = await r.json();
-    document.getElementById('map-pkg').textContent =
-      'package ' + (d.package || '—') + (d.known ? ' (known)' : ' (no map)');
-    const sc = document.getElementById('map-screens');
-    sc.innerHTML = '';
-    const screens = d.screens || [];
-    if (!screens.length) sc.innerHTML = '<li class="empty">no screens</li>';
-    else screens.forEach(s => {
-      const li = document.createElement('li');
-      const name = typeof s === 'string' ? s : (s.name || '?');
-      const extra = typeof s === 'object' ? (' visits=' + (s.visit_count || 0) + (s.stale ? ' stale' : '')) : '';
-      li.textContent = name + extra;
-      sc.appendChild(li);
-    });
-    const rt = document.getElementById('map-routes');
-    rt.innerHTML = '';
-    const routes = d.routes || [];
-    if (!routes.length) rt.innerHTML = '<li class="empty">no routes</li>';
-    else routes.forEach(e => {
-      const li = document.createElement('li');
-      if (typeof e === 'string') li.textContent = e;
-      else li.textContent = (e.from || e.from_screen || '?') + ' → ' + (e.to || e.to_screen || '?') +
-        (e.action ? '  [' + e.action + ']' : '');
-      rt.appendChild(li);
-    });
-  } catch (e) {}
+    const signature = JSON.stringify([d.package, d.known, d.screens, d.routes, d.flows]);
+    if (signature === knowledgeSignature) return;
+    knowledgeSignature = signature;
+    renderKnowledge(d);
+  } catch (e) {
+    document.getElementById('knowledge-total').textContent = 'library unavailable';
+  }
 }
 
 const LOGCAT_ORDER = {V: 0, D: 1, I: 2, W: 3, E: 4, F: 5, A: 5, S: 5};
 const logcatEl = document.getElementById('logcat');
 const logcatView = document.getElementById('logcat-view');
 const logcatFilter = document.getElementById('logcat-filter');
+const logcatAppFilter = document.getElementById('logcat-app-filter');
 const logcatLevel = document.getElementById('logcat-level');
 const logcatFollow = document.getElementById('logcat-follow');
 let logcatLines = [];
+let logcatAppTouched = false;
+let logcatAppTimer = null;
+
+function logcatAnchor() {
+  const rows = logcatEl.children;
+  const top = logcatView.scrollTop;
+  for (let i = 0; i < rows.length; i += 1) {
+    if (rows[i].offsetTop + rows[i].offsetHeight > top + 1) {
+      return {raw: rows[i].dataset.raw || rows[i].textContent, top: rows[i].offsetTop};
+    }
+  }
+  return null;
+}
 
 function renderLogcat(lines) {
   const needle = logcatFilter.value.trim().toLowerCase();
+  const appId = logcatAppFilter.value.trim();
   const floor = LOGCAT_ORDER[logcatLevel.value] || 0;
   const kept = [];
-  lines.forEach(line => {
+  // The API returns Android's chronological buffer; the dashboard is newest-first so
+  // fresh evidence appears beside the filters instead of below hundreds of older lines.
+  lines.slice().reverse().forEach(line => {
     const tokens = logcatTokens(line);
     let level = '';
     for (let i = 0; i < tokens.length; i += 1) {
@@ -2067,30 +3022,33 @@ function renderLogcat(lines) {
     }
     if (level && (LOGCAT_ORDER[level] || 0) < floor) return;
     if (needle !== '' && line.toLowerCase().indexOf(needle) < 0) return;
-    kept.push([tokens, level]);
+    kept.push([tokens, level, line]);
   });
   document.getElementById('logcat-shown').textContent =
-    kept.length + ' / ' + lines.length + ' lines';
-  const signature = JSON.stringify(lines) + '\\u0000' + needle + '\\u0000' + floor;
+    kept.length + ' / ' + lines.length + ' lines' + (appId ? (' · ' + appId) : ' · all apps');
+  const signature = JSON.stringify(lines) + '\\u0000' + needle + '\\u0000' + floor + '\\u0000' + appId;
   if (logcatEl.dataset.signature === signature) return;
-  // Bottom-anchored, like a terminal: hold position unless the reader is at the end or
-  // has asked to follow. Re-rendering the whole pre used to slam it back to the top.
-  const atBottom =
-    logcatView.scrollHeight - logcatView.scrollTop - logcatView.clientHeight < 12;
+  // Newest-first: follow hugs the top. When the reader scrolls into history, retain the
+  // first visible raw line even as newer rows are inserted above it.
+  const atTop = logcatView.scrollTop < 12;
+  const anchor = !logcatFollow.checked && !atTop ? logcatAnchor() : null;
   logcatEl.dataset.signature = signature;
   logcatEl.textContent = '';
   if (!kept.length) {
     logcatEl.textContent = lines.length ? '(nothing matches the filter)' : '(empty)';
+    logcatView.scrollTop = 0;
     return;
   }
   const frag = document.createDocumentFragment();
   kept.forEach(entry => {
     const tokens = entry[0];
     const level = entry[1];
+    const raw = entry[2];
     const row = document.createElement('span');
     row.className = 'lc-line' +
       (level === 'E' || level === 'F' || level === 'A' ? ' err' : '') +
       (level === 'W' ? ' warn' : '');
+    row.dataset.raw = raw;
     tokens.forEach(pair => {
       if (pair[0] === 'sp') {
         row.appendChild(document.createTextNode(pair[1]));
@@ -2106,13 +3064,28 @@ function renderLogcat(lines) {
     frag.appendChild(row);
   });
   logcatEl.appendChild(frag);
-  if (logcatFollow.checked || atBottom) logcatView.scrollTop = logcatView.scrollHeight;
+  if (logcatFollow.checked || atTop) {
+    logcatView.scrollTop = 0;
+  } else if (anchor) {
+    const rows = logcatEl.children;
+    for (let i = 0; i < rows.length; i += 1) {
+      if ((rows[i].dataset.raw || rows[i].textContent) === anchor.raw) {
+        logcatView.scrollTop += rows[i].offsetTop - anchor.top;
+        break;
+      }
+    }
+  }
 }
 
 logcatFilter.addEventListener('input', () => renderLogcat(logcatLines));
+logcatAppFilter.addEventListener('input', () => {
+  logcatAppTouched = true;
+  if (logcatAppTimer) clearTimeout(logcatAppTimer);
+  logcatAppTimer = setTimeout(tickLogcat, 250);
+});
 logcatLevel.addEventListener('change', () => renderLogcat(logcatLines));
 logcatFollow.addEventListener('change', () => {
-  if (logcatFollow.checked) logcatView.scrollTop = logcatView.scrollHeight;
+  if (logcatFollow.checked) logcatView.scrollTop = 0;
 });
 document.getElementById('logcat-wrap').addEventListener('change', event => {
   logcatEl.classList.toggle('wrap', event.target.checked);
@@ -2120,11 +3093,22 @@ document.getElementById('logcat-wrap').addEventListener('change', event => {
 
 async function tickLogcat() {
   try {
-    const r = await fetch('/api/logcat' + qSerial({lines: 400}), {cache: 'no-store'});
+    const params = {lines: 400};
+    const appId = logcatAppFilter.value.trim();
+    if (appId) params.app_id = appId;
+    const r = await fetch('/api/logcat' + qSerial(params), {cache: 'no-store'});
     const d = await r.json();
+    if (!r.ok || d.ok === false) {
+      logcatLines = ['Logcat filter error: ' + (d.error || ('HTTP ' + r.status))];
+      renderLogcat(logcatLines);
+      return;
+    }
     logcatLines = d.lines || [];
     renderLogcat(logcatLines);
-  } catch (e) {}
+  } catch (e) {
+    logcatLines = ['Logcat unavailable: ' + (e && e.message ? e.message : String(e))];
+    renderLogcat(logcatLines);
+  }
 }
 
 const dbPackage = document.getElementById('db-package');
@@ -2454,6 +3438,380 @@ async function submitDatabaseConfirmation() {
   }
 }
 
+const modelIntercept = document.getElementById('model-intercept');
+const modelInterceptLabel = document.getElementById('model-intercept-label');
+const modelTraces = document.getElementById('model-traces');
+const modelChat = document.getElementById('model-chat');
+const modelPrompt = document.getElementById('model-prompt');
+const modelChatProvider = document.getElementById('model-chat-provider');
+const modelMaxTokens = document.getElementById('model-max-tokens');
+const modelChatStatus = document.getElementById('model-chat-status');
+const modelRequestKind = document.getElementById('model-request-kind');
+const modelRequestSample = document.getElementById('model-request-sample');
+const modelPromptGuide = document.getElementById('model-prompt-guide');
+const modelProviderLabel = document.getElementById('model-provider-label');
+const modelHistories = {functiongemma: [], gemma4: [], agent_chain: []};
+let modelDirectProvider = 'functiongemma';
+const MODEL_AGENT_SAMPLES = {
+  settings: {
+    goal: 'Open Settings',
+    phase: 'Choose the next current-screen control',
+    observation: {fresh: true, known_screen: 'home', source: 'hierarchy'},
+    constraints: ['Choose only a supplied current-frame control.'],
+    candidates: [
+      {id: 0, label: 'Search', purpose: 'Open search', proof: 'Visible Search control'},
+      {id: 1, label: 'Settings', purpose: 'Open Settings', proof: 'Visible Settings control directly matches the goal'},
+      {id: 2, label: 'Profile', purpose: 'Open profile', proof: 'Visible Profile control'},
+    ],
+    allow_handoff: true,
+  },
+  next_step: {
+    goal: 'Open Account, then Notifications',
+    phase: 'Reach Account before looking for Notifications',
+    observation: {fresh: true, known_screen: 'home', source: 'hierarchy'},
+    constraints: ['Choose the earliest incomplete waypoint.'],
+    candidates: [
+      {id: 0, label: 'Home', purpose: 'Stay on Home', proof: 'Visible Home control'},
+      {id: 1, label: 'Account', purpose: 'Open Account', proof: 'Visible Account control reaches the next waypoint'},
+      {id: 2, label: 'Help', purpose: 'Open Help', proof: 'Visible Help control'},
+    ],
+    allow_handoff: true,
+  },
+  handoff: {
+    goal: 'Open Notifications',
+    phase: 'Choose the next current-screen control',
+    observation: {fresh: true, known_screen: 'home', source: 'hierarchy'},
+    constraints: ['Return handoff instead of guessing.'],
+    candidates: [
+      {id: 0, label: 'Home', purpose: 'Open Home', proof: 'Visible Home control'},
+      {id: 1, label: 'Search', purpose: 'Open Search', proof: 'Visible Search control'},
+      {id: 2, label: 'Profile', purpose: 'Open Profile', proof: 'Visible Profile control'},
+    ],
+    allow_handoff: true,
+  },
+};
+let modelPolling = false;
+
+function updateModelRequestShape(populate) {
+  const agent = modelRequestKind.value === 'agent';
+  modelMaxTokens.disabled = agent;
+  modelRequestSample.disabled = !agent;
+  if (agent) {
+    if (modelChatProvider.value !== 'agent_chain') modelDirectProvider = modelChatProvider.value;
+    modelChatProvider.querySelector('[value="agent_chain"]').hidden = false;
+    modelChatProvider.value = 'agent_chain';
+    modelChatProvider.disabled = true;
+    modelProviderLabel.textContent = 'Execution path';
+    modelPrompt.placeholder = '{"goal":"Open Settings","candidates":[…]}';
+    modelPromptGuide.innerHTML = 'Uses the exact configured agent policy chain, guards, consensus, ' +
+      'semantic review and fallback. Candidate IDs must be dense <code>0…N</code>; the trusted ' +
+      'result is shown but never executed.';
+    if (populate && !modelRequestSample.value) modelRequestSample.value = 'settings';
+    if (populate && modelRequestSample.value) {
+      modelPrompt.value = JSON.stringify(MODEL_AGENT_SAMPLES[modelRequestSample.value], null, 2);
+    }
+  } else {
+    modelChatProvider.disabled = false;
+    modelChatProvider.value = modelDirectProvider;
+    modelChatProvider.querySelector('[value="agent_chain"]').hidden = true;
+    modelProviderLabel.textContent = 'Model';
+    modelPrompt.placeholder = 'Message the local model…';
+    modelPromptGuide.textContent = 'Plain text sends a normal chat message and returns raw text.';
+  }
+  renderModelChat(modelChatProvider.value);
+}
+
+function modelError(data, fallback) {
+  const error = data && data.error;
+  if (typeof error === 'string') return error;
+  if (error && error.message) return error.message;
+  return fallback || 'local model operation failed';
+}
+
+async function modelPost(action, payload) {
+  const response = await fetch('/api/models/' + action, {
+    method: 'POST',
+    cache: 'no-store',
+    headers: {'Content-Type': 'application/json', 'X-AUA-Dashboard-Token': DATABASE_TOKEN},
+    body: JSON.stringify(Object.assign({serial: focusSerial}, payload || {})),
+  });
+  const data = await response.json();
+  if (!response.ok || data.ok === false) throw new Error(modelError(data));
+  return data;
+}
+
+function modelFormatTokens(value) {
+  if (value == null) return '—';
+  const n = Number(value);
+  if (!Number.isFinite(n)) return String(value);
+  if (n >= 1000000) return (n / 1000000).toFixed(1) + 'm';
+  if (n >= 1000) return (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k';
+  return String(n);
+}
+
+function modelGroupedEvents(events) {
+  const grouped = new Map();
+  (events || []).forEach(event => {
+    const id = event.id || ('event-' + event.timestamp_ms);
+    const previous = grouped.get(id) || {};
+    grouped.set(id, Object.assign(previous, event, {
+      id: id,
+      started_ms: previous.started_ms || previous.timestamp_ms || event.timestamp_ms,
+    }));
+  });
+  return Array.from(grouped.values()).sort((a, b) =>
+    Number(b.timestamp_ms || 0) - Number(a.timestamp_ms || 0));
+}
+
+function modelRenderTraces(events) {
+  const grouped = modelGroupedEvents(events);
+  document.getElementById('model-trace-count').textContent =
+    grouped.length + ' exchange' + (grouped.length === 1 ? '' : 's');
+  modelTraces.textContent = '';
+  if (!grouped.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = 'No model activity yet.';
+    modelTraces.appendChild(empty);
+    return;
+  }
+  grouped.forEach(event => {
+    const details = document.createElement('details');
+    details.className = 'model-trace';
+    const summary = document.createElement('summary');
+    const state = document.createElement('span');
+    state.className = 'model-state ' +
+      (event.phase === 'error' ? 'bad' : (event.phase === 'running' || event.phase === 'loading' ? 'busy' : 'ready'));
+    state.textContent = event.phase || 'event';
+    const title = document.createElement('span');
+    title.className = 'model-trace-title';
+    const strong = document.createElement('strong');
+    strong.textContent = (event.provider || 'control') + ' · ' +
+      (event.operation || (event.source === 'playground' ? 'message' : 'policy decision'));
+    const sub = document.createElement('span');
+    sub.textContent = (event.source || 'runtime') + ' · ' + fmtTime(event.timestamp_ms);
+    title.append(strong, sub);
+    const metrics = document.createElement('span');
+    metrics.className = 'model-trace-metrics';
+    const tokenBits = event.input_tokens != null || event.output_tokens != null
+      ? (modelFormatTokens(event.input_tokens) + ' → ' + modelFormatTokens(event.output_tokens) + ' tok')
+      : '';
+    metrics.textContent = [event.duration_ms != null ? event.duration_ms + ' ms' : '', tokenBits]
+      .filter(Boolean).join(' · ') || '—';
+    summary.append(state, title, metrics);
+    const body = document.createElement('div');
+    body.className = 'model-trace-body';
+    const inputPane = document.createElement('section');
+    inputPane.className = 'model-trace-pane';
+    const inputTitle = document.createElement('h4');
+    inputTitle.textContent = 'Model input';
+    const input = document.createElement('pre');
+    const fullInput = event.tools ? {messages: event.input, tools: event.tools} : event.input;
+    input.textContent = fullInput == null ? 'No prompt for this operation.' : prettyJson(fullInput);
+    highlightJson(input);
+    inputPane.append(inputTitle, input);
+    const outputPane = document.createElement('section');
+    outputPane.className = 'model-trace-pane';
+    const outputTitle = document.createElement('h4');
+    outputTitle.textContent = event.error ? 'Error' : 'Model output';
+    const output = document.createElement('pre');
+    output.textContent = event.error || (event.output == null
+      ? (event.selected_id != null ? ('selected candidate ' + event.selected_id) : 'Waiting for output…')
+      : (typeof event.output === 'string' ? event.output : prettyJson(event.output)));
+    outputPane.append(outputTitle, output);
+    body.append(inputPane, outputPane);
+    details.append(summary, body);
+    modelTraces.appendChild(details);
+  });
+}
+
+function modelLatestFor(events, provider) {
+  return modelGroupedEvents(events).find(event => event.provider === provider) || null;
+}
+
+function renderModels(data) {
+  const control = data.control || {};
+  modelIntercept.checked = Boolean(control.intercept_enabled);
+  modelInterceptLabel.textContent = modelIntercept.checked
+    ? 'Intercepting eligible agent decisions'
+    : 'Agent interception off';
+  const events = data.events || [];
+  const byName = {};
+  (data.providers || []).forEach(provider => { byName[provider.provider] = provider; });
+  ['functiongemma', 'gemma4'].forEach(name => {
+    const provider = byName[name] || {provider: name};
+    const card = document.getElementById('model-card-' + name);
+    const latest = modelLatestFor(events, name);
+    const busy = Boolean(latest && (latest.phase === 'running' || latest.phase === 'loading'));
+    card.classList.toggle('busy', busy);
+    const state = card.querySelector('.model-state');
+    state.textContent = busy ? latest.phase : (provider.loaded ? 'resident' : (provider.available ? 'ready' : 'unavailable'));
+    state.className = 'model-state ' + (busy ? 'busy' : (provider.available ? 'ready' : 'bad'));
+    card.querySelector('[data-field="context"]').textContent = modelFormatTokens(provider.context_window);
+    card.querySelector('[data-field="runtime"]').textContent = provider.loaded ? 'loaded' : (provider.available ? 'cold' : 'missing');
+    card.querySelector('[data-field="latency"]').textContent = latest && latest.duration_ms != null
+      ? latest.duration_ms + ' ms' : '—';
+    const toggle = card.querySelector('.model-provider-toggle');
+    toggle.checked = provider.enabled !== false;
+    card.querySelector('.model-load').disabled = busy || provider.loaded || !provider.available;
+    card.querySelector('.model-unload').disabled = busy || !provider.loaded;
+    card.title = provider.reason || '';
+  });
+  modelRenderTraces(events);
+  modelChatStatus.textContent = data.daemon_connected === false
+    ? 'Warm daemon unavailable' : 'Resident daemon connected';
+}
+
+async function tickModels() {
+  if (isGrid || modelPolling) return;
+  modelPolling = true;
+  try {
+    const response = await fetch('/api/models' + qSerial(), {cache: 'no-store'});
+    const data = await response.json();
+    if (response.ok && data.ok !== false) renderModels(data);
+  } catch (error) {
+    modelChatStatus.textContent = 'Model control unavailable';
+  } finally {
+    modelPolling = false;
+  }
+}
+
+function renderModelChat(provider) {
+  modelChat.textContent = '';
+  const history = modelHistories[provider] || [];
+  if (!history.length) {
+    const note = document.createElement('div');
+    note.className = 'model-message meta';
+    note.textContent = provider === 'agent_chain'
+      ? 'Agent requests run through the same configured evaluator as a real agent turn.'
+      : (provider === 'functiongemma'
+          ? 'FunctionGemma v10 is selector-tuned; raw replies may be terse or tool-shaped.'
+          : 'Gemma 4 is the deeper semantic reviewer and may include reasoning before its answer.');
+    modelChat.appendChild(note);
+  }
+  history.forEach(message => {
+    const bubble = document.createElement('div');
+    bubble.className = 'model-message ' + message.role;
+    bubble.textContent = message.content;
+    modelChat.appendChild(bubble);
+  });
+  modelChat.scrollTop = modelChat.scrollHeight;
+}
+
+async function sendModelMessage() {
+  const provider = modelChatProvider.value;
+  const content = modelPrompt.value.trim();
+  if (!content) return;
+  const history = modelHistories[provider];
+  const agentRequest = modelRequestKind.value === 'agent';
+  let parsedRequest = null;
+  if (agentRequest) {
+    try {
+      parsedRequest = JSON.parse(content);
+    } catch (error) {
+      modelChatStatus.textContent = 'Agent request must be valid JSON: ' + error.message;
+      return;
+    }
+  }
+  history.push({role: 'user', content: content});
+  if (!agentRequest) modelPrompt.value = '';
+  renderModelChat(provider);
+  modelChatStatus.textContent = agentRequest
+    ? 'Sending through the real agent selector…'
+    : 'Generating locally…';
+  document.getElementById('model-send').disabled = true;
+  try {
+    if (agentRequest) {
+      const data = await modelPost('agent-test', {
+        provider: 'agent_chain',
+        request: parsedRequest,
+      });
+      const exchanges = Array.isArray(data.exchanges) ? data.exchanges : [];
+      const exchange = data.exchange || {};
+      const raw = exchanges.length
+        ? exchanges.map((item, index) => {
+            const output = typeof item.output === 'string' ? item.output : prettyJson(item.output);
+            return '[' + (index + 1) + '] ' + (item.provider || 'model') + '\\n' + output;
+          }).join('\\n\\n')
+        : (data.provider_error || 'No model output');
+      const verdict = data.status === 'handoff'
+        ? 'HANDOFF'
+        : (data.selected_candidate
+            ? ('SELECTED #' + data.selected_id + ' · ' +
+              (data.selected_candidate.purpose || 'candidate'))
+            : (String(data.status || 'NO VALID SELECTION').toUpperCase() +
+              (data.provider_error ? ' · ' + data.provider_error : '')));
+      const trace = data.decision && data.decision.selection_trace
+        ? '\\n\\nEVALUATOR TRACE\\n' + prettyJson(data.decision.selection_trace)
+        : '';
+      history.push({role: 'assistant', content: raw + '\\n\\n' + verdict + trace});
+      modelChatStatus.textContent = (exchange.duration_ms == null ? '' : exchange.duration_ms + ' ms · ') +
+        (data.providers || []).join(' → ') + ' · ' + verdict;
+    } else {
+      const data = await modelPost('chat', {
+        provider: provider,
+        messages: history.filter(message => ['user', 'assistant'].includes(message.role)).slice(-30),
+        max_tokens: Number(modelMaxTokens.value || 128),
+      });
+      history.push({role: 'assistant', content: String(data.output || '')});
+      modelChatStatus.textContent = data.duration_ms + ' ms · ' +
+        modelFormatTokens(data.input_tokens) + ' → ' + modelFormatTokens(data.output_tokens) + ' tokens';
+    }
+  } catch (error) {
+    history.push({role: 'meta', content: 'Error: ' + error.message});
+    modelChatStatus.textContent = error.message;
+  } finally {
+    document.getElementById('model-send').disabled = false;
+    renderModelChat(provider);
+    tickModels();
+  }
+}
+
+modelIntercept.addEventListener('change', async () => {
+  const enabled = modelIntercept.checked;
+  modelInterceptLabel.textContent = enabled ? 'Enabling interception…' : 'Disabling immediately…';
+  try { renderModels(await modelPost('set-intercept', {enabled: enabled})); }
+  catch (error) { modelChatStatus.textContent = error.message; tickModels(); }
+});
+document.querySelectorAll('.model-provider-toggle').forEach(toggle => {
+  toggle.addEventListener('change', async event => {
+    const provider = event.target.closest('.model-card').dataset.provider;
+    try { renderModels(await modelPost('set-provider', {provider: provider, enabled: event.target.checked})); }
+    catch (error) { modelChatStatus.textContent = error.message; tickModels(); }
+  });
+});
+document.querySelectorAll('.model-load, .model-unload').forEach(button => {
+  button.addEventListener('click', async event => {
+    const card = event.target.closest('.model-card');
+    const provider = card.dataset.provider;
+    const action = event.target.dataset.action;
+    modelChatStatus.textContent = (action === 'load' ? 'Loading ' : 'Unloading ') + provider + '…';
+    card.classList.add('busy');
+    try {
+      await modelPost(action, {provider: provider});
+      modelChatStatus.textContent = provider + (action === 'load' ? ' is resident.' : ' unloaded.');
+    } catch (error) { modelChatStatus.textContent = error.message; }
+    tickModels();
+  });
+});
+document.getElementById('model-send').addEventListener('click', sendModelMessage);
+modelPrompt.addEventListener('keydown', event => {
+  if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') sendModelMessage();
+});
+modelChatProvider.addEventListener('change', () => renderModelChat(modelChatProvider.value));
+modelRequestKind.addEventListener('change', () => updateModelRequestShape(true));
+modelRequestSample.addEventListener('change', () => {
+  if (!modelRequestSample.value) return;
+  modelRequestKind.value = 'agent';
+  updateModelRequestShape(true);
+});
+document.getElementById('model-clear').addEventListener('click', async () => {
+  try { renderModels(await modelPost('clear', {})); }
+  catch (error) { modelChatStatus.textContent = error.message; }
+});
+renderModelChat(modelChatProvider.value);
+updateModelRequestShape(false);
+
 document.getElementById('db-refresh').addEventListener('click', loadDatabases);
 document.getElementById('db-schema-button').addEventListener('click', loadSchema);
 document.getElementById('db-query-button').addEventListener('click', runDatabaseQuery);
@@ -2480,6 +3838,12 @@ document.getElementById('db-confirm-cancel').addEventListener('click', () => {
 dbConfirmSubmit.addEventListener('click', submitDatabaseConfirmation);
 updateDatabaseControls();
 
+screenAnalyze.addEventListener('click', analyzeScreen);
+document.getElementById('inspection-live').addEventListener('click', resumeLiveFrame);
+inspectionClickableOnly.addEventListener('change', () => {
+  elementOverlay.classList.toggle('clickable-only', inspectionClickableOnly.checked);
+});
+
 if (isGrid) {
   tickGrid();
   setInterval(tickGrid, Math.max(POLL_MS, 800));
@@ -2487,9 +3851,10 @@ if (isGrid) {
   if (focusSerial && frame) {
     frame.src = '/api/frame.jpg?serial=' + encodeURIComponent(focusSerial);
   }
-  tickStatus(); tickEvents(); tickMap(); tickLogcat();
+  tickStatus(); tickEvents(); tickMap(); tickLogcat(); tickModels();
   setInterval(() => { tickStatus(); tickEvents(); }, POLL_MS);
   setInterval(() => { tickMap(); tickLogcat(); }, MAP_MS);
+  setInterval(tickModels, 1000);
   if (!isGrid) {
     document.getElementById('px-arm').addEventListener('click', pxArm);
     document.getElementById('px-clear').addEventListener('click', () => pxPost('clear', {}));
@@ -2536,6 +3901,12 @@ class _DashboardState:
         self._pkg_cache: dict[str, tuple[str | None, float]] = {}
         self._map_cache: dict[str, tuple[dict[str, Any], float]] = {}
         self._runtime_cache: dict[str, tuple[dict[str, Any], float]] = {}
+        self._model_status_cache: dict[str, Any] | None = None
+        self._inspection_lock = threading.Lock()
+        self._inspections: dict[str, dict[str, Any]] = {}
+        from . import leases
+
+        self._inspection_owner = leases.resolve_owner(f"aua-dashboard-{os.getpid()}")
         self.database_token = secrets.token_urlsafe(32)
         self._database_lock = threading.Lock()
         self._proxy_lock = threading.Lock()
@@ -2622,7 +3993,17 @@ class _DashboardState:
             )
         return selected
 
-    def _daemon_call(self, serial: str, cmd: str, timeout: float = 1.5) -> dict[str, Any] | None:
+    def _daemon_call(
+        self,
+        serial: str,
+        cmd: str,
+        timeout: float = 1.5,
+        *,
+        journal: bool = False,
+        owner: str | None = None,
+        uncertain_is_error: bool = False,
+        **args: Any,
+    ) -> dict[str, Any] | None:
         try:
             from . import daemon as daemon_mod
 
@@ -2633,16 +4014,314 @@ class _DashboardState:
                     sock = base
                 else:
                     return None
-            with daemon_mod.DaemonClient(sock, timeout=timeout) as client:
-                if not client.ping():
+            # Health checks are lease-free and anonymous. Reusing an owner-bearing client for
+            # ping made the daemon adopt that owner without claiming the device; the following
+            # Analyze then saw the same owner, skipped adoption, and failed validation against a
+            # lease that had never existed.
+            with daemon_mod.DaemonClient(sock, timeout=timeout) as health:
+                if not health.ping():
                     return None
-                resp = client.call(cmd, journal=False)
+            with daemon_mod.DaemonClient(sock, timeout=timeout, owner=owner) as client:
+                resp = client.call(cmd, journal=journal, **args)
                 if isinstance(resp, dict):
                     result = resp.get("result")
                     return result if isinstance(result, dict) else resp
+        except DaemonOutcomeUnknownError:
+            # A device mutation may already have happened. Never turn transport uncertainty
+            # into a second tap by treating it like a daemon that was never reached.
+            if uncertain_is_error:
+                raise
+            return None
         except Exception as exc:  # noqa: BLE001
             logger.debug("daemon %s skipped: %s", cmd, exc)
         return None
+
+    def _model_daemon_call(
+        self,
+        serial: str,
+        cmd: str,
+        *,
+        timeout: float = 300.0,
+        **args: Any,
+    ) -> dict[str, Any] | None:
+        """Reach the resident model host, starting it when the operator got here first."""
+
+        result = self._daemon_call(serial, cmd, timeout=timeout, **args)
+        if result is not None:
+            return result
+        try:
+            from . import daemon as daemon_mod
+
+            started = daemon_mod.start(self.config, serial=serial)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("dashboard could not start model host: %s", exc)
+            return None
+        if not bool(started.get("running")):
+            return None
+        return self._daemon_call(serial, cmd, timeout=timeout, **args)
+
+    def _inspection_daemon_call(
+        self,
+        serial: str,
+        cmd: str,
+        *,
+        timeout: float = 90.0,
+        **args: Any,
+    ) -> dict[str, Any] | None:
+        """Run a dashboard-authored device command through the shared warm Engine."""
+
+        call_args = {
+            "timeout": timeout,
+            "journal": True,
+            "owner": self._inspection_owner,
+            "uncertain_is_error": cmd == "tap",
+            **args,
+        }
+        result = self._daemon_call(serial, cmd, **call_args)
+        if result is not None:
+            return result
+        try:
+            from . import daemon as daemon_mod
+
+            started = daemon_mod.start(self.config, serial=serial)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("dashboard could not start inspection host: %s", exc)
+            return None
+        if not bool(started.get("running")):
+            return None
+        return self._daemon_call(serial, cmd, **call_args)
+
+    def _inspection_path(self, serial: str, inspection_id: str) -> Path:
+        safe_serial = "".join(char if char.isalnum() or char in "-_." else "_" for char in serial)
+        root = self.cache_dir / "dashboard-inspection" / safe_serial
+        root.mkdir(parents=True, exist_ok=True)
+        return root / f"{inspection_id}.png"
+
+    @staticmethod
+    def _inspection_error(result: dict[str, Any] | None) -> None:
+        if result is None:
+            raise UsageError("the dashboard could not start the AUA inspection host")
+        error = result.get("error")
+        if result.get("ok") is False and isinstance(error, dict):
+            raise UsageError(
+                str(error.get("message") or "AUA inspection failed"),
+                code=str(error.get("code") or "dashboard_inspection"),
+                hint=str(error.get("hint")) if error.get("hint") else None,
+            )
+
+    def _store_inspection(
+        self,
+        serial: str,
+        inspection_id: str,
+        frame_path: Path,
+        raw_result: dict[str, Any],
+        view: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        record = {
+            "inspection_id": inspection_id,
+            "frame_path": frame_path,
+            "result": raw_result,
+            "view": view or {},
+            "busy": False,
+        }
+        with self._inspection_lock:
+            previous = self._inspections.get(serial)
+            self._inspections[serial] = record
+        old_path = previous.get("frame_path") if previous else None
+        if isinstance(old_path, Path) and old_path != frame_path:
+            with contextlib.suppress(OSError):
+                old_path.unlink()
+        return {
+            "ok": True,
+            "inspection_id": inspection_id,
+            "frame_url": f"/api/inspection-frame?serial={serial}&inspection_id={inspection_id}",
+            "result": raw_result,
+            "view": view,
+        }
+
+    def inspection_operation(self, action: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Analyze one exact frame, or consume its id once for a guarded tap-and-analyze."""
+
+        ser = self._scoped_serial(payload.get("serial"))
+        inspection_id = secrets.token_urlsafe(12)
+        frame_path = self._inspection_path(ser, inspection_id)
+        if action == "analyze":
+            result = self._inspection_daemon_call(
+                ser,
+                "analyze",
+                source="auto",
+                no_cache=True,
+                with_image=str(frame_path),
+            )
+            self._inspection_error(result)
+            assert result is not None
+            return self._store_inspection(ser, inspection_id, frame_path, result, result)
+        if action != "tap":
+            raise UsageError(f"unknown dashboard inspection action {action!r}")
+
+        source_id = payload.get("inspection_id")
+        element_id = payload.get("element_id")
+        if not isinstance(source_id, str) or not source_id:
+            raise UsageError("dashboard tap needs the analysis frame id")
+        if isinstance(element_id, bool) or not isinstance(element_id, int) or element_id < 0:
+            raise UsageError("dashboard tap needs a non-negative AUA element id")
+        with self._inspection_lock:
+            current = self._inspections.get(ser)
+            if current is None or current.get("inspection_id") != source_id:
+                raise UsageError(
+                    "that analysis frame is no longer current",
+                    code="stale_dashboard_analysis",
+                    hint="Click Analyze again and choose an id from the fresh overlay.",
+                )
+            if current.get("busy"):
+                raise UsageError("that analysis frame is already being acted on")
+            view = current.get("view") or {}
+            valid_ids = {
+                item.get("id") for item in (view.get("elements") or []) if isinstance(item, dict)
+            }
+            if element_id not in valid_ids:
+                raise UsageError(f"element id {element_id} is not in that analysis frame")
+            # Consume the frame before sending the mutation. A double-click can never replay it.
+            current["busy"] = True
+        try:
+            result = self._inspection_daemon_call(
+                ser,
+                "tap",
+                element_id=element_id,
+                observe=True,
+                with_image=str(frame_path),
+            )
+            self._inspection_error(result)
+        except Exception:
+            with self._inspection_lock:
+                if self._inspections.get(ser) is current:
+                    current["busy"] = False
+            raise
+        assert result is not None
+        observation = result.get("observation")
+        view = observation if isinstance(observation, dict) else None
+        return self._store_inspection(ser, inspection_id, frame_path, result, view)
+
+    def inspection_frame(self, serial: str, inspection_id: str) -> tuple[bytes, str] | None:
+        with self._inspection_lock:
+            current = self._inspections.get(serial)
+            if current is None or current.get("inspection_id") != inspection_id:
+                return None
+            path = current.get("frame_path")
+        if not isinstance(path, Path) or not path.is_file():
+            return None
+        try:
+            return path.read_bytes(), "image/png"
+        except OSError:
+            return None
+
+    def model_payload(self, serial: str | None = None) -> dict[str, Any]:
+        """Live daemon model state plus out-of-band controls and inference telemetry."""
+
+        from .model_control import ModelControlStore
+
+        ser = self._scoped_serial(serial)
+        store = ModelControlStore(self.config)
+        live = self._daemon_call(ser, "model_status", timeout=0.8, limit=120)
+        if live and live.get("ok"):
+            self._model_status_cache = live
+        out = dict(self._model_status_cache or {})
+        if not out:
+            # Readiness remains useful before a daemon exists; this Engine is host-only until a
+            # load/chat action and does not connect to Android merely to report provider status.
+            out = self._dashboard_engine().model_control_status(limit=120)
+            out["daemon_connected"] = False
+        else:
+            out["daemon_connected"] = True
+        # These two files remain observable even while the daemon is busy generating, which is
+        # why the dashboard can show RUNNING and apply OFF without waiting behind inference.
+        out["control"] = store.read_state()
+        out["events"] = store.events(limit=120)
+        out["serial"] = ser
+        return out
+
+    def model_operation(self, action: str, payload: dict[str, Any]) -> dict[str, Any]:
+        from .model_control import MODEL_NAMES, ModelControlStore
+
+        ser = self._scoped_serial(payload.get("serial"))
+        provider = payload.get("provider")
+        enabled = payload.get("enabled")
+        store = ModelControlStore(self.config)
+        if action == "set-intercept":
+            if not isinstance(enabled, bool):
+                raise UsageError("model intercept action requires enabled=true or false")
+            store.update(intercept_enabled=enabled)
+            store.record(
+                {
+                    "source": "dashboard",
+                    "phase": "complete",
+                    "operation": "intercept_on" if enabled else "intercept_off",
+                }
+            )
+            return self.model_payload(ser)
+        if action == "set-provider":
+            if provider not in MODEL_NAMES or not isinstance(enabled, bool):
+                raise UsageError("model provider action needs a known provider and boolean enabled")
+            store.update(provider=provider, provider_enabled=enabled)
+            store.record(
+                {
+                    "provider": provider,
+                    "source": "dashboard",
+                    "phase": "complete",
+                    "operation": "enable" if enabled else "disable",
+                }
+            )
+            return self.model_payload(ser)
+        if action == "clear":
+            store.clear_events()
+            return self.model_payload(ser)
+        if action in {"load", "unload"}:
+            if provider not in MODEL_NAMES:
+                raise UsageError("model load action needs a known provider")
+            result = self._model_daemon_call(
+                ser,
+                "model_action",
+                timeout=300.0,
+                action=action,
+                provider=provider,
+            )
+            if result is None:
+                raise UsageError("the dashboard could not start the local model host")
+            self._model_status_cache = None
+            return result
+        if action == "chat":
+            if provider not in MODEL_NAMES:
+                raise UsageError("model chat needs a known provider")
+            messages = payload.get("messages")
+            max_tokens = payload.get("max_tokens")
+            result = self._model_daemon_call(
+                ser,
+                "model_chat",
+                timeout=300.0,
+                provider=provider,
+                messages=messages,
+                max_tokens=max_tokens,
+            )
+            if result is None:
+                raise UsageError("the dashboard could not start the local model host")
+            self._model_status_cache = None
+            return result
+        if action == "agent-test":
+            if provider != "agent_chain":
+                raise UsageError("agent-shaped model test must use the configured agent chain")
+            request = payload.get("request")
+            result = self._model_daemon_call(
+                ser,
+                "model_agent_test",
+                timeout=300.0,
+                provider=provider,
+                request=request,
+            )
+            if result is None:
+                raise UsageError("the dashboard could not start the local model host")
+            self._model_status_cache = None
+            return result
+        raise UsageError(f"unknown dashboard model action {action!r}")
 
     def device_runtime(self, serial: str) -> dict[str, Any]:
         now = time.time()
@@ -2810,18 +4489,16 @@ class _DashboardState:
             "detail_revision": journal_mod.detail_revision(self.cache_dir, ser),
         }
 
-    def journal_detail(
-        self, detail_id: str, serial: str | None = None
-    ) -> dict[str, Any] | None:
+    def journal_detail(self, detail_id: str, serial: str | None = None) -> dict[str, Any] | None:
         from . import journal as journal_mod
 
-        if not detail_id or len(detail_id) > 128 or not all(
-            char.isalnum() or char in "-_." for char in detail_id
+        if (
+            not detail_id
+            or len(detail_id) > 128
+            or not all(char.isalnum() or char in "-_." for char in detail_id)
         ):
             raise UsageError("invalid dashboard journal detail id")
-        return journal_mod.read_detail(
-            self.cache_dir, self._scoped_serial(serial), detail_id
-        )
+        return journal_mod.read_detail(self.cache_dir, self._scoped_serial(serial), detail_id)
 
     def map_payload(self, serial: str | None = None) -> dict[str, Any]:
         ser = serial or self.focus
@@ -2836,9 +4513,30 @@ class _DashboardState:
             "known": False,
             "screens": [],
             "routes": [],
+            "flows": [],
             "serial": ser,
         }
         try:
+            from .flows import FlowStore
+
+            flow_store = FlowStore(self.config.memory)
+            flow_entries = flow_store.list()
+            for entry in flow_entries:
+                detail = dict(entry)
+                path = detail.get("path")
+                if path and not detail.get("error"):
+                    try:
+                        flow = flow_store.load_file(Path(path))
+                        detail["steps_detail"] = [
+                            _dashboard_step_payload(step) for step in flow.steps
+                        ]
+                    except Exception as exc:  # noqa: BLE001 — expose a broken saved flow
+                        detail["error"] = str(exc)
+                # A local absolute memory path is implementation detail, not useful UI.
+                detail.pop("path", None)
+                out["flows"].append(detail)
+            out["flow_count"] = len(flow_entries)
+
             pkg = self.foreground_package(ser)
             out["package"] = pkg
             if not pkg:
@@ -2863,10 +4561,19 @@ class _DashboardState:
             out["screens"] = [
                 {
                     "name": s.name,
+                    "id": s.id,
+                    "canonical_name": s.canonical_name,
+                    "logical_name": s.logical_name,
+                    "aliases": s.aliases,
                     "activity": s.activity,
                     "visit_count": s.visit_count,
                     "stale": s.stale,
                     "context_id": s.context_id,
+                    "surface": s.surface,
+                    "tier": s.tier,
+                    "anchors": s.anchors,
+                    "notes": s.notes,
+                    "last_verified": s.last_verified,
                 }
                 for s in screens[:80]
             ]
@@ -2877,6 +4584,12 @@ class _DashboardState:
                     "action": e.action,
                     "count": e.count,
                     "status": e.status,
+                    "id": e.id,
+                    "context_id": e.context_id,
+                    "guards": e.guards,
+                    "verification_count": e.verification_count,
+                    "last_seen": e.last_seen,
+                    "steps": [_dashboard_step_payload(step) for step in e.steps],
                 }
                 for e in app.routes[:120]
             ]
@@ -3022,13 +4735,14 @@ class _DashboardState:
         """The platform's proxy capability, or a typed refusal on a platform without one."""
         return self.platform.capability("proxy")
 
-    def _proxy_engine(self) -> Any:
-        """A lazily built engine for the *write* half of the panel.
+    def _dashboard_engine(self) -> Any:
+        """A lazily built host-only engine for dashboard control operations.
 
         Reads go straight to the proxy capability, but arming or removing a rule changes
         state the device keeps until something clears it, and only the engine knows how to
         journal that undo first. None of the mock methods it is used for connect to the
-        device, so this never competes with a running agent for the UiAutomation slot.
+        device. Model readiness is likewise host-only, so neither use competes with a running
+        agent for the UiAutomation slot.
         """
         if self._engine is None:
             from .engine import Engine
@@ -3120,7 +4834,7 @@ class _DashboardState:
 
     def proxy_operation(self, action: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Arm or remove a mock rule from the browser, through the engine that owns undo."""
-        engine = self._proxy_engine()
+        engine = self._dashboard_engine()
         serial = self._database_text(payload, "serial") if payload.get("serial") else self.focus
         if serial and serial not in self.serials:
             raise UsageError(
@@ -3247,10 +4961,10 @@ class _DashboardState:
                 return stale.read_bytes(), "image/jpeg"
         return _PLACEHOLDER_PNG, "image/png"
 
-    def log_lines(self, serial: str, lines: int = 80) -> list[str]:
+    def log_lines(self, serial: str, lines: int = 80, *, app_id: str | None = None) -> list[str]:
         n = max(1, min(int(lines), 500))
         try:
-            return self.platform.recent_logs(serial, limit=n)
+            return self.platform.recent_logs(serial, limit=n, app_id=app_id)
         except Exception as exc:  # noqa: BLE001 — dashboard remains available
             return [f"<device logs failed: {exc}>"]
 
@@ -3276,7 +4990,10 @@ def _make_handler(state: _DashboardState) -> type[BaseHTTPRequestHandler]:
                 "object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
             )
             self.end_headers()
-            self.wfile.write(body)
+            # Browsers cancel superseded frame polls aggressively. That is a normal client
+            # disconnect, not a dashboard failure worth an 18-line server traceback.
+            with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                self.wfile.write(body)
 
         def _json(self, payload: dict[str, Any], code: int = 200) -> None:
             body = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
@@ -3311,6 +5028,9 @@ def _make_handler(state: _DashboardState) -> type[BaseHTTPRequestHandler]:
                     .replace("__DATABASE_TOKEN__", state.database_token)
                 )
                 self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
+                return
+            if path == "/assets/aua-dashboard-logo.png":
+                self._send(200, _DASHBOARD_LOGO.read_bytes(), "image/png")
                 return
             if path == "/api/devices":
                 self._json(state.devices_payload())
@@ -3362,6 +5082,17 @@ def _make_handler(state: _DashboardState) -> type[BaseHTTPRequestHandler]:
                     return
                 data, mime = state.frame_bytes(ser)
                 self._send(200, data, mime)
+                return
+            if path == "/api/inspection-frame":
+                ser = self._scoped_qs_serial(qs)
+                if ser is None:
+                    return
+                inspection_id = (qs.get("inspection_id") or [""])[0].strip()
+                frame = state.inspection_frame(ser, inspection_id)
+                if frame is None:
+                    self._send(404, b"inspection frame not found", "text/plain")
+                else:
+                    self._send(200, frame[0], frame[1])
                 return
             if path == "/api/events":
                 ser = self._scoped_qs_serial(qs)
@@ -3416,16 +5147,34 @@ def _make_handler(state: _DashboardState) -> type[BaseHTTPRequestHandler]:
                     return
                 self._json(state.map_payload(ser))
                 return
+            if path == "/api/models":
+                ser = self._scoped_qs_serial(qs)
+                if ser is None:
+                    return
+                self._json(state.model_payload(ser))
+                return
             if path == "/api/logcat":
                 ser = self._scoped_qs_serial(qs)
                 if ser is None:
                     return
                 lines_raw = (qs.get("lines") or ["80"])[0]
+                app_id = (qs.get("app_id") or [""])[0].strip() or None
+                if app_id and (
+                    len(app_id) > 255 or not all(char.isalnum() or char in "._-" for char in app_id)
+                ):
+                    self._json({"ok": False, "error": "invalid app id", "lines": []}, 400)
+                    return
                 try:
                     n = max(1, min(int(lines_raw), 500))
                 except ValueError:
                     n = 80
-                self._json({"ok": True, "lines": state.log_lines(ser, n) if ser else []})
+                self._json(
+                    {
+                        "ok": True,
+                        "app_id": app_id,
+                        "lines": state.log_lines(ser, n, app_id=app_id) if ser else [],
+                    }
+                )
                 return
             if path.startswith("/api/file"):
                 ser = self._scoped_qs_serial(qs)
@@ -3445,7 +5194,12 @@ def _make_handler(state: _DashboardState) -> type[BaseHTTPRequestHandler]:
         def do_POST(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
             prefix = ""
-            for candidate in ("/api/database/", "/api/proxy/"):
+            for candidate in (
+                "/api/database/",
+                "/api/proxy/",
+                "/api/models/",
+                "/api/inspect/",
+            ):
                 if parsed.path.startswith(candidate):
                     prefix = candidate
                     break
@@ -3488,6 +5242,10 @@ def _make_handler(state: _DashboardState) -> type[BaseHTTPRequestHandler]:
                 action = parsed.path[len(prefix) :]
                 if prefix == "/api/proxy/":
                     result = state.proxy_operation(action, payload)
+                elif prefix == "/api/models/":
+                    result = state.model_operation(action, payload)
+                elif prefix == "/api/inspect/":
+                    result = state.inspection_operation(action, payload)
                 else:
                     result = state.database_operation(action, payload)
                 self._json(result)
@@ -3505,7 +5263,7 @@ def _make_handler(state: _DashboardState) -> type[BaseHTTPRequestHandler]:
             except AuaError as exc:
                 self._json({"ok": False, **exc.to_dict()}, 400)
             except Exception as exc:  # noqa: BLE001 — dashboard must stay available
-                logger.exception("dashboard database request failed")
+                logger.exception("dashboard request failed")
                 self._json(
                     {
                         "ok": False,

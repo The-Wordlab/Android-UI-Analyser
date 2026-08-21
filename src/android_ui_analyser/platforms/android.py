@@ -178,11 +178,28 @@ class AndroidPlatform(PlatformAdapter):
         # Prefer a disposable emulator over a physical USB phone when the user did not pin one.
         return 0 if target.serial.startswith("emulator-") else 1
 
-    def recent_logs(self, target_id: str, *, limit: int = 80) -> list[str]:
+    def recent_logs(
+        self, target_id: str, *, limit: int = 80, app_id: str | None = None
+    ) -> list[str]:
         self.prepare_host()
         count = max(1, min(int(limit), 500))
+        pid_args: list[str] = []
+        if app_id:
+            pid_result = subprocess.run(  # noqa: S603
+                ["adb", "-s", target_id, "shell", "pidof", app_id],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            pids = [item for item in (pid_result.stdout or "").split() if item.isdigit()]
+            if not pids:
+                return []
+            # Android logcat's --pid lane is exact and substantially cheaper than downloading
+            # the global buffer and hoping the package name appears in each message.
+            pid_args = ["-v", "threadtime", "--pid", pids[0]]
         result = subprocess.run(  # noqa: S603
-            ["adb", "-s", target_id, "logcat", "-d", "-t", str(count)],
+            ["adb", "-s", target_id, "logcat", "-d", *pid_args, "-t", str(count)],
             capture_output=True,
             text=True,
             timeout=8,

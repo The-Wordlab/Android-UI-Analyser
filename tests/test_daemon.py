@@ -117,6 +117,31 @@ def test_dispatch_analyze_returns_schema_keys() -> None:
     assert "meta" in result
 
 
+def test_dispatch_agent_model_sample_uses_the_shared_engine_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = make_engine(device=FakeDevice())
+    seen: dict[str, object] = {}
+
+    def agent_test(provider: str, request: dict[str, object]) -> dict[str, object]:
+        seen.update({"provider": provider, "request": request})
+        return {"ok": True, "status": "selected", "selected_id": 1}
+
+    monkeypatch.setattr(engine, "model_control_agent_test", agent_test)
+    request = {"goal": "Open Settings", "candidates": [{"id": 0}, {"id": 1}]}
+    response = dispatch(
+        engine,
+        {
+            "cmd": "model_agent_test",
+            "args": {"provider": "functiongemma", "request": request},
+        },
+    )
+
+    assert response["ok"] is True
+    assert response["result"]["selected_id"] == 1
+    assert seen == {"provider": "functiongemma", "request": request}
+
+
 def test_dispatch_holds_device_fence_until_the_command_returns(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -259,9 +284,7 @@ def test_push_watcher_uses_background_fence_without_blocking_transfer(
         assert sampled.wait(timeout=2)
         offered: list[dict[str, object]] = []
         transfer = threading.Thread(
-            target=lambda: offered.append(
-                leases.create_handoff(tmp_path, serial, owner=source)
-            )
+            target=lambda: offered.append(leases.create_handoff(tmp_path, serial, owner=source))
         )
         transfer.start()
         transfer.join(timeout=2)

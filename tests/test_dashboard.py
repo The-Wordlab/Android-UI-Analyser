@@ -205,6 +205,340 @@ def _dashboard_state(tmp_path: Path):
     )
 
 
+def test_model_controls_start_the_host_when_no_agent_has_used_it_yet(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from android_ui_analyser import daemon as daemon_mod
+
+    state = _dashboard_state(tmp_path)
+    calls: list[tuple[str, str, dict[str, Any]]] = []
+    replies = iter([None, {"ok": True, "loaded": True}])
+
+    def fake_call(serial: str, cmd: str, timeout: float = 1.5, **args: Any) -> Any:
+        calls.append((serial, cmd, args))
+        return next(replies)
+
+    starts: list[str | None] = []
+    monkeypatch.setattr(state, "_daemon_call", fake_call)
+    monkeypatch.setattr(
+        daemon_mod,
+        "start",
+        lambda _config, *, serial=None: (
+            starts.append(serial) or {"running": True, "status": "started"}
+        ),
+    )
+
+    result = state._model_daemon_call(
+        "emulator-5554", "model_action", action="load", provider="functiongemma"
+    )
+
+    assert result == {"ok": True, "loaded": True}
+    assert starts == ["emulator-5554"]
+    assert calls == [
+        ("emulator-5554", "model_action", {"action": "load", "provider": "functiongemma"}),
+        ("emulator-5554", "model_action", {"action": "load", "provider": "functiongemma"}),
+    ]
+
+
+def test_existing_model_playground_routes_agent_samples_to_the_selector(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state = _dashboard_state(tmp_path)
+    calls: list[tuple[str, str, dict[str, Any]]] = []
+
+    def fake_call(serial: str, cmd: str, **args: Any) -> dict[str, Any]:
+        calls.append((serial, cmd, args))
+        return {"ok": True, "status": "selected", "selected_id": 1}
+
+    monkeypatch.setattr(state, "_model_daemon_call", fake_call)
+    request = {
+        "goal": "Open Settings",
+        "candidates": [
+            {"id": 0, "label": "Search"},
+            {"id": 1, "label": "Settings"},
+        ],
+    }
+
+    result = state.model_operation(
+        "agent-test",
+        {"serial": "emulator-5554", "provider": "agent_chain", "request": request},
+    )
+
+    assert result["selected_id"] == 1
+    assert calls == [
+        (
+            "emulator-5554",
+            "model_agent_test",
+            {"timeout": 300.0, "provider": "agent_chain", "request": request},
+        )
+    ]
+
+
+def test_dashboard_device_health_ping_never_adopts_the_action_owner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from android_ui_analyser import daemon as daemon_mod
+
+    state = _dashboard_state(tmp_path)
+    socket_path = tmp_path / "daemon.sock"
+    socket_path.touch()
+    state.config.daemon.socket = str(socket_path)
+    owners: list[str | None] = []
+
+    class FakeClient:
+        def __init__(self, _path: str, *, timeout: float, owner: str | None = None) -> None:
+            owners.append(owner)
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def ping(self) -> bool:
+            return True
+
+        def call(self, _cmd: str, **_args: Any) -> dict[str, Any]:
+            return {"ok": True, "result": {"screen": {}, "elements": []}}
+
+    monkeypatch.setattr(daemon_mod, "DaemonClient", FakeClient)
+
+    result = state._daemon_call("emulator-5554", "analyze", owner="dashboard-owner", journal=True)
+
+    assert result == {"screen": {}, "elements": []}
+    assert owners == [None, "dashboard-owner"]
+
+
+def test_dashboard_never_retries_a_tap_with_an_unknown_daemon_outcome(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from android_ui_analyser import daemon as daemon_mod
+    from android_ui_analyser.errors import DaemonOutcomeUnknownError
+
+    state = _dashboard_state(tmp_path)
+
+    def uncertain(*_args: Any, **_kwargs: Any) -> Any:
+        raise DaemonOutcomeUnknownError("the tap may have arrived")
+
+    monkeypatch.setattr(state, "_daemon_call", uncertain)
+    monkeypatch.setattr(
+        daemon_mod,
+        "start",
+        lambda *_args, **_kwargs: pytest.fail("an uncertain tap must never start and retry"),
+    )
+
+    with pytest.raises(DaemonOutcomeUnknownError, match="may have arrived"):
+        state._inspection_daemon_call("emulator-5554", "tap", element_id=4)
+
+
+def test_dashboard_analyze_returns_one_exact_overlay_frame(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state = _dashboard_state(tmp_path)
+    calls: list[tuple[str, str, dict[str, Any]]] = []
+    analyzed = {
+        "schema_version": 1,
+        "screen": {"width": 1080, "height": 2400, "package": "com.example"},
+        "elements": [
+            {
+                "id": 7,
+                "text": "Open app",
+                "bounds": [100, 1800, 980, 1950],
+                "clickable": True,
+            }
+        ],
+        "meta": {"duration_ms": 12, "tier_used": "hierarchy"},
+    }
+
+    def fake_call(serial: str, cmd: str, **args: Any) -> dict[str, Any]:
+        calls.append((serial, cmd, args))
+        Path(args["with_image"]).write_bytes(b"exact-analysis-frame")
+        return analyzed
+
+    monkeypatch.setattr(state, "_inspection_daemon_call", fake_call)
+    result = state.inspection_operation("analyze", {"serial": "emulator-5554"})
+
+    assert result["view"] == analyzed
+    assert result["result"] == analyzed
+    assert result["inspection_id"]
+    assert calls[0][0:2] == ("emulator-5554", "analyze")
+    assert calls[0][2]["no_cache"] is True
+    assert state.inspection_frame("emulator-5554", result["inspection_id"]) == (
+        b"exact-analysis-frame",
+        "image/png",
+    )
+
+
+def test_dashboard_overlay_id_is_consumed_by_tap_and_analyze(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state = _dashboard_state(tmp_path)
+    analyzed = {
+        "screen": {"width": 100, "height": 200},
+        "elements": [{"id": 4, "bounds": [10, 20, 80, 60], "clickable": True}],
+        "meta": {},
+    }
+    source_frame = tmp_path / "source.png"
+    source_frame.write_bytes(b"source")
+    source = state._store_inspection("emulator-5554", "source-id", source_frame, analyzed, analyzed)
+    assert source["inspection_id"] == "source-id"
+    calls: list[dict[str, Any]] = []
+
+    def fake_call(_serial: str, cmd: str, **args: Any) -> dict[str, Any]:
+        calls.append({"cmd": cmd, **args})
+        Path(args["with_image"]).write_bytes(b"post-action")
+        return {"ok": True, "action": "tap", "id": 4, "observation": analyzed}
+
+    monkeypatch.setattr(state, "_inspection_daemon_call", fake_call)
+    result = state.inspection_operation(
+        "tap",
+        {"serial": "emulator-5554", "inspection_id": "source-id", "element_id": 4},
+    )
+
+    assert calls == [
+        {
+            "cmd": "tap",
+            "element_id": 4,
+            "observe": True,
+            "with_image": str(
+                tmp_path
+                / "dashboard-inspection"
+                / "emulator-5554"
+                / f"{result['inspection_id']}.png"
+            ),
+        }
+    ]
+    assert result["view"] == analyzed
+    assert result["result"]["action"] == "tap"
+    with pytest.raises(UsageError, match="no longer current"):
+        state.inspection_operation(
+            "tap",
+            {"serial": "emulator-5554", "inspection_id": "source-id", "element_id": 4},
+        )
+
+
+def test_dashboard_forwards_app_scoped_logcat_to_the_selected_platform(tmp_path: Path) -> None:
+    state = _dashboard_state(tmp_path)
+    calls: list[tuple[str, int, str | None]] = []
+
+    class FakePlatform:
+        def recent_logs(
+            self, target_id: str, *, limit: int = 80, app_id: str | None = None
+        ) -> list[str]:
+            calls.append((target_id, limit, app_id))
+            return ["one app only"]
+
+    state.platform = FakePlatform()
+
+    assert state.log_lines("emulator-5554", 40, app_id="com.example.notes") == ["one app only"]
+    assert calls == [("emulator-5554", 40, "com.example.notes")]
+
+
+def test_map_payload_contains_expandable_route_steps_and_all_app_flows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from types import SimpleNamespace
+
+    from android_ui_analyser import flows as flows_mod
+    from android_ui_analyser import memory as memory_mod
+
+    class FakeStep:
+        def __init__(self, **payload: Any) -> None:
+            self.payload = payload
+
+        def model_dump(self, *, exclude_none: bool = True) -> dict[str, Any]:
+            return dict(self.payload)
+
+    class FakeFlowStore:
+        def __init__(self, _config: Any) -> None:
+            pass
+
+        def list(self) -> list[dict[str, Any]]:
+            return [
+                {
+                    "name": "sign in",
+                    "storage_name": "sign-in",
+                    "ref": "com.example.notes:sign-in",
+                    "app": "com.example.notes",
+                    "path": str(tmp_path / "sign-in.yaml"),
+                    "steps": 1,
+                },
+                {
+                    "name": "dismiss system dialog",
+                    "storage_name": "dismiss-system-dialog",
+                    "ref": "dismiss-system-dialog",
+                    "app": None,
+                    "path": str(tmp_path / "dismiss-system-dialog.yaml"),
+                    "steps": 1,
+                },
+            ]
+
+        def load_file(self, path: Path) -> Any:
+            if path.name == "sign-in.yaml":
+                return SimpleNamespace(
+                    steps=[FakeStep(kind="type", text="private input", data={"token": "x"})]
+                )
+            return SimpleNamespace(steps=[FakeStep(kind="press", key="back")])
+
+    screen = SimpleNamespace(
+        name="Home",
+        id="screen-home",
+        canonical_name="Home",
+        logical_name="Home",
+        aliases=["Main"],
+        activity="MainActivity",
+        visit_count=4,
+        stale=False,
+        context_id=None,
+        surface="native",
+        tier="mapped",
+        anchors=[],
+        notes="Landing screen",
+        last_verified="2026-08-21T09:00:00Z",
+    )
+    route = SimpleNamespace(
+        from_screen="Login",
+        to_screen="Home",
+        action="submit credentials",
+        count=3,
+        status="verified",
+        id="route-login-home",
+        context_id=None,
+        guards=[],
+        verification_count=2,
+        last_seen="2026-08-21T09:00:00Z",
+        steps=[FakeStep(kind="tap", target="Continue")],
+    )
+    app = SimpleNamespace(
+        label="Notes",
+        description="Example app",
+        screens={"screen-home": screen},
+        routes=[route],
+    )
+
+    class FakeAppMemoryStore:
+        def __init__(self, _config: Any) -> None:
+            pass
+
+        def load(self, package: str) -> Any:
+            assert package == "com.example.notes"
+            return app
+
+    monkeypatch.setattr(flows_mod, "FlowStore", FakeFlowStore)
+    monkeypatch.setattr(memory_mod, "AppMemoryStore", FakeAppMemoryStore)
+    state = _dashboard_state(tmp_path)
+    monkeypatch.setattr(state, "foreground_package", lambda _serial: "com.example.notes")
+
+    payload = state.map_payload("emulator-5554")
+
+    assert payload["screens"][0]["name"] == "Home"
+    assert payload["routes"][0]["steps"] == [{"kind": "tap", "target": "Continue"}]
+    assert [flow["app"] for flow in payload["flows"]] == ["com.example.notes", None]
+    assert payload["flows"][0]["steps_detail"][0]["text"] == "<redacted>"
+    assert payload["flows"][0]["steps_detail"][0]["data"]["token"] == "<redacted>"
+    assert all("path" not in flow for flow in payload["flows"])
+
+
 def test_dashboard_database_view_is_in_detail_html() -> None:
     from android_ui_analyser import dashboard as dash
 
@@ -356,9 +690,7 @@ def test_dashboard_database_operations_delegate_and_require_typed_confirmation(
         state.database_operation("execute", mutation)
     assert len(calls) == call_count
 
-    result = state.database_operation(
-        "execute", {**mutation, "confirmation": "MUTATE app.db"}
-    )
+    result = state.database_operation("execute", {**mutation, "confirmation": "MUTATE app.db"})
     assert result == {"ok": True, "changes": 1}
     assert calls[-1][0] == "execute"
     assert calls[-1][1]["confirmed"] is True
@@ -370,9 +702,7 @@ def test_dashboard_database_operations_delegate_and_require_typed_confirmation(
     }
     with pytest.raises(UsageError, match="RESTORE backup-1"):
         state.database_operation("restore", restore)
-    restored = state.database_operation(
-        "restore", {**restore, "confirmation": "RESTORE backup-1"}
-    )
+    restored = state.database_operation("restore", {**restore, "confirmation": "RESTORE backup-1"})
     assert restored == {"ok": True, "backup_id": "backup-1"}
     assert calls[-1][0] == "restore"
     assert calls[-1][1]["confirmed"] is True
@@ -467,9 +797,7 @@ def test_dashboard_journal_detail_is_token_protected_and_serial_scoped(
     )
     event = state.journal_bundle(limit=1)["events"][0]
     detail_id = event["detail_id"]
-    other_detail_id = journal.read_since(tmp_path, "emulator-9999", limit=1)[0][
-        "detail_id"
-    ]
+    other_detail_id = journal.read_since(tmp_path, "emulator-9999", limit=1)[0]["detail_id"]
     assert "full_only" not in event["result"]
     monkeypatch.setattr(
         dash,
@@ -481,10 +809,7 @@ def test_dashboard_journal_detail_is_token_protected_and_serial_scoped(
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     root_url = f"http://127.0.0.1:{server.server_port}/"
-    detail_url = (
-        root_url
-        + f"api/event?detail_id={detail_id}&serial=emulator-5554"
-    )
+    detail_url = root_url + f"api/event?detail_id={detail_id}&serial=emulator-5554"
     try:
         with urllib.request.urlopen(
             root_url + "api/events?serial=emulator-5554&limit=1", timeout=2
@@ -510,9 +835,7 @@ def test_dashboard_journal_detail_is_token_protected_and_serial_scoped(
             "args": {"source": "auto"},
         }
         assert payload["detail"]["response"]["result"]["full_only"] == full_only
-        assert payload["detail"]["response"]["result"]["elements"] == [
-            {"id": 1, "text": "Ready"}
-        ]
+        assert payload["detail"]["response"]["result"]["elements"] == [{"id": 1, "text": "Ready"}]
 
         assert journal.record_emitted_response(
             cache_dir=tmp_path,
@@ -541,8 +864,7 @@ def test_dashboard_journal_detail_is_token_protected_and_serial_scoped(
         assert state.serials == ["emulator-5554"]
 
         wrong_serial = urllib.request.Request(
-            root_url
-            + f"api/event?detail_id={other_detail_id}&serial=emulator-9999",
+            root_url + f"api/event?detail_id={other_detail_id}&serial=emulator-9999",
             headers={"X-AUA-Dashboard-Token": state.database_token},
         )
         with pytest.raises(urllib.error.HTTPError) as not_found:
@@ -550,21 +872,14 @@ def test_dashboard_journal_detail_is_token_protected_and_serial_scoped(
         assert not_found.value.code == 400
 
         with pytest.raises(urllib.error.HTTPError) as events_out_of_scope:
-            urllib.request.urlopen(
-                root_url + "api/events?serial=emulator-9999&limit=1", timeout=2
-            )
+            urllib.request.urlopen(root_url + "api/events?serial=emulator-9999&limit=1", timeout=2)
         assert events_out_of_scope.value.code == 400
 
         with pytest.raises(urllib.error.HTTPError) as logs_out_of_scope:
-            urllib.request.urlopen(
-                root_url + "api/logcat?serial=emulator-9999", timeout=2
-            )
+            urllib.request.urlopen(root_url + "api/logcat?serial=emulator-9999", timeout=2)
         assert logs_out_of_scope.value.code == 400
 
-        injected_serial = (
-            root_url
-            + "?serial=%27%3BglobalThis.SERIAL_XSS%3Dtrue%3B%2F%2F"
-        )
+        injected_serial = root_url + "?serial=%27%3BglobalThis.SERIAL_XSS%3Dtrue%3B%2F%2F"
         with pytest.raises(urllib.error.HTTPError) as injected:
             urllib.request.urlopen(injected_serial, timeout=2)
         assert injected.value.code == 404
@@ -812,8 +1127,15 @@ def test_proxy_payload_reports_health_rules_and_live_traffic(tmp_path: Path) -> 
     before = state._proxy_opened_at - 100
     svc.flows = [
         {"n": 1, "ts": before, "method": "GET", "path": "/earlier", "status": 200},
-        {"n": 2, "ts": time.time() + 1, "method": "GET", "path": "/v1/me", "status": 200,
-         "action": "stub", "rule": "r1"},
+        {
+            "n": 2,
+            "ts": time.time() + 1,
+            "method": "GET",
+            "path": "/v1/me",
+            "status": 200,
+            "action": "stub",
+            "rule": "r1",
+        },
         {"n": 3, "ts": time.time() + 1, "method": "POST", "path": "/v1/track", "status": 204},
     ]
 
@@ -1084,9 +1406,7 @@ def test_a_tile_never_takes_the_uiautomation_slot_from_the_agent_using_the_devic
         raise AssertionError("the dashboard must not connect to a device another agent holds")
 
     monkeypatch.setattr(state.platform, "connect", refuse)
-    monkeypatch.setattr(
-        leases, "read_lease", lambda _cache, _ser: {"owner": "some-other-agent"}
-    )
+    monkeypatch.setattr(leases, "read_lease", lambda _cache, _ser: {"owner": "some-other-agent"})
 
     frames = tmp_path / "captures" / "emulator-5554" / "s1" / "frames"
     frames.mkdir(parents=True)
