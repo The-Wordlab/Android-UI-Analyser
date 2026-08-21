@@ -694,12 +694,18 @@ class Device(ABC):
 
         self.adb_reverse_remove(device_port)
 
-    def logcat(self, *, since_ms: int | None = None, dump: bool = True) -> str:
+    def logcat(
+        self, *, since_ms: int | None = None, dump: bool = True, pid: str | None = None
+    ) -> str:
         """Dump (or clear) logcat. ``dump=False`` clears the buffer and returns ``""``.
 
         *since_ms* is a **device**-clock epoch and an implementation MUST apply it — the
         caller does no time filtering of its own. Raise :class:`DeviceError` if
         unavailable.
+
+        *pid* scopes the dump to one process. It is a device-side filter on purpose: matching
+        a package name against message text downloads the whole buffer and still misses every
+        line an app logs under a library's tag.
         """
         raise DeviceError("logcat requires a real device")
 
@@ -2020,7 +2026,9 @@ class Uiautomator2Device(Device):
         )
         return proc.stdout or ""
 
-    def logcat(self, *, since_ms: int | None = None, dump: bool = True) -> str:
+    def logcat(
+        self, *, since_ms: int | None = None, dump: bool = True, pid: str | None = None
+    ) -> str:
         if not dump:
             try:
                 subprocess.run(  # noqa: S603
@@ -2041,11 +2049,12 @@ class Uiautomator2Device(Device):
             return ""
         # logcat's own `-T <sec.nsec>` compares against the same clock that stamped the
         # lines, which no amount of host-side parsing can match.
+        scope = ["--pid", str(pid)] if pid else []
         native = (
             [] if since_ms is None else ["-T", f"{since_ms // 1000}.{since_ms % 1000:03d}000000"]
         )
         try:
-            return self._logcat_dump(native)
+            return self._logcat_dump([*scope, *native])
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
             if not native:
                 raise DeviceError(
@@ -2053,7 +2062,10 @@ class Uiautomator2Device(Device):
                     hint="Check `adb` is on PATH and the device is reachable.",
                 ) from exc
         try:
-            raw = self._logcat_dump([])
+            # Only `-T` is dropped on retry. Keeping `--pid` matters: an image that rejects the
+            # timestamp filter would otherwise silently widen a one-app window to the whole
+            # device buffer, which reads to the caller as "the app logged all of this".
+            raw = self._logcat_dump(scope)
         except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as exc:
             raise DeviceError(
                 "could not dump logcat",

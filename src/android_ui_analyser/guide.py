@@ -1114,7 +1114,25 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "[--tag TAG] [--lines N] [--json]` — dump since the mark (default: last-action, else "
         "30s). Windows are in DEVICE time (logcat lines are device-stamped and emulator "
         "clocks drift from the host by seconds); `mark` reports `clock`, `host_unix_ms` and "
-        "the measured `skew_ms` so drift is visible rather than silently eating your window",
+        "the measured `skew_ms` so drift is visible rather than silently eating your window. "
+        "You rarely need to call it after an action: every observed action already folds that "
+        "same window into `app_logs` (see below)",
+    ),
+    (
+        "app_logs",
+        "every observed action folds what the APP itself logged during that action into "
+        "`app_logs` — its own process only, priorities `DWEF`, at most 20 lines and 5 per tag, "
+        "each line bounded. The screen is the app's conclusion; this is its reasoning, which is "
+        "how you catch the tap that landed on a plausible-looking screen while the app quietly "
+        "logged the refusal. Absent when the app said nothing, which is most actions, so a "
+        "quiet step costs nothing. `I` and `V` are excluded on purpose: it is a level SET, not "
+        "a floor — measured on a real app, every `I` line in a launch window came from an HTTP "
+        "client, an attribution SDK, or the ART runtime, while `D` is where the app writes its "
+        "own breadcrumbs. Widen with `--app-logs DIWEF` (MCP: `configure app_log_levels`) only "
+        "when you are chasing a library; `F` is always included so a narrow filter can never "
+        "hide a crash. Turn it off with `--no-app-logs` (MCP: `configure app_logs=false`). A "
+        "crash supersedes it: when the app leaves the foreground you get the stronger "
+        "`crash_evidence` block instead, from the same window",
     ),
     (
         "suite",

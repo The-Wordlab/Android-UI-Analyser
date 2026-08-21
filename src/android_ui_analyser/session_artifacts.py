@@ -43,6 +43,17 @@ def _redact(value: Any, *, key: str | None = None) -> Any:
         return "<redacted>"
     if lowered in {"params", "parameters", "sql", "speech", "wav_path"}:
         return "<redacted>"
+    if lowered == "app_logs" and isinstance(value, dict):
+        # An action's folded log window is live guidance for the agent, not evidence worth
+        # archiving. These bundles get published as review evidence, and raw device log lines are
+        # the likeliest place for a bearer token, an install id, or an unreleased flag name to
+        # ride along. So the record keeps the fact that the app spoke — which is what a reader
+        # of the archive needs — and withholds what it said.
+        summary: dict[str, Any] = {"withheld": "app_logs not archived"}
+        for field in ("count", "total_count", "omitted", "truncated", "levels", "since"):
+            if field in value:
+                summary[field] = value[field]
+        return summary
     if isinstance(value, dict):
         out = {str(k): _redact(v, key=str(k)) for k, v in value.items()}
         if value.get("kind") == "input" and "text" in out:

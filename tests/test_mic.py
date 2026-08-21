@@ -1280,7 +1280,12 @@ def test_internal_stream_error_releases_hold_and_carries_post_action_observation
             observe=False,
         )
 
-    assert [call[0] for call in device.calls[-2:]] == ["touch_down", "touch_up"]
+    # The hold must be *released*, in that order. Not "these were the last two calls": a
+    # folded observation legitimately reads the app's log window afterwards, and pinning the
+    # tail of the call list makes this test fail for reasons that have nothing to do with the
+    # hold it is here to verify.
+    touches = [call[0] for call in device.calls if call[0] in {"touch_down", "touch_up"}]
+    assert touches == ["touch_down", "touch_up"]
     error = caught.value.to_dict()["error"]
     assert error["code"] == "mic_delivery_uncertain"
     assert "Do not retry blindly" in error["hint"]

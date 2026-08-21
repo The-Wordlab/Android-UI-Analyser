@@ -113,8 +113,9 @@ class _LogPlatform(_InjectedPlatform):
         *,
         lines: int = 400,
         since_ms: int | None = None,
+        app_id: str | None = None,
     ) -> str:
-        self.calls.append(("diagnostic_logs", (runtime, lines, since_ms)))
+        self.calls.append(("diagnostic_logs", (runtime, lines, since_ms, app_id)))
         return (
             "08-20 12:00:00.001  1234  1234 E AndroidRuntime: FATAL EXCEPTION: main\n"
             "08-20 12:00:00.002  1234  1234 E AndroidRuntime: "
@@ -324,7 +325,7 @@ def test_android_platform_provides_bounded_failure_diagnostics() -> None:
 
     assert "newer" in logs
     assert "older" not in logs
-    assert ("logcat", (123456, True)) in runtime.calls
+    assert ("logcat", (123456, True, None)) in runtime.calls
 
 
 def test_crash_evidence_uses_the_selected_platform_log_capability() -> None:

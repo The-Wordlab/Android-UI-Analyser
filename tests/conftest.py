@@ -307,26 +307,46 @@ class FakeDevice(Device):
         """
         self.clock_skew_ms -= ms
 
-    def log_now(self, tag: str = "Test", msg: str = "hello", *, offset_ms: int = 0) -> str:
-        """Append a line stamped off the DEVICE clock in device-local time, as apps do."""
+    def log_now(
+        self,
+        tag: str = "Test",
+        msg: str = "hello",
+        *,
+        offset_ms: int = 0,
+        priority: str = "I",
+        pid: str = "1234",
+    ) -> str:
+        """Append a line stamped off the DEVICE clock in device-local time, as apps do.
+
+        *priority* is a real field of a real logcat line, so tests that care which levels a
+        filter keeps must be able to write one. It defaults to ``I`` because that is what this
+        helper has always emitted.
+        """
         device_ms = (self.get_clock_ms() or 0) + offset_ms
         local = datetime.fromtimestamp(device_ms / 1000.0 + self.utc_offset * 60, tz=UTC)
         line = (
             f"{local.month:02d}-{local.day:02d} {local.hour:02d}:{local.minute:02d}:"
-            f"{local.second:02d}.{local.microsecond // 1000:03d}  1234  5678 I {tag}: {msg}"
+            f"{local.second:02d}.{local.microsecond // 1000:03d}  {pid}  5678 "
+            f"{priority} {tag}: {msg}"
         )
         self._logcat_lines.append(line)
         return line
 
-    def logcat(self, *, since_ms: int | None = None, dump: bool = True) -> str:
-        self.calls.append(("logcat", (since_ms, dump)))
+    def logcat(
+        self, *, since_ms: int | None = None, dump: bool = True, pid: str | None = None
+    ) -> str:
+        self.calls.append(("logcat", (since_ms, dump, pid)))
         if not dump:
             self._logcat_cleared = True
             self._logcat_lines = []
             return ""
         from android_ui_analyser.logcat import filter_logcat
 
-        raw = "\n".join(self._logcat_lines)
+        lines = self._logcat_lines
+        if pid is not None:
+            # Models `logcat --pid`: a device-side filter on the line's own pid field.
+            lines = [line for line in lines if line.split()[2:3] == [str(pid)]]
+        raw = "\n".join(lines)
         if since_ms is None:
             return raw
         # Models `logcat -T <device epoch>`: the device compares against its own clock.
@@ -394,6 +414,10 @@ class FakeDevice(Device):
                 ("global", "mobile_data"): "1" if self._mobile_data_enabled else "0",
             }
         parts = command.split()
+        if parts[:1] == ["pidof"]:
+            # Every process this fake device "runs" logs under pid 1234 (see `log_now`), so the
+            # scoped dump and the lines it is supposed to select agree.
+            return "1234" if len(parts) > 1 else ""
         if command == "pm has-feature android.hardware.wifi":
             return "true"
         if command == "pm has-feature android.hardware.telephony":

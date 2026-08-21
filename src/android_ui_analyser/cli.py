@@ -148,6 +148,11 @@ class GlobalOpts:
     timeout: int | None = None
     log_level: str = "warn"
     no_cache: bool = False
+    #: `--no-app-logs` / `--app-logs LEVELS`. Deliberately NOT named `--log-level*`: that flag
+    #: already exists and controls AUA's own stderr verbosity, which is a different thing from
+    #: which of the app's log priorities get folded into an observation.
+    no_app_logs: bool = False
+    app_log_levels: str | None = None
     with_image: bool = False
     observe_fields: str | None = None
     until: str | None = None
@@ -193,6 +198,13 @@ class GlobalOpts:
             overrides["timeouts"] = {"action_ms": self.timeout}
         if self.no_cache:
             overrides["cache"] = {"enabled": False}
+        if self.no_app_logs or self.app_log_levels is not None:
+            logs: dict[str, Any] = {}
+            if self.no_app_logs:
+                logs["enabled"] = False
+            if self.app_log_levels is not None:
+                logs["levels"] = self.app_log_levels
+            overrides["logs"] = logs
         return overrides
 
     def load(self) -> Config:
@@ -2169,6 +2181,18 @@ def main(
         "warn", "--log-level", help="error|warn|info|debug (logs → stderr)."
     ),
     no_cache: bool = typer.Option(False, "--no-cache", help="Bypass the cached analyze result."),
+    no_app_logs: bool = typer.Option(
+        False,
+        "--no-app-logs",
+        help="Do not fold what the app logged during an action into its observation.",
+    ),
+    app_log_levels: str | None = typer.Option(
+        None,
+        "--app-logs",
+        metavar="LEVELS",
+        help="Log priorities folded into an action's observation (default DWEF). "
+        "A set, not a floor: `I` is noisier than `D` on Android. `F` is always included.",
+    ),
     with_image: bool = typer.Option(
         False,
         "--with-image",
@@ -2271,6 +2295,8 @@ def main(
         timeout=timeout,
         log_level=log_level,
         no_cache=no_cache,
+        no_app_logs=no_app_logs,
+        app_log_levels=app_log_levels,
         with_image=with_image,
         observe_fields=observe_fields,
         answers=tuple(answers or ()),

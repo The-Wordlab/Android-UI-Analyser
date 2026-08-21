@@ -2387,13 +2387,29 @@ def _tool_definitions() -> list[types.Tool]:
         types.Tool(
             name="configure",
             description="Set session defaults for subsequent action tools "
-            "(e.g. with_image on every observation).",
+            "(e.g. with_image on every observation, or which app log levels they fold in).",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "with_image": {
                         "type": "boolean",
                         "description": "Default with_image for action tools that observe.",
+                    },
+                    "app_logs": {
+                        "type": "boolean",
+                        "description": (
+                            "Fold what the app logged during an action into its observation "
+                            "(default true). Set false to stop paying for it."
+                        ),
+                    },
+                    "app_log_levels": {
+                        "type": "string",
+                        "description": (
+                            "Log priorities to fold in, as a SET not a floor (default 'DWEF'). "
+                            "'I' is noisier than 'D' on Android — measured, every 'I' line in a "
+                            "real launch window came from an SDK or the runtime — so widen to "
+                            "'DIWEF' only when chasing a library. 'F' is always included."
+                        ),
                     },
                 },
                 "additionalProperties": False,
@@ -3281,9 +3297,15 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
     if name == "configure":
         if "with_image" in args:
             engine._default_with_image = args["with_image"]
+        if "app_logs" in args:
+            engine.config.logs.enabled = bool(args["app_logs"])
+        if "app_log_levels" in args:
+            engine.config.logs.levels = str(args["app_log_levels"])
         return {
             "ok": True,
             "with_image": getattr(engine, "_default_with_image", None),
+            "app_logs": engine.config.logs.enabled,
+            "app_log_levels": engine.config.logs.levels,
         }
     raise AuaError(f"unknown tool '{name}'", code="usage")
 

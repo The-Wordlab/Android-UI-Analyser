@@ -79,6 +79,20 @@ class PlatformAdapter(ABC):
 
         return None
 
+    def forget_app_process(self, app_id: str | None = None) -> None:
+        """Forget anything cached about an app's *process*, after a lifecycle event.
+
+        Launching, restarting, clearing or reinstalling an app replaces its process. A platform
+        that caches process identity to keep per-action log scoping to a single round trip must
+        drop it here, or the next action reads the dead process's window — which comes back
+        empty, and an empty window is indistinguishable from "the app said nothing".
+
+        Platform-neutral by design: the core calls this after every lifecycle action rather than
+        knowing which platforms cache what. Default is a no-op.
+        """
+
+        return None
+
     @abstractmethod
     def connect(self, target_id: str | None = None) -> Device:
         """Connect to a target, or choose the sole available target."""
@@ -151,6 +165,7 @@ class PlatformAdapter(ABC):
         *,
         lines: int = 400,
         since_ms: int | None = None,
+        app_id: str | None = None,
     ) -> str:
         """Return recent platform diagnostics for a failed test artifact.
 
@@ -158,6 +173,11 @@ class PlatformAdapter(ABC):
         ``device.logs`` must implement it; every other platform gets an explicit unsupported
         result instead of an Android fallback in the engine. ``since_ms`` is the target-clock
         start of the relevant action window when the platform supports time-bounded logs.
+
+        *app_id* asks for the window scoped to that app's process. A platform that cannot scope
+        may ignore it and return the unscoped window — the caller filters what it can host-side
+        — but it must never return another app's logs *as* this app's, so a platform whose logs
+        cannot be attributed at all should advertise no ``device.logs`` capability.
         """
 
         raise DeviceError(

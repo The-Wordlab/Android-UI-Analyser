@@ -594,6 +594,12 @@ class ActionResult(BaseModel):
     # window when the app leaves the foreground. This is structured and top-level so CLI and MCP
     # callers receive the cause without parsing the warning or spending another tool call.
     crash_evidence: dict[str, Any] | None = None
+    # What the app itself logged in this action's own window, scoped to its process and reduced
+    # to a priority set plus a line budget. The screen is the app's conclusion; this is its
+    # reasoning, and between them sits the failure an agent otherwise cannot see: the tap
+    # landed, the screen looks plausible, and the app quietly logged the refusal. Absent when
+    # the window was empty, so a quiet action costs nothing.
+    app_logs: dict[str, Any] | None = None
     await_outcome: str | None = None
     # Per-term results, reported satisfied or not: *which* term is missing is how a reader
     # tells a failed load from a slow one.

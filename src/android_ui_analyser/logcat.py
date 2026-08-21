@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -459,4 +460,168 @@ def extract_crash_evidence(
         "total_count": len(selected),
         "truncated": truncated,
         "matched_app": bool(app_folded and any(app_folded in line.casefold() for line in lines)),
+    }
+
+
+# --------------------------------------------------------------------------- action log digest
+
+# Priority set attached to a folded action observation by default. ``V`` and ``I`` are
+# deliberately absent, from measurement rather than taste: in one real app's cold-launch window
+# all 113 ``I`` lines came from a third-party HTTP client, an attribution SDK, the advertising-id
+# client, or the ART runtime, and not one carried app logic. ``D`` is kept because that is where
+# an app writes its own breadcrumbs — dropping it would leave the digest technically cheaper and
+# practically useless.
+DEFAULT_LEVELS = "DWEF"
+
+# Tags that are noise *by construction*: platform framework internals, and third-party SDKs that
+# log per request, per frame, or per attribution event. Deliberately generic — an app's own tags
+# are never listed, so they always survive the filter, and this file never learns the name of a
+# real app's logger. Matched as a case-insensitive prefix so one entry covers the versioned
+# (``AppsFlyer_6.17.6``) and namespaced (``TRuntime.CctTransportBackend``) shapes SDKs actually
+# emit.
+DEFAULT_DENY_TAG_PREFIXES: tuple[str, ...] = (
+    "AdvertisingIdClient",
+    "AppsFlyer",
+    "ApplicationLoaders",
+    "Choreographer",
+    "Chucker",
+    "CompatChangeReporter",
+    "DesktopExperienceFlags",
+    "FirebaseSessions",
+    "HWUI",
+    "ImeTracker",
+    "InsetsController",
+    "LeakCanary",
+    "OkHttp",
+    "StrictMode",
+    "TRuntime",
+    "VRI[",
+    "ViewRootImpl",
+    "WindowOnBackDispatcher",
+    "ashmem",
+    "com.facebook.",
+    "libEGL",
+    "nativeloader",
+)
+
+# Note on what is deliberately NOT here. `System` would be the single biggest win by line count
+# on some apps, and it is refused: `System.out` and `System.err` are how an app prints, so a
+# `System` prefix would delete real app output to remove framework chatter. Payment and billing
+# SDK tags are likewise kept — a failed purchase is exactly the kind of thing the screen will not
+# tell you. Both stay bounded by the per-tag cap instead, and an app's own chatty logger belongs
+# in the user's `logs.deny_tags`, never in this file.
+
+# Below this length a tag is too short to be a meaningful suffix of a package name, so the
+# runtime-tag rule stops applying. Without the floor an app whose own tag happened to be a
+# two-letter suffix of its package ("es" in "…example.notes") would be silently deleted.
+_RUNTIME_TAG_MIN = 8
+
+# One logcat line has no length limit worth relying on. Measured on a real app, a single `I`
+# line carried a 145 KB HTTP response body — one such line is seven times the entire line
+# budget this digest is supposed to enforce, and an app that logs a payload under its *own* tag
+# defeats every tag filter. So the cap is per line as well as per window, and a clipped line is
+# marked as clipped: a reader must never mistake a truncated message for a complete one.
+DEFAULT_MAX_LINE_CHARS = 300
+
+
+def _is_runtime_tag(tag: str, app_id: str | None) -> bool:
+    """Whether *tag* is ART/libcore logging under the app's own (truncated) process name.
+
+    The Android runtime logs GC, JIT, lock-verification and hidden-api messages under the
+    process name truncated to fit logcat's tag field, so the tag is a *suffix* of the package.
+    Deriving it beats listing it: a hardcoded list would have to name real applications, and
+    this repository is public.
+    """
+    if not app_id or len(tag) < _RUNTIME_TAG_MIN:
+        return False
+    return app_id == tag or app_id.endswith(tag)
+
+
+def _clip(line: str, limit: int) -> str:
+    """Bound one line, saying so where the cut is rather than trailing off silently."""
+    if len(line) <= limit:
+        return line
+    return f"{line[:limit]}…[+{len(line) - limit} chars]"
+
+
+def digest_app_logs(
+    raw: str,
+    *,
+    app_id: str | None = None,
+    levels: str = DEFAULT_LEVELS,
+    deny_tag_prefixes: Sequence[str] = DEFAULT_DENY_TAG_PREFIXES,
+    limit: int = 20,
+    per_tag: int = 5,
+    max_line_chars: int = DEFAULT_MAX_LINE_CHARS,
+) -> dict[str, Any]:
+    """Reduce one action's log window to something affordable to attach to every observation.
+
+    Three filters, in the order of how much they remove. Priority first (a level set, not a
+    floor: ``I`` is noisier than ``D`` on Android, so a floor would keep the wrong half). Then
+    known-noisy tags. Then a per-tag cap, so a single chatty logger cannot spend the whole line
+    budget and push out the one error that explains the failure — measured on a real launch,
+    44 near-identical config lines would otherwise have filled a 20-line cap by themselves.
+
+    ``F`` is always included whatever *levels* asks for: a caller narrowing the filter must not
+    be able to hide the line that explains a crash.
+
+    *max_line_chars* bounds each line as well, because a line budget alone does not bound the
+    output: a single measured line held a 145 KB response body.
+    """
+
+    wanted = {ch.upper() for ch in levels if ch.strip()} | {"F"}
+    deny = tuple(prefix.casefold() for prefix in deny_tag_prefixes)
+
+    kept: list[str] = []
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        match = _DETAIL_RE.match(line.lstrip())
+        if match is None:
+            # Buffer separators ("--------- beginning of main") and continuation lines carry no
+            # priority. They are structure, not app output, so they are not reported as such.
+            continue
+        if match.group("priority") not in wanted:
+            continue
+        tag = (match.group("tag") or "").strip()
+        folded = tag.casefold()
+        if any(folded.startswith(prefix) for prefix in deny):
+            continue
+        if _is_runtime_tag(tag, app_id):
+            continue
+        kept.append(line)
+
+    total = len(kept)
+    if per_tag > 0:
+        seen: dict[str, int] = {}
+        capped: list[str] = []
+        for line in kept:
+            tag = line_tag(line) or ""
+            seen[tag] = seen.get(tag, 0) + 1
+            if seen[tag] <= per_tag:
+                capped.append(line)
+        kept = capped
+
+    bounded = max(1, int(limit))
+    truncated = len(kept) > bounded
+    if truncated:
+        # Head and tail, as `extract_crash_evidence` does: the first thing the app said after
+        # the action and the last thing it said before we looked are both load-bearing, and a
+        # plain head slice throws the second one away.
+        head = max(1, (bounded * 2) // 3)
+        tail = bounded - head
+        kept = kept[:head] + (kept[-tail:] if tail else [])
+
+    if max_line_chars > 0:
+        kept = [_clip(line, max_line_chars) for line in kept]
+
+    return {
+        # Android's own priority order, not alphabetical: `DWEF` is how a reader thinks about
+        # this filter, and `DEFW` would look like a different, wrong answer.
+        "levels": "".join(ch for ch in "VDIWEF" if ch in wanted),
+        "lines": kept,
+        "count": len(kept),
+        "total_count": total,
+        "omitted": max(0, total - len(kept)),
+        "truncated": truncated,
     }

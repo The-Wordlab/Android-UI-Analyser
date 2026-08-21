@@ -228,7 +228,7 @@ def test_logcat_clear_on_mark() -> None:
     dev._logcat_lines = ["noise"]
     eng = Engine(make_config(), device=dev)
     eng.logcat_mark("cleared", clear=True)
-    assert ("logcat", (None, False)) in dev.calls
+    assert ("logcat", (None, False, None)) in dev.calls
     assert dev._logcat_lines == []
 
 

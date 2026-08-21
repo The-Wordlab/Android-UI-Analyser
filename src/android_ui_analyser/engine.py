@@ -160,6 +160,12 @@ _MAX_FLOW_DEPTH = 5  # bound on nested `flow:` sub-flow composition (cycle backs
 # time it returns). Measured ~150ms headless vs 600-1200ms windowed on the same emulator.
 _FAST_DUMP_MS = 250.0
 _CHANGE_TEXT_CAP = 12  # text deltas echoed back per direction; a list screen would dump hundreds
+# Package-name fragments that mark a surface AUA is never *testing* — the system launcher and
+# the system UI. Scoping an action's log window to one of these is not a smaller answer, it is a
+# wrong one: measured on a real device, a Back to home attached 20 lines of `LauncherStateManager`
+# animation state under a field that claims to be the app's own output.
+_NOT_THE_APP_UNDER_TEST = ("launcher", "systemui", "com.android.systemui", ".home")
+
 _CRASH_LOG_SCAN_LINES = 600  # bounded read from one already-short last-action window
 _CRASH_EVIDENCE_LINES = 60  # enough for exception + causes without dumping the full device log
 _FLAGS_VERIFY_DEADLINE_S = 2.0  # how long a flag write gets to reach the app's prefs file
@@ -763,6 +769,11 @@ class Engine:
         # re-observes the settled destination and must compare it with that same original screen,
         # not with an absent baseline that can falsely report `changed: false`.
         self._action_observation_baseline: dict[str, Any] | None = None
+        # Which app this run is driving, and the log window already reported for it. The second
+        # half stops a wait — which does not stamp a new `last-action` — from re-reporting the
+        # previous action's lines as though the app had just said them again.
+        self._app_under_test: str | None = None
+        self._app_logs_reported_ms: int | None = None
         self._last_activity: str | None = None
         # Lease context: which agent this engine speaks for, what it needs, and what it got.
         # Set by the CLI/MCP layer before the device is first touched.
@@ -11395,7 +11406,36 @@ class Engine:
                 # Say it in the note too, not only in `change`: the screen this observation
                 # describes belongs to a different app, so every id in it is a dead end for
                 # whatever the caller was doing.
+                # What the app said while it was doing this, before the crash branch below:
+                # that branch reads the same window for a different, stronger purpose, and
+                # reading it twice would pay for two dumps to say one thing.
                 left = change.get("app_left_foreground") if isinstance(change, dict) else None
+                if not left:
+                    with contextlib.suppress(Exception):
+                        # Order matters. The app that was in front when the action was dispatched
+                        # is the one that logged the response to it, so it wins over the screen we
+                        # landed on. Both are ignored when they are the launcher or system UI, and
+                        # the remembered app under test then carries a cold launch — the window
+                        # that has no previous package at all and the most to say.
+                        for candidate in (
+                            (before_state or {}).get("package"),
+                            obs.screen.package,
+                        ):
+                            self._note_app_under_test(candidate)
+                        scope = next(
+                            (
+                                pkg
+                                for pkg in (
+                                    (before_state or {}).get("package"),
+                                    obs.screen.package,
+                                    self._app_under_test,
+                                )
+                                if self._could_be_app_under_test(pkg)
+                            ),
+                            None,
+                        )
+                        if scope:
+                            result.app_logs = self._app_logs(str(scope))
                 if left:
                     result.crash_evidence = self._crash_evidence(str(left["from"]))
                     dialog = (
@@ -16860,6 +16900,7 @@ class Engine:
                 with self._mem_lock:
                     activity = mem.launch_activity(package)
         with self._acting():
+            self._app_process_replaced(package)
             device.stop_app(package)
             pinned = False
             if activity:
@@ -17107,6 +17148,7 @@ class Engine:
             pkg = (device.current_app() or {}).get("package")
         if pkg and ca_info and ca_info.get("ok"):
             with contextlib.suppress(Exception):
+                self._app_process_replaced(pkg)
                 device.stop_app(pkg)
                 device.launch_app(pkg)
         out: dict[str, Any] = {
@@ -17903,6 +17945,7 @@ class Engine:
             with self._acting():
                 if clear_state:
                     clear_warning = device.clear_app(package)
+                self._app_process_replaced(package)
                 device.launch_app(package, activity=entry)
             self._record_action_safe(step)
             if mem is not None:
@@ -18023,6 +18066,7 @@ class Engine:
             if mem is not None and not self._join_memory_writers(timeout_s=5.0):
                 raise UsageError("memory provenance is still being finalized")
             with self._acting():
+                self._app_process_replaced(package)
                 device.stop_app(package)
             if mem is not None:
                 with self._mem_lock:
@@ -18039,6 +18083,7 @@ class Engine:
             if mem is not None and not self._join_memory_writers(timeout_s=5.0):
                 raise UsageError("memory provenance is still being finalized")
             with self._acting():
+                self._app_process_replaced(package)
                 device.stop_app(package)
             if mem is not None:
                 with self._mem_lock:
@@ -18061,6 +18106,7 @@ class Engine:
             if mem is not None and not self._join_memory_writers(timeout_s=5.0):
                 raise UsageError("memory provenance is still being finalized")
             with self._acting():
+                self._app_process_replaced(package)
                 clear_warning = device.clear_app(package)
             if mem is not None:
                 with self._mem_lock:
@@ -18215,6 +18261,7 @@ class Engine:
             if mem is not None and not self._join_memory_writers(timeout_s=5.0):
                 raise UsageError("memory provenance is still being finalized")
             with self._acting():
+                self._app_process_replaced(app_id)
                 if removed:
                     platform.uninstall_app(device, app_id)
                 platform.install_app_bundle(
@@ -18806,6 +18853,97 @@ class Engine:
                 app_id=app_id,
                 limit=_CRASH_EVIDENCE_LINES,
             ),
+        }
+
+    @staticmethod
+    def _could_be_app_under_test(package: str | None) -> bool:
+        """Whether *package* is plausibly the app being tested, rather than the shell around it."""
+        if not package:
+            return False
+        folded = package.casefold()
+        return not any(hint in folded for hint in _NOT_THE_APP_UNDER_TEST)
+
+    def _note_app_under_test(self, package: str | None) -> None:
+        """Remember which app this run is driving, so a log window can be scoped to it.
+
+        Needed because "the package in front right now" is the wrong answer twice over: after a
+        Back to home it is the launcher, and during a cold launch there is no previous package at
+        all — which is exactly the window whose logs matter most.
+        """
+        if self._could_be_app_under_test(package):
+            self._app_under_test = package
+
+    def _app_process_replaced(self, app_id: str | None) -> None:
+        """Tell the adapter an app's process is gone, so per-action log scoping stays truthful.
+
+        Launch, stop, clear, reinstall and proxy-restart all replace the process. A platform
+        that caches process identity to keep `_app_logs` to one round trip would otherwise scope
+        the next action's window to a dead process and read back nothing — which is the one
+        wrong answer that looks exactly like the right one.
+        """
+        # Every caller passes the app it is launching, stopping, clearing or reinstalling — which
+        # is, by construction, the app this run is testing. Recording it here rather than at each
+        # site means a cold launch (no previous package at all) still knows whose logs to read.
+        self._note_app_under_test(app_id)
+        with contextlib.suppress(Exception):
+            self.platform.forget_app_process(app_id)
+
+    def _app_logs(self, app_id: str) -> dict[str, Any] | None:
+        """What *app_id* logged inside this action's own window, or None when it said nothing.
+
+        Reuses the ``last-action`` mark ``_acting`` already stamps before the device is touched,
+        so this costs one scoped dump and no extra bookkeeping. Returns None rather than an
+        "empty" structure for a quiet window: a field that appears on every action to say
+        nothing is a tax on every step of every flow, and measured on a real app most actions
+        are quiet — an idle window logged 0 lines and an ordinary tap 0 after filtering.
+        """
+        cfg = self.config.logs
+        if not cfg.enabled or not app_id:
+            return None
+        if not self.platform.supports("device.logs"):
+            # Silent, deliberately. An unsupported optional extra is not the caller's problem
+            # on every single action; `aua logcat` reports it properly when asked directly.
+            return None
+        from . import logcat as logcat_mod
+
+        device = self.device
+        marks = logcat_mod.load_marks(logcat_mod.marks_path(self.config.cache.dir, device.serial))
+        if "last-action" not in marks:
+            # No window means no action bracketed this observation — a bare `analyze` must not
+            # re-report the previous action's lines as if they were new.
+            return None
+        clock = logcat_mod.resolve_clock(device, self.config.cache.dir)
+        since_ms, since_label = logcat_mod.resolve_since_ms(marks, "last-action", clock=clock)
+        if since_ms is not None and since_ms == self._app_logs_reported_ms:
+            # A wait does not stamp a new mark, so its observation would otherwise re-report the
+            # previous action's lines — reading as though the app had just said all of it again.
+            return None
+        self._app_logs_reported_ms = since_ms
+        try:
+            raw = self.platform.diagnostic_logs(
+                device,
+                lines=cfg.scan_lines,
+                since_ms=since_ms,
+                app_id=app_id,
+            )
+        except AuaError as exc:
+            logger.debug("app log window unavailable: %s", exc.message)
+            return None
+        digest = logcat_mod.digest_app_logs(
+            raw,
+            app_id=app_id,
+            levels=cfg.levels,
+            deny_tag_prefixes=(*logcat_mod.DEFAULT_DENY_TAG_PREFIXES, *cfg.deny_tags),
+            limit=cfg.limit,
+            per_tag=cfg.per_tag,
+        )
+        if not digest["count"]:
+            return None
+        return {
+            "app_id": app_id,
+            "since": since_label,
+            "since_unix_ms": since_ms,
+            **digest,
         }
 
     def _change_summary(self, before: dict[str, Any] | None, obs: AnalyzeResult) -> dict[str, Any]:
