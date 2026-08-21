@@ -985,13 +985,13 @@ KEY_FLAGS: list[tuple[str, str]] = [
     ),
     (
         "dashboard",
-        "`dashboard start|status|open|qr|stop|run`; `start [--lan] [--name aua] [--serial …] "
-        "[--grid|--detail] [--port 48765]` — detached exact-port grid; `--lan` prints a "
-        "token-authenticated phone URL (trusted private networks only); `dashboard qr` opens "
-        "a scannable copy; `--name aua` implies `--lan`, serves port 80 and publishes "
-        "`aua.local` over mDNS so a human can type the URL (Android browsers cannot resolve "
-        "`.local` — keep using the QR for a phone); `--no-auth` drops the token on a network "
-        "the operator vouches for and is never implied. Opens with or without "
+        "`dashboard start|status|open|qr|stop|run`; `start [--serial …] [--grid|--detail]` — "
+        "detached exact-port grid, **by default published as `aua.local` on port 80, bound to "
+        "every interface, with no access token**, so the URL is typeable; every start prints a "
+        "warning naming what that exposes. Narrow it with `--auth` (require the token), "
+        "`--local` (loopback only), `--name \"\"` (publish nothing) or `--port N`; the "
+        "`dashboard.*` config block changes the default. Android browsers cannot resolve "
+        "`.local`, so `dashboard qr` remains the phone path. Opens with or without "
         "a device, discovers later emulators and shows lease/idle-watchdog "
         "state (click a tile for journal/map); the detail view has a proxy panel — health, "
         "live exchanges, which rules are armed and which fired, and click-a-request-to-arm "

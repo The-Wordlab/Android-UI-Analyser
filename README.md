@@ -1135,24 +1135,22 @@ Agents often drive a **headless** emulator with no window. The dashboard is a de
 one exact port, so it keeps running after the command returns and phone bookmarks remain valid:
 
 ```bash
-# Start/reuse the localhost dashboard on the dedicated port 48765:
+# Start/reuse the dashboard. By default it is reachable at a name you can type:
 aua dashboard start
+# → publishes aua.local over mDNS, binds port 80, serves http://aua.local/ with no token
 aua dashboard status
 aua dashboard open
 aua dashboard stop
 
-# Watch and control from a phone on the same trusted private network:
-aua dashboard start --lan
-# → prints an authenticated http://<laptop-ip>:48765/?token=… access URL
+# Phone on the same network (Android browsers cannot resolve .local):
 aua dashboard qr
-# → writes and opens a QR code for that authenticated phone URL
+# → writes and opens a QR code for the phone URL
 
-# Reach it by a name you can type instead of an IP and a port:
-aua dashboard start --name aua
-# → publishes aua.local over mDNS and serves http://aua.local/ (implies --lan, uses port 80)
-
-# Drop the token on a network you control — no URL to scan, no cookie to lose:
-aua dashboard start --name aua --no-auth
+# Narrow it when you are not on a network you control:
+aua dashboard start --local          # loopback only, no published name
+aua dashboard start --auth           # keep the network bind, require an access token
+aua dashboard start --name ""        # publish no name
+aua dashboard start --port 48765     # pin an exact port
 
 # Compatibility and foreground debugging:
 aua dashboard                         # alias for `dashboard start`
@@ -1160,24 +1158,46 @@ aua dashboard start --detail          # focus the first online device
 aua dashboard run                     # foreground; Ctrl-C stops it
 ```
 
-Service mode never tries a nearby port. If `48765` belongs to another process, startup fails and
-names the collision. `--name aua` moves the dashboard to port 80 so the URL carries no port, and
-publishes `aua.local` as an mDNS host record — no `sudo`, no `/etc/hosts` edit, and the name is
-retired when the dashboard stops. `status`, `open`, `qr`, and `stop` then find that dashboard
-without repeating `--port`. Resolving `.local` is the *client's* job: macOS, iOS, and Windows 10+
-do it natively, Android browsers do not — so a phone still uses `aua dashboard qr`. Where no
-publisher exists (`dns-sd` on macOS, `avahi-publish` on Linux) the dashboard starts anyway and
-simply keeps its IP URL. `--lan` binds all laptop interfaces, but every page, frame, journal, log, and
-control endpoint requires the generated access token. The browser exchanges the one-time URL token
-for an HttpOnly cookie and removes it from the address bar. LAN mode uses HTTP, so use it only on a
-trusted private network; do not expose the port through a router or public Wi-Fi.
+**The default is open on your network.** `aua dashboard start` binds every interface, publishes
+`aua.local`, and serves without a token, so the dashboard is something you type rather than
+something you scan. Be clear about what that means: anything that can reach the port gets the whole
+dashboard, which drives the device, streams logcat (routinely carrying auth tokens and user
+identifiers), and queries app databases. Every start prints a warning saying so. Use it on a network
+whose members you would hand your unlocked phone to — a home LAN, not an office guest SSID, a
+coworking space, or a hotel — and use `--auth` or `--local` anywhere else.
 
-`--no-auth` removes the token entirely, so `http://aua.local/` opens on any device that can reach
-the port, with nothing to scan and nothing to re-do after a restart. It is opt-in per start, never
-implied by `--lan` or `--name`, and the start result carries a warning. Understand what it opens:
-the dashboard drives the device, streams logcat (which routinely carries auth tokens and user
-identifiers), and queries app databases. Use it on a network whose members you would hand your
-unlocked phone to — a home LAN, not an office guest SSID, a coworking space, or a hotel.
+Change the default once instead of typing a flag every time:
+
+```yaml
+# $XDG_CONFIG_HOME/android-ui-analyser/config.yaml
+dashboard:
+  name: aua        # mDNS name to publish; null or "" publishes nothing
+  lan: true        # bind every interface rather than loopback only
+  auth: false      # require an access token on network access
+  port: null       # exact port; null means 80 with a name, else 48765
+```
+
+A typed flag always beats config, in both directions: `--auth` re-arms the token for one start and
+`--no-auth` drops it, `--local`/`--lan` move the bind, `--name ""` publishes nothing.
+
+Publishing the name needs no privilege — `dns-sd` on macOS and `avahi-publish` on Linux register a
+host record as an ordinary user — so nothing edits `/etc/hosts` and nothing prompts for a password.
+The record lives in a child process that dies with the dashboard, so a stopped dashboard leaves no
+name pointing at a closed port; a host with no publisher simply keeps its IP URL. Resolving `.local`
+is the *client's* job: macOS, iOS, and Windows 10+ do it natively, Android browsers do not — so a
+phone still uses `aua dashboard qr`.
+
+Port 80 is a preference, not a requirement: macOS lets an ordinary user bind it, Linux does not
+without `CAP_NET_BIND_SERVICE`. When the default port cannot be bound the dashboard starts on 48765
+and says so, but a port you pinned with `--port` is never quietly moved. Service mode never walks to
+a *nearby* port — if the chosen port belongs to another process, startup fails and names the
+collision — and `status`, `open`, `qr`, and `stop` follow the running dashboard's port without you
+repeating it.
+
+With `--auth`, every page, frame, journal, log, and control endpoint requires the generated access
+token; the browser exchanges the one-time URL token for an HttpOnly cookie and removes it from the
+address bar. Either way the dashboard speaks plain HTTP, so never expose the port through a router
+or public Wi-Fi.
 
 The page live-polls capture frames + recent action marks. In a device detail view, the
 **Agent I/O journal** keeps rows compact while they stream; expand any row to inspect the full
@@ -1582,7 +1602,7 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 | `aua proxy start\|stop` / `aua mock …` | HTTPS mitm record/map/replay (`[proxy]` extra) |
 | `aua capture …` | Session capture / export / explain |
 | `aua helper status\|enable\|remove` | Optional on-device helper APK — runs a long flow on the device (rootable targets, off by default) |
-| `aua dashboard start|status|open|qr|stop|run` | Persistent fixed-port browser grid; optional authenticated phone access and QR with `--lan`; a typeable `http://<name>.local/` with `--name`; token-free on a trusted LAN with `--no-auth` |
+| `aua dashboard start|status|open|qr|stop|run` | Persistent browser grid, by default open on your network at `http://aua.local/`; narrow it with `--auth`, `--local`, or `--name ""`; QR for phones |
 | `aua logcat` / `aua suite` | Device-clock log windows / scripted suites |
 | `aua dev` / `aua a11y` | Dev options helpers / a11y scroll |
 | `aua map` | Show the active-context map (`--all-contexts`, `--audit`, or `--find "<goal>"`) |

@@ -415,6 +415,30 @@ class CaptureCfg(BaseModel):
     idle_pause_s: int = 120
 
 
+class LogsCfg(BaseModel):
+    """What the app logged during an action, folded into that action's observation.
+
+    Defaults are measured, not chosen. On one real app: an idle two-second window logged 0
+    lines, an ordinary tap 11 (all framework noise, 0 after filtering), and a cold launch 210
+    (~30 KB) of which every one of the 113 ``I`` lines came from a third-party SDK or the ART
+    runtime. Hence a level *set* rather than a floor — ``I`` is noisier than ``D`` on Android,
+    so a floor keeps the wrong half — and a per-tag cap so one chatty logger cannot spend the
+    whole budget.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = True
+    # Priority set, not a floor. `F` is added back however narrow this is: a caller must not be
+    # able to hide the line that explains a crash.
+    levels: str = "DWEF"
+    limit: int = 20  # lines attached, head+tail when the window overflows
+    per_tag: int = 5  # lines any single tag may contribute before it is capped
+    scan_lines: int = 600  # bounded read from one already-short last-action window
+    # Extra tags to drop on top of the built-in generic framework/SDK list. The place to name an
+    # app's own chatty logger — that belongs in a user's config, never in this repository.
+    deny_tags: list[str] = Field(default_factory=list)
+
+
 class MemoryCfg(BaseModel):
     """Persistent per-app map settings (PRD §6b, §9)."""
 
@@ -574,6 +598,43 @@ class FlagsCfg(BaseModel):
     context_refresh_s: float = 2.0
 
 
+class DashboardCfg(BaseModel):
+    """Defaults for ``aua dashboard``: reachable at ``http://aua.local/`` out of the box.
+
+    ``aua dashboard start`` publishes an mDNS name, binds every interface, and serves
+    without a token, so the dashboard is something you type rather than something you
+    scan. This is a deliberate default for a tool that is used on a developer's own
+    network, and it is worth being plain about what it means: anything that can reach the
+    port gets the whole dashboard, which drives the device, streams logcat, and queries
+    app databases. Every start says so in its output.
+
+    Each field is overridable in config and on the command line, and the flag wins:
+
+    * ``--auth`` re-arms the access token for one start;
+    * ``--local`` pulls the dashboard back to loopback only;
+    * ``--name ""`` serves without publishing a name;
+    * ``--port N`` pins an exact port.
+
+    Set ``auth: true`` (or ``lan: false``) in your config to make the guarded shape your
+    own default on a network you do not control.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    # mDNS hostname to publish, e.g. "aua" serves http://aua.local/. Implies ``lan``.
+    # Empty or null publishes nothing and leaves the dashboard on its IP.
+    name: str | None = "aua"
+    # Bind every interface rather than loopback only.
+    lan: bool = True
+    # Require the access token whenever the dashboard is network-bound. Off by default:
+    # turning it on costs one token-bearing URL per browser and survives restarts poorly,
+    # which is the friction the published name exists to remove.
+    auth: bool = False
+    # Exact port. Unset means 80 when a name is published, else 48765. Port 80 needs no
+    # privilege on macOS but does on Linux, so an unbindable 80 falls back rather than
+    # failing the start.
+    port: int | None = None
+
+
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -592,7 +653,9 @@ class Config(BaseModel):
     daemon: DaemonCfg = Field(default_factory=DaemonCfg)
     cache: CacheCfg = Field(default_factory=CacheCfg)
     capture: CaptureCfg = Field(default_factory=CaptureCfg)
+    dashboard: DashboardCfg = Field(default_factory=DashboardCfg)
     memory: MemoryCfg = Field(default_factory=MemoryCfg)
+    logs: LogsCfg = Field(default_factory=LogsCfg)
     perf: PerfCfg = Field(default_factory=PerfCfg)
     helper: HelperCfg = Field(default_factory=HelperCfg)
     lease: LeaseCfg = Field(default_factory=LeaseCfg)

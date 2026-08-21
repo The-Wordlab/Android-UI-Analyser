@@ -538,6 +538,21 @@ def _dashboard_health(port: int) -> dict[str, Any] | None:
     return payload
 
 
+def _can_bind(host: str, port: int) -> bool:
+    """True when this process may claim ``host:port`` right now.
+
+    Distinct from :func:`_port_is_open`, which asks whether somebody is already serving.
+    Port 80 needs no privilege on macOS but does on Linux, and the default dashboard port
+    is chosen before the child is spawned — so the choice has to be made against what the
+    kernel will actually allow rather than against an assumption about the platform.
+    """
+    with contextlib.suppress(OSError), socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((host, int(port)))
+        return True
+    return False
+
+
 def _port_is_open(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(0.2)
@@ -784,10 +799,18 @@ def start_service(
                 f"{hostname}`, or drop --name for localhost only.",
             )
     # A published name exists to remove the port from the URL, so it claims the default
-    # HTTP port unless the caller pinned one. Port 80 is bindable without privilege on
-    # 0.0.0.0, which is the only bind a named dashboard uses.
+    # HTTP port unless the caller pinned one. macOS lets an ordinary user bind 0.0.0.0:80;
+    # Linux does not without CAP_NET_BIND_SERVICE. A pinned port is honoured as given and
+    # fails loudly if it cannot be bound, but a port nobody asked for must never be the
+    # reason `aua dashboard start` does not start.
+    bind_host = "0.0.0.0" if lan else "127.0.0.1"
+    port_fallback: int | None = None
     if port is None:
         port = 80 if hostname else DEFAULT_DASHBOARD_PORT
+        if port != DEFAULT_DASHBOARD_PORT and not _can_bind(bind_host, port):
+            port_fallback = port
+            port = DEFAULT_DASHBOARD_PORT
+            logger.info("cannot bind port %s here; using %s", port_fallback, port)
     port = int(port)
 
     current = service_status(config, port=port)
@@ -823,7 +846,7 @@ def start_service(
         "service": _SERVICE_ID,
         "pid": None,
         "port": int(port),
-        "bind": "0.0.0.0" if lan else "127.0.0.1",
+        "bind": bind_host,
         "lan": bool(lan),
         "hostname": hostname or "",
         "auth": require_auth,
@@ -842,7 +865,7 @@ def start_service(
         "--port",
         str(int(port)),
         "--bind",
-        "0.0.0.0" if lan else "127.0.0.1",
+        bind_host,
         "--poll-ms",
         str(max(200, int(poll_ms))),
         "--cache-dir",
@@ -888,6 +911,17 @@ def start_service(
                 "lan": bool(lan),
                 "authenticated": require_auth,
                 "log": str(log_path),
+                **(
+                    {}
+                    if port_fallback is None
+                    else {
+                        "port_fallback": (
+                            f"port {port_fallback} could not be bound here, so the URL keeps "
+                            f"its port; pass `--port {port_fallback}` with the privilege to "
+                            "bind it, or ignore this."
+                        )
+                    }
+                ),
                 **(
                     {}
                     if require_auth or not lan
