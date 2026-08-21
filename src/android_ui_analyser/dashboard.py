@@ -29,6 +29,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import urlopen
 
+from . import bonjour
 from .errors import AuaError, DaemonOutcomeUnknownError, UsageError
 
 logger = logging.getLogger(__name__)
@@ -171,7 +172,9 @@ def _dashboard_step_payload(step: Any) -> dict[str, Any]:
 
 # url -> (server, thread) for dashboards started with block=False, so callers that
 # do not own the serve loop can still stop one.
-_SERVERS: dict[str, tuple[ThreadingHTTPServer, threading.Thread]] = {}
+_SERVERS: dict[
+    str, tuple[ThreadingHTTPServer, threading.Thread, bonjour.Advertisement | None]
+] = {}
 
 # 1x1 black PNG - served when a device has neither a capture file nor a screencap.
 _PLACEHOLDER_PNG = (
@@ -559,17 +562,70 @@ def _lan_addresses() -> list[str]:
     return sorted(found)
 
 
-def _service_urls(*, port: int, lan: bool, access_token: str | None) -> dict[str, Any]:
-    local_url = f"http://127.0.0.1:{int(port)}/"
+def _primary_lan_address() -> str | None:
+    """The source address for outbound traffic — the interface a phone can actually reach.
+
+    ``_lan_addresses`` may also surface VPN, container, or secondary-interface addresses;
+    an mDNS record must point at exactly one of them, so prefer the routed one.
+    """
+    with contextlib.suppress(OSError), socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.connect(("192.0.2.1", 9))
+        address = str(sock.getsockname()[0])
+        if address and not address.startswith("127.") and address != "0.0.0.0":
+            return address
+    addresses = _lan_addresses()
+    return addresses[0] if addresses else None
+
+
+def _resolve_service_port(cache_dir: str | Path, port: int | None) -> int:
+    """An explicit port wins; otherwise follow the running dashboard, then the default.
+
+    ``--name`` moves the dashboard to port 80, so ``status``/``open``/``qr``/``stop`` have
+    to find it without the user re-typing a port they never chose.
+    """
+    if port is not None:
+        return int(port)
+    recorded = _read_service_state(cache_dir).get("port")
+    if isinstance(recorded, int) and 0 < recorded < 65536:
+        return recorded
+    return DEFAULT_DASHBOARD_PORT
+
+
+def _http_url(host: str, port: int) -> str:
+    """A browser URL that omits the port only when it is the HTTP default."""
+    return f"http://{host}/" if int(port) == 80 else f"http://{host}:{int(port)}/"
+
+
+def _service_urls(
+    *,
+    port: int,
+    lan: bool,
+    access_token: str | None,
+    hostname: str | None = None,
+    name_resolved: bool = False,
+) -> dict[str, Any]:
+    local_url = _http_url("127.0.0.1", port)
     hosts = _lan_addresses() if lan else []
-    lan_urls = [f"http://{host}:{int(port)}/" for host in hosts]
+    lan_urls = [_http_url(host, port) for host in hosts]
     token_suffix = f"?token={access_token}" if access_token else ""
-    return {
+    urls: dict[str, Any] = {
         "url": local_url,
         "access_url": local_url + token_suffix,
         "lan_urls": lan_urls,
         "lan_access_urls": [url + token_suffix for url in lan_urls],
     }
+    if hostname:
+        name_url = bonjour.hostname_url(hostname, port)
+        urls["name"] = bonjour.hostname_for(hostname)
+        urls["name_url"] = name_url
+        urls["name_access_url"] = name_url + token_suffix
+        urls["name_resolved"] = bool(name_resolved)
+        if name_resolved:
+            # The session cookie that replaces ``?token=`` is bound to the origin that first
+            # presents the token. Opening the IP URL would leave the friendly name locked out,
+            # so a published name becomes the URL callers open.
+            urls["access_url"] = name_url + token_suffix
+    return urls
 
 
 def _qr_svg(value: str) -> bytes:
@@ -619,11 +675,12 @@ def _qr_png(value: str) -> bytes:
 def create_access_qr(
     config: Any,
     *,
-    port: int = DEFAULT_DASHBOARD_PORT,
+    port: int | None = None,
     output: str | Path | None = None,
 ) -> dict[str, Any]:
     """Write a user-private QR image for the running dashboard's authenticated LAN URL."""
     status = service_status(config, port=port)
+    port = int(status.get("port") or DEFAULT_DASHBOARD_PORT)
     if not status.get("running"):
         raise UsageError("dashboard is not running", hint="Run `aua dashboard start --lan`.")
     urls = status.get("lan_access_urls") or []
@@ -657,10 +714,11 @@ def create_access_qr(
 
 
 def service_status(
-    config: Any, *, port: int = DEFAULT_DASHBOARD_PORT
+    config: Any, *, port: int | None = None
 ) -> dict[str, Any]:
     """Return detached-dashboard status without adopting an arbitrary port owner."""
     cache = Path(config.cache.dir).expanduser()
+    port = _resolve_service_port(cache, port)
     state = _read_service_state(cache)
     health = _dashboard_health(port)
     if health is not None:
@@ -676,7 +734,13 @@ def service_status(
             "bind": health.get("bind"),
             "lan": lan,
             "authenticated": bool(health.get("authenticated")),
-            **_service_urls(port=port, lan=lan, access_token=token or None),
+            **_service_urls(
+                port=port,
+                lan=lan,
+                access_token=token or None,
+                hostname=str(health.get("name") or "") or None,
+                name_resolved=bool(health.get("name_resolved")),
+            ),
         }
     occupied = _port_is_open(port)
     return {
@@ -697,8 +761,10 @@ def start_service(
     config: Any,
     *,
     serial: str | None = None,
-    port: int = DEFAULT_DASHBOARD_PORT,
+    port: int | None = None,
     lan: bool = False,
+    hostname: str | None = None,
+    auth: bool = True,
     poll_ms: int = 500,
     grid: bool = True,
     explicit_config: str | None = None,
@@ -706,12 +772,41 @@ def start_service(
     platform: str | None = None,
 ) -> dict[str, Any]:
     """Start one idempotent detached dashboard on an exact localhost/LAN port."""
+    if hostname:
+        hostname = bonjour.normalise_hostname(hostname)
+        if not lan:
+            # ``aua.local`` resolves to this machine's LAN address, so a loopback-bound
+            # server would answer the name with a refused connection. Publishing a name
+            # and binding only 127.0.0.1 is never what the caller meant.
+            raise UsageError(
+                "a dashboard hostname needs network access",
+                hint="Run `aua dashboard start --lan --name "
+                f"{hostname}`, or drop --name for localhost only.",
+            )
+    # A published name exists to remove the port from the URL, so it claims the default
+    # HTTP port unless the caller pinned one. Port 80 is bindable without privilege on
+    # 0.0.0.0, which is the only bind a named dashboard uses.
+    if port is None:
+        port = 80 if hostname else DEFAULT_DASHBOARD_PORT
+    port = int(port)
+
     current = service_status(config, port=port)
     if current.get("running"):
         if bool(current.get("lan")) != bool(lan):
             raise UsageError(
                 "dashboard is already running with a different network scope",
                 hint="Run `aua dashboard stop`, then start it again with or without `--lan`.",
+            )
+        running_name = str(current.get("name") or "").removesuffix(bonjour.MDNS_SUFFIX)
+        if running_name != (hostname or ""):
+            raise UsageError(
+                "dashboard is already running under a different hostname",
+                hint="Run `aua dashboard stop`, then start it again with the name you want.",
+            )
+        if bool(current.get("authenticated")) != bool(lan and auth):
+            raise UsageError(
+                "dashboard is already running with a different authentication setting",
+                hint="Run `aua dashboard stop`, then start it again with or without `--no-auth`.",
             )
         return {**current, "action": "dashboard-start", "status": "already_running"}
     if current.get("status") == "port_occupied":
@@ -722,13 +817,16 @@ def start_service(
 
     cache = Path(config.cache.dir).expanduser()
     cache.mkdir(parents=True, exist_ok=True)
-    token = secrets.token_urlsafe(32) if lan else ""
+    require_auth = bool(lan and auth)
+    token = secrets.token_urlsafe(32) if require_auth else ""
     initial_state = {
         "service": _SERVICE_ID,
         "pid": None,
         "port": int(port),
         "bind": "0.0.0.0" if lan else "127.0.0.1",
         "lan": bool(lan),
+        "hostname": hostname or "",
+        "auth": require_auth,
         "access_token": token,
         "started_at_ms": int(time.time() * 1000),
     }
@@ -751,6 +849,10 @@ def start_service(
         str(cache),
     ]
     cmd.append("--grid" if grid else "--detail")
+    if lan and not auth:
+        cmd.append("--no-auth")
+    if hostname:
+        cmd += ["--hostname", hostname]
     if serial:
         cmd += ["--serial", serial]
     if explicit_config:
@@ -784,9 +886,26 @@ def start_service(
                 "port": int(port),
                 "bind": initial_state["bind"],
                 "lan": bool(lan),
-                "authenticated": bool(lan),
+                "authenticated": require_auth,
                 "log": str(log_path),
-                **_service_urls(port=port, lan=lan, access_token=token or None),
+                **(
+                    {}
+                    if require_auth or not lan
+                    else {
+                        "warning": (
+                            "This dashboard is unauthenticated and reachable by anything on "
+                            "your network. It can drive the device, read logcat, and query "
+                            "app databases. Use it only on a network you control."
+                        )
+                    }
+                ),
+                **_service_urls(
+                    port=port,
+                    lan=lan,
+                    access_token=token or None,
+                    hostname=str(health.get("name") or "") or None,
+                    name_resolved=bool(health.get("name_resolved")),
+                ),
             }
         if proc.poll() is not None:
             break
@@ -799,9 +918,10 @@ def start_service(
     )
 
 
-def stop_service(config: Any, *, port: int = DEFAULT_DASHBOARD_PORT) -> dict[str, Any]:
+def stop_service(config: Any, *, port: int | None = None) -> dict[str, Any]:
     """Stop only the dashboard process proven by both health and its private state file."""
     cache = Path(config.cache.dir).expanduser()
+    port = _resolve_service_port(cache, port)
     health = _dashboard_health(port)
     if health is None:
         occupied = _port_is_open(port)
@@ -842,7 +962,7 @@ def stop_service(config: Any, *, port: int = DEFAULT_DASHBOARD_PORT) -> dict[str
     }
 
 
-def open_service(config: Any, *, port: int = DEFAULT_DASHBOARD_PORT) -> dict[str, Any]:
+def open_service(config: Any, *, port: int | None = None) -> dict[str, Any]:
     status = service_status(config, port=port)
     if not status.get("running"):
         raise UsageError(
@@ -4952,6 +5072,7 @@ class _DashboardState:
         bind_host: str = "127.0.0.1",
         require_auth: bool = False,
         access_token: str | None = None,
+        hostname: str | None = None,
     ) -> None:
         self.serials = list(serials)
         self._online_serials = set(serials)
@@ -4964,6 +5085,10 @@ class _DashboardState:
         self.bind_host = bind_host
         self.require_auth = bool(require_auth)
         self.access_token = access_token or ""
+        # Published mDNS name, filled in by ``run`` once the record actually answers a
+        # lookup. Health reports both so the CLI never advertises a name that failed.
+        self.hostname = hostname or ""
+        self.name_resolved = False
         from .platforms import PlatformFactory
 
         self.platform = PlatformFactory(config).create()
@@ -6365,6 +6490,8 @@ def _make_handler(state: _DashboardState) -> type[BaseHTTPRequestHandler]:
                         "bind": state.bind_host,
                         "lan": state.bind_host == "0.0.0.0",
                         "authenticated": state.require_auth,
+                        "name": state.hostname,
+                        "name_resolved": state.name_resolved,
                     }
                 )
                 return
@@ -6695,6 +6822,7 @@ def run(
     exact_port: bool = False,
     require_auth: bool = False,
     access_token: str | None = None,
+    hostname: str | None = None,
     announce: bool = True,
 ) -> dict[str, Any]:
     """Ensure capture, serve the dashboard, optionally open a browser.
@@ -6738,6 +6866,7 @@ def run(
         bind_host=bind_host,
         require_auth=require_auth,
         access_token=access_token,
+        hostname=hostname,
     )
     state.discovery_error = discovery_error
     handler = _make_handler(state)
@@ -6750,7 +6879,20 @@ def run(
         ) from exc
     # port=0 lets the OS choose, so report what we actually bound rather than the ask.
     listen = int(httpd.server_address[1])
-    url = f"http://127.0.0.1:{listen}/"
+    url = _http_url("127.0.0.1", listen)
+
+    # Publish the friendly name only once the socket exists, so the record never points at
+    # a port nothing is listening on. A failure here is soft: the dashboard still serves.
+    advert: bonjour.Advertisement | None = None
+    if hostname and bind_host == "0.0.0.0":
+        address = _primary_lan_address()
+        if address is None:
+            logger.info("no private network address; dashboard keeps its loopback URL only")
+        else:
+            advert = bonjour.advertise(hostname=hostname, port=listen, address=address)
+            if advert is not None:
+                state.name_resolved = advert.resolved
+
     primary_via = (ensures.get(focus or (serials[0] if serials else "")) or {}).get("via")
     info = {
         "ok": True,
@@ -6764,6 +6906,7 @@ def run(
         "bind": bind_host,
         "lan": bind_host == "0.0.0.0",
         "authenticated": require_auth,
+        "name": advert.info() if advert is not None else None,
         "discovery_error": discovery_error,
         "hint": (
             (
@@ -6789,7 +6932,11 @@ def run(
         with httpd:
             httpd.serve_forever(poll_interval=0.5)
 
-    browser_url = url + (f"?token={access_token}" if require_auth and access_token else "")
+    token_suffix = f"?token={access_token}" if require_auth and access_token else ""
+    # Prefer the published name: the token is exchanged for an origin-bound cookie, so the
+    # first visit decides which URL keeps working without a token afterwards.
+    browser_base = advert.url if advert is not None and advert.resolved else url
+    browser_url = browser_base + token_suffix
     if open_browser:
         threading.Timer(0.4, lambda: webbrowser.open(browser_url)).start()
 
@@ -6804,12 +6951,17 @@ def run(
         finally:
             with contextlib.suppress(Exception):
                 httpd.shutdown()
+            if advert is not None:
+                # The name lives in the publisher child; retiring it here is what keeps a
+                # stopped dashboard from leaving a hostname pointing at a dead port.
+                with contextlib.suppress(Exception):
+                    advert.stop()
         return info
 
     t = threading.Thread(target=_serve, name="aua-dashboard", daemon=True)
     t.start()
     info["thread"] = True
-    _SERVERS[url] = (httpd, t)
+    _SERVERS[url] = (httpd, t, advert)
     return info
 
 
@@ -6819,11 +6971,14 @@ def shutdown(info: dict[str, Any]) -> None:
     entry = _SERVERS.pop(str(info.get("url") or ""), None)
     if entry is None:
         return
-    httpd, thread = entry
+    httpd, thread, advert = entry
     with contextlib.suppress(Exception):
         httpd.shutdown()
     with contextlib.suppress(Exception):
         httpd.server_close()
+    if advert is not None:
+        with contextlib.suppress(Exception):
+            advert.stop()
     thread.join(timeout=2)
 
 
@@ -6836,6 +6991,8 @@ def _service_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--state-file", required=True)
     parser.add_argument("--port", required=True, type=int)
     parser.add_argument("--bind", choices=("127.0.0.1", "0.0.0.0"), required=True)
+    parser.add_argument("--hostname")
+    parser.add_argument("--no-auth", action="store_true")
     parser.add_argument("--poll-ms", type=int, default=500)
     parser.add_argument("--cache-dir", required=True)
     parser.add_argument("--serial")
@@ -6885,8 +7042,9 @@ def _service_main(argv: list[str] | None = None) -> int:
             grid=not args.detail,
             bind_host=args.bind,
             exact_port=True,
-            require_auth=args.bind == "0.0.0.0",
+            require_auth=args.bind == "0.0.0.0" and not args.no_auth,
             access_token=access_token or None,
+            hostname=args.hostname or None,
             announce=False,
         )
     except AuaError as exc:

@@ -6061,8 +6061,10 @@ def _dashboard_start(
     *,
     serial: str | None,
     grid: bool,
-    port: int,
+    port: int | None,
     lan: bool,
+    hostname: str | None,
+    auth: bool,
     open_browser: bool,
     poll_ms: int,
 ) -> None:
@@ -6079,7 +6081,9 @@ def _dashboard_start(
             port=port,
             poll_ms=poll_ms,
             grid=grid,
-            lan=lan,
+            lan=lan or bool(hostname),
+            hostname=hostname,
+            auth=auth,
             explicit_config=opts.config,
             profile=opts.profile,
             platform=opts.platform,
@@ -6105,14 +6109,18 @@ def dashboard_cmd(
         "--grid/--detail",
         help="Start with the live device grid (default); --detail focuses the first device.",
     ),
-    port: int = typer.Option(
-        48765, "--port", help="Dedicated exact dashboard port; never shifts if occupied."
+    port: int | None = typer.Option(
+        None,
+        "--port",
+        help="Dedicated exact dashboard port; never shifts if occupied (default 48765, or 80 with --name).",
     ),
     lan: bool = typer.Option(
         False,
         "--lan/--local",
         help="Expose to this private network with token authentication (default: localhost only).",
     ),
+    hostname: str | None = typer.Option(None, "--name", help="Publish a typeable mDNS hostname, e.g. `--name aua` serves http://aua.local/ (implies --lan; claims port 80 unless --port is given)."),
+    auth: bool = typer.Option(True, "--auth/--no-auth", help="Require the access token on network access (default). --no-auth serves the LAN with no token at all: anyone who can reach the port gets full device control."),
     open_browser: bool = typer.Option(
         True, "--open/--no-open", help="Open the detached dashboard in your default browser."
     ),
@@ -6127,6 +6135,8 @@ def dashboard_cmd(
         grid=grid,
         port=port,
         lan=lan,
+        hostname=hostname,
+        auth=auth,
         open_browser=open_browser,
         poll_ms=poll_ms,
     )
@@ -6137,10 +6147,14 @@ def dashboard_start_cmd(
     ctx: typer.Context,
     serial: str | None = typer.Option(None, "--serial", help="Pin detail to one device."),
     grid: bool = typer.Option(True, "--grid/--detail", help="Grid or one-device detail view."),
-    port: int = typer.Option(48765, "--port", help="Dedicated exact dashboard port."),
+    port: int | None = typer.Option(
+        None, "--port", help="Dedicated exact dashboard port (default 48765, or 80 with --name)."
+    ),
     lan: bool = typer.Option(
         False, "--lan/--local", help="Allow authenticated access from your private network."
     ),
+    hostname: str | None = typer.Option(None, "--name", help="Publish a typeable mDNS hostname, e.g. `--name aua` serves http://aua.local/ (implies --lan; claims port 80 unless --port is given)."),
+    auth: bool = typer.Option(True, "--auth/--no-auth", help="Require the access token on network access (default). --no-auth serves the LAN with no token at all: anyone who can reach the port gets full device control."),
     open_browser: bool = typer.Option(
         True, "--open/--no-open", help="Open the dashboard after ensuring it is running."
     ),
@@ -6153,6 +6167,8 @@ def dashboard_start_cmd(
         grid=grid,
         port=port,
         lan=lan,
+        hostname=hostname,
+        auth=auth,
         open_browser=open_browser,
         poll_ms=poll_ms,
     )
@@ -6161,7 +6177,9 @@ def dashboard_start_cmd(
 @dashboard_app.command("status")
 def dashboard_status_cmd(
     ctx: typer.Context,
-    port: int = typer.Option(48765, "--port", help="Dedicated dashboard port."),
+    port: int | None = typer.Option(
+        None, "--port", help="Dedicated dashboard port (default: the running dashboard's)."
+    ),
 ) -> None:
     """Show process, network scope, and authenticated phone URLs."""
     from . import dashboard as dash
@@ -6173,7 +6191,9 @@ def dashboard_status_cmd(
 @dashboard_app.command("open")
 def dashboard_open_cmd(
     ctx: typer.Context,
-    port: int = typer.Option(48765, "--port", help="Dedicated dashboard port."),
+    port: int | None = typer.Option(
+        None, "--port", help="Dedicated dashboard port (default: the running dashboard's)."
+    ),
 ) -> None:
     """Open the already-running dashboard in the default browser."""
     from . import dashboard as dash
@@ -6189,7 +6209,9 @@ def dashboard_open_cmd(
 @dashboard_app.command("qr")
 def dashboard_qr_cmd(
     ctx: typer.Context,
-    port: int = typer.Option(48765, "--port", help="Dedicated dashboard port."),
+    port: int | None = typer.Option(
+        None, "--port", help="Dedicated dashboard port (default: the running dashboard's)."
+    ),
     output: Path | None = typer.Option(
         None,
         "--output",
@@ -6222,7 +6244,9 @@ def dashboard_qr_cmd(
 @dashboard_app.command("stop")
 def dashboard_stop_cmd(
     ctx: typer.Context,
-    port: int = typer.Option(48765, "--port", help="Dedicated dashboard port."),
+    port: int | None = typer.Option(
+        None, "--port", help="Dedicated dashboard port (default: the running dashboard's)."
+    ),
 ) -> None:
     """Stop the owned background dashboard without touching another port owner."""
     from . import dashboard as dash
@@ -6240,10 +6264,14 @@ def dashboard_run_cmd(
     ctx: typer.Context,
     serial: str | None = typer.Option(None, "--serial", help="Pin detail to one device."),
     grid: bool = typer.Option(True, "--grid/--detail", help="Grid or one-device detail view."),
-    port: int = typer.Option(48765, "--port", help="Exact foreground dashboard port."),
+    port: int | None = typer.Option(
+        None, "--port", help="Exact foreground dashboard port (default 48765, or 80 with --name)."
+    ),
     lan: bool = typer.Option(
         False, "--lan/--local", help="Allow authenticated access from your private network."
     ),
+    hostname: str | None = typer.Option(None, "--name", help="Publish a typeable mDNS hostname, e.g. `--name aua` serves http://aua.local/ (implies --lan; claims port 80 unless --port is given)."),
+    auth: bool = typer.Option(True, "--auth/--no-auth", help="Require the access token on network access (default). --no-auth serves the LAN with no token at all: anyone who can reach the port gets full device control."),
     open_browser: bool = typer.Option(
         True, "--open/--no-open", help="Open the page in your default browser."
     ),
@@ -6256,11 +6284,17 @@ def dashboard_run_cmd(
 
     opts = _opts(ctx)
     cfg = opts.load()
-    token = secrets.token_urlsafe(32) if lan else None
-    if lan:
-        urls = dash._service_urls(port=port, lan=True, access_token=token)
-        _echo_json({"ok": True, "action": "dashboard-run", **urls}, opts.fmt())
     try:
+        if hostname:
+            hostname = dash.bonjour.normalise_hostname(hostname)
+            lan = True
+        if port is None:
+            port = 80 if hostname else dash.DEFAULT_DASHBOARD_PORT
+        require_auth = bool(lan and auth)
+        token = secrets.token_urlsafe(32) if require_auth else None
+        if lan:
+            urls = dash._service_urls(port=port, lan=True, access_token=token)
+            _echo_json({"ok": True, "action": "dashboard-run", **urls}, opts.fmt())
         dash.run(
             serial=serial,
             port=port,
@@ -6271,8 +6305,9 @@ def dashboard_run_cmd(
             block=True,
             bind_host="0.0.0.0" if lan else "127.0.0.1",
             exact_port=True,
-            require_auth=lan,
+            require_auth=require_auth,
             access_token=token,
+            hostname=hostname,
         )
     except AuaError as err:
         emit_error(err)
