@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import json
 import os
 import socket
@@ -101,6 +102,24 @@ def test_dashboard_access_qr_requires_a_running_lan_dashboard(
     )
     with pytest.raises(UsageError, match="local-only"):
         dash.create_access_qr(cfg)
+
+
+def test_dashboard_access_qr_reports_a_stale_tool_install(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from android_ui_analyser import dashboard as dash
+
+    real_import = builtins.__import__
+
+    def import_without_qrcode(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "qrcode" or name.startswith("qrcode."):
+            raise ModuleNotFoundError("No module named 'qrcode'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", import_without_qrcode)
+    with pytest.raises(UsageError, match="QR support is not installed") as missing:
+        dash._qr_png("http://192.0.2.10:48765/?token=test")
+    assert "uv tool install --force --editable" in str(missing.value.hint)
 
 
 def test_dashboard_service_start_is_idempotent_but_network_scope_is_explicit(

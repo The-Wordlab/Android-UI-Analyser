@@ -573,8 +573,14 @@ def _service_urls(*, port: int, lan: bool, access_token: str | None) -> dict[str
 
 
 def _qr_svg(value: str) -> bytes:
-    import qrcode
-    import qrcode.image.svg
+    try:
+        import qrcode
+        import qrcode.image.svg
+    except ModuleNotFoundError as exc:
+        raise UsageError(
+            "dashboard QR support is not installed",
+            hint="Refresh AUA with `uv tool install --force --editable .` from the repository.",
+        ) from exc
 
     code = qrcode.QRCode(
         error_correction=qrcode.constants.ERROR_CORRECT_M,
@@ -589,7 +595,13 @@ def _qr_svg(value: str) -> bytes:
 
 
 def _qr_png(value: str) -> bytes:
-    import qrcode
+    try:
+        import qrcode
+    except ModuleNotFoundError as exc:
+        raise UsageError(
+            "dashboard QR support is not installed",
+            hint="Refresh AUA with `uv tool install --force --editable .` from the repository.",
+        ) from exc
 
     code = qrcode.QRCode(
         error_correction=qrcode.constants.ERROR_CORRECT_M,
