@@ -12,7 +12,7 @@ from collections.abc import Iterable, Sequence
 from typing import Any, NamedTuple
 
 from .memory import REDACT_TOKENS, RouteStep, _id_tail
-from .schema import Element
+from .schema import Element, ElementId
 
 _SELECTOR_FIELDS = ("rid", "text", "desc")
 _MAX_CANDIDATES = 8  # candidate elements echoed back in an ambiguous/not-found error
@@ -100,7 +100,7 @@ def match_selector(
     Tiering is what makes ``--text Browse`` usable on a screen that also has a
     "Browse more apps" row: an exact hit never gets drowned in substring hits.
     """
-    tiers: dict[int, list[Element]] = {}
+    tiers: dict[ElementId, list[Element]] = {}
     for el in elements:
         if rid:
             tier = _rid_tier(el.resource_id, rid)
@@ -133,7 +133,7 @@ class ActingNode(NamedTuple):
     element: Element
     relation: str
     named: Element
-    candidates: tuple[int, ...] = ()
+    candidates: tuple[ElementId, ...] = ()
 
     @property
     def redirected(self) -> bool:
@@ -150,15 +150,15 @@ def can_act(el: Element) -> bool:
     return bool(el.clickable or el.long_clickable or el.checkable)
 
 
-def _children_by_parent(elements: Sequence[Element]) -> dict[int, list[Element]]:
-    out: dict[int, list[Element]] = {}
+def _children_by_parent(elements: Sequence[Element]) -> dict[ElementId, list[Element]]:
+    out: dict[ElementId, list[Element]] = {}
     for el in elements:
         if el.parent is not None:
             out.setdefault(el.parent, []).append(el)
     return out
 
 
-def _subtree(root_id: int, kids: dict[int, list[Element]]) -> list[Element]:
+def _subtree(root_id: ElementId, kids: dict[ElementId, list[Element]]) -> list[Element]:
     out: list[Element] = []
     stack = list(kids.get(root_id, ()))
     while stack:
@@ -242,7 +242,7 @@ def acting_node(elements: Sequence[Element], named: Element) -> ActingNode:
         chosen = _one_obvious(inner)
         if chosen is not None:
             return ActingNode(chosen, "descendant", named)
-        return ActingNode(named, "ambiguous", named, tuple(sorted(el.id for el in inner)))
+        return ActingNode(named, "ambiguous", named, tuple(sorted((el.id for el in inner), key=str)))
 
     # 3. An acting relative under a shared ancestor — the tile: click on a sibling Box, the
     #    title rendered outside it. Nearest ancestor first, so the smallest shared scope wins.
@@ -254,7 +254,7 @@ def acting_node(elements: Sequence[Element], named: Element) -> ActingNode:
         chosen = _one_obvious(siblings)
         if chosen is not None:
             return ActingNode(chosen, "sibling-subtree", named)
-        return ActingNode(named, "ambiguous", named, tuple(sorted(el.id for el in siblings)))
+        return ActingNode(named, "ambiguous", named, tuple(sorted((el.id for el in siblings), key=str)))
 
     return ActingNode(named, "none", named)
 

@@ -264,7 +264,8 @@ def test_tap_records_click_and_emits_action(patched_device: FakeDevice) -> None:
     data = json.loads(result.stdout)
     assert data["ok"] is True
     assert data["action"] == "tap"
-    assert data["id"] == 1
+    # An action reports the id its observation publishes, not the frame ordinal.
+    assert data["id"] == "rid:continue_btn"
     assert any(call[0] == "click" for call in patched_device.calls)
 
 
@@ -277,7 +278,7 @@ def test_tap_accepts_explicit_id_flag_for_cli_mcp_symmetry(
     result = runner.invoke(app, ["tap-and-analyze", "--id", "1"])
 
     assert result.exit_code == 0, result.stderr
-    assert json.loads(result.stdout)["id"] == 1
+    assert json.loads(result.stdout)["id"] == "rid:continue_btn"
     assert any(call[0] == "click" for call in patched_device.calls)
 
 

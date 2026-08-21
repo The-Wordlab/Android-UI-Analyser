@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from android_ui_analyser.identity import stable_key
 from android_ui_analyser.memory import AppMemoryStore
 from conftest import make_config
 
@@ -198,9 +199,11 @@ def test_a_learned_cost_rides_on_the_next_action_row_for_its_control(tmp_path: P
 
     rows = {row["id"]: row for row in eng._next_actions(observation) or []}
 
-    assert rows[element.id].get("avg_ms") == 4800, "the cost must be priced onto its own row"
-    assert rows[element.id].get("max_ms") == 4800
-    assert rows[element.id].get("n") == 1, "one observation must not read as ten"
+    assert (
+        rows[stable_key(element)].get("avg_ms") == 4800
+    ), "the cost must be priced onto its own row"
+    assert rows[stable_key(element)].get("max_ms") == 4800
+    assert rows[stable_key(element)].get("n") == 1, "one observation must not read as ten"
 
 
 def test_an_observed_action_records_what_it_cost(tmp_path: Path) -> None:

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from .errors import SelectorAmbiguousError, UsageError
-from .schema import Element, Source
+from .schema import Element, ElementId, Source
 from .selectors import element_digest, match_selector, selector_label
 
 if TYPE_CHECKING:
@@ -115,14 +115,14 @@ def _indexed_match(
 
 
 def _descends_from(
-    element: Element, ancestor_id: int, by_id: dict[int, Element]
+    element: Element, ancestor_id: ElementId, by_id: dict[ElementId, Element]
 ) -> bool | None:
     """True/False for a known tree relation; None when structural evidence is unavailable."""
 
     if element.parent is None:
         return None if element.source is not Source.hierarchy else False
-    visited: set[int] = set()
-    cursor: int | None = element.parent
+    visited: set[ElementId] = set()
+    cursor: ElementId | None = element.parent
     while cursor is not None:
         if cursor == ancestor_id:
             return True

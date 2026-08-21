@@ -330,7 +330,11 @@ def elements_fingerprint(elements: list[Element]) -> str:
 
 
 def element_diff(prev: list[Element], curr: list[Element]) -> dict[str, Any]:
-    """Token-cheap delta between two element lists (by stable_key / id fallback)."""
+    """Token-cheap delta between two element lists, reported by stable identity.
+
+    Ids in the returned lists are the same stable keys the payload publishes, so a reader can
+    take one straight from `added` and act on it.
+    """
 
     def _key(e: Element) -> str:
         sk = getattr(e, "stable_key", None)
@@ -342,14 +346,19 @@ def element_diff(prev: list[Element], curr: list[Element]) -> dict[str, Any]:
 
     prev_map = {_key(e): e for e in prev}
     curr_map = {_key(e): e for e in curr}
-    added = [e.id for k, e in curr_map.items() if k not in prev_map]
-    removed = [e.id for k, e in prev_map.items() if k not in curr_map]
+    # Report the identity, not the ordinal. `removed` is the case that forced it: those
+    # elements are gone from the current frame, so a reader handed their ordinals could not
+    # look any of them up — and the numbers it got back were *reused* by whatever occupies
+    # that reading position now, which reads as "row 5 disappeared" about a row that is on
+    # screen. The key that identified them in this very function is the honest answer.
+    added = [k for k in curr_map if k not in prev_map]
+    removed = [k for k in prev_map if k not in curr_map]
     changed: list[dict[str, Any]] = []
     for k, e in curr_map.items():
         old = prev_map.get(k)
         if old is None:
             continue
-        delta: dict[str, Any] = {"id": e.id}
+        delta: dict[str, Any] = {"id": k}
         if (old.text or "") != (e.text or ""):
             delta["text"] = {"from": old.text, "to": e.text}
         if (old.content_desc or "") != (e.content_desc or ""):

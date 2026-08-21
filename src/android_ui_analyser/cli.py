@@ -686,11 +686,18 @@ def _selector(
     index: int | None = None,
     first: bool = False,
 ) -> dict[str, Any] | None:
-    """Build the engine selector, or ``None`` when the caller passed a plain element id.
+    """Build the engine selector, or ``None`` when the caller passed a plain frame ordinal.
 
     Two spellings resolve to the same thing: ``--by id <positional>`` (reads like the
     existing ``has``/``wait`` flag) and the one-shot ``--rid/--text/--desc <value>``.
+
+    A bare positional that is not an integer is a **published stable id** and becomes a key
+    selector: that is what the payload hands the caller, so pasting it back must just work
+    rather than being reported as a malformed number.
     """
+    bare = by is None and key is None and rid is None and text is None and desc is None
+    if bare and _is_stable_id(ident):
+        return {"key": ident}
     if by is not None:
         kind = _BY_KINDS.get(by.lower())
         if kind is None:
@@ -734,17 +741,31 @@ def _exit_unless_ok(
 
 
 def _element_id(ident: str | None, selector: dict[str, Any] | None) -> int | None:
-    """The positional as an element id — only meaningful when no selector is in play."""
+    """The positional as a frame-local ordinal, or ``None`` when it is a stable id.
+
+    Ids published in a payload are stable keys (`rid:continue_btn`, `tx:9f0c1a2b3c#2`), and a
+    caller must be able to paste one straight back in. Those are not ordinals, so they become a
+    key selector instead and resolve by identity — see `Engine._resolve_action_key`. An integer
+    is still accepted: it is what older scripts hold, and the ordinal path still validates it
+    against the frame it came from.
+    """
     if selector is not None or ident is None:
         return None
     try:
         return int(ident)
-    except ValueError as exc:
-        raise UsageError(
-            f"'{ident}' is not an element id",
-            hint="Ids are integers from the last analyze. To address by name use "
-            "`--rid <resource-id>`, `--text <label>`, or `--by id <resource-id>`.",
-        ) from exc
+    except ValueError:
+        return None
+
+
+def _is_stable_id(ident: str | None) -> bool:
+    """Whether the positional is a published stable id rather than a frame ordinal."""
+    if not ident:
+        return False
+    try:
+        int(ident)
+    except ValueError:
+        return True
+    return False
 
 
 def _require_target(verb: str, ident: str | None, selector: dict[str, Any] | None) -> int | None:
@@ -753,8 +774,8 @@ def _require_target(verb: str, ident: str | None, selector: dict[str, Any] | Non
     if element_id is None and selector is None:
         raise UsageError(
             f"{verb} needs an element id or a selector",
-            hint=f"e.g. `aua {verb} 4` or `aua {verb} --rid continue_btn` "
-            f"or `aua {verb} --text Continue`.",
+            hint=f"e.g. `aua {verb} rid:continue_btn` (a published id) or "
+            f"`aua {verb} --rid continue_btn` or `aua {verb} --text Continue`.",
         )
     return element_id
 

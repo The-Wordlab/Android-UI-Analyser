@@ -587,7 +587,7 @@ def test_hold_selector_stays_down_for_pre_audio_post_and_releases_on_failure(
         observe=False,
     )
 
-    assert result.action == "mic-inject" and result.id == 0
+    assert result.action == "mic-inject" and result.id == "rid:hold_to_talk"
     assert [name for name, _value in events] == ["down", "sleep", "inject", "sleep", "up"]
     assert events[1][1] == pytest.approx(0.1)
     assert events[3][1] == pytest.approx(0.2)
@@ -1467,7 +1467,9 @@ def test_hold_accepts_a_fresh_numeric_id(tmp_path: Path, monkeypatch: pytest.Mon
         observe=False,
     )
 
-    assert result.id == observed.elements[0].id
+    from android_ui_analyser.identity import stable_key
+
+    assert result.id == stable_key(observed.elements[0])
     assert [call[0] for call in device.calls[-2:]] == ["touch_down", "touch_up"]
 
 

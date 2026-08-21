@@ -92,6 +92,12 @@ class MatchMode(str, Enum):
 Bounds = tuple[int, int, int, int]
 Center = tuple[int, int]
 
+#: How an element is addressed. An ``int`` is a frame-local ordinal (reading order, renumbered
+#: every analyze); a ``str`` is the stable id that the payload actually publishes. Both flow
+#: through the same code paths because a caller may hold either — a fresh observation gives it
+#: the string, an older script still has the number.
+ElementId = int | str
+
 
 def center_of(bounds: Bounds) -> Center:
     """Geometric center of an ``[x1, y1, x2, y2]`` box."""
@@ -161,7 +167,12 @@ class Element(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    id: int
+    # A frame-local ordinal in memory, a stable id once published. Both are accepted so a
+    # payload round-trips: `as_dict` rewrites every id to the element's stable key (see
+    # `AnalyzeResult._publish_identity`), and re-validating that payload must not be an error —
+    # the alternative is a shape the tool emits but cannot read back, which every consumer
+    # eventually trips over. Python paths index by whatever they were given.
+    id: int | str
     type: str
     text: str | None = None
     resource_id: str | None = None
@@ -188,7 +199,7 @@ class Element(BaseModel):
     # it: a design-system tile puts the click on an inner Box and renders the title as a
     # sibling **outside** those bounds, so containment cannot find one from the other and
     # only the tree can. See :func:`selectors.acting_node`.
-    parent: int | None = None
+    parent: int | str | None = None
 
     def compact(self) -> dict[str, Any]:
         """Token-minimal dict: drop nulls and default-valued verbose fields."""
@@ -391,6 +402,59 @@ class AnalyzeResult(BaseModel):
 
     # -- rendering ---------------------------------------------------------
 
+    def _publish_identity(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Rewrite every published ``id`` to the element's stable key.
+
+        The integer ``id`` is a frame-local ordinal: reading order, renumbered on every
+        analyze, and validated through one cache file per device that all callers of that
+        device share. Publishing it made the number the caller's handle on the element, which
+        is wrong in two directions — it goes stale the moment the screen moves, and a caller
+        holding an observation produced by another process (the dashboard, a second agent, a
+        saved report) is validated against whoever wrote that file last.
+
+        So the ordinal stays internal — every Python path still indexes by it — and what goes
+        out is the one name that outlives the frame. `parent` is remapped through the same
+        table, because a parent pointer that still held an ordinal would name a different
+        element than the id it points at. `meta.element_diff` too: an added/removed list of
+        ordinals is unreadable next to string ids, and worse, silently comparable to the wrong
+        row. Actions accept what is published — see `Engine._resolve_action_key`.
+        """
+        elements = data.get("elements")
+        if not isinstance(elements, list):
+            return data
+        # Every element gets one, with no exceptions: a payload that mixed string ids with
+        # leftover integers would make the caller guess which kind it is holding, and
+        # `identity.stable_key` always has an answer — a resource-id, a label hash, or a
+        # geometry fingerprint as the last resort. Imported here because `identity` imports
+        # this module.
+        from .identity import stable_key as _stable_key
+
+        by_ordinal: dict[Any, Any] = {}
+        for element in elements:
+            if not isinstance(element, dict):
+                continue
+            key = element.get("stable_key") or _stable_key(element)
+            if key:
+                by_ordinal[element.get("id")] = key
+                element["stable_key"] = key
+        if not by_ordinal:
+            return data
+        for element in elements:
+            if not isinstance(element, dict):
+                continue
+            if element.get("id") in by_ordinal:
+                element["id"] = by_ordinal[element["id"]]
+            if element.get("parent") in by_ordinal:
+                element["parent"] = by_ordinal[element["parent"]]
+        meta = data.get("meta")
+        diff = meta.get("element_diff") if isinstance(meta, dict) else None
+        if isinstance(diff, dict):
+            for key in ("added", "removed", "changed"):
+                rows = diff.get(key)
+                if isinstance(rows, list):
+                    diff[key] = [by_ordinal.get(row, row) for row in rows]
+        return data
+
     def as_dict(self, fmt: OutputFormat | str = OutputFormat.json) -> dict[str, Any]:
         """The serialisable payload for *fmt* (``compact`` trims to the smallest footprint).
 
@@ -425,7 +489,7 @@ class AnalyzeResult(BaseModel):
                 base["meta"]["unchanged"] = True
             return base
         if fmt is OutputFormat.compact:
-            return {
+            return self._publish_identity({
                 "schema_version": self.schema_version,
                 "screen": {
                     k: v for k, v in self.screen.model_dump(mode="json").items() if v is not None
@@ -440,8 +504,8 @@ class AnalyzeResult(BaseModel):
                     # trimming exists for. Test `False` by identity.
                     if v is not None and v != [] and v is not False
                 },
-            }
-        return self.model_dump(mode="json")
+            })
+        return self._publish_identity(self.model_dump(mode="json"))
 
     def render(self, fmt: OutputFormat | str = OutputFormat.json) -> str:
         """Serialise to one of the output formats (PRD §8)."""
@@ -455,7 +519,7 @@ class AnalyzeResult(BaseModel):
         sep = None if indent else (",", ":")
         return json.dumps(data, indent=indent, separators=sep, ensure_ascii=False)
 
-    def element_by_id(self, element_id: int) -> Element | None:
+    def element_by_id(self, element_id: ElementId) -> Element | None:
         for e in self.elements:
             if e.id == element_id:
                 return e
@@ -551,7 +615,7 @@ class ActionResult(BaseModel):
     # not after it. Buried under the optional diagnostics it was read last, once the decision it
     # exists to prevent had already been made.
     note: str | None = None
-    id: int | None = None
+    id: ElementId | None = None
     target: list[int] | None = None  # coords or bounds acted on
     detail: str | None = None
     # The screen right after the action (when called with observe=True), so an agent gets
@@ -567,8 +631,6 @@ class ActionResult(BaseModel):
     observation_present: bool | None = None
     # Route context on the action response itself.
     known_screen: str | None = None
-    # Stable identifiers for the returned ids (ID churn does happen, stable_key usually survives).
-    stable_elements: list[dict[str, Any]] | None = None
     # Compact diff summary from the folded observation (`meta.element_diff` transformed).
     action_diff_summary: dict[str, Any] | None = None
     # Structured one-call efficiency recommendation (CLI and MCP share the same ids/text).
@@ -751,8 +813,8 @@ class ResolveResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     ok: bool
-    from_id: int | None = None
-    to_id: int | None = None
+    from_id: ElementId | None = None
+    to_id: ElementId | None = None
     stable_key: str | None = None
     element: Element | None = None
     detail: str | None = None

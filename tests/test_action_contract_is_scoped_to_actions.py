@@ -1,6 +1,6 @@
 """The action-observation contract belongs to actions, and only to them.
 
-`observation_present`/`stable_elements` exist so a caller can branch on one payload without
+`observation_present` exists so a caller can branch on one payload without
 probing for key existence. That promise is worth keeping *and* worth bounding: `ActionResult`
 is also the return type of commands that perform no action at all (`screenshot`,
 `record_start`, `record_stop`). Emitting `observation_present: false` there states that the
@@ -28,7 +28,8 @@ def test_an_action_publishes_the_contract_fields(tmp_path: Path) -> None:
 
     observed = eng.tap(target, observe=True)
     assert observed.observation_present is True
-    assert observed.stable_elements  # ids the caller can carry across ID churn
+    # Ids in the observation are already the stable ids a caller carries across churn,
+    # so there is no second list to check.
     payload = json.loads(observed.render())
     assert payload["observation_present"] is True
 
@@ -46,7 +47,5 @@ def test_a_non_action_command_publishes_neither(tmp_path: Path) -> None:
 
     shot = eng.screenshot(str(out))
     assert shot.observation_present is None, "screenshot performs no action to observe"
-    assert shot.stable_elements is None
     payload = json.loads(shot.render())
     assert "observation_present" not in payload
-    assert "stable_elements" not in payload

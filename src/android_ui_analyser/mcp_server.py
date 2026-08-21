@@ -46,9 +46,32 @@ def _with_image(engine: Engine, args: dict[str, Any]) -> bool | str | None:
     return getattr(engine, "_default_with_image", None)
 
 
+def _ordinal(raw: Any) -> int | None:
+    """*raw* as a frame-local ordinal, or ``None`` when it is a published stable id.
+
+    A stable id is resolved through the selector instead (see :func:`_selector_from_args`), so
+    coercing it here would turn a valid target into a ValueError from inside the dispatcher.
+    """
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def _selector_from_args(args: dict[str, Any]) -> dict[str, Any] | None:
-    """Build the engine selector from an optional stable_key, or rid/text/desc (+ index/first)."""
+    """Build the engine selector from an optional stable id, or rid/text/desc (+ index/first).
+
+    ``id`` is accepted here as well as ``stable_key``: ids are *published* as stable ids, so a
+    caller pasting one back sends it in the field it came out of. A numeric ``id`` stays an
+    ordinal and is handled by the caller of this function.
+    """
     key = args.get("stable_key")
+    if not (isinstance(key, str) and key.strip()):
+        raw = args.get("id")
+        if isinstance(raw, str) and raw.strip() and not raw.strip().lstrip("-").isdigit():
+            key = raw
     if isinstance(key, str) and key.strip():
         # A stable_key is an identity, not a query: it needs no index/first, and it is the
         # only element name that stays meaningful outside the frame it was published in.
@@ -907,7 +930,7 @@ def _tool_definitions() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "id": {"type": "integer"},
+                    "id": {"type": ["integer", "string"]},
                     **_SELECTOR_PROPS,
                     "observe": _OBSERVE_PROP,
                     "with_image": _WITH_IMAGE_PROP,
@@ -927,7 +950,7 @@ def _tool_definitions() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "id": {"type": "integer"},
+                    "id": {"type": ["integer", "string"]},
                     "text": {"type": "string"},
                     "submit": {"type": "boolean", "default": False},
                     "observe": _OBSERVE_PROP,
@@ -1075,7 +1098,7 @@ def _tool_definitions() -> list[types.Tool]:
             description="Return full attributes for one element id from the last analyze.",
             inputSchema={
                 "type": "object",
-                "properties": {"id": {"type": "integer"}},
+                "properties": {"id": {"type": ["integer", "string"]}},
                 "required": ["id"],
                 "additionalProperties": False,
             },
@@ -1086,7 +1109,7 @@ def _tool_definitions() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "id": {"type": "integer"},
+                    "id": {"type": ["integer", "string"]},
                     "ms": {"type": "integer", "default": 600},
                     "observe": _OBSERVE_PROP,
                     "with_image": _WITH_IMAGE_PROP,
@@ -1381,7 +1404,7 @@ def _tool_definitions() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "id": {"type": "integer"},
+                    "id": {"type": ["integer", "string"]},
                     "observe": _OBSERVE_PROP,
                     "with_image": _WITH_IMAGE_PROP,
                 },
@@ -1395,7 +1418,7 @@ def _tool_definitions() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "id": {"type": "integer"},
+                    "id": {"type": ["integer", "string"]},
                     "observe": _OBSERVE_PROP,
                     "with_image": _WITH_IMAGE_PROP,
                 },
@@ -1531,7 +1554,7 @@ def _tool_definitions() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "id": {"type": "integer"},
+                    "id": {"type": ["integer", "string"]},
                     **_SELECTOR_PROPS,
                 },
                 "additionalProperties": False,
@@ -1544,7 +1567,7 @@ def _tool_definitions() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "id": {"type": "integer"},
+                    "id": {"type": ["integer", "string"]},
                     "chars": {
                         "type": "integer",
                         "description": "Delete this many characters; omit to clear all.",
@@ -1833,7 +1856,7 @@ def _tool_definitions() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "id": {"type": "integer"},
+                    "id": {"type": ["integer", "string"]},
                     "rid": {"type": "string"},
                     "text": {"type": "string"},
                     "direction": {"type": "string", "enum": ["forward", "backward"]},
@@ -2986,11 +3009,11 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         )
     if name == "copy_text":
         selector = _selector_from_args(args)
-        element_id = int(args["id"]) if args.get("id") is not None else None
+        element_id = _ordinal(args.get("id"))
         return _dump(engine.copy_text(element_id, selector=selector))
     if name == "erase":
         selector = _selector_from_args(args)
-        element_id = int(args["id"]) if args.get("id") is not None else None
+        element_id = _ordinal(args.get("id"))
         return _dump(
             engine.erase(
                 element_id,
@@ -3077,7 +3100,7 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         return _dump(engine.dev_profile(args["name"]))
     if name == "a11y_scroll":
         sel = _selector_from_args(args)
-        eid = int(args["id"]) if args.get("id") is not None else None
+        eid = _ordinal(args.get("id"))
         return _dump(
             engine.a11y_scroll(
                 eid,

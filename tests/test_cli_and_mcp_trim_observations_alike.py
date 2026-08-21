@@ -6,7 +6,7 @@ all, so every action returned every field of every element. Then the rename stri
 switch, leaving that surface with a full dump on every action and no way to ask for less.
 
 Both now go through `trim_observation_payload`, and both derived lists are filtered with it:
-`stable_elements` (an unprojected copy re-adds every system-bar node the view just dropped) and
+`next_actions` (an unprojected copy re-adds every system-bar node the view just dropped) and
 `next_actions` (which could otherwise name an id that is absent from the observation the caller was
 handed — the same "a value you cannot distinguish from its absence" failure this engine keeps
 producing).
@@ -33,7 +33,6 @@ def _payload() -> dict:
                 {"id": 3, "text": "Cancel", "clickable": True, "window": "app"},
             ],
         },
-        "stable_elements": [{"id": 0}, {"id": 2, "stable_key": "send"}, {"id": 3}],
         "next_actions": [{"id": 0}, {"id": 2, "label": "Send"}, {"id": 3, "label": "Cancel"}],
     }
 
@@ -52,7 +51,7 @@ def test_the_observation_is_trimmed() -> None:
 def test_derived_lists_cannot_name_a_dropped_element() -> None:
     out = _trimmed()
     kept = {e["id"] for e in out["observation"]["elements"]}
-    for key in ("stable_elements", "next_actions"):
+    for key in ("next_actions",):
         named = {r["id"] for r in out[key]}
         assert named <= kept, f"{key} names ids absent from the observation: {named - kept}"
 

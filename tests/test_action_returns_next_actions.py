@@ -61,10 +61,13 @@ def test_selected_state_rides_on_each_relevant_next_action(tmp_path: Path) -> No
     controls[0].selected = True
     controls[1].selected = False
 
+    # `next_actions` names elements the way the payload does — by stable id.
+    from android_ui_analyser.identity import stable_key
+
     by_id = {row["id"]: row for row in eng._next_actions(observation) or []}
 
-    assert by_id[controls[0].id]["selected"] is True
-    assert by_id[controls[1].id]["selected"] is False
+    assert by_id[stable_key(controls[0])]["selected"] is True
+    assert by_id[stable_key(controls[1])]["selected"] is False
 
 
 def test_learned_cost_rides_on_the_control_it_belongs_to(tmp_path: Path) -> None:

@@ -12,7 +12,7 @@ import re
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from .schema import Element
+from .schema import Element, ElementId
 
 if TYPE_CHECKING:
     from .providers.base import ScreenImage
@@ -105,7 +105,7 @@ def base_stable_key(key: str | None) -> str | None:
     return head if sep and tail.isdigit() else key
 
 
-def _uniquify(pairs: Sequence[tuple[Element, str]]) -> dict[int, str]:
+def _uniquify(pairs: Sequence[tuple[Element, str]]) -> dict[ElementId, str]:
     """Map element id → a key unique among *pairs*, suffixing only where one collides.
 
     Additive by construction: a key that occurs once is returned untouched, so every key ever
@@ -121,7 +121,7 @@ def _uniquify(pairs: Sequence[tuple[Element, str]]) -> dict[int, str]:
         counts[key] = counts.get(key, 0) + 1
     ordered = sorted(pairs, key=lambda pair: (pair[0].bounds[1], pair[0].bounds[0], pair[0].id))
     seen: dict[str, int] = {}
-    out: dict[int, str] = {}
+    out: dict[ElementId, str] = {}
     for el, key in ordered:
         if counts[key] == 1:
             out[el.id] = key
@@ -282,9 +282,9 @@ def _identity_distance(previous: Element, current: Element) -> int | None:
 def remap_ids(
     previous: Sequence[Element],
     current: Sequence[Element],
-) -> dict[int, int]:
+) -> dict[ElementId, ElementId]:
     """Map previous-frame ids → current-frame ids via exact or perceptually-close identity."""
-    mapping: dict[int, int] = {}
+    mapping: dict[ElementId, ElementId] = {}
     for prev in previous:
         scored = [
             (distance, candidate)

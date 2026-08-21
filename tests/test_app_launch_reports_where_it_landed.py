@@ -228,7 +228,6 @@ def test_launch_retries_a_transient_systemui_hierarchy_while_app_stays_foregroun
             action="app-launch",
             observation=stale,
             observation_present=True,
-            stable_elements=eng._stable_elements(stale.elements),
             next_actions=[{"id": stale.elements[0].id, "label": "System UI"}],
             routes=["systemui-route", "systemui-goto"],
             known_screen="systemui-shade",
@@ -255,7 +254,6 @@ def test_launch_retries_a_transient_systemui_hierarchy_while_app_stays_foregroun
     assert [element.id for element in cached.elements] == [
         element.id for element in result.observation.elements
     ]
-    assert result.stable_elements == eng._stable_elements(target.elements)
     assert result.next_actions == eng._next_actions(target)
     assert result.routes == ["target-route", "target-goto"]
     assert result.known_screen == "target-login"
@@ -264,7 +262,8 @@ def test_launch_retries_a_transient_systemui_hierarchy_while_app_stays_foregroun
     assert result.stale_risk is None
     assert result.note == "No separate analyze needed; state is in observation."
     systemui_ids = {element.id for element in stale.elements}
-    assert not systemui_ids.intersection(item["id"] for item in result.stable_elements or [])
+    observed = result.observation.as_dict("json") if result.observation else {"elements": []}
+    assert not systemui_ids.intersection(e["id"] for e in observed["elements"])
     assert "systemui-route" not in (result.routes or [])
     assert result.known_screen != "systemui-shade"
     assert calls == [

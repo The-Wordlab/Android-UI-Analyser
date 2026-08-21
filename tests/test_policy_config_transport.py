@@ -583,7 +583,9 @@ def test_cli_detail_matches_projected_until_response_emitted_to_agent(
         "text",
     ]
     assert emitted["await_outcome"] == "satisfied"
-    assert emitted["observation"]["elements"] == [{"id": 7, "text": "Arrived"}]
+    # Ids are published as stable ids, so the projected row names the element that way too.
+    assert [e["text"] for e in emitted["observation"]["elements"]] == ["Arrived"]
+    assert all(isinstance(e["id"], str) for e in emitted["observation"]["elements"])
 
 
 def test_private_cli_until_row_inherits_input_redaction(

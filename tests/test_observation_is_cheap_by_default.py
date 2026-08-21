@@ -6,7 +6,7 @@ get a small read of the new screen was ``--no-observe`` plus a filtered ``analyz
 unfilterable call cost more than two targeted ones, so the default lost on economics.
 
 These tests pin the two properties that remove the incentive: the observation is projected to
-a compact view, and ``stable_elements`` (derived from the same tree) is trimmed to match
+a compact view, and ``next_actions`` (derived from the same tree) is trimmed to match
 rather than silently re-adding every system-bar node the view just dropped.
 """
 
@@ -81,15 +81,9 @@ def _action_result() -> ActionResult:
         id=2,
         observation=obs,
         observation_present=True,
-        stable_elements=[
-            {"id": 0, "stable_key": "rid:status_bar"},
-            {"id": 1, "stable_key": "rid:clock"},
-            {"id": 2, "stable_key": "rid:buttonContinue"},
-            {"id": 3, "stable_key": "rid:key_search"},
-        ],
         next_actions=[
             {"id": 0, "label": "Status bar"},
-            {"id": 2, "label": "Continue"},
+            {"id": "rid:buttonContinue", "label": "Continue"},
             {"id": 3, "label": "Keyboard search"},
         ],
     )
@@ -108,30 +102,31 @@ def _emitted(monkeypatch, view: Projection | None) -> dict:
     return json.loads(printed[-1])
 
 
+def _key(ordinal: int) -> str:
+    """The stable id the payload publishes for the fixture element with this ordinal."""
+    from android_ui_analyser.identity import stable_key
+
+    return stable_key(next(e for e in _observation().elements if e.id == ordinal))
+
+
 def test_default_observation_drops_system_chrome_and_extra_columns(monkeypatch) -> None:
     view = Projection.for_observation("id,text,rid,clickable")
     data = _emitted(monkeypatch, view)
 
     ids = [e["id"] for e in data["observation"]["elements"]]
-    assert ids == [2], "the status bar and clock are not what the caller acted on"
+    assert ids == [_key(2)], "the status bar and clock are not what the caller acted on"
 
     columns = set(data["observation"]["elements"][0])
     assert columns <= {"id", "text", "rid", "clickable"}
     assert "bounds" not in columns and "center" not in columns
 
 
-def test_stable_elements_follow_the_same_view(monkeypatch) -> None:
-    """Trimming only ``elements`` would re-add the dropped nodes through the back door."""
-    view = Projection.for_observation("id,text,rid,clickable")
-    data = _emitted(monkeypatch, view)
-    assert [s["id"] for s in data["stable_elements"]] == [2]
-
 
 def test_next_actions_follow_the_same_view(monkeypatch) -> None:
     """Guidance cannot reference system/IME ids absent from the projected observation."""
     view = Projection.for_observation("id,text,rid,clickable")
     data = _emitted(monkeypatch, view)
-    assert data["next_actions"] == [{"id": 2, "label": "Continue"}]
+    assert data["next_actions"] == [{"id": _key(2), "label": "Continue"}]
 
 
 def test_observe_fields_all_is_an_exact_opt_out(monkeypatch) -> None:
@@ -142,8 +137,9 @@ def test_observe_fields_all_is_an_exact_opt_out(monkeypatch) -> None:
     assert Projection.for_observation(None) is None
 
     data = _emitted(monkeypatch, None)
-    assert [e["id"] for e in data["observation"]["elements"]] == [0, 1, 2, 3]
-    assert [s["id"] for s in data["stable_elements"]] == [0, 1, 2, 3]
+    assert [e["id"] for e in data["observation"]["elements"]] == [
+        _key(i) for i in (0, 1, 2, 3)
+    ]
 
 
 def test_compact_view_is_materially_smaller(monkeypatch) -> None:

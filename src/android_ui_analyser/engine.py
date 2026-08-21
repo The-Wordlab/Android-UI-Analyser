@@ -97,6 +97,7 @@ from .schema import (
     AppStatusResult,
     DeviceInfo,
     Element,
+    ElementId,
     HasResult,
     MatchMode,
     Meta,
@@ -714,6 +715,21 @@ class DeviceStoodDownError(DeviceError):
     slot straight back. Failing fast is the point: a background sampler must never resurrect
     a connection the foreground deliberately tore down.
     """
+
+
+def _published_id(el: Element | None) -> ElementId | None:
+    """The id an action reports for *el* — the same stable id its observation publishes.
+
+    Reporting the frame ordinal here made one payload speak two languages: `id: 34` at the top
+    and `"id": "rid:characterCard_Teacher"` in the elements beneath it, for the same control.
+    A caller echoing the top-level value back would be sending a number that appears nowhere in
+    what it was given.
+    """
+    if el is None:
+        return None
+    from .identity import stable_key as _sk
+
+    return el.stable_key or _sk(el)
 
 
 class Engine:
@@ -1723,7 +1739,8 @@ class Engine:
         if provider is not None:
             from . import merge
 
-            start_id = max((element.id for element in elements), default=-1) + 1
+            # These elements were just built by this process, so their ids are ordinals.
+            start_id = max((int(element.id) for element in elements), default=-1) + 1
             ocr_elements = merge.merge_vision([], texts, start_id=start_id)
             if self.config.ocr.drop_redundant:
                 # Withhold readings of text the tree already reports. Provenance is worth
@@ -2326,7 +2343,8 @@ class Engine:
                     hierarchy_observation.ocr_texts,
                     hierarchy_observation.ocr_provider,
                 )
-            start_id = max((element.id for element in elements), default=-1) + 1
+            # These elements were just built by this process, so their ids are ordinals.
+            start_id = max((int(element.id) for element in elements), default=-1) + 1
             vis_elements, vision_providers, img = self._run_vision(
                 device,
                 with_ocr=with_ocr,
@@ -2575,7 +2593,8 @@ class Engine:
                     hierarchy_observation.ocr_texts,
                     hierarchy_observation.ocr_provider,
                 )
-            start_id = max((element.id for element in pool), default=-1) + 1
+            # Built in this process: ordinals by construction.
+            start_id = max((int(element.id) for element in pool), default=-1) + 1
             vis_elements, vprov, img = self._run_vision(
                 device,
                 with_ocr=with_ocr,
@@ -3156,6 +3175,8 @@ class Engine:
         Cost rides on the entry it belongs to, so "tap 26 next, and it takes ~4.8s" is one read
         rather than a cross-reference against `slow_controls`.
         """
+        from .identity import stable_key as _stable_key
+
         rows: list[dict[str, Any]] = []
         timings = self._screen_timings_safe(obs.meta.known_screen if obs.meta else None)
         for e in obs.elements:
@@ -3163,7 +3184,11 @@ class Engine:
                 continue
             label = (e.text or e.content_desc or "").strip()
             rid = _id_tail(e.resource_id)
-            row: dict[str, Any] = {"id": e.id}
+            # The same id the observation publishes. Naming the frame ordinal here would hand
+            # the caller a number that does not appear anywhere in the payload it came with —
+            # and the shared trim, which filters this list to the ids that survived the view,
+            # would match nothing and quietly return no next actions at all.
+            row: dict[str, Any] = {"id": e.stable_key or _stable_key(e)}
             if label:
                 row["label"] = _label(label)
             if rid:
@@ -10973,7 +10998,7 @@ class Engine:
 
     # ----------------------------------------------------------------- inspect
 
-    def inspect(self, element_id: int) -> Element:
+    def inspect(self, element_id: ElementId) -> Element:
         return self._resolve(element_id)
 
     def screenshot(self, path: str | None = None, *, annotate: bool = False) -> ActionResult:
@@ -11012,17 +11037,6 @@ class Engine:
             out["curr_count"] = element_diff["curr_count"]
         if element_diff.get("unchanged") is not None:
             out["unchanged"] = bool(element_diff["unchanged"])
-        return out
-
-    @staticmethod
-    def _stable_elements(elements: list[Element]) -> list[dict[str, Any]]:
-        """A compact stable-key map for the ids in the folded observation."""
-        out: list[dict[str, Any]] = []
-        for e in elements:
-            if e.stable_key is not None:
-                out.append({"id": e.id, "stable_key": e.stable_key})
-            else:
-                out.append({"id": e.id})
         return out
 
     def _analyze_post_action(
@@ -11395,7 +11409,6 @@ class Engine:
                 nav = list(obs.meta.known_routes or []) + list(obs.meta.suggested_gotos or [])
                 result.routes = nav or None
                 result.known_screen = obs.meta.known_screen
-                result.stable_elements = self._stable_elements(obs.elements)
                 result.action_diff_summary = self._compact_action_diff(obs.meta.element_diff)
                 if launch_transitional:
                     result.note = (
@@ -11703,7 +11716,6 @@ class Engine:
         """Replace all fields derived from a transient launch readback with *fresh*."""
         launched.observation = fresh
         launched.observation_present = True
-        launched.stable_elements = self._stable_elements(fresh.elements)
         launched.next_actions = self._next_actions(fresh)
         nav = list(fresh.meta.known_routes or []) + list(fresh.meta.suggested_gotos or [])
         launched.routes = nav or None
@@ -12552,7 +12564,7 @@ class Engine:
         )
 
     def _target(
-        self, element_id: int | None, selector: dict[str, Any] | None, *, verb: str = "tap"
+        self, element_id: ElementId | None, selector: dict[str, Any] | None, *, verb: str = "tap"
     ) -> Element:
         """The element an action addresses: a freshly-bound prior id, or a selector.
 
@@ -12627,8 +12639,9 @@ class Engine:
             raise ElementNotFoundError(
                 f"no element with stable_key {key!r} on the current screen for {verb}",
                 hint=(
-                    "No action was sent. Re-analyze and use a stable_key from that fresh "
-                    "observation, or address the element with --rid/--text/--desc."
+                    f"No action was sent. {key!r} is not on this screen: re-analyze and use an "
+                    f"id from that fresh observation, or address the element with "
+                    f"--rid/--text/--desc."
                 ),
             )
         if len(hits) == 1:
@@ -12645,7 +12658,7 @@ class Engine:
             ),
         )
 
-    def _resolve_action_id(self, element_id: int, *, verb: str) -> Element:
+    def _resolve_action_id(self, element_id: ElementId, *, verb: str) -> Element:
         """Remap a frame-local id onto a fresh hierarchy, or raise ``stale_element_id``.
 
         Resource ids are normally the strongest binding, but reusable row layouts give every
@@ -12854,7 +12867,7 @@ class Engine:
 
     def tap(
         self,
-        element_id: int | None = None,
+        element_id: ElementId | None = None,
         *,
         selector: dict[str, Any] | None = None,
         observe: bool = True,
@@ -12892,7 +12905,9 @@ class Engine:
             self.device.click(cx, cy)
         self._record_action_safe(step)
         return self._observe(
-            ActionResult(ok=True, action="tap", id=el.id, target=[cx, cy], acting=acting),
+            ActionResult(
+                ok=True, action="tap", id=_published_id(el), target=[cx, cy], acting=acting
+            ),
             observe,
             with_image,
         )
@@ -12928,7 +12943,7 @@ class Engine:
 
     def long_press(
         self,
-        element_id: int | None = None,
+        element_id: ElementId | None = None,
         *,
         selector: dict[str, Any] | None = None,
         ms: int = 600,
@@ -12943,7 +12958,13 @@ class Engine:
             self.device.long_click(cx, cy, ms)
         self._record_action_safe(step)
         return self._observe(
-            ActionResult(ok=True, action="long-press", id=el.id, target=[cx, cy], acting=acting),
+            ActionResult(
+                ok=True,
+                action="long-press",
+                id=_published_id(el),
+                target=[cx, cy],
+                acting=acting,
+            ),
             observe,
             with_image,
         )
@@ -12951,7 +12972,7 @@ class Engine:
     def mic_inject(
         self,
         wav_path: str | Path,
-        element_id: int | None = None,
+        element_id: ElementId | None = None,
         *,
         selector: dict[str, Any] | None = None,
         control_mode: str = "hold",
@@ -13231,7 +13252,7 @@ class Engine:
         action_result = ActionResult(
             ok=terminal_mic_error is None,
             action=_action,
-            id=el.id if el is not None else None,
+            id=_published_id(el),
             target=target,
             detail=detail,
             acting=acting,
@@ -13251,7 +13272,7 @@ class Engine:
     def mic_speak(
         self,
         text: str,
-        element_id: int | None = None,
+        element_id: ElementId | None = None,
         *,
         selector: dict[str, Any] | None = None,
         control_mode: str = "hold",
@@ -13294,7 +13315,7 @@ class Engine:
 
     def double_tap(
         self,
-        element_id: int | None = None,
+        element_id: ElementId | None = None,
         *,
         selector: dict[str, Any] | None = None,
         observe: bool = True,
@@ -13307,14 +13328,14 @@ class Engine:
             self.device.double_click(cx, cy)
         self._record_action_safe(step)
         return self._observe(
-            ActionResult(ok=True, action="double-tap", id=el.id, target=[cx, cy]),
+            ActionResult(ok=True, action="double-tap", id=_published_id(el), target=[cx, cy]),
             observe,
             with_image,
         )
 
     def input_text(
         self,
-        element_id: int | None = None,
+        element_id: ElementId | None = None,
         text: str = "",
         *,
         selector: dict[str, Any] | None = None,
@@ -13336,7 +13357,7 @@ class Engine:
             ActionResult(
                 ok=verified is not False,
                 action="input",
-                id=el.id,
+                id=_published_id(el),
                 detail=text,
                 verified=verified,
             ),
@@ -13471,7 +13492,7 @@ class Engine:
 
     def clear(
         self,
-        element_id: int | None = None,
+        element_id: ElementId | None = None,
         *,
         selector: dict[str, Any] | None = None,
         observe: bool = True,
@@ -13484,7 +13505,7 @@ class Engine:
             self.device.click(cx, cy)
             self.device.clear_text()
         self._record_action_safe(step)
-        return self._observe(ActionResult(ok=True, action="clear", id=el.id), observe, with_image)
+        return self._observe(ActionResult(ok=True, action="clear", id=_published_id(el)), observe, with_image)
 
     # ------------------------------------------------------------- scroll internals
 
@@ -14052,7 +14073,7 @@ class Engine:
                 )
             before_observation = current.observation
             before = self._back_observation_identity(current.observation)
-            requested_id: int | None = None
+            requested_id: ElementId | None = None
             explicit_id_invalid = False
             if steps == 1 and back_id is not None:
                 if back_binding is None or current.observation is None:
@@ -14060,7 +14081,9 @@ class Engine:
                 else:
                     from .identity import remap_ids
 
-                    requested_id = remap_ids([back_binding], current.observation.elements).get(
+                    requested_id = remap_ids(
+                        [back_binding], current.observation.elements
+                    ).get(
                         back_binding.id
                     )
                     explicit_id_invalid = requested_id is None
@@ -14468,8 +14491,8 @@ class Engine:
         observation: AnalyzeResult | None,
         override: dict[str, str] | None = None,
         *,
-        frame_id: int | None = None,
-    ) -> tuple[str, dict[str, str] | None, int | None]:
+        frame_id: ElementId | None = None,
+    ) -> tuple[str, dict[str, str] | None, ElementId | None]:
         """One app-owned Back selector, plus none/ambiguous status."""
         if override:
             return "one", override, None
@@ -16198,7 +16221,7 @@ class Engine:
 
     def copy_text(
         self,
-        element_id: int | None = None,
+        element_id: ElementId | None = None,
         *,
         selector: dict[str, Any] | None = None,
     ) -> ActionResult:
@@ -16210,7 +16233,7 @@ class Engine:
                 hint="Pick a labelled element, or use `clipboard set` for a literal.",
             )
         self.device.set_clipboard(text)
-        return ActionResult(ok=True, action="copy", id=el.id, detail=text)
+        return ActionResult(ok=True, action="copy", id=_published_id(el), detail=text)
 
     def location_set(self, lat: float, lon: float) -> ActionResult:
         self.device.set_location(lat, lon)
@@ -16777,7 +16800,7 @@ class Engine:
 
     def a11y_scroll(
         self,
-        element_id: int | None = None,
+        element_id: ElementId | None = None,
         *,
         selector: dict[str, Any] | None = None,
         direction: str = "forward",
@@ -16805,7 +16828,7 @@ class Engine:
 
     def a11y_action(
         self,
-        element_id: int | None = None,
+        element_id: ElementId | None = None,
         *,
         selector: dict[str, Any] | None = None,
         action: str = "CLICK",
@@ -16904,7 +16927,6 @@ class Engine:
             "observation",
             "observation_present",
             "known_screen",
-            "stable_elements",
             "action_diff_summary",
             "next_actions",
             "routes",
@@ -17966,7 +17988,7 @@ class Engine:
 
     def erase(
         self,
-        element_id: int | None = None,
+        element_id: ElementId | None = None,
         *,
         selector: dict[str, Any] | None = None,
         chars: int | None = None,
@@ -17989,7 +18011,7 @@ class Engine:
                 self.device.erase_chars(chars)
         detail = "all" if not chars or chars <= 0 else str(chars)
         return self._observe(
-            ActionResult(ok=True, action="erase", id=el.id if el else None, detail=detail),
+            ActionResult(ok=True, action="erase", id=_published_id(el), detail=detail),
             observe,
             with_image,
         )
@@ -18867,7 +18889,7 @@ class Engine:
             return None
         labels: list[str] = []
         rids: list[str] = []
-        focused: int | None = None
+        focused: ElementId | None = None
         for e in cached.elements:
             if e.focused and focused is None:
                 focused = e.id
@@ -19698,7 +19720,7 @@ class Engine:
         with contextlib.suppress(OSError):  # pragma: no cover
             path.unlink(missing_ok=True)
 
-    def _resolve(self, element_id: int) -> Element:
+    def _resolve(self, element_id: ElementId) -> Element:
         cached = self._read_cache()
         if cached is None:
             raise ElementNotFoundError(

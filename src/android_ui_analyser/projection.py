@@ -795,7 +795,7 @@ def _strictly_contains(outer: Bounds, inner: Bounds) -> bool:
     )
 
 
-def _wrapper_ids(elements: Sequence[dict[str, Any]]) -> frozenset[int]:
+def _wrapper_ids(elements: Sequence[dict[str, Any]]) -> frozenset[Any]:
     """Ids of pure layout containers — the rows ``--no-wrappers`` drops.
 
     A wrapper is a node that survived the parse *only* because it carries an app
@@ -817,7 +817,7 @@ def _wrapper_ids(elements: Sequence[dict[str, Any]]) -> frozenset[int]:
         and _is_inert(el)
     ]
     return frozenset(
-        int(el["id"])
+        el["id"]
         for el, box in candidates
         if any(other is not el and ob is not None and _strictly_contains(box, ob) for other, ob in boxed)
     )
@@ -859,10 +859,9 @@ def trim_observation_payload(
     action, so the measured cost win ("37 taps produced 73 separate analyze calls") applied to one
     caller and not the other. One implementation means a future change lands on both.
 
-    ``stable_elements`` and ``next_actions`` are both derived from the same tree, so they are
-    filtered to the ids that survived. Leaving them whole re-adds exactly the nodes the view just
-    dropped — the status bar alone was a third of `stable_elements` — and worse, lets
-    ``next_actions`` name an id that is not in the observation the caller was given.
+    ``next_actions`` is derived from the same tree, so it is filtered to the ids that survived.
+    Leaving it whole re-adds exactly the nodes the view just dropped, and worse, lets it name an
+    id that is not in the observation the caller was given.
     """
     if view is None or not isinstance(data, dict):
         return data
@@ -872,7 +871,7 @@ def trim_observation_payload(
     projected = view.apply(payload, fmt=fmt)
     data["observation"] = projected
     kept = {e.get("id") for e in projected.get("elements", []) if isinstance(e, dict)}
-    for key in ("stable_elements", "next_actions"):
+    for key in ("next_actions",):
         rows = data.get(key)
         if isinstance(rows, list):
             data[key] = [r for r in rows if not isinstance(r, dict) or r.get("id") in kept]

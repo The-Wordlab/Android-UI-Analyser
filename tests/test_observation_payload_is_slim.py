@@ -223,16 +223,25 @@ def _observation(payload: dict[str, object], **kw: object) -> dict[str, object]:
     return view.apply(payload)
 
 
-def _ids(observation: dict[str, object]) -> list[int]:
-    elements = observation["elements"]
-    assert isinstance(elements, list)
-    return [int(e["id"]) for e in elements]
+def _key(ordinal: int) -> str:
+    """The stable id the payload publishes for the fixture element with this ordinal."""
+    from android_ui_analyser.identity import stable_key
+
+    raw = next(e for e in _payload()["elements"] if e["id"] == ordinal)  # type: ignore[index]
+    return str(raw.get("stable_key") or stable_key(raw))
 
 
-def _row(observation: dict[str, object], element_id: int) -> dict[str, object]:
+def _ids(observation: dict[str, object]) -> list[str]:
     elements = observation["elements"]
     assert isinstance(elements, list)
-    return next(e for e in elements if e["id"] == element_id)
+    return [str(e["id"]) for e in elements]
+
+
+def _row(observation: dict[str, object], ordinal: int) -> dict[str, object]:
+    """The row for a fixture ordinal, looked up by its published stable id."""
+    elements = observation["elements"]
+    assert isinstance(elements, list)
+    return next(e for e in elements if e["id"] == _key(ordinal))
 
 
 # --------------------------------------------------------------- the flag-default rule
@@ -283,11 +292,11 @@ def test_the_rule_matches_element_compact() -> None:
 
 
 def test_the_observation_drops_the_status_bar(payload: dict[str, object]) -> None:
-    assert _ids(_observation(payload)) == [3, 4, 5, 6, 7]
+    assert _ids(_observation(payload)) == [_key(i) for i in (3, 4, 5, 6, 7)]
 
 
 def test_the_observation_drops_pure_wrapper_layouts(payload: dict[str, object]) -> None:
-    assert 0 not in _ids(_observation(payload))
+    assert _key(0) not in _ids(_observation(payload))
 
 
 def test_the_observation_keeps_both_switches_with_their_state(
@@ -301,7 +310,7 @@ def test_the_observation_keeps_both_switches_with_their_state(
 
 def test_the_observation_omits_default_flags(payload: dict[str, object]) -> None:
     row = _row(_observation(payload), 3)
-    assert row == {"id": 3, "text": "Alpha Setting", "clickable": True}
+    assert row == {"id": _key(3), "text": "Alpha Setting", "clickable": True}
 
 
 def test_a_vision_row_keeps_its_unknown_flags_absent(payload: dict[str, object]) -> None:
@@ -412,15 +421,14 @@ def test_the_observation_is_much_cheaper_than_the_full_dump(
 def test_trim_observation_payload_filters_the_derived_lists(
     payload: dict[str, object],
 ) -> None:
-    """`stable_elements` must not name an id the caller was not given."""
+    """A derived list must not name an id the caller was not given."""
     action = {
         "ok": True,
         "action": "tap",
         "observation": payload,
-        "stable_elements": [{"id": 0, "stable_key": "rid:action_bar_root"}, {"id": 3}],
-        "next_actions": [{"id": 1}, {"id": 3}],
+        # `next_actions` names ids the same way the observation does.
+        "next_actions": [{"id": _key(1)}, {"id": _key(3)}],
     }
     view = Projection.for_observation("id,text,clickable", meta="changed")
     trimmed = trim_observation_payload(action, view)
-    assert [r["id"] for r in trimmed["stable_elements"]] == [3]
-    assert [r["id"] for r in trimmed["next_actions"]] == [3]
+    assert [r["id"] for r in trimmed["next_actions"]] == [_key(3)]
