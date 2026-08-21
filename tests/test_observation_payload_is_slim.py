@@ -316,7 +316,7 @@ def test_a_vision_row_keeps_its_unknown_flags_absent(payload: dict[str, object])
 def test_the_observation_meta_keeps_what_changed(payload: dict[str, object]) -> None:
     meta = _observation(payload)["meta"]
     assert isinstance(meta, dict)
-    for key in ("fingerprint", "tier_used", "device_serial", "raw_image"):
+    for key in ("fingerprint", "device_serial", "raw_image"):
         assert key in meta, f"{key} must survive: it is how a caller reads the new screen"
 
 
@@ -325,6 +325,32 @@ def test_the_observation_meta_drops_the_analyze_only_keys(payload: dict[str, obj
     assert isinstance(meta, dict)
     for key in ("research_tasks", "suggested_deeplinks", "capture_hint", "device_locale"):
         assert key not in meta, f"{key} belongs to a deliberate analyze, not to every action"
+
+
+def test_the_observation_meta_drops_pure_telemetry(payload: dict[str, object]) -> None:
+    """How the read was obtained and how long it took change nothing a caller can do.
+
+    `tier_used` and `via` were also the same word twice on the overwhelming majority of reads
+    — both said "hierarchy" — so between them they spent two keys to say nothing once.
+    """
+    meta = _observation(payload)["meta"]
+    assert isinstance(meta, dict)
+    for key in ("tier_used", "via", "duration_ms", "path"):
+        assert key not in meta, f"{key} is telemetry; an agent cannot act on it"
+
+
+def test_the_fingerprint_survives_because_something_reads_it(
+    payload: dict[str, object],
+) -> None:
+    """Not decoration: `coaching.emitted_fingerprint` reads this back out of the payload.
+
+    Under the warm daemon the answering engine is a different process, so the payload is the
+    only place that value can come from — dropping it silently breaks caller-turn tracking
+    rather than just saving bytes.
+    """
+    meta = _observation(payload)["meta"]
+    assert isinstance(meta, dict)
+    assert "fingerprint" in meta
 
 
 def test_the_observation_meta_drops_empty_keys(payload: dict[str, object]) -> None:

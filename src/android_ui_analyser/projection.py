@@ -120,6 +120,14 @@ TSV_DEFAULT_FIELDS: tuple[str, ...] = ("id", "text", "rid", "clickable")
 # so they are never budget-trimmed; `lossy_*` warns that the text may be wrong, which a caller
 # must see before believing a label it is about to assert on. `raw_image` stays because it is
 # the escape hatch from the whole element view — the frame an agent can actually look at.
+#
+# Telemetry is out, and that is the test a key has to pass: not "is this true" but "can the
+# caller do anything differently knowing it". `tier_used`, `via` and `path` describe how the
+# read was obtained and `duration_ms` how long it took; none changes the next call. The first
+# two were also the same word twice on the overwhelming majority of reads — both said
+# `hierarchy` — so between them they spent two keys to say nothing once. A human debugging
+# perception wants all four and gets them from `analyze`, which is where that question is
+# actually being asked.
 # Declaration order is the emitted order (see :meth:`Projection._meta`), and it is chosen, not
 # alphabetical: a reader — human or model — takes the first keys most seriously, so the frame it
 # can actually look at and the answer to "did anything change" lead, and the provenance of the
@@ -144,12 +152,13 @@ OBSERVATION_META_PRESETS: Mapping[str, tuple[str, ...]] = MappingProxyType(
             "suggested_gotos",
             "flows",
             "map_hint",
-            # provenance of the read — true but rarely load-bearing, so last
+            # `fingerprint` is here because something *reads* it, not as provenance:
+            # `coaching.emitted_fingerprint` recovers it from the emitted payload to stamp the
+            # caller turn, and under the warm daemon the answering engine is another process,
+            # so the payload is the only place it can come from. `device_serial` answers "which
+            # target did this happen on" for anyone driving more than one.
             "fingerprint",
             "device_serial",
-            "tier_used",
-            "via",
-            "duration_ms",
         ),
     }
 )
