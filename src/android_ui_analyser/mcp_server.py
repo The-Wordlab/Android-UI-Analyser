@@ -103,6 +103,16 @@ _OBSERVE_FIELDS_PROP: dict[str, Any] = {
         "it, which is what the CLI's --observe-fields already offered."
     ),
 }
+_OBSERVE_META_PROP: dict[str, Any] = {
+    "type": "string",
+    "description": (
+        "`meta` keys to keep in the returned `observation`: 'changed' (default — did the screen "
+        "move, where am I, plus anything you must not miss), 'all', or a comma-separated key "
+        "list. The second cost dial, independent of `observe_fields` on purpose: wanting every "
+        "column is not the same as wanting every hint. Research tasks, deeplink suggestions, "
+        "capture hints and locale are not in 'changed' — call analyze_screen when you want them."
+    ),
+}
 _OBSERVE_PROP: dict[str, Any] = {
     "type": "boolean",
     "default": True,
@@ -300,6 +310,7 @@ def _as_analyzed_tool(tool: types.Tool) -> types.Tool:
     # `observe` contradicted the name; a *width* control does not. Without it MCP had no cost
     # control at all and returned the whole tree on every action, while the CLI trimmed by default.
     properties["observe_fields"] = _OBSERVE_FIELDS_PROP
+    properties["observe_meta"] = _OBSERVE_META_PROP
     properties.update(_UNTIL_PROPS)
     schema["properties"] = properties
     return types.Tool(
@@ -690,6 +701,7 @@ def _tool_definitions() -> list[types.Tool]:
                     },
                     "ignore_case": {"type": "boolean", "default": False},
                     "observe_fields": _OBSERVE_FIELDS_PROP,
+                    "observe_meta": _OBSERVE_META_PROP,
                 },
                 "required": ["predicate"],
                 "additionalProperties": False,
@@ -984,6 +996,7 @@ def _tool_definitions() -> list[types.Tool]:
                     },
                     "poll_ms": {"type": "integer", "default": 200, "minimum": 10},
                     "observe_fields": _OBSERVE_FIELDS_PROP,
+                    "observe_meta": _OBSERVE_META_PROP,
                 },
                 "required": ["predicate"],
                 "allOf": [{"not": {"required": ["back_id", "back_selector"]}}],
@@ -2437,6 +2450,7 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         # Dropped rather than read: no engine method takes it. The caller's copy in `args_in`
         # is what trims the folded observation, at the boundary every tool returns through.
         args.pop("observe_fields", None)
+        args.pop("observe_meta", None)
         for wrapper_arg in _UNTIL_PROPS:
             args.pop(wrapper_arg, None)
     elif name in _ANALYZED_TOOL_NAMES:
@@ -3573,7 +3587,12 @@ def build_server(engine: Engine) -> Server:
                 spec = args_in.get("observe_fields")
                 if spec is None:
                     spec = getattr(engine.config.output, "observation_fields", None)
-                view = Projection.for_observation(spec, fmt=OutputFormat.json)
+                meta_spec = args_in.get("observe_meta")
+                if meta_spec is None:
+                    meta_spec = getattr(engine.config.output, "observation_meta", None)
+                view = Projection.for_observation(
+                    spec, meta=meta_spec, fmt=OutputFormat.json
+                )
                 payload = trim_observation_payload(payload, view, fmt=OutputFormat.json)
             if annotation_warnings and isinstance(payload, dict):
                 payload["annotation_warnings"] = annotation_warnings

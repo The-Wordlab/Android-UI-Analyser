@@ -324,6 +324,7 @@ class JobManager:
 
                         view = Projection.for_observation(
                             getattr(self.engine.config.output, "observation_fields", None),
+                            meta=getattr(self.engine.config.output, "observation_meta", None),
                             fmt=OutputFormat.json,
                         )
                         state.result = trim_observation_payload(

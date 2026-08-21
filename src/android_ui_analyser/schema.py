@@ -8,7 +8,9 @@ wrapper, and the tests. Do not duplicate these shapes elsewhere.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from enum import Enum
+from types import MappingProxyType
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_serializer
@@ -95,6 +97,54 @@ def center_of(bounds: Bounds) -> Center:
     """Geometric center of an ``[x1, y1, x2, y2]`` box."""
     x1, y1, x2, y2 = bounds
     return ((x1 + x2) // 2, (y1 + y2) // 2)
+
+
+# Flag → the value that carries no information. A flag sitting at its default is omitted from
+# a trimmed payload, and absence reads back as this value. ``checked`` is deliberately absent
+# from the table: whether it says anything depends on ``checkable``, which is the one rule a
+# flat table cannot express (see :func:`drop_default_flags`).
+FLAG_DEFAULTS: Mapping[str, bool] = MappingProxyType(
+    {
+        "clickable": False,
+        "enabled": True,
+        "focused": False,
+        "checkable": False,
+        "selected": False,
+        "scrollable": False,
+        "long_clickable": False,
+        "password": False,
+    }
+)
+
+
+def drop_default_flags(element: Mapping[str, Any]) -> dict[str, Any]:
+    """*element* without the keys that say nothing: nulls, and flags at their default.
+
+    The dict-level twin of :meth:`Element.compact`, for the projection layer — which operates
+    on payload dicts and has no model instance to ask. Both consult :data:`FLAG_DEFAULTS`, and
+    ``tests/test_observation_payload_is_slim.py`` pins them to each other so they cannot drift.
+
+    One exception, and it is the whole reason this is a function rather than a comprehension:
+    ``checked: false`` on a **checkable** node is the reading of a switch, not a default.
+    Omitting it turns an off toggle into something indistinguishable from a plain button — the
+    same trap :meth:`Element._compact_state` documents.
+
+    Membership is tested by identity, not equality: ``0 == False`` in Python, so an equality
+    test would silently delete a legitimate ``duration_ms``-style zero if this ever grew past
+    booleans.
+    """
+    checkable = bool(element.get("checkable"))
+    out: dict[str, Any] = {}
+    for key, value in element.items():
+        if value is None:
+            continue
+        if key == "checked":
+            if not checkable and not value:
+                continue
+        elif value is FLAG_DEFAULTS.get(key):
+            continue
+        out[key] = value
+    return out
 
 
 class Element(BaseModel):

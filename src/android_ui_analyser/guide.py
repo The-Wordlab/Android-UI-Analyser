@@ -432,6 +432,19 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "widen it with `--observe-fields all` or any field list. You therefore never need the "
         "`--no-observe` + `analyze` pair to get a cheap read — that pair costs two round trips "
         "for one screen. "
+        "**Reading it: an absent key was at its default, so absence is information, not a gap.** "
+        "On a `hierarchy` element an absent flag means `false`; on a vision element "
+        "(`source: ocr|detection|grounding`) it means *unknown* — `source` is how you tell "
+        "which, and an absent `enabled` means `true`. The one flag never dropped is `checked` "
+        "on a checkable node: an off switch always shows `checked: false`, so a control with no "
+        "`checked` at all is not a toggle. Absent **rows** are the status bar, the keyboard and "
+        "pure wrapper layouts; an unlabeled control is still listed whenever you can act on it. "
+        "The observation's `meta` is trimmed to `changed` — what moved, where you are, and "
+        "anything you must not miss. Research tasks, deeplink suggestions, capture hints, the "
+        "provider list and locale are **not** in it: run `analyze` when you want them, or widen "
+        "one dial at a time with `--observe-meta all` / `--observe-fields all` "
+        "(MCP: `observe_meta`, `observe_fields`). They are independent — asking for every "
+        "column does not ask for every hint. "
         "**That settle can only wait ~1.1s (max 1.6s).** A slower screen makes the action "
         "report `nothing changed` for a tap that did land, and `stale_risk` appears in "
         '`detail`. That is *not* evidence the tap missed: it cannot tell "no effect" from '
@@ -970,6 +983,22 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "[--json]` — bracket API/analytics verification around an action",
     ),
     (
+        "app_logs",
+        "every observed action folds what the APP itself logged during that action into "
+        "`app_logs` — its own process only, priorities `DWEF`, at most 20 lines and 5 per tag, "
+        "each line bounded. The screen is the app's conclusion; this is its reasoning, which is "
+        "how you catch the tap that landed on a plausible-looking screen while the app quietly "
+        "logged the refusal. Absent when the app said nothing, which is most actions, so a "
+        "quiet step costs nothing. `I` and `V` are excluded on purpose: it is a level SET, not "
+        "a floor — measured on a real app, every `I` line in a launch window came from an HTTP "
+        "client, an attribution SDK, or the ART runtime, while `D` is where the app writes its "
+        "own breadcrumbs. Widen with `--app-logs DIWEF` (MCP: `configure app_log_levels`) only "
+        "when you are chasing a library; `F` is always included so a narrow filter can never "
+        "hide a crash. Turn it off with `--no-app-logs` (MCP: `configure app_logs=false`). A "
+        "crash supersedes it: when the app leaves the foreground you get the stronger "
+        "`crash_evidence` block instead, from the same window",
+    ),
+    (
         "suite",
         "`suite run PATH.yaml [--continue]` — AC checklist (has/expect/wait_for) with "
         "per-item pass/fail + summary; exit 8 if any fail",
@@ -1117,22 +1146,6 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "the measured `skew_ms` so drift is visible rather than silently eating your window. "
         "You rarely need to call it after an action: every observed action already folds that "
         "same window into `app_logs` (see below)",
-    ),
-    (
-        "app_logs",
-        "every observed action folds what the APP itself logged during that action into "
-        "`app_logs` — its own process only, priorities `DWEF`, at most 20 lines and 5 per tag, "
-        "each line bounded. The screen is the app's conclusion; this is its reasoning, which is "
-        "how you catch the tap that landed on a plausible-looking screen while the app quietly "
-        "logged the refusal. Absent when the app said nothing, which is most actions, so a "
-        "quiet step costs nothing. `I` and `V` are excluded on purpose: it is a level SET, not "
-        "a floor — measured on a real app, every `I` line in a launch window came from an HTTP "
-        "client, an attribution SDK, or the ART runtime, while `D` is where the app writes its "
-        "own breadcrumbs. Widen with `--app-logs DIWEF` (MCP: `configure app_log_levels`) only "
-        "when you are chasing a library; `F` is always included so a narrow filter can never "
-        "hide a crash. Turn it off with `--no-app-logs` (MCP: `configure app_logs=false`). A "
-        "crash supersedes it: when the app leaves the foreground you get the stronger "
-        "`crash_evidence` block instead, from the same window",
     ),
     (
         "suite",
@@ -1842,8 +1855,7 @@ def render_skill_markdown() -> str:
     """Compact triggered instructions; deeper guidance stays in the CLI manual."""
     return """# Android UI Analyser
 
-Use `aua` for Android UI. Act on returned IDs or stable selectors, never pixels;
-do not substitute raw `adb`.
+Use `aua` for Android UI: act on returned IDs or stable selectors, never pixels, never raw `adb`.
 
 ## Operating loop
 
@@ -1855,9 +1867,10 @@ do not substitute raw `adb`.
 2. Prefer navigation in this order: verified `goto`, matching saved `flow`, proven deeplink,
    then a manual analyzed action. Preview risky routes; goal text never authorizes destructive,
    external, settings, data, payment, send, or sign-out effects.
-3. Use analyzed actions and consume their returned `observation`; integer ids belong only to
-   that frame. On dynamic screens prefer `--rid` or `stable_key`, resolving it again after a
-   transition instead of replaying an old numeric id.
+3. Use analyzed actions and consume their returned `observation`; its integer ids belong to
+   that frame only, so on dynamic screens prefer `--rid` or `stable_key` and resolve it again
+   after a transition. An absent key was at its **default, not unknown**; widen with
+   `--observe-fields all`/`--observe-meta all`.
 4. Fold arrival into the action with a positive predicate such as
    `--until 'rid:resultCard,!text:Loading'`. On `settled-unmet`, use its fresh destination and
    corrected predicate; never repeat the action. Use `await-and-analyze` for absence-only checks
@@ -1882,10 +1895,10 @@ on the same package/context/frame.
 ## Device and safety rules
 
 - First call `session start`; never list/start devices, set `AUA_OWNER`, or acquire a lease.
-  It scans leased targets, frees dead owners, and selects/provisions a capable match. One device
+  It scans leases, frees dead owners, and provisions a capable match. One device
   stays implicit: omit `--serial`; switching or transfer is explicit.
 - Use `--no-start-emulator` only when provisioning is forbidden; use `--headed` only when
-  visibility is required. For voice input add `--audio`, then use `mic inject` or macOS `mic speak`;
+  visibility is required. For voice add `--audio`, then `mic inject` or macOS `mic speak`;
   never repeat late-delivery or uncertain-toggle errors.
 - Use `aua network offline --verify`; session cleanup restores it. Use guarded `aua db` for
   debuggable SQLite.
@@ -1901,7 +1914,7 @@ on the same package/context/frame.
 
 - Run `aua guide --brief` for the selector, wait, navigation, map, flow, lease, and recovery
   field guide.
-- Run `aua capabilities --goal "<goal>"` for structured discovery without reading the manual.
+- Run `aua capabilities --goal "<goal>"` for structured discovery.
 - Run `aua guide` for command/flag tables, databases, proxy/mock, capture, maps,
   flow authoring, `aua helper`, troubleshooting, schema, and exit-code reference.
 """

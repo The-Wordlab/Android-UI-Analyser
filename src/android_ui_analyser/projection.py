@@ -21,12 +21,13 @@ from __future__ import annotations
 
 import difflib
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from types import MappingProxyType
 from typing import Any
 
 from .errors import UsageError
-from .schema import Meta, OutputFormat
+from .schema import Meta, OutputFormat, drop_default_flags
 
 # Short agent-facing names → the canonical element key they read. Two spellings are
 # deliberate: `rid` yields the *tail* after "/" (what a human recognises), `resource_id`
@@ -104,6 +105,52 @@ def resolve_field_name(name: str) -> str:
 # What `--format tsv` shows when no `--fields` was given: who am I, what does it say,
 # what is its selector, can I tap it.
 TSV_DEFAULT_FIELDS: tuple[str, ...] = ("id", "text", "rid", "clickable")
+
+# Named `meta` budgets for a folded post-action observation. The full `meta` is sized for a
+# question a caller *asked* — it carries research tasks, deeplink suggestions, a capture hint,
+# the provider list. An action asks a much narrower question, and measured on one real settings
+# screen the full block was 299 of the observation's 919 tokens: 16 keys empty, and three
+# (`research_tasks`, `suggested_deeplinks`, `capture_hint`) alone accounting for over half of
+# what was left. Paying that on every tap is what pushes an agent into calling `analyze`
+# separately, which is the cost this whole path exists to avoid.
+#
+# `changed` therefore answers only the questions an *action* raises: did the screen change,
+# where am I now, which device, and is there anything I am not allowed to miss. `ask`,
+# `goal_progress` and `observation_contract` are protocol obligations rather than information,
+# so they are never budget-trimmed; `lossy_*` warns that the text may be wrong, which a caller
+# must see before believing a label it is about to assert on. `raw_image` stays because it is
+# the escape hatch from the whole element view — the frame an agent can actually look at.
+OBSERVATION_META_PRESETS: Mapping[str, frozenset[str]] = MappingProxyType(
+    {
+        "changed": frozenset(
+            {
+                # did anything change, and can I trust what I am looking at
+                "unchanged",
+                "fingerprint",
+                "element_diff",
+                "stale_risk",
+                "lossy_text",
+                "lossy_hint",
+                # where am I, on what
+                "known_screen",
+                "device_serial",
+                "tier_used",
+                "via",
+                "duration_ms",
+                # the escape hatch from the element view
+                "raw_image",
+                # protocol obligations — never trimmed for budget
+                "ask",
+                "goal_progress",
+                "observation_contract",
+                # shortcuts worth knowing the moment they exist; empty (and free) otherwise
+                "suggested_gotos",
+                "flows",
+                "map_hint",
+            }
+        ),
+    }
+)
 
 # Packages whose resource-ids are never app content. `android:` is deliberately absent —
 # `android:id/button1` is a dialog's OK button and `android:id/content` the app's own root.
@@ -227,6 +274,12 @@ class Projection:
     meta_keys: tuple[str, ...] | None = None
     no_meta: bool = False
     tsv: bool = False
+    # Omit every key that carries nothing — a null, an empty list, a flag at its default —
+    # whatever `--format` asked for. Set only for the folded observation, whose contract is
+    # "the cheapest read of the new screen"; `analyze` keeps its byte-for-byte output so a
+    # caller that wants the full shape still has one call that gives it. See
+    # :func:`~.schema.drop_default_flags` for the one flag this must never drop.
+    drop_defaults: bool = False
     _explicit: bool = field(default=False, repr=False)
 
     # -- construction ------------------------------------------------------
@@ -306,27 +359,71 @@ class Projection:
 
     @classmethod
     def for_observation(
-        cls, spec: str | None, *, fmt: OutputFormat | str = OutputFormat.json
+        cls,
+        spec: str | None,
+        *,
+        meta: str | None = None,
+        fmt: OutputFormat | str = OutputFormat.json,
     ) -> Projection | None:
         """The view applied to a folded post-action ``observation``; ``None`` means "don't touch".
 
-        ``spec`` of ``"all"`` (or empty) returns ``None`` so the full dump is emitted verbatim.
-        Anything else is a field list, filtered to the app's own labelled nodes — the point is
-        that the *default* observation is cheap enough that no caller needs ``--no-observe``.
+        Two independent dials, because they answer different questions and a caller needs one
+        without the other: *which columns* per element (``spec``) and *which* ``meta`` *keys*
+        (``meta``, a name from :data:`OBSERVATION_META_PRESETS` or a comma-separated key list).
+        Either at ``"all"`` opts that dial out; only both at ``"all"`` returns ``None`` and
+        emits the payload verbatim. Wiring them together was the earlier mistake — asking for
+        every column silently re-added every `meta` key too, so the cheap dial could not be
+        used at the one moment a caller wanted the full element shape.
+
+        Rows are filtered to the app's own nodes: no status bar, no keyboard, no pure wrapper
+        layouts, and nothing unlabelled *unless it can be acted on* — an unnamed switch is
+        exactly the row a caller needs next, so ``keep_actionable`` overrides ``nonempty``.
+        The whole point is that the default observation is cheap enough that no caller needs
+        ``--no-observe`` and reaches for a separate ``analyze`` instead.
         """
-        if spec is None:
+        if spec is None and meta is None:
             return None
-        cleaned = spec.strip()
-        if not cleaned or cleaned.lower() == "all":
+        fields = (spec or "all").strip() or "all"
+        meta_spec = (meta or "all").strip() or "all"
+        fields_all = fields.lower() == "all"
+        meta_all = meta_spec.lower() == "all"
+        if fields_all and meta_all:
             return None
         parsed = cls.parse(
             fmt=fmt,
-            fields=cleaned,
+            fields=None if fields_all else fields,
             nonempty=True,
             no_system=True,
             no_ime=True,
+            no_wrappers=True,
         )
-        return replace(parsed, keep_actionable=True)
+        return replace(
+            parsed,
+            keep_actionable=True,
+            drop_defaults=True,
+            meta_keys=None if meta_all else cls._parse_observation_meta(meta_spec),
+        )
+
+    @staticmethod
+    def _parse_observation_meta(raw: str) -> tuple[str, ...]:
+        """A preset name from :data:`OBSERVATION_META_PRESETS`, or an explicit key list."""
+        preset = OBSERVATION_META_PRESETS.get(raw.strip().lower())
+        if preset is not None:
+            # Sorted so the emitted key order is deterministic across runs — a payload that
+            # reshuffles itself defeats both diffing and prompt caching.
+            return tuple(sorted(preset))
+        names = _split_csv(raw)
+        valid = set(Meta.model_fields)
+        unknown = [n for n in names if n not in valid]
+        if unknown:
+            raise UsageError(
+                f"unknown observation meta key(s): {', '.join(unknown)}",
+                hint=(
+                    f"Use a preset ({', '.join(sorted(OBSERVATION_META_PRESETS))}), 'all', "
+                    f"or any of: {', '.join(sorted(valid))}."
+                ),
+            )
+        return tuple(names)
 
     @staticmethod
     def _parse_fields(raw: str | None) -> tuple[str, ...]:
@@ -430,14 +527,28 @@ class Projection:
 
     def apply(self, payload: dict[str, Any], *, fmt: OutputFormat | str = OutputFormat.json) -> dict:
         """The payload as a JSON view: filtered rows, projected columns, trimmed meta."""
-        drop_null = OutputFormat(fmt) is OutputFormat.compact
+        drop_null = self.drop_defaults or OutputFormat(fmt) is OutputFormat.compact
         out = dict(payload)
-        out["elements"] = [self.project(e, drop_null=drop_null) for e in self.select(payload)]
+        rows = self.select(payload)
+        if self.drop_defaults:
+            # Default-trim the *whole* element, then let the columns select — never the reverse.
+            # `checked: false` survives only on a checkable node, and `checkable` is not in the
+            # default column set: trimming a projected row would look at a dict with no
+            # `checkable` key, conclude the node is not checkable, and delete the one field that
+            # makes an off switch readable. Order is the fix, not a longer column list.
+            rows = [drop_default_flags(row) for row in rows]
+        out["elements"] = [self.project(row, drop_null=drop_null) for row in rows]
+        screen = payload.get("screen")
+        if self.drop_defaults and isinstance(screen, dict):
+            out["screen"] = {k: v for k, v in screen.items() if v is not None}
         out["meta"] = self._meta(payload.get("meta") or {})
         if self.no_meta:
             out.pop("meta", None)
         elif drop_null:
-            out["meta"] = {k: v for k, v in out["meta"].items() if v not in (None, [])}
+            strict = self.drop_defaults
+            out["meta"] = {
+                k: v for k, v in out["meta"].items() if not _is_empty(v, strict=strict)
+            }
         return out
 
     def _meta(self, meta: dict[str, Any]) -> dict[str, Any]:
@@ -586,6 +697,23 @@ def _is_scalar_list(value: Any) -> bool:
         and bool(value)
         and all(v is None or isinstance(v, (str, int, float, bool)) for v in value)
     )
+
+
+def _is_empty(value: Any, *, strict: bool = False) -> bool:
+    """A ``meta`` value that carries nothing; ``strict`` also counts ``False`` as nothing.
+
+    Only the observation is strict. ``--format compact`` has emitted ``lossy_text: false`` for
+    as long as it has existed and a consumer may be branching on its presence, whereas the
+    observation's contract is new and states that absence means the default — so the stricter
+    rule applies where it was announced and nowhere else.
+
+    ``False`` is tested by identity: ``0 == False`` in Python, and a ``duration_ms`` of 0 is a
+    real measurement, not an absence. That exact equality trap already cost this file's sibling
+    a bug (see :meth:`~.schema.AnalyzeResult.as_dict`).
+    """
+    if value is None or value == []:
+        return True
+    return strict and value is False
 
 
 def _has_label(element: dict[str, Any]) -> bool:

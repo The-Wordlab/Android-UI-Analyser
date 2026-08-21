@@ -8,8 +8,15 @@ container with no text, no content-desc and no resource-id. The view then showed
 disabled", which is precisely the reading that produced a false FAIL_CRITICAL against the maths
 composer, and precisely what `acting` exists to prevent.
 
-The columns matter for the same reason: `checked`/`enabled` are how "is that switch on" is answered
-without a screenshot. Trimmed away, a caller cannot tell "off" from "not reported".
+The columns matter for the same reason: `checked`/`selected` are how "is that switch on" is
+answered without a screenshot. Trimmed away, a caller cannot tell "off" from "not reported".
+
+`enabled` answers the same question by the opposite route. It is a plain bool the a11y tree
+always reports, so `true` is the overwhelming majority and says nothing, while `false` is the
+whole message. The observation therefore omits `enabled: true` and **always** emits
+`enabled: false` — absence means enabled, and a control you must not tap is never silent. That
+is a stronger guarantee than presence was: the old view spent a key on every row to state the
+default, and still had no test proving a disabled control was visible at all.
 """
 
 from __future__ import annotations
@@ -37,6 +44,10 @@ def _screen() -> AnalyzeResult:
             Element(id=4, type="Tab", bounds=[40, 1000, 600, 1080], center=[320, 1040],
                     resource_id="com.example.app:id/catalogTab", selected=True,
                     clickable=True, enabled=True, window="app"),
+            # The control a caller must not tap. Its `enabled: false` is the whole payload.
+            Element(id=5, type="Button", bounds=[40, 1100, 600, 1180], center=[320, 1140],
+                    resource_id="com.example.app:id/submitButton", text="Submit",
+                    clickable=True, enabled=False, window="app"),
             # System chrome: still worth dropping — that is where the cost win comes from.
             Element(id=0, type="FrameLayout", bounds=[0, 0, 1080, 74], center=[540, 37],
                     resource_id="com.android.systemui:id/status_bar", window="system"),
@@ -65,9 +76,15 @@ def test_system_chrome_is_still_dropped() -> None:
 def test_state_is_judgeable_from_the_observation() -> None:
     switch = next(r for r in _rows(Config().output.observation_fields) if r["id"] == 3)
     assert switch.get("checked") is True, "'is that switch on' must be answerable without a screenshot"
-    assert switch.get("enabled") is True, "and enabled must not be confused with absent"
     tab = next(r for r in _rows(Config().output.observation_fields) if r["id"] == 4)
     assert tab.get("selected") is True, "the active tab must be visible in the default view"
+
+
+def test_a_disabled_control_says_so_and_an_enabled_one_stays_silent() -> None:
+    """`enabled` earns a key only when it is `false`; absence is the documented default."""
+    rows = {r["id"]: r for r in _rows(Config().output.observation_fields)}
+    assert rows[5]["enabled"] is False, "a control you must not tap is never silent about it"
+    assert "enabled" not in rows[3], "'enabled: true' restates the default on every single row"
 
 
 def test_all_restores_the_full_dump() -> None:

@@ -301,6 +301,17 @@ class OutputCfg(BaseModel):
     # one unfilterable call was dearer than two targeted ones. The default path has to be the
     # cheap path, or agents will keep routing around it.
     observation_fields: str = "id,text,desc,rid,clickable,enabled,checked,selected"
+    # `meta` keys kept in that observation: a preset name from
+    # `projection.OBSERVATION_META_PRESETS`, `"all"`, or an explicit comma-separated list.
+    #
+    # The second half of the same argument. Trimming the element rows left the full `meta`
+    # block riding along on every action — measured at 299 of 919 tokens on one real screen,
+    # 16 of its keys empty and the largest three (`research_tasks`, `suggested_deeplinks`,
+    # `capture_hint`) answering a question no action asked. `changed` keeps what an action
+    # does raise: did the screen move, where am I, and anything a caller must not miss.
+    # Deliberately a separate dial from `observation_fields`, because wanting every column is
+    # not the same as wanting every hint, and one knob could not express that.
+    observation_meta: str = "changed"
 
 
 class _ChainCfg(BaseModel):
@@ -927,6 +938,9 @@ routing:
 output:
   format: json            # json | pretty | compact
   annotate: false
+  # The post-action `observation` budget — two independent dials, either accepting "all".
+  observation_fields: id,text,desc,rid,clickable,enabled,checked,selected
+  observation_meta: changed   # changed | all | <comma-separated meta keys>
 
 ocr:
   enabled: true

@@ -155,6 +155,7 @@ class GlobalOpts:
     app_log_levels: str | None = None
     with_image: bool = False
     observe_fields: str | None = None
+    observe_meta: str | None = None
     until: str | None = None
     #: `--answers TASK_ID="value"` pairs, applied before the command runs.
     answers: tuple[str, ...] = ()
@@ -446,7 +447,10 @@ def _run(ctx: typer.Context, fn: Callable[[Engine, OutputFormat], T]) -> T:
         if spec is None:
             spec = getattr(engine.config.output, "observation_fields", None)
         _CLI_OBSERVE_FIELDS_SPEC = spec
-        _OBSERVATION_VIEW = Projection.for_observation(spec, fmt=cfg_fmt)
+        meta_spec = opts.observe_meta
+        if meta_spec is None:
+            meta_spec = getattr(engine.config.output, "observation_meta", None)
+        _OBSERVATION_VIEW = Projection.for_observation(spec, meta=meta_spec, fmt=cfg_fmt)
         _ENGINE = engine
         _EXPECTED_ERROR_CODE = opts.expect_error
         _ANNOTATION_WARNINGS = []
@@ -2206,6 +2210,15 @@ def main(
         help="Columns kept in an action's post-action observation ('all' = full dump). "
         "Defaults to a compact view so you never need --no-observe.",
     ),
+    observe_meta: str | None = typer.Option(
+        None,
+        "--observe-meta",
+        metavar="PRESET|KEYS|all",
+        help="`meta` keys kept in an action's post-action observation: 'changed' (default), "
+        "'all', or a comma-separated list. Independent of --observe-fields: asking for every "
+        "column is not asking for every hint. Research tasks, deeplink suggestions and capture "
+        "hints are not in 'changed' — run `analyze` when you want them.",
+    ),
     until: str | None = typer.Option(
         None,
         "--until",
@@ -2299,6 +2312,7 @@ def main(
         app_log_levels=app_log_levels,
         with_image=with_image,
         observe_fields=observe_fields,
+        observe_meta=observe_meta,
         answers=tuple(answers or ()),
         phases_done=tuple(phase_done or ()),
         expect_error=expect_error,
