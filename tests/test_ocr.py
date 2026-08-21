@@ -9,8 +9,10 @@ Test categories:
 
 from __future__ import annotations
 
+import contextlib
 import io
 import sys
+from collections.abc import Iterator
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -58,35 +60,63 @@ def _make_screen_image(width: int = 300, height: int = 100, text: str = "") -> S
 # ---------------------------------------------------------------------------
 
 
+@contextlib.contextmanager
+def _import_blocked(*names: str) -> Iterator[None]:
+    """Make ``import <name>`` raise ImportError, whatever this host happens to have installed.
+
+    A ``None`` entry in ``sys.modules`` is the documented way to make an import fail, and it is
+    what makes these tests state a fact about the code instead of a fact about the machine.
+    """
+    missing = object()
+    saved = {name: sys.modules.get(name, missing) for name in names}
+    try:
+        for name in names:
+            sys.modules[name] = None  # type: ignore[assignment]
+        yield
+    finally:
+        for name, module in saved.items():
+            if module is missing:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module  # type: ignore[assignment]
+
+
 class TestUnavailableProviders:
-    """paddleocr, tesseract, and easyocr are not installed; verify is_available returns False
-    with a reason that mentions the install extra."""
+    """A missing dependency must be *reported*, with a reason naming the install extra.
+
+    Absence is simulated rather than assumed. These tests used to read the host: they asserted
+    ``ok is False`` against whatever was really installed, so they passed on a plain checkout and
+    failed the moment someone installed the extra — the exact inversion of the rule stated at the
+    top of this file. A suite that goes red because you installed something trains everyone to
+    ignore red just as effectively as one that goes red because you did not.
+    """
 
     def test_paddleocr_unavailable(self) -> None:
-        provider = PaddleOcrProvider()
-        avail = provider.is_available()
+        with _import_blocked("paddleocr"):
+            avail = PaddleOcrProvider().is_available()
         assert avail.ok is False
         # The reason must mention the pip install extra
         assert "paddle" in avail.reason.lower() or "paddleocr" in avail.reason.lower()
 
     def test_tesseract_unavailable(self) -> None:
-        provider = TesseractOcrProvider()
-        avail = provider.is_available()
+        with _import_blocked("pytesseract"):
+            avail = TesseractOcrProvider().is_available()
         assert avail.ok is False
         assert "tesseract" in avail.reason.lower()
 
     def test_easyocr_unavailable(self) -> None:
-        provider = EasyOcrProvider()
-        avail = provider.is_available()
+        with _import_blocked("easyocr"):
+            avail = EasyOcrProvider().is_available()
         assert avail.ok is False
         assert "easyocr" in avail.reason.lower()
 
     def test_unavailable_recognize_returns_empty_list(self) -> None:
         """recognize() must return [] (never raise) when the dep is missing."""
         image = _make_screen_image()
-        assert PaddleOcrProvider().recognize(image) == []
-        assert TesseractOcrProvider().recognize(image) == []
-        assert EasyOcrProvider().recognize(image) == []
+        with _import_blocked("paddleocr", "pytesseract", "easyocr"):
+            assert PaddleOcrProvider().recognize(image) == []
+            assert TesseractOcrProvider().recognize(image) == []
+            assert EasyOcrProvider().recognize(image) == []
 
 
 # ---------------------------------------------------------------------------
