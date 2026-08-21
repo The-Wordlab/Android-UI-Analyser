@@ -469,6 +469,12 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     --border: #2a303c;
     --danger: #ef6b5a;
     --warn: #e0a84a;
+    --wide: 1900px;
+    --tok-key: #7fd3ff;
+    --tok-str: #b7e08a;
+    --tok-num: #f0b26a;
+    --tok-bool: #d59bf6;
+    --tok-dim: #6d7686;
   }
   * { box-sizing: border-box; }
   body {
@@ -492,10 +498,15 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .pill.bad { color: var(--danger); border-color: #7a3a35; }
   .layout {
     display: grid;
-    grid-template-columns: minmax(0, 1.35fr) minmax(300px, 0.9fr);
-    gap: 0.85rem; padding: 0.85rem; max-width: 1600px; margin: 0 auto;
+    /* `auto` sizes the stage column to the frame itself. A fractional column handed the
+       widest part of the page to a portrait emulator - which is what a device is almost
+       all of the time - and left the journal, where the evidence actually is, in the
+       offcut. Rotate the device and the column widens on its own. */
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 0.85rem; padding: 0.85rem; max-width: var(--wide); margin: 0 auto;
+    align-items: start;
   }
-  @media (max-width: 980px) { .layout { grid-template-columns: 1fr; } }
+  @media (max-width: 980px) { .layout { grid-template-columns: minmax(0, 1fr); } }
   .panel {
     background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
     padding: 0.7rem 0.85rem; min-height: 0;
@@ -505,20 +516,59 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     text-transform: uppercase; letter-spacing: 0.07em;
   }
   .stage img {
-    width: 100%; max-height: 68vh; object-fit: contain; background: #000;
-    border-radius: 6px;
+    display: block; height: min(74vh, 880px); width: auto;
+    min-width: 210px; max-width: min(38vw, 470px);
+    object-fit: contain; background: #000; border-radius: 6px;
+  }
+  @media (max-width: 980px) {
+    .stage img { width: 100%; height: auto; max-width: 100%; max-height: 62vh; }
   }
   .meta { font-size: 0.75rem; color: var(--muted); display: flex; gap: 0.9rem; flex-wrap: wrap; margin-top: 0.4rem; }
-  .scroll { overflow: auto; max-height: 68vh; }
+  /* `contain` keeps a wheel gesture inside the panel it started in: without it, hitting
+     the end of the journal scrolled the whole page out from under the reader. */
+  .scroll { overflow: auto; max-height: 68vh; overscroll-behavior: contain; }
   .scroll.sm { max-height: 14rem; }
   .scroll.md { max-height: 18rem; }
+  .panel.journal { display: flex; flex-direction: column; min-width: 0; }
+  .journal-tools, .logcat-tools {
+    display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;
+    margin-bottom: 0.45rem;
+  }
+  .journal-tools h2, .logcat-tools h2 { margin: 0 0.35rem 0 0; }
+  .journal-tools .grow, .logcat-tools .grow { flex: 1 1 8rem; min-width: 0; }
+  .journal-tools .db-button, .logcat-tools .db-button {
+    padding: 0.2rem 0.45rem; font-size: 0.7rem;
+  }
+  .journal-tools .db-input, .logcat-tools .db-input, .logcat-tools .db-select {
+    padding: 0.24rem 0.45rem; font-size: 0.74rem;
+  }
+  .journal-tools .pill, .logcat-tools .pill {
+    display: inline-flex; align-items: center; gap: 0.3rem; cursor: pointer;
+  }
+  #journal-wrap {
+    /* Deterministic anchoring lives in preserveJournalScroll(). The browser's own scroll
+       anchoring would apply a second shift on top of it, so the row being read jumped
+       twice for every event that arrived. `position: relative` makes each row's
+       offsetTop measurable against this viewport, which is what the anchor compares. */
+    overflow-anchor: none; position: relative;
+    height: min(74vh, 880px); max-height: none; overflow: auto;
+    overscroll-behavior: contain; flex: 1 1 auto;
+  }
+  #journal-jump {
+    color: #06130c; background: var(--accent); border: 1px solid var(--accent);
+    border-radius: 999px; padding: 0.16rem 0.6rem; font: 600 0.7rem inherit;
+    cursor: pointer; white-space: nowrap;
+  }
+  #journal li.filtered { display: none; }
   #journal, #marks, #fail-list, #slow { list-style: none; margin: 0; padding: 0; font-size: 0.78rem; }
   #journal li, #marks li, #fail-list li, #slow li {
     padding: 0.4rem 0.35rem; border-bottom: 1px solid var(--border);
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   }
   #journal li.fail { background: rgba(239,107,90,0.08); border-left: 2px solid var(--danger); }
-  #journal .t, #marks .t { color: var(--muted); margin-right: 0.45rem; }
+  #journal .t, #marks .t, #fail-list .t, #slow .t {
+    color: var(--muted); margin-right: 0.45rem;
+  }
   #journal .badge {
     display: inline-block; min-width: 2.4rem; font-size: 0.65rem;
     padding: 0.05rem 0.3rem; border-radius: 4px; margin-right: 0.35rem;
@@ -540,18 +590,36 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     margin: 0 0 0.3rem; color: var(--accent); font: 600 0.68rem ui-sans-serif, system-ui;
     text-transform: uppercase; letter-spacing: 0.06em;
   }
+  #journal .exchange-head { display: flex; align-items: baseline; gap: 0.5rem; }
   #journal .exchange pre {
-    margin: 0; max-height: 28rem; overflow: auto; padding: 0.55rem;
+    /* One scroll surface per panel. A capped, independently scrollable pre nested inside
+       the scrollable journal meant a wheel gesture went to whichever of the two the
+       pointer happened to be over, and reaching the end of a payload stalled dead. */
+    margin: 0; max-height: none; overflow: visible; padding: 0.55rem;
     border-radius: 5px; background: #090b10; color: #cdd2db; font: inherit;
-    font-size: 0.7rem; line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere;
+    font-size: 0.7rem; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere;
     user-select: text;
   }
+  .copy-button {
+    color: var(--muted); background: transparent; border: 1px solid var(--border);
+    border-radius: 5px; padding: 0.04rem 0.36rem; font: inherit; font-size: 0.62rem;
+    cursor: pointer;
+  }
+  .copy-button:hover { color: var(--accent); border-color: var(--accent); }
+  /* --- syntax colour, shared by the payload panes and logcat --- */
+  .tok-key { color: var(--tok-key); }
+  .tok-str { color: var(--tok-str); }
+  .tok-num { color: var(--tok-num); }
+  .tok-bool { color: var(--tok-bool); }
+  .tok-null { color: var(--muted); font-style: italic; }
+  .tok-punc { color: var(--tok-dim); }
   #journal .detail-note { color: var(--muted); font: 0.68rem ui-sans-serif, system-ui; }
   .lower {
-    display: grid; grid-template-columns: 1fr 1fr 1fr;
-    gap: 0.85rem; padding: 0 0.85rem 0.85rem; max-width: 1600px; margin: 0 auto;
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.85rem; padding: 0 0.85rem 0.85rem; max-width: var(--wide); margin: 0 auto;
   }
-  @media (max-width: 1100px) { .lower { grid-template-columns: 1fr; } }
+  .lower.wide { grid-template-columns: minmax(0, 1fr); }
+  @media (max-width: 1100px) { .lower { grid-template-columns: minmax(0, 1fr); } }
   .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; }
   @media (max-width: 600px) { .stats-grid { grid-template-columns: 1fr; } }
   table.cmdstats {
@@ -569,11 +637,36 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   }
   #map-pkg { font-size: 0.78rem; color: var(--muted); margin-bottom: 0.5rem; }
+  .logcat-scroll {
+    /* Logcat is evidence, not a footnote: a whole row of its own, and real height. One
+       third of a three-column strip with `word-break: break-all` chopped identifiers
+       mid-token, so nothing in it could be read or searched. */
+    height: min(46vh, 560px); max-height: none; overflow: auto;
+    overscroll-behavior: contain; overflow-anchor: none;
+    border: 1px solid var(--border); border-radius: 6px; background: #090b10;
+    padding: 0.4rem 0.5rem;
+  }
   #logcat {
     margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.68rem; line-height: 1.35; color: #b8bec8; white-space: pre-wrap;
-    word-break: break-all;
+    font-size: 0.7rem; line-height: 1.5; color: #b8bec8; white-space: pre;
   }
+  #logcat.wrap { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .lc-line { display: block; }
+  .lc-line.err { background: rgba(239,107,90,0.09); }
+  .lc-line.warn { background: rgba(224,168,74,0.07); }
+  .lc-date { color: #5f6b7d; }
+  .lc-time { color: var(--tok-key); }
+  .lc-pid, .lc-tid { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .lc-tag { color: var(--tok-num); font-weight: 600; }
+  .lc-pkg { color: var(--tok-str); }
+  .lc-sep { color: var(--tok-dim); }
+  .lc-msg { color: #c8cedb; }
+  .lc-raw { color: var(--tok-dim); }
+  .lc-lvl { font-weight: 700; }
+  .lc-lvl-v, .lc-lvl-d { color: #7f8794; }
+  .lc-lvl-i { color: var(--accent); }
+  .lc-lvl-w { color: var(--warn); }
+  .lc-lvl-e, .lc-lvl-f, .lc-lvl-a { color: var(--danger); }
   footer { padding: 0.4rem 1.1rem 1rem; color: var(--muted); font-size: 0.72rem; }
   .empty { color: var(--muted); font-size: 0.78rem; padding: 0.4rem 0; }
   /* --- grid mode --- */
@@ -619,7 +712,9 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .proxy-workspace { max-width: 1600px; margin: 0 auto 0.85rem; padding: 0 0.85rem; }
   .proxy-head { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
   .proxy-head h2 { margin-right: auto; }
-  .proxy-grid { display: grid; grid-template-columns: 1.25fr 1fr; gap: 0.85rem; }
+  .proxy-grid {
+    display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 0.85rem;
+  }
   @media (max-width: 1100px) { .proxy-grid { grid-template-columns: 1fr; } }
   .flow-table { width: 100%; border-collapse: collapse; font-size: 0.72rem; }
   .flow-table th {
@@ -635,14 +730,24 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .flow-table .upath {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere;
   }
-  .rule-row {
+  .rule-row { border-top: 1px solid var(--border); font-size: 0.72rem; }
+  .rule-row > summary {
     display: flex; gap: 0.45rem; align-items: baseline; flex-wrap: wrap;
-    padding: 0.3rem 0; border-top: 1px solid var(--border); font-size: 0.72rem;
+    padding: 0.3rem 0; cursor: pointer;
   }
+  .rule-row > summary::marker { color: var(--accent); }
+  .rule-row .db-button { padding: 0.16rem 0.42rem; font-size: 0.68rem; }
   .rule-row .rid {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted);
   }
-  .rule-row .spec { overflow-wrap: anywhere; flex: 1; }
+  .rule-row .spec { overflow-wrap: anywhere; flex: 1 1 8rem; min-width: 0; }
+  #px-rulelist { max-height: min(52vh, 580px); }
+  .rule-body { padding: 0 0 0.55rem; display: grid; gap: 0.4rem; }
+  .rule-body pre {
+    margin: 0; padding: 0.5rem; border-radius: 5px; background: #090b10; color: #cdd2db;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.68rem;
+    line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere;
+  }
   .proxy-form { display: grid; gap: 0.45rem; margin-top: 0.5rem; }
   .proxy-form .row { display: flex; gap: 0.45rem; flex-wrap: wrap; align-items: end; }
   .proxy-note { color: var(--muted); font-size: 0.72rem; line-height: 1.45; margin: 0 0 0.5rem; }
@@ -735,8 +840,17 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       <span id="fps">poll —</span>
     </div>
   </section>
-  <aside class="panel">
-    <h2>Agent I/O journal</h2>
+  <aside class="panel journal">
+    <div class="journal-tools">
+      <h2>Agent I/O journal</h2>
+      <input id="journal-filter" class="db-input grow" placeholder="filter cmd, args, error…"
+             autocomplete="off" spellcheck="false"/>
+      <label class="pill"><input id="journal-fails-only" type="checkbox"/>fails only</label>
+      <button id="journal-expand" class="db-button" type="button">expand</button>
+      <button id="journal-collapse" class="db-button" type="button">collapse</button>
+      <span id="journal-shown" class="db-status">—</span>
+      <button id="journal-jump" class="hidden" type="button">newest ↑</button>
+    </div>
     <div class="scroll" id="journal-wrap">
       <ul id="journal"><li class="empty">waiting for events…</li></ul>
     </div>
@@ -767,14 +881,30 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     <ul id="map-routes" class="scroll sm"><li class="empty">—</li></ul>
   </section>
   <section class="panel">
-    <h2>Logcat</h2>
-    <pre id="logcat" class="scroll md">…</pre>
-  </section>
-</div>
-<div class="lower" style="grid-template-columns:1fr">
-  <section class="panel">
     <h2>Capture marks</h2>
     <ul id="marks" class="scroll sm"><li class="empty">—</li></ul>
+  </section>
+</div>
+<div class="lower wide">
+  <section class="panel">
+    <div class="logcat-tools">
+      <h2>Logcat</h2>
+      <input id="logcat-filter" class="db-input grow" placeholder="filter tag or message…"
+             autocomplete="off" spellcheck="false"/>
+      <label class="pill">min level
+        <select id="logcat-level" class="db-select" style="min-width:4.5rem">
+          <option value="V">V</option>
+          <option value="D">D</option>
+          <option value="I">I</option>
+          <option value="W">W</option>
+          <option value="E">E</option>
+        </select>
+      </label>
+      <label class="pill"><input id="logcat-wrap" type="checkbox"/>wrap</label>
+      <label class="pill"><input id="logcat-follow" type="checkbox" checked/>follow</label>
+      <span id="logcat-shown" class="db-status">—</span>
+    </div>
+    <div class="logcat-scroll" id="logcat-view"><pre id="logcat">…</pre></div>
   </section>
 </div>
 <div class="proxy-workspace">
@@ -814,7 +944,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
           <h3 style="margin-right:auto">Armed rules</h3>
           <button id="px-clear" class="db-button">Clear all</button>
         </div>
-        <div id="px-rulelist" class="scroll sm"><div class="empty">No rules armed.</div></div>
+        <div id="px-rulelist" class="scroll md"><div class="empty">No rules armed.</div></div>
         <div class="proxy-form">
           <div class="row">
             <label class="db-field" style="width:6.5rem">Action
@@ -844,7 +974,8 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
           <label class="db-field">Body (whole replacement response; JSON or raw)
             <textarea id="px-body" class="db-sql" style="min-height:4rem" spellcheck="false"></textarea>
           </label>
-          <label class="db-field">Set JSON fields (rewrite only) — one <code>path=value</code> per line
+          <label class="db-field">
+            <span>Set JSON fields (rewrite only) — one <code>path=value</code> per line</span>
             <textarea id="px-set" class="db-sql" style="min-height:3rem" spellcheck="false" placeholder="items[0].title=&quot;patched&quot;"></textarea>
           </label>
           <div class="row">
@@ -934,6 +1065,96 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 </div>
 
 <script nonce="__DATABASE_TOKEN__">
+/* Pure tokenisers, deliberately kept free of the DOM and in a script block of their own
+   so `tests/test_dashboard_layout_and_syntax.py` can run them under node and assert on
+   the tokens themselves. Colouring is worth nothing if the split is wrong: a colon
+   inside a string value must not promote it to a key, and no token may lose a byte. */
+function jsonTokens(text) {
+  const src = text == null ? '' : String(text);
+  const out = [];
+  const push = (kind, value) => {
+    if (!value) return;
+    const last = out[out.length - 1];
+    if (last && last[0] === kind) last[1] += value;
+    else out.push([kind, value]);
+  };
+  let i = 0;
+  while (i < src.length) {
+    const ch = src[i];
+    if (ch === '"') {
+      let j = i + 1;
+      while (j < src.length) {
+        if (src[j] === '\\\\') { j += 2; continue; }
+        if (src[j] === '"') { j += 1; break; }
+        j += 1;
+      }
+      // A key is a string whose next non-blank character is a colon. Scanning forward
+      // from the closing quote is what keeps `"a:b"` a value and not a key.
+      let k = j;
+      while (k < src.length && (src[k] === ' ' || src[k] === '\\t')) k += 1;
+      push(src[k] === ':' ? 'key' : 'str', src.slice(i, j));
+      i = j;
+      continue;
+    }
+    const digit = ch >= '0' && ch <= '9';
+    const signed = ch === '-' && src[i + 1] >= '0' && src[i + 1] <= '9';
+    if (digit || signed) {
+      let j = i + 1;
+      while (j < src.length && '0123456789.eE+-'.indexOf(src[j]) >= 0) j += 1;
+      push('num', src.slice(i, j));
+      i = j;
+      continue;
+    }
+    if (src.startsWith('true', i) || src.startsWith('false', i)) {
+      const word = src.startsWith('true', i) ? 'true' : 'false';
+      push('bool', word);
+      i += word.length;
+      continue;
+    }
+    if (src.startsWith('null', i)) { push('nul', 'null'); i += 4; continue; }
+    if ('{}[],:'.indexOf(ch) >= 0) { push('punc', ch); i += 1; continue; }
+    push('plain', ch);
+    i += 1;
+  }
+  return out;
+}
+
+const LOGCAT_THREADTIME = new RegExp(
+  '^(\\\\d\\\\d-\\\\d\\\\d\\\\s+)?' +          // optional date, absent from some buffers
+  '(\\\\d\\\\d:\\\\d\\\\d:\\\\d\\\\d\\\\.\\\\d+)' +   // time
+  '(\\\\s+)(\\\\d+)(\\\\s+)(\\\\d+)(\\\\s+)' +  // pid, tid
+  '([VDIWEFAS])(\\\\s+)' +               // level
+  '([^:]*?)(\\\\s*:\\\\s?)' +            // tag, then the separator
+  '([\\\\s\\\\S]*)$'                     // message
+);
+const LOGCAT_PACKAGE = /[a-z][a-z0-9_]*(?:\\.[a-z0-9_]+){2,}/g;
+
+function logcatTokens(line) {
+  const src = line == null ? '' : String(line);
+  const m = LOGCAT_THREADTIME.exec(src);
+  if (!m) return [['raw', src]];
+  const out = [];
+  if (m[1]) out.push(['date', m[1]]);
+  out.push(['time', m[2]], ['sp', m[3]], ['pid', m[4]], ['sp', m[5]]);
+  out.push(['tid', m[6]], ['sp', m[7]], ['lvl', m[8]], ['sp', m[9]]);
+  out.push(['tag', m[10]], ['sep', m[11]]);
+  // Package names are the thing you actually scan a log for, so they get their own
+  // colour instead of disappearing into the message.
+  const message = m[12];
+  let at = 0;
+  LOGCAT_PACKAGE.lastIndex = 0;
+  let hit = LOGCAT_PACKAGE.exec(message);
+  while (hit) {
+    if (hit.index > at) out.push(['msg', message.slice(at, hit.index)]);
+    out.push(['pkg', hit[0]]);
+    at = hit.index + hit[0].length;
+    hit = LOGCAT_PACKAGE.exec(message);
+  }
+  if (at < message.length) out.push(['msg', message.slice(at)]);
+  return out;
+}
+</script>
+<script nonce="__DATABASE_TOKEN__">
 const POLL_MS = __POLL_MS__;
 const MAP_MS = Math.max(POLL_MS * 4, 2000);
 const BOOT_MODE = __MODE_JSON__;
@@ -969,6 +1190,15 @@ if (isGrid) {
 
 const frame = document.getElementById('frame');
 const journalEl = document.getElementById('journal');
+const journalWrap = document.getElementById('journal-wrap');
+const journalJump = document.getElementById('journal-jump');
+const journalFilter = document.getElementById('journal-filter');
+const journalFailsOnly = document.getElementById('journal-fails-only');
+const journalShown = document.getElementById('journal-shown');
+// Pinned to the newest row, or parked somewhere in the backlog? Everything the journal
+// does about scrolling hangs off this one answer.
+let journalFollow = true;
+let journalPending = 0;
 let lastSrc = '';
 let sinceMs = 0;
 const seenKeys = new Set();
@@ -1014,6 +1244,81 @@ function fmtTime(ms) {
   if (!ms) return '';
   return new Date(ms).toLocaleTimeString();
 }
+function copyText(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text).then(() => true, () => false);
+  }
+  return Promise.resolve(false);
+}
+function highlightJson(pre, text) {
+  const source = text === undefined ? pre.textContent : (text == null ? '' : String(text));
+  pre.textContent = '';
+  const frag = document.createDocumentFragment();
+  jsonTokens(source).forEach(pair => {
+    const kind = pair[0];
+    if (kind === 'plain') {
+      frag.appendChild(document.createTextNode(pair[1]));
+      return;
+    }
+    const span = document.createElement('span');
+    span.className = 'tok-' + (kind === 'nul' ? 'null' : kind);
+    span.textContent = pair[1];
+    frag.appendChild(span);
+  });
+  pre.appendChild(frag);
+}
+// The row the reader is actually looking at. Prepending above it, or an expanded payload
+// growing above it, both move it by a measurable amount - and that amount is exactly the
+// correction the viewport needs.
+function journalAnchor() {
+  const top = journalWrap.scrollTop;
+  const rows = journalEl.children;
+  for (let i = 0; i < rows.length; i += 1) {
+    if (rows[i].offsetTop + rows[i].offsetHeight > top + 1) return rows[i];
+  }
+  return null;
+}
+function preserveJournalScroll(mutate) {
+  const anchor = journalAnchor();
+  const anchorTop = anchor ? anchor.offsetTop : 0;
+  const top = journalWrap.scrollTop;
+  const result = mutate();
+  if (journalFollow) {
+    journalWrap.scrollTop = 0;
+    return result;
+  }
+  if (!anchor || !anchor.isConnected) return result;
+  const shift = anchor.offsetTop - anchorTop;
+  if (shift) journalWrap.scrollTop = top + shift;
+  return result;
+}
+function updateJournalFollow() {
+  if (journalFollow || !journalPending) {
+    journalJump.classList.add('hidden');
+  } else {
+    journalJump.classList.remove('hidden');
+    journalJump.textContent = journalPending + ' new \u2191';
+  }
+}
+function applyJournalFilter() {
+  const needle = journalFilter.value.trim().toLowerCase();
+  const failsOnly = journalFailsOnly.checked;
+  const rows = journalEl.children;
+  let shown = 0;
+  let total = 0;
+  for (let i = 0; i < rows.length; i += 1) {
+    const li = rows[i];
+    if (li.classList.contains('empty')) continue;
+    total += 1;
+    const hidden = (failsOnly && !li.classList.contains('fail')) ||
+      (needle !== '' && (li.dataset.search || '').indexOf(needle) < 0);
+    li.classList.toggle('filtered', hidden);
+    if (!hidden) shown += 1;
+  }
+  journalShown.textContent = total === 0
+    ? '—'
+    : (shown === total ? (total + ' events') : (shown + ' / ' + total + ' events'));
+}
 function argsSummary(args) {
   if (!args || typeof args !== 'object') return '';
   const parts = [];
@@ -1051,31 +1356,55 @@ function prettyJson(value) {
   try { return JSON.stringify(value, null, 2); }
   catch (error) { return String(value); }
 }
+function payloadHead(title, text) {
+  const head = document.createElement('div');
+  head.className = 'exchange-head';
+  const heading = document.createElement('h3');
+  heading.textContent = title;
+  const copy = document.createElement('button');
+  copy.type = 'button';
+  copy.className = 'copy-button';
+  copy.textContent = 'copy';
+  copy.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    copyText(text).then(ok => { copy.textContent = ok ? 'copied' : 'copy failed'; });
+  });
+  head.append(heading, copy);
+  return head;
+}
 function renderExchange(panel, exchange, note) {
-  panel.textContent = '';
-  const requestSection = document.createElement('section');
-  requestSection.className = 'exchange-section';
-  const requestHeading = document.createElement('h3');
-  requestHeading.textContent = 'Agent request';
-  const requestPayload = document.createElement('pre');
-  requestPayload.className = 'request-payload';
-  requestPayload.textContent = prettyJson(exchange.request);
-  requestSection.append(requestHeading, requestPayload);
-  const responseSection = document.createElement('section');
-  responseSection.className = 'exchange-section';
-  const responseHeading = document.createElement('h3');
-  responseHeading.textContent = 'AUA response';
-  const responsePayload = document.createElement('pre');
-  responsePayload.className = 'response-payload';
-  responsePayload.textContent = prettyJson(exchange.response);
-  responseSection.append(responseHeading, responsePayload);
-  panel.append(requestSection, responseSection);
-  if (note) {
-    const noteElement = document.createElement('div');
-    noteElement.className = 'detail-note';
-    noteElement.textContent = note;
-    panel.appendChild(noteElement);
-  }
+  const requestText = prettyJson(exchange.request);
+  const responseText = prettyJson(exchange.response);
+  // Every poll re-renders open payloads. Re-rendering byte-identical content still
+  // resized the row and dragged the viewport, so an unchanged exchange is left alone.
+  const signature = JSON.stringify([requestText, responseText, note || '']);
+  if (panel.dataset.signature === signature) return;
+  preserveJournalScroll(() => {
+    panel.dataset.signature = signature;
+    panel.textContent = '';
+    const requestSection = document.createElement('section');
+    requestSection.className = 'exchange-section';
+    const requestPayload = document.createElement('pre');
+    requestPayload.className = 'request-payload';
+    requestPayload.textContent = requestText;
+    highlightJson(requestPayload);
+    requestSection.append(payloadHead('Agent request', requestText), requestPayload);
+    const responseSection = document.createElement('section');
+    responseSection.className = 'exchange-section';
+    const responsePayload = document.createElement('pre');
+    responsePayload.className = 'response-payload';
+    responsePayload.textContent = responseText;
+    highlightJson(responsePayload);
+    responseSection.append(payloadHead('AUA response', responseText), responsePayload);
+    panel.append(requestSection, responseSection);
+    if (note) {
+      const noteElement = document.createElement('div');
+      noteElement.className = 'detail-note';
+      noteElement.textContent = note;
+      panel.appendChild(noteElement);
+    }
+  });
 }
 async function loadEventExchange(e, panel, showLoading = true) {
   if (!e.detail_id) {
@@ -1086,7 +1415,10 @@ async function loadEventExchange(e, panel, showLoading = true) {
     );
     return;
   }
-  if (showLoading) panel.textContent = 'Loading full request and response…';
+  if (showLoading) {
+    panel.dataset.signature = '';
+    panel.textContent = 'Loading full request and response…';
+  }
   try {
     const response = await fetch('/api/event' + qSerial({detail_id: e.detail_id}), {
       cache: 'no-store',
@@ -1124,12 +1456,11 @@ function loadEventDetails(details, showLoading = true) {
     if (refreshPending && details.open) return loadEventDetails(details, false);
   });
 }
-function prependEvent(e) {
-  const key = e.detail_id || ((e.ts_ms || 0) + ':' + (e.cmd || '') + ':' + (e.source || '') + ':' + (e.pid || ''));
-  if (seenKeys.has(key)) return;
-  seenKeys.add(key);
-  const empty = journalEl.querySelector('.empty');
-  if (empty) empty.remove();
+function eventKey(e) {
+  return e.detail_id ||
+    ((e.ts_ms || 0) + ':' + (e.cmd || '') + ':' + (e.source || '') + ':' + (e.pid || ''));
+}
+function buildEventRow(e) {
   const li = document.createElement('li');
   const ok = e.ok !== false;
   li.className = ok ? '' : 'fail';
@@ -1140,21 +1471,88 @@ function prependEvent(e) {
   addEventText(summary, 'badge ' + (ok ? 'ok' : 'fail'), ok ? 'ok' : 'fail');
   addEventText(summary, 'cmd', e.cmd || '?');
   summary.appendChild(document.createTextNode(' '));
-  addEventText(summary, 'args', argsSummary(e.args));
+  const args = argsSummary(e.args);
+  addEventText(summary, 'args', args);
   if (e.duration_ms != null) addEventText(summary, 'dur', e.duration_ms + 'ms');
-  if (!ok && e.error) addEventText(summary, 'err', errText(e.error));
+  const failure = ok ? '' : errText(e.error);
+  if (!ok && e.error) addEventText(summary, 'err', failure);
   const exchange = document.createElement('div');
   exchange.className = 'exchange';
   exchange.textContent = 'Expand to load the full request and response.';
   details.journalEvent = e;
+  // The `toggle` event fires after the row has already grown or shrunk, so anchoring from
+  // there is a frame too late. Owning the click means the measurement brackets the actual
+  // layout change - which matters most on collapse, where the row above the reader
+  // disappears and nothing else would pull the viewport back.
+  summary.addEventListener('click', event => {
+    if (event.target.closest('button')) return;
+    event.preventDefault();
+    preserveJournalScroll(() => { details.open = !details.open; });
+  });
   details.addEventListener('toggle', () => {
-    if (details.open) loadEventDetails(details);
+    if (details.open) preserveJournalScroll(() => loadEventDetails(details));
   });
   details.append(summary, exchange);
   li.appendChild(details);
-  journalEl.insertBefore(li, journalEl.firstChild);
-  while (journalEl.children.length > 200) journalEl.removeChild(journalEl.lastChild);
+  li.dataset.search =
+    [e.cmd || '', args, failure, ok ? 'ok' : 'fail'].join(' ').toLowerCase();
+  return li;
 }
+// Batched on purpose. Inserting one row at a time meant one reflow and one scroll
+// correction per event, and a burst of ten events walked the viewport ten times.
+function prependEvents(events) {
+  const fresh = [];
+  (events || []).forEach(e => {
+    const key = eventKey(e);
+    if (seenKeys.has(key)) return;
+    seenKeys.add(key);
+    fresh.push(e);
+  });
+  if (!fresh.length) return;
+  const empty = journalEl.querySelector('.empty');
+  if (empty) empty.remove();
+  preserveJournalScroll(() => {
+    fresh.forEach(e => journalEl.insertBefore(buildEventRow(e), journalEl.firstChild));
+    while (journalEl.children.length > 300) journalEl.removeChild(journalEl.lastChild);
+    applyJournalFilter();
+  });
+  if (!journalFollow) journalPending += fresh.length;
+  updateJournalFollow();
+}
+
+journalWrap.addEventListener('scroll', () => {
+  const atTop = journalWrap.scrollTop <= 2;
+  if (atTop === journalFollow) return;
+  journalFollow = atTop;
+  if (atTop) journalPending = 0;
+  updateJournalFollow();
+});
+journalJump.addEventListener('click', () => {
+  journalFollow = true;
+  journalPending = 0;
+  journalWrap.scrollTop = 0;
+  updateJournalFollow();
+});
+journalFilter.addEventListener('input', () => {
+  applyJournalFilter();
+  journalWrap.scrollTop = 0;
+});
+journalFailsOnly.addEventListener('change', () => {
+  applyJournalFilter();
+  journalWrap.scrollTop = 0;
+});
+document.getElementById('journal-expand').addEventListener('click', () => {
+  // Capped: every expansion is a fetch, and 300 rows would be 300 of them.
+  const rows = journalEl.querySelectorAll('li:not(.filtered) > details:not([open])');
+  for (let i = 0; i < rows.length && i < 20; i += 1) rows[i].open = true;
+});
+document.getElementById('journal-collapse').addEventListener('click', () => {
+  journalEl.querySelectorAll('details[open]').forEach(d => { d.open = false; });
+  journalFollow = true;
+  journalPending = 0;
+  journalWrap.scrollTop = 0;
+  updateJournalFollow();
+});
 
 async function refreshOpenEventExchanges() {
   const loads = [];
@@ -1268,16 +1666,44 @@ function pxRuleSpec(rule) {
   return where + '  \u2192 ' + (bits.join(' \u00b7 ') || 'unchanged');
 }
 
+function pxLoadRuleIntoForm(rule) {
+  const match = rule.match || rule.request || {};
+  const spec = (rule.action === 'stub' ? rule.response : rule.rewrite) || {};
+  document.getElementById('px-action').value = rule.action === 'stub' ? 'stub' : 'rewrite';
+  document.getElementById('px-method').value = match.method || '';
+  document.getElementById('px-path').value = match.path || '';
+  document.getElementById('px-host').value = match.host || '';
+  document.getElementById('px-status').value =
+    spec.status != null ? String(spec.status) : '';
+  document.getElementById('px-times').value = rule.times ? String(rule.times) : '';
+  const body = spec.body;
+  document.getElementById('px-body').value =
+    body == null ? '' : (typeof body === 'string' ? body : prettyJson(body));
+  const setJson = spec.set_json || {};
+  document.getElementById('px-set').value = Object.keys(setJson)
+    .map(key => key + '=' + JSON.stringify(setJson[key])).join('\\n');
+  document.getElementById('px-status-line').textContent =
+    'Loaded ' + (rule.id || 'rule') + ' into the form. Arming adds a new rule.';
+  document.getElementById('px-path').focus();
+}
+
 function pxRenderRules(rules) {
   const host = document.getElementById('px-rulelist');
-  host.innerHTML = '';
+  host.textContent = '';
   if (!rules.length) {
-    host.innerHTML = '<div class="empty">No rules armed.</div>';
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = 'No rules armed.';
+    host.appendChild(empty);
     return;
   }
   rules.forEach(rule => {
-    const row = document.createElement('div');
+    // A rule's address is not its behaviour. The summary line says which request it
+    // catches; only the full spec says what the app will actually receive, so the row
+    // opens onto it instead of leaving the body unknowable from the page.
+    const row = document.createElement('details');
     row.className = 'rule-row';
+    const summary = document.createElement('summary');
     const id = document.createElement('span');
     id.className = 'rid';
     id.textContent = rule.id || '?';
@@ -1290,11 +1716,38 @@ function pxRenderRules(rules) {
     const fired = document.createElement('span');
     fired.className = 'pill' + (rule.fired ? '' : ' ok');
     fired.textContent = rule.fired ? ('fired ' + rule.fired + '\u00d7') : 'armed';
+    const load = document.createElement('button');
+    load.className = 'db-button px-rule-load';
+    load.type = 'button';
+    load.textContent = 'edit';
+    load.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      pxLoadRuleIntoForm(rule);
+    });
     const rm = document.createElement('button');
     rm.className = 'db-button';
+    rm.type = 'button';
     rm.textContent = 'remove';
-    rm.addEventListener('click', () => pxPost('rm', {id: rule.id}));
-    row.append(id, act, spec, fired, rm);
+    rm.addEventListener('click', event => {
+      // Both buttons live in the summary, where a bare click would also toggle the row.
+      event.preventDefault();
+      event.stopPropagation();
+      pxPost('rm', {id: rule.id});
+    });
+    summary.append(id, act, spec, fired, load, rm);
+    const body = document.createElement('div');
+    body.className = 'rule-body';
+    const note = document.createElement('div');
+    note.className = 'detail-note';
+    note.textContent = rule.action === 'stub'
+      ? 'Answered from this rule; the server never sees the request.'
+      : 'The real response is fetched, then patched with the changes below.';
+    const payload = document.createElement('pre');
+    payload.textContent = prettyJson(rule);
+    highlightJson(payload);
+    body.append(note, payload);
+    row.append(summary, body);
     host.appendChild(row);
   });
 }
@@ -1557,8 +2010,8 @@ async function tickEvents() {
     const evs = d.events || [];
     evs.forEach(e => {
       if (e.ts_ms && e.ts_ms >= sinceMs) sinceMs = e.ts_ms + 1;
-      prependEvent(e);
     });
+    prependEvents(evs);
     if (detailChanged) await refreshOpenEventExchanges();
   } catch (e) {}
 }
@@ -1594,11 +2047,83 @@ async function tickMap() {
   } catch (e) {}
 }
 
+const LOGCAT_ORDER = {V: 0, D: 1, I: 2, W: 3, E: 4, F: 5, A: 5, S: 5};
+const logcatEl = document.getElementById('logcat');
+const logcatView = document.getElementById('logcat-view');
+const logcatFilter = document.getElementById('logcat-filter');
+const logcatLevel = document.getElementById('logcat-level');
+const logcatFollow = document.getElementById('logcat-follow');
+let logcatLines = [];
+
+function renderLogcat(lines) {
+  const needle = logcatFilter.value.trim().toLowerCase();
+  const floor = LOGCAT_ORDER[logcatLevel.value] || 0;
+  const kept = [];
+  lines.forEach(line => {
+    const tokens = logcatTokens(line);
+    let level = '';
+    for (let i = 0; i < tokens.length; i += 1) {
+      if (tokens[i][0] === 'lvl') { level = tokens[i][1]; break; }
+    }
+    if (level && (LOGCAT_ORDER[level] || 0) < floor) return;
+    if (needle !== '' && line.toLowerCase().indexOf(needle) < 0) return;
+    kept.push([tokens, level]);
+  });
+  document.getElementById('logcat-shown').textContent =
+    kept.length + ' / ' + lines.length + ' lines';
+  const signature = JSON.stringify(lines) + '\\u0000' + needle + '\\u0000' + floor;
+  if (logcatEl.dataset.signature === signature) return;
+  // Bottom-anchored, like a terminal: hold position unless the reader is at the end or
+  // has asked to follow. Re-rendering the whole pre used to slam it back to the top.
+  const atBottom =
+    logcatView.scrollHeight - logcatView.scrollTop - logcatView.clientHeight < 12;
+  logcatEl.dataset.signature = signature;
+  logcatEl.textContent = '';
+  if (!kept.length) {
+    logcatEl.textContent = lines.length ? '(nothing matches the filter)' : '(empty)';
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  kept.forEach(entry => {
+    const tokens = entry[0];
+    const level = entry[1];
+    const row = document.createElement('span');
+    row.className = 'lc-line' +
+      (level === 'E' || level === 'F' || level === 'A' ? ' err' : '') +
+      (level === 'W' ? ' warn' : '');
+    tokens.forEach(pair => {
+      if (pair[0] === 'sp') {
+        row.appendChild(document.createTextNode(pair[1]));
+        return;
+      }
+      const span = document.createElement('span');
+      span.className = pair[0] === 'lvl'
+        ? ('lc-lvl lc-lvl-' + String(pair[1]).toLowerCase())
+        : ('lc-' + pair[0]);
+      span.textContent = pair[1];
+      row.appendChild(span);
+    });
+    frag.appendChild(row);
+  });
+  logcatEl.appendChild(frag);
+  if (logcatFollow.checked || atBottom) logcatView.scrollTop = logcatView.scrollHeight;
+}
+
+logcatFilter.addEventListener('input', () => renderLogcat(logcatLines));
+logcatLevel.addEventListener('change', () => renderLogcat(logcatLines));
+logcatFollow.addEventListener('change', () => {
+  if (logcatFollow.checked) logcatView.scrollTop = logcatView.scrollHeight;
+});
+document.getElementById('logcat-wrap').addEventListener('change', event => {
+  logcatEl.classList.toggle('wrap', event.target.checked);
+});
+
 async function tickLogcat() {
   try {
-    const r = await fetch('/api/logcat' + qSerial({lines: 80}), {cache: 'no-store'});
+    const r = await fetch('/api/logcat' + qSerial({lines: 400}), {cache: 'no-store'});
     const d = await r.json();
-    document.getElementById('logcat').textContent = (d.lines || []).join('\\n') || '(empty)';
+    logcatLines = d.lines || [];
+    renderLogcat(logcatLines);
   } catch (e) {}
 }
 
