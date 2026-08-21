@@ -2059,6 +2059,7 @@ class Engine:
         deep: bool = False,
         no_cache: bool = False,
         record: bool = True,
+        record_ids: bool = True,
     ) -> AnalyzeResult:
         wi = self._effective_with_image(with_image)
         if wi:
@@ -2073,6 +2074,7 @@ class Engine:
                     deep=deep,
                     no_cache=no_cache,
                     record=record,
+                    record_ids=record_ids,
                     with_image=False,  # already applying session/per-call image below
                 ),
                 wi,
@@ -2107,6 +2109,7 @@ class Engine:
             annotate=annotate,
             no_cache=no_cache,
             record=record,
+            record_ids=record_ids,
         )
 
     def _analyze_screen(
@@ -2119,6 +2122,7 @@ class Engine:
         annotate: bool | str | None,
         no_cache: bool,
         record: bool = True,
+        record_ids: bool = True,
     ) -> AnalyzeResult:
         t0 = time.perf_counter()
         device, w, h = self._context()
@@ -2454,7 +2458,12 @@ class Engine:
             self._last_hierarchy_hash = xml_hash
         self._last_analyze_result = result
         self._last_analyze_image = img
-        if not no_cache:
+        if record_ids:
+            # Recording is not the same decision as reuse. `no_cache` means "do not hand me a
+            # stale result"; it used to also mean "do not record this one", so a caller who
+            # asked for a fresh screen received ids that the next numeric action validated
+            # against the *previous* screen. Only AUA's own internal freshness reads opt out,
+            # because their observation is never published to a caller.
             self._write_cache(result)
         if self.config.perf.prefetch:
             self._kick_hierarchy_prefetch()
@@ -12548,8 +12557,13 @@ class Engine:
         evidence no longer names the same labelled control, refuse before touching the device.
         """
         if selector:
+            if selector.get("key"):
+                return self._resolve_action_key(
+                    str(selector["key"]), bounds=selector.get("bounds"), verb=verb
+                )
+            named = {name: value for name, value in selector.items() if name != "bounds"}
             # A verb that needs something tappable may break a tie on clickability.
-            return self.resolve_selector(**selector, prefer_clickable=verb in ("tap", "long-press"))
+            return self.resolve_selector(**named, prefer_clickable=verb in ("tap", "long-press"))
         if element_id is None:
             raise UsageError(
                 f"{verb} needs an element id or a selector",
@@ -12565,6 +12579,65 @@ class Engine:
             return re.sub(r"\s+", " ", (value or "").strip()).casefold()
 
         return normalise(element.text), normalise(element.content_desc)
+
+    @staticmethod
+    def _key_may_be_visual(key: str) -> bool:
+        """Whether *key* could name an element that only OCR/vision can see.
+
+        Label-derived keys (``tx:``/``cd:``) hash the element *type* alongside the label, and a
+        vision reading's type is always ``Text`` rather than a widget class, so an OCR key can
+        never collide with a hierarchy node. ``rid:``/``geo:``/``px:`` keys only ever come from
+        accessibility data, so they never justify the extra pass.
+        """
+        return key.startswith(("tx:", "cd:"))
+
+    def _resolve_action_key(
+        self, key: str, *, bounds: Sequence[int] | None = None, verb: str = "tap"
+    ) -> Element:
+        """Address an element by cross-frame identity, independent of the numeric id cache.
+
+        Integer ids are frame-local ordinals resolved through one cache file per device, which
+        every caller of that device shares. A caller holding an observation produced by a
+        *different* process — the dashboard, a second agent, a saved report — therefore cannot
+        safely send a number: the file it would be validated against belongs to whoever wrote
+        it last. ``stable_key`` is the only element name that outlives its frame, so it is what
+        such a caller sends, and this resolves it against the live screen with no shared state
+        in the path at all.
+        """
+        from .identity import closest_by_bounds, find_by_stable_key
+
+        # A resolution read is AUA's own evidence, never a published observation: recording
+        # it would replace the caller's id space with a hierarchy-only view of it.
+        current = self.analyze(
+            source="hierarchy", with_ocr=False, record=False, record_ids=False
+        )
+        hits = find_by_stable_key(current.elements, key)
+        if not hits and self._key_may_be_visual(key):
+            current = self.analyze(
+                source="hierarchy", with_ocr=True, record=False, record_ids=False
+            )
+            hits = find_by_stable_key(current.elements, key)
+        if not hits:
+            raise ElementNotFoundError(
+                f"no element with stable_key {key!r} on the current screen for {verb}",
+                hint=(
+                    "No action was sent. Re-analyze and use a stable_key from that fresh "
+                    "observation, or address the element with --rid/--text/--desc."
+                ),
+            )
+        if len(hits) == 1:
+            return hits[0]
+        chosen = closest_by_bounds(hits, bounds)
+        if chosen is not None:
+            return chosen
+        where = ", ".join(f"id {hit.id} at {tuple(hit.bounds)}" for hit in hits[:8])
+        raise SelectorAmbiguousError(
+            f"stable_key {key!r} matches {len(hits)} elements for {verb}: {where}",
+            hint=(
+                "No action was sent. Send the bounds the element was published with so the "
+                "right one can be chosen, or use a selector that names it uniquely."
+            ),
+        )
 
     def _resolve_action_id(self, element_id: int, *, verb: str) -> Element:
         """Remap a frame-local id onto a fresh hierarchy, or raise ``stale_element_id``.
@@ -12589,17 +12662,31 @@ class Engine:
                 hint="Re-run `aua analyze`; ids change when the screen changes.",
             )
 
-        # Freshness validation compares hierarchy bindings. Running optional OCR here adds an
-        # unrelated provider call to every numeric action and defeats goto's hierarchy-first
-        # policy; `_run_steps` already performs one explicit OCR retry on a selector miss.
-        current = self.analyze(source="hierarchy", with_ocr=False, record=False)
-        mapped = remap_ids(cached.elements, current.elements).get(element_id)
-        candidate = current.element_by_id(mapped) if mapped is not None else None
+        # Freshness validation compares hierarchy bindings, which is the cheap read and the
+        # right one for almost every id.
+        def rebind(with_ocr: bool) -> Element | None:
+            fresh = self.analyze(
+                source="hierarchy", with_ocr=with_ocr, record=False, record_ids=False
+            )
+            mapped = remap_ids(cached.elements, fresh.elements).get(element_id)
+            return fresh.element_by_id(mapped) if mapped is not None else None
+
+        def bound(candidate: Element | None) -> bool:
+            return candidate is not None and self._binding_label(
+                previous
+            ) == self._binding_label(candidate)
+
+        candidate = rebind(False)
+        if not bound(candidate) and (previous.source or "hierarchy") != "hierarchy":
+            # An element the hierarchy cannot describe is missing from a hierarchy-only read
+            # by construction, so its absence there is evidence of nothing. Without this
+            # retry a canvas label read by OCR reports a changed binding 100% of the time and
+            # is simply unreachable by number. It stays a retry rather than the first read:
+            # the cheap path resolves most vision ids too, and goto's hierarchy-first budget
+            # must not pay for a provider call it does not need.
+            candidate = rebind(True)
         previous_key = previous.stable_key or stable_key(previous)
-        labels_match = candidate is not None and self._binding_label(
-            previous
-        ) == self._binding_label(candidate)
-        if candidate is None or not labels_match:
+        if candidate is None or not bound(candidate):
             selector_hint = "a stable --rid/--text/--desc selector"
             if previous.resource_id:
                 selector_hint = f"--rid {(previous.resource_id or '').rsplit('/', 1)[-1]}"

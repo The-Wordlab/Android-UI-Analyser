@@ -579,7 +579,9 @@ def test_dashboard_analyze_returns_one_exact_overlay_frame(
     assert result["result"] == analyzed
     assert result["inspection_id"]
     assert calls[0][0:2] == ("emulator-5554", "analyze")
-    assert calls[0][2]["no_cache"] is True
+    # The overlay publishes numbered elements to a human, so those numbers must be recorded;
+    # see test_dashboard_acts_on_identity_not_a_number.py for what withholding them cost.
+    assert "no_cache" not in calls[0][2]
     assert state.inspection_frame("emulator-5554", result["inspection_id"]) == (
         b"exact-analysis-frame",
         "image/png",
@@ -595,7 +597,14 @@ def test_dashboard_overlay_id_is_consumed_by_tap_and_analyze(
     monkeypatch.setattr(dash, "list_online_serials", lambda *a, **k: ["emulator-5554"])
     analyzed = {
         "screen": {"width": 100, "height": 200},
-        "elements": [{"id": 4, "bounds": [10, 20, 80, 60], "clickable": True}],
+        "elements": [
+            {
+                "id": 4,
+                "bounds": [10, 20, 80, 60],
+                "clickable": True,
+                "stable_key": "rid:openButton",
+            }
+        ],
         "meta": {},
     }
     source_frame = tmp_path / "source.png"
@@ -618,7 +627,9 @@ def test_dashboard_overlay_id_is_consumed_by_tap_and_analyze(
     assert calls == [
         {
             "cmd": "tap",
-            "element_id": 4,
+            # The clicked element's own identity, not the frame-local ordinal: the ordinal
+            # would be resolved through the per-device id cache this process does not own.
+            "selector": {"key": "rid:openButton", "bounds": [10, 20, 80, 60]},
             "observe": True,
             "with_image": str(
                 tmp_path

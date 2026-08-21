@@ -920,7 +920,11 @@ KEY_FLAGS: list[tuple[str, str]] = [
     (
         "resolve",
         "`<id|stable_key>` — remap a previous-frame id (or `rid:…` key) onto the current "
-        "screen after IDs churn",
+        "screen after IDs churn. To act in one call instead, every action verb takes "
+        "`--key <stable_key>` (MCP `stable_key`, with optional `bounds` to choose between "
+        "list rows sharing one key): it resolves on the live screen without consulting the "
+        "per-device id cache, which is what makes it the safe way to act on an observation "
+        "another process produced",
     ),
     (
         "app",

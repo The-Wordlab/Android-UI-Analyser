@@ -213,6 +213,8 @@ PUBLIC_AUA_ARGUMENTS: dict[str, frozenset[str]] = {
             "rid",
             "text",
             "desc",
+            "stable_key",
+            "bounds",
             "index",
             "first",
             "with_image",
@@ -522,8 +524,10 @@ def _validate_aua_call(name: str, arguments: Mapping[str, Any]) -> None:
     missing = REQUIRED_AUA_ARGUMENTS.get(name, frozenset()) - set(arguments)
     if missing:
         raise ValueError(f"missing {name} argument(s): {sorted(missing)}")
-    if name == "tap_and_analyze" and not ({"id", "rid", "text", "desc"} & set(arguments)):
-        raise ValueError("tap_and_analyze requires id, rid, text, or desc")
+    if name == "tap_and_analyze" and not (
+        {"id", "rid", "text", "desc", "stable_key"} & set(arguments)
+    ):
+        raise ValueError("tap_and_analyze requires id, rid, text, desc, or stable_key")
 
 
 def _common_candidates(context: ExampleContext) -> list[dict[str, Any]]:

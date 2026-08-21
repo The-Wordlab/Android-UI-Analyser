@@ -617,6 +617,13 @@ _SEL_BY = typer.Option(
 _SEL_RID = typer.Option(None, "--rid", help="Target this resource-id (bare tail accepted).")
 _SEL_TEXT = typer.Option(None, "--text", help="Target this label (exact first, then substring).")
 _SEL_DESC = typer.Option(None, "--desc", help="Target this content-desc.")
+_SEL_KEY = typer.Option(
+    None,
+    "--key",
+    metavar="STABLE_KEY",
+    help="Target this stable_key (e.g. rid:continueBtn) - the one element name "
+    "that survives the frame it was observed in.",
+)
 _SEL_INDEX = typer.Option(None, "--index", help="Take the nth (0-based) of several matches.")
 _SEL_FIRST = typer.Option(
     False, "--first", help="Take the first of several matches instead of erroring."
@@ -675,6 +682,7 @@ def _selector(
     rid: str | None = None,
     text: str | None = None,
     desc: str | None = None,
+    key: str | None = None,
     index: int | None = None,
     first: bool = False,
 ) -> dict[str, Any] | None:
@@ -693,6 +701,15 @@ def _selector(
                 hint="e.g. `aua tap-and-analyze --by id homeTabBROWSE`",
             )
         return {kind: ident, "index": index, "first": first}
+    if key:
+        # A stable_key names one element across frames, so it needs neither the id cache nor
+        # index/first to be meaningful; ambiguity is answered with the candidates instead.
+        if rid or text or desc:
+            raise UsageError(
+                "--key already names the element, so it cannot be combined with a selector",
+                hint="Use --key on its own, or drop it and use --rid/--text/--desc.",
+            )
+        return {"key": key}
     if rid or text or desc:
         return {"rid": rid, "text": text, "desc": desc, "index": index, "first": first}
     return None
@@ -2648,6 +2665,7 @@ def tap(
     rid: str | None = _SEL_RID,
     text: str | None = _SEL_TEXT,
     desc: str | None = _SEL_DESC,
+    key: str | None = _SEL_KEY,
     index: int | None = _SEL_INDEX,
     first: bool = _SEL_FIRST,
     point: str | None = typer.Option(
@@ -2719,6 +2737,7 @@ def tap(
             rid=rid,
             text=text,
             desc=desc,
+            key=key,
             index=index,
             first=first,
         )
@@ -2808,6 +2827,7 @@ def target_cmd(
     rid: str | None = _SEL_RID,
     text: str | None = _SEL_TEXT,
     desc: str | None = _SEL_DESC,
+    key: str | None = _SEL_KEY,
     index: int | None = _SEL_INDEX,
     first: bool = _SEL_FIRST,
 ) -> None:
@@ -2825,7 +2845,7 @@ def target_cmd(
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
         selector = _selector(
-            ident=ident, by=by, rid=rid, text=text, desc=desc, index=index, first=first
+            ident=ident, by=by, rid=rid, text=text, desc=desc, key=key, index=index, first=first
         )
         if not selector:
             raise UsageError(
@@ -2858,6 +2878,7 @@ def click_cmd(
     rid: str | None = _SEL_RID,
     text: str | None = _SEL_TEXT,
     desc: str | None = _SEL_DESC,
+    key: str | None = _SEL_KEY,
     index: int | None = _SEL_INDEX,
     first: bool = _SEL_FIRST,
     observe: bool = typer.Option(
@@ -2875,7 +2896,7 @@ def click_cmd(
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
         selector = _selector(
-            ident=ident, by=by, rid=rid, text=text, desc=desc, index=index, first=first
+            ident=ident, by=by, rid=rid, text=text, desc=desc, key=key, index=index, first=first
         )
         _emit(
             _route(
@@ -2902,6 +2923,7 @@ def long_press(
     rid: str | None = _SEL_RID,
     text: str | None = _SEL_TEXT,
     desc: str | None = _SEL_DESC,
+    key: str | None = _SEL_KEY,
     index: int | None = _SEL_INDEX,
     first: bool = _SEL_FIRST,
     ms: int = typer.Option(600, "--ms", help="Press duration in milliseconds."),
@@ -2920,7 +2942,7 @@ def long_press(
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
         selector = _selector(
-            ident=ident, by=by, rid=rid, text=text, desc=desc, index=index, first=first
+            ident=ident, by=by, rid=rid, text=text, desc=desc, key=key, index=index, first=first
         )
         _emit(
             _route(
@@ -2948,6 +2970,7 @@ def double_tap(
     rid: str | None = _SEL_RID,
     text: str | None = _SEL_TEXT,
     desc: str | None = _SEL_DESC,
+    key: str | None = _SEL_KEY,
     index: int | None = _SEL_INDEX,
     first: bool = _SEL_FIRST,
     observe: bool = typer.Option(
@@ -2965,7 +2988,7 @@ def double_tap(
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
         selector = _selector(
-            ident=ident, by=by, rid=rid, text=text, desc=desc, index=index, first=first
+            ident=ident, by=by, rid=rid, text=text, desc=desc, key=key, index=index, first=first
         )
         _emit(
             _route(
@@ -2992,6 +3015,7 @@ def input_cmd(
     by: str | None = _SEL_BY,
     rid: str | None = _SEL_RID,
     desc: str | None = _SEL_DESC,
+    key: str | None = _SEL_KEY,
     index: int | None = _SEL_INDEX,
     first: bool = _SEL_FIRST,
     # Accepted only to answer it properly: `--text` is a selector on every other command, so
@@ -3029,7 +3053,9 @@ def input_cmd(
                 hint=f'e.g. `aua input-and-analyze --rid <resourceId> "{text_opt}"`; on other '
                 "commands --text selects an element by its label, so input cannot reuse it",
             )
-        selector = _selector(ident=first_arg, by=by, rid=rid, desc=desc, index=index, first=first)
+        selector = _selector(
+            ident=first_arg, by=by, rid=rid, desc=desc, key=key, index=index, first=first
+        )
         # --rid/--desc address the field, so the lone positional is the text to type;
         # --by consumes the first positional as the selector value.
         typed = first_arg if (selector is not None and by is None) else second_arg
@@ -3080,6 +3106,7 @@ def clear(
     rid: str | None = _SEL_RID,
     text: str | None = _SEL_TEXT,
     desc: str | None = _SEL_DESC,
+    key: str | None = _SEL_KEY,
     index: int | None = _SEL_INDEX,
     first: bool = _SEL_FIRST,
     observe: bool = typer.Option(
@@ -3097,7 +3124,7 @@ def clear(
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
         selector = _selector(
-            ident=ident, by=by, rid=rid, text=text, desc=desc, index=index, first=first
+            ident=ident, by=by, rid=rid, text=text, desc=desc, key=key, index=index, first=first
         )
         _emit(
             _route(
@@ -5506,6 +5533,7 @@ def copy(
     rid: str | None = _SEL_RID,
     text: str | None = _SEL_TEXT,
     desc: str | None = _SEL_DESC,
+    key: str | None = _SEL_KEY,
     index: int | None = _SEL_INDEX,
     first: bool = _SEL_FIRST,
 ) -> None:
@@ -5513,7 +5541,7 @@ def copy(
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
         selector = _selector(
-            ident=ident, by=by, rid=rid, text=text, desc=desc, index=index, first=first
+            ident=ident, by=by, rid=rid, text=text, desc=desc, key=key, index=index, first=first
         )
         _emit(
             engine.copy_text(element_id=_element_id(ident, selector), selector=selector),
@@ -5531,6 +5559,7 @@ def erase(
     rid: str | None = _SEL_RID,
     text: str | None = _SEL_TEXT,
     desc: str | None = _SEL_DESC,
+    key: str | None = _SEL_KEY,
     index: int | None = _SEL_INDEX,
     first: bool = _SEL_FIRST,
     chars: int | None = typer.Option(
@@ -5545,7 +5574,7 @@ def erase(
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
         selector = _selector(
-            ident=ident, by=by, rid=rid, text=text, desc=desc, index=index, first=first
+            ident=ident, by=by, rid=rid, text=text, desc=desc, key=key, index=index, first=first
         )
         _emit(
             engine.erase(
@@ -8445,6 +8474,7 @@ def a11y_scroll_cmd(
     rid: str | None = _SEL_RID,
     text: str | None = _SEL_TEXT,
     desc: str | None = _SEL_DESC,
+    key: str | None = _SEL_KEY,
     index: int | None = _SEL_INDEX,
     first: bool = _SEL_FIRST,
     forward: bool = typer.Option(False, "--forward", help="Scroll forward (default)."),
@@ -8457,7 +8487,9 @@ def a11y_scroll_cmd(
         if forward and backward:
             raise UsageError("pass only one of --forward / --backward")
         direction = "backward" if backward else "forward"
-        sel = _selector(ident=ident, by=by, rid=rid, text=text, desc=desc, index=index, first=first)
+        sel = _selector(
+            ident=ident, by=by, rid=rid, text=text, desc=desc, key=key, index=index, first=first
+        )
         _emit(
             engine.a11y_scroll(
                 _element_id(ident, sel),
@@ -8489,6 +8521,7 @@ def a11y_action_cmd(
     rid: str | None = _SEL_RID,
     text: str | None = _SEL_TEXT,
     desc: str | None = _SEL_DESC,
+    key: str | None = _SEL_KEY,
     index: int | None = _SEL_INDEX,
     first: bool = _SEL_FIRST,
     no_observe: bool = typer.Option(False, "--no-observe", help="Skip post-action analyze."),
@@ -8510,7 +8543,9 @@ def a11y_action_cmd(
                 )
             action_name = ident_or_action
             ident = None
-        sel = _selector(ident=ident, by=by, rid=rid, text=text, desc=desc, index=index, first=first)
+        sel = _selector(
+            ident=ident, by=by, rid=rid, text=text, desc=desc, key=key, index=index, first=first
+        )
         _emit(
             engine.a11y_action(
                 _element_id(ident, sel),

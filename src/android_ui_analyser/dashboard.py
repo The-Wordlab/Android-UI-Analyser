@@ -2877,11 +2877,44 @@ function fmtTime(ms) {
   if (!ms) return '';
   return new Date(ms).toLocaleTimeString();
 }
-function copyText(text) {
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    return navigator.clipboard.writeText(text).then(() => true, () => false);
+// The dashboard's default home is http://aua.local/, which is not a browser secure
+// context - only https, localhost and 127.0.0.1 are. There navigator.clipboard is not
+// restricted, it is absent, so the modern API alone means every copy button on the
+// default deployment reports failure. The deprecated selection copy is the only one left,
+// and it only works inside the click handler that called us, which is why this stays
+// synchronous rather than awaiting anything first.
+function copySelectionFallback(text) {
+  try {
+    const area = document.createElement('textarea');
+    area.value = text;
+    // Off-screen, not hidden: display:none and visibility:hidden cannot be selected,
+    // and readonly keeps a phone keyboard from opening over the dialog.
+    area.setAttribute('readonly', '');
+    area.style.position = 'fixed';
+    area.style.top = '-1000px';
+    area.style.opacity = '0';
+    document.body.appendChild(area);
+    area.focus();
+    area.select();
+    if (area.setSelectionRange) area.setSelectionRange(0, text.length);
+    const ok = document.execCommand('copy');
+    area.remove();
+    return ok === true;
+  } catch (err) {
+    return false;
   }
-  return Promise.resolve(false);
+}
+function copyText(text) {
+  const payload = text == null ? '' : String(text);
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    // A permission the user denied fails the same way a missing API does; fall through
+    // rather than reporting failure while a working path is still available.
+    return navigator.clipboard.writeText(payload).then(
+      () => true,
+      () => copySelectionFallback(payload),
+    );
+  }
+  return Promise.resolve(copySelectionFallback(payload));
 }
 function highlightJson(pre, text) {
   const source = text === undefined ? pre.textContent : (text == null ? '' : String(text));
@@ -5438,6 +5471,30 @@ class _DashboardState:
         return root / f"{inspection_id}.png"
 
     @staticmethod
+    def _inspection_selector(element_id: int, element: dict[str, Any]) -> dict[str, Any]:
+        """Address the clicked element by the identity its own frame published.
+
+        ``stable_key`` is the only name that outlives the frame it came from, so it is the
+        only one this process may send: a frame-local integer resolves through the shared
+        per-device id cache, whose last writer is not necessarily the reader who clicked.
+        The bounds ride along because a key deliberately carries no exact position - a
+        reusable row layout hands every row the same key, and where the human saw it is then
+        the only evidence for which row was meant.
+        """
+        key = element.get("stable_key")
+        if not isinstance(key, str) or not key.strip():
+            raise UsageError(
+                f"element id {element_id} in that frame has no stable identity to act on",
+                code="element_identity_missing",
+                hint="Click Analyze again; elements from a fresh observation carry a stable_key.",
+            )
+        selector: dict[str, Any] = {"key": key.strip()}
+        bounds = element.get("bounds")
+        if isinstance(bounds, (list, tuple)) and len(bounds) == 4:
+            selector["bounds"] = [int(value) for value in bounds]
+        return selector
+
+    @staticmethod
     def _inspection_error(result: dict[str, Any] | None) -> None:
         if result is None:
             raise UsageError("the dashboard could not start the AUA inspection host")
@@ -5490,11 +5547,16 @@ class _DashboardState:
         inspection_id = secrets.token_urlsafe(12)
         frame_path = self._inspection_path(ser, inspection_id)
         if action == "analyze":
+            # No ``no_cache`` here on purpose. An analyze that publishes numbered elements
+            # to a human has to record those numbers: the id cache describes the *device*,
+            # and both this reader and any agent driving the same device are looking at the
+            # same screen. Withholding them to avoid overwriting an agent's ids only created
+            # an id space nobody could resolve - the numbers the overlay showed and the
+            # numbers `aua tap-and-analyze <id>` validated against came from different screens.
             result = self._inspection_daemon_call(
                 ser,
                 "analyze",
                 source="auto",
-                no_cache=True,
                 with_image=str(frame_path),
             )
             self._inspection_error(result)
@@ -5520,18 +5582,24 @@ class _DashboardState:
             if current.get("busy"):
                 raise UsageError("that analysis frame is already being acted on")
             view = current.get("view") or {}
-            valid_ids = {
-                item.get("id") for item in (view.get("elements") or []) if isinstance(item, dict)
-            }
-            if element_id not in valid_ids:
+            clicked = next(
+                (
+                    item
+                    for item in (view.get("elements") or [])
+                    if isinstance(item, dict) and item.get("id") == element_id
+                ),
+                None,
+            )
+            if clicked is None:
                 raise UsageError(f"element id {element_id} is not in that analysis frame")
+            selector = self._inspection_selector(element_id, clicked)
             # Consume the frame before sending the mutation. A double-click can never replay it.
             current["busy"] = True
         try:
             result = self._inspection_daemon_call(
                 ser,
                 "tap",
-                element_id=element_id,
+                selector=selector,
                 observe=True,
                 with_image=str(frame_path),
             )

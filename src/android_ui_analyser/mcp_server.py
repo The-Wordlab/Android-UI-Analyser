@@ -47,7 +47,16 @@ def _with_image(engine: Engine, args: dict[str, Any]) -> bool | str | None:
 
 
 def _selector_from_args(args: dict[str, Any]) -> dict[str, Any] | None:
-    """Build ``resolve_selector`` kwargs from optional rid/text/desc (+ index/first)."""
+    """Build the engine selector from an optional stable_key, or rid/text/desc (+ index/first)."""
+    key = args.get("stable_key")
+    if isinstance(key, str) and key.strip():
+        # A stable_key is an identity, not a query: it needs no index/first, and it is the
+        # only element name that stays meaningful outside the frame it was published in.
+        identity: dict[str, Any] = {"key": key.strip()}
+        bounds = args.get("bounds")
+        if isinstance(bounds, (list, tuple)) and len(bounds) == 4:
+            identity["bounds"] = [int(value) for value in bounds]
+        return identity
     rid, text, desc = args.get("rid"), args.get("text"), args.get("desc")
     if rid is None and text is None and desc is None:
         return None
@@ -166,6 +175,24 @@ _SELECTOR_PROPS: dict[str, Any] = {
     "rid": {"type": "string", "description": "Match by resource-id."},
     "text": {"type": "string", "description": "Match by visible text."},
     "desc": {"type": "string", "description": "Match by content-desc."},
+    "stable_key": {
+        "type": "string",
+        "description": (
+            "Match by an element's stable_key from any observation (e.g. rid:continueBtn). "
+            "Unlike an integer id it outlives the frame it was read in, so it is the safe "
+            "way to act on an observation this process did not produce."
+        ),
+    },
+    "bounds": {
+        "type": "array",
+        "items": {"type": "integer"},
+        "minItems": 4,
+        "maxItems": 4,
+        "description": (
+            "Where stable_key was seen, as [x1,y1,x2,y2]. Only used to pick between several "
+            "elements sharing that key, as reusable list rows do."
+        ),
+    },
     "index": {"type": "integer", "description": "0-based index when the selector is ambiguous."},
     "first": {"type": "boolean", "default": False, "description": "Take the first match."},
 }

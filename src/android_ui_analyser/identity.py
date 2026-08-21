@@ -298,6 +298,29 @@ def find_by_stable_key(elements: Sequence[Element], key: str) -> list[Element]:
     return [el for distance, el in scored if distance == best]
 
 
+def closest_by_bounds(
+    elements: Sequence[Element], bounds: Sequence[int] | None
+) -> Element | None:
+    """The candidate overlapping *bounds* most, or ``None`` when none of them overlaps it.
+
+    A ``stable_key`` deliberately carries no exact position — that is what lets it survive a
+    re-analyze — so a reusable row layout hands the same key to every row. The bounds the
+    caller saw the element at are then the only evidence for which row it meant. Declining on
+    zero overlap everywhere is the point: no evidence must not become a coin flip, because a
+    silent tap on the wrong row is indistinguishable from the app mishandling the right one.
+    """
+    if bounds is None or len(tuple(bounds)) != 4:
+        return None
+    want = (int(bounds[0]), int(bounds[1]), int(bounds[2]), int(bounds[3]))
+    best: Element | None = None
+    best_iou = 0.0
+    for element in elements:
+        overlap = _iou(want, tuple(element.bounds))  # type: ignore[arg-type]
+        if overlap > best_iou:
+            best, best_iou = element, overlap
+    return best
+
+
 def _iou(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
     ax1, ay1, ax2, ay2 = a
     bx1, by1, bx2, by2 = b
