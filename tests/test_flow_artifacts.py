@@ -113,7 +113,10 @@ def test_inline_flow_writes_complete_artifact_and_junit_bundle(tmp_path: Path) -
     assert len(result["steps_run"]) == 4
     assert all(row["evidence_id"].startswith(result["run_id"]) for row in result["steps_run"])
     assert all("duration_ms" in row for row in result["steps_run"])
-    assert device.screenshot_calls == 4  # three automatic step frames + named checkpoint
+    # Three automatic step frames, the named checkpoint, and the frame the session-default
+    # `with_image` now saves for `meta.raw_image` (the pixels were already captured for
+    # OCR either way — see OutputCfg.with_image).
+    assert device.screenshot_calls == 5
 
     artifact_dir = Path(result["artifacts"]["dir"])
     for relative in (

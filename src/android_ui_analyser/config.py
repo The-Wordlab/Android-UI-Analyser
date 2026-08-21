@@ -291,7 +291,15 @@ class OutputCfg(BaseModel):
     format: OutputFormat = OutputFormat.json
     annotate: bool = False
     # Session default for analyze/actions — per-call --with-image overrides when set.
-    with_image: bool | str = False
+    #
+    # On by default, because the pixels are already in hand. OCR runs alongside the hierarchy
+    # (`ocr.augment_hierarchy`) and the visual stable keys are computed from a frame, so every
+    # analyze has already captured and decoded a screenshot; `false` only threw it away instead
+    # of writing it. What that cost a caller was the one escape hatch out of the element view —
+    # `meta.raw_image` came back null and the agent had no frame to look at when the tree could
+    # not explain what it was seeing. Writing the PNG we already hold is a few milliseconds, and
+    # `_prune_run_frames` bounds the directory, so the old default bought nothing.
+    with_image: bool | str = True
     # Columns kept in a folded post-action ``observation``; ``"all"`` restores the full dump.
     #
     # The observation used to be all-or-nothing: the whole screen, or `--no-observe`. Actions
@@ -938,6 +946,7 @@ routing:
 output:
   format: json            # json | pretty | compact
   annotate: false
+  with_image: true        # save the frame each analyze already captured (see meta.raw_image)
   # The post-action `observation` budget — two independent dials, either accepting "all".
   observation_fields: id,text,desc,rid,clickable,enabled,checked,selected
   observation_meta: changed   # changed | all | <comma-separated meta keys>

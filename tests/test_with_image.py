@@ -51,10 +51,40 @@ def test_analyze_with_image_honours_explicit_path(tmp_path: Path) -> None:
     assert out.exists()
 
 
-def test_analyze_without_with_image_leaves_meta_unset() -> None:
+def test_analyze_saves_a_frame_by_default() -> None:
+    """The frame is free to keep: OCR and the visual stable keys already decoded it.
+
+    It used to be discarded unless asked for, which left `meta.raw_image` null and took away
+    the one escape hatch from the element view — an agent that could not explain what the tree
+    was showing it had no picture to look at.
+    """
     result = _engine().analyze(source="hierarchy")
 
+    assert result.meta.raw_image is not None
+    assert Path(result.meta.raw_image).exists()
+
+
+def test_with_image_false_forces_the_frame_off() -> None:
+    """`False` is the off switch, and it must beat the session default.
+
+    Internal polling reads rely on this: a wait can analyze once per poll, so a screenshot it
+    could not decline would land inside the loop.
+    """
+    result = _engine().analyze(source="hierarchy", with_image=False)
+
     assert result.meta.raw_image is None
+
+
+def test_auto_named_frames_stay_bounded() -> None:
+    """An always-on default cannot be allowed to grow the runs directory without a limit."""
+    engine = _engine()
+    engine.MAX_RUN_FRAMES = 3
+    for _ in range(6):
+        engine.analyze(source="hierarchy", no_cache=True)
+
+    run_dir = Path(engine.config.cache.dir).expanduser() / "runs"
+    frames = list(run_dir.glob("*_screen_*.png"))
+    assert len(frames) <= 3, f"{len(frames)} frames kept, cap is 3"
 
 
 def test_sequential_captures_never_clobber_each_other() -> None:

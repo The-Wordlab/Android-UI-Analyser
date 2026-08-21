@@ -545,6 +545,12 @@ class ActionResult(BaseModel):
 
     ok: bool
     action: str
+    # Inline hint when an action already returns usable screen state. Declared this high on
+    # purpose: it is the sentence that stops a caller spending a second round trip on an
+    # `analyze` it does not need, and it has to be read *before* the observation it describes,
+    # not after it. Buried under the optional diagnostics it was read last, once the decision it
+    # exists to prevent had already been made.
+    note: str | None = None
     id: int | None = None
     target: list[int] | None = None  # coords or bounds acted on
     detail: str | None = None
@@ -565,8 +571,6 @@ class ActionResult(BaseModel):
     stable_elements: list[dict[str, Any]] | None = None
     # Compact diff summary from the folded observation (`meta.element_diff` transformed).
     action_diff_summary: dict[str, Any] | None = None
-    # Inline hint when an action already returns usable screen state.
-    note: str | None = None
     # Structured one-call efficiency recommendation (CLI and MCP share the same ids/text).
     advice: list[dict[str, str]] | None = None
     # What an install actually did to the target, as data rather than prose: {"package": ...,
@@ -671,13 +675,16 @@ class ActionResult(BaseModel):
 
     def render(self, fmt: OutputFormat | str = OutputFormat.json) -> str:
         fmt = OutputFormat(fmt)
+        # `observation` is re-rendered in *fmt* rather than taken from `model_dump`, but it keeps
+        # its declared position instead of being appended: excluding it and adding it back put
+        # the screen — the thing the caller asked for — dead last, behind a dozen optional
+        # diagnostics. A reader that stops early should hit the screen, not miss it.
+        rendered = self.observation.as_dict(fmt) if self.observation is not None else None
         data = {
-            k: v
+            k: (rendered if k == "observation" else v)
             for k, v in self.model_dump(mode="json").items()
-            if v is not None and k != "observation"
+            if v is not None
         }
-        if self.observation is not None:
-            data["observation"] = self.observation.as_dict(fmt)
         indent = 2 if fmt is OutputFormat.pretty else None
         sep = None if indent else (",", ":")
         return json.dumps(data, indent=indent, separators=sep, ensure_ascii=False)

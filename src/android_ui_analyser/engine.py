@@ -11261,11 +11261,17 @@ class Engine:
                 # Analyze only after the confirmation. Besides being safer, this avoids paying
                 # for and returning an OCR-enriched read of a frame we already distrust.
                 if hierarchy_only:
+                    # Explicitly frame-free, not merely defaulted so. This branch is the cheap
+                    # read for *intermediate* navigation, and it can run once per poll — letting
+                    # it inherit the session `with_image` default would put a screenshot on the
+                    # inside of a wait loop, which is exactly the visual work this path exists
+                    # to skip. An explicit per-call request still reaches the returned
+                    # observation through the non-hierarchy-only branch.
                     obs = self.analyze(
                         source="hierarchy",
                         with_ocr=False,
                         record=record_screen,
-                        with_image=self._effective_with_image(with_image),
+                        with_image=False,
                     )
                 else:
                     obs = self._analyze_post_action(with_image, record_screen=record_screen)
@@ -18687,14 +18693,45 @@ class Engine:
         image: ScreenImage | None = None,
     ) -> AnalyzeResult:
         img = image or self._screenshot(max_reuse_ms=80.0)
+        explicit = isinstance(with_image, str)
         out = (
             with_image
             if isinstance(with_image, str)
             else self._default_annotate_path(self.device.serial, suffix="screen", timestamped=True)
         )
         img.save(out)
+        if not explicit:
+            # Frames are timestamped so a before/after pair cannot clobber itself, which makes
+            # the directory grow without a bound — fine while this was opt-in, not fine now that
+            # every analyze writes one. A caller-named path is left alone: that file is the
+            # caller's, and pruning someone else's directory is not this function's business.
+            self._prune_run_frames(self.device.serial, suffix="screen")
         result.meta.raw_image = out
         return result
+
+    #: Frames kept per device per suffix once AUA is naming the files itself. Enough to look
+    #: back over a short flow, small enough that an always-on default cannot fill a disk.
+    MAX_RUN_FRAMES = 40
+
+    def _prune_run_frames(self, serial: str, *, suffix: str) -> None:
+        """Keep only the newest :attr:`MAX_RUN_FRAMES` auto-named frames for this device.
+
+        Best-effort by design: a frame that cannot be deleted is a housekeeping problem, never
+        a reason to fail the analyze that produced it.
+        """
+        try:
+            run_dir = Path(self.config.cache.dir).expanduser() / "runs"
+            safe = serial.replace(":", "_")
+            frames = sorted(
+                run_dir.glob(f"{safe}_{suffix}_*.png"),
+                key=lambda f: f.name,
+                reverse=True,
+            )
+            for stale in frames[self.MAX_RUN_FRAMES :]:
+                with contextlib.suppress(OSError):
+                    stale.unlink()
+        except Exception:  # noqa: BLE001 - housekeeping must never break perception
+            logger.debug("could not prune run frames for %s", serial, exc_info=True)
 
     def _maybe_annotate(
         self,

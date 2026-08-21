@@ -463,6 +463,9 @@ def test_internal_hierarchy_only_wait_skips_visual_verification_and_escalation(
             "source": "hierarchy",
             "with_ocr": False,
             "record": False,
-            "with_image": None,
+            # Explicitly off, not merely unset: the session `with_image` default is on and
+            # this read can run once per poll, so inheriting it would put a screenshot
+            # inside a wait loop. `False` is what forces the frame-free path.
+            "with_image": False,
         }
     ]

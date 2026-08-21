@@ -120,34 +120,36 @@ TSV_DEFAULT_FIELDS: tuple[str, ...] = ("id", "text", "rid", "clickable")
 # so they are never budget-trimmed; `lossy_*` warns that the text may be wrong, which a caller
 # must see before believing a label it is about to assert on. `raw_image` stays because it is
 # the escape hatch from the whole element view — the frame an agent can actually look at.
-OBSERVATION_META_PRESETS: Mapping[str, frozenset[str]] = MappingProxyType(
+# Declaration order is the emitted order (see :meth:`Projection._meta`), and it is chosen, not
+# alphabetical: a reader — human or model — takes the first keys most seriously, so the frame it
+# can actually look at and the answer to "did anything change" lead, and the provenance of the
+# read trails.
+OBSERVATION_META_PRESETS: Mapping[str, tuple[str, ...]] = MappingProxyType(
     {
-        "changed": frozenset(
-            {
-                # did anything change, and can I trust what I am looking at
-                "unchanged",
-                "fingerprint",
-                "element_diff",
-                "stale_risk",
-                "lossy_text",
-                "lossy_hint",
-                # where am I, on what
-                "known_screen",
-                "device_serial",
-                "tier_used",
-                "via",
-                "duration_ms",
-                # the escape hatch from the element view
-                "raw_image",
-                # protocol obligations — never trimmed for budget
-                "ask",
-                "goal_progress",
-                "observation_contract",
-                # shortcuts worth knowing the moment they exist; empty (and free) otherwise
-                "suggested_gotos",
-                "flows",
-                "map_hint",
-            }
+        "changed": (
+            # the frame a reader can actually look at, first
+            "raw_image",
+            # protocol obligations — never trimmed for budget, never buried
+            "ask",
+            "goal_progress",
+            "observation_contract",
+            # did anything change, and can I trust what I am looking at
+            "unchanged",
+            "element_diff",
+            "stale_risk",
+            "lossy_text",
+            "lossy_hint",
+            "known_screen",
+            # shortcuts worth knowing the moment they exist; empty (and free) otherwise
+            "suggested_gotos",
+            "flows",
+            "map_hint",
+            # provenance of the read — true but rarely load-bearing, so last
+            "fingerprint",
+            "device_serial",
+            "tier_used",
+            "via",
+            "duration_ms",
         ),
     }
 )
@@ -409,9 +411,9 @@ class Projection:
         """A preset name from :data:`OBSERVATION_META_PRESETS`, or an explicit key list."""
         preset = OBSERVATION_META_PRESETS.get(raw.strip().lower())
         if preset is not None:
-            # Sorted so the emitted key order is deterministic across runs — a payload that
-            # reshuffles itself defeats both diffing and prompt caching.
-            return tuple(sorted(preset))
+            # Declared order, not sorted: the preset encodes what a reader should see first,
+            # and it is a literal, so the emitted order is deterministic either way.
+            return tuple(preset)
         names = _split_csv(raw)
         valid = set(Meta.model_fields)
         unknown = [n for n in names if n not in valid]
@@ -552,9 +554,16 @@ class Projection:
         return out
 
     def _meta(self, meta: dict[str, Any]) -> dict[str, Any]:
+        """The requested `meta` keys, in the order they were requested.
+
+        Order is part of the answer. A reader weights what it sees first, so the caller (or the
+        preset) decides what leads; following the payload's own field order instead would bury
+        the frame path and the did-anything-change keys behind whatever the model happens to
+        declare first.
+        """
         if self.meta_keys is None:
             return dict(meta)
-        return {k: v for k, v in meta.items() if k in self.meta_keys}
+        return {k: meta[k] for k in self.meta_keys if k in meta}
 
     # -- rendering ---------------------------------------------------------
 
