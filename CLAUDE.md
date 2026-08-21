@@ -42,6 +42,23 @@ Requirements: **Python 3.11+**, **`adb` on PATH** (Android SDK platform-tools), 
   agent instructions. Use obviously fictional placeholders. Per-app knowledge belongs only in
   the user's config or local AUA memory. Run `tests/test_no_app_specific_refs.py` before publishing.
 - Enable git hooks (once per clone): `git config core.hooksPath .githooks` — keeps the SKILL.md copies in sync on every commit
+- **Worktrees live inside the repo, under `.worktree/`.** Never create one as a sibling of the
+  repo (`../android-ui-analyser-wt-<topic>`): siblings escape this repo's `.gitignore`, clutter the
+  parent directory, and get orphaned once the branch lands — each one still holding its own ~300 MB
+  `.venv`. Create and retire them like this:
+
+  ```bash
+  git worktree add .worktree/<slug> -b <branch>   # new branch in a new worktree
+  # …work, commit, land it…
+  git worktree remove .worktree/<slug> && git branch -d <branch>
+  ```
+
+  `.worktree/` and `.claude/worktrees/` (the Claude Code harness path) are both gitignored, so
+  either is fine; anything outside the repo root is not. `git worktree list` must only ever show
+  the main checkout plus paths under it. To clean up leftovers: a branch whose
+  `git log --oneline main..<branch>` is empty is fully merged — remove the worktree and delete the
+  branch, nothing is lost. `tests/test_worktrees_stay_inside_the_repo.py` fails on a registered
+  worktree outside the repo root.
 - **The agent guidance is generated** — edit `src/android_ui_analyser/guide.py` (the single source),
   never a SKILL.md directly. There are **two** committed copies (project
   `.claude/skills/android-ui-analyser/SKILL.md` + plugin `skills/android-ui-analyser/SKILL.md`);

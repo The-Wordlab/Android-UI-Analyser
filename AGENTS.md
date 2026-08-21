@@ -1,7 +1,8 @@
 # AUA repository instructions for coding agents
 
-Read `CLAUDE.md` for the complete development and verification guide. The following two
-architecture rules are non-negotiable for every new device-facing feature.
+Read `CLAUDE.md` for the complete development and verification guide. The two architecture
+rules below are non-negotiable for every new device-facing feature; the worktree rule at the end
+applies to every session.
 
 ## Register the undo for anything the device keeps
 
@@ -58,3 +59,18 @@ Before considering a device-facing feature complete, be able to answer:
 3. What happens on an adapter that does not support it?
 4. Do CLI and MCP reach the same implementation?
 5. Does a fake-adapter test prove the core is platform-independent?
+
+## Put worktrees inside the repo, under `.worktree/`
+
+A worktree created beside the repo (`../android-ui-analyser-wt-<topic>`) is outside this repo's
+`.gitignore`. Nobody sees it in `git status`, so it survives the branch it was made for: three of
+them once sat in the parent directory for months, ~1 GB of `.venv`, every commit already in `main`.
+
+- Create: `git worktree add .worktree/<slug> -b <branch>`.
+- Retire as soon as the branch lands: `git worktree remove .worktree/<slug>` then
+  `git branch -d <branch>`.
+- `.worktree/` and `.claude/worktrees/` are gitignored and are the only acceptable locations.
+  `git worktree list` must show the main checkout and paths under it — nothing else.
+- A branch is safe to drop when `git log --oneline main..<branch>` prints nothing: every commit is
+  already in `main`. "Behind main" is not "unmerged".
+- `tests/test_worktrees_stay_inside_the_repo.py` enforces this.
