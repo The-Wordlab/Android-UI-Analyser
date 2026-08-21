@@ -1802,6 +1802,22 @@ def _resource_name(elements: list[Element], height: int | None = None) -> str | 
 # --------------------------------------------------------------------------- store
 
 
+class AppStrings(BaseModel):
+    """Per-locale UI labels mined from the app's string resources (`aua explore mine`).
+
+    The cross-locale bridge for text lookups: a key (``basket_edit``) names the same
+    label in every locale, so a query written in one language can be resolved to what
+    the device actually renders in its own.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    schema_version: int = 1
+    package: str
+    locales: list[str] = Field(default_factory=list)
+    entries: dict[str, dict[str, str]] = Field(default_factory=dict)  # key → locale → text
+
+
 def _now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
@@ -1972,6 +1988,27 @@ class AppMemoryStore:
         if not root.is_dir():
             return []
         return sorted(p.name for p in root.iterdir() if (p / "index.json").is_file())
+
+    # -- mined strings I/O --------------------------------------------------
+    # Deliberately file-based in both backends: the mined-label table is a bulk artifact
+    # regenerated wholesale by `explore mine`, not per-walk incremental state.
+
+    def strings_path(self, package: str) -> Path:
+        return self.app_dir(package) / "strings.json"
+
+    def load_strings(self, package: str) -> AppStrings | None:
+        path = self.strings_path(package)
+        if not path.is_file():
+            return None
+        try:
+            return AppStrings.model_validate_json(path.read_text(encoding="utf-8"))
+        except Exception:  # pragma: no cover - corrupt file → treat as absent
+            return None
+
+    def save_strings(self, strings: AppStrings) -> None:
+        d = self.app_dir(strings.package)
+        d.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(self.strings_path(strings.package), strings.model_dump_json())
 
     # -- session I/O ------------------------------------------------------
 

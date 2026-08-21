@@ -1435,10 +1435,13 @@ Prefer `goto` over manual tapping whenever your target is listed in `suggested_g
     "suggested_gotos": ["goto product_detail"],
     "map_hint": null,
     "annotated_image": null,
-    "device_serial": "emulator-5554"
+    "device_serial": "emulator-5554",
+    "device_locale": "es-ES"
   }
 }
 ```
+
+`meta.device_locale` is the device's UI locale — labels render in it, so match text you observed on screen (or use locale-proof resource-ids) rather than literals written in another language. On a text miss, `has`/`wait --for`/`scroll-to` echo the locale plus a hint — language-neutral, so a query in any language crossed with any device locale is caught. After `aua explore mine <repo>` has harvested the app's string resources (`values-*/strings.xml`), text lookups bridge locales automatically: `has "Edit basket"` finds "Editar cesta" on an es-ES device (any locale pair) and reports which string key and rendering matched.
 
 `compact` format drops null fields and verbose defaults for the smallest token footprint.
 `pretty` is indented JSON. `tsv` is one element per line. `delta` / `msgpack` are for warm-

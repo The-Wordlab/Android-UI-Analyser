@@ -194,7 +194,9 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "arrived. Some deeplinks "
         "need an app restart to take effect (`aua app stop <pkg>` + `aua app launch <pkg>`). "
         "Don't know the app's deeplinks? `aua explore mine <repo> --app <pkg>` harvests them "
-        "from the source once (then they ride inline + show in `aua about`).",
+        "from the source once (then they ride inline + show in `aua about`) — and it also "
+        "harvests the app's per-locale string resources, which make text lookups "
+        "locale-bridging (see the device-language step below).",
     ),
     (
         "Inspect or seed app state through AUA, not hand-written adb",
@@ -380,6 +382,23 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "`wait --for <id> --by id` and "
         "`scroll-to <id> --by id` take `--by id` too. If a screen is WebView/Compose-backed "
         "and its result text isn't in the tree at all, read it with `analyze --source vision`.",
+    ),
+    (
+        "Match the device's language, not your instructions'",
+        "The device UI locale can differ from the language of your task — an English brief "
+        "on a Spanish device means an 'Edit basket' button renders as 'Editar cesta', and "
+        "asserting the English literal fails every time. Every `analyze` reports "
+        "`meta.device_locale` (so does `aua devices`) — check it before asserting text. "
+        "Resource-ids/testTags are locale-proof: prefer `--by id`. For text, assert labels "
+        "you OBSERVED on screen (from `analyze`/`observation`), never literals translated "
+        "from your instructions. This cuts BOTH ways — a Spanish query misses on an English "
+        "device just the same. On a text miss, `has`/`wait --for`/`scroll-to` return the "
+        "device locale plus a hint, whatever the language pair. Better: `aua explore mine "
+        "<repo>` also harvests the app's string resources (`values-*/strings.xml`, every "
+        "shipped locale), after which text lookups bridge languages by themselves — "
+        "`has \"Edit basket\"` finds 'Editar cesta' on an es-ES device (any locale pair), "
+        "reports which string key and rendering matched (`hint`), and a miss tells you what "
+        "the label would have rendered as.",
     ),
     (
         "Act, then read the screen the action gives back",
@@ -1669,7 +1688,7 @@ def render_markdown(*, brief: bool = False) -> str:
         '                "ask": {"id","about","q","how"},   // answer with --answers id="<name>"'
     )
     p.append('                "map_hint",')
-    p.append('                "annotated_image", "raw_image", "device_serial" } }')
+    p.append('                "annotated_image", "raw_image", "device_serial", "device_locale" } }')
     p.append("```")
     p.append(
         "`compact` drops null/default fields for the smallest token footprint — except "
@@ -1851,6 +1870,7 @@ on the same package/context/frame.
 - A delivered deeplink, spinner disappearance, or unchanged short settle is not proof of the
   requested destination — check `verified`, not just `ok`. Verify the final interactive
   affordance the user named.
+- Assert observed text or `--rid` — labels render in `meta.device_locale`.
 - Never execute `policy_suggestion`; `session autopilot` is off by default and **taps only** —
   never start it on a login or text entry. Short goal in the screen's own words (`Open Catalog`):
   a candidate sharing no goal word is refused. `policy_handoff` hands back.
@@ -1939,6 +1959,7 @@ def render_json() -> dict[str, object]:
                 "annotated_image",
                 "raw_image",
                 "device_serial",
+                "device_locale",
             ],
         },
         "element_views": {

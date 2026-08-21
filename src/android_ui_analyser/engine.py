@@ -57,6 +57,7 @@ from .memory import (
     LEGACY_CONTEXT_ID,
     AppMap,
     AppMemoryStore,
+    AppStrings,
     NavHints,
     RouteEdge,
     RouteStep,
@@ -148,6 +149,7 @@ _SINGLE_LINE_HEIGHT_RATIO = 3.5
 QUERY_CONFIDENT = 1.0  # all salient tokens / exact phrase present
 QUERY_SOFT = 0.5  # best-effort threshold when escalation is exhausted
 _ASSIST_MAX_STEPS = 6  # bound on planner actions per recovery attempt (opt-in only)
+_LOCALE_CANDIDATE_CAP = 3  # translated-label retries per text miss (generic labels fan out)
 # A bottom system bar starts within this fraction of the screen height. Wide enough for a
 # tall three-button bar, narrow enough that a systemui sheet or the expanded notification
 # shade can never be mistaken for it (see Engine._system_bar_top).
@@ -349,6 +351,11 @@ def _parse_await_terms(predicate: str, *, require_positive: bool = False) -> lis
 # are off-screen evidence with no `by=` equivalent on this path, so they are deliberately not
 # offered here even though `_AWAIT_PREFIXES` knows them.
 _WAIT_FOR_FIELDS = {k: v for k, v in _AWAIT_PREFIXES.items() if v in {"text", "rid", "desc"}}
+
+
+def _is_resource_id_lookup(by: str) -> bool:
+    """Both public spellings select the locale-independent resource-id field."""
+    return (by or "text").lower() in {"id", "rid"}
 
 
 def _parse_wait_for_predicate(for_: str, *, by: str, absent: bool) -> tuple[str, str, bool]:
@@ -727,6 +734,7 @@ class Engine:
             self.model_control = ModelControlStore(config)
         self._mem: AppMemoryStore | None = None
         self._version_cache: dict[str, str | None] = {}
+        self._strings_cache: dict[str, AppStrings | None] = {}
         self._flag_context_checked_at: dict[str, float] = {}
         # Session default for --with-image (CLI global / MCP configure); per-call wins.
         self._default_with_image: bool | str | None = (
@@ -2363,6 +2371,7 @@ class Engine:
                 ocr_repaired=_repaired,
                 annotated_image=annotated,
                 device_serial=device.serial,
+                device_locale=device.device_locale(),
                 element_diff=ediff,
                 unchanged=False,
                 fingerprint=fp,
@@ -2639,6 +2648,7 @@ class Engine:
                 capture_hint=self._capture_hint(),
                 annotated_image=annotated,
                 device_serial=device.serial,
+                device_locale=device.device_locale(),
             ),
         )
         if not no_cache:
@@ -6396,12 +6406,16 @@ class Engine:
         Deeplinks are shortcuts — jump straight to a screen instead of navigating — and
         the app declares them in its source. Found links are recorded so the agent can
         reuse them (`aua open-and-analyze <uri>`); templated ones (``$id``/``{id}``) are flagged.
+        String resources (``values*/strings.xml``) are recorded per locale so text
+        lookups can bridge the device's UI language.
         """
-        from .explore import mine_deeplinks
+        from .explore import mine_deeplinks, mine_strings
 
         result = mine_deeplinks(Path(source))
+        strings = mine_strings(Path(source))
         pkg = package or self.current_package()
         saved = 0
+        strings_saved = 0
         mem = self._memory
         if save and pkg and mem is not None:
             for d in result.deeplinks:
@@ -6410,6 +6424,12 @@ class Engine:
                     note += " — templated, fill the placeholder"
                 mem.remember_deeplink(pkg, d.uri, note=note)
                 saved += 1
+            if strings.entries:
+                mem.save_strings(
+                    AppStrings(package=pkg, locales=strings.locales, entries=strings.entries)
+                )
+                strings_saved = len(strings.entries)
+                self._strings_cache.pop(pkg, None)
         return {
             "ok": True,
             "action": "explore-mine",
@@ -6418,6 +6438,9 @@ class Engine:
             "schemes": result.schemes,
             "found": len(result.deeplinks),
             "saved": saved,
+            "strings_found": len(strings.entries),
+            "string_locales": strings.locales,
+            "strings_saved": strings_saved,
             "deeplinks": result.as_dict()["deeplinks"],
         }
 
@@ -10583,20 +10606,45 @@ class Engine:
             deadline = time.monotonic() + timeout_ms / 1000.0
         if src in ("auto", "hierarchy"):
             if timeout_ms and timeout_ms > 0:
-                bounds = device.wait_for(
-                    text, match=mode, ignore_case=ignore_case, timeout_ms=timeout_ms, by=by
+                candidates = self._locale_candidates(device, text, by)
+                bounds, matched = self._wait_for_any(
+                    device,
+                    text,
+                    candidates,
+                    mode=mode,
+                    ignore_case=ignore_case,
+                    timeout_ms=timeout_ms,
+                    by=by,
                 )
             else:
                 bounds = device.find_text(text, match=mode, ignore_case=ignore_case, by=by)
+                matched = None
             if bounds is not None:
+                rendered = matched[0] if matched is not None else text
                 return self._has_wait_result(
-                    HasResult(found=True, source="hierarchy", bounds=bounds, text=text),
+                    HasResult(
+                        found=True,
+                        source="hierarchy",
+                        bounds=bounds,
+                        text=rendered,
+                        device_locale=device.device_locale() if matched is not None else None,
+                        hint=self._translated_hint(matched[0], matched[1], matched[2], text)
+                        if matched is not None
+                        else None,
+                    ),
                     clamped_from,
                     ceiling_ms,
                 )
-            if src == "hierarchy" or by == "id":
+            translated = (
+                None
+                if timeout_ms and timeout_ms > 0
+                else self._find_translated(device, text, mode, ignore_case, by)
+            )
+            if translated is not None:
+                return self._has_wait_result(translated, clamped_from, ceiling_ms)
+            if src == "hierarchy" or _is_resource_id_lookup(by):
                 return self._has_wait_result(
-                    HasResult(found=False, source="hierarchy"), clamped_from, ceiling_ms
+                    self._has_miss(device, "hierarchy", by, text), clamped_from, ceiling_ms
                 )
 
         # T0→T3: OCR fallback (only on a hierarchy miss)
@@ -10623,7 +10671,7 @@ class Engine:
                 )
 
         return self._has_wait_result(
-            HasResult(found=False, source="hierarchy" if src != "vision" else "ocr"),
+            self._has_miss(device, "hierarchy" if src != "vision" else "ocr", by, text),
             clamped_from,
             ceiling_ms,
         )
@@ -10637,6 +10685,161 @@ class Engine:
         result.wait_ceiling_ms = ceiling_ms
         result.wait_ceiling_mode = getattr(self._job_context, "last_wait_ceiling_mode", None)
         return result
+
+    def _has_miss(self, device: Device, source: str, by: str, text: str) -> HasResult:
+        return HasResult(
+            found=False,
+            source=source,
+            device_locale=device.device_locale(),
+            hint=self._text_miss_hint(device, by, text, tried_translations=True),
+        )
+
+    def _find_translated(
+        self, device: Device, text: str, mode: MatchMode, ignore_case: bool, by: str
+    ) -> HasResult | None:
+        """Retry a missed text lookup with the app's known renderings of the same label
+        (hierarchy only — the mined strings bridge the device's UI language, §6b)."""
+        for cand, loc, key in self._locale_candidates(device, text, by):
+            bounds = device.find_text(cand, match=mode, ignore_case=ignore_case, by=by)
+            if bounds is not None:
+                return HasResult(
+                    found=True,
+                    source="hierarchy",
+                    bounds=bounds,
+                    text=cand,
+                    device_locale=device.device_locale(),
+                    hint=self._translated_hint(cand, loc, key, text),
+                )
+        return None
+
+    # ------------------------------------------------------------- locale bridge (§6b)
+
+    def _app_strings(self, package: str) -> AppStrings | None:
+        if package not in self._strings_cache:
+            mem = self._memory
+            self._strings_cache[package] = mem.load_strings(package) if mem else None
+        return self._strings_cache[package]
+
+    def _locale_candidates(
+        self, device: Device, text: str, by: str = "text"
+    ) -> list[tuple[str, str, str]]:
+        """(label, locale, key) alternates for *text* from the app's mined strings.
+
+        The query is matched against every locale's value of a key, so the bridge works
+        in both directions (a query in the source language on a localized device and
+        vice versa); the device-locale rendering ranks first, the default (source)
+        value last.
+        """
+        from .explore import DEFAULT_LOCALE
+
+        if _is_resource_id_lookup(by):
+            return []
+        wanted = text.strip().casefold()
+        if not wanted:
+            return []
+        pkg = self._cached_package() or self.current_package()
+        strings = self._app_strings(pkg) if pkg else None
+        if strings is None:
+            return []
+        locale = device.device_locale()
+        lang = locale.split("-", 1)[0].casefold() if locale else None
+        out: list[tuple[str, str, str]] = []
+        seen = {wanted}
+        for key, per in strings.entries.items():
+            if not any(v.strip().casefold() == wanted for v in per.values()):
+                continue
+            exact = [
+                (loc, v)
+                for loc, v in per.items()
+                if locale and loc.casefold() == locale.casefold()
+            ]
+            same_language = [
+                (loc, v)
+                for loc, v in per.items()
+                if lang
+                and loc.split("-", 1)[0].casefold() == lang
+                and (not locale or loc.casefold() != locale.casefold())
+            ]
+            ranked = [*exact, *same_language]
+            if DEFAULT_LOCALE in per:
+                ranked.append((DEFAULT_LOCALE, per[DEFAULT_LOCALE]))
+            for loc, v in ranked:
+                cand = v.strip()
+                if cand.casefold() in seen:
+                    continue
+                seen.add(cand.casefold())
+                out.append((cand, loc, key))
+            if len(out) >= _LOCALE_CANDIDATE_CAP:
+                break
+        return out[:_LOCALE_CANDIDATE_CAP]
+
+    @staticmethod
+    def _translated_hint(cand: str, loc: str, key: str, original: str) -> str:
+        return f"matched '{cand}' — the {loc} rendering of '{original}' (string key {key})"
+
+    def _text_miss_hint(
+        self, device: Device, by: str, text: str, *, tried_translations: bool
+    ) -> str | None:
+        """Explain a text miss: the label may render translated in the device locale."""
+        if _is_resource_id_lookup(by):
+            return None
+        candidates = self._locale_candidates(device, text, by)
+        if candidates:
+            cand, loc, key = candidates[0]
+            tail = (
+                "that rendering is not on screen either"
+                if tried_translations
+                else f"try '{cand}' instead"
+            )
+            return f"'{text}' is string key {key}, rendered {loc} as '{cand}' — {tail}"
+        return self._locale_hint(by, device.device_locale())
+
+    @staticmethod
+    def _locale_hint(by: str, locale: str | None) -> str | None:
+        """Why a text lookup may have missed: labels render in the device locale.
+
+        Deliberately language-neutral — the query's language is unknowable, so the hint
+        fires for any known locale. Resource-id lookups are locale-proof, never hinted.
+        """
+        if _is_resource_id_lookup(by) or not locale:
+            return None
+        return (
+            f"on-screen labels render in the device locale ({locale}) — a target written "
+            "in another language never matches; match text observed via `analyze`, or "
+            "select --by id (locale-proof)"
+        )
+
+    def _wait_for_any(
+        self,
+        device: Device,
+        text: str,
+        candidates: list[tuple[str, str, str]],
+        *,
+        mode: MatchMode,
+        ignore_case: bool,
+        timeout_ms: int,
+        by: str,
+    ) -> tuple[tuple[int, int, int, int] | None, tuple[str, str, str] | None]:
+        """Poll for *text* or any known translated rendering; report which one matched."""
+        if not candidates:
+            return (
+                device.wait_for(
+                    text, match=mode, ignore_case=ignore_case, timeout_ms=timeout_ms, by=by
+                ),
+                None,
+            )
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        while True:
+            bounds = device.find_text(text, match=mode, ignore_case=ignore_case, by=by)
+            if bounds is not None:
+                return bounds, None
+            for cand in candidates:
+                bounds = device.find_text(cand[0], match=mode, ignore_case=ignore_case, by=by)
+                if bounds is not None:
+                    return bounds, cand
+            if time.monotonic() >= deadline:
+                return None, None
+            self._sleep_between_polls(200.0, deadline)
 
     def _ocr_contains(
         self,
@@ -13364,9 +13567,26 @@ class Engine:
         """
         mode = MatchMode(match)
         step = self._step("scroll-to", arg=query)
+        candidates = self._locale_candidates(self.device, query, by)
+        matched_via: tuple[str, str, str] | None = None
 
         def locate() -> tuple[int, int, int, int] | None:
-            return self.device.find_text(query, match=mode, ignore_case=ignore_case, by=by)
+            nonlocal matched_via
+            b = self.device.find_text(query, match=mode, ignore_case=ignore_case, by=by)
+            if b is not None:
+                matched_via = None
+                return b
+            for cand in candidates:
+                b = self.device.find_text(cand[0], match=mode, ignore_case=ignore_case, by=by)
+                if b is not None:
+                    matched_via = cand
+                    return b
+            return None
+
+        def locate_hint() -> str | None:
+            if matched_via is not None:
+                return self._translated_hint(matched_via[0], matched_via[1], matched_via[2], query)
+            return None
 
         found = locate()
         if found is not None:
@@ -13376,6 +13596,7 @@ class Engine:
                     action="scroll-to",
                     detail=detail_tokens("already-visible", target=query),
                     target=list(found),
+                    hint=locate_hint(),
                 ),
                 observe,
                 with_image,
@@ -13423,6 +13644,9 @@ class Engine:
                     exhausted="true" if (found is None and exhausted) else None,
                 ),
                 target=list(found) if found else None,
+                hint=locate_hint()
+                if found is not None
+                else self._text_miss_hint(self.device, by, query, tried_translations=True),
             ),
             observe,
             with_image,
@@ -15171,13 +15395,20 @@ class Engine:
             raise UsageError("wait needs --for <text> or --idle")
         for_, by, absent = _parse_wait_for_predicate(for_, by=by, absent=absent)
         mode = MatchMode(match)
+        candidates = self._locale_candidates(device, for_, by)
         if absent:
             # Wait until the target is NO LONGER present (loading spinners, transient
-            # dialogs) — Maestro's `notVisible`. ok=True once it's gone.
+            # dialogs) — Maestro's `notVisible`. ok=True once it's gone. Known translated
+            # renderings count as present too, else a source-language spinner label
+            # reports gone while its device-locale rendering is still on screen.
+            probes = [for_] + [c for c, _, _ in candidates]
             deadline = time.monotonic() + timeout_ms / 1000.0
             gone = False
             while True:
-                if device.find_text(for_, match=mode, ignore_case=ignore_case, by=by) is None:
+                if all(
+                    device.find_text(p, match=mode, ignore_case=ignore_case, by=by) is None
+                    for p in probes
+                ):
                     gone = True
                     break
                 if time.monotonic() >= deadline:
@@ -15203,8 +15434,14 @@ class Engine:
                 clamped_from,
                 ceiling_ms,
             )
-        found = device.wait_for(
-            for_, match=mode, ignore_case=ignore_case, timeout_ms=timeout_ms, by=by
+        found, matched = self._wait_for_any(
+            device,
+            for_,
+            candidates,
+            mode=mode,
+            ignore_case=ignore_case,
+            timeout_ms=timeout_ms,
+            by=by,
         )
         if found is None:
             detail = self._wait_timeout_message(
@@ -15222,6 +15459,9 @@ class Engine:
             action="wait",
             detail=for_,
             target=list(found),
+            hint=self._translated_hint(matched[0], matched[1], matched[2], for_)
+            if matched
+            else None,
         )
         # `--observe` returns the screen with fresh ids so the agent acts without a separate
         # `analyze` — attached even on a MISS, so a failed wait is diagnosable in one call.
@@ -15470,6 +15710,11 @@ class Engine:
                 f"hint: pattern looks like regex but --match is '{mode.value}' "
                 f"(matched literally as a substring). Use --match regex."
             )
+        # A label written in another language than the device renders never matches.
+        if not absent:
+            locale_part = self._text_miss_hint(self.device, by, needle, tried_translations=True)
+            if locale_part:
+                parts.append(locale_part)
         # Closest on-screen candidates.
         try:
             result = self.analyze(source="hierarchy", record=False)

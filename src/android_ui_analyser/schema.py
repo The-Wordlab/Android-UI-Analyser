@@ -307,6 +307,7 @@ class Meta(BaseModel):
     annotated_image: str | None = None
     raw_image: str | None = None  # unannotated screenshot saved on request (--with-image)
     device_serial: str | None = None
+    device_locale: str | None = None  # BCP-47 UI locale (e.g. "es-ES"); labels render in it
     observation_contract: ObservationContract | None = None
     # Optional token-cheap delta vs the previous analyze (perf.differential).
     element_diff: dict[str, Any] | None = None
@@ -423,6 +424,13 @@ class HasResult(BaseModel):
     source: str | None = None  # "hierarchy" | "ocr"
     bounds: Bounds | None = None
     text: str | None = None
+    # On a miss only: the device UI locale plus, for text lookups, a hint that labels
+    # render in that locale — match observed labels or go --by id. Language-neutral:
+    # the query may be written in any language, so no locale is treated as "safe".
+    # On a hit through the mined-strings bridge, `hint` names the key and rendering
+    # that matched (and `text` carries the rendering that was actually found).
+    device_locale: str | None = None
+    hint: str | None = None
     wait_clamped_from_ms: int | None = None
     wait_ceiling_ms: int | None = None
     wait_ceiling_mode: str | None = None
@@ -601,6 +609,9 @@ class ActionResult(BaseModel):
     # Bounded multi-step actions expose why they stopped and a compact semantic hop trace.
     stop_reason: str | None = None
     steps_run: list[dict[str, Any]] | None = None
+    # Locale-bridge diagnosis: on a translated hit, which string key and rendering matched;
+    # on a text miss, what the target renders as in the device locale (see Meta.device_locale).
+    hint: str | None = None
 
     def render(self, fmt: OutputFormat | str = OutputFormat.json) -> str:
         fmt = OutputFormat(fmt)
@@ -696,4 +707,5 @@ class DeviceInfo(BaseModel):
     serial: str
     model: str | None = None
     android_version: str | None = None
+    locale: str | None = None
     state: str = "device"
