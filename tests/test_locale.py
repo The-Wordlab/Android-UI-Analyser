@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from android_ui_analyser.device import parse_locale
+from android_ui_analyser.device import Device, Uiautomator2Device, parse_locale
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.explore import _values_dir_locale, mine_strings
 from android_ui_analyser.guide import render_json, render_markdown
@@ -71,6 +71,28 @@ def test_parse_locale(raw: str | None, expected: str | None) -> None:
     assert parse_locale(raw) == expected
 
 
+def test_platform_neutral_locale_contract_does_not_probe_a_native_shell() -> None:
+    device = FakeDevice()
+    assert Device.device_locale(device) is None
+    assert not any(name == "shell" for name, _ in device.calls)
+
+
+def test_android_locale_probe_uses_fallback_order_and_is_memoized() -> None:
+    device = object.__new__(Uiautomator2Device)
+    device._device_locale_memo = None
+    device._device_locale_read = False
+    calls: list[str] = []
+
+    def shell(command: str) -> str:
+        calls.append(command)
+        return "es-ES" if command == "settings get system system_locales" else ""
+
+    device.shell = shell  # type: ignore[method-assign]
+    assert device.device_locale() == "es-ES"
+    assert device.device_locale() == "es-ES"
+    assert calls == ["getprop persist.sys.locale", "settings get system system_locales"]
+
+
 # ------------------------------------------------------------------------ analyze meta
 
 
@@ -105,6 +127,15 @@ def test_has_text_miss_carries_locale_and_hint() -> None:
 def test_has_id_miss_carries_locale_but_no_hint() -> None:
     engine = make_engine(device=FakeDevice(locale="es-ES"))
     res = engine.has("missingContainer", by="id")
+    assert res.found is False
+    assert res.device_locale == "es-ES"
+    assert res.hint is None
+
+
+@pytest.mark.parametrize("by", ["id", "rid", "RID"])
+def test_has_resource_id_miss_never_suggests_a_translation(by: str) -> None:
+    engine = make_engine(device=FakeDevice(locale="es-ES"))
+    res = engine.has("missingContainer", by=by)
     assert res.found is False
     assert res.device_locale == "es-ES"
     assert res.hint is None
@@ -235,6 +266,41 @@ def test_has_bridges_reverse_direction() -> None:
     assert res.found is True
     assert res.text == "Edit basket"
     assert res.hint is not None and "basket_edit" in res.hint
+
+
+def test_has_timeout_polls_the_translated_rendering_without_waiting_on_the_literal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = engine_with_strings("es-ES", ON_SCREEN_ES)
+
+    def untranslated_only_wait(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("the source-language literal must not consume the whole wait budget")
+
+    monkeypatch.setattr(engine.device, "wait_for", untranslated_only_wait)
+    res = engine.has("Edit basket", timeout_ms=300)
+    assert res.found is True
+    assert res.text == "Editar cesta"
+
+
+def test_exact_device_locale_ranks_before_other_regions() -> None:
+    engine = make_engine(device=FakeDevice(locale="es-ES"))
+    store = engine._memory
+    assert store is not None
+    strings = APP_STRINGS.model_copy(deep=True)
+    strings.entries["basket_edit"] = {
+        "default": "Edit basket",
+        "es-AR": "Editar changuito",
+        "es-MX": "Editar carrito",
+        "es-US": "Editar canasta",
+        "es-ES": "Editar cesta",
+    }
+    store.save_strings(strings)
+
+    assert engine._locale_candidates(engine.device, "Edit basket")[0] == (
+        "Editar cesta",
+        "es-ES",
+        "basket_edit",
+    )
 
 
 def test_has_miss_reports_expected_rendering() -> None:

@@ -4347,7 +4347,7 @@ def reach_cmd(
 
 @app.command()
 def devices(ctx: typer.Context) -> None:
-    """List attached devices (serial, model, android version, state)."""
+    """List attached devices (serial, model, platform version, locale, state)."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
         import json

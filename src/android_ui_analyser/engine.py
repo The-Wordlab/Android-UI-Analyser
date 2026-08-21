@@ -352,6 +352,11 @@ def _parse_await_terms(predicate: str, *, require_positive: bool = False) -> lis
 _WAIT_FOR_FIELDS = {k: v for k, v in _AWAIT_PREFIXES.items() if v in {"text", "rid", "desc"}}
 
 
+def _is_resource_id_lookup(by: str) -> bool:
+    """Both public spellings select the locale-independent resource-id field."""
+    return (by or "text").lower() in {"id", "rid"}
+
+
 def _parse_wait_for_predicate(for_: str, *, by: str, absent: bool) -> tuple[str, str, bool]:
     """Honour a leading ``!`` (and optional ``field:`` prefix) in ``wait --for``.
 
@@ -10305,21 +10310,43 @@ class Engine:
             deadline = time.monotonic() + timeout_ms / 1000.0
         if src in ("auto", "hierarchy"):
             if timeout_ms and timeout_ms > 0:
-                bounds = device.wait_for(
-                    text, match=mode, ignore_case=ignore_case, timeout_ms=timeout_ms, by=by
+                candidates = self._locale_candidates(device, text, by)
+                bounds, matched = self._wait_for_any(
+                    device,
+                    text,
+                    candidates,
+                    mode=mode,
+                    ignore_case=ignore_case,
+                    timeout_ms=timeout_ms,
+                    by=by,
                 )
             else:
                 bounds = device.find_text(text, match=mode, ignore_case=ignore_case, by=by)
+                matched = None
             if bounds is not None:
+                rendered = matched[0] if matched is not None else text
                 return self._has_wait_result(
-                    HasResult(found=True, source="hierarchy", bounds=bounds, text=text),
+                    HasResult(
+                        found=True,
+                        source="hierarchy",
+                        bounds=bounds,
+                        text=rendered,
+                        device_locale=device.device_locale() if matched is not None else None,
+                        hint=self._translated_hint(matched[0], matched[1], matched[2], text)
+                        if matched is not None
+                        else None,
+                    ),
                     clamped_from,
                     ceiling_ms,
                 )
-            translated = self._find_translated(device, text, mode, ignore_case, by)
+            translated = (
+                None
+                if timeout_ms and timeout_ms > 0
+                else self._find_translated(device, text, mode, ignore_case, by)
+            )
             if translated is not None:
                 return self._has_wait_result(translated, clamped_from, ceiling_ms)
-            if src == "hierarchy" or by == "id":
+            if src == "hierarchy" or _is_resource_id_lookup(by):
                 return self._has_wait_result(
                     self._has_miss(device, "hierarchy", by, text), clamped_from, ceiling_ms
                 )
@@ -10409,7 +10436,7 @@ class Engine:
         """
         from .explore import DEFAULT_LOCALE
 
-        if by == "id":
+        if _is_resource_id_lookup(by):
             return []
         wanted = text.strip().casefold()
         if not wanted:
@@ -10425,11 +10452,19 @@ class Engine:
         for key, per in strings.entries.items():
             if not any(v.strip().casefold() == wanted for v in per.values()):
                 continue
-            ranked = [
+            exact = [
                 (loc, v)
                 for loc, v in per.items()
-                if lang and (loc == locale or loc.split("-", 1)[0].casefold() == lang)
+                if locale and loc.casefold() == locale.casefold()
             ]
+            same_language = [
+                (loc, v)
+                for loc, v in per.items()
+                if lang
+                and loc.split("-", 1)[0].casefold() == lang
+                and (not locale or loc.casefold() != locale.casefold())
+            ]
+            ranked = [*exact, *same_language]
             if DEFAULT_LOCALE in per:
                 ranked.append((DEFAULT_LOCALE, per[DEFAULT_LOCALE]))
             for loc, v in ranked:
@@ -10450,7 +10485,7 @@ class Engine:
         self, device: Device, by: str, text: str, *, tried_translations: bool
     ) -> str | None:
         """Explain a text miss: the label may render translated in the device locale."""
-        if by == "id":
+        if _is_resource_id_lookup(by):
             return None
         candidates = self._locale_candidates(device, text, by)
         if candidates:
@@ -10470,7 +10505,7 @@ class Engine:
         Deliberately language-neutral — the query's language is unknowable, so the hint
         fires for any known locale. Resource-id lookups are locale-proof, never hinted.
         """
-        if by == "id" or not locale:
+        if _is_resource_id_lookup(by) or not locale:
             return None
         return (
             f"on-screen labels render in the device locale ({locale}) — a target written "

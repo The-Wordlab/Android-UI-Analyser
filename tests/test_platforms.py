@@ -230,6 +230,23 @@ def test_engine_uses_injected_strategy_for_tree_capture_and_normalization() -> N
     ]
 
 
+def test_locale_metadata_is_optional_on_a_non_android_runtime() -> None:
+    cfg = Config.model_validate({"memory": {"enabled": False}, "lease": {"enabled": False}})
+
+    class LocaleNeutralRuntime(FakeDevice):
+        device_locale = Device.device_locale
+
+    runtime = LocaleNeutralRuntime(package="example.native")
+    platform = _InjectedPlatform(cfg)
+
+    result = Engine(cfg, device=runtime, platform=platform).analyze(
+        source="hierarchy", record=False
+    )
+
+    assert result.meta.device_locale is None
+    assert not any(name == "shell" for name, _args in runtime.calls)
+
+
 def test_flow_artifacts_do_not_fall_back_to_android_logs_on_another_platform(tmp_path) -> None:
     cfg = Config.model_validate(
         {

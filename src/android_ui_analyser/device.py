@@ -466,30 +466,9 @@ class Device(ABC):
         """Best-effort app versionName for memory freshness; ``None`` if unknown."""
         return None
 
-    _device_locale_memo: str | None = None
-    _device_locale_read: bool = False
-
     def device_locale(self) -> str | None:
-        """Best-effort device UI locale (BCP-47, e.g. ``es-ES``); ``None`` if unknown.
-
-        On-screen labels render in this locale — callers use it to avoid asserting text
-        written in another language. Memoized per connection: changing the locale takes
-        a Settings trip and usually an app restart, so a stale read within one session
-        is not a realistic failure mode.
-        """
-        if not self._device_locale_read:
-            self._device_locale_read = True
-            for cmd in _LOCALE_READS:
-                try:
-                    raw = self.shell(cmd)
-                except Exception as exc:
-                    logger.debug("locale read %r failed: %s", cmd, exc)
-                    continue
-                locale = parse_locale(raw)
-                if locale:
-                    self._device_locale_memo = locale
-                    break
-        return self._device_locale_memo
+        """Best-effort device UI locale (BCP-47, e.g. ``es-ES``); ``None`` if unsupported."""
+        return None
 
     # -- composed helpers (built on the primitives; usually not overridden)-
     def input_text(
@@ -812,6 +791,8 @@ class Uiautomator2Device(Device):
         self._settle = settle_wait
         self._d: Any = None
         self._winsize: tuple[int, int] | None = None
+        self._device_locale_memo: str | None = None
+        self._device_locale_read = False
         self._recording_remote: str | None = None
         self._recording_proc: subprocess.Popen[bytes] | None = None
         self._connect()
@@ -968,6 +949,22 @@ class Uiautomator2Device(Device):
         if isinstance(info, dict) and info.get("versionName"):
             return str(info["versionName"])
         return None
+
+    def device_locale(self) -> str | None:
+        """Best-effort Android UI locale, memoized for this connected runtime."""
+        if not self._device_locale_read:
+            self._device_locale_read = True
+            for cmd in _LOCALE_READS:
+                try:
+                    raw = self.shell(cmd)
+                except Exception as exc:
+                    logger.debug("locale read %r failed: %s", cmd, exc)
+                    continue
+                locale = parse_locale(raw)
+                if locale:
+                    self._device_locale_memo = locale
+                    break
+        return self._device_locale_memo
 
     # -- input -------------------------------------------------------------
 
