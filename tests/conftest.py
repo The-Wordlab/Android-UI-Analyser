@@ -96,6 +96,7 @@ class FakeDevice(Device):
         screenshots: list[bytes] | None = None,
         app_version: str | None = None,
         serial: str = "fake-emulator-5554",
+        locale: str | None = None,
         clock_skew_ms: int = 0,
         utc_offset: int = 0,
         prefs: dict[str, dict[str, str]] | None = None,
@@ -125,6 +126,7 @@ class FakeDevice(Device):
         self._stream = list(screenshots) if screenshots else None
         self._stream_i = 0
         self._app_version = app_version
+        self._locale = locale
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
         self.hierarchy_calls = 0
         self.screenshot_calls = 0
@@ -166,6 +168,11 @@ class FakeDevice(Device):
 
     def app_version(self, package: str) -> str | None:
         return self._app_version
+
+    def device_locale(self) -> str | None:
+        # Overrides the shell-probing base helper so fakes never grow surprise
+        # ("shell", ...) entries in `calls` on lookup-miss paths.
+        return self._locale
 
     # input primitives (recorded)
     def click(self, x: int, y: int) -> None:

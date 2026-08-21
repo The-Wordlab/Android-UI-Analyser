@@ -63,6 +63,7 @@ on the same package/context/frame.
 - A delivered deeplink, spinner disappearance, or unchanged short settle is not proof of the
   requested destination — check `verified`, not just `ok`. Verify the final interactive
   affordance the user named.
+- Assert observed text or `--rid` — labels render in `meta.device_locale`.
 - Never execute `policy_suggestion`; `session autopilot` is off by default and **taps only** —
   never start it on a login or text entry. Short goal in the screen's own words (`Open Catalog`):
   a candidate sharing no goal word is refused. `policy_handoff` hands back.

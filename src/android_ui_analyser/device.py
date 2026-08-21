@@ -44,6 +44,28 @@ _RECONNECT_WARN_WINDOW_S = 30.0
 _last_reconnect_warn: dict[str, float] = {}
 _SHELL_OUTPUT_LIMIT_BYTES = 256 * 1024
 
+# Ordered by authority: the user-set locale, the settings fallback older/OEM builds
+# populate instead, then the build default.
+_LOCALE_READS = (
+    "getprop persist.sys.locale",
+    "settings get system system_locales",
+    "getprop ro.product.locale",
+)
+
+
+def parse_locale(raw: str | None) -> str | None:
+    """First BCP-47 tag from a device locale read (``"en-US,es-ES"`` → ``"en-US"``).
+
+    Shell reads come back as ``""``/``"null"`` on devices where a source is unset —
+    those mean "unknown", not a locale.
+    """
+    if not raw:
+        return None
+    first = raw.strip().split(",")[0].strip()
+    if not first or first.lower() in ("null", "undefined"):
+        return None
+    return first
+
 
 _READ_ONLY_PM_ACTIONS = frozenset(
     {
@@ -443,6 +465,31 @@ class Device(ABC):
     def app_version(self, package: str) -> str | None:
         """Best-effort app versionName for memory freshness; ``None`` if unknown."""
         return None
+
+    _device_locale_memo: str | None = None
+    _device_locale_read: bool = False
+
+    def device_locale(self) -> str | None:
+        """Best-effort device UI locale (BCP-47, e.g. ``es-ES``); ``None`` if unknown.
+
+        On-screen labels render in this locale — callers use it to avoid asserting text
+        written in another language. Memoized per connection: changing the locale takes
+        a Settings trip and usually an app restart, so a stale read within one session
+        is not a realistic failure mode.
+        """
+        if not self._device_locale_read:
+            self._device_locale_read = True
+            for cmd in _LOCALE_READS:
+                try:
+                    raw = self.shell(cmd)
+                except Exception as exc:
+                    logger.debug("locale read %r failed: %s", cmd, exc)
+                    continue
+                locale = parse_locale(raw)
+                if locale:
+                    self._device_locale_memo = locale
+                    break
+        return self._device_locale_memo
 
     # -- composed helpers (built on the primitives; usually not overridden)-
     def input_text(
@@ -2132,13 +2179,23 @@ def list_devices() -> list[DeviceInfo]:
             state = "device"
             model: str | None = None
             version: str | None = None
+            locale: str | None = None
             try:
                 model = dev.prop.model
                 version = dev.getprop("ro.build.version.release") or None
+                locale = parse_locale(
+                    dev.getprop("persist.sys.locale") or dev.getprop("ro.product.locale")
+                )
             except Exception:  # pragma: no cover - offline device
                 state = "offline"
             out.append(
-                DeviceInfo(serial=dev.serial, model=model, android_version=version, state=state)
+                DeviceInfo(
+                    serial=dev.serial,
+                    model=model,
+                    android_version=version,
+                    locale=locale,
+                    state=state,
+                )
             )
     except Exception as exc:
         raise DeviceError(
