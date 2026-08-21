@@ -30,6 +30,32 @@ from . import device_ledger
 logger = logging.getLogger(__name__)
 
 
+def cleanup_complete(result: Any) -> bool:
+    """Whether a :meth:`Engine.teardown_run` result proves nothing was deferred.
+
+    Handing a device back — to the next agent, or to a human breaking a wedged lease — only
+    counts if the undos actually replayed. A skipped or partial reap means the device still
+    carries somebody else's proxy, clock or radio state, so the caller must keep the lease
+    rather than advertise a clean device.
+    """
+
+    if not isinstance(result, dict) or not result.get("ok", False):
+        return False
+    reports = result.get("reports")
+    if not isinstance(reports, list):
+        return False
+    for report in reports:
+        if not isinstance(report, dict):
+            return False
+        skipped = report.get("skipped")
+        if skipped not in (None, "", "nothing pending"):
+            return False
+        remaining = report.get("remaining", 0)
+        if not isinstance(remaining, (int, float)) or remaining != 0:
+            return False
+    return True
+
+
 def _connect(platform: Any, serial: str) -> Any | None:
     try:
         return platform.connect(serial)

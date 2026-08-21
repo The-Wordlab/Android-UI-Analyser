@@ -101,7 +101,10 @@ polls, replays when the holder is provably gone, and exits when the ledger is em
 not do this job: the failure being covered is *that process dying*.
 
 Plus two explicit hooks: `aua lease release` resets before handing the device back, and
-`aua teardown run` forces it by hand.
+`aua teardown run` forces it by hand. The dashboard's **Unlease** button on the Lease chip is the
+same escape hatch for a human: it runs the identical clean-then-release pair under the same device
+lock, so breaking a wedged lease from the browser can never hand the next agent a still-mutated
+device.
 
 ### 4. The idle emulator watchdog, lease-gated
 

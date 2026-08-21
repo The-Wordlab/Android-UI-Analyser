@@ -1115,6 +1115,9 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .detail-status:first-child { border-left: 0; }
   .detail-status-label { color: var(--faint); font-size: 0.56rem; font-weight: 750; letter-spacing: 0.1em; text-transform: uppercase; }
   .detail-status-value { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: 0.7rem; font-weight: 650; }
+  .detail-status-row { min-width: 0; display: flex; align-items: center; gap: 0.35rem; }
+  .detail-status-row .detail-status-value { flex: 1 1 auto; }
+  .detail-status-action { flex: 0 0 auto; padding: 0.08rem 0.34rem; font-size: 0.58rem; }
   .detail-status-value.ok { color: var(--accent); }
   .detail-status-value.bad { color: var(--danger); }
   @media (max-width: 1250px) {
@@ -1533,6 +1536,8 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     color: #ffd9df; text-align: center; background: rgba(132, 42, 58, 0.24);
     border: 1px solid rgba(255,123,142,0.38); border-radius: 11px; font-size: 0.72rem;
   }
+  .detail-notice { margin: 0.9rem auto 0; }
+  .detail-notice.ok { color: #d6fff1; background: rgba(28, 96, 76, 0.24); border-color: rgba(99,230,190,0.38); }
   .device-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(280px, 340px));
@@ -1949,12 +1954,20 @@ if (new URLSearchParams(window.location.search).has('token')) {
   <div class="detail-health">
     <div class="detail-status"><span class="detail-status-label">Capture</span><span id="capture" class="detail-status-value">—</span></div>
     <div class="detail-status"><span class="detail-status-label">Source</span><span id="via" class="detail-status-value">—</span></div>
-    <div class="detail-status"><span class="detail-status-label">Lease</span><span id="lease" class="detail-status-value">—</span></div>
+    <div class="detail-status">
+      <span class="detail-status-label">Lease</span>
+      <div class="detail-status-row">
+        <span id="lease" class="detail-status-value">—</span>
+        <button id="lease-release" class="db-button danger detail-status-action hidden" type="button"
+                title="Clean this device and drop the lease its holder is still keeping">Unlease</button>
+      </div>
+    </div>
     <div class="detail-status"><span class="detail-status-label">Auto-stop</span><span id="watchdog" class="detail-status-value">—</span></div>
     <div class="detail-status"><span class="detail-status-label">Frame age</span><span id="age" class="detail-status-value">—</span></div>
     <div class="detail-status"><span class="detail-status-label">Failures</span><span id="failpill" class="detail-status-value">0</span></div>
   </div>
 </section>
+<div id="lease-notice" class="device-notice detail-notice hidden" role="status"></div>
 <div class="layout">
   <section class="panel stage">
     <div class="stage-heading">
@@ -3224,6 +3237,51 @@ document.getElementById('journal-clear').addEventListener('click', async () => {
   }
 });
 
+const leaseReleaseButton = document.getElementById('lease-release');
+const leaseNotice = document.getElementById('lease-notice');
+let leaseHolder = '';
+let leaseReleasing = false;
+
+function showLeaseNotice(message, kind) {
+  leaseNotice.textContent = message;
+  leaseNotice.className = 'device-notice detail-notice' + (kind ? (' ' + kind) : '');
+  clearTimeout(showLeaseNotice.timer);
+  showLeaseNotice.timer = setTimeout(() => leaseNotice.classList.add('hidden'), 9000);
+}
+
+leaseReleaseButton.addEventListener('click', async () => {
+  const holder = leaseHolder || 'another agent';
+  const confirmed = await confirmKnowledgeAction(
+    'Force unlease ' + focusSerial + '?',
+    'Undo pending device changes on ' + focusSerial + ', then drop the lease held by ' + holder +
+      '. An agent still driving this device loses it on its next call.',
+    'Force unlease'
+  );
+  if (!confirmed) return;
+  leaseReleasing = true;
+  leaseReleaseButton.disabled = true;
+  leaseReleaseButton.textContent = 'Unleasing…';
+  try {
+    const result = await dashboardControlPost('lease', 'release', {
+      confirmation: 'FORCE UNLEASE ' + focusSerial,
+    });
+    showLeaseNotice(
+      result.was_held
+        ? focusSerial + ' cleaned and unleased (was held by ' + (result.previous_owner || 'unknown') + ').'
+        : focusSerial + ' was already free; it is cleaned.',
+      'ok'
+    );
+    leaseReleaseButton.classList.add('hidden');
+  } catch (error) {
+    showLeaseNotice(error.message, '');
+  } finally {
+    leaseReleasing = false;
+    leaseReleaseButton.disabled = false;
+    leaseReleaseButton.textContent = 'Unlease';
+    tickStatus();
+  }
+});
+
 async function refreshOpenEventExchanges() {
   const loads = [];
   journalEl.querySelectorAll('details[open][data-detail-id]').forEach(details => {
@@ -3620,6 +3678,14 @@ async function tickStatus() {
     const leasePill = document.getElementById('lease');
     leasePill.textContent = lease.held ? (lease.owner || 'Held') : 'Available';
     leasePill.className = 'detail-status-value' + (lease.held ? ' ok' : '');
+    // Only offer the escape hatch while there is something to break. A pending release keeps
+    // its own label, so a slow teardown does not flicker back to "Unlease" mid-flight.
+    if (!leaseReleasing) {
+      leaseHolder = lease.held ? (lease.owner || 'another agent') : '';
+      leaseReleaseButton.classList.toggle('hidden', !lease.held);
+      leaseReleaseButton.disabled = false;
+      leaseReleaseButton.textContent = 'Unlease';
+    }
     const watchdog = s.watchdog || {};
     const watchdogPill = document.getElementById('watchdog');
     watchdogPill.textContent = !watchdog.managed
@@ -5986,6 +6052,62 @@ class _DashboardState:
             }
         raise UsageError(f"unknown dashboard navigation action {action!r}")
 
+    @staticmethod
+    def _require_lease_confirmation(payload: dict[str, Any], phrase: str) -> None:
+        if payload.get("confirmation") != phrase:
+            raise UsageError(
+                f"confirm this lease action with {phrase!r}",
+                code="lease_confirmation_required",
+            )
+
+    def lease_operation(self, action: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Break a wedged device lease from the browser, the way `lease release --force` does.
+
+        The button exists for the case the lease design cannot solve on its own: an owner
+        process that is still alive but no longer driving, so nothing ages the entry out and
+        every other agent is locked out of the emulator. Forcing it is the same two steps as
+        the CLI escape hatch, in the same order and under the same device lock — clean the
+        device first, drop the entry second — because a lease released before its owner's
+        proxy, clock or radio change is undone hands the next agent a poisoned device.
+        """
+
+        if action != "release":
+            raise UsageError(f"unknown dashboard lease action {action!r}")
+        from . import leases, teardown
+
+        ser = self._scoped_serial(payload.get("serial"))
+        self._require_lease_confirmation(payload, f"FORCE UNLEASE {ser}")
+        registry = self.config.lease.registry_dir
+        with leases.device_transaction(registry, ser):
+            entry = leases.read_lease(registry, ser)
+            previous_owner = str((entry or {}).get("owner") or "") or None
+            reset = self._dashboard_engine().teardown_run(serial=ser, force=True)
+            if not teardown.cleanup_complete(reset):
+                raise UsageError(
+                    f"could not clean {ser}; its lease was kept",
+                    code="dashboard_lease_cleanup_failed",
+                    hint="Run `aua teardown status`, fix the reported undo, then retry.",
+                )
+            released = leases.release(registry, ser, owner=None)
+        if not released:
+            raise UsageError(
+                f"{ser} was cleaned but its lease file could not be removed",
+                code="dashboard_lease_release_failed",
+                hint="Run `aua lease list`, then retry.",
+            )
+        # The lease pill is served from a one-second cache; without this the browser would
+        # poll back "held" right after a release it just watched succeed.
+        self._runtime_cache.pop(ser, None)
+        return {
+            "ok": True,
+            "action": "lease-release",
+            "serial": ser,
+            "forced": True,
+            "was_held": entry is not None,
+            "previous_owner": previous_owner,
+            "reset": reset.get("reports"),
+        }
+
     def journal_operation(self, action: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Clear the compact and detailed journal files visible in this device view."""
 
@@ -6167,8 +6289,10 @@ class _DashboardState:
         Reads go straight to the proxy capability, but arming or removing a rule changes
         state the device keeps until something clears it, and only the engine knows how to
         journal that undo first. None of the mock methods it is used for connect to the
-        device. Model readiness is likewise host-only, so neither use competes with a running
-        agent for the UiAutomation slot.
+        device, and model readiness is likewise host-only, so neither use competes with a
+        running agent for the UiAutomation slot. Forcing a lease is the one exception: its
+        teardown must reach the device, which is exactly what the operator authorised by
+        confirming that the current holder is wedged.
         """
         if self._engine is None:
             from .engine import Engine
@@ -6759,6 +6883,7 @@ def _make_handler(state: _DashboardState) -> type[BaseHTTPRequestHandler]:
                 "/api/inspect/",
                 "/api/navigation/",
                 "/api/journal/",
+                "/api/lease/",
             ):
                 if parsed.path.startswith(candidate):
                     prefix = candidate
@@ -6810,6 +6935,8 @@ def _make_handler(state: _DashboardState) -> type[BaseHTTPRequestHandler]:
                     result = state.navigation_operation(action, payload)
                 elif prefix == "/api/journal/":
                     result = state.journal_operation(action, payload)
+                elif prefix == "/api/lease/":
+                    result = state.lease_operation(action, payload)
                 else:
                     result = state.database_operation(action, payload)
                 self._json(result)

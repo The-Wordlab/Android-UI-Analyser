@@ -6610,26 +6610,6 @@ def policy_status_cmd(ctx: typer.Context) -> None:
 # --------------------------------------------------------------------------- doctor
 
 
-def _lease_cleanup_complete(result: Any) -> bool:
-    """Whether teardown proved that no durable device mutation was deferred."""
-
-    if not isinstance(result, dict) or not result.get("ok", False):
-        return False
-    reports = result.get("reports")
-    if not isinstance(reports, list):
-        return False
-    for report in reports:
-        if not isinstance(report, dict):
-            return False
-        skipped = report.get("skipped")
-        if skipped not in (None, "", "nothing pending"):
-            return False
-        remaining = report.get("remaining", 0)
-        if not isinstance(remaining, (int, float)) or remaining != 0:
-            return False
-    return True
-
-
 @app.command(name="lease")
 def lease_cmd(
     ctx: typer.Context,
@@ -6680,6 +6660,7 @@ def lease_cmd(
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
         from . import leases as lease_mod
+        from .teardown import cleanup_complete as _lease_cleanup_complete
 
         cache = engine.config.lease.registry_dir
         owner = lease_mod.resolve_owner(_opts(ctx).owner)
