@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import difflib
 import re
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from typing import Any, NamedTuple
 
 from .memory import REDACT_TOKENS, RouteStep, _id_tail
@@ -583,3 +583,54 @@ def match_step(elements: list[Element], step: RouteStep) -> Element | None:
 
 # Private alias kept for engine call sites that used ``_match_step``.
 _match_step = match_step
+
+
+# --------------------------------------------------------------- selectors the app never had
+
+# Below this many distinct mapped ids, "no screen carries this" is a guess about a thin map
+# rather than a fact about the app, and a wrong impossibility claim is worse than silence.
+_MIN_RID_VOCABULARY = 6
+
+
+def unknown_map_rids(
+    terms: Sequence[str],
+    known_rid_tails: Iterable[str],
+    *,
+    limit: int = 3,
+    min_vocabulary: int = _MIN_RID_VOCABULARY,
+) -> list[dict[str, Any]]:
+    """Unmet ``rid:`` terms that no mapped screen of this app has ever carried.
+
+    A wait reporting only ``unmet: rid:x`` reads as "not there yet" whether or not ``x`` can
+    exist. When the map is thick enough to be a survey of the app, an id absent from every
+    screen it has recorded is a caller mistake, and saying so ends a retry loop that otherwise
+    runs until the agent gives up.
+
+    Only resource ids are judged: the map stores text and content-description anchors
+    selectively (short, non-dynamic values only), so their absence carries no signal, while an
+    id is recorded whenever it is seen. Negated terms are skipped — an unmet ``!rid:x`` means
+    ``x`` *is* on screen, so calling it non-existent would be backwards.
+    """
+    vocabulary = {tail.strip().casefold() for tail in known_rid_tails if tail.strip()}
+    if len(vocabulary) < min_vocabulary:
+        return []
+    found: list[dict[str, Any]] = []
+    for raw in terms:
+        term = str(raw).strip()
+        if term.startswith("!"):
+            continue
+        field, _, needle = term.partition(":")
+        if field.casefold() not in {"rid", "id"} or not needle.strip():
+            continue
+        tail = (_id_tail(needle) or needle).strip().casefold()
+        if not tail or tail in vocabulary:
+            continue
+        found.append(
+            {
+                "term": term,
+                "known_in_app": False,
+                "nearest": difflib.get_close_matches(tail, sorted(vocabulary), n=limit, cutoff=0.5)
+                or difflib.get_close_matches(tail, sorted(vocabulary), n=limit, cutoff=0.3),
+            }
+        )
+    return found

@@ -27,6 +27,74 @@ _ENGINE_PROGRESS_COMMANDS = frozenset(
 )
 
 
+# A relaunch resets app state and cannot change what a screen contains; a third one in one
+# window is churn. A repeated call on one target means the first answer was already the true one.
+_RELAUNCH_CHURN = 3
+_REPEAT_CHURN = 3
+_LAUNCH_COMMANDS = frozenset({"app_launch", "app_launch_and_analyze"})
+# Fields that name *what* a call acted on, most specific first.
+_TARGET_KEYS = ("rid", "resource_id", "stable_key", "label", "text", "desc", "content_desc", "id")
+
+
+def _target_of(args: Any) -> str | None:
+    """What a call acted on, for deciding whether two calls did the same thing."""
+    mapping = _mapping(args)
+    for key in _TARGET_KEYS:
+        value = mapping.get(key)
+        if value not in (None, ""):
+            return f"{key}={value}"
+    return None
+
+
+def looping_advice(history: Any) -> dict[str, str] | None:
+    """One hint when the recent history is churn rather than progress, else ``None``.
+
+    Read from the same durable journal the other rules use, so it survives the short-lived CLI
+    processes an agent actually runs. Relaunching outranks repeating: a relaunch destroys app
+    state — it cost one live run its login — while a repeated tap only wastes a call.
+    """
+    rows = [row for row in (history or []) if isinstance(row, dict)]
+    if not rows:
+        return None
+    launches = sum(1 for row in rows if _base_command(row.get("cmd")) in _LAUNCH_COMMANDS)
+    if launches >= _RELAUNCH_CHURN:
+        return {
+            "id": "session_looping",
+            "message": (
+                f"the app was relaunched {launches} times in the last {len(rows)} calls; a "
+                "relaunch resets app state (a live run lost its login this way) and cannot "
+                "change what a screen contains"
+            ),
+            "recommended_call": (
+                "Read the current observation and say what is actually missing. If the screen "
+                "is empty, the data has to be seeded before it can be verified — "
+                "`aua map --find '<goal>'` shows what this app is known to reach."
+            ),
+        }
+    counts: dict[tuple[str, str], int] = {}
+    for row in rows:
+        target = _target_of(row.get("args"))
+        if target is None:
+            continue
+        key = (_base_command(row.get("cmd")), target)
+        counts[key] = counts.get(key, 0) + 1
+    repeated = max(counts.items(), key=lambda item: item[1], default=None)
+    if repeated is not None and repeated[1] >= _REPEAT_CHURN:
+        (command, target), count = repeated
+        return {
+            "id": "session_looping",
+            "message": (
+                f"{command} on {target} ran {count} times in the last {len(rows)} calls; the "
+                "first answer was already the true one"
+            ),
+            "recommended_call": (
+                "Take the fresh observation as the answer and change approach, or run "
+                "`aua session review` to see what the run has already spent."
+            ),
+        }
+    return None
+
+
 def _mapping(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
@@ -320,7 +388,10 @@ def decorate_result(
     try:
         from . import journal
 
-        events = journal.read_since(engine.config.cache.dir, serial, limit=12)
+        # Two windows from one read. The per-command rules below were tuned on the last 12
+        # calls and stay on 12; churn needs a longer view — a run can relaunch seven times
+        # across twelve minutes and never show three in any twelve-call slice.
+        events = journal.read_since(engine.config.cache.dir, serial, limit=36)
     except Exception:  # pragma: no cover - coaching is always best effort
         events = []
     owner = getattr(engine, "_lease_owner_resolved", None)
@@ -337,6 +408,8 @@ def decorate_result(
             and event["args"].get("adopt_action") is True
         )
     ]
+    history = events
+    events = events[-12:]
     normalized = _base_command(cmd)
     # Goal progress is durable across short-lived CLI processes. Environment checkpoints advance
     # only from structured, verified tool events; UI checkpoints advance only when the agent's
@@ -424,6 +497,12 @@ def decorate_result(
                 "owner": owner,
             }
         )
+    # Additive, not an early return: "you are looping" and "reuse that observation" are both
+    # worth saying, and the churn hint must not suppress the more specific one.
+    churn = looping_advice(history)
+    if churn is not None:
+        result = _append(result, churn)
+
     prior = events[:-1] if events and _base_command(events[-1].get("cmd")) == normalized else events
 
     if normalized == "analyze" and prior:

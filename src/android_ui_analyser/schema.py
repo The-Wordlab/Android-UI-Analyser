@@ -593,6 +593,10 @@ class ActionResult(BaseModel):
     # Structured correction for ``await_outcome=settled-unmet``.  Keeping this separate from
     # prose lets adapters and agents offer a corrected predicate without parsing ``detail``.
     arrival_mismatch: dict[str, Any] | None = None
+    # Unmet positive ``rid:`` terms that no mapped screen of this app has ever carried. An
+    # unmet term reads as "not there yet" whether or not it *can* be there; naming the ones
+    # that cannot is what stops an agent inventing a second id and waiting on that too.
+    unknown_selectors: list[dict[str, Any]] | None = None
     elapsed_ms: int | None = None
     # Bounded multi-step actions expose why they stopped and a compact semantic hop trace.
     stop_reason: str | None = None

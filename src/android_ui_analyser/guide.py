@@ -431,7 +431,9 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "action-bound wait can instead return `settled-unmet` when two stable, non-loading "
         "destination frames prove the positive predicate names the wrong screen; its "
         "`arrival_mismatch` gives stable replacement predicates without repeating the action. "
-        "`await_terms` says which term is missing. Prefer "
+        "`await_terms` says which term is missing, and `unknown_selectors` names any unmet "
+        "`rid:` the app map has never recorded on any screen — that one cannot arrive, so "
+        "correct it from its `nearest` list instead of waiting again. Prefer "
         '`wait --for "<text>"` for known targets; wait/await observations accept `--no-meta` '
         "with the same meaning as analyze. Reserve `wait --for-stable` for "
         "generation / loading / video.",

@@ -28,6 +28,7 @@ from .memory import (
     AppMap,
     RouteEdge,
     RouteStep,
+    ScreenRecord,
     _shortest_path,
     is_destructive_step,
     resolve_goal,
@@ -2824,6 +2825,104 @@ def _deeplink_candidates(goal: str, app: AppMap, *, target: str | None) -> list[
     return sorted(out, key=lambda item: (-item.score, item.name))[:5]
 
 
+# A screen's own words for "there is nothing here". Anchored on a word boundary so
+# "notifications" and "notes" are not read as "no ...", which would cry wolf on half an app.
+_EMPTY_STATE_RE = re.compile(
+    r"\b(?:no\s+\w|nothing\s+(?:here|yet)|empty[\s_-]?state|emptystate|"
+    r"is\s+empty|nothing\s+to\s+show)",
+    re.IGNORECASE,
+)
+
+
+def empty_state_anchor(screen: ScreenRecord | None) -> str | None:
+    """The anchor proving this screen was last seen showing an empty state, if any.
+
+    Reads the screen's own recorded copy rather than inferring from a missing element: "no
+    drafts" is the app stating the fact, and quoting it back is what lets an agent trust the
+    claim without navigating there to check.
+    """
+    if screen is None:
+        return None
+    for anchor in screen.anchors:
+        field, _, value = anchor.partition(":")
+        if field not in {"tx", "cd", "id"} or not value:
+            continue
+        if _EMPTY_STATE_RE.search(value):
+            return anchor
+    return None
+
+
+
+def inherited_device_state_warning(
+    status_rows: Iterable[dict[str, Any]], serial: str | None, owner: str | None
+) -> str | None:
+    """Device changes this session is starting behind but did not make.
+
+    These are *device* settings — a proxy, a moved clock, an enabled service. They outlive the
+    process that set them and outlive the app, so force-stopping or reinstalling the app cannot
+    clear one; only the registered undo can. Saying so at bootstrap turns an inherited proxy
+    from a mystery into a named variable.
+
+    A change this session recorded itself is skipped: ``session finish`` will undo it, and
+    warning an agent about its own bookkeeping is noise it learns to ignore.
+    """
+    if not serial:
+        return None
+    kinds: list[str] = []
+    for row in status_rows:
+        if str(row.get("serial") or "") != serial:
+            continue
+        changes = row.get("changes")
+        for change in changes if isinstance(changes, list) else []:
+            if not isinstance(change, dict):
+                continue
+            change_owner = change.get("owner")
+            if change_owner and owner and str(change_owner) == str(owner):
+                continue
+            kind = str(change.get("kind") or "").strip()
+            if kind and kind not in kinds:
+                kinds.append(kind)
+    if not kinds:
+        return None
+    return (
+        f"This device carries {len(kinds)} device change(s) another run left behind: "
+        f"{', '.join(kinds)}. These are device settings, not app state — restarting or "
+        "reinstalling the app does not clear them, so every observation is taken through "
+        f"them until they are undone. Inspect with `aua teardown status`; clear with "
+        f"`aua teardown run --serial {serial}` once you know no live run owns them."
+    )
+
+
+def _empty_state_target(
+    goal: str, app: AppMap | None, candidates: Sequence[GoalCandidate]
+) -> tuple[str, str] | None:
+    """The screen this goal is about, and the anchor proving it was last seen empty.
+
+    Prefers a ranked candidate's own target. Falls back to the mapped screen the goal names,
+    because the incident this exists for had *no* verified route: a candidate-only check would
+    have stayed silent for exactly the run that needed it. The fallback demands a shared word
+    of four characters or more, so a one-letter overlap cannot conjure a warning.
+    """
+    if app is None:
+        return None
+    names = [candidate.target for candidate in candidates if candidate.target]
+    if not names:
+        terms = {term for term in _goal_terms(goal) if len(term) >= 4}
+        scored = [
+            (_match_score(goal, name, *(record.aliases or [])), name)
+            for name, record in app.screens.items()
+            if terms & set(_GOAL_WORD.findall(name.casefold()))
+        ]
+        if not scored:
+            return None
+        names = [max(scored)[1]]
+    for name in names:
+        anchor = empty_state_anchor(app.screens.get(name))
+        if anchor is not None:
+            return name, anchor
+    return None
+
+
 def plan_goal_session(
     goal: str,
     observation: AnalyzeResult,
@@ -2887,6 +2986,17 @@ def plan_goal_session(
         warnings.append(
             "Deeplinks rank after verified routes and saved flows and require explicit unsafe "
             "authorization plus arrival evidence."
+        )
+    # The map may already know the destination is empty. Saying so here costs nothing and
+    # saves an agent from reading "arrived, but nothing is here" as "navigated wrong" — the
+    # mistake that turned one live run into twelve minutes of relaunches.
+    empty_target = _empty_state_target(goal, app, candidates)
+    if empty_target is not None:
+        target_name, empty_anchor = empty_target
+        warnings.append(
+            f"The mapped screen {target_name!r} was last seen showing an empty state "
+            f"({empty_anchor!r}). Navigating there will succeed and still show nothing. If "
+            "the goal needs content, seed or create it first rather than re-navigating."
         )
     if "offline" in goal.casefold():
         recommendation = GoalCall(

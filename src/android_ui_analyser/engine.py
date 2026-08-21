@@ -7351,6 +7351,17 @@ class Engine:
             artifacts_dir=state.artifact_dir,
             goal_progress=progress,
         )
+        # A device setting another run left behind — a proxy, a moved clock — outlives its
+        # process and outlives the app, so no amount of restarting clears it. `teardown status`
+        # already knew; nothing consulted it on the path an agent actually takes, so a session
+        # could take every observation through somebody else's proxy without ever being told.
+        from .session import inherited_device_state_warning
+
+        inherited = inherited_device_state_warning(
+            self.teardown_status().get("devices") or [], state.serial, state.owner
+        )
+        if inherited:
+            out["warnings"] = [*(out.get("warnings") or []), inherited]
         # Session bootstrap embeds an AnalyzeResult rather than an ActionResult, so it does not
         # otherwise carry the latter's `next_actions`. Derive them from this same fresh frame:
         # manual handoff can now choose a stable selector without a redundant analyze/capability
@@ -14700,6 +14711,29 @@ class Engine:
             self._sleep_between_polls(max(10.0, float(poll_ms)), deadline)
             results = evaluate()
 
+    def _unknown_map_selectors(self, unmet: list[str], package: str) -> list[dict[str, Any]]:
+        """Unmet ``rid:`` terms this app's map has never recorded on any screen.
+
+        Deliberately map-based rather than screen-based: "not on this screen" is what an unmet
+        term already says. What an agent cannot see, and what sends it inventing a second id, is
+        that the id exists nowhere in the app. Not cached — it runs only when a positive term
+        went unmet, and a map that just learned a screen must not be answered from a stale copy.
+        """
+        if not unmet or not package or self._memory is None:
+            return []
+        app = self._memory.load(package)
+        if app is None:
+            return []
+        from .selectors import unknown_map_rids
+
+        vocabulary = {
+            anchor[3:]
+            for screen in app.screens.values()
+            for anchor in screen.anchors
+            if anchor.startswith("id:")
+        }
+        return unknown_map_rids(unmet, vocabulary)
+
     def _await_result(
         self,
         outcome: str,
@@ -14720,6 +14754,16 @@ class Engine:
         detail = f"{outcome} after {elapsed}ms ({checks} checks)"
         if unmet:
             detail += "; unmet: " + ", ".join(unmet)
+        # An unmet id that no mapped screen of this app has ever carried is a caller mistake,
+        # not a slow load, and the two are indistinguishable from "unmet:" alone. Checked only
+        # on the unmet path, so a satisfied wait pays nothing.
+        impossible = self._unknown_map_selectors(unmet, now[0] or origin[0]) if unmet else []
+        if impossible:
+            detail += "; " + ", ".join(
+                f"{row['term']} is in no mapped screen of this app"
+                + (f" (nearest: {', '.join(row['nearest'])})" if row["nearest"] else "")
+                for row in impossible
+            )
         if outcome == "screen-changed":
             detail += f"; now on {now[0]}/{now[1]} (was {origin[0]}/{origin[1]})"
         result = ActionResult(
@@ -14731,6 +14775,7 @@ class Engine:
             await_outcome=outcome,
             await_terms=terms,
             arrival_mismatch=arrival_mismatch,
+            unknown_selectors=impossible or None,
             elapsed_ms=elapsed,
         )
         if outcome == "absence-satisfied":
