@@ -12806,6 +12806,29 @@ class Engine:
         """
         return key.startswith(("tx:", "cd:"))
 
+    def _miss_observation(self, observation: AnalyzeResult) -> Any:
+        """The screen attached to a miss, trimmed the way a successful action's is.
+
+        The resolution read is the whole tree — status bar, wrappers and all — because it was
+        taken to search, not to publish. Attaching it raw made a failure the most expensive
+        payload the tool emits (147 rows against the ~20 an action returns). Same dials, so a
+        caller reading a miss sees rows in the shape it already knows.
+        """
+        from .projection import Projection
+        from .schema import OutputFormat as _Fmt
+
+        try:
+            output = getattr(self.config, "output", None)
+            view = Projection.for_observation(
+                getattr(output, "observation_fields", None),
+                meta=getattr(output, "observation_meta", None),
+            )
+            if view is None:
+                return observation
+            return view.apply(observation.as_dict(_Fmt.json))
+        except Exception:  # noqa: BLE001 - an attached screen is a bonus, never the failure
+            return observation
+
     def _resolve_action_key(
         self, key: str, *, bounds: Sequence[int] | None = None, verb: str = "tap"
     ) -> Element:
@@ -12833,13 +12856,18 @@ class Engine:
             )
             hits = find_by_stable_key(current.elements, key)
         if not hits:
+            # The screen that proves the miss rides along: this read is how we know the key is
+            # absent, so telling the caller to go and analyze would spend a round trip on a
+            # payload already in hand — and when the screen moved underneath them (an
+            # interstitial, a dialog), this observation is the answer they actually need.
             raise ElementNotFoundError(
                 f"no element with stable_key {key!r} on the current screen for {verb}",
                 hint=(
-                    f"No action was sent. {key!r} is not on this screen: re-analyze and use an "
-                    f"id from that fresh observation, or address the element with "
-                    f"--rid/--text/--desc."
+                    f"No action was sent and {key!r} is not on this screen — which may have "
+                    f"changed under you. The current screen is attached as `observation`: use "
+                    f"an id from it, or address the element with --rid/--text/--desc."
                 ),
+                observation=self._miss_observation(current),
             )
         if len(hits) == 1:
             return hits[0]

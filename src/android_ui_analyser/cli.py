@@ -50,10 +50,12 @@ from .errors import (
     DaemonBusyError,
     DeviceError,
     DeviceLeasedError,
+    ElementNotFoundError,
     ExitCode,
     ExpectationFailed,
     SelectorAmbiguousError,
     SelectorNotFoundError,
+    StaleElementIdError,
     UsageError,
     emit_error,
 )
@@ -1537,6 +1539,11 @@ def _daemon_error(err: dict[str, Any]) -> AuaError:
         "device": DeviceError,
         "config": ConfigError,
         "selector_not_found": SelectorNotFoundError,
+        # Same shape as its sibling: both mean "your target is not here", and both now
+        # carry the screen that proves it. Absent from this table, it fell through to a
+        # plain AuaError with nowhere to put the observation.
+        "element_not_found": ElementNotFoundError,
+        "stale_element_id": StaleElementIdError,
         "selector_ambiguous": SelectorAmbiguousError,
         "expectation_failed": ExpectationFailed,
     }
@@ -1593,7 +1600,14 @@ def _daemon_error(err: dict[str, Any]) -> AuaError:
     if code in device_error_codes:
         return DeviceError(message, hint=hint, code=code)
     if code in mapping:
-        return mapping[code](message, hint=hint)
+        rebuilt = mapping[code](message, hint=hint)
+        # A miss that already read the screen sends it back; rebuilding the error from
+        # message/hint/code alone dropped it at the daemon boundary, so the caller was told the
+        # observation was attached and then handed a payload without one.
+        observation = err.get("observation")
+        if observation is not None and hasattr(rebuilt, "observation"):
+            rebuilt.observation = observation
+        return rebuilt
     if code.startswith("provider"):
         out = AuaError(message, hint=hint, code=code)
         out.exit_code = ExitCode.PROVIDER

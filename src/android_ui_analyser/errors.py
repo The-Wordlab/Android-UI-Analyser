@@ -190,7 +190,44 @@ class ProviderError(AuaError):
         super().__init__(message, hint=hint)
 
 
-class ElementNotFoundError(AuaError):
+class _CarriesObservation(AuaError):
+    """An error that hands back the screen it already read.
+
+    "Your target is not here" is only actionable with the screen that proves it. Every raise
+    site that reaches this has *already* analyzed — that read is how it knows the target is
+    absent — so attaching it costs nothing and removes a guaranteed round trip on the one path
+    where the caller is most confused about what is on screen.
+
+    Trimmed on the way out (``compact``): a failure has no business costing more bytes than a
+    success.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        hint: str | None = None,
+        observation: Any | None = None,
+    ) -> None:
+        super().__init__(message, hint=hint)
+        self.observation = observation
+
+    def to_dict(self) -> dict[str, object]:
+        payload = super().to_dict()
+        if self.observation is None:
+            return payload
+        if hasattr(self.observation, "as_dict"):
+            observation = self.observation.as_dict("compact")
+        else:
+            observation = self.observation
+        error = payload["error"]
+        if isinstance(error, dict):
+            error["observation_present"] = True
+            error["observation"] = observation
+        return payload
+
+
+class ElementNotFoundError(_CarriesObservation):
     """A referenced element id is not in the cached analyze result."""
 
     exit_code = ExitCode.USAGE
@@ -223,35 +260,13 @@ class JobCancelledError(AuaError):
     code = "job_cancelled"
 
 
-class SelectorNotFoundError(AuaError):
+class SelectorNotFoundError(_CarriesObservation):
     """A ``--rid``/``--text``/``--by`` selector matched no element on screen."""
 
     exit_code = ExitCode.NOT_FOUND
     code = "selector_not_found"
 
-    def __init__(
-        self,
-        message: str,
-        *,
-        hint: str | None = None,
-        observation: Any | None = None,
-    ) -> None:
-        super().__init__(message, hint=hint)
-        self.observation = observation
-
-    def to_dict(self) -> dict[str, object]:
-        payload = super().to_dict()
-        if self.observation is None:
-            return payload
-        if hasattr(self.observation, "as_dict"):
-            observation = self.observation.as_dict("compact")
-        else:
-            observation = self.observation
-        error = payload["error"]
-        if isinstance(error, dict):
-            error["observation_present"] = True
-            error["observation"] = observation
-        return payload
+    # Behaviour comes from `_CarriesObservation`; only the code and exit status differ.
 
 
 class SelectorAmbiguousError(AuaError):
