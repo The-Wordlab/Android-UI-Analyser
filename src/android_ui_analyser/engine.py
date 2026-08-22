@@ -11231,6 +11231,84 @@ class Engine:
             or change.get("text_removed")
         )
 
+    def _unready_destination_risk(
+        self,
+        change: dict[str, Any] | None,
+        obs: AnalyzeResult,
+        *,
+        before_state: dict[str, Any] | None,
+        destination_confirmed: bool,
+    ) -> str | None:
+        """Why this post-action screen is a loading/unrendered destination, or ``None``.
+
+        The journalled failure this exists for: a tap started a new Activity that then waited
+        on the network before drawing. The settle wait truthfully reported quiet pixels and a
+        stable tree (``via=hierarchy``), the change summary said the Activity moved with
+        nothing added — and the result still cleared every caveat. The screen was *physically
+        settled and semantically loading*, so no settle-loop tuning can catch it; only
+        classification can. This is Phase 0 of the arrival design: classification only, from
+        evidence already in hand — no new waits, no new device reads, the same facts finally
+        consulted.
+
+        Two detectors, most explicit first:
+
+        * the screen *says* it is loading — a progress widget, loading text, or a mapped
+          ``loading`` screen (:meth:`_observation_is_loading`, until now consulted only by
+          goto/back/await). Explicit beats inference, so this fires even on a recognized or
+          additive destination: a loading shell that arrived is still a loading shell.
+        * departure without arrival — the Activity changed while nothing was added: no new
+          text, a tree that did not grow, and no new actionable control. Removal-only change
+          proves the old screen was *left*, not that the new one has rendered
+          (``_change_has_semantic_effect`` treats those symmetrically, which is exactly how
+          the journalled frame passed for arrival). Suppressed when recognition confirmed a
+          different known screen — the map is stronger arrival evidence than this inference —
+          and when the app left the foreground, which is its own, stronger report.
+        """
+        if self._observation_is_loading(obs):
+            return (
+                "the post-action screen shows an explicit loading state (progress indicator, "
+                "loading text, or a mapped loading screen). Content may replace these ids when "
+                "it lands — run `aua wait-and-analyze --after-change` or wait for an exact "
+                "destination predicate instead of acting on this frame."
+            )
+        if destination_confirmed and (before_state or {}).get("known_screen"):
+            # Recognition suppresses the inference only when the *origin* was also known:
+            # `destination_confirmed` is "recognized name differs from the before name", and
+            # with an unstamped before name (cold session, async memory) it is True whenever
+            # anything is recognized at all. Under this detector's own preconditions the after
+            # tree barely differs from the before tree, so that recognition is at least as
+            # likely to be the origin's map entry as a reached destination — no differential,
+            # no suppression.
+            return None
+        if not isinstance(change, dict) or change.get("activity_changed") is not True:
+            return None
+        if change.get("app_left_foreground"):
+            return None
+        if change.get("text_added"):
+            return None
+        delta = change.get("node_count_delta")
+        if not isinstance(delta, int) or delta > 0:
+            return None
+        # A new actionable control without a label still proves content arrived — labels alone
+        # miss icon buttons. Compare resource ids against the pre-action snapshot when one
+        # exists; no snapshot means no claim either way, and the conjunction above must hold
+        # on its own.
+        before_rids = set((before_state or {}).get("rids") or [])
+        if before_rids:
+            for element in app_elements(obs.elements):
+                if element.clickable is not True:
+                    continue
+                rid = _id_tail(element.resource_id)
+                if rid and rid not in before_rids:
+                    return None
+        return (
+            "the action left the previous screen (the Activity changed) but the new one has "
+            "rendered nothing yet: no text or actionable control was added and the tree did "
+            "not grow. This observation is a transitional/loading frame, not arrival evidence "
+            "— run `aua wait-and-analyze --after-change` or wait for an exact destination "
+            "predicate before acting on ids from it."
+        )
+
     @staticmethod
     def _tap_settle_needs_confirmation(
         action_kind: str | None, ready: dict[str, Any] | None
@@ -11430,6 +11508,22 @@ class Engine:
                     # The bounded package-owned poll subsequently found semantic app content,
                     # which is newer and stronger evidence than that early frame.
                     caveat = None
+                arrival_unready: str | None = None
+                if caveat is None and settle and not hierarchy_only and not launch_transitional:
+                    # Only where the settle machinery cleared every caveat: an existing caveat
+                    # (unchanged / timeout / unconfirmed) is already honest, and the repeat-
+                    # mutation warning on `unchanged` must never be replaced by a softer one.
+                    # Its own suppress: the surrounding blanket suppress would otherwise let a
+                    # classifier bug silently discard the whole observation attachment.
+                    with contextlib.suppress(Exception):
+                        arrival_unready = self._unready_destination_risk(
+                            change,
+                            obs,
+                            before_state=before_state,
+                            destination_confirmed=destination_confirmed,
+                        )
+                    if arrival_unready:
+                        caveat = arrival_unready
                 if caveat:
                     obs.meta.stale_risk = caveat
                     # Also at the top level of the action result, because a runner reading only the
@@ -11485,9 +11579,18 @@ class Engine:
                 # reaches the caller: `meta.slow_controls` is not in the `changed` preset a
                 # folded observation is trimmed to.
                 self._price_elements(obs)
+                # Three independent reasons to withhold the derived list, and the third is the
+                # honesty one: an unready destination's ids may vanish when content finally
+                # lands, so advertising next actions from it invites exactly the wrong tap the
+                # caveat exists to prevent. That suppression is best-effort — the list is now
+                # off by default anyway, so `stale_risk` and the note carry the verdict.
                 result.next_actions = (
                     self._next_actions(obs)
-                    if self.config.output.next_actions and not launch_ids_unstable
+                    if (
+                        self.config.output.next_actions
+                        and not launch_ids_unstable
+                        and not arrival_unready
+                    )
                     else None
                 )
                 nav = list(obs.meta.known_routes or []) + list(obs.meta.suggested_gotos or [])
@@ -11506,6 +11609,13 @@ class Engine:
                         "The app is foreground, but its launch screen has not produced a stable "
                         "readback yet, so its ids may not survive until your next call. Run "
                         "`aua analyze` once before acting on an id."
+                    )
+                elif arrival_unready:
+                    result.note = (
+                        "The action dispatched, but the destination has not rendered usable "
+                        "content yet (see stale_risk). Do not act on ids from this frame; run "
+                        "`aua wait-and-analyze --after-change` or wait for an exact "
+                        "destination predicate."
                     )
                 elif ready and ready.get("timeout") and self._change_has_semantic_effect(change):
                     result.note = (

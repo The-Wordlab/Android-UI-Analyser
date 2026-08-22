@@ -1252,6 +1252,32 @@ def _journal_serial_without_device(engine: Engine) -> str | None:
     return configured if isinstance(configured, str) and configured else None
 
 
+def _previous_response_invited_a_reread(prev: dict[str, Any]) -> bool:
+    """Did the previous action itself admit its observation may not be usable?
+
+    Two admissions license the follow-up ``analyze`` this lint would otherwise scold
+    (journalled 2026-08-22: a tap returned a transitional frame as the settled screen, the
+    recovery ``analyze`` was warned off as redundant — the tool punishing a caller for
+    recovering from the tool's own admitted uncertainty):
+
+    * ``stale_risk`` — the engine said the observation may predate the action, be
+      mid-transition, or be an unrendered/loading destination. It survives the journal's
+      slim record (``summarize_result`` keeps it top-level).
+    * an empty observation — its note literally says "Re-read with `analyze`". The slim
+      record carries ``elements_count``; the in-process shape carries ``elements``. An
+      observation stating neither makes no emptiness claim and keeps the lint.
+    """
+    if prev.get("stale_risk"):
+        return True
+    obs = prev.get("observation")
+    if isinstance(obs, dict):
+        if "elements_count" in obs:
+            return not obs.get("elements_count")
+        if "elements" in obs:
+            return not obs.get("elements")
+    return False
+
+
 def _warn_if_redundant_analyze(engine: Engine, args: dict[str, Any] | None = None) -> None:
     """Soft lint: `analyze` immediately after an observed action usually re-reads the same state."""
     if args is not None and args.get("cmd") != "analyze":
@@ -1275,6 +1301,10 @@ def _warn_if_redundant_analyze(engine: Engine, args: dict[str, Any] | None = Non
     if not isinstance(prev, dict):
         return
     if not prev.get("observation"):
+        return
+    if _previous_response_invited_a_reread(prev):
+        # The previous response told the caller its observation might not be usable; an
+        # `analyze` that follows that advice is recovery, not redundancy.
         return
     action = prev.get("action")
     if not isinstance(action, str):
