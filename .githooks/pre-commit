@@ -13,15 +13,32 @@ set -uo pipefail
 root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
 cd "$root" || exit 0
 
-# Prefer the project venv; fall back to module invocation, then PATH.
-if [ -x ".venv/bin/aua" ]; then
-  run_aua() { ./.venv/bin/aua "$@"; }
-elif [ -x ".venv/bin/python" ]; then
-  run_aua() { ./.venv/bin/python -m android_ui_analyser.cli "$@"; }
-elif command -v aua >/dev/null 2>&1; then
-  run_aua() { command aua "$@"; }
+# Tooling lives in the main checkout's venv; the SOURCE must be this worktree. Keeping those
+# two apart is the whole point of what follows.
+#
+# A linked worktree under `.worktree/` has no `.venv` of its own, so the old
+# `[ -x ".venv/bin/aua" ]` test failed there and the hook fell through to `aua` on PATH — the
+# *installed* CLI, whose `src` is the main checkout. Committing from a worktree therefore
+# regenerated SKILL.md from a different tree's `guide.py`, and when the main checkout happened
+# to sit behind, it stamped stale agent guidance over correct guidance inside an unrelated
+# commit. `--git-common-dir` is the only reliable way back to the main checkout, and
+# `PYTHONPATH` is what pins generation to the tree actually being committed.
+common_dir="$(git rev-parse --git-common-dir 2>/dev/null)" || common_dir=".git"
+case "$common_dir" in /*) ;; *) common_dir="$root/$common_dir" ;; esac
+main_root="$(cd "$common_dir/.." 2>/dev/null && pwd)" || main_root="$root"
+
+find_tool() {
+  # This worktree first (a full clone has its own venv), then the main checkout's.
+  for candidate in "$root/.venv/bin/$1" "$main_root/.venv/bin/$1"; do
+    [ -x "$candidate" ] && { printf '%s' "$candidate"; return 0; }
+  done
+  return 1
+}
+
+if py="$(find_tool python)"; then
+  run_aua() { PYTHONPATH="$root/src" "$py" -m android_ui_analyser.cli "$@"; }
 else
-  echo "pre-commit: 'aua' unavailable — skipping SKILL.md sync (install the dev env to enable)." >&2
+  echo "pre-commit: no project venv found — skipping SKILL.md sync (install the dev env)." >&2
   exit 0
 fi
 
@@ -55,15 +72,19 @@ fi
 # that introduced it. mypy names it; a green test suite does not.
 #
 # Both skip when the tool is absent so a fresh clone can still commit. `--no-verify` bypasses.
-if [ -x ".venv/bin/ruff" ]; then
-  if ! .venv/bin/ruff check . >&2; then
+# Located the same way, for the same reason: guarding these on a worktree-relative
+# `.venv/bin/…` path made the only gate this repo has skip silently in every worktree, and a
+# skipped gate reports success. They run with this worktree's `src` on the path and its files
+# as the target, so what is checked is what is being committed.
+if ruff_bin="$(find_tool ruff)"; then
+  if ! PYTHONPATH="$root/src" "$ruff_bin" check . >&2; then
     echo "pre-commit: ruff found problems (above). Fix them, or commit with --no-verify." >&2
     exit 1
   fi
 fi
 
-if [ -x ".venv/bin/mypy" ]; then
-  if ! .venv/bin/mypy >&2; then
+if mypy_bin="$(find_tool mypy)"; then
+  if ! PYTHONPATH="$root/src" "$mypy_bin" >&2; then
     echo "pre-commit: mypy found problems (above). An [attr-defined] error inside a" >&2
     echo "            suppressed-exception block means a silently dead feature, not a nit." >&2
     echo "            Fix them, or commit with --no-verify." >&2
