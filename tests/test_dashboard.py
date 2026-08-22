@@ -575,8 +575,19 @@ def test_dashboard_analyze_returns_one_exact_overlay_frame(
     monkeypatch.setattr(state, "_inspection_daemon_call", fake_call)
     result = state.inspection_operation("analyze", {"serial": "emulator-5554"})
 
-    assert result["view"] == analyzed
-    assert result["result"] == analyzed
+    # The panel is a client of the warm daemon like the CLI and MCP, so what it serves is the
+    # default observation view, not the daemon's whole answer — see
+    # test_the_dashboard_trims_what_it_serves.py. The frame's identity and geometry survive
+    # that trim; `duration_ms`/`tier_used` are provenance and do not.
+    assert result["view"] is result["result"]
+    assert result["result"]["screen"] == analyzed["screen"]
+    assert result["result"]["elements"] == [
+        {"id": 7, "text": "Open app", "clickable": True, "bounds": [100, 1800, 980, 1950]}
+    ]
+    assert result["result"]["meta"] == {}
+    assert state._inspections["emulator-5554"]["result"] == analyzed, (
+        "the stored frame stays the daemon's answer; only the served copy is a view"
+    )
     assert result["inspection_id"]
     assert calls[0][0:2] == ("emulator-5554", "analyze")
     # The overlay publishes numbered elements to a human, so those numbers must be recorded;

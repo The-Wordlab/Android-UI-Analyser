@@ -24,13 +24,16 @@ import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import urlopen
 
 from . import bonjour
 from .errors import AuaError, DaemonOutcomeUnknownError, UsageError
+
+if TYPE_CHECKING:  # pragma: no cover - typing only, so the runtime import stays lazy
+    from .projection import Projection
 
 logger = logging.getLogger(__name__)
 
@@ -5525,6 +5528,57 @@ class _DashboardState:
                 hint=str(error.get("hint")) if error.get("hint") else None,
             )
 
+    def _display_view(self) -> Projection | None:
+        """The default observation view, widened by the two columns the overlay is made of.
+
+        The daemon answers with everything on purpose — ``--observe-fields all`` depends on it —
+        and every client trims on the way out: the CLI at three call sites, MCP at its single
+        return boundary. This is the dashboard's, and it reads the same
+        ``output.observation_fields`` / ``output.observation_meta`` dials so all three surfaces
+        move together.
+
+        ``bounds`` and ``stable_key`` are added because for this client they are not detail,
+        they *are* the row: ``bounds`` positions the box over the frame and ``stable_key`` names
+        the control on its badge and anchors it inside the displayed JSON. A caller asking for
+        every column (``all``) already gets them and is left alone.
+        """
+        from .projection import Projection, resolve_field_name
+
+        output = getattr(self.config, "output", None)
+        spec = getattr(output, "observation_fields", None)
+        meta_spec = getattr(output, "observation_meta", None)
+        if isinstance(spec, str) and spec.strip().lower() != "all":
+            names = [name.strip() for name in spec.split(",") if name.strip()]
+            resolved = {resolve_field_name(name) for name in names}
+            names += [name for name in ("bounds", "stable_key") if name not in resolved]
+            spec = ",".join(names)
+        return Projection.for_observation(spec, meta=meta_spec)
+
+    def _display_payload(
+        self, raw_result: dict[str, Any], view: dict[str, Any] | None
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """The daemon's answer as the browser should see it: rows filtered, columns projected.
+
+        Trims what is **served**, never what is **stored**. The stored record is this panel's
+        resolution table for a click — :meth:`_inspection_selector` reads ``stable_key`` and the
+        exact ``bounds`` off it, and an id the overlay published has to stay resolvable there
+        even after the display view has filtered its row away. Putting the trim on the way out
+        keeps a display budget cosmetic: no value of ``output.observation_fields`` can make a
+        drawn box unclickable.
+        """
+        from .projection import trim_observation_payload
+
+        projection = self._display_view()
+        if projection is None:
+            return raw_result, view
+        if isinstance(raw_result.get("elements"), list):
+            # `analyze` answers with the observation payload itself, so it is the whole result.
+            shown = projection.apply(raw_result)
+            return shown, shown
+        shown = trim_observation_payload(dict(raw_result), projection)
+        observation = shown.get("observation")
+        return shown, observation if isinstance(observation, dict) else view
+
     def _store_inspection(
         self,
         serial: str,
@@ -5547,12 +5601,13 @@ class _DashboardState:
         if isinstance(old_path, Path) and old_path != frame_path:
             with contextlib.suppress(OSError):
                 old_path.unlink()
+        shown_result, shown_view = self._display_payload(raw_result, view)
         return {
             "ok": True,
             "inspection_id": inspection_id,
             "frame_url": f"/api/inspection-frame?serial={serial}&inspection_id={inspection_id}",
-            "result": raw_result,
-            "view": view,
+            "result": shown_result,
+            "view": shown_view,
         }
 
     def inspection_operation(self, action: str, payload: dict[str, Any]) -> dict[str, Any]:
