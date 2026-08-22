@@ -201,6 +201,32 @@ class CallerLatencyStore:
             previous_age_ms=age_ms,
         )
 
+    def peek_turn(self) -> CallerTurnFacts:
+        """The same facts as :meth:`open_turn`, without opening one or learning from it.
+
+        The warm daemon must never open a caller turn — a daemon round trip is aua's own
+        transport, and counting it would halve every gap — but it *is* the process that reads
+        the screen, so it is the only one that can compare what is on the device now against
+        what the caller was last handed. Both ends of the turn are stamped into this record by
+        the CLI process, ``open_turn`` included, so this call needs no lock and no write: the
+        gap it reports is the one the CLI already measured and classified for this turn.
+        """
+        now = self._clock()
+        record = self._read()
+        raw_gap = record.get("last_gap_ms")
+        gap_ms = int(raw_gap) if isinstance(raw_gap, int) and not isinstance(raw_gap, bool) else None
+        finite_fp_at = _finite_number(record.get("fingerprint_at"))
+        fp = record.get("fingerprint")
+        return CallerTurnFacts(
+            profile=_profile(record, gap_ms=gap_ms, gap_ignored=_ignored_reason(gap_ms)),
+            previous_fingerprint=str(fp) if fp else None,
+            previous_age_ms=(
+                int((now - finite_fp_at) * 1000.0)
+                if finite_fp_at is not None and now >= finite_fp_at
+                else None
+            ),
+        )
+
     def close_turn(self, fingerprint: str | None = None) -> None:
         """Stamp when this call returned, and which screen it handed back.
 
@@ -245,19 +271,32 @@ class CallerLatencyStore:
             atomic_write_text(self.path, json.dumps(record, ensure_ascii=False))
 
 
+def _ignored_reason(gap_ms: int | None) -> str | None:
+    """Why a measured gap must not be believed, or None when it can be.
+
+    Its own function because two readers need the same verdict from different inputs:
+    :func:`_classify` has the raw stamps, while :meth:`CallerLatencyStore.peek_turn` has only
+    the gap this turn already recorded. A second copy of the rule would be a second place for
+    "was anyone actually driving" to drift.
+    """
+    if gap_ms is None:
+        return None
+    if gap_ms < 0:
+        # An NTP correction or a restored snapshot. Believing it would poison the EMA with a
+        # negative think time, and there is no way to tell how much of the gap was real.
+        return "clock"
+    if gap_ms > IDLE_GAP_MS:
+        return "idle"
+    return None
+
+
 def _classify(ended_at: Any, now: float) -> tuple[int | None, str | None]:
     """``(gap_ms, why_it_was_ignored)`` for the interval since the last call returned."""
     finite_ended_at = _finite_number(ended_at)
     if finite_ended_at is None or not math.isfinite(now):
         return None, None
     gap_ms = int(round((now - finite_ended_at) * 1000.0))
-    if gap_ms < 0:
-        # An NTP correction or a restored snapshot. Believing it would poison the EMA with a
-        # negative think time, and there is no way to tell how much of the gap was real.
-        return gap_ms, "clock"
-    if gap_ms > IDLE_GAP_MS:
-        return gap_ms, "idle"
-    return gap_ms, None
+    return gap_ms, _ignored_reason(gap_ms)
 
 
 def _learn(record: dict[str, Any], gap_ms: int) -> None:

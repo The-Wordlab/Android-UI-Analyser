@@ -158,6 +158,13 @@ OBSERVATION_META_PRESETS: Mapping[str, tuple[str, ...]] = MappingProxyType(
             # `activity_changed` plus the added/removed **text**. Ask for it with
             # `--observe-meta all` (or by name) when you want the id-level diff.
             "unchanged",
+            # …and the one thing `unchanged`/`stale_risk` cannot say, because it is not about
+            # this action at all: the screen the caller was holding was already gone before the
+            # device was touched. `caller` is deliberately NOT in this preset — measured at
+            # 199 B (~50 tok) on every action, of which `gap_ms`/`ema_ms`/`spread_ms`/`samples`/
+            # `wait_ceiling_*` is telemetry this trimming removed on purpose. The warning is
+            # worth carrying because it is absent unless it fires; the block around it is not.
+            "screen_moved",
             "stale_risk",
             "lossy_text",
             "lossy_hint",

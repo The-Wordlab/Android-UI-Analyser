@@ -45,6 +45,8 @@ def _result(*elements: Element) -> AnalyzeResult:
 
 
 class _FakeEngine:
+    _last_analyze_result = None
+
     def __init__(self, tree):
         self._tree = tree
 
@@ -52,6 +54,10 @@ class _FakeEngine:
         return self._tree
 
     def _read_cache(self):
+        return None
+
+    def _note_screen_moved(self, _shown, _fresh):
+        """Not what this double is for: it exercises the tie-break, not the caller's turn."""
         return None
 
     def _resolve_container_rid(self, _rid):

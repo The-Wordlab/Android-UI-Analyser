@@ -326,10 +326,25 @@ adapter stamps at the end of each turn (`Engine.close_caller_turn`, `_previous_s
 `guide.py` already instructs agents to read it. But `caller` is **not** in the `changed`
 observation-meta preset, so a folded observation never carries it.
 
-Both fields are `None`-stripped, so restoring them costs **zero bytes when nothing moved** and
-appears only when something did. Put `caller` — or at minimum those two keys — back in the
-preset, and when `previous_screen_gone` is true say so in the `note` as well: a field a caller
-must remember to read is weaker than a sentence in the place it is already reading.
+**Delivered — but not by restoring `caller`.** The whole block measured 182-199 B on every
+action, most of it the telemetry this series removed on purpose, and `previous_screen_gone`
+itself is the wrong comparison for an *action*: it compares the fingerprint of the screen just
+emitted, so a tap that navigates always sets it. Measured live: an ordinary back-to-back tap
+that changed nothing but one label reported `previous_screen_gone: true`, and a tap taken while
+a real overlay had arrived on its own reported `false`.
+
+So `Meta.screen_moved` carries the signal instead (`projection.OBSERVATION_META_PRESETS`
+`changed`), decided by `Engine._screen_moved_verdict` on the **pre-action resolution read** —
+the only read that happens before the device is touched, which is what makes "nothing you sent
+caused this" true. It fires only when the set of *actionable* stable keys differs between the
+screen published to the caller and the live one: three consecutive `analyze` calls on one live
+screen with nobody touching the device gave node counts 43, 43, 44 and two different
+fingerprints with the same nine actionable ids, so a fingerprint-keyed warning would have fired
+on almost every call. It is also silent on the first action of a session and on a gap
+`caller_latency` classifies as `idle`. `None`-stripped, so an unmoved screen pays nothing; when
+it fires the reason is also prepended to the action `note` (and folded into the miss `hint`),
+because a field a caller must remember to read is weaker than a sentence where it is already
+reading.
 
 ## 2. An error should carry the observation it already took
 
@@ -363,17 +378,25 @@ shows *what happened in between* — an interstitial sliding in, a dialog appear
 replaced twice. Surface `capture_hint` on those responses specifically, rather than on every
 successful action where it was pure cost.
 
+**Delivered**, and the gate turned out to be needed in the other direction too: the top-level
+`ActionResult.capture_hint` was still being attached to *every* observed action whenever the
+buffer was live — 98 B for a pointer to a buffer nothing was wrong with.
+`Engine._frame_history_matters` now gates it on the three verdicts that ask the question the
+frames answer (`not ok`, `stale_risk`/`settled_unmet`, an empty observation), and
+`Engine._miss_observation` keeps `capture_hint` through the shared observation budget that
+drops it on the healthy path — a miss has no `ActionResult` to hang it on.
+
 ## Why these three belong together
 
 They are one story: **the caller's picture of the screen can be wrong for reasons that are not
 its fault, and AUA usually already knows.** Each fix delivers information the tool has already
 computed, so all three are close to free:
 
-| | already computed | delivered today |
+| | already computed | delivered |
 |---|---|---|
-| `previous_screen_gone` | yes, per turn | no — trimmed out of the observation |
-| observation on a key miss | yes, to detect the miss | no — discarded |
-| `capture_hint` / frame history | yes, always running | no — trimmed out of the observation |
+| the screen moved on its own | yes, per turn | yes — `meta.screen_moved` + the action `note` |
+| observation on a key miss | yes, to detect the miss | yes — `errors._CarriesObservation` |
+| `capture_hint` / frame history | yes, always running | yes — on a miss / an unsettled arrival only |
 
 Two of the three were removed by the payload-trimming work in this same series, which is the
 lesson worth keeping: **trimming by "is this usually empty" removed fields whose whole value is

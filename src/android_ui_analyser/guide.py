@@ -1031,9 +1031,11 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "capture",
         "`capture status|last [--seconds N|--since last-action] [--region center]|"
         "export PATH.gif|explain [--llm]|on|off|prune|sidecar start|stop` — always-on "
-        "rolling screencap with the daemon (deduped frames + diff summary / GIF); see "
-        "`meta.capture_hint` / action `capture_hint` after fast transitions; suite failures "
-        "attach `capture last --since last-action`. Sneak-peek a headless agent live with "
+        "rolling screencap with the daemon (deduped frames + diff summary / GIF); a response "
+        "carrying `capture_hint` is telling you the frames can explain it — it appears only "
+        "where something is wrong (a miss, `stale_risk`, an empty screen), never on a settled "
+        "action; suite failures attach `capture last --since last-action`. "
+        "Sneak-peek a headless agent live with "
         "`aua dashboard start` (detached fixed-port device **grid**)",
     ),
     (
@@ -1222,11 +1224,15 @@ AGENT_BEST_PRACTICES_PERCEPTION: list[tuple[str, str, str]] = [
     ),
     (
         "Act on ids from your previous response without checking whether that screen is still up",
-        "Read `caller.previous_screen_gone` (on `meta.caller` for `analyze`); when it is true, "
-        "use the ids in *this* response",
-        "Every response reports your own think time (`caller.gap_ms`, `ema_ms`) and whether the "
-        "screen your last call handed you has since been replaced — computed from fingerprints "
-        "already in hand, so it costs nothing. Measured on one 13-call session: 75% of the "
+        "Read the action `note` — one that opens `WARNING:` (and sets "
+        "`observation.meta.screen_moved`) means the screen arrived on its own, so use the ids "
+        "in *this* response; `meta.caller.previous_screen_gone` answers the same on `analyze`",
+        "`screen_moved` is present only when something you could ACT on changed between two "
+        "calls — an interstitial, a permission dialog, a session-expiry sheet, a push — so its "
+        "presence is the warning and it costs nothing the rest of the time. A ticking clock or "
+        "a changed badge moves the hierarchy fingerprint and is deliberately silent, as is a "
+        "gap so long that nobody was driving. Settle and arrival verdicts cannot see any of "
+        "this, because nothing you did caused it. Measured on one 13-call session: 75% of the "
         "elapsed time was the caller generating, mean 12.4s, and a screen arrived *during* one "
         "of those gaps. `caller.wait_ceiling_ms` is the cap on any single wait "
         "(`wait_ceiling_mode` says whether it was measured or pinned); it is deliberately short "

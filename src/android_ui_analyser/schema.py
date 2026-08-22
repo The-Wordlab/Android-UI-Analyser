@@ -387,6 +387,15 @@ class Meta(BaseModel):
     element_diff: dict[str, Any] | None = None
     # Host-side incremental a11y: True when hierarchy XML matched the previous analyze.
     unchanged: bool = False
+    # The screen the caller was last handed was already gone *before* this call touched the
+    # device: an interstitial, a permission dialog, a session-expiry sheet, a push. Settle and
+    # arrival logic are blind to this by construction — nothing the caller did caused it — and
+    # `caller.previous_screen_gone` answered it only for whoever remembered to read a telemetry
+    # block that costs 199 B on every response. This is the same fact, delivered instead of
+    # measured: absent unless something the caller could act on moved on its own, which makes
+    # its mere presence the warning. A *string* for `stale_risk`'s reasons (compact drops
+    # falsey values), and it carries the drift so a reader can judge it.
+    screen_moved: str | None = None
     # Why `unchanged` / `element_diff` must NOT be read as evidence about an action's effect:
     # set on a post-action observation whose settle wait never confirmed the screen had moved,
     # so the frame it describes may predate the action. A *string* rather than a False flag
@@ -520,6 +529,11 @@ class AnalyzeResult(BaseModel):
                         # Must survive the delta trim: `delta` fires precisely when
                         # `unchanged` is True, which is the case whose caveat matters.
                         "stale_risk",
+                        # Same argument, one step further out: `unchanged` compares this read
+                        # against the previous one *this engine* took, which under a warm daemon
+                        # is not necessarily the screen this caller was handed. A trim that drops
+                        # the warning is a trim that hides the only case it exists for.
+                        "screen_moved",
                     }
                     and v not in (None, [], False)
                 }

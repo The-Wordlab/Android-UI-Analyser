@@ -759,6 +759,25 @@ def _published_id(el: Element | None) -> ElementId | None:
     return el.stable_key or _sk(el)
 
 
+def _actionable_keys(elements: Sequence[Element]) -> frozenset[str]:
+    """The app's own controls, named the way an observation publishes them.
+
+    Deliberately narrow — the interaction flags and nothing else, matching
+    ``projection._is_actionable``. This is the set a caller's next command can name, which is
+    what makes it the right basis for "did the screen you are holding move": a label whose text
+    ticked over has not taken anything away from you, and an arriving dialog has.
+    """
+    from .identity import stable_key as _sk
+    from .selectors import app_elements
+
+    return frozenset(
+        key
+        for el in app_elements(elements)
+        if (el.clickable or el.checkable or el.long_clickable or el.scrollable)
+        and (key := el.stable_key or _sk(el))
+    )
+
+
 class Engine:
     def __init__(
         self,
@@ -812,6 +831,12 @@ class Engine:
         # re-observes the settled destination and must compare it with that same original screen,
         # not with an absent baseline that can falsely report `changed: false`.
         self._action_observation_baseline: dict[str, Any] | None = None
+        # ``(fingerprint the caller was holding, why it is gone)``, decided by the pre-action
+        # resolution read and consumed by the response that read produced. Paired with the
+        # fingerprint on purpose: an action that resolves nothing against the live screen
+        # (`key`, `swipe`, `tap-point`) must not inherit a verdict about a screen that is no
+        # longer the one this caller holds. See :meth:`_screen_moved_verdict`.
+        self._screen_moved: tuple[str, str] | None = None
         # Which app this run is driving, and the log window already reported for it. The second
         # half stops a wait — which does not stamp a new `last-action` — from re-reporting the
         # previous action's lines as though the app had just said them again.
@@ -1297,6 +1322,7 @@ class Engine:
         self._pre_action_tree_fp = None
         self._pre_action_state = None
         self._action_observation_baseline = None
+        self._screen_moved = None
         self._last_mem_fp = None
         self._last_known_screen = None
         self._last_action_kind = None
@@ -11625,6 +11651,15 @@ class Engine:
                     )
                 else:
                     result.note = "No separate analyze needed; state is in observation."
+                # The world arriving on its own is not about this action at all, so it is not in
+                # the chain above — it is prepended to whatever that chain concluded. In the
+                # note as well as in `meta` because a field a caller must remember to check is
+                # weaker than a sentence in the place it is already reading, which is the whole
+                # reason `stale_risk` says itself twice too. Free when it does not fire.
+                moved = self._consume_screen_moved()
+                if moved:
+                    obs.meta.screen_moved = moved
+                    result.note = f"WARNING: {moved} {result.note}"
                 # Say it in the note too, not only in `change`: the screen this observation
                 # describes belongs to a different app, so every id in it is a dead end for
                 # whatever the caller was doing.
@@ -11688,12 +11723,32 @@ class Engine:
             if self.config.perf.prefetch:
                 self._kick_hierarchy_prefetch()
             result.observation_present = False
-        hint = self._capture_hint()
-        if hint:
-            result.capture_hint = hint
+        if self._frame_history_matters(result):
+            hint = self._capture_hint()
+            if hint:
+                result.capture_hint = hint
         if finalize:
             result = self._finalize_observed_action(result)
         return result
+
+    @staticmethod
+    def _frame_history_matters(result: ActionResult) -> bool:
+        """Is there anything about this response the rolling frame buffer could explain?
+
+        `capture_hint` names the one artefact that shows *what happened in between* — an
+        interstitial sliding in, a screen replaced twice — and it was trimmed out of the
+        observation because on a settled, successful action it answered a question nobody had
+        asked. Three verdicts do ask it: the action failed, the settle never confirmed the
+        screen had moved (`stale_risk` / `settled_unmet`), or the screen came back empty. A
+        healthy arrival raises none of them and pays nothing.
+        """
+        observation = result.observation
+        return bool(
+            not result.ok
+            or result.stale_risk
+            or result.settled_unmet
+            or (observation is not None and not observation.elements)
+        )
 
     def _finalize_observed_action(self, result: ActionResult) -> ActionResult:
         """Attach final timing/emptiness and journal the response the caller will receive."""
@@ -12145,6 +12200,104 @@ class Engine:
             report["wait_ceiling_ms"] = ceiling
             report["wait_ceiling_mode"] = mode
         return report
+
+    def _caller_turn_facts(self) -> Any | None:
+        """What this caller was last handed, and how long ago — in either process.
+
+        In-process the open turn already holds it. Under the warm daemon the turn belongs to
+        the CLI (``open_caller_turn`` is deliberately never called here, because a daemon round
+        trip is not a caller), so the record it stamped is read instead — read only, and without
+        opening a turn, so the gap measurement stays the CLI's to make.
+        """
+        turn = self._caller_turn
+        if turn is not None:
+            return turn
+        store = self._caller_latency_store()
+        if store is None:
+            return None
+        with contextlib.suppress(Exception):
+            return store.peek_turn()
+        return None
+
+    def _note_screen_moved(
+        self, shown: AnalyzeResult | None, fresh: AnalyzeResult | None
+    ) -> str | None:
+        """Record whether *fresh* shows the caller's screen already replaced, and say why.
+
+        Called from a **pre-action** resolution read, which is the only read that happens
+        before the device is touched, so the caller's own action can never be reported as the
+        world moving. *shown* must be the published screen as it was before that read, because
+        a selector resolve refreshes the id cache on its way through.
+        """
+        verdict: tuple[str, str] | None = None
+        with contextlib.suppress(Exception):
+            verdict = self._screen_moved_verdict(shown, fresh)
+        self._screen_moved = verdict
+        return verdict[1] if verdict else None
+
+    def _screen_moved_verdict(
+        self, shown: AnalyzeResult | None, fresh: AnalyzeResult | None
+    ) -> tuple[str, str] | None:
+        """``(held fingerprint, reason)`` when the world moved by itself, else None.
+
+        Five ways this must stay silent, because a warning a caller sees on every call is a
+        warning it stops reading:
+
+        * nothing was published for this caller to be holding (the first action of a session);
+        * the live screen is the published one, byte for byte;
+        * the case that decides this whole design: the fingerprint moved but **nothing the
+          caller could act on** did. Measured on one live emulator screen, three consecutive
+          `analyze` calls with nobody touching the device gave node counts 43, 43, 44 and two
+          different hierarchy fingerprints, with the same nine actionable ids every time. A
+          clock, a badge, a "typing…" line all do that. So the verdict is decided on the
+          actionable set — which is also exactly the set the caller's next command can name;
+        * the published screen is not the one that was stamped, so what the caller is holding
+          cannot be established (a second agent drove the same device, a cache that never got
+          written);
+        * and the gap was not one this caller generated — `gap_ignored` already draws that line
+          for the wait ceiling, and past ``IDLE_GAP_MS`` the screen being different means
+          somebody walked away, not that an interstitial arrived.
+
+        The order is load-bearing, not just tidy. The first three are pure comparisons of two
+        payloads already in memory and answer the overwhelming majority of calls; the last two
+        need this caller's stamped record, and identifying the caller can cost a `ps` (see
+        :meth:`_caller_latency_store`). So the cheap gates run first and the hot path never
+        pays for the bookkeeping.
+        """
+        if fresh is None or shown is None:
+            return None
+        held = shown.meta.fingerprint
+        if not held or held == fresh.meta.fingerprint:
+            return None
+        held_keys = _actionable_keys(shown.elements)
+        live_keys = _actionable_keys(fresh.elements)
+        gone = held_keys - live_keys
+        arrived = live_keys - held_keys
+        if not gone and not arrived:
+            return None
+        facts = self._caller_turn_facts()
+        if facts is None or getattr(facts, "previous_fingerprint", None) != held:
+            return None
+        if getattr(getattr(facts, "profile", None), "gap_ignored", None):
+            return None
+        age_ms = getattr(facts, "previous_age_ms", None)
+        held_for = f", held {age_ms / 1000.0:.1f}s" if isinstance(age_ms, int) else ""
+        return (
+            held,
+            "the screen you were last shown was replaced before this call touched the device "
+            f"(controls -{len(gone)} +{len(arrived)}{held_for}). Nothing you sent caused that "
+            "— act on ids from THIS response, not the previous one.",
+        )
+
+    def _consume_screen_moved(self) -> str | None:
+        """The pending verdict, if it is still about the screen this caller is holding."""
+        verdict = self._screen_moved
+        self._screen_moved = None
+        if verdict is None:
+            return None
+        facts = self._caller_turn_facts()
+        previous = getattr(facts, "previous_fingerprint", None)
+        return verdict[1] if previous and previous == verdict[0] else None
 
     def _previous_screen_gone(self, current_fingerprint: str | None = None) -> bool | None:
         """Has the screen described by the caller's previous result been replaced?
@@ -12777,8 +12930,16 @@ class Engine:
                     str(selector["key"]), bounds=selector.get("bounds"), verb=verb
                 )
             named = {name: value for name, value in selector.items() if name != "bounds"}
+            # The screen the caller is holding, read before `resolve_selector` refreshes the id
+            # cache with its own fresh read (which is the point of that read, and also why this
+            # cannot be sampled afterwards). The verdict is decided here rather than inside
+            # `resolve_selector` because that method is also the one AUA calls to *look*, and
+            # only an action asks "was my screen already gone".
+            shown = self._read_cache()
             # A verb that needs something tappable may break a tie on clickability.
-            return self.resolve_selector(**named, prefer_clickable=verb in ("tap", "long-press"))
+            found = self.resolve_selector(**named, prefer_clickable=verb in ("tap", "long-press"))
+            self._note_screen_moved(shown, self._last_analyze_result)
+            return found
         if element_id is None:
             raise UsageError(
                 f"{verb} needs an element id or a selector",
@@ -12813,6 +12974,12 @@ class Engine:
         taken to search, not to publish. Attaching it raw made a failure the most expensive
         payload the tool emits (147 rows against the ~20 an action returns). Same dials, so a
         caller reading a miss sees rows in the shape it already knows.
+
+        One key survives that budget which a healthy action's does not: `capture_hint`. A miss
+        has no `ActionResult` to hang it on, and "what happened in between" is precisely the
+        question being asked here — the frame buffer is the only thing that can answer it. It
+        was trimmed out of the shared preset because on a *successful* action it cost bytes to
+        say nothing, which is an argument about the healthy path and not about this one.
         """
         from .projection import Projection
         from .schema import OutputFormat as _Fmt
@@ -12825,7 +12992,11 @@ class Engine:
             )
             if view is None:
                 return observation
-            return view.apply(observation.as_dict(_Fmt.json))
+            trimmed = view.apply(observation.as_dict(_Fmt.json))
+            meta = trimmed.get("meta")
+            if isinstance(meta, dict) and observation.meta.capture_hint:
+                meta.setdefault("capture_hint", observation.meta.capture_hint)
+            return trimmed
         except Exception:  # noqa: BLE001 - an attached screen is a bonus, never the failure
             return observation
 
@@ -12844,6 +13015,9 @@ class Engine:
         """
         from .identity import closest_by_bounds, find_by_stable_key
 
+        # The screen the caller is holding, read before this call's own read so the two can be
+        # compared; see `_note_screen_moved`.
+        shown = self._read_cache()
         # A resolution read is AUA's own evidence, never a published observation: recording
         # it would replace the caller's id space with a hierarchy-only view of it.
         current = self.analyze(
@@ -12855,17 +13029,28 @@ class Engine:
                 source="hierarchy", with_ocr=True, record=False, record_ids=False
             )
             hits = find_by_stable_key(current.elements, key)
+        moved = self._note_screen_moved(shown, current)
         if not hits:
             # The screen that proves the miss rides along: this read is how we know the key is
             # absent, so telling the caller to go and analyze would spend a round trip on a
             # payload already in hand — and when the screen moved underneath them (an
             # interstitial, a dialog), this observation is the answer they actually need.
+            #
+            # When that is what happened, say so as a fact rather than as a hedge. "It may have
+            # changed under you" reads as boilerplate; "it did, and nothing you sent caused it"
+            # is the difference between a recoverable answer and a caller re-sending the same id.
+            if moved:
+                current.meta.screen_moved = moved
+                self._screen_moved = None
+                why = f"is not on this screen, because {moved.rstrip('.')}"
+            else:
+                why = "is not on this screen — which may have changed under you"
             raise ElementNotFoundError(
                 f"no element with stable_key {key!r} on the current screen for {verb}",
                 hint=(
-                    f"No action was sent and {key!r} is not on this screen — which may have "
-                    f"changed under you. The current screen is attached as `observation`: use "
-                    f"an id from it, or address the element with --rid/--text/--desc."
+                    f"No action was sent and {key!r} {why}. The current screen is attached as "
+                    "`observation`: use an id from it, or address the element with "
+                    "--rid/--text/--desc."
                 ),
                 observation=self._miss_observation(current),
             )
@@ -12912,6 +13097,9 @@ class Engine:
             fresh = self.analyze(
                 source="hierarchy", with_ocr=with_ocr, record=False, record_ids=False
             )
+            # Same pre-action read, same question: was the caller's screen already gone before
+            # this call touched the device (see `_note_screen_moved`)?
+            self._note_screen_moved(cached, fresh)
             mapped = remap_ids(cached.elements, fresh.elements).get(element_id)
             return fresh.element_by_id(mapped) if mapped is not None else None
 

@@ -173,7 +173,10 @@ def test_a_destination_that_rendered_content_carries_no_caveat(
     assert change.get("activity_changed") is True
     assert change.get("text_added"), f"fixture drifted: {change}"
     assert out.stale_risk is None, f"a rendered destination is not a stale risk: {out.stale_risk}"
-    assert out.next_actions, "a settled destination keeps advertising what to do next"
+    # `next_actions` is off by default now, so its absence here proves nothing either way.
+    # The invariant that matters is the one above: a rendered destination is not suspected.
+    # The withholding itself is covered by the unready cases, which assert it is empty.
+    assert out.observation.elements, "a settled destination still returns its screen"
 
 
 def test_recognition_of_a_known_destination_suppresses_the_departure_verdict(

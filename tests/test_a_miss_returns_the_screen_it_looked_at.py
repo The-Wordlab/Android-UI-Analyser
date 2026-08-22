@@ -45,7 +45,7 @@ def _observation() -> AnalyzeResult:
 
 def test_a_key_miss_carries_the_screen_it_read() -> None:
     err = ElementNotFoundError(
-        "no element with stable_key 'rid:bottomBarFeed' on the current screen for tap",
+        "no element with stable_key 'rid:feedTab' on the current screen for tap",
         hint="the screen changed",
         observation=_observation(),
     )
