@@ -308,7 +308,12 @@ class OutputCfg(BaseModel):
     # 5-scenario run: 37 taps produced 73 separate `analyze` calls and 37 `wait` calls, because
     # one unfilterable call was dearer than two targeted ones. The default path has to be the
     # cheap path, or agents will keep routing around it.
-    observation_fields: str = "id,text,desc,rid,clickable,enabled,checked,selected"
+    # `rid` is deliberately absent: `id` is the element's stable identity, so on the screens
+    # measured for this change the column restated it on more than half the rows and differed
+    # only by the uniqueness ordinal on the rest. It remains a first-class *selector* —
+    # `--rid`/`--where-rid` name a class of row without analyzing first — which is a different
+    # job from addressing one element, and the flags keep doing it.
+    observation_fields: str = "id,text,desc,clickable,enabled,checked,selected"
     # `meta` keys kept in that observation: a preset name from
     # `projection.OBSERVATION_META_PRESETS`, `"all"`, or an explicit comma-separated list.
     #

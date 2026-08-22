@@ -77,4 +77,8 @@ def test_routes_and_flows_and_questions_coexist() -> None:
     assert "# goto:" in rendered
     assert "# flows:" in rendered
     assert "# aua asks:" in rendered
-    assert "buttonContinue" in rendered, "the element rows still come last and intact"
+    # The element row, whatever columns the default view carries — the claim here is about
+    # placement (rows last, after the comment block), not about which columns exist.
+    assert rendered.splitlines()[-1].split("\t")[1] == "Continue", (
+        "the element rows still come last and intact"
+    )

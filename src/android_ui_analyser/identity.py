@@ -105,8 +105,17 @@ def base_stable_key(key: str | None) -> str | None:
     return head if sep and tail.isdigit() else key
 
 
-def _uniquify(pairs: Sequence[tuple[Element, str]]) -> dict[ElementId, str]:
-    """Map element id → a key unique among *pairs*, suffixing only where one collides.
+def uniquify_keys(
+    rows: Sequence[tuple[ElementId, str, Sequence[int] | None]],
+) -> dict[ElementId, str]:
+    """Map each row's id → a key unique among *rows*, suffixing only where one collides.
+
+    Takes ``(id, key, bounds)`` triples rather than :class:`Element` objects so the same rule
+    can be applied to a payload dict at the publishing boundary. That matters because the
+    guarantee "a published id names exactly one element" has to hold wherever a payload leaves,
+    not only on the path that happened to call :func:`attach_stable_keys` first — and once the
+    default view stopped carrying ``rid``, two rows publishing one id became genuinely
+    indistinguishable rather than merely ambiguous.
 
     Additive by construction: a key that occurs once is returned untouched, so every key ever
     published for a non-repeating element stays byte-identical.
@@ -117,18 +126,30 @@ def _uniquify(pairs: Sequence[tuple[Element, str]]) -> dict[ElementId, str]:
     tree reorders siblings between reads while the pixels stay put.
     """
     counts: dict[str, int] = {}
-    for _el, key in pairs:
+    for _ident, key, _bounds in rows:
         counts[key] = counts.get(key, 0) + 1
-    ordered = sorted(pairs, key=lambda pair: (pair[0].bounds[1], pair[0].bounds[0], pair[0].id))
+
+    def _position(row: tuple[ElementId, str, Sequence[int] | None]) -> tuple[int, int, str]:
+        ident, _key, bounds = row
+        box = tuple(bounds or ())
+        top = int(box[1]) if len(box) == 4 else 0
+        left = int(box[0]) if len(box) == 4 else 0
+        return (top, left, str(ident))
+
     seen: dict[str, int] = {}
     out: dict[ElementId, str] = {}
-    for el, key in ordered:
+    for ident, key, _bounds in sorted(rows, key=_position):
         if counts[key] == 1:
-            out[el.id] = key
+            out[ident] = key
             continue
         seen[key] = seen.get(key, 0) + 1
-        out[el.id] = f"{key}{KEY_ORDINAL_SEP}{seen[key]}"
+        out[ident] = f"{key}{KEY_ORDINAL_SEP}{seen[key]}"
     return out
+
+
+def _uniquify(pairs: Sequence[tuple[Element, str]]) -> dict[ElementId, str]:
+    """:func:`uniquify_keys` for :class:`Element` objects."""
+    return uniquify_keys([(el.id, key, el.bounds) for el, key in pairs])
 
 
 def attach_stable_keys(elements: Sequence[Element]) -> list[Element]:

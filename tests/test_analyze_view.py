@@ -158,14 +158,16 @@ def test_tsv_is_comment_header_then_columns_then_rows(device: FakeDevice) -> Non
     assert lines[0].startswith("# screen=")
     assert "package=com.test.app" in lines[0] and "1080x2400" in lines[0]
     assert lines[1].startswith("# elements=")
-    assert lines[2] == "id\ttext\trid\tclickable"
+    assert lines[2] == "id\ttext\tclickable"
 
 
 def test_tsv_default_view_hides_system_chrome_and_unlabelled_rows(device: FakeDevice) -> None:
-    rids = [row[2] for row in _rows(_run("--format", "tsv", "analyze"))[1:]]
-    assert "clock" not in rids  # com.android.systemui id
-    assert "notificationsButton" in rids and "homeTabBROWSE" in rids
-    assert "" not in rids  # the unlabelled View is gone
+    # `rid` is no longer a default column, so the identity is read from `id` — which is the
+    # point of the change: one name per row rather than the same name twice.
+    ids = [row[0] for row in _rows(_run("--format", "tsv", "analyze"))[1:]]
+    assert "rid:clock" not in ids  # com.android.systemui id
+    assert "rid:notificationsButton" in ids and "rid:homeTabBROWSE" in ids
+    assert "" not in ids  # the unlabelled View is gone
 
 
 def test_tsv_all_shows_everything(device: FakeDevice) -> None:
@@ -182,7 +184,7 @@ def test_tsv_respects_field_order(device: FakeDevice) -> None:
 def test_tsv_no_meta_emits_only_columns_and_rows(device: FakeDevice) -> None:
     out = _run("--format", "tsv", "analyze", "--no-meta")
     assert not out.startswith("#")
-    assert out.strip().splitlines()[0] == "id\ttext\trid\tclickable"
+    assert out.strip().splitlines()[0] == "id\ttext\tclickable"
 
 
 def test_tsv_meta_selection_becomes_comment_lines(device: FakeDevice) -> None:
@@ -199,7 +201,7 @@ def test_invalid_global_format_still_exits_2() -> None:
 
 def test_region_and_clickable_compose_to_the_header_only(device: FakeDevice) -> None:
     rows = _rows(_run("--format", "tsv", "analyze", "--region", "0,0,1080,300", "--clickable"))
-    assert [r[2] for r in rows[1:]] == ["notificationsButton"]
+    assert [r[0] for r in rows[1:]] == ["rid:notificationsButton"]
 
 
 def test_where_text_is_case_insensitive(device: FakeDevice) -> None:

@@ -74,7 +74,7 @@ def test_the_element_rows_are_untouched() -> None:
         _screen(suggested_gotos=["goto settings"])
     )
 
-    assert "buttonContinue" in rendered
+    assert "Continue\ttrue" in rendered
     assert rendered.count("\n# ") + rendered.startswith("# ") <= 4, "comments stay a header"
 
 

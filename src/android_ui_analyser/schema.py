@@ -429,17 +429,26 @@ class AnalyzeResult(BaseModel):
         # geometry fingerprint as the last resort. Imported here because `identity` imports
         # this module.
         from .identity import stable_key as _stable_key
+        from .identity import uniquify_keys as _uniquify_keys
 
-        by_ordinal: dict[Any, Any] = {}
+        # Uniqueness is applied here, not merely inherited. `attach_stable_keys` numbers
+        # repeats during analyze, but a payload can reach a boundary without having gone
+        # through it, and then two rows built from one reusable layout publish the same id.
+        # That was survivable while `rid` rode along in the default view; once the id became
+        # the only name on the row it made them indistinguishable.
+        rows: list[tuple[Any, str, Any]] = []
         for element in elements:
             if not isinstance(element, dict):
                 continue
             key = element.get("stable_key") or _stable_key(element)
             if key:
-                by_ordinal[element.get("id")] = key
-                element["stable_key"] = key
-        if not by_ordinal:
+                rows.append((element.get("id"), str(key), element.get("bounds")))
+        if not rows:
             return data
+        by_ordinal: dict[Any, Any] = _uniquify_keys(rows)
+        for element in elements:
+            if isinstance(element, dict) and element.get("id") in by_ordinal:
+                element["stable_key"] = by_ordinal[element["id"]]
         for element in elements:
             if not isinstance(element, dict):
                 continue
@@ -457,11 +466,11 @@ class AnalyzeResult(BaseModel):
             # between two frames, so it surfaced as an intermittent `internal_error` on real
             # taps while every fixture with an empty diff passed.
             for key in ("added", "removed"):
-                rows = diff.get(key)
-                if isinstance(rows, list):
+                flat = diff.get(key)
+                if isinstance(flat, list):
                     diff[key] = [
                         by_ordinal.get(row, row) if isinstance(row, (int, str)) else row
-                        for row in rows
+                        for row in flat
                     ]
             changed = diff.get("changed")
             if isinstance(changed, list):

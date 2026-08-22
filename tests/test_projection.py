@@ -360,8 +360,11 @@ def test_tsv_shape_is_comments_then_header_then_rows() -> None:
     assert lines[0].startswith("# screen=my_apps package=com.example.app.dev 1080x2400")
     assert lines[1].startswith("# elements=6 shown=3")
     assert all(line.startswith("#") for line in lines[:head])
-    assert lines[head] == "id\ttext\trid\tclickable"
-    assert lines[head + 1].split("\t") == ["2", "", "notificationsButton", "true"]
+    assert lines[head] == "id\ttext\tclickable"
+    # Three columns: `rid` left the defaults when `id` became the stable identity. The id
+    # here is still an ordinal because this fixture is a raw payload — publishing happens
+    # at the boundary that hands one to a caller, which this unit does not cross.
+    assert lines[head + 1].split("\t") == ["2", "", "true"]
 
 
 def test_tsv_column_order_follows_fields() -> None:
@@ -418,7 +421,7 @@ def test_tsv_summary_reports_how_many_rows_were_hidden() -> None:
 def test_tsv_survives_an_empty_screen() -> None:
     lines = _tsv(_payload())
     assert lines[1].startswith("# elements=0 shown=0")
-    assert lines[-1] == "id\ttext\trid\tclickable"
+    assert lines[-1] == "id\ttext\tclickable"
 
 
 # ----------------------------------------------------------------- --no-wrappers (opt-in)

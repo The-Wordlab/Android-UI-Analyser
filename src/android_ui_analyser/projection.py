@@ -102,9 +102,13 @@ def resolve_field_name(name: str) -> str:
         return _SQUASHED_FIELD_ALIASES[squashed[2:]]
     return _SQUASHED_FIELD_ALIASES.get(squashed, name)
 
-# What `--format tsv` shows when no `--fields` was given: who am I, what does it say,
-# what is its selector, can I tap it.
-TSV_DEFAULT_FIELDS: tuple[str, ...] = ("id", "text", "rid", "clickable")
+# What `--format tsv` shows when no `--fields` was given: who am I, what does it say, can I
+# tap it. `rid` used to sit in here as "what is its selector", and stopped earning the column
+# when `id` became the stable identity — measured over 40 rows of one real screen, 23 had
+# `id == "rid:" + rid` exactly and the other 12 differed only by the uniqueness ordinal. Ask
+# for it with `--fields id,rid` when the *class* of a row is the question; match on it with
+# `--where-rid`, which reads the full payload and never needed the column.
+TSV_DEFAULT_FIELDS: tuple[str, ...] = ("id", "text", "clickable")
 
 # Named `meta` budgets for a folded post-action observation. The full `meta` is sized for a
 # question a caller *asked* — it carries research tasks, deeplink suggestions, a capture hint,
