@@ -227,6 +227,17 @@ CAPABILITIES: tuple[Capability, ...] = (
         "app_status",
     ),
     Capability(
+        "app_log_prefs",
+        "Persist one app's log preferences: ignored or only-wanted tags, levels, line caps.",
+        # Specific phrases only: `capabilities_for_goal` matches triggers as plain substrings, so
+        # a bare "log" or "tag" would recommend this for goals with nothing to do with logging.
+        ("log noise", "log tag", "chatty log", "app_logs", "quieter logs", "more log lines"),
+        79,
+        "aua logcat prefs show --app <package>",
+        "app_log_prefs_get",
+        risk="writes a local per-app preference; changes no device state",
+    ),
+    Capability(
         "shell_read_only",
         "Run a bounded read-only target diagnostic without selecting a device through adb.",
         ("shell", "getprop", "dumpsys", "package path", "pidof", "diagnostic"),
@@ -286,6 +297,10 @@ def render_mcp_instructions() -> str:
         "Its top_level_calls are caller-visible and split into lifecycle_calls plus task_calls; "
         "journal_events also include folded_internal_events. reporting_call_included=false "
         "means the snapshot precedes this reporting call. "
+        "app_log_prefs_set persists one app's app_logs preferences — ignored tags, tags to "
+        "report despite the built-in noisy list, an only-list, the line and per-tag caps — and "
+        "every later session inherits them; configure changes this session only and is not per "
+        "app. "
         "If a daemon call reports daemon_outcome_unknown, never repeat it: wait, then inspect "
         "one fresh screen. A busy live daemon remains the sole device controller. "
         "Unsafe or destructive effects require explicit "

@@ -30,19 +30,19 @@ import logging
 import re
 import shutil
 from collections import Counter, deque
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from datetime import datetime
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 from urllib.parse import parse_qsl, urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 from .atomic import atomic_write_text
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from .config import MemoryCfg
+    from .config import LogsCfg, MemoryCfg
     from .schema import Element
 
 logger = logging.getLogger("android_ui_analyser.memory")
@@ -1818,6 +1818,185 @@ class AppStrings(BaseModel):
     entries: dict[str, dict[str, str]] = Field(default_factory=dict)  # key → locale → text
 
 
+# The scalar preferences, in the order a reader thinks about them. Held apart from the model so
+# pydantic sees a plain constant rather than a private attribute.
+_LOG_PREF_SCALARS = ("enabled", "levels", "limit", "per_tag", "scan_lines")
+_LOG_PREF_TAG_LISTS = ("ignore_tags", "keep_tags", "only_tags")
+# Ceilings on the counts, because this preference persists and is attached to EVERY action: a
+# forgotten `limit: 5000` is a permanent tax on every observation of that app, in every later
+# session, paid by whoever runs next. High enough to be generous, low enough to stay affordable.
+# `scan_lines` is the pre-filter read rather than what gets attached, so it is allowed to be big.
+_LOG_PREF_MAX = {"limit": 500, "per_tag": 500, "scan_lines": 5_000}
+
+
+class AppLogPrefs(BaseModel):
+    """One app's standing instructions for the ``app_logs`` digest folded into its observations.
+
+    An agent learns which of an app's tags are noise the expensive way: by paying for them in
+    every observation until it notices. ``config.logs`` cannot hold that lesson, because it is
+    one setting for every app on the host — widen the line count for the app whose breadcrumbs
+    are being truncated and every other app in every other project pays too. So the lesson is
+    stored per app id, beside that app's map under ``memory.dir``: local only, never in a
+    committed file, because an app's own tag names are its product knowledge.
+
+    Every scalar is ``None`` when unset, which means "inherit ``config.logs``" — that is what
+    makes "the default happens to be 20" and "this app asked for 20" distinguishable, and it is
+    why a reset deletes the document instead of writing zeros into it.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    schema_version: int = 1
+    package: str
+    enabled: bool | None = None
+    levels: str | None = None
+    limit: int | None = None
+    per_tag: int | None = None
+    scan_lines: int | None = None
+    # Tags this app drops on top of the built-in generic list — its own chatty logger.
+    ignore_tags: list[str] = Field(default_factory=list)
+    # Tags that must survive the built-in list *for this app*: the built-in list is a guess
+    # about apps in general, and in one app the guess is wrong.
+    keep_tags: list[str] = Field(default_factory=list)
+    # When non-empty, the ONLY tags folded in for this app. `F` still survives.
+    only_tags: list[str] = Field(default_factory=list)
+    updated: str | None = None
+
+    @field_validator("limit", "per_tag", "scan_lines", mode="before")
+    @classmethod
+    def _bounded(cls, value: Any, info: ValidationInfo) -> Any:
+        """Clamp the counts, because this file is meant to be hand-edited.
+
+        ``app_log_prefs_set`` refuses a zero, but a document edited in a text editor bypasses it,
+        and a ``per_tag: 0`` silently *disables* the per-tag cap — turning one chatty logger back
+        into the thing that spends every observation's budget.
+        """
+        if value is None:
+            return None
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            return None
+        return min(max(number, 1), _LOG_PREF_MAX.get(info.field_name or "", 500))
+
+    @field_validator("levels", mode="before")
+    @classmethod
+    def _priorities_only(cls, value: Any) -> Any:
+        """Keep only real logcat priorities, so a typo cannot silence the window."""
+        if value is None:
+            return None
+        kept = "".join(ch for ch in str(value).upper() if ch in "VDIWEF")
+        return kept or None
+
+    @field_validator("ignore_tags", "keep_tags", "only_tags", mode="before")
+    @classmethod
+    def _named_tags_only(cls, value: Any) -> Any:
+        """Drop blank entries: an empty prefix matches every tag and would delete the window."""
+        if not isinstance(value, list):
+            return value
+        return [str(tag).strip() for tag in value if str(tag).strip()]
+
+    def stored_fields(self) -> dict[str, Any]:
+        """Only what was actually asked for — never the defaults it inherited.
+
+        A reader has to be able to tell "this app wants 20 lines" from "nobody said, and the
+        default is 20"; echoing the resolved values back as if they were stored loses that.
+        """
+        out: dict[str, Any] = {}
+        for name in _LOG_PREF_SCALARS:
+            value = getattr(self, name)
+            if value is not None:
+                out[name] = value
+        for name in _LOG_PREF_TAG_LISTS:
+            value = getattr(self, name)
+            if value:
+                out[name] = list(value)
+        return out
+
+    def is_empty(self) -> bool:
+        """Whether this document asks for nothing, and so should not exist at all."""
+        return not self.stored_fields()
+
+
+class EffectiveAppLogs(NamedTuple):
+    """``config.logs`` with one app's stored preference layered on top."""
+
+    enabled: bool
+    levels: str
+    limit: int
+    per_tag: int
+    scan_lines: int
+    ignore_tags: tuple[str, ...]
+    keep_tags: tuple[str, ...]
+    only_tags: tuple[str, ...]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "levels": self.levels,
+            "limit": self.limit,
+            "per_tag": self.per_tag,
+            "scan_lines": self.scan_lines,
+            "ignore_tags": list(self.ignore_tags),
+            "keep_tags": list(self.keep_tags),
+            "only_tags": list(self.only_tags),
+        }
+
+
+def resolve_app_log_prefs(
+    cfg: LogsCfg,
+    prefs: AppLogPrefs | None,
+    *,
+    session_fields: Iterable[str] = (),
+) -> EffectiveAppLogs:
+    """What one app's log window is actually filtered by.
+
+    Three layers, most immediate first. *session_fields* names the ``config.logs`` fields the
+    caller set **for this session on purpose** — MCP ``configure``, or a typed ``--app-logs``
+    flag — and those win outright: an agent that just asked for 60 lines while chasing a library
+    must get 60, or the per-turn control is broken for exactly the apps that use a stored
+    preference. Below that, a stored per-app preference beats the host-wide defaults. Below
+    that, ``config.logs``.
+
+    One deliberate exception: the global ``enabled`` switch is a cost decision, so a host that
+    turned the feature off stays off and no stored preference can re-enable it. A per-app
+    ``enabled: false`` can still silence one app while the rest stay on.
+
+    Tag lists **add** rather than replace, so an app cannot accidentally un-deny the built-in
+    noise list by naming one tag of its own; the explicit way to read a denied library is
+    ``keep_tags``. ``only_tags`` is the exception, because narrowing is not additive: an app's
+    own only-list replaces a host-wide one rather than widening it.
+    """
+    session = set(session_fields)
+    stored = prefs or AppLogPrefs(package="")
+
+    def _resolve(cfg_field: str, app_value: Any, cfg_value: Any) -> Any:
+        if cfg_field in session or app_value is None:
+            return cfg_value
+        return app_value
+
+    return EffectiveAppLogs(
+        enabled=cfg.enabled and ("enabled" in session or stored.enabled is not False),
+        levels=str(_resolve("levels", stored.levels, cfg.levels)),
+        limit=int(_resolve("limit", stored.limit, cfg.limit)),
+        per_tag=int(_resolve("per_tag", stored.per_tag, cfg.per_tag)),
+        scan_lines=int(_resolve("scan_lines", stored.scan_lines, cfg.scan_lines)),
+        ignore_tags=(
+            tuple(cfg.deny_tags)
+            if "deny_tags" in session
+            else (*cfg.deny_tags, *stored.ignore_tags)
+        ),
+        keep_tags=(
+            tuple(cfg.keep_tags) if "keep_tags" in session else (*cfg.keep_tags, *stored.keep_tags)
+        ),
+        only_tags=(
+            tuple(cfg.only_tags)
+            if "only_tags" in session
+            else tuple(stored.only_tags or cfg.only_tags)
+        ),
+    )
+
+
 def _now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
@@ -2009,6 +2188,44 @@ class AppMemoryStore:
         d = self.app_dir(strings.package)
         d.mkdir(parents=True, exist_ok=True)
         atomic_write_text(self.strings_path(strings.package), strings.model_dump_json())
+
+    # -- per-app log preferences I/O ---------------------------------------
+    # File-based in both backends, like the mined strings: this is a short hand-written document
+    # an agent (or a human) edits by name, not incremental state the walk accumulates — and
+    # keeping it out of `index.json` means reading it costs one small file per action instead of
+    # loading and re-serialising the whole map.
+
+    def log_prefs_path(self, package: str) -> Path:
+        return self.app_dir(package) / "log_prefs.json"
+
+    def load_log_prefs(self, package: str) -> AppLogPrefs | None:
+        """This app's stored log preference, or None when nobody has set one.
+
+        Deliberately ignores ``memory.enabled``: that switch says "record nothing you discover",
+        not "discard what I was explicitly told". A corrupt document reads as absent, because a
+        half-written preference must not break every action that follows it.
+        """
+        path = self.log_prefs_path(package)
+        if not path.is_file():
+            return None
+        try:
+            return AppLogPrefs.model_validate_json(path.read_text(encoding="utf-8"))
+        except Exception:  # pragma: no cover - corrupt file → treat as absent
+            return None
+
+    def save_log_prefs(self, prefs: AppLogPrefs) -> None:
+        d = self.app_dir(prefs.package)
+        d.mkdir(parents=True, exist_ok=True)
+        stamped = prefs.model_copy(update={"updated": _now_iso()})
+        atomic_write_text(self.log_prefs_path(prefs.package), stamped.model_dump_json(indent=2))
+
+    def forget_log_prefs(self, package: str) -> bool:
+        """Delete this app's preference; True when there was one. Absence *is* the default."""
+        path = self.log_prefs_path(package)
+        if not path.is_file():
+            return False
+        path.unlink()
+        return True
 
     # -- session I/O ------------------------------------------------------
 

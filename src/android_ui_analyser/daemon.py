@@ -399,6 +399,8 @@ def _adopt_client_owner(
 
 _LEASE_FREE_COMMANDS = frozenset(
     {
+        "app_log_prefs",
+        "app_log_prefs_set",
         "capture_explain",
         "capture_export",
         "capture_last",
@@ -838,6 +840,12 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
         elif cmd == "logcat_mark":
             return _result_ok(engine.logcat_mark(**args))
 
+        elif cmd == "app_log_prefs":
+            return _result_ok(engine.app_log_prefs(**args))
+
+        elif cmd == "app_log_prefs_set":
+            return _result_ok(engine.app_log_prefs_set(**args))
+
         elif cmd == "suite_run":
             return _result_ok(engine.suite_run(**args))
 
@@ -927,7 +935,8 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
                 "app_status, shell, install_app, "
                 "database_list, database_schema, database_query, database_execute, "
                 "database_backup, database_backups, database_restore, "
-                "logcat, logcat_mark, suite_run, dev_show, dev_anim, dev_crashes, dev_profile, "
+                "logcat, logcat_mark, app_log_prefs, app_log_prefs_set, "
+                "suite_run, dev_show, dev_anim, dev_crashes, dev_profile, "
                 "a11y_scroll, a11y_action, flags_set, flags_apply, proxy_start, proxy_stop, "
                 "mock_map, mock_record, mock_replay, capture_status, capture_last, capture_export, "
                 "capture_explain, capture_on, capture_off, capture_prune, capture_start, capture_stop",

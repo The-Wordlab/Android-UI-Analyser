@@ -775,6 +775,12 @@ ORIENTATION: tuple[tuple[str, str], ...] = (
         "this the moment a screen is not the app you were driving",
     ),
     (
+        "aua logcat prefs set --app <package> --ignore-tag <Tag>",
+        "PERSISTED, per app — stop one chatty library spending the `app_logs` budget on every "
+        "future action, or `--lines 40` when the app\'s own breadcrumbs are being truncated. "
+        "Local to this host, inherited by every later session",
+    ),
+    (
         "aua guide --brief",
         "the manual, short form — the full `aua guide` is ~46KB and the loop above covers most "
         "tasks; reach for it only when something above did not answer you",
@@ -1001,7 +1007,18 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "when you are chasing a library; `F` is always included so a narrow filter can never "
         "hide a crash. Turn it off with `--no-app-logs` (MCP: `configure app_logs=false`). A "
         "crash supersedes it: when the app leaves the foreground you get the stronger "
-        "`crash_evidence` block instead, from the same window",
+        "`crash_evidence` block instead, from the same window. Per-app and PERSISTED: "
+        "`aua logcat prefs set --app <package> [--ignore-tag T] [--unignore-tag T] "
+        "[--only-tag T] [--lines N] [--per-tag N] [--levels DIWEF]` (MCP: "
+        "`app_log_prefs_set`) remembers it beside that app\'s map on this host, so every later "
+        "session inherits it — that is where you name the app\'s own chatty logger, raise the "
+        "20-line budget when its breadcrumbs are being truncated, or report a tag the built-in "
+        "noisy list hides. `--only-tag` narrows to the logger you are chasing and says so, as "
+        "`only` in the digest. Read it back with `aua logcat prefs show`, drop it with "
+        "`aua logcat prefs reset`. Precedence: what you set for THIS session (`configure`, or a typed "
+        "`--app-logs`) beats the stored preference, which beats the host defaults; a global "
+        "`--no-app-logs` still turns everything off. An ignored tag stays ignored even under "
+        "`--only-tag`, and `F` survives every tag filter",
     ),
     (
         "suite",
@@ -1150,7 +1167,8 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "clocks drift from the host by seconds); `mark` reports `clock`, `host_unix_ms` and "
         "the measured `skew_ms` so drift is visible rather than silently eating your window. "
         "You rarely need to call it after an action: every observed action already folds that "
-        "same window into `app_logs` (see below)",
+        "same window into `app_logs` (see the `app_logs` entry above, including its persisted "
+        "per-app tag and line-count preferences)",
     ),
     (
         "suite",

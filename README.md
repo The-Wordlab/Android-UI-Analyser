@@ -1286,7 +1286,8 @@ location/orientation/airplane/network/network-profile/media/record/clock,
 `database_list` / `database_schema` / `database_query` / `database_execute` /
 `database_backup` / `database_backups` / `database_restore`,
 map/`reconcile_*`/`knowledge_*`,
-`proxy_start` / `proxy_stop` / `mock_replay`, `configure`.
+`proxy_start` / `proxy_stop` / `mock_replay`, `configure`,
+`app_log_prefs_get` / `app_log_prefs_set`.
 
 Example MCP client config (Claude Desktop / `claude_desktop_config.json`):
 
@@ -1604,6 +1605,7 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 | `aua helper status\|enable\|remove` | Optional on-device helper APK — runs a long flow on the device (rootable targets, off by default) |
 | `aua dashboard start|status|open|qr|stop|run` | Persistent browser grid, by default open on your network at `http://aua.local/`; narrow it with `--auth`, `--local`, or `--name ""`; QR for phones |
 | `aua logcat` / `aua suite` | Device-clock log windows / scripted suites |
+| `aua logcat prefs show\|set\|reset` | Per-app, persisted `app_logs` preferences — ignored or only-wanted tags, priority set, line and per-tag caps |
 | `aua dev` / `aua a11y` | Dev options helpers / a11y scroll |
 | `aua map` | Show the active-context map (`--all-contexts`, `--audit`, or `--find "<goal>"`) |
 | `aua goto "<goal>"` | Drive the remembered route to a known screen — taps + verifies each hop (`--plan` previews, `--max-steps N`) |

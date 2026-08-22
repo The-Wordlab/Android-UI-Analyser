@@ -434,6 +434,11 @@ def _run(ctx: typer.Context, fn: Callable[[Engine, OutputFormat], T]) -> T:
                 )
                 raise error
         engine = opts.engine()
+        if opts.app_log_levels is not None:
+            # Typed on this invocation, so it beats a stored per-app preference for that one
+            # field. Without this, `--app-logs DIWEF` silently did nothing on any app that had a
+            # remembered level set — the one app you were most likely to be debugging.
+            engine._session_log_fields.add("levels")
         # The far end of the gap this turn measures: the stamp aua wrote when it last returned.
         # Here rather than in the engine's own entry points because a *caller* turn is a process
         # the agent invoked — a daemon round trip is aua's own transport and counting it would
@@ -1424,7 +1429,12 @@ def _warm(engine: Engine) -> None:
 
 # Engine method name → daemon command name (they differ only for ``input``).
 _DAEMON_CMD = {"input_text": "input"}
-_HOST_ONLY_ROUTE_METHODS = frozenset({"flow_delete"})
+_HOST_ONLY_ROUTE_METHODS = frozenset(
+    # Nothing here touches a device. Routing them like device calls made a preference file
+    # read demand a lease — and refuse with "no device found" — while the same call over MCP
+    # needed nothing attached.
+    {"flow_delete", "app_log_prefs", "app_log_prefs_set"}
+)
 _CAPTURE_READ_METHODS = frozenset(
     {"capture_status", "capture_last", "capture_export", "capture_explain"}
 )
@@ -8263,6 +8273,105 @@ def logcat_mark_cmd(
 
         result = engine.logcat_mark(name, clear=clear)
         typer.echo(json.dumps(result, ensure_ascii=False))
+
+    _run(ctx, go)
+
+
+logcat_prefs_app = typer.Typer(
+    help="Per-app, persisted preferences for the `app_logs` digest folded into observations.",
+    no_args_is_help=True,
+)
+logcat_app.add_typer(logcat_prefs_app, name="prefs")
+
+
+@logcat_prefs_app.command("show")
+def logcat_prefs_show_cmd(
+    ctx: typer.Context,
+    app_pkg: str | None = typer.Option(None, "--app", help="App id (default: current)."),
+) -> None:
+    """Print one app's stored log preferences, what they resolve to, and what is hidden by default."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _echo_json(_route(engine, "app_log_prefs", app=app_pkg), fmt)
+
+    _run(ctx, go)
+
+
+@logcat_prefs_app.command("set")
+def logcat_prefs_set_cmd(
+    ctx: typer.Context,
+    app_pkg: str | None = typer.Option(None, "--app", help="App id (default: current)."),
+    ignore_tag: list[str] = typer.Option(  # noqa: B008 - typer option factory
+        [], "--ignore-tag", help="Stop reporting this log tag for this app (repeatable)."
+    ),
+    unignore_tag: list[str] = typer.Option(  # noqa: B008 - typer option factory
+        [],
+        "--unignore-tag",
+        help="Report this tag again, even one the built-in noise list hides (repeatable).",
+    ),
+    only_tag: list[str] = typer.Option(  # noqa: B008 - typer option factory
+        [],
+        "--only-tag",
+        help="Report ONLY these tags for this app (repeatable). `F` lines still survive.",
+    ),
+    clear_only: bool = typer.Option(
+        False, "--clear-only", help="Drop the only-list and go back to filtering by tag."
+    ),
+    levels: str | None = typer.Option(
+        None, "--levels", help="Priority SET folded in (default DWEF); `F` is always included."
+    ),
+    lines: int | None = typer.Option(
+        None, "--lines", "-n", help="Lines attached per action for this app (default 20)."
+    ),
+    per_tag: int | None = typer.Option(
+        None, "--per-tag", help="Lines one tag may contribute before it is capped (default 5)."
+    ),
+    scan_lines: int | None = typer.Option(
+        None, "--scan-lines", help="Lines read from the window before filtering (default 600)."
+    ),
+    enabled: bool | None = typer.Option(
+        None, "--enable/--disable", help="Fold this one app's logs into its observations, or not."
+    ),
+) -> None:
+    """Persist this app's log preferences — kept under `memory.dir`, inherited by later sessions.
+
+    The place to name an app's own chatty logger, or to raise its line count past the default
+    20 when its breadcrumbs are being truncated. Stored per app id, so nothing here changes what
+    any other app costs.
+    """
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        if clear_only and only_tag:
+            raise UsageError("--clear-only and --only-tag cannot be combined")
+        _echo_json(
+            _route(
+                engine,
+                "app_log_prefs_set",
+                app=app_pkg,
+                ignore_tags=list(ignore_tag) or None,
+                unignore_tags=list(unignore_tag) or None,
+                only_tags=[] if clear_only else (list(only_tag) or None),
+                levels=levels,
+                limit=lines,
+                per_tag=per_tag,
+                scan_lines=scan_lines,
+                enabled=enabled,
+            ),
+            fmt,
+        )
+
+    _run(ctx, go)
+
+
+@logcat_prefs_app.command("reset")
+def logcat_prefs_reset_cmd(
+    ctx: typer.Context,
+    app_pkg: str | None = typer.Option(None, "--app", help="App id (default: current)."),
+) -> None:
+    """Forget this app's stored log preferences and go back to the host-wide defaults."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _echo_json(_route(engine, "app_log_prefs_set", app=app_pkg, reset=True), fmt)
 
     _run(ctx, go)
 

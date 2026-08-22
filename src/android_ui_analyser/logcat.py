@@ -550,6 +550,9 @@ def digest_app_logs(
     app_id: str | None = None,
     levels: str = DEFAULT_LEVELS,
     deny_tag_prefixes: Sequence[str] = DEFAULT_DENY_TAG_PREFIXES,
+    drop_tag_prefixes: Sequence[str] = (),
+    keep_tag_prefixes: Sequence[str] = (),
+    allow_tag_prefixes: Sequence[str] = (),
     limit: int = 20,
     per_tag: int = 5,
     max_line_chars: int = DEFAULT_MAX_LINE_CHARS,
@@ -565,14 +568,33 @@ def digest_app_logs(
     ``F`` is always included whatever *levels* asks for: a caller narrowing the filter must not
     be able to hide the line that explains a crash.
 
+    Tag filtering happens in layers, because "this app is noisy" and "apps are noisy" are
+    different claims and the specific one has to win. *deny_tag_prefixes* is the generic guess
+    about apps in general; *drop_tag_prefixes* is what this caller said about **this** app, and
+    it outranks an allow-list, so "show me only Payment*" and "never show me PaymentDebug" can
+    both be true at once. *keep_tag_prefixes* names tags that must survive a deny list — the way
+    to read a library this file hides by default — and *allow_tag_prefixes* keeps **only** the
+    tags named, for an agent that knows exactly which logger it is chasing. An allow-list narrows
+    what a reader is looking at, so it is reported back as ``only``.
+
+    No tag filter can drop an ``F`` line, for the same reason the level set force-includes ``F``:
+    these lists are agent-writable and persist across sessions, and a filter that can hide the
+    line explaining a crash is worse than no filter at all.
+
     *max_line_chars* bounds each line as well, because a line budget alone does not bound the
     output: a single measured line held a 145 KB response body.
     """
 
     wanted = {ch.upper() for ch in levels if ch.strip()} | {"F"}
-    deny = tuple(prefix.casefold() for prefix in deny_tag_prefixes)
+    # Blanks are dropped from every list: `"".startswith("")` is true for every tag, so one
+    # empty entry in a config file or a hand-edited preference would delete the whole window.
+    deny = tuple(prefix.casefold() for prefix in deny_tag_prefixes if prefix.strip())
+    drop = tuple(prefix.casefold() for prefix in drop_tag_prefixes if prefix.strip())
+    keep = tuple(prefix.casefold() for prefix in keep_tag_prefixes if prefix.strip())
+    only = tuple(prefix.casefold() for prefix in allow_tag_prefixes if prefix.strip())
 
     kept: list[str] = []
+    asked_for_tags: set[str] = set()
     for line in raw.splitlines():
         if not line.strip():
             continue
@@ -581,14 +603,27 @@ def digest_app_logs(
             # Buffer separators ("--------- beginning of main") and continuation lines carry no
             # priority. They are structure, not app output, so they are not reported as such.
             continue
-        if match.group("priority") not in wanted:
+        priority = match.group("priority")
+        if priority not in wanted:
             continue
         tag = (match.group("tag") or "").strip()
         folded = tag.casefold()
-        if any(folded.startswith(prefix) for prefix in deny):
+        fatal = priority == "F"
+        exempt = any(folded.startswith(prefix) for prefix in keep)
+        if not fatal and not exempt and any(folded.startswith(prefix) for prefix in drop):
             continue
-        if _is_runtime_tag(tag, app_id):
+        asked_for = any(folded.startswith(prefix) for prefix in only)
+        if only and not asked_for and not fatal:
             continue
+        # A tag the caller named by hand outranks both generic filters: the deny list and the
+        # runtime-tag rule exist to remove noise nobody asked for.
+        if not fatal and not asked_for and not exempt:
+            if any(folded.startswith(prefix) for prefix in deny):
+                continue
+            if _is_runtime_tag(tag, app_id):
+                continue
+        if asked_for:
+            asked_for_tags.add(tag)
         kept.append(line)
 
     total = len(kept)
@@ -597,6 +632,12 @@ def digest_app_logs(
         capped: list[str] = []
         for line in kept:
             tag = line_tag(line) or ""
+            # A tag the caller narrowed to is not capped: the cap exists so one logger cannot
+            # spend a budget nobody spent on purpose, and `only` is exactly that purpose. Capping
+            # it anyway answers "show me only this tag" with five lines of it.
+            if tag in asked_for_tags:
+                capped.append(line)
+                continue
             seen[tag] = seen.get(tag, 0) + 1
             if seen[tag] <= per_tag:
                 capped.append(line)
@@ -615,7 +656,7 @@ def digest_app_logs(
     if max_line_chars > 0:
         kept = [_clip(line, max_line_chars) for line in kept]
 
-    return {
+    digest: dict[str, Any] = {
         # Android's own priority order, not alphabetical: `DWEF` is how a reader thinks about
         # this filter, and `DEFW` would look like a different, wrong answer.
         "levels": "".join(ch for ch in "VDIWEF" if ch in wanted),
@@ -625,3 +666,8 @@ def digest_app_logs(
         "omitted": max(0, total - len(kept)),
         "truncated": truncated,
     }
+    if only:
+        # Stated, not implied. `total_count` counts what survived the filters, so without this a
+        # deliberately narrowed window is indistinguishable from a quiet one.
+        digest["only"] = [prefix for prefix in allow_tag_prefixes if prefix.strip()]
+    return digest

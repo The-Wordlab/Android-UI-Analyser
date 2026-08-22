@@ -443,6 +443,12 @@ class LogsCfg(BaseModel):
     runtime. Hence a level *set* rather than a floor — ``I`` is noisier than ``D`` on Android,
     so a floor keeps the wrong half — and a per-tag cap so one chatty logger cannot spend the
     whole budget.
+
+    Every field here is one setting for **every** app on the host. Per-app overrides are
+    deliberately not config: they live beside that app's map under ``memory.dir``
+    (:class:`~android_ui_analyser.memory.AppLogPrefs`), so the preference follows the app
+    instead of the project, and an app's own tag names never have to be written into a config
+    file somebody might commit.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -456,6 +462,12 @@ class LogsCfg(BaseModel):
     # Extra tags to drop on top of the built-in generic framework/SDK list. The place to name an
     # app's own chatty logger — that belongs in a user's config, never in this repository.
     deny_tags: list[str] = Field(default_factory=list)
+    # Tags that must survive the deny list: the way to read a library the built-in list hides by
+    # default, without giving up the rest of the filter.
+    keep_tags: list[str] = Field(default_factory=list)
+    # When non-empty, the ONLY tags folded in — for a caller that knows which logger it is
+    # chasing. `F` still survives, so a narrow filter can never hide a crash.
+    only_tags: list[str] = Field(default_factory=list)
 
 
 class MemoryCfg(BaseModel):

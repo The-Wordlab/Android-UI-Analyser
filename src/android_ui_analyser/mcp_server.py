@@ -894,6 +894,100 @@ def _tool_definitions() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="app_log_prefs_get",
+            description=(
+                "Read one app's persisted app_logs preferences: which tags it ignores, which "
+                "it reports despite the built-in noise list, any only-list, and the line, "
+                "per-tag and priority settings — plus what they resolve to and what the "
+                "built-in list already hides."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "package": {"type": "string", "description": "App id to read."},
+                },
+                "required": ["package"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="app_log_prefs_set",
+            description=(
+                "Persist one app's app_logs preferences: ignore a chatty tag, stop ignoring one "
+                "(including a tag the built-in noise list hides), keep only the tags you are "
+                "chasing, or raise the 20-line budget and the 5-per-tag cap. Stored per app id "
+                "beside its map on this host, so every later session inherits it — unlike "
+                "`configure`, which lasts this session and applies to every app. Needs no "
+                "device. `F` lines survive every tag filter, so this can never hide a crash, "
+                "and an ignored tag stays ignored even when only_tags names it too. `configure` "
+                "set in this session outranks what is stored here."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "package": {"type": "string", "description": "App id these apply to."},
+                    "ignore_tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Tags to stop reporting for this app (prefix match).",
+                    },
+                    "unignore_tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Tags to report again — reaches the built-in noise list too. Tags "
+                            "that were not being ignored come back in `not_ignored`."
+                        ),
+                    },
+                    "only_tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Report ONLY these tags for this app; [] clears the list. A narrowed "
+                            "window says so, as `only` in the digest."
+                        ),
+                    },
+                    "levels": {
+                        "type": "string",
+                        "description": (
+                            "Priority SET, not a floor (default 'DWEF'). 'I' is noisier than 'D' "
+                            "on Android, so widen to 'DIWEF' only when chasing a library."
+                        ),
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 500,
+                        "description": "Lines attached per action (default 20), head+tail on overflow.",
+                    },
+                    "per_tag": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 500,
+                        "description": "Lines one tag may contribute before it is capped (default 5). "
+                        "A tag named in only_tags is never capped.",
+                    },
+                    "scan_lines": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 5000,
+                        "description": "Lines read from the window before filtering (default 600).",
+                    },
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "Fold this one app's logs into its observations, or not.",
+                    },
+                    "reset": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Forget this app's preferences; cannot be combined with a change.",
+                    },
+                },
+                "required": ["package"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
             name="analyze_screen",
             description="Analyze the current screen and return Set-of-Marks JSON "
             "(elements with stable ids, bounds, centers).",
@@ -2495,6 +2589,43 @@ def _tool_definitions() -> list[types.Tool]:
                             "'DIWEF' only when chasing a library. 'F' is always included."
                         ),
                     },
+                    "app_log_limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": (
+                            "Lines folded into each action (default 20). Raise it for one stretch "
+                            "of a session; use app_log_prefs_set to keep it for an app."
+                        ),
+                    },
+                    "app_log_per_tag": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Lines one tag may contribute before it is capped (default 5).",
+                    },
+                    "app_log_ignore_tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Tags to drop this session, on top of the built-in noisy list. "
+                            "Replaces the current session list; [] clears it."
+                        ),
+                    },
+                    "app_log_keep_tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Tags to report despite the built-in noisy list, this session. "
+                            "Replaces the current session list; [] clears it."
+                        ),
+                    },
+                    "app_log_only_tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Fold in ONLY these tags this session; [] clears the list. 'F' lines "
+                            "survive it, so this cannot hide a crash."
+                        ),
+                    },
                 },
                 "additionalProperties": False,
             },
@@ -2558,6 +2689,8 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
     if name == "job_list":
         return jobs.list(limit=int(args.get("limit", 20)))
     if name not in {
+        "app_log_prefs_get",
+        "app_log_prefs_set",
         "capabilities",
         "session_progress",
         "session_autopilot",
@@ -2694,6 +2827,23 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 grep=args.get("grep"),
                 tag=args.get("tag"),
                 lines=args.get("lines"),
+            )
+        )
+    if name == "app_log_prefs_get":
+        return _dump(engine.app_log_prefs(app=str(args["package"])))
+    if name == "app_log_prefs_set":
+        return _dump(
+            engine.app_log_prefs_set(
+                app=str(args["package"]),
+                ignore_tags=args.get("ignore_tags"),
+                unignore_tags=args.get("unignore_tags"),
+                only_tags=args.get("only_tags"),
+                levels=args.get("levels"),
+                limit=args.get("limit"),
+                per_tag=args.get("per_tag"),
+                scan_lines=args.get("scan_lines"),
+                enabled=args.get("enabled"),
+                reset=bool(args.get("reset", False)),
             )
         )
     if name == "analyze_screen":
@@ -3387,13 +3537,38 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
             engine._default_with_image = args["with_image"]
         if "app_logs" in args:
             engine.config.logs.enabled = bool(args["app_logs"])
-        if "app_log_levels" in args:
-            engine.config.logs.levels = str(args["app_log_levels"])
+        # Every log field set here is recorded as a SESSION field, which is what makes it beat a
+        # stored per-app preference. An agent asking for 60 lines while chasing a library must get
+        # 60 even on an app whose remembered preference says 20 — otherwise this tool quietly does
+        # nothing for exactly the apps that use the persisted one.
+        for arg, field in (
+            ("app_log_levels", "levels"),
+            ("app_log_limit", "limit"),
+            ("app_log_per_tag", "per_tag"),
+            ("app_log_ignore_tags", "deny_tags"),
+            ("app_log_keep_tags", "keep_tags"),
+            ("app_log_only_tags", "only_tags"),
+        ):
+            if arg not in args:
+                continue
+            if field in {"deny_tags", "keep_tags", "only_tags"}:
+                value: Any = [str(tag) for tag in (args[arg] or []) if str(tag).strip()]
+            elif field == "levels":
+                value = str(args[arg])
+            else:
+                value = int(args[arg])
+            setattr(engine.config.logs, field, value)
+            engine._session_log_fields.add(field)
         return {
             "ok": True,
             "with_image": getattr(engine, "_default_with_image", None),
             "app_logs": engine.config.logs.enabled,
             "app_log_levels": engine.config.logs.levels,
+            "app_log_limit": engine.config.logs.limit,
+            "app_log_per_tag": engine.config.logs.per_tag,
+            "app_log_ignore_tags": list(engine.config.logs.deny_tags),
+            "app_log_keep_tags": list(engine.config.logs.keep_tags),
+            "app_log_only_tags": list(engine.config.logs.only_tags),
         }
     raise AuaError(f"unknown tool '{name}'", code="usage")
 
@@ -3429,6 +3604,8 @@ _MCP_STARTED_SERIALS: set[str] = set()
 _MCP_STARTED_OWNERS: set[str] = set()
 _LEASE_FREE_TOOLS = frozenset(
     {
+        "app_log_prefs_get",
+        "app_log_prefs_set",
         "capabilities",
         "capture_explain",
         "capture_export",

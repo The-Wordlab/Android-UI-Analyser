@@ -53,11 +53,13 @@ from .errors import (
     UsageError,
 )
 from .memory import (
+    _LOG_PREF_MAX,
     DEFAULT_CONTEXT_ID,
     LEGACY_CONTEXT_ID,
     AppMap,
     AppMemoryStore,
     AppStrings,
+    EffectiveAppLogs,
     NavHints,
     RouteEdge,
     RouteStep,
@@ -166,6 +168,30 @@ _CHANGE_TEXT_CAP = 12  # text deltas echoed back per direction; a list screen wo
 # wrong one: measured on a real device, a Back to home attached 20 lines of `LauncherStateManager`
 # animation state under a field that claims to be the app's own output.
 _NOT_THE_APP_UNDER_TEST = ("launcher", "systemui", "com.android.systemui", ".home")
+
+
+def _clean_tags(tags: Sequence[str] | None) -> list[str]:
+    """Trim a caller's tag list, dropping blanks and repeats but keeping their order."""
+    out: list[str] = []
+    for tag in tags or ():
+        name = str(tag).strip()
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
+def _tag_hides(prefix: str, tag: str) -> bool:
+    """Whether a filter written as *prefix* hides a log tag called *tag*.
+
+    Case-insensitive prefix matching, because that is what `digest_app_logs` does. Comparing tag
+    lists with `==` instead is how "stop ignoring this" ends up removing nothing.
+    """
+    return tag.casefold().startswith(prefix.casefold())
+
+
+def _same_tag_family(one: str, other: str) -> bool:
+    """Whether two tag entries are about the same tag — either one is a prefix of the other."""
+    return _tag_hides(one, other) or _tag_hides(other, one)
 
 _CRASH_LOG_SCAN_LINES = 600  # bounded read from one already-short last-action window
 _CRASH_EVIDENCE_LINES = 60  # enough for exception + causes without dumping the full device log
@@ -790,6 +816,12 @@ class Engine:
         # previous action's lines as though the app had just said them again.
         self._app_under_test: str | None = None
         self._app_logs_reported_ms: int | None = None
+        self._log_prefs_store: AppMemoryStore | None = None
+        # `config.logs` fields the CALLER set on purpose this session (MCP `configure`, or a typed
+        # `--app-logs` flag). Those beat a stored per-app preference: an agent that just asked for
+        # 60 lines while chasing a library must get 60, or the per-turn control silently does
+        # nothing for exactly the apps that have a preference.
+        self._session_log_fields: set[str] = set()
         self._last_activity: str | None = None
         # Lease context: which agent this engine speaks for, what it needs, and what it got.
         # Set by the CLI/MCP layer before the device is first touched.
@@ -18649,6 +18681,251 @@ class Engine:
             "count": len(filtered),
         }
 
+    # -- per-app log preferences -------------------------------------------
+    # `config.logs` is one setting for every app on the host. These two are the per-app, across
+    # sessions half of it: what an agent learns about one app's loggers is worth keeping, and
+    # re-learning it every session is exactly the cost the digest exists to avoid.
+
+    def app_log_prefs(self, *, app: str | None = None) -> dict[str, Any]:
+        """What this host has been told to keep or drop from *app*'s action log windows."""
+        package = self._app_for_log_prefs(app)
+        store = self._app_log_store()
+        return {
+            "ok": True,
+            "action": "app-log-prefs",
+            **self._app_log_prefs_view(package, store.load_log_prefs(package), store),
+        }
+
+    def app_log_prefs_set(
+        self,
+        *,
+        app: str | None = None,
+        ignore_tags: Sequence[str] | None = None,
+        unignore_tags: Sequence[str] | None = None,
+        only_tags: Sequence[str] | None = None,
+        levels: str | None = None,
+        limit: int | None = None,
+        per_tag: int | None = None,
+        scan_lines: int | None = None,
+        enabled: bool | None = None,
+        reset: bool = False,
+    ) -> dict[str, Any]:
+        """Persist one app's log-window preference locally and return the effective view.
+
+        ``ignore_tags`` and ``unignore_tags`` are the two halves of the same list, and the
+        second one has to reach the built-in deny list too: that list is a guess about apps in
+        general, and the app in front of you is where the guess can be wrong. Un-ignoring a tag
+        nobody was ignoring is reported in ``not_ignored`` rather than answered with a silent
+        success — the failure it prevents is an agent that thinks it has widened the window and
+        then spends the session reading an unchanged one.
+
+        ``only_tags=[]`` clears the allow-list; ``None`` leaves it alone. Nothing here touches
+        the device, so it works with no device attached as long as *app* is named.
+        """
+        from .memory import AppLogPrefs
+
+        package = self._app_for_log_prefs(app)
+        store = self._app_log_store()
+        changes = {
+            "ignore_tags": ignore_tags,
+            "unignore_tags": unignore_tags,
+            "only_tags": only_tags,
+            "levels": levels,
+            "limit": limit,
+            "per_tag": per_tag,
+            "scan_lines": scan_lines,
+            "enabled": enabled,
+        }
+        if reset:
+            named = sorted(name for name, value in changes.items() if value is not None)
+            if named:
+                raise UsageError(
+                    f"reset cannot be combined with {', '.join(named)}",
+                    hint="Reset first, then set what you want — or drop reset.",
+                )
+            existed = store.forget_log_prefs(package)
+            return {
+                "ok": True,
+                "action": "app-log-prefs-set",
+                "reset": True,
+                "changed": existed,
+                "not_ignored": [],
+                "shadowed_by_only_tags": [],
+                **self._app_log_prefs_view(package, None, store),
+            }
+
+        add = _clean_tags(ignore_tags)
+        drop = _clean_tags(unignore_tags)
+        contradictory = sorted(set(add) & set(drop))
+        if contradictory:
+            raise UsageError(
+                f"cannot ignore and un-ignore the same tag: {', '.join(contradictory)}",
+                hint="Pick one direction per call.",
+            )
+        if levels is not None:
+            unknown = sorted({ch for ch in levels.upper() if ch not in "VDIWEF"})
+            if not levels.strip() or unknown:
+                raise UsageError(
+                    f"levels must be a set of V D I W E F, got {levels!r}",
+                    hint="It is a SET, not a floor — 'DWEF' is the default, 'DIWEF' is wider.",
+                )
+        for name, value in (("limit", limit), ("per_tag", per_tag), ("scan_lines", scan_lines)):
+            if value is None:
+                continue
+            # Bounded, not just positive. This is attached to every action and outlives the
+            # session that set it, so an unbounded number here is a permanent tax on whoever
+            # drives this app next.
+            ceiling = _LOG_PREF_MAX[name]
+            if not 1 <= int(value) <= ceiling:
+                raise UsageError(
+                    f"{name} must be between 1 and {ceiling}, got {value!r}",
+                    hint="It is folded into EVERY action for this app, in every later session.",
+                )
+
+        prefs = store.load_log_prefs(package) or AppLogPrefs(package=package)
+        keep_ignoring = list(prefs.ignore_tags)
+        keep_reporting = list(prefs.keep_tags)
+        for tag in add:
+            # Entries are prefixes, so a broader one absorbs the narrower ones it already covers
+            # and a narrower one is not worth storing beside a prefix that already hides it.
+            if not any(_tag_hides(held, tag) for held in keep_ignoring):
+                keep_ignoring = [held for held in keep_ignoring if not _tag_hides(tag, held)]
+                keep_ignoring.append(tag)
+            # Ignoring beats an earlier exemption: the last explicit instruction wins.
+            keep_reporting = [held for held in keep_reporting if not _same_tag_family(held, tag)]
+        not_ignored: list[str] = []
+        for tag in drop:
+            # Prefix-aware, both ways: un-ignoring `NetworkError` has to clear a stored `Network`
+            # that hides it, and un-ignoring `Network` has to clear the narrower entries under it.
+            hidden_here = [held for held in keep_ignoring if _same_tag_family(held, tag)]
+            keep_ignoring = [held for held in keep_ignoring if held not in hidden_here]
+            if self._log_tag_is_hidden_elsewhere(tag, package):
+                if not any(_tag_hides(held, tag) for held in keep_reporting):
+                    keep_reporting.append(tag)
+            elif not hidden_here:
+                not_ignored.append(tag)
+
+        updates: dict[str, Any] = {
+            "ignore_tags": keep_ignoring,
+            "keep_tags": keep_reporting,
+        }
+        if only_tags is not None:
+            updates["only_tags"] = _clean_tags(only_tags)
+        scalars: tuple[tuple[str, Any], ...] = (
+            ("levels", levels.upper() if levels is not None else None),
+            ("limit", limit),
+            ("per_tag", per_tag),
+            ("scan_lines", scan_lines),
+            ("enabled", enabled),
+        )
+        for name, value in scalars:
+            if value is not None:
+                updates[name] = value
+
+        updated = prefs.model_copy(update=updates)
+        # `changed` has to mean changed. Un-ignoring a tag nobody ignored writes the same
+        # document back, and reporting that as a change is how an agent concludes it has widened
+        # a window it has not touched.
+        differs = updated.stored_fields() != prefs.stored_fields()
+        if updated.is_empty():
+            # Nothing left to remember. An empty document and no document must not be different
+            # states, or "reset" would have two spellings with two behaviours.
+            changed = store.forget_log_prefs(package)
+            stored: Any = None
+        elif differs:
+            store.save_log_prefs(updated)
+            changed = True
+            stored = updated
+        else:
+            changed = False
+            stored = updated
+        view = self._app_log_prefs_view(package, stored, store)
+        # An only-list drops every tag it does not name, so an exemption outside it is stored but
+        # inert. Saying so is the difference between a preference that will work later and one the
+        # agent believes is working now.
+        active_only = view["effective"]["only_tags"]
+        shadowed = [
+            tag
+            for tag in (*drop, *keep_reporting)
+            if active_only and not any(_tag_hides(prefix, tag) for prefix in active_only)
+        ]
+        return {
+            "ok": True,
+            "action": "app-log-prefs-set",
+            "reset": False,
+            "changed": changed,
+            "not_ignored": not_ignored,
+            "shadowed_by_only_tags": _clean_tags(shadowed),
+            **view,
+        }
+
+    def _app_for_log_prefs(self, app: str | None) -> str:
+        """The app a preference call is about — named explicitly, or the one in front."""
+        if app and app.strip():
+            return app.strip()
+        package = self.current_package()
+        if not package:
+            raise UsageError(
+                "could not determine which app these log preferences are for",
+                hint="Pass the app id, or attach a device so the current app can be detected.",
+            )
+        return package
+
+    def _app_log_store(self) -> AppMemoryStore:
+        """A store for the preference document alone — its own object, on purpose.
+
+        Three things it must not do, each of which `self._mem` would. It must not claim a memory
+        session (`_memory` reads the device on first access, and a preference call has to work
+        with nothing attached). It must not become the memory subsystem's store: several call
+        sites read `self._mem is None` as "memory is off", so filling it in on a
+        `memory.enabled: false` run would switch parts of memory back on. And it must not open
+        the sqlite backend — the preference is a file in both backends, so building the sqlite
+        store would create a database, and run its one-shot legacy migration, as a side effect of
+        one action's log digest.
+        """
+        if self._log_prefs_store is None:
+            self._log_prefs_store = AppMemoryStore(
+                self.config.memory.model_copy(update={"backend": "json"})
+            )
+        return self._log_prefs_store
+
+    def _log_tag_is_hidden_elsewhere(self, tag: str, app_id: str) -> bool:
+        """Whether a filter outside this app's own ignore list would still hide *tag*.
+
+        All three of the digest's other filters count — the built-in noise list, a host's
+        `logs.deny_tags`, and the derived runtime-tag rule that drops ART logging under the app's
+        own truncated process name. Un-ignoring a tag any of those hides needs a recorded
+        exemption, and answering "it was not being ignored" for a tag that stays invisible is the
+        one wrong answer that looks exactly like the right one.
+        """
+        from . import logcat as logcat_mod
+
+        denied = (*logcat_mod.DEFAULT_DENY_TAG_PREFIXES, *self.config.logs.deny_tags)
+        if any(_same_tag_family(prefix, tag) for prefix in denied if prefix.strip()):
+            return True
+        return logcat_mod._is_runtime_tag(tag, app_id)
+
+    def _app_log_prefs_view(
+        self, package: str, prefs: Any, store: AppMemoryStore
+    ) -> dict[str, Any]:
+        """The stored document, what it resolves to, and what the built-ins already hide.
+
+        All three, because two of them are indistinguishable on their own: an empty `stored`
+        with no `builtin_ignore_tags` beside it reads as "nothing is being filtered", which is
+        never true.
+        """
+        from . import logcat as logcat_mod
+        from .memory import resolve_app_log_prefs
+
+        effective = resolve_app_log_prefs(self.config.logs, prefs)
+        return {
+            "package": package,
+            "stored": prefs.stored_fields() if prefs is not None else {},
+            "effective": effective.as_dict(),
+            "builtin_ignore_tags": list(logcat_mod.DEFAULT_DENY_TAG_PREFIXES),
+            "path": str(store.log_prefs_path(package)),
+        }
+
     def suite_run(
         self,
         path: str,
@@ -19034,6 +19311,25 @@ class Engine:
         with contextlib.suppress(Exception):
             self.platform.forget_app_process(app_id)
 
+    def _effective_app_logs(self, app_id: str) -> EffectiveAppLogs:
+        """``config.logs`` with *app_id*'s stored preference layered on top.
+
+        One small file read per action, uncached deliberately: the store caches nothing either,
+        which is what lets a warm daemon pick up a preference the CLI just wrote without a
+        restart. An unreadable store falls back to the config defaults rather than costing the
+        action its whole log window.
+        """
+        from .memory import resolve_app_log_prefs
+
+        prefs = None
+        try:
+            prefs = self._app_log_store().load_log_prefs(app_id)
+        except Exception as exc:  # a broken store costs a filter, never the whole window
+            logger.debug("per-app log preference unavailable: %s", exc)
+        return resolve_app_log_prefs(
+            self.config.logs, prefs, session_fields=self._session_log_fields
+        )
+
     def _app_logs(self, app_id: str) -> dict[str, Any] | None:
         """What *app_id* logged inside this action's own window, or None when it said nothing.
 
@@ -19043,8 +19339,13 @@ class Engine:
         nothing is a tax on every step of every flow, and measured on a real app most actions
         are quiet — an idle window logged 0 lines and an ordinary tap 0 after filtering.
         """
-        cfg = self.config.logs
-        if not cfg.enabled or not app_id:
+        if not self.config.logs.enabled or not app_id:
+            return None
+        # Per-app first: what this app was told to keep or drop outranks the host-wide default,
+        # and it is re-read per action on purpose — a preference another process just wrote (the
+        # CLI, or an agent through MCP) has to take effect on the very next observation.
+        cfg = self._effective_app_logs(app_id)
+        if not cfg.enabled:
             return None
         if not self.platform.supports("device.logs"):
             # Silent, deliberately. An unsupported optional extra is not the caller's problem
@@ -19079,7 +19380,12 @@ class Engine:
             raw,
             app_id=app_id,
             levels=cfg.levels,
-            deny_tag_prefixes=(*logcat_mod.DEFAULT_DENY_TAG_PREFIXES, *cfg.deny_tags),
+            deny_tag_prefixes=logcat_mod.DEFAULT_DENY_TAG_PREFIXES,
+            # Held apart from the built-in list on purpose: what a caller said about THIS app
+            # outranks an allow-list, while the generic guess about apps in general does not.
+            drop_tag_prefixes=cfg.ignore_tags,
+            keep_tag_prefixes=cfg.keep_tags,
+            allow_tag_prefixes=cfg.only_tags,
             limit=cfg.limit,
             per_tag=cfg.per_tag,
         )

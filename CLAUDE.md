@@ -136,6 +136,7 @@ aua db list <pkg>              # discover private SQLite databases (debuggable b
 aua db query <pkg> <db> "SELECT …"   # live host-side snapshot; current UI is preserved
 aua db query <pkg> <db> "SELECT …" --coherent  # stop app for transactional coherence
 aua db execute <pkg> <db> "UPDATE …" --yes  # backup + validate + replace + relaunch
+aua logcat prefs set --app <pkg> --ignore-tag <Tag> --lines 40  # persisted per-app app_logs filter
 ```
 
 An **optional on-device helper APK** (`helper/`, shipped prebuilt at
