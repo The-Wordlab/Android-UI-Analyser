@@ -68,7 +68,7 @@ from .memory import (
 )
 from .projection import Projection, render_action_tsv, trim_observation_payload
 from .reconcile import ReconciliationStore, ResearchReport, audit_map, summarize_audit
-from .schema import ActionResult, AnalyzeResult, OutputFormat
+from .schema import ActionResult, AnalyzeResult, OutputFormat, publish_ids
 
 logger = logging.getLogger("android_ui_analyser")
 
@@ -1377,7 +1377,12 @@ def _analyze_payload(result: Any) -> dict[str, Any] | None:
         data = result
     else:  # pragma: no cover - defensive
         return None
-    return data if isinstance(data.get("elements"), list) else None
+    if not isinstance(data.get("elements"), list):
+        return None
+    # A projection is an output path like any other, so it publishes stable ids too. Without
+    # this, `--fields` and `--format tsv` printed ordinals while plain `--format json` printed
+    # identities — the same screen, two incompatible id spaces, chosen by a formatting flag.
+    return publish_ids(data)
 
 
 def _emit_analyze(result: Any, fmt: OutputFormat, view: Projection) -> None:

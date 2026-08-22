@@ -113,7 +113,10 @@ def test_filters_alone_still_validate_as_an_analyze_result(device: FakeDevice) -
 
 def test_fields_projects_and_shortens_rid(device: FakeDevice) -> None:
     payload = json.loads(_run("analyze", "--fields", "id,text,rid", "--where-rid", "homeTab"))
-    assert payload["elements"] == [{"id": 4, "text": "Browse", "rid": "homeTabBROWSE"}]
+    # A projection is an output path, so its ids are the published stable ids.
+    assert payload["elements"] == [
+        {"id": "rid:homeTabBROWSE", "text": "Browse", "rid": "homeTabBROWSE"}
+    ]
 
 
 def test_fields_resource_id_keeps_the_full_selector(device: FakeDevice) -> None:
@@ -201,7 +204,7 @@ def test_region_and_clickable_compose_to_the_header_only(device: FakeDevice) -> 
 
 def test_where_text_is_case_insensitive(device: FakeDevice) -> None:
     rows = _rows(_run("--format", "tsv", "analyze", "--where-text", "brow"))
-    assert [r[0] for r in rows[1:]] == ["4"]
+    assert [r[0] for r in rows[1:]] == ["rid:homeTabBROWSE"]
 
 
 def test_limit_caps_the_rows(device: FakeDevice) -> None:

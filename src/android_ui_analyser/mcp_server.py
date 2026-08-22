@@ -34,7 +34,7 @@ from .engine import (
 )
 from .errors import AuaError, UsageError
 from .projection import Projection, trim_observation_payload
-from .schema import OutputFormat
+from .schema import OutputFormat, publish_ids
 
 SERVER_NAME = "android-ui-analyser"
 
@@ -58,6 +58,23 @@ def _ordinal(raw: Any) -> int | None:
         return int(raw)
     except (TypeError, ValueError):
         return None
+
+
+def _element_target(engine: Engine, args: dict[str, Any], *, verb: str) -> Any:
+    """The id for a call that takes an id and no selector.
+
+    ``inspect`` reads one element rather than acting on one, so it has no selector parameter to
+    carry an identity — but the id a caller holds is a published stable id, and refusing it here
+    would mean the one read-only lookup could not accept the ids every other call hands out.
+    Resolving through the engine's own key path keeps a single definition of what an id means.
+    """
+    raw = args.get("id")
+    ordinal = _ordinal(raw)
+    if ordinal is not None:
+        return ordinal
+    if isinstance(raw, str) and raw.strip():
+        return engine._resolve_action_key(raw.strip(), verb=verb).id
+    raise UsageError(f"{verb} needs an element id")
 
 
 def _selector_from_args(args: dict[str, Any]) -> dict[str, Any] | None:
@@ -109,12 +126,16 @@ def _optional_mic_target(
     if target_keys[0] == "id":
         if args.get("index") is not None or args.get("first"):
             raise UsageError("index/first cannot modify a numeric microphone control id")
-        return int(args["id"]), None
+        return _ordinal(args.get("id")), _selector_from_args(args)
     return None, _selector_from_args(args)
 
 
 def _dump(result: Any) -> Any:
-    return result.model_dump(mode="json") if hasattr(result, "model_dump") else result
+    # Publish at the boundary: `model_dump` is the internal form and still carries frame
+    # ordinals, and this is the last place before the payload reaches an agent.
+    return publish_ids(
+        result.model_dump(mode="json") if hasattr(result, "model_dump") else result
+    )
 
 
 def _engine_method(engine: Engine, name: str) -> Any:
@@ -202,7 +223,7 @@ _SELECTOR_PROPS: dict[str, Any] = {
         "type": "string",
         "description": (
             "Match by an element's stable_key from any observation (e.g. rid:continueBtn). "
-            "Unlike an integer id it outlives the frame it was read in, so it is the safe "
+            "It is what `id` already carries, and it outlives the frame it was read in, so it is the safe "
             "way to act on an observation this process did not produce."
         ),
     },
@@ -2439,7 +2460,7 @@ def _tool_definitions() -> list[types.Tool]:
                 "type": "object",
                 "properties": {
                     "target": {
-                        "description": "Previous-frame integer id or stable_key string.",
+                        "description": "A published stable id, or a legacy frame-local integer id.",
                         "oneOf": [{"type": "integer"}, {"type": "string"}],
                     },
                 },
@@ -2695,10 +2716,9 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
             )
         )
     if name == "tap":
-        element_id = args.get("id")
         return _dump(
             engine.tap(
-                int(element_id) if element_id is not None else None,
+                _ordinal(args.get("id")),
                 selector=_selector_from_args(args),
                 observe=args.get("observe", True),
                 with_image=img,
@@ -2707,8 +2727,9 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
     if name == "input":
         return _dump(
             engine.input_text(
-                int(args["id"]),
+                _ordinal(args.get("id")),
                 args["text"],
+                selector=_selector_from_args(args),
                 submit=args.get("submit", False),
                 observe=args.get("observe", True),
                 with_image=img,
@@ -2767,11 +2788,12 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
     if name == "screenshot":
         return _dump(engine.screenshot(args.get("path"), annotate=args.get("annotate", False)))
     if name == "inspect":
-        return _dump(engine.inspect(int(args["id"])))
+        return _dump(engine.inspect(_element_target(engine, args, verb="inspect")))
     if name == "long_press":
         return _dump(
             engine.long_press(
-                int(args["id"]),
+                _ordinal(args.get("id")),
+                selector=_selector_from_args(args),
                 ms=int(args.get("ms", 600)),
                 observe=args.get("observe", True),
                 with_image=img,
@@ -2931,7 +2953,8 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
     if name == "double_tap":
         return _dump(
             engine.double_tap(
-                int(args["id"]),
+                _ordinal(args.get("id")),
+                selector=_selector_from_args(args),
                 observe=args.get("observe", True),
                 with_image=img,
             )
@@ -2939,7 +2962,8 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
     if name == "clear":
         return _dump(
             engine.clear(
-                int(args["id"]),
+                _ordinal(args.get("id")),
+                selector=_selector_from_args(args),
                 observe=args.get("observe", True),
                 with_image=img,
             )

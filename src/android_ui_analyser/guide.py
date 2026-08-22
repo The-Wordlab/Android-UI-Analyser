@@ -335,10 +335,11 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
     ),
     (
         "Drive by element ID",
-        "`aua --format compact analyze` → a list of elements each with an integer `id` + bounds. "
-        "An integer is bound to that one observation frame; after a dynamic update prefer the "
-        "element's stable `resource_id`/`stable_key` via `--rid` or `aua resolve`, rather than "
-        "guessing that the same number still means the same control. Within the current frame: "
+        "`aua --format compact analyze` → a list of elements each with a stable `id` + bounds. "
+        "That `id` is the element's identity (`rid:continue_btn`, `tx:9f0c1a2b3c#2`), not a "
+        "position, so it survives a re-analyze and you can send it straight back — no "
+        "`aua resolve` step, no guessing that the same number still means the same control. "
+        "Repeats on one screen are numbered `#1`, `#2` down the screen. Within the current frame: "
         '`aua tap-and-analyze <id>`, `aua input-and-analyze <id> "text"`, '
         "`aua swipe-and-analyze up`, `aua key-and-analyze back`. "
         'Use `aua has "<text>"` (exit 0/1) to branch cheaply without parsing JSON.',
@@ -624,8 +625,8 @@ BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
     (
         "Observe once and use stable selectors",
         "Reuse the compact observation returned by session start. Without a goal session, use "
-        "`aua --format tsv analyze --fields id,text,rid,clickable`. Integer ids belong "
-        "only to that frame; prefer `--rid <resource-id>` or `stable_key`. An unlabeled actionable "
+        "`aua --format tsv analyze --fields id,text,rid,clickable`. Each `id` is a stable "
+        "identity you can act on directly; `--rid <resource-id>` still works. An unlabeled actionable "
         "control may expose a `px:` perceptual crop fingerprint with rendering tolerance and a "
         "legacy geometry fallback. After state changes, consume the returned observation or use "
         "`aua resolve <stable_key>`; never replay an old numeric id. Numeric taps and long-presses "
@@ -1228,7 +1229,7 @@ AGENT_BEST_PRACTICES_PERCEPTION: list[tuple[str, str, str]] = [
     ),
     (
         "Guess coordinates or scrape `uiautomator dump` yourself",
-        "Act with integer `id` from analyze, or stable `--rid <tail>` / `has --rid`",
+        "Act with the `id` from analyze (a stable identity), or `--rid <tail>` / `has --rid`",
         "That is the whole point of aua — selectors, not geometry.",
     ),
     (
@@ -1357,7 +1358,7 @@ def render_markdown(*, brief: bool = False) -> str:
     p.append("# android-ui-analyser (`aua`) — agent operating manual")
     p.append("")
     p.append(
-        "`aua` reports **what's on an Android screen and where**, so you act on **integer "
+        "`aua` reports **what's on an Android screen and where**, so you act on **stable "
         "element IDs, not pixels**. It reads the accessibility/view hierarchy first (fast, "
         "exact) and falls back to image vision (detection + OCR, optional grounding VLM) on "
         "screens the hierarchy can't see. It remembers each app's layout so you start each "
@@ -1871,10 +1872,9 @@ Use `aua` for Android UI: act on returned IDs or stable selectors, never pixels,
 2. Prefer navigation in this order: verified `goto`, matching saved `flow`, proven deeplink,
    then a manual analyzed action. Preview risky routes; goal text never authorizes destructive,
    external, settings, data, payment, send, or sign-out effects.
-3. Use analyzed actions and consume their returned `observation`; its integer ids belong to
-   that frame only, so on dynamic screens prefer `--rid` or `stable_key` and resolve it again
-   after a transition. An absent key was at its **default, not unknown**; widen with
-   `--observe-fields all`/`--observe-meta all`.
+3. Use analyzed actions and consume their returned `observation`. Each `id` is a stable
+   identity (`rid:continue_btn`), so send it straight back on the next call. An absent key
+   was at its **default, not unknown**; widen with `--observe-fields all`/`--observe-meta all`.
 4. Fold arrival into the action with a positive predicate such as
    `--until 'rid:resultCard,!text:Loading'`. On `settled-unmet`, use its fresh destination and
    corrected predicate; never repeat the action. Use `await-and-analyze` for absence-only checks

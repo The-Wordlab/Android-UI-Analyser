@@ -2581,7 +2581,9 @@ function inspectionElementLabel(element) {
 }
 
 function inspectionObjectRange(lines, element) {
-  const idText = '"id": ' + Number(element.id);
+  // JSON.stringify, not Number: an id is `"rid:greetingPanel"` in the rendered payload, and
+  // building the needle with Number produced `"id": NaN`, which matches no line ever written.
+  const idText = '"id": ' + JSON.stringify(element.id);
   const stableText = element.stable_key ? JSON.stringify(String(element.stable_key)) : '';
   for (let pivot = 0; pivot < lines.length; pivot += 1) {
     if (lines[pivot].trim().replace(/,$/, '') !== idText) continue;
@@ -2816,7 +2818,9 @@ async function tapInspectionElement(elementId, label) {
   try {
     const data = await inspectionPost('tap', {
       inspection_id: currentInspectionId,
-      element_id: Number(elementId),
+      // Sent as published, never coerced: ids are stable ids, `Number("rid:x")` is NaN, and
+      // NaN serialises to null — so coercing turned a click into a request with no id at all.
+      element_id: elementId,
     });
     renderInspection(data, elementId);
   } catch (error) {
@@ -5191,6 +5195,19 @@ if (isGrid) {
 """
 
 
+def _is_addressable_id(value: Any) -> bool:
+    """Whether *value* is an id a frame could have published.
+
+    A stable id (a non-empty string) or a legacy frame ordinal (a non-negative int). ``bool``
+    is excluded explicitly because ``True`` is an ``int`` in Python and ``element_id: true``
+    would otherwise be read as ordinal 1.
+    """
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return value >= 0
+    return isinstance(value, str) and bool(value.strip())
+
 class _DashboardState:
     def __init__(
         self,
@@ -5471,7 +5488,9 @@ class _DashboardState:
         return root / f"{inspection_id}.png"
 
     @staticmethod
-    def _inspection_selector(element_id: int, element: dict[str, Any]) -> dict[str, Any]:
+    def _inspection_selector(
+        element_id: Any, element: dict[str, Any]
+    ) -> dict[str, Any]:
         """Address the clicked element by the identity its own frame published.
 
         ``stable_key`` is the only name that outlives the frame it came from, so it is the
@@ -5569,8 +5588,11 @@ class _DashboardState:
         element_id = payload.get("element_id")
         if not isinstance(source_id, str) or not source_id:
             raise UsageError("dashboard tap needs the analysis frame id")
-        if isinstance(element_id, bool) or not isinstance(element_id, int) or element_id < 0:
-            raise UsageError("dashboard tap needs a non-negative AUA element id")
+        if not _is_addressable_id(element_id):
+            raise UsageError(
+                "dashboard tap needs the element id this frame published",
+                hint="Click Analyze again and use an id from the fresh overlay.",
+            )
         with self._inspection_lock:
             current = self._inspections.get(ser)
             if current is None or current.get("inspection_id") != source_id:

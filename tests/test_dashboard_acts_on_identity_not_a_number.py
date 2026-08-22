@@ -23,6 +23,18 @@ import pytest
 from android_ui_analyser.errors import UsageError
 
 
+@pytest.fixture(autouse=True)
+def _device_is_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin discovery: without this the host's `adb` decides, so the suite passed or failed
+    on whether an emulator happened to be attached — and the failure it produced was
+    `dashboard_device_detached`, which looks like a bug in the code under test."""
+    from android_ui_analyser import dashboard as dash
+
+    monkeypatch.setattr(
+        dash, "discover_online_serials", lambda *_a, **_k: (["emulator-5554"], None)
+    )
+
+
 def _state(tmp_path: Path) -> Any:
     from android_ui_analyser import dashboard as dash
     from android_ui_analyser.config import Config

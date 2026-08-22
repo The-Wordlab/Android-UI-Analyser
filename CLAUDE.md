@@ -1,7 +1,7 @@
 # android-ui-analyser (`aua`) — agent development guide
 
 This repo **is** the `aua` CLI: it gives an AI agent structured "what's on screen and where"
-for an Android device/emulator, so you act on **integer element IDs, not pixels**.
+for an Android device/emulator, so you act on **stable element IDs, not pixels**.
 Hierarchy-first (tens of ms), with OCR/detection/grounding vision fallbacks for screens the
 accessibility tree can't see (Compose/Flutter/WebView/canvas/games).
 
@@ -122,8 +122,8 @@ Raw ADB/native calls are confined to Android runtime/service implementation modu
 ## How the tool works (quick reference)
 
 ```bash
-aua --format compact analyze   # → elements[] each with integer id + bounds
-aua tap-and-analyze <id>       # act by id and receive the resulting screen
+aua --format compact analyze   # → elements[] each with a stable id + bounds
+aua tap-and-analyze <id>       # act by id (e.g. rid:continue_btn) and get the resulting screen
 aua input-and-analyze <id> "text"  # focus + type + resulting screen (--submit sends IME)
 aua swipe-and-analyze up · aua key-and-analyze back
 aua has "<text>"               # exit 0 if present, 1 if not — cheap branch check
@@ -160,7 +160,7 @@ The detail view in `aua dashboard` exposes the same database service for human i
 browser execute/restore actions add server-verified typed confirmation phrases.
 
 No separate `re-analyze` is required after every state-changing action. By default, each action
-returns the post-action screen in `observation` with fresh IDs. Re-run `analyze` only when you
+returns the post-action screen in `observation`. Re-run `analyze` only when you
 need a different view (`--fields`/`--where-*`, `source vision`, etc.).
 Full manual + flag placement rules: run `aua guide`, or read
 `.claude/skills/android-ui-analyser/SKILL.md`.

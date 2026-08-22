@@ -402,7 +402,8 @@ class AnalyzeResult(BaseModel):
 
     # -- rendering ---------------------------------------------------------
 
-    def _publish_identity(self, data: dict[str, Any]) -> dict[str, Any]:
+    @staticmethod
+    def _publish_identity(data: dict[str, Any]) -> dict[str, Any]:
         """Rewrite every published ``id`` to the element's stable key.
 
         The integer ``id`` is a frame-local ordinal: reading order, renumbered on every
@@ -524,6 +525,33 @@ class AnalyzeResult(BaseModel):
             if e.id == element_id:
                 return e
         return None
+
+
+
+def publish_ids(payload: Any) -> Any:
+    """Rewrite ids to stable ids anywhere an observation sits in *payload*, in place.
+
+    The boundary function. :meth:`AnalyzeResult.as_dict` publishes for callers who use it, but
+    `model_dump(mode="json")` is the more obvious method and three surfaces reached for it —
+    MCP, the CLI's projection path, and the engine sites that embed an observation in a larger
+    response — so those kept handing out frame ordinals.
+
+    Deliberately *not* a model serializer, which would be the tidier place: `model_dump` is
+    also the internal form. The analyze cache is written and read through it and a numeric
+    action resolves against that file, so publishing inside the model turned the cache into
+    something its own resolver could not read. The ordinal stays internal; this is where it
+    stops being internal.
+
+    Idempotent, so a payload that passed a boundary twice is unchanged by the second.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    if isinstance(payload.get("elements"), list):
+        AnalyzeResult._publish_identity(payload)
+    nested = payload.get("observation")
+    if isinstance(nested, dict) and isinstance(nested.get("elements"), list):
+        AnalyzeResult._publish_identity(nested)
+    return payload
 
 
 # --------------------------------------------------------- lightweight result models

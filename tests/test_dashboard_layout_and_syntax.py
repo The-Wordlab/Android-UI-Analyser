@@ -138,7 +138,9 @@ def test_live_frame_can_analyze_overlay_ids_and_tap_the_exact_analysis() -> None
     assert "inspectionPost('analyze'" in html
     assert "inspectionPost('tap'" in html
     assert "inspection_id: currentInspectionId" in html
-    assert "element_id: Number(elementId)" in html
+    # Sent as published: ids are stable ids, and `Number("rid:x")` is NaN.
+    assert "element_id: elementId" in html
+    assert "Number(elementId)" not in html
     assert "element.bounds.map(Number)" in html
     assert "element.stable_key || ''" in html
     assert "keyBadge.className = 'element-key'" in html

@@ -101,7 +101,10 @@ def test_brief_prefers_stable_selectors_and_current_playbook_facts() -> None:
     for claim in [
         "stable_key",
         "`px:` perceptual crop fingerprint",
-        "prefer `--rid",
+        # Was "prefer `--rid`" — advice that only made sense while `id` was a frame-local
+        # ordinal. The id is now itself a stable identity, so the brief has to say the
+        # named selector still works rather than that it is preferable.
+        "`--rid <resource-id>` still works",
         "numeric id after its frame changed",
         "knowledge stale",
         "near-duplicate",
