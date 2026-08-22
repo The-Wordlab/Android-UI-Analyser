@@ -140,6 +140,13 @@ class ActingNode(NamedTuple):
         return self.relation in {"ancestor", "descendant", "sibling-subtree"}
 
 
+def _published(el: Element) -> ElementId:
+    """The id this element is published under — its stable identity, never the frame ordinal."""
+    from .identity import stable_key
+
+    return el.stable_key or stable_key(el)
+
+
 def can_act(el: Element) -> bool:
     """Does this node carry an interaction, regardless of whether it is currently enabled?
 
@@ -267,18 +274,22 @@ def acting_report(found: ActingNode) -> dict[str, Any]:
     gets read as "nothing to see" when it is missing for the other reason.
     """
     acted, named = found.element, found.named
-    out: dict[str, Any] = {"id": acted.id, "relation": found.relation}
+    # Published ids, like every other id in the response. `acting` exists to say *which* node
+    # took the action — usually not the one the caller named — so an ordinal here is a number
+    # the caller cannot find among the elements printed beside it.
+    out: dict[str, Any] = {"id": _published(acted), "relation": found.relation}
     if found.relation == "self":
         out["detail"] = "the element named is the one that acts"
         return out
-    out["named_id"] = named.id
+    out["named_id"] = _published(named)
     out["named_acts"] = False
     if found.redirected:
         out["clickable"] = bool(acted.clickable)
         out["enabled"] = bool(acted.enabled)
         out["detail"] = (
-            f"id={named.id} ({named.type}) carries no interaction; acting on its "
-            f"{found.relation} id={acted.id} ({acted.type}), enabled={bool(acted.enabled)}"
+            f"id={_published(named)} ({named.type}) carries no interaction; acting on its "
+            f"{found.relation} id={_published(acted)} ({acted.type}), "
+            f"enabled={bool(acted.enabled)}"
         )
         return out
     if found.relation == "ambiguous":

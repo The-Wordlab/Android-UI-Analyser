@@ -12799,7 +12799,10 @@ class Engine:
             "acts": found.relation == "self",
             "acting": acting_report(found),
             "control": {
-                "id": acted.id,
+                # The id the observation publishes: `acting` explains which node actually
+                # received the action, and an ordinal here cannot be found in the elements
+                # beside it.
+                "id": _published_id(acted),
                 "type": acted.type,
                 "clickable": bool(acted.clickable),
                 "enabled": bool(acted.enabled),

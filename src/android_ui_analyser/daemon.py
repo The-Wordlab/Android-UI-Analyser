@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .errors import AuaError, DaemonOutcomeUnknownError, UsageError
+from .schema import publish_ids
 
 if TYPE_CHECKING:
     from .config import Config
@@ -298,7 +299,18 @@ def socket_path(config: Config, serial: str | None = None) -> str:
 
 
 def _result_ok(value: Any) -> dict[str, Any]:
-    return {"ok": True, "result": value}
+    """Wrap a successful daemon result, publishing stable ids on the way out.
+
+    Every response is built by `model_dump(mode="json")` — 53 call sites, all funnelling
+    through here. That is the *internal* form, so without this the daemon handed back element
+    ids as reading-order integers while the same payload carried stable ids in the parts the
+    engine builds itself (`id`, `next_actions`, `meta.element_diff`): one response, two id
+    spaces, naming the same controls. The dashboard reads the daemon directly, so that
+    inconsistency was visible on screen.
+
+    One funnel is the whole reason it goes here rather than at the 53 sites.
+    """
+    return {"ok": True, "result": publish_ids(value)}
 
 
 def _result_err(code: str, message: str, hint: str | None = None) -> dict[str, Any]:

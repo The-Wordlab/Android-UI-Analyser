@@ -450,10 +450,24 @@ class AnalyzeResult(BaseModel):
         meta = data.get("meta")
         diff = meta.get("element_diff") if isinstance(meta, dict) else None
         if isinstance(diff, dict):
-            for key in ("added", "removed", "changed"):
+            # `added`/`removed` are flat id lists; `changed` is a list of
+            # `{"id": …, "text": {"from": …, "to": …}}` rows. Treating all three the same way
+            # meant calling `by_ordinal.get(row)` with a dict, which raises
+            # `TypeError: unhashable type: 'dict'` — and only when something actually changed
+            # between two frames, so it surfaced as an intermittent `internal_error` on real
+            # taps while every fixture with an empty diff passed.
+            for key in ("added", "removed"):
                 rows = diff.get(key)
                 if isinstance(rows, list):
-                    diff[key] = [by_ordinal.get(row, row) for row in rows]
+                    diff[key] = [
+                        by_ordinal.get(row, row) if isinstance(row, (int, str)) else row
+                        for row in rows
+                    ]
+            changed = diff.get("changed")
+            if isinstance(changed, list):
+                for row in changed:
+                    if isinstance(row, dict) and row.get("id") in by_ordinal:
+                        row["id"] = by_ordinal[row["id"]]
         return data
 
     def as_dict(self, fmt: OutputFormat | str = OutputFormat.json) -> dict[str, Any]:
