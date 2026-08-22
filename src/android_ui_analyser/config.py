@@ -144,6 +144,24 @@ class PerfCfg(BaseModel):
     # an app whose transitions are uniformly slow.
     settle_total_max_ms: int = 1600
     settle_learn_cap_ms: float = 500.0
+    # -- the arrival extension: bounded truth-completion, not a longer blind wait -------
+    #
+    # Spent ONLY when the post-action classification says the folded observation is an
+    # unready destination (an explicit loading state, or an Activity change that rendered
+    # nothing) — i.e. only on calls that would otherwise return a wrong answer. A settled
+    # tap never pays it. It re-reads the cheap hierarchy until content arrives, then swaps
+    # in the rendered screen, so the agent gets one call with the right answer instead of
+    # a stale frame plus a recovery loop.
+    #
+    # Deliberately a different instrument from `max_wait_ms`. That ceiling caps waits the
+    # CALLER sizes — open-ended, and capable of waiting for a change that already happened,
+    # which is how a 42s stall was measured. This budget is sized by AUA, waits on specific
+    # missing evidence (content that provably has not arrived), and shares the extended
+    # confirmation window's ceiling, so the worst post-action wall time does not grow at
+    # the default. Raise per-app (auth-heavy screens) toward the 5s backstop the launch
+    # content poll already spends; `AUA_ARRIVAL_EXTENSION_MS` sweeps it, 0 disables the
+    # wait while keeping the honest verdict.
+    arrival_extension_ms: int = 1200
 
     # -- deliberate settle, and a ceiling the agent cannot lift ----------------
     #
@@ -956,6 +974,7 @@ perf:
   skip_unchanged_analyze: true  # skip re-parse when hierarchy XML hash matches
   auto_daemon: true           # CLI auto-starts daemon when enabled but down
   settle_profiles: true       # learn per-action settle budgets
+  arrival_extension_ms: 1200  # bounded in-action wait when the destination is provably unready
   gate_cache: true            # memoize gate.decide for identical trees
 
 perception:

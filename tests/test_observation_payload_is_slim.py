@@ -329,6 +329,18 @@ def test_the_observation_meta_keeps_what_changed(payload: dict[str, object]) -> 
         assert key in meta, f"{key} must survive: it is how a caller reads the new screen"
 
 
+def test_the_meta_preset_registers_the_arrival_state() -> None:
+    """A non-settled arrival must survive the observation trim, or the verdict is CLI-only.
+
+    Not asserted on the healthy payload fixture above, deliberately: `arrival_state` is
+    None-stripped when an action settles — its absence IS the healthy answer, exactly like
+    `stale_risk` and `screen_moved`.
+    """
+    from android_ui_analyser.projection import OBSERVATION_META_PRESETS
+
+    assert "arrival_state" in OBSERVATION_META_PRESETS["changed"]
+
+
 def test_the_observation_meta_drops_the_analyze_only_keys(payload: dict[str, object]) -> None:
     meta = _observation(payload)["meta"]
     assert isinstance(meta, dict)

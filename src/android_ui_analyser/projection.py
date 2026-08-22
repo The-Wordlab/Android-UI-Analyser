@@ -166,6 +166,7 @@ OBSERVATION_META_PRESETS: Mapping[str, tuple[str, ...]] = MappingProxyType(
             # worth carrying because it is absent unless it fires; the block around it is not.
             "screen_moved",
             "stale_risk",
+            "arrival_state",
             "lossy_text",
             "lossy_hint",
             "known_screen",

@@ -191,6 +191,8 @@ def test_recognition_of_a_known_destination_suppresses_the_departure_verdict(
     differs from the before tree, so that recognition is at least as likely to be the origin's
     own map entry. Recognition without a known origin must not suppress the verdict.
     """
+    from android_ui_analyser.engine import _label
+
     dev = NetworkBoundAuth(AUTH_BLANK)
     eng = _engine(tmp_path, dev)
     obs = eng.analyze(source="hierarchy")
@@ -200,23 +202,31 @@ def test_recognition_of_a_known_destination_suppresses_the_departure_verdict(
         "text_removed": ["Continue with MegaID"],
         "node_count_delta": 0,
     }
+    # A realistic pre-action snapshot: the labels/rids the origin screen actually had —
+    # additive arrival is measured against these, so an unrealistic empty baseline would
+    # make everything on screen look freshly rendered.
+    seen = {
+        "labels": [_label((e.text or e.content_desc or "").strip()) for e in obs.elements],
+        "rids": ["entryTitle", "loginBtn", "terms"],
+    }
 
-    known_origin = {"known_screen": "entry", "rids": []}
     assert (
         eng._unready_destination_risk(
-            departure_change, obs, before_state=known_origin, destination_confirmed=True
+            departure_change, obs, before_state={**seen, "known_screen": "entry"},
+            destination_confirmed=True,
         )
         is None
     ), "a recognized navigation away from a known screen is arrival evidence"
     assert (
         eng._unready_destination_risk(
-            departure_change, obs, before_state=None, destination_confirmed=True
+            departure_change, obs, before_state=seen, destination_confirmed=True
         )
         is not None
     ), "recognition with no known origin has no differential power"
     assert (
         eng._unready_destination_risk(
-            departure_change, obs, before_state=known_origin, destination_confirmed=False
+            departure_change, obs, before_state={**seen, "known_screen": "entry"},
+            destination_confirmed=False,
         )
         is not None
     )

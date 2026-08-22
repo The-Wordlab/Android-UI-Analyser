@@ -402,6 +402,11 @@ class Meta(BaseModel):
     # because `compact` drops falsey values and `delta` allowlists keys — a boolean would
     # vanish from output in exactly the cases that need it.
     stale_risk: str | None = None
+    # Where the arrival state machine landed for the action this observation is folded
+    # into: settled / no_change / loading / transitioning / unconfirmed. None on a plain
+    # `analyze` and on a settled action — like `screen_moved` and `stale_risk`, the key
+    # appearing IS the warning, so a healthy response pays nothing for it.
+    arrival_state: str | None = None
     # SHA1 of the raw hierarchy XML (or elements fingerprint for vision paths).
     fingerprint: str | None = None
     # How the result was produced (e.g. hierarchy, hierarchy-unchanged, vision).
@@ -534,6 +539,9 @@ class AnalyzeResult(BaseModel):
                         # is not necessarily the screen this caller was handed. A trim that drops
                         # the warning is a trim that hides the only case it exists for.
                         "screen_moved",
+                        # The machine-readable form of the same warning: `delta` fires when
+                        # `unchanged` is True, which is exactly the `no_change` state.
+                        "arrival_state",
                     }
                     and v not in (None, [], False)
                 }
@@ -725,6 +733,12 @@ class ActionResult(BaseModel):
     # byte-identical to the pre-action one. Carries the reason, not a bare flag, so a reader can
     # judge it. Absent when the observation is trustworthy, so its presence is the signal.
     stale_risk: str | None = None
+    # The arrival verdict, machine-readable: {"state", "evidence": [detector names],
+    # "waited_ms"?}. Present only when the state is not a silent settled arrival — absence
+    # means "arrived, nothing to say", presence means "read me before acting". Named
+    # evidence, never a confidence score. `stale_risk` and `note` carry the same verdict as
+    # prose and remain the compatibility surface.
+    arrival: dict[str, Any] | None = None
     # What the post-action wait cost: {"ms": int, "via": str, "anim": ...}. Answers "why did that
     # tap take 300 ms" as data rather than as a tag glued onto `detail`.
     settle: dict[str, Any] | None = None

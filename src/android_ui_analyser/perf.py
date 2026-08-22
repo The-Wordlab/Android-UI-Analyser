@@ -213,6 +213,27 @@ def wait_ceiling_ms(cap_ms: int, config: Any, profile: Any = None) -> tuple[int,
 
 
 STABLE_DELAY_ENV = "AUA_STABLE_DELAY_MS"
+ARRIVAL_EXTENSION_ENV = "AUA_ARRIVAL_EXTENSION_MS"
+
+
+def arrival_extension_for(config: Any) -> int:
+    """Budget for the in-action content wait, in milliseconds (0 disables the wait).
+
+    One env var moves it for a whole sweep without editing config, for the same reason
+    ``AUA_STABLE_DELAY_MS`` exists: the empty-result/latency trade is measured, not argued.
+    The honest classification itself has no knob — it is free, and a wrong answer with the
+    warning suppressed is strictly worse than the same answer with it.
+    """
+    flat = os.environ.get(ARRIVAL_EXTENSION_ENV)
+    if flat is not None:
+        try:
+            return max(0, int(float(flat)))
+        except (TypeError, ValueError):
+            logger.warning("ignoring non-numeric %s=%r", ARRIVAL_EXTENSION_ENV, flat)
+    try:
+        return max(0, int(getattr(getattr(config, "perf", None), "arrival_extension_ms", 0) or 0))
+    except (OverflowError, TypeError, ValueError):
+        return 0
 
 
 def stable_delay_for(kind: str | None, config: Any) -> int:

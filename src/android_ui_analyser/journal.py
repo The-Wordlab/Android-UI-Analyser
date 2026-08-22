@@ -440,6 +440,7 @@ def summarize_result(result: Any) -> Any:
             "goal_progress",
             "advice",
             "stale_risk",
+            "arrival",
             "verified",
             "finished",
             "errors",

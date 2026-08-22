@@ -1,13 +1,55 @@
 # An honest arrival verdict for the folded observation
 
-Status: **Phase 0 implemented** (see `Engine._unready_destination_risk`). Phases 1–3 designed
-and not built. This document is the plan; pick it up here.
+Status: **Phases 0–1 implemented** (`Engine._unready_destination_risk`,
+`Engine._await_rendered_destination`, `Engine._arrival_report`). Phases 2–3 designed and not
+built. This document is the plan; pick it up here.
 
 Every state-changing action folds the post-action screen into `observation` so the caller does
 not need a second `analyze`. That promise is the justification for the whole design — measured:
 37 taps once produced 73 separate `analyze` calls, because one unfilterable read cost more than
 two targeted ones. **A tap that returns a transitional frame recreates exactly that**, and adds
 a wrong action on top: the caller picks a target that no longer exists.
+
+## The goal
+
+Remove blind waits and extra function calls from the agent, and make the agent **wait for the
+response** instead of composing waits and re-reads itself. Three patterns, worst to best:
+
+```
+sleep 2 && analyze                            <- blind: guesses, wrong in both directions
+analyze; analyze; analyze                     <- polling: n calls to learn one fact
+tap --until 'rid:resultCard,!text:Loading'    <- one call, waits on evidence
+```
+
+AUA already has the third **when the caller can name the destination**. This design is for when
+it cannot — you tap a login control you have never tapped before, and there is no label to wait
+on. The content-wait is what replaces the guess: the action itself holds on, bounded, and
+returns either the rendered destination or a verdict that says exactly what is still missing.
+
+## The two wait instruments (why `perf.max_wait_ms` is not a contradiction)
+
+The same codebase caps a caller's 25s wait at 5s while an action patiently holds on for
+content. Both are right, because they are different instruments:
+
+- **`perf.max_wait_ms` caps waits the *caller* sizes.** They are open-ended and can be waiting
+  for a change that already happened — the measured failure was 42s blocked on a screen that
+  had been ready the whole time. No in-call logic can rule that out for a caller-specified
+  predicate; returning lets the caller re-decide from a fresh read. The old hint text justified
+  the cap with "another function call is cheaper than a blocked session", which the repo's own
+  arithmetic contradicts (an LLM re-invoke costs 6–39s of think time); the hint now gives the
+  real reason. The cap is anti-*stall*, not economics.
+- **`perf.arrival_extension_ms` bounds a wait AUA sizes**, spent only when the classification
+  proves the answer in hand is wrong (an unready destination), waiting on *specific missing
+  evidence* — content that provably was not there — and exiting on the first sign of it. It is
+  exempt from the ceiling for the same reason launch's 5s content poll and provisioning waits
+  are: it is not an observation wait the caller composed, it is the action finishing its own
+  answer.
+
+Budget: **1200ms default**, sharing the extended confirmation's ceiling (whatever the
+confirmation spent comes off the extension), so the worst post-action wall time does not grow
+at the default. The owner's 5s figure is the *backstop*, reachable per app via config for
+auth-heavy screens — launch already spends up to 5s, so the precedent exists.
+`AUA_ARRIVAL_EXTENSION_MS` sweeps it; 0 disables the wait and keeps the honest verdict.
 
 ## The failure this exists to fix
 
@@ -86,10 +128,53 @@ sessions. It means "recognised name ≠ before name", and with async memory the 
 counts as a confirmed destination. Phase 0 works around it locally (suppression requires a known
 origin). `_stale_observation_risk` trusts the same weak form and should be revisited in Phase 1.
 
-## Phase 1 — the arrival state machine
+## Phase 1 — the arrival state machine (shipped)
 
 The part that turns an honest warning into a correct answer. This is where the latency budget is
 meant to be spent.
+
+**Implemented, with these deviations from the plan below — each learned by building it:**
+
+- **`arrival` is emitted only when there is something to say** — a non-settled state, or a
+  settled arrival that had to be waited for. A silently settled action carries no field at all.
+  The plan implied an always-present field; the payload-trimming series this landed in teaches
+  the opposite lesson: a key that appears only when something is wrong is the cheapest warning.
+- **The content-wait skips `app-launch`** (it already has its own, longer content poll) **and
+  adopted-baseline observes** (an action-bound `--until` owns its evidence wait; racing it with
+  a second wait would double-spend the budget).
+- **Poll reads are internal** (`record_ids=False`): no candidate is ever published, so the ids a
+  caller holds always match the observation it was handed. The accepted candidate is only a
+  trigger — the caller-facing re-read goes through the same `_analyze_post_action` path as the
+  first readback (image, vision gate, published ids), and the verdict is re-derived from
+  scratch, because the wait itself proves nothing.
+- **`destination_confirmed` is fixed globally, not just in the classifier**: it now requires a
+  known origin (`Engine._destination_confirmed`). The weak form cleared stale caveats on cold
+  sessions by recognising the origin's own map entry.
+- **`screen_moved` gained a sixth silence**: a frame already carrying `stale_risk` predicted its
+  own replacement, so the replacement is the caller's action landing late — warning "nothing
+  you sent caused that" would be a false attribution (see the sibling section below).
+- **`via=hierarchy` keeps its confirmation exemption only when the tree grew**
+  (`ready.tree_added`): two agreeing dumps of a tree that only lost parts are the recorded
+  transitional shape. A settle dict without the count (older tests, monkeypatched settles)
+  keeps the old exemption rather than inventing evidence.
+- The expiry caveat and note say **how long the call already waited**, or the caller's obvious
+  next move is the very wait that just expired.
+- **`shell_only_tree` is promoted from Phase 2, because Phase 1 is nearly inert without it.**
+  Measured live on a single-Activity (Compose) app — the dominant modern shape — an in-app
+  navigation re-entered mid-fetch handed back a destination with nothing readable on it, and
+  the verdict stayed silent: `departure_without_arrival` requires an Activity change that
+  single-Activity apps never make. A strong subtractive transition landing on a content-bare
+  tree is now the same verdict without the Activity evidence.
+- **Additive arrival is measured on the app's own elements, never `change.text_added`.** That
+  field counts every window; live, the status-bar clock ticking over ("8:15") and the Wi-Fi
+  icon returning counted as "content arrived" and vetoed the verdict on exactly the frame that
+  needed it.
+- **A shell's own chrome is not arrival.** The loading shell's new nav-back control is a new
+  actionable control by the additive rule, and it suppressed the verdict live. Bareness is
+  therefore checked before additive evidence, in the classifier and in the poll's acceptance.
+- **Punctuation is not content.** A page-indicator dot ("•") was a live shell's only text and
+  counted as readable content. A label counts only with at least one alphanumeric character
+  (`_readable_label`).
 
 ### States
 
@@ -170,9 +255,11 @@ Each contributes one line to `arrival.evidence`:
   across locales *as data*. Matched against tree labels **and** OCR boxes, so canvas/Compose
   loading text the tree cannot see still counts.
 - `mapped_loading_screen` — memory state == `loading`.
-- `departure_without_arrival` — `activity_changed ∧ text_added==[] ∧ node_count_delta ≤ ε ∧ no new
-  clickables`. **This one alone catches the recorded case, at zero cost.**
-- `shell_only_tree` — generalise the launch-transitional detector off its `app-launch` gate.
+- `departure_without_arrival` — `activity_changed ∧ no new app-window label ∧ node_count_delta
+  ≤ ε ∧ no new clickables`. **This one alone catches the recorded case, at zero cost.**
+  (Shipped measuring additions on app elements only — see the deviations above.)
+- `shell_only_tree` — **shipped early, in Phase 1** (see the deviations above): a strong
+  subtractive transition landing on a content-bare tree, one unlabelled affordance allowed.
 - `animated_region` — mask census; gated by conjunction with activity-change/no-content so a
   video on a content screen is not called loading.
 - `blank_frame` — near-zero variance + activity change.
@@ -252,10 +339,10 @@ wins by an order of magnitude.
 
 ## Migration
 
-- **Phase 1**: `arrival` field + state machine; generalise the launch content poll to tap-driven
-  transitions; `via="hierarchy"` joins the confirmation gate for non-additive changes; budgets in
-  config (`perf.arrival_extension_ms` plus an env sweep knob); register the meta key in
-  projection, journal and the slim-payload test. Revisit `destination_confirmed`.
+- **Phase 1** (shipped): `arrival` field + state machine; the launch content poll generalised to
+  tap-driven transitions; `via="hierarchy"` confirmation for shrink-only changes; budgets in
+  config (`perf.arrival_extension_ms` + `AUA_ARRIVAL_EXTENSION_MS`); meta key registered in
+  projection, journal and the slim-payload test; `destination_confirmed` made strict.
 - **Phase 2**: the remaining signals; unified lexicon; log annotation.
 - **Phase 3**: the classifier, evidence-gated.
 

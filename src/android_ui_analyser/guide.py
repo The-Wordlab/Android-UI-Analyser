@@ -1236,8 +1236,11 @@ AGENT_BEST_PRACTICES_PERCEPTION: list[tuple[str, str, str]] = [
         "elapsed time was the caller generating, mean 12.4s, and a screen arrived *during* one "
         "of those gaps. `caller.wait_ceiling_ms` is the cap on any single wait "
         "(`wait_ceiling_mode` says whether it was measured or pinned); it is deliberately short "
-        "because another call is cheaper than a blocked session, so a wait that returns "
-        "`timeout` means \"not yet\", never \"not there\".",
+        "because an open-ended wait can outlive the change it waits for, so a wait that "
+        "returns `timeout` means \"not yet\", never \"not there\". Actions are different: "
+        "when the folded observation is provably unready, the action itself holds on "
+        "briefly (`perf.arrival_extension_ms`) and returns the rendered screen, or an "
+        "`arrival` verdict saying it could not.",
     ),
     (
         "Re-tap when an action reports `nothing changed` / `stale_risk`",
