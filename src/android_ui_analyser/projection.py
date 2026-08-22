@@ -145,9 +145,16 @@ OBSERVATION_META_PRESETS: Mapping[str, tuple[str, ...]] = MappingProxyType(
             "ask",
             "goal_progress",
             "observation_contract",
-            # did anything change, and can I trust what I am looking at
+            # did anything change, and can I trust what I am looking at. `element_diff` is
+            # deliberately absent: measured on one real tap it was 318 of the response's 921
+            # tokens, and 91% of that was `removed` — ids of elements no longer on screen,
+            # which a caller can neither tap nor assert on. Its `added` ids were already in
+            # `elements` with full detail. What replaces it costs a tenth as much and reads
+            # without a second lookup: `unchanged` for the one-bit answer,
+            # `action_diff_summary` for the counts, and the top-level `change` block for
+            # `activity_changed` plus the added/removed **text**. Ask for it with
+            # `--observe-meta all` (or by name) when you want the id-level diff.
             "unchanged",
-            "element_diff",
             "stale_risk",
             "lossy_text",
             "lossy_hint",
