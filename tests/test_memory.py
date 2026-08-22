@@ -108,8 +108,12 @@ def _store(tmp_path: Path, **memov) -> AppMemoryStore:
     return AppMemoryStore(cfg.memory)
 
 
-def _engine(tmp_path: Path, device: FakeDevice, **memov) -> Engine:
-    cfg = make_config(memory={"dir": str(tmp_path / "home"), **memov}, daemon={"enabled": False})
+def _engine(tmp_path: Path, device: FakeDevice, output: dict | None = None, **memov) -> Engine:
+    cfg = make_config(
+        memory={"dir": str(tmp_path / "home"), **memov},
+        daemon={"enabled": False},
+        **({"output": output} if output else {}),
+    )
     return Engine(cfg, device=device, factory=ProviderFactory(cfg))
 
 

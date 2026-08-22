@@ -28,7 +28,8 @@
     "confidence": null,
     "stable_key": "geo:View:q52:de5bb20082",
     "window": "app",
-    "parent": null
+    "parent": null,
+    "cost": null
   },
   {
     "id": 1,
@@ -59,7 +60,8 @@
     "confidence": null,
     "stable_key": "geo:View:q12:8e07d491cb",
     "window": "app",
-    "parent": 0
+    "parent": 0,
+    "cost": null
   },
   {
     "id": 2,
@@ -90,7 +92,8 @@
     "confidence": null,
     "stable_key": "geo:View:q21:9a6692d844",
     "window": "app",
-    "parent": 0
+    "parent": 0,
+    "cost": null
   },
   {
     "id": 3,
@@ -121,7 +124,8 @@
     "confidence": null,
     "stable_key": "geo:View:q22:5d19d4cddf",
     "window": "app",
-    "parent": 0
+    "parent": 0,
+    "cost": null
   },
   {
     "id": 4,
@@ -152,6 +156,7 @@
     "confidence": null,
     "stable_key": "geo:View:q42:61d1f72a19",
     "window": "app",
-    "parent": 0
+    "parent": 0,
+    "cost": null
   }
 ]

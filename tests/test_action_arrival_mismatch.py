@@ -56,10 +56,11 @@ def _observation(*, title: str = "Recent items", loading: bool = False) -> Analy
     )
 
 
-def _engine(tmp_path: Path, device: FakeDevice) -> Engine:
+def _engine(tmp_path: Path, device: FakeDevice, output: dict | None = None) -> Engine:
     cfg = make_config(
         memory={"enabled": False, "dir": str(tmp_path / "home")},
         daemon={"enabled": False},
+        **({"output": output} if output else {}),
     )
     return Engine(cfg, device=device, factory=ProviderFactory(cfg))
 
@@ -281,14 +282,20 @@ def test_changing_action_destination_is_not_declared_settled(
         ({"changed": True, "timeout": True, "via": "timeout", "ms": 1100}, False),
     ],
 )
-def test_launch_only_advertises_numeric_next_actions_after_stable_readback(
+def test_launch_only_advertises_derived_ids_after_a_stable_readback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     ready: dict[str, object],
     advertised: bool,
 ) -> None:
+    """The derived list is opt-in now, so it is turned on here: withholding is the invariant.
+
+    A one-sample/timeout/unchanged settle path proves the app is foreground and nothing more.
+    Publishing a pre-filtered list of its ids reads as "these are the controls you can act on",
+    and the frame they came from may be gone before the next call reaches it.
+    """
     device = FakeDevice(package=PKG, activity=".MainActivity")
-    engine = _engine(tmp_path, device)
+    engine = _engine(tmp_path, device, output={"next_actions": True})
     destination = _observation()
     engine._pre_action_state = {
         "count": 1,
@@ -310,5 +317,5 @@ def test_launch_only_advertises_numeric_next_actions_after_stable_readback(
 
     assert bool(result.next_actions) is advertised
     if not advertised:
-        assert "numeric next actions are withheld" in (result.note or "")
+        assert "its ids may not survive until your next call" in (result.note or "")
         assert "`aua analyze`" in (result.note or "")

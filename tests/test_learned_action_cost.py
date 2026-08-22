@@ -6,8 +6,10 @@ together with a login button that waits on a network round-trip. ``perf.py`` the
 1.6s, while real screens in this app take 18-60s. A per-kind number cannot answer the question an
 agent actually has, which is "what will *this* button on *this* screen cost me".
 
-Timing is stored per (screen, control), scoped to the flag context, and used two ways: surfaced in
-``meta.slow_controls`` when the agent arrives, and spent as a deadline when it acts.
+Timing is stored per (screen, control), scoped to the flag context, and used three ways: surfaced
+in ``meta.slow_controls`` when the agent arrives, priced onto the element itself as ``cost`` in
+the folded observation an action hands back (``meta.slow_controls`` is not in the ``changed`` meta
+preset those are trimmed to), and spent as a deadline when it acts.
 """
 
 from __future__ import annotations
@@ -190,20 +192,30 @@ def test_a_cost_learned_mid_session_reaches_a_screen_that_has_not_changed(tmp_pa
     )
 
 
-def test_a_learned_cost_rides_on_the_next_action_row_for_its_control(tmp_path: Path) -> None:
-    """ "tap 26 next, and it takes ~4.8s" is one read — the promise `_next_actions` documents."""
+def test_a_learned_cost_rides_on_the_element_it_belongs_to(tmp_path: Path) -> None:
+    """ "tap this next, and it takes ~4.8s" is one read — now on the element, not beside it.
+
+    This used to be asserted through the derived `next_actions` list, which was the only route
+    from memory to an acting agent: `meta.slow_controls` carries the same numbers and is not in
+    the `changed` meta preset every folded observation is trimmed to. That list cost more than
+    the whole `elements` list it was a filtered subset of, so it went behind an opt-in and the
+    cost moved onto the row it describes. Same promise, one fewer list.
+    """
     eng, observation, screen, element, control = _engine_on_apps(tmp_path, "emu-cost-priced")
     eng._memory.record_action_timing(  # type: ignore[union-attr]
         P, screen=screen, control=control, ms=4800.0, outcome="changed"
     )
 
-    rows = {row["id"]: row for row in eng._next_actions(observation) or []}
+    eng._price_elements(observation)
+    priced = {stable_key(e): e.cost for e in observation.elements if e.cost is not None}
 
-    assert (
-        rows[stable_key(element)].get("avg_ms") == 4800
-    ), "the cost must be priced onto its own row"
-    assert rows[stable_key(element)].get("max_ms") == 4800
-    assert rows[stable_key(element)].get("n") == 1, "one observation must not read as ten"
+    assert priced[stable_key(element)] == {
+        "avg_ms": 4800,
+        "max_ms": 4800,
+        # One observation must not read as ten.
+        "n": 1,
+    }, "the cost must be priced onto its own control"
+    assert list(priced) == [stable_key(element)], "a control with no history stays unpriced"
 
 
 def test_an_observed_action_records_what_it_cost(tmp_path: Path) -> None:

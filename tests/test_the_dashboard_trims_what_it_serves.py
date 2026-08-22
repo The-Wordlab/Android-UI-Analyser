@@ -30,7 +30,19 @@ SERIAL = "emulator-5554"
 # What the panel is allowed to show per element: the shared default observation columns
 # (`config.output.observation_fields`) plus the two the overlay itself is made of.
 _ALLOWED_COLUMNS = frozenset(
-    {"id", "text", "desc", "clickable", "enabled", "checked", "selected", "bounds", "stable_key"}
+    {
+        "id",
+        "text",
+        "desc",
+        "clickable",
+        "enabled",
+        "checked",
+        "selected",
+        # What this control cost last time it was acted on; absent on a row with no history.
+        "cost",
+        "bounds",
+        "stable_key",
+    }
 )
 
 # Columns the daemon always sends and no dashboard reader ever consumes.

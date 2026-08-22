@@ -112,6 +112,7 @@ from .schema import (
     Source,
     Tier,
     center_of,
+    drop_default_flags,
 )
 from .scroll_geom import (
     Box,
@@ -3194,23 +3195,32 @@ class Engine:
         cached = self._read_cache()
         return cached.screen.package if cached else None
 
-    def _next_actions(self, obs: AnalyzeResult, *, limit: int = 12) -> list[dict[str, Any]] | None:
-        """What can be done from here, decision-ready, with each control's learned cost attached.
+    def _next_actions(
+        self, obs: AnalyzeResult, *, limit: int | None = None
+    ) -> list[dict[str, Any]] | None:
+        """The actionable subset of *obs*, pre-filtered — emitted only on explicit opt-in.
 
-        This exists to remove a *reasoning* step, not a call: the post-action screen already came
-        back inline, but an agent still had to scan `observation.elements` to find which of 50
-        nodes it could act on — and scanning was expensive enough that agents preferred
-        `--no-observe` plus a filtered `analyze`, which is two calls to avoid one read.
+        Not on by default, and the default is measured. This existed to remove a *reasoning*
+        step: the post-action screen already came back inline, but an agent had to scan
+        `observation.elements` for which of ~50 nodes it could act on. That scan is gone — the
+        folded observation is trimmed to ~20 app-owned rows carrying `clickable`, so filtering
+        it is one comprehension over a list the caller already holds. What the duplicate cost
+        on one real journalled response: 1384 bytes / 346 tokens, 25% of the whole response,
+        for a filtered restatement of a 1301-byte `elements` list.
 
-        Ordered by how likely a caller wants it (labelled controls first, then the rest) and
-        capped: a list of every tappable node is a dump, and a dump is what `analyze` is for.
-        Cost rides on the entry it belongs to, so "tap 26 next, and it takes ~4.8s" is one read
-        rather than a cross-reference against `slow_controls`.
+        Two faults were fixed rather than shipped behind the switch. The rows go through
+        :func:`schema.drop_default_flags`, the same rule `elements` uses, because 12 of 12 rows
+        were reporting `checked: false, selected: false` and meaning nothing by it. And the
+        list is complete: it used to cap at 12, so a 15-control screen silently hid three real
+        controls from a list an agent reads as "what I can do here". A caller that wants a
+        bound passes *limit* and knows it asked for one.
+
+        The learned per-control cost — the one thing `elements` could not express — moved onto
+        the element itself; see :meth:`_price_elements`.
         """
         from .identity import stable_key as _stable_key
 
         rows: list[dict[str, Any]] = []
-        timings = self._screen_timings_safe(obs.meta.known_screen if obs.meta else None)
         for e in obs.elements:
             if not (e.clickable or e.checkable or e.long_clickable or e.scrollable):
                 continue
@@ -3225,22 +3235,50 @@ class Engine:
                 row["label"] = _label(label)
             if rid:
                 row["rid"] = rid
-            if e.checkable is not None:
-                row["checked"] = e.checked
-            if e.selected is not None:
-                row["selected"] = e.selected
-            known = timings.get(e.stable_key or rid or "")
-            if known is not None:
-                row["avg_ms"] = round(known.ema_ms)
-                row["max_ms"] = round(known.max_ms)
-                row["n"] = known.n
+            # One rule for "a flag at its default says nothing", shared with `elements`, and it
+            # is the reason `checkable` is written here at all: without it the trim cannot tell
+            # an off switch (whose `checked: false` IS the reading) from a plain button.
+            row.update(
+                drop_default_flags(
+                    {"checkable": e.checkable, "checked": e.checked, "selected": e.selected}
+                )
+            )
             rows.append(row)
         if not rows:
             return None
         # Labelled first: an unlabelled container is kept (it may be the only thing that acts —
         # see `keep_actionable`) but it is not what a caller reaches for first.
         rows.sort(key=lambda r: 0 if r.get("label") or r.get("rid") else 1)
-        return rows[:limit]
+        return rows if limit is None else rows[:limit]
+
+    def _price_elements(self, obs: AnalyzeResult) -> None:
+        """Attach each control's learned cost to the element it belongs to, in place.
+
+        A cost is learned per (screen, control) and spent two ways already — as a deadline when
+        acting, and as `meta.slow_controls` on arrival. Neither reaches an agent choosing what
+        to tap from a folded observation: `slow_controls` is not in the `changed` meta preset
+        every action response is trimmed to, so the only route was the derived `next_actions`
+        list, which cost more than the whole element list to carry it.
+
+        Priced onto the row it describes, "tap this next, and it takes ~4.8s" stays one read,
+        and it survives every projection because `cost` is a default observation column. In
+        place, and on the observation about to be returned, because the timing may have been
+        recorded *after* the analyze that produced this frame — a still screen is exactly when
+        a caller is deciding, and a price that only appears on the next fresh tree is stale
+        guidance for as long as the screen sits still.
+        """
+        timings = self._screen_timings_safe(obs.meta.known_screen if obs.meta else None)
+        if not timings:
+            return
+        for e in obs.elements:
+            known = timings.get(e.stable_key or _id_tail(e.resource_id) or "")
+            if known is None:
+                continue
+            e.cost = {
+                "avg_ms": round(known.ema_ms),
+                "max_ms": round(known.max_ms),
+                "n": known.n,
+            }
 
     def _screen_timings_safe(self, screen: str | None) -> dict[str, Any]:
         """The timing map for *screen*, keyed by control — empty when unknown."""
@@ -7332,15 +7370,16 @@ class Engine:
                     observe=True,
                 )
                 observation = launched.observation
-                # ``app launch`` deliberately withholds ``next_actions`` when its folded
-                # hierarchy came from a one-sample/timeout/unchanged settle path.  Reusing that
-                # explicitly unstable frame here makes the goal planner answer
-                # ``manual_observation`` even though the immediately following hierarchy is
-                # actionable.  Session bootstrap owns the launch, so pay for that one bounded
-                # authoritative read now instead of handing every agent a redundant analyze.
+                # ``app launch`` marks its folded hierarchy unstable when it came from a
+                # one-sample/timeout/unchanged settle path.  Reusing that explicitly unstable
+                # frame here makes the goal planner answer ``manual_observation`` even though
+                # the immediately following hierarchy is actionable.  Session bootstrap owns the
+                # launch, so pay for that one bounded authoritative read now instead of handing
+                # every agent a redundant analyze.  The note carries the verdict: the derived
+                # ``next_actions`` list used to double as the signal and is off by default, so
+                # its absence no longer distinguishes an unstable frame from a settled one.
                 if (
                     observation is not None
-                    and launched.next_actions is None
                     and isinstance(launched.note, str)
                     and "has not produced a stable readback yet" in launched.note
                 ):
@@ -7535,13 +7574,16 @@ class Engine:
         )
         if inherited:
             out["warnings"] = [*(out.get("warnings") or []), inherited]
-        # Session bootstrap embeds an AnalyzeResult rather than an ActionResult, so it does not
-        # otherwise carry the latter's `next_actions`. Derive them from this same fresh frame:
-        # manual handoff can now choose a stable selector without a redundant analyze/capability
-        # call, and every numeric id is guaranteed to belong to the observation just returned.
-        next_actions = self._next_actions(observed)
-        if next_actions:
-            out["next_actions"] = next_actions
+        # Session bootstrap embeds an AnalyzeResult rather than an ActionResult, so the learned
+        # per-control cost has to be attached here too — the bootstrap frame is the one a manual
+        # handoff picks its first control from. The derived `next_actions` list follows the same
+        # opt-in as every action response: filtering `observation.elements` on `clickable` is the
+        # same answer, from the observation already in this payload.
+        self._price_elements(observed)
+        if self.config.output.next_actions:
+            next_actions = self._next_actions(observed)
+            if next_actions:
+                out["next_actions"] = next_actions
         if installed_bundle is not None:
             # Whether bootstrap pushed a build or reused the one already there decides whether app
             # data survived, so it belongs in the session's own record rather than only in the log.
@@ -8904,12 +8946,14 @@ class Engine:
             }
         return {
             "kind": "manual_observation",
-            "cli": "No call: inspect this result's next_actions and choose deliberately",
+            "cli": "No call: inspect this result's observation.elements and choose deliberately",
             "mcp": None,
             "reason": (
                 "No verified route, matching flow, or unambiguous goal-labelled control is "
-                "available on this frame. The result already includes the reusable observation "
-                "and its available next_actions; another capabilities/analyze call would add no evidence."
+                "available on this frame. The result already includes the reusable observation; "
+                "filter observation.elements on clickable (plus checked/scrollable for toggles "
+                "and scrollers) to see what can be acted on. Another capabilities/analyze call "
+                "would add no evidence."
             ),
             "executes": False,
         }
@@ -11395,7 +11439,9 @@ class Engine:
                     # package/activity there — and appending a marker to it corrupts the thing a
                     # caller parses. The caveat text, not a bare flag, so the reason travels too.
                     result.stale_risk = caveat
-                launch_next_actions_unstable = bool(
+                # The launch readback cannot be stood behind: its ids may be gone before the
+                # caller's next command reaches them.
+                launch_ids_unstable = bool(
                     result.action == "app-launch"
                     and not launch_content_ready
                     and (
@@ -11435,8 +11481,14 @@ class Engine:
                 elif launch_content_wait_ms:
                     result.settle = {"content_ms": launch_content_wait_ms}
                 result.observation_present = True
+                # The learned cost belongs on the control it describes, and this is where it
+                # reaches the caller: `meta.slow_controls` is not in the `changed` preset a
+                # folded observation is trimmed to.
+                self._price_elements(obs)
                 result.next_actions = (
-                    None if launch_next_actions_unstable else self._next_actions(obs)
+                    self._next_actions(obs)
+                    if self.config.output.next_actions and not launch_ids_unstable
+                    else None
                 )
                 nav = list(obs.meta.known_routes or []) + list(obs.meta.suggested_gotos or [])
                 result.routes = nav or None
@@ -11449,11 +11501,11 @@ class Engine:
                         "wait-and-analyze --after-change` or wait for an exact destination "
                         "predicate; do not act on ids from this frame."
                     )
-                elif launch_next_actions_unstable:
+                elif launch_ids_unstable:
                     result.note = (
                         "The app is foreground, but its launch screen has not produced a stable "
-                        "readback yet, so numeric next actions are withheld. Run `aua analyze` "
-                        "once before acting on an id."
+                        "readback yet, so its ids may not survive until your next call. Run "
+                        "`aua analyze` once before acting on an id."
                     )
                 elif ready and ready.get("timeout") and self._change_has_semantic_effect(change):
                     result.note = (
@@ -11748,7 +11800,10 @@ class Engine:
         """Replace all fields derived from a transient launch readback with *fresh*."""
         launched.observation = fresh
         launched.observation_present = True
-        launched.next_actions = self._next_actions(fresh)
+        self._price_elements(fresh)
+        launched.next_actions = (
+            self._next_actions(fresh) if self.config.output.next_actions else None
+        )
         nav = list(fresh.meta.known_routes or []) + list(fresh.meta.suggested_gotos or [])
         launched.routes = nav or None
         launched.known_screen = fresh.meta.known_screen

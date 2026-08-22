@@ -200,6 +200,17 @@ class Element(BaseModel):
     # sibling **outside** those bounds, so containment cannot find one from the other and
     # only the tree can. See :func:`selectors.acting_node`.
     parent: int | str | None = None
+    # What this control cost last time it was acted on: ``{"avg_ms": 4800, "max_ms": 4800,
+    # "n": 3}``, learned per (screen, control) and scoped to the flag context. Absent unless
+    # this exact control has history, so an unmeasured screen pays nothing.
+    #
+    # It lives on the element because it is the one thing about a control that the tree cannot
+    # tell you, and every other home for it was worse. `meta.slow_controls` carries the same
+    # numbers but is not in the `changed` meta preset every folded observation is trimmed to;
+    # the derived `next_actions` list carried it and cost more than the whole element list to
+    # do so. Priced onto the row it belongs to, "tap this next, and it takes ~4.8s" is one
+    # read rather than a cross-reference.
+    cost: dict[str, Any] | None = None
 
     def compact(self) -> dict[str, Any]:
         """Token-minimal dict: drop nulls and default-valued verbose fields."""
@@ -232,6 +243,8 @@ class Element(BaseModel):
             out["window"] = self.window
         if self.parent is not None:
             out["parent"] = self.parent
+        if self.cost is not None:
+            out["cost"] = self.cost
         return out
 
     def _compact_state(self) -> dict[str, Any]:
@@ -725,11 +738,17 @@ class ActionResult(BaseModel):
     # A bounded wait reached its ceiling with the screen still moving. Distinct from an error:
     # the screen is returned, nothing is known to be wrong, and the caller may simply ask again.
     settled_unmet: bool | None = None
-    # What can be done from the screen this action landed on — the point being that an agent should
-    # not have to scan `observation.elements` to pick its next id. Each entry carries the control's
-    # own learned cost when we have one, so "tap 26 next, and it historically takes 4.8s" is a
-    # single read: [{"id": 26, "label": "Submit", "rid": "submitButton", "avg_ms": 4800, "n": 3}].
-    # Capped, because a list of everything is a dump, not guidance.
+    # What can be done from the screen this action landed on, as a filtered projection of
+    # `observation.elements`: [{"id": "rid:submit", "label": "Submit", "rid": "submit"}].
+    #
+    # **Off unless `output.next_actions` is set**, and that default is measured. It existed to
+    # remove a *reasoning* step — an agent scanning ~50 observation nodes for the ones it could
+    # act on — and that scan no longer exists: the folded observation is trimmed to ~20 rows
+    # with `clickable` on each, so `[e for e in observation.elements if e["clickable"]]` is the
+    # same answer for free. On one real journalled response the list cost 1384 bytes / 346
+    # tokens (25% of the whole response) to restate 12 rows of a 1301-byte `elements` list. The
+    # learned per-control cost, the one thing `elements` could not express, moved to
+    # `Element.cost`.
     next_actions: list[dict[str, Any]] | None = None
     # Navigation shortcuts out of here that memory already knows — merged `known_routes` and
     # `suggested_gotos`, hoisted so they are visible without opening `observation.meta`.

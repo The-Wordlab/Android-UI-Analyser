@@ -345,7 +345,6 @@ def _fold_action_until(
         "observation",
         "observation_present",
         "known_screen",
-        "stable_elements",
         "action_diff_summary",
         "change",
         "next_actions",

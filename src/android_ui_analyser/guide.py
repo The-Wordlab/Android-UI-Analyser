@@ -408,7 +408,7 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "(elements with fresh ids). This is the default agent contract: action + `observation` "
         "covers the normal readback path, so you should skip `analyze` unless you need another "
         "filtered view. Every action response now also includes `observation_present`, "
-        "`known_screen`, `stable_elements`, `action_diff_summary`, and `note`, so callers can "
+        "`known_screen`, `action_diff_summary`, and `note`, so callers can "
         "branch on that single payload. `type → tap send` is two calls, not three, and `goto` "
         "returns the destination's `elements` too. "
         "The MCP surface makes that contract visible in the method name: "
@@ -650,8 +650,10 @@ BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
         "their `observation` already contains fresh ids. Do not immediately call `analyze` again. "
         "Verify the exact depth the user named: an intermediate card/detail page with an "
         "`Open` control does not prove that a conversation, thread, document, or tool itself "
-        "opens. Continue through the returned `next_actions` until the requested content and "
-        "interactive affordance are visible. Never invent a rid that was not returned. "
+        "opens. Pick each next control by filtering the returned `observation.elements` on "
+        "`clickable` (plus `checked`/`scrollable` for toggles and scrollers), until the "
+        "requested content and interactive affordance are visible. Never invent a rid that was "
+        "not returned. "
         "For your action's expected result add `--until 'rid:resultCard'` or "
         "`--until 'text:Results,!text:Loading'`; escape a literal comma as "
         "`text:Hello\\, friend`. For a "
@@ -845,7 +847,7 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "analyze — views (use these instead of post-processing JSON)",
         "`--fields <csv>` (`id,text,rid,desc,bounds,center,type,clickable,enabled,focused,"
         "checkable,checked,selected,scrollable,long_clickable,password,resource_id,parent,source,"
-        "confidence`), `--nonempty`, `--no-system`, `--no-ime`, `--no-wrappers`, `--all`, "
+        "confidence,cost`), `--nonempty`, `--no-system`, `--no-ime`, `--no-wrappers`, `--all`, "
         "`--where-text <substr>`, "
         "`--where-rid <substr>`, `--clickable`, `--region x1,y1,x2,y2`, `--limit N`, "
         "`--meta <csv>`, `--no-meta` — repeatable where it makes sense, and free of a device "
@@ -1715,9 +1717,6 @@ def render_markdown(*, brief: bool = False) -> str:
     p.append('  "observation_present": true,')
     p.append('  "known_screen": "chat",')
     p.append(
-        '  "stable_elements": [{"id": 25, "stable_key": "compose_input"}, {"id": 26, "stable_key": "send"}],'
-    )
-    p.append(
         '  "action_diff_summary": {"added": 0, "removed": 0, "changed": 2, "prev_count": 17, "curr_count": 17},'
     )
     p.append('  "note": "No separate analyze needed; state is in observation."')
@@ -1736,7 +1735,10 @@ def render_markdown(*, brief: bool = False) -> str:
     p.append('                  "clickable", "enabled", "focused",')
     p.append('                  "checkable", "checked", "selected",      // tri-state:')
     p.append('                  "scrollable", "long_clickable", "password",  // null = unknown')
-    p.append('                  "source": "hierarchy|detection|ocr|grounding", "confidence" } ],')
+    p.append('                  "source": "hierarchy|detection|ocr|grounding", "confidence",')
+    p.append(
+        '                  "cost": {"avg_ms","max_ms","n"} } ],  // learned; absent with no history'
+    )
     p.append('  "meta":     { "duration_ms", "tier_used", "path", "providers_used",')
     p.append('                "known_screen", "known_routes", "suggested_gotos", "research_tasks",')
     p.append(
@@ -1766,10 +1768,6 @@ def render_markdown(*, brief: bool = False) -> str:
     p.append('  "action": "tap",')
     p.append('  "observation_present": true,')
     p.append('  "known_screen": "chat",')
-    p.append('  "stable_elements": [')
-    p.append('    {"id": 25, "stable_key": "compose_input"},')
-    p.append('    {"id": 26, "stable_key": "send"}')
-    p.append("  ],")
     p.append(
         '  "action_diff_summary": {"added": 0, "removed": 0, "changed": 2, "prev_count": 17, "curr_count": 17},'
     )
@@ -1882,29 +1880,31 @@ Use `aua` for Android UI: act on returned IDs or stable selectors, never pixels,
 
 ## Operating loop
 
-1. Start with `aua session start --goal "<what must be verified>"`; it selects/provisions a
-   compatible target and leases it to the caller process. Add `--needs root,play,proxy` and
+1. Start with `aua session start --goal "<what must be verified>"`; it provisions a
+   compatible target and leases it. Add `--needs root,play,proxy` and
    `--app <package>` for an unrelated foreground app. Reuse its observation and follow its
    exact `recommended_call`; do not immediately re-analyze. `--contract` requires fresh
    proof and strict finish. `--artifacts-dir` records evidence; `--wait-for-lease` waits safely.
-2. Prefer navigation in this order: verified `goto`, matching saved `flow`, proven deeplink,
+2. Navigate in this order: verified `goto`, matching saved `flow`, proven deeplink,
    then a manual analyzed action. Preview risky routes; goal text never authorizes destructive,
    external, settings, data, payment, send, or sign-out effects.
 3. Use analyzed actions and consume their returned `observation`. Each `id` is a stable
-   identity (`rid:continue_btn`), so send it straight back on the next call. An absent key
-   was at its **default, not unknown**; widen with `--observe-fields all`/`--observe-meta all`.
-4. Fold arrival into the action with a positive predicate such as
+   identity (`rid:continue_btn`), so send it straight back on the next call. Pick the next
+   control by filtering `observation.elements` on `clickable` (`checked`/`scrollable` for
+   toggles and scrollers); a timed control carries its `cost`. An absent key was at
+   its **default, not unknown**; widen with `--observe-fields all`/`--observe-meta all`.
+4. Fold arrival into the action with a positive predicate:
    `--until 'rid:resultCard,!text:Loading'`. On `settled-unmet`, use its fresh destination and
    corrected predicate; never repeat the action. Use `await-and-analyze` for absence-only checks
-   and `back-until-and-analyze` for nested return navigation.
+   and `back-until-and-analyze` for nested returns.
 5. Keep perception hierarchy-first. Filter in AUA (`--where-rid`, `--where-text`, `--clickable`,
-   `--region`); use vision for opaque screens and `--deep` for grounding.
-6. Carry `goal_progress.checkpoint` on the next call with `--phase-done` (MCP: `phase_done`)
-   instead of spending a separate progress call. Use `aua job start await ...` only for a
+   `--region`); vision for opaque screens and `--deep` for grounding.
+6. Carry `goal_progress.checkpoint` on the next call with `--phase-done` (MCP: `phase_done`),
+   not a separate progress call. Use `aua job start await ...` only for a
    read-only wait that may outlive one agent call. If `daemon_outcome_unknown` appears, never
-   repeat the action; wait, then inspect one fresh screen.
+   repeat the action: wait, then inspect a fresh screen.
 7. End with the returned cleanup call, normally `aua session finish`. Use `review.accounting`, not estimates:
-   `top_level_calls` counts caller-visible invocations and equals `lifecycle_calls` + `task_calls`;
+   `top_level_calls` counts caller-visible invocations = `lifecycle_calls` + `task_calls`;
    `journal_events` adds `folded_internal_events` such as an action-bound wait. The snapshot excludes
    this review/finish (`reporting_call_included` is false); `top_level_calls_including_reporting_call` adds it.
 8. After a contract passes, `session candidate-flow NAME --save` requires explicit
@@ -1917,22 +1917,22 @@ on the same package/context/frame.
 ## Device and safety rules
 
 - First call `session start`; never list/start devices, set `AUA_OWNER`, or acquire a lease.
-  It scans leases, frees dead owners, and provisions a capable match. One device
+  It frees dead owners and provisions a capable match. One device
   stays implicit: omit `--serial`; switching or transfer is explicit.
-- Use `--no-start-emulator` only when provisioning is forbidden; use `--headed` only when
+- Use `--no-start-emulator` only when provisioning is forbidden; `--headed` only when
   visibility is required. For voice add `--audio`, then `mic inject` or macOS `mic speak`;
   never repeat late-delivery or uncertain-toggle errors.
-- Use `aua network offline --verify`; session cleanup restores it. Use guarded `aua db` for
+- Use `aua network offline --verify`; session cleanup restores it. Guarded `aua db` for
   debuggable SQLite.
 - A delivered deeplink, spinner disappearance, or unchanged short settle is not proof of the
-  requested destination — check `verified`, not just `ok`. Verify the final interactive
-  affordance the user named.
+  requested destination — check `verified`, not just `ok`. Verify the final affordance
+  the user named.
 - Assert observed text or `--rid` — labels render in `meta.device_locale`.
 - Never execute `policy_suggestion`; `session autopilot` is off by default and **taps only** —
   never start it on a login or text entry. Short goal in the screen's own words (`Open Catalog`):
   a candidate sharing no goal word is refused. `policy_handoff` hands back.
 
-## Load more only when needed
+## Load more when needed
 
 - Run `aua guide --brief` for the selector, wait, navigation, map, flow, lease, and recovery
   field guide.
@@ -1999,6 +1999,9 @@ def render_json() -> dict[str, object]:
                 "password",
                 "source",
                 "confidence",
+                # What this control cost last time it was acted on, learned per (screen,
+                # control): {"avg_ms", "max_ms", "n"}. Absent unless it has history.
+                "cost",
             ],
             "meta": [
                 "duration_ms",

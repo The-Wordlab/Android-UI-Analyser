@@ -56,6 +56,9 @@ FIELD_ALIASES: dict[str, str] = {
     "window": "window",
     "stable_key": "stable_key",
     "parent": "parent",
+    # What this control cost last time — see :attr:`schema.Element.cost`. A column rather than
+    # a `meta` key because it belongs to one row, and absent on every row with no history.
+    "cost": "cost",
 }
 
 # Aliases that render the shortened form of their underlying key.
@@ -870,9 +873,12 @@ def trim_observation_payload(
     action, so the measured cost win ("37 taps produced 73 separate analyze calls") applied to one
     caller and not the other. One implementation means a future change lands on both.
 
-    ``next_actions`` is derived from the same tree, so it is filtered to the ids that survived.
-    Leaving it whole re-adds exactly the nodes the view just dropped, and worse, lets it name an
-    id that is not in the observation the caller was given.
+    ``next_actions`` is derived from the same tree, so when a caller has opted into it
+    (``output.next_actions``) it is filtered to the ids that survived. Leaving it whole re-adds
+    exactly the nodes the view just dropped, and worse, lets it name an id that is not in the
+    observation the caller was given. It is the only such list left — ``stable_elements`` is
+    gone and ``next_actions`` is off by default — so an absent key here is the normal case and
+    must stay a no-op rather than an error.
     """
     if view is None or not isinstance(data, dict):
         return data

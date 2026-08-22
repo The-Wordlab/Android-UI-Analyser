@@ -1089,7 +1089,6 @@ def _await_until(result: Any, *, journal_privacy_cmd: str | None = None) -> Any:
         "observation",
         "observation_present",
         "known_screen",
-        "stable_elements",
         "action_diff_summary",
         "change",
         "next_actions",

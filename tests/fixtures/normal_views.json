@@ -28,7 +28,8 @@
     "confidence": null,
     "stable_key": "rid:title",
     "window": "app",
-    "parent": null
+    "parent": null,
+    "cost": null
   },
   {
     "id": 1,
@@ -59,7 +60,8 @@
     "confidence": null,
     "stable_key": "rid:email",
     "window": "app",
-    "parent": null
+    "parent": null,
+    "cost": null
   },
   {
     "id": 2,
@@ -90,7 +92,8 @@
     "confidence": null,
     "stable_key": "rid:password",
     "window": "app",
-    "parent": null
+    "parent": null,
+    "cost": null
   },
   {
     "id": 3,
@@ -121,7 +124,8 @@
     "confidence": null,
     "stable_key": "rid:remember",
     "window": "app",
-    "parent": null
+    "parent": null,
+    "cost": null
   },
   {
     "id": 4,
@@ -152,7 +156,8 @@
     "confidence": null,
     "stable_key": "rid:login_btn",
     "window": "app",
-    "parent": null
+    "parent": null,
+    "cost": null
   },
   {
     "id": 5,
@@ -183,6 +188,7 @@
     "confidence": null,
     "stable_key": "rid:forgot",
     "window": "app",
-    "parent": null
+    "parent": null,
+    "cost": null
   }
 ]

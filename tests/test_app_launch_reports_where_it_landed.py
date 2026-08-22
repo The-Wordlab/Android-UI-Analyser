@@ -46,7 +46,9 @@ def test_launch_waits_inside_the_same_call_for_content_after_a_shell_only_frame(
     monkeypatch: Any, tmp_path: Path
 ) -> None:
     dev = FakeDevice(hierarchy_xml=SHELL_ONLY, package=P, serial="emu-launch-shell-heals")
-    eng = _engine(tmp_path, dev)
+    # The derived list is opt-in (`output.next_actions`); asked for here because "it was NOT
+    # withheld" is half of what this test proves, and an absent field cannot say that.
+    eng = _engine(tmp_path, dev, output={"next_actions": True})
     shell = eng.analyze(source="hierarchy", with_ocr=False)
     meaningful = shell.model_copy(deep=True)
     meaningful.elements[1].resource_id = f"{P}:id/catalog"
@@ -72,7 +74,8 @@ def test_launch_waits_inside_the_same_call_for_content_after_a_shell_only_frame(
 
 def test_launch_shell_timeout_is_explicitly_non_reusable(monkeypatch: Any, tmp_path: Path) -> None:
     dev = FakeDevice(hierarchy_xml=SHELL_ONLY, package=P, serial="emu-launch-shell-stays")
-    eng = _engine(tmp_path, dev)
+    # Opted in, so `next_actions is None` below means "withheld" rather than "never emitted".
+    eng = _engine(tmp_path, dev, output={"next_actions": True})
     shell = eng.analyze(source="hierarchy", with_ocr=False)
     monkeypatch.setattr(eng, "_analyze_post_action", lambda *_args, **_kwargs: shell)
     monkeypatch.setattr(
@@ -195,7 +198,8 @@ def test_launch_retries_a_transient_systemui_hierarchy_while_app_stays_foregroun
     monkeypatch: Any, tmp_path: Path
 ) -> None:
     dev = FakeDevice(hierarchy_xml=APPS, package=P, serial="emu-launch-attaching")
-    eng = _engine(tmp_path, dev)
+    # Opted in: "re-derived from the fresh frame, not the rejected one" needs a value to compare.
+    eng = _engine(tmp_path, dev, output={"next_actions": True})
     target = eng.analyze(source="hierarchy", with_ocr=False)
     target.meta.known_screen = "target-login"
     target.meta.known_routes = ["target-route"]

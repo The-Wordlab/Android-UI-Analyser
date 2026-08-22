@@ -28,6 +28,7 @@
     "confidence": null,
     "stable_key": "rid:surface",
     "window": "app",
-    "parent": null
+    "parent": null,
+    "cost": null
   }
 ]

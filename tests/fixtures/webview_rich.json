@@ -28,7 +28,8 @@
     "confidence": null,
     "stable_key": "rid:close_button",
     "window": "app",
-    "parent": null
+    "parent": null,
+    "cost": null
   },
   {
     "id": 1,
@@ -59,7 +60,8 @@
     "confidence": null,
     "stable_key": "rid:title_url_bar",
     "window": "app",
-    "parent": null
+    "parent": null,
+    "cost": null
   },
   {
     "id": 2,
@@ -90,7 +92,8 @@
     "confidence": null,
     "stable_key": "geo:WebView:q52:1a72b22ddd",
     "window": "app",
-    "parent": null
+    "parent": null,
+    "cost": null
   },
   {
     "id": 3,
@@ -121,7 +124,8 @@
     "confidence": null,
     "stable_key": "tx:b8ba0321e7",
     "window": "app",
-    "parent": 2
+    "parent": 2,
+    "cost": null
   },
   {
     "id": 4,
@@ -152,7 +156,8 @@
     "confidence": null,
     "stable_key": "tx:3e5969cf9b",
     "window": "app",
-    "parent": 2
+    "parent": 2,
+    "cost": null
   },
   {
     "id": 5,
@@ -183,7 +188,8 @@
     "confidence": null,
     "stable_key": "tx:113935f739",
     "window": "app",
-    "parent": 2
+    "parent": 2,
+    "cost": null
   },
   {
     "id": 6,
@@ -214,7 +220,8 @@
     "confidence": null,
     "stable_key": "tx:69e73a7f5d",
     "window": "app",
-    "parent": 2
+    "parent": 2,
+    "cost": null
   },
   {
     "id": 7,
@@ -245,7 +252,8 @@
     "confidence": null,
     "stable_key": "tx:ecbeec6fce",
     "window": "app",
-    "parent": 2
+    "parent": 2,
+    "cost": null
   },
   {
     "id": 8,
@@ -276,7 +284,8 @@
     "confidence": null,
     "stable_key": "tx:93195e282b",
     "window": "app",
-    "parent": 2
+    "parent": 2,
+    "cost": null
   },
   {
     "id": 9,
@@ -307,7 +316,8 @@
     "confidence": null,
     "stable_key": "tx:f038596d25",
     "window": "app",
-    "parent": 2
+    "parent": 2,
+    "cost": null
   },
   {
     "id": 10,
@@ -338,7 +348,8 @@
     "confidence": null,
     "stable_key": "tx:fb26cca437",
     "window": "app",
-    "parent": 2
+    "parent": 2,
+    "cost": null
   },
   {
     "id": 11,
@@ -369,6 +380,7 @@
     "confidence": null,
     "stable_key": "tx:78a83d1337",
     "window": "app",
-    "parent": 2
+    "parent": 2,
+    "cost": null
   }
 ]

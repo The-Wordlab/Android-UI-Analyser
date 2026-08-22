@@ -313,7 +313,11 @@ class OutputCfg(BaseModel):
     # only by the uniqueness ordinal on the rest. It remains a first-class *selector* —
     # `--rid`/`--where-rid` name a class of row without analyzing first — which is a different
     # job from addressing one element, and the flags keep doing it.
-    observation_fields: str = "id,text,desc,clickable,enabled,checked,selected"
+    # `cost` is here rather than in `meta`: it is what this control cost last time it was
+    # acted on, it is absent unless that control has history, and the `changed` meta preset
+    # below deliberately drops `slow_controls`. Without the column a learned cost cannot
+    # reach an acting caller at all.
+    observation_fields: str = "id,text,desc,clickable,enabled,checked,selected,cost"
     # `meta` keys kept in that observation: a preset name from
     # `projection.OBSERVATION_META_PRESETS`, `"all"`, or an explicit comma-separated list.
     #
@@ -325,6 +329,15 @@ class OutputCfg(BaseModel):
     # Deliberately a separate dial from `observation_fields`, because wanting every column is
     # not the same as wanting every hint, and one knob could not express that.
     observation_meta: str = "changed"
+    # Emit the derived `next_actions` list on every action response. Off, and the default is
+    # measured: on one real journalled response the list was 1384 bytes / 346 tokens — 25% of
+    # the whole response, and more than the entire 1301-byte `elements` list it was a filtered
+    # subset of. It existed to save an agent from scanning ~50 observation nodes for the
+    # actionable ones; the observation is now trimmed to ~20 rows with `clickable` on each, so
+    # that scan is a one-line filter over a list the caller already holds. Turn it on if you
+    # want the pre-filtered form; `Element.cost` carries the learned per-control cost either
+    # way, which was the only thing the list said that `elements` could not.
+    next_actions: bool = False
 
 
 class _ChainCfg(BaseModel):
@@ -965,8 +978,9 @@ output:
   annotate: false
   with_image: true        # save the frame each analyze already captured (see meta.raw_image)
   # The post-action `observation` budget — two independent dials, either accepting "all".
-  observation_fields: id,text,desc,rid,clickable,enabled,checked,selected
+  observation_fields: id,text,desc,clickable,enabled,checked,selected,cost
   observation_meta: changed   # changed | all | <comma-separated meta keys>
+  next_actions: false         # also emit the derived pre-filtered actionable list
 
 ocr:
   enabled: true
