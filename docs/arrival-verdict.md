@@ -302,3 +302,80 @@ Classifier and OCR latencies are estimates pending measurement. The claim that u
 frozen old-window trees mid-transition is inferred from one record plus code comments, not
 re-measured. Compose spinner accessibility exposure varies, which is exactly why no single
 detector is load-bearing. The 1200ms extension default is a judgement call, built to be swept.
+
+---
+
+# Sibling problem: the world moving on its own
+
+Everything above answers *"did **my** action arrive?"*. A separate class of failure answers
+*"did something arrive that I did not ask for?"* — and settle logic cannot see it, because
+nothing the caller did caused it.
+
+Recorded case: a tap landed on a tab, and then a **promotional/onboarding interstitial appeared
+by itself**, covering the bottom bar. The caller's next tap named a control the interstitial had
+covered. It read like a stale-id mistake and was not: the screen moved between two calls.
+
+The same shape covers push notifications, permission dialogs, session-expiry sheets, and
+rate-limit interstitials — none of them caused by the caller, all of them invalidating the
+observation the caller is holding.
+
+## 1. The warning already exists and is not delivered
+
+`caller.previous_screen_gone` (+ `previous_screen_age_ms`) is computed from the fingerprint the
+adapter stamps at the end of each turn (`Engine.close_caller_turn`, `_previous_screen_gone`), and
+`guide.py` already instructs agents to read it. But `caller` is **not** in the `changed`
+observation-meta preset, so a folded observation never carries it.
+
+Both fields are `None`-stripped, so restoring them costs **zero bytes when nothing moved** and
+appears only when something did. Put `caller` — or at minimum those two keys — back in the
+preset, and when `previous_screen_gone` is true say so in the `note` as well: a field a caller
+must remember to read is weaker than a sentence in the place it is already reading.
+
+## 2. An error should carry the observation it already took
+
+The stable-key miss reads:
+
+```
+{"ok": false, "error": {"code": "element_not_found",
+  "hint": "No action was sent. … re-analyze and use an id from that fresh observation …"}}
+```
+
+`_resolve_action_key` **already analyzed the current screen** to discover the key was absent, then
+discards that observation and tells the caller to go and fetch it. That is one guaranteed wasted
+round trip per miss, on the exact path where the caller is already confused.
+
+The mechanism exists: `SelectorNotFoundError` takes an `observation` and attaches it.
+`ElementNotFoundError` does not. Give it the same treatment — the resolution read is already
+paid for. Same for the stale-id path, which also re-reads before raising.
+
+While there: the hint should say *what the screen is now*, not just "re-analyze". A miss plus a
+fresh observation plus "the screen changed under you" is a recoverable answer; a miss plus an
+instruction is a round trip.
+
+## 3. Point at the frame history
+
+The rolling capture buffer already keeps deduped frames with diff summaries
+(`capture_sidecar.py`, `aua capture last --since last-action`), and `meta.capture_hint` already
+names the exact command. `capture_hint` is also **not** in the `changed` preset.
+
+On an error, or on any non-settled arrival verdict, the frame history is the one artefact that
+shows *what happened in between* — an interstitial sliding in, a dialog appearing, a screen
+replaced twice. Surface `capture_hint` on those responses specifically, rather than on every
+successful action where it was pure cost.
+
+## Why these three belong together
+
+They are one story: **the caller's picture of the screen can be wrong for reasons that are not
+its fault, and AUA usually already knows.** Each fix delivers information the tool has already
+computed, so all three are close to free:
+
+| | already computed | delivered today |
+|---|---|---|
+| `previous_screen_gone` | yes, per turn | no — trimmed out of the observation |
+| observation on a key miss | yes, to detect the miss | no — discarded |
+| `capture_hint` / frame history | yes, always running | no — trimmed out of the observation |
+
+Two of the three were removed by the payload-trimming work in this same series, which is the
+lesson worth keeping: **trimming by "is this usually empty" removed fields whose whole value is
+that they are usually empty.** A key that appears only when something went wrong is the cheapest
+possible warning, and the easiest to mistake for noise.
