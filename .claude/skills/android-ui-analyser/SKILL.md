@@ -25,10 +25,9 @@ Use `aua` for Android UI: act on returned IDs or stable selectors, never pixels,
 2. Prefer navigation in this order: verified `goto`, matching saved `flow`, proven deeplink,
    then a manual analyzed action. Preview risky routes; goal text never authorizes destructive,
    external, settings, data, payment, send, or sign-out effects.
-3. Use analyzed actions and consume their returned `observation`; its integer ids belong to
-   that frame only, so on dynamic screens prefer `--rid` or `stable_key` and resolve it again
-   after a transition. An absent key was at its **default, not unknown**; widen with
-   `--observe-fields all`/`--observe-meta all`.
+3. Use analyzed actions and consume their returned `observation`. Each `id` is a stable
+   identity (`rid:continue_btn`), so send it straight back on the next call. An absent key
+   was at its **default, not unknown**; widen with `--observe-fields all`/`--observe-meta all`.
 4. Fold arrival into the action with a positive predicate such as
    `--until 'rid:resultCard,!text:Loading'`. On `settled-unmet`, use its fresh destination and
    corrected predicate; never repeat the action. Use `await-and-analyze` for absence-only checks
