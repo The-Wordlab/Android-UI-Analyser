@@ -785,6 +785,36 @@ def _require_target(verb: str, ident: str | None, selector: dict[str, Any] | Non
     return element_id
 
 
+def _input_text_argument(
+    first_arg: str | None,
+    second_arg: str | None,
+    *,
+    selector: dict[str, Any] | None,
+    from_flag: bool,
+) -> str | None:
+    """Which positional `input-and-analyze` should type.
+
+    `input` is the only action with two positionals — the field and the text — and it used to
+    decide by asking "was a selector built?". That was equivalent to "was a `--rid`/`--desc`
+    flag passed", because a bare positional could only be an integer id.
+
+    Publishing stable ids broke the equivalence: a bare non-numeric positional now builds a key
+    selector, so `input-and-analyze rid:searchField "Brazil"` took the *id* as the text and then
+    refused `"Brazil"` as an unexpected extra argument. The command's own docstring promises the
+    opposite, and the failing shape is the one every payload now hands the caller.
+
+    So the question is not whether a selector exists but **where it came from**: a flag leaves
+    one positional, which is the text; a bare positional consumes the first, so the text is the
+    second.
+    """
+    if selector is None or not from_flag:
+        # No selector, or one built from the bare positional: the first argument addressed the
+        # field, so the text is the second. `_is_stable_id(first_arg)` cannot stand in for this
+        # — with `--rid` the first positional is the text, and text is non-numeric too.
+        return second_arg
+    return first_arg
+
+
 def _rehydrate(data: dict[str, Any]) -> Any:
     """Restore the result model behind a daemon response, keyed on the payload's shape.
 
@@ -3121,10 +3151,15 @@ def input_cmd(
         selector = _selector(
             ident=first_arg, by=by, rid=rid, desc=desc, key=key, index=index, first=first
         )
-        # --rid/--desc address the field, so the lone positional is the text to type;
-        # --by consumes the first positional as the selector value.
-        typed = first_arg if (selector is not None and by is None) else second_arg
-        if selector is not None and by is None and second_arg is not None:
+        # --rid/--desc address the field, so the lone positional is the text to type; --by and
+        # a bare published id consume the first positional as the selector value.
+        # `--by` consumes the first positional as the selector *value*, so it groups with a
+        # bare positional, not with the flags that leave the positional as the text.
+        selector_from_flag = any(v is not None for v in (rid, desc, key))
+        typed = _input_text_argument(
+            first_arg, second_arg, selector=selector, from_flag=selector_from_flag
+        )
+        if selector is not None and selector_from_flag and by is None and second_arg is not None:
             raise UsageError(
                 "with --rid/--desc, pass only the text to type",
                 hint='e.g. `aua input-and-analyze --rid promptField "hello"`',
