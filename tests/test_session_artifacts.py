@@ -75,6 +75,7 @@ def test_session_bundle_deduplicates_invocations_and_links_evidence(tmp_path: Pa
     assert len(manifest["entries"]) == 1
     assert len((store.root / "calls.jsonl").read_text().splitlines()) == 1
     assert list((store.root / "evidence").glob("*-observation.json"))
+    assert store.observation_for_evidence(contract["evidence_id"]) == _observation()
 
 
 def test_session_bundle_finalizes_checkpoint_junit_and_redacts_inputs(tmp_path: Path) -> None:

@@ -9090,15 +9090,63 @@ class Engine:
         session_id: str | None = None,
     ) -> dict[str, Any]:
         """Acknowledge current-phase evidence without adding a dedicated device read."""
-        from .session import mark_phase_complete, phase_progress
+        from .session import (
+            complete_current_ui_phase_from_observation,
+            mark_phase_complete,
+            phase_progress,
+        )
+        from .session_artifacts import SessionArtifactStore, observation_evidence_id
 
         state = self._session_state(session_id)
+        evidence_value = " ".join(evidence.strip().split())
+        evidence_prefix = f"session-{state.session_id}:observation:"
+        if evidence_value.startswith(evidence_prefix):
+            observation: AnalyzeResult | None = None
+            cached = self._read_cache()
+            if cached is not None:
+                cached_id = observation_evidence_id(
+                    state.session_id,
+                    cached.model_dump(mode="json"),
+                )
+                if cached_id == evidence_value and cached.meta.stale_risk is None:
+                    observation = cached
+            if observation is None and state.artifact_dir:
+                raw = SessionArtifactStore(state.artifact_dir).observation_for_evidence(
+                    evidence_value
+                )
+                if raw is not None:
+                    try:
+                        observation = AnalyzeResult.model_validate(raw)
+                    except (TypeError, ValueError):
+                        observation = None
+            if observation is None:
+                raise UsageError(
+                    "the observation evidence_id is not a reusable frame from this session",
+                    hint=(
+                        "Use observation_contract.evidence_id from a fresh result in this "
+                        "session, or provide phase-specific observable facts instead."
+                    ),
+                )
+            updated = complete_current_ui_phase_from_observation(
+                self.config.cache.dir,
+                state,
+                observation=observation,
+            )
+            if updated == state:
+                raise UsageError(
+                    "the observation evidence_id does not satisfy the current goal phase",
+                    hint=(
+                        "Use the checkpoint's exact visible/absent state, or provide at least "
+                        "two phase-specific observable facts from that result."
+                    ),
+                )
+            return {"ok": True, "goal_progress": phase_progress(updated)}
         try:
             state = mark_phase_complete(
                 self.config.cache.dir,
                 state,
                 phase_id=phase_id,
-                evidence=evidence,
+                evidence=evidence_value,
             )
         except ValueError as exc:
             raise UsageError(str(exc)) from exc
@@ -9982,17 +10030,36 @@ class Engine:
         allow_incomplete: bool = False,
     ) -> dict[str, Any]:
         """Restore only reversible state created after this session started, then review it."""
-        from .session import finish_session_state, phase_progress
+        from .session import (
+            complete_current_ui_phase_from_observation,
+            finish_session_state,
+            phase_progress,
+        )
 
         state = self._session_state(session_id)
         contract_verdict: dict[str, Any] | None = None
         contract_observation: AnalyzeResult | None = None
-        if state.contract is not None and any(
-            phase.status != "completed" for phase in state.phases
-        ):
+        blocking_phases = [
+            phase
+            for phase in state.phases
+            if phase.status != "completed"
+            and not (
+                phase.kind == "cleanup" and phase.satisfaction == "session_cleanup"
+            )
+        ]
+        if blocking_phases:
             fresh = self.analyze(source="hierarchy", with_ocr=False, no_cache=True)
             contract_observation = fresh
-            state, contract_verdict = self._complete_contract_phase_from_observation(state, fresh)
+            if state.contract is not None:
+                state, contract_verdict = self._complete_contract_phase_from_observation(
+                    state, fresh
+                )
+            else:
+                state = complete_current_ui_phase_from_observation(
+                    self.config.cache.dir,
+                    state,
+                    observation=fresh,
+                )
             incomplete = [
                 {
                     "id": phase.id,
@@ -10001,12 +10068,19 @@ class Engine:
                 }
                 for phase in state.phases
                 if phase.status != "completed"
+                and not (
+                    phase.kind == "cleanup" and phase.satisfaction == "session_cleanup"
+                )
             ]
             if incomplete and not allow_incomplete:
                 progress = phase_progress(state)
                 return {
                     "ok": False,
-                    "code": "contract_incomplete",
+                    "code": (
+                        "contract_incomplete"
+                        if state.contract is not None
+                        else "session_incomplete"
+                    ),
                     "session_id": state.session_id,
                     "finished": False,
                     "terminated": False,
@@ -10019,8 +10093,9 @@ class Engine:
                     "cleanup": [],
                     "errors": [],
                     "hint": (
-                        "The authored contract is still active. Satisfy the current checkpoint "
-                        "and retry session finish, or explicitly pass --allow-incomplete."
+                        "The session is still active. Follow goal_progress.next_call, then carry "
+                        "goal_progress.checkpoint on the next AUA call and retry session finish. "
+                        "Use --allow-incomplete only to abandon the unfinished goal explicitly."
                     ),
                 }
         candidate_payload: dict[str, Any] | None = None
@@ -10146,6 +10221,13 @@ class Engine:
             # closed session with incomplete phases from claiming both finished=true and done=false.
             "finished": not errors and bool(progress["done"]),
             "terminated": not errors,
+            "verdict": (
+                "passed"
+                if not errors and bool(progress["done"])
+                else "incomplete"
+                if not errors
+                else "cleanup_failed"
+            ),
             "goal_progress": progress,
             "cleanup": cleanup,
             "errors": errors,

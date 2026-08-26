@@ -1009,13 +1009,22 @@ def phase_progress(state: SessionState, *, compact: bool = False) -> dict[str, A
             None
             if not manual_checkpoint or current is None
             else {
-                "cli": f'--phase-done {current.id}="<evidence from the current result>"',
-                "mcp": {"phase_done": {"id": current.id, "evidence": "<evidence>"}},
+                "cli": (
+                    f'--phase-done {current.id}="<observable facts or '
+                    'observation_contract.evidence_id>"'
+                ),
+                "mcp": {
+                    "phase_done": {
+                        "id": current.id,
+                        "evidence": "<observable facts or observation evidence_id>",
+                    }
+                },
                 "proof_required": True,
                 "minimum_relevant_terms": _required_proof_matches(current),
                 "note": (
-                    "Acknowledge this phase on the next AUA call only with phase-specific "
-                    "observable facts from the current result; unrelated evidence is rejected."
+                    "Acknowledge this phase on the next AUA call with phase-specific observable "
+                    "facts, or reuse the current result's observation_contract.evidence_id when "
+                    "that exact frame satisfies the checkpoint. Unrelated evidence is rejected."
                 ),
             }
         ),
@@ -1041,6 +1050,7 @@ _PROOF_STOP_WORDS = frozenset(
         "after",
         "an",
         "and",
+        "android",
         "app",
         "as",
         "at",
@@ -1048,12 +1058,23 @@ _PROOF_STOP_WORDS = frozenset(
         "by",
         "check",
         "checked",
+        "complete",
+        "completed",
+        "completes",
+        "completing",
         "confirm",
         "confirmed",
+        "destructive",
         "displayed",
         "done",
+        "end",
+        "ending",
         "ensure",
+        "explore",
+        "explored",
+        "exploring",
         "finally",
+        "flow",
         "for",
         "from",
         "if",
@@ -1061,9 +1082,12 @@ _PROOF_STOP_WORDS = frozenset(
         "inspect",
         "into",
         "item",
+        "meaningful",
         "next",
+        "non",
         "of",
         "on",
+        "one",
         "only",
         "open",
         "opened",
@@ -1076,6 +1100,9 @@ _PROOF_STOP_WORDS = frozenset(
         "success",
         "successful",
         "successfully",
+        "test",
+        "tested",
+        "testing",
         "the",
         "then",
         "through",
@@ -1335,6 +1362,16 @@ def _manual_phase_proof(phase: GoalPhase, evidence: str) -> PhaseProof:
     objective_terms = _proof_terms(phase.objective)
     evidence_terms = _proof_terms(evidence)
     matched = sorted(objective_terms & evidence_terms)
+    if not objective_terms and not phase.requirements:
+        if len(evidence_terms) < 2:
+            raise ValueError(
+                f"evidence does not substantiate {phase.id!r}; include at least 2 distinct "
+                "observable facts from the completed flow"
+            )
+        return PhaseProof(
+            source="manual_evidence",
+            matched_terms=sorted(evidence_terms)[:12],
+        )
     required = _required_proof_matches(phase)
     if len(matched) < required:
         examples = ", ".join(sorted(objective_terms)[:5]) or "the observable checkpoint"

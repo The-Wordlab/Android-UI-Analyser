@@ -322,6 +322,75 @@ def test_bad_inline_phase_annotation_warns_but_does_not_cancel_the_action(
     assert payload["annotation_warnings"][0]["annotation"] == "phase_done"
 
 
+def test_cli_finish_exits_nonzero_for_an_incomplete_session(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    from android_ui_analyser import cli
+
+    engine = _engine(tmp_path, "incomplete-finish-cli")
+    monkeypatch.setattr(cli.GlobalOpts, "engine", lambda _self: engine)
+    monkeypatch.setattr(
+        cli,
+        "_route",
+        lambda *_args, **_kwargs: {
+            "ok": False,
+            "code": "session_incomplete",
+            "finished": False,
+            "terminated": False,
+            "verdict": "incomplete",
+        },
+    )
+
+    result = runner.invoke(app, ["session", "finish"])
+
+    assert result.exit_code == 1
+    assert __import__("json").loads(result.stdout)["verdict"] == "incomplete"
+
+
+def test_generic_end_to_end_goal_accepts_two_concrete_observable_facts(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path, "generic-flow-proof")
+    started = engine.session_start(
+        "Explore the Android app and complete one meaningful non-destructive end-to-end flow",
+        observation=_observation(engine.device.serial),
+    )
+
+    completed = engine.session_mark_phase(
+        "phase_1",
+        "Conversation opened; assistant reply appeared; thread persisted after returning",
+        session_id=started["session_id"],
+    )
+
+    assert completed["goal_progress"]["done"] is True
+
+
+def test_phase_annotation_accepts_the_exact_reusable_observation_evidence_id(
+    tmp_path: Path,
+) -> None:
+    from android_ui_analyser.session_artifacts import observation_evidence_id
+
+    engine = _engine(tmp_path, "evidence-frame-proof")
+    started = engine.session_start(
+        "Verify Grammar Mathematics visible",
+        observation=_observation(engine.device.serial),
+    )
+    proof = _control_observation(engine.device.serial, "Grammar Mathematics")
+    proof.meta.fingerprint = "grammar-mathematics-proof"
+    engine._write_cache(proof)
+    evidence_id = observation_evidence_id(
+        started["session_id"], proof.model_dump(mode="json")
+    )
+
+    completed = engine.session_mark_phase(
+        "phase_1",
+        evidence_id,
+        session_id=started["session_id"],
+    )
+
+    assert completed["goal_progress"]["done"] is True
+
+
 def test_stale_deeplink_is_not_recommended_again_for_active_phase(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
@@ -1079,7 +1148,7 @@ def test_finish_restores_network_state_created_by_session(tmp_path: Path, monkey
         lambda: restored.append("profile") or {"ok": True, "action": "network-profile-restore"},
     )
 
-    finished = engine.session_finish(started["session_id"])
+    finished = engine.session_finish(started["session_id"], allow_incomplete=True)
 
     assert finished["ok"] is True
     assert restored == ["profile", "offline"]
@@ -1108,7 +1177,7 @@ def test_finish_preserves_restore_points_that_predated_session(
         lambda: (_ for _ in ()).throw(AssertionError("must preserve prior state")),
     )
 
-    finished = engine.session_finish(started["session_id"])
+    finished = engine.session_finish(started["session_id"], allow_incomplete=True)
 
     assert finished["ok"] is True
     assert finished["cleanup"] == []
@@ -1189,7 +1258,7 @@ def test_explicit_session_emulator_start_is_handed_to_the_warm_pool(
         audio=True,
         avd="Small_Phone",
     )
-    finished = engine.session_finish(started["session_id"])
+    finished = engine.session_finish(started["session_id"], allow_incomplete=True)
 
     assert started["emulator_started"] is True
     assert starts[0]["headless"] is False
@@ -1255,7 +1324,7 @@ def test_restore_error_keeps_owned_emulator_cached_and_leased_for_retry(
     closed: list[str] = []
     monkeypatch.setattr(engine, "close", lambda: closed.append("emulator-5592"))
 
-    finished = engine.session_finish(started["session_id"])
+    finished = engine.session_finish(started["session_id"], allow_incomplete=True)
 
     assert finished["ok"] is False
     assert closed == []

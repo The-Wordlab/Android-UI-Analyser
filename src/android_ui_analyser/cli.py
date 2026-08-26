@@ -4286,7 +4286,7 @@ def session_finish_cmd(
     allow_incomplete: bool = typer.Option(
         False,
         "--allow-incomplete",
-        help="Explicitly terminate even though authored checkpoints are incomplete.",
+        help="Explicitly terminate even though goal checkpoints are incomplete.",
     ),
 ) -> None:
     """Restore only session-owned reversible state and return the final review."""

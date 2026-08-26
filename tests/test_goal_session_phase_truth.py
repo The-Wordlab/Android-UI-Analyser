@@ -75,7 +75,7 @@ def test_if_otherwise_is_one_alternative_checkpoint() -> None:
     assert sum("otherwise" in phase.objective for phase in phases) == 1
 
 
-def test_terminated_session_keeps_unfinished_phases_without_an_active_next_call(
+def test_incomplete_session_refuses_to_terminate_and_keeps_an_active_next_call(
     tmp_path: Path,
 ) -> None:
     engine = _engine(tmp_path, "phase-terminated")
@@ -92,15 +92,39 @@ def test_terminated_session_keeps_unfinished_phases_without_an_active_next_call(
 
     finished = engine.session_finish(started["session_id"])
 
+    assert finished["ok"] is False
+    assert finished["code"] == "session_incomplete"
+    assert finished["verdict"] == "incomplete"
+    assert finished["terminated"] is False
+    assert finished["finished"] is False
+    assert finished["goal_progress"]["done"] is False
+    assert finished["goal_progress"]["terminated"] is False
+    assert finished["goal_progress"]["status"] == "active"
+    assert finished["goal_progress"]["current"]["status"] == "active"
+    assert finished["goal_progress"]["next_call"] is not None
+    assert finished["goal_progress"]["checkpoint"] is not None
+    assert finished["cleanup"] == []
+
+
+def test_allow_incomplete_terminates_with_an_explicit_incomplete_verdict(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path, "phase-abandoned")
+    observed = _observation(
+        engine.device.serial,
+        screen="catalog",
+        title="Catalog",
+        controls=[],
+    )
+    started = engine.session_start("Inspect catalog. Then verify details", observation=observed)
+
+    finished = engine.session_finish(started["session_id"], allow_incomplete=True)
+
     assert finished["ok"] is True
     assert finished["terminated"] is True
     assert finished["finished"] is False
-    assert finished["goal_progress"]["done"] is False
-    assert finished["goal_progress"]["terminated"] is True
+    assert finished["verdict"] == "incomplete"
     assert finished["goal_progress"]["status"] == "terminated_incomplete"
-    assert finished["goal_progress"]["current"]["status"] == "active"
-    assert finished["goal_progress"]["next_call"] is None
-    assert finished["goal_progress"]["checkpoint"] is None
 
 
 def test_arrived_title_prefers_requested_flow_preview_over_weak_child_control(

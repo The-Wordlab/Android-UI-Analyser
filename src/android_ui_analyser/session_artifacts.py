@@ -287,6 +287,27 @@ class SessionArtifactStore:
             self._write_json("manifest.json", manifest)
             return contract
 
+    def observation_for_evidence(self, evidence_id: str) -> dict[str, Any] | None:
+        """Return the exact reusable observation named by a prior session result."""
+        try:
+            lines = (self.root / "calls.jsonl").read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return None
+        for line in reversed(lines):
+            try:
+                call = json.loads(line)
+            except (TypeError, ValueError):
+                continue
+            raw_result = call.get("result")
+            result = raw_result if isinstance(raw_result, dict) else {}
+            raw_contract = result.get("observation_contract")
+            contract = raw_contract if isinstance(raw_contract, dict) else {}
+            if contract.get("evidence_id") != evidence_id or contract.get("reusable") is not True:
+                continue
+            observation = _observation(result)
+            return dict(observation) if isinstance(observation, dict) else None
+        return None
+
     def _write_junit(self, result: dict[str, Any], checkpoints: list[dict[str, Any]]) -> str:
         failures = sum(item.get("status") != "completed" for item in checkpoints)
         suite = ET.Element(
