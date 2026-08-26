@@ -1569,13 +1569,17 @@ def test_dashboard_serves_with_no_devices_attached(
         dash.shutdown(info)
 
 
-def test_lan_dashboard_serves_token_entry_then_uses_an_http_only_cookie(tmp_path: Path) -> None:
+def test_lan_dashboard_serves_token_entry_then_uses_an_http_only_cookie(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     from android_ui_analyser import dashboard as dash
 
+    monkeypatch.setattr(dash, "_lan_addresses", lambda: ["192.0.2.10"])
     state = _dashboard_state(tmp_path)
     state.bind_host = "0.0.0.0"
     state.require_auth = True
     state.access_token = "phone-access-token"
+    monkeypatch.setattr(state, "devices_payload", lambda: {"ok": True})
     server = ThreadingHTTPServer(("127.0.0.1", 0), dash._make_handler(state))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
