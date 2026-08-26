@@ -541,6 +541,11 @@ REVIEWED_SOURCE_OVERRIDES = (
     "experiments/functiongemma/train-lora-v10-seed103.yaml",
     "experiments/functiongemma/train-lora-v10-seed103-long.yaml",
     "experiments/functiongemma/validate_dataset.py",
+    "experiments/functiongemma/v11_contract.py",
+    "experiments/functiongemma/v11_learning_material.py",
+    "experiments/functiongemma/v11_curriculum.py",
+    "experiments/functiongemma/v11_shortcut_gate.py",
+    "experiments/functiongemma/train-lora-lfm2.5-350m-v11.yaml",
     "experiments/functiongemma/v8_curriculum.py",
     "experiments/functiongemma/v8_learning_material.py",
     "experiments/functiongemma/v9_curriculum.py",
@@ -1603,7 +1608,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--mode", choices=("smoke", "benchmark", "full"), default="benchmark")
     parser.add_argument(
         "--curriculum-version",
-        choices=("v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10"),
+        choices=("v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11"),
         default="v3",
     )
     parser.add_argument("--config")

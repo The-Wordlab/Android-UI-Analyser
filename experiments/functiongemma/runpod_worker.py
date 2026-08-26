@@ -28,6 +28,9 @@ DEFAULT_MODEL = "mlx-community/functiongemma-270m-it-bf16"
 DEFAULT_MODEL_REVISION = "bb327a9ad61044e1496a2bee2365a6b6a6684c72"
 DEFAULT_MLX_PACKAGE = "mlx[cuda12]==0.32.0"
 MLX_CUDA_GRAPH_CACHE_SIZE = "2048"
+#: cuDNN cannot populate a CUDA graph for LFM2's convolution plans; see
+#: `_configure_mlx_cuda_runtime`. "0" is false for MLX's int-valued env reader.
+MLX_USE_CUDA_GRAPHS = "0"
 DEFAULT_CONFIG = "experiments/functiongemma/train-lora.yaml"
 REQUIREMENTS = REPO_ROOT / "experiments" / "functiongemma" / "requirements.txt"
 
@@ -136,15 +139,39 @@ def _install_dependencies(mlx_package: str) -> None:
 
 
 def _configure_mlx_cuda_runtime() -> dict[str, str]:
-    """Size MLX's CUDA graph cache before any validator/trainer imports.
+    """Size MLX's CUDA graph cache, and disable graph capture for convolutional models.
 
     The variable-length AUA corpus exceeded MLX 0.32's default cache of 400
     shortly after the first full validation pass. Keep the fail-fast thrashing
     check enabled and provide enough cache capacity for the bounded 1,024-token
     training/evaluation workload instead of suppressing that safety signal.
+
+    ``MLX_USE_CUDA_GRAPHS`` is the second half, and it is required for any model with
+    convolution blocks. LFM2/LFM2.5 interleave short-convolution blocks with attention, and on an
+    L40S the first optimizer step dies inside cuDNN's own graph population:
+
+        RuntimeError: graph.encode_graph(encoder, std::move(variant_pack)) failed:
+        detail::populate_cuda_graph(...) failed with message:
+        plan.getEnginePtr()->populate_cuda_graph(vars, cudaGraph),
+        and code: CUDNN_STATUS_INTERNAL_ERROR
+
+    Everything before that step is fine — model load, dataset load, LoRA attach, and the first
+    validation pass all succeed with numbers matching a Metal run — so this is specifically cuDNN
+    refusing to serialise a convolution plan into a CUDA graph, not a model or data problem. MLX's
+    CUDA backend reads ``MLX_USE_CUDA_GRAPHS`` (``mlx/backend/cuda/device.cpp``,
+    ``env::get_var("MLX_USE_CUDA_GRAPHS", true)``); ``env::get_var`` is the int overload declared in
+    ``mlx/utils.h``, so ``0`` is the correct spelling for false. With graphs off, work is launched
+    on the stream instead of captured, which costs throughput and avoids the failing path entirely.
+
+    Left at MLX's default for attention-only models, this variable changes nothing; it only matters
+    once a convolutional architecture is trained here.
     """
     os.environ["MLX_CUDA_GRAPH_CACHE_SIZE"] = MLX_CUDA_GRAPH_CACHE_SIZE
-    return {"graph_cache_size": MLX_CUDA_GRAPH_CACHE_SIZE}
+    os.environ["MLX_USE_CUDA_GRAPHS"] = MLX_USE_CUDA_GRAPHS
+    return {
+        "graph_cache_size": MLX_CUDA_GRAPH_CACHE_SIZE,
+        "use_cuda_graphs": MLX_USE_CUDA_GRAPHS,
+    }
 
 
 def _package_versions() -> dict[str, str]:
@@ -253,7 +280,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--mode", choices=("smoke", "benchmark", "full"), default="benchmark")
     parser.add_argument(
         "--curriculum-version",
-        choices=("v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10"),
+        choices=("v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11"),
         default="v3",
     )
     parser.add_argument("--config", default=DEFAULT_CONFIG)

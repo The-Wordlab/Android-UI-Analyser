@@ -232,7 +232,7 @@ def test_worker_sizes_mlx_cuda_graph_cache_before_training(
 
     configured = runpod_worker._configure_mlx_cuda_runtime()
 
-    assert configured == {"graph_cache_size": "2048"}
+    assert configured == {"graph_cache_size": "2048", "use_cuda_graphs": "0"}
     assert runpod_worker.os.environ["MLX_CUDA_GRAPH_CACHE_SIZE"] == "2048"
 
 
@@ -409,6 +409,11 @@ def test_source_archive_is_git_only_plus_reviewed_functiongemma_overrides(tmp_pa
         "experiments/functiongemma/train-lora-v10-seed103.yaml",
         "experiments/functiongemma/train-lora-v10-seed103-long.yaml",
         "experiments/functiongemma/validate_dataset.py",
+        "experiments/functiongemma/v11_contract.py",
+        "experiments/functiongemma/v11_learning_material.py",
+        "experiments/functiongemma/v11_curriculum.py",
+        "experiments/functiongemma/v11_shortcut_gate.py",
+        "experiments/functiongemma/train-lora-lfm2.5-350m-v11.yaml",
         "experiments/functiongemma/v8_curriculum.py",
         "experiments/functiongemma/v8_learning_material.py",
         "experiments/functiongemma/v9_curriculum.py",
