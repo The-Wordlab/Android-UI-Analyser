@@ -41,7 +41,13 @@ DEVICE_PORT = 8779
 
 # Bump together with InfoFeature.PROTOCOL in the APK. A device carrying an older helper is
 # refused rather than driven through a wire format it does not speak.
-PROTOCOL = 1
+#
+# 2: `drive.run` became reachable from the host, and its per-step reply gained `tried`, `last` and
+#    `outcome`, plus the `needs_host` and `needs_auth` refusal reasons. A protocol-1 helper left on
+#    a device from an older AUA answers `drive.run` without any of that, and a caller reading the
+#    reply cannot tell "this node never stalled" from "this helper does not report stalls" — so it
+#    is refused instead, with a hint pointing at `--reinstall`.
+PROTOCOL = 2
 
 _SECURE_SERVICES = "secure enabled_accessibility_services"
 _SECURE_ENABLED = "secure accessibility_enabled"

@@ -229,6 +229,10 @@ RID_MATCH = 0.5
 #: How many times to scroll one screen before concluding the target is not there.
 MAX_SCROLLS = 3
 
+#: ``last`` values meaning the run is not advancing. Mirrors :data:`v12_progress.STALLED`; spelled
+#: out here rather than imported because this file has to port to Java, where there is no import.
+STALLED = frozenset({"blocked", "unchanged"})
+
 
 def words(value: Any) -> list[str]:
     """Lowercased content words, punctuation stripped. No regex — this has to port to Java."""
@@ -332,6 +336,18 @@ def _node_text(node: Mapping[str, Any]) -> str:
     return " ".join(str(node.get(key) or "") for key in ("text", "desc")).strip()
 
 
+def stalled(node: Mapping[str, Any]) -> bool:
+    """This node was acted on and the screen did not move. The whole of ``no_progress``, per node.
+
+    Reads the two fields :mod:`v12_progress` writes onto a node — ``tried`` and ``last`` — and
+    nothing else. There is deliberately no history list to join against: the joinable version of
+    this was the source of every ground-truth bug in the V12 corpus, and the helper already holds
+    every ``AccessibilityNodeInfo`` it taps, so it can count per node for free.
+    """
+
+    return int(node.get("tried") or 0) > 0 and str(node.get("last") or "") in STALLED
+
+
 def score(goal_terms: Sequence[str], node: Mapping[str, Any]) -> float:
     """How well *node* answers a goal reduced to *goal_terms*.
 
@@ -399,6 +415,27 @@ def decide(
             best_index, best_score = index, value
 
     if best_index >= 0 and best_score >= SCORE_FLOOR:
+        # The goal's own target is the thing that stalled. Tapping it again is the loop this
+        # closes: the screen has already settled, so a second identical tap gets an identical
+        # non-result, and on-device that spent the whole budget re-pressing one row.
+        #
+        # Only the *winner* is consulted, and that is the entire distinction the V12 corpus was
+        # built to teach. A stalled node somewhere on the screen means nothing — those rows answer
+        # `tap` 49.6% of the time, because the node the goal is about has never been touched. So
+        # stalled nodes are scored normally and stay eligible to win; what changes is only what
+        # winning means when the winner is the one that already failed.
+        if stalled(nodes[best_index]):
+            return {
+                "call": "handoff",
+                "reason": "no_progress",
+                "n": nodes[best_index].get("n"),
+                "stable_key": keys[best_index] if best_index < len(keys) else None,
+                "score": round(best_score, 2),
+                "why": (
+                    f"best match was tried {nodes[best_index].get('tried')} time(s) and last "
+                    f"{nodes[best_index].get('last')}"
+                ),
+            }
         return {
             "call": "tap",
             "n": nodes[best_index].get("n"),

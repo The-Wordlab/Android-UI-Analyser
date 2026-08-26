@@ -438,20 +438,26 @@ final class FlowFeature implements Feature {
      * every step reported success while the flow had not navigated at all — 8/8 passed on a
      * run that never left the second page. Correctness first: a step is not done until the
      * screen it acted on has changed, or the budget says it never will.
+     *
+     * @return whether the screen actually moved. {@link FlowFeature} ignores this — a step that
+     *     changed nothing is still a step it was told to run — but {@link DriveFeature} decides
+     *     its next move on it, and it is already computed here. Answering it a second time
+     *     outside would mean a second 400-node walk of the tree for something known in here.
      */
-    void settle(String before, long budgetMs) {
+    boolean settle(String before, long budgetMs) {
         long deadline = System.currentTimeMillis() + budgetMs;
         while (System.currentTimeMillis() < deadline) {
             if (!signature().equals(before)) {
-                return;
+                return true;
             }
             try {
                 Thread.sleep(FIND_INTERVAL_MS);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                return;
+                return !signature().equals(before);
             }
         }
+        return false;
     }
 
     /** Only the global keys map onto accessibility; the rest belong to the host. */

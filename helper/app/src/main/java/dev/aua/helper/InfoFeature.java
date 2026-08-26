@@ -13,8 +13,14 @@ import org.json.JSONObject;
  */
 final class InfoFeature implements Feature {
 
-    /** Bump on any wire-visible change. The host checks it against its own expectation. */
-    static final int PROTOCOL = 1;
+    /**
+     * Bump on any wire-visible change. The host checks it against its own expectation.
+     *
+     * <p>2: {@code drive.run} became reachable from the host, and its per-step reply gained
+     * {@code tried}, {@code last} and {@code outcome}, plus the {@code needs_host} and
+     * {@code needs_auth} refusal reasons.
+     */
+    static final int PROTOCOL = 2;
 
     private final HelperChannel channel;
     private final String versionName;

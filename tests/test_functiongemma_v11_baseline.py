@@ -36,6 +36,7 @@ from experiments.functiongemma.v11_baseline import (  # noqa: E402
     content_words,
     decide,
     score,
+    stalled,
     variants,
     words,
 )
@@ -355,3 +356,78 @@ def test_only_a_consent_control_counts_and_not_every_dismissal() -> None:
         nodes = [{"n": "n1", "text": label, "tap": True}]
         got = decide("open Display", _projection(nodes, more=False))
         assert got["reason"] == "target_absent", label
+
+
+# --------------------------------------------------------------------------- tried, and stalled
+
+
+def test_progress_is_read_off_the_node_and_never_joined() -> None:
+    """Two fields on the node, exactly as `v12_progress` writes them, and nothing else.
+
+    A node with no `tried` has not been touched — the field is omitted at zero rather than sent as
+    zero, because a runtime that omitted it against a corpus that sent it is the train/serve gap
+    that cost V10 its whole run.
+    """
+
+    assert not stalled({"n": "n1", "text": "Wi-Fi"})
+    assert not stalled({"n": "n1", "text": "Wi-Fi", "tried": 0})
+    assert not stalled({"n": "n1", "text": "Wi-Fi", "tried": 2, "last": "changed"})
+    assert stalled({"n": "n1", "text": "Wi-Fi", "tried": 1, "last": "unchanged"})
+    assert stalled({"n": "n1", "text": "Wi-Fi", "tried": 3, "last": "blocked"})
+
+
+def test_the_goals_own_target_stalling_is_a_refusal() -> None:
+    """The repeat-tap loop, closed. The screen has already settled, so a second identical tap gets
+    an identical non-result — on-device that spent the whole budget re-pressing one row."""
+
+    nodes = [{"n": "n1", "text": "Display", "tap": True, "tried": 2, "last": "unchanged"}]
+    got = decide("open Display", _projection(nodes, more=False))
+    assert got["call"] == "handoff"
+    assert got["reason"] == "no_progress"
+    assert got["n"] == "n1"  # says which node stalled, so the host can act on it
+
+
+def test_a_blocked_target_refuses_the_same_way() -> None:
+    nodes = [{"n": "n1", "text": "Display", "tap": True, "tried": 1, "last": "blocked"}]
+    assert decide("open Display", _projection(nodes))["reason"] == "no_progress"
+
+
+def test_a_stalled_node_that_is_not_the_target_changes_nothing() -> None:
+    """The `tap_despite_stalls` distinction, which is the whole reason this reads only the winner.
+
+    2,035 rows of data-v12/test.jsonl have this exact shape — a stalled node elsewhere plus an
+    untried target — and they answer `tap`. Refusing because "something on this screen stalled"
+    would lose all of them, and is how a rule learns to give up on a screen it never tried.
+    """
+
+    nodes = [
+        {"n": "n1", "text": "Sound", "tap": True, "tried": 3, "last": "unchanged"},
+        {"n": "n2", "text": "Display", "tap": True},
+    ]
+    got = decide("open Display", _projection(nodes))
+    assert got["call"] == "tap"
+    assert got["n"] == "n2"
+
+
+def test_a_stalled_node_still_competes_and_is_not_scored_down() -> None:
+    """Stalled nodes are scored normally and stay eligible to win. Zeroing them out instead would
+    scroll away from the right answer and then report the wrong reason for giving up."""
+
+    nodes = [{"n": "n1", "text": "Display", "tap": True, "tried": 1, "last": "unchanged"}]
+    assert score(content_words("open Display"), nodes[0]) == 1.5
+    # It wins, and because it wins the refusal can name it. With its score suppressed this would
+    # have been an unexplained `target_absent`.
+    got = decide("open Display", _projection(nodes, more=True))
+    assert got["reason"] == "no_progress"
+
+
+def test_an_untried_target_is_reached_even_after_a_stall_elsewhere_and_scrolls_spent() -> None:
+    """Progress must not become a second, quieter way of exhausting the budget."""
+
+    nodes = [
+        {"n": "n1", "text": "Sound", "tap": True, "tried": 4, "last": "blocked"},
+        {"n": "n2", "text": "Storage 84 GB used", "tap": True},
+    ]
+    got = decide("open Storage", _projection(nodes, more=True), scrolls_used=MAX_SCROLLS)
+    assert got["call"] == "tap"
+    assert got["n"] == "n2"

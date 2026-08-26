@@ -9135,6 +9135,29 @@ def helper_remove_cmd(ctx: typer.Context) -> None:
     _run(ctx, go)
 
 
+@helper_app.command("drive")
+def helper_drive_cmd(
+    ctx: typer.Context,
+    goal: str = typer.Argument(..., help="What to reach, in plain words."),
+    budget: int = typer.Option(8, "--budget", help="Most steps the device may take."),
+) -> None:
+    """Hand a goal to the device and let it decide each step itself — no host round trips.
+
+    Every other command here drives the device one step per round trip. This hands over the goal
+    and reads back what the device chose to do, which is the only way the on-device scoring rule
+    is reachable at all.
+
+    Unlike the automatic flow offload this has no step floor and no silent fallback: there is no
+    host implementation of the rule to fall back *to*, so a handover that cannot happen is an
+    error with the reason attached, not a quiet no-op.
+    """
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.drive_on_device(goal, budget=budget), fmt)
+
+    _run(ctx, go)
+
+
 @helper_app.command("tree")
 def helper_tree_cmd(
     ctx: typer.Context,

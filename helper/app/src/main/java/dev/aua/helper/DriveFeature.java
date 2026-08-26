@@ -8,8 +8,10 @@ import org.json.JSONObject;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Locale;
 import java.util.Set;
 
@@ -46,6 +48,14 @@ import java.util.Set;
  *       fi]}, so a goal saying {@code wifi} scored zero against both. {@link #variants} reads the
  *       joint in each direction. Capitalisation and punctuation, not meaning.
  * </ul>
+ *
+ * <p><b>And a third, which was a defect rather than a gap.</b> After a tap that did not navigate,
+ * this re-scored the settled screen, picked the same row, and pressed it again until the budget ran
+ * out — in a log that reads as a hung helper, not as a rule with nothing left to try. The run now
+ * counts attempts per node ({@code tried}) and what came of each ({@code last}), the field shape
+ * {@code experiments/functiongemma/v12_progress.py} defines, and refuses {@code no_progress} when
+ * the node the goal names is the one that stalled. A stalled node <em>elsewhere</em> still means
+ * nothing: those screens are tapped, not refused.
  *
  * <p>What remains is a true synonym — "make the text bigger" for "Display" — which is derivable
  * from neither string. There is nowhere on the device to keep one: this class's word tables are
@@ -117,6 +127,18 @@ final class DriveFeature implements Feature {
     private static final Set<String> DECLINE_LABELS = new HashSet<>(Arrays.asList(
             "deny", "don't allow", "dont allow"));
 
+    /**
+     * {@code last} values meaning the run is not advancing. Mirrors {@code v12_progress.STALLED}.
+     */
+    private static final Set<String> STALLED = new HashSet<>(Arrays.asList("blocked", "unchanged"));
+
+    /** An action landed and the screen became a different screen. */
+    private static final String CHANGED = "changed";
+    /** An action landed and nothing happened. The evidence for {@code no_progress}. */
+    private static final String UNCHANGED = "unchanged";
+    /** The node refused the click outright. Also evidence. */
+    private static final String BLOCKED = "blocked";
+
     private static final double SCORE_FLOOR = 1.0;
     private static final double FIRST_TOKEN_BONUS = 1.5;
     private static final double WORD_MATCH = 1.0;
@@ -151,6 +173,12 @@ final class DriveFeature implements Feature {
         JSONArray steps = new JSONArray();
         int scrolls = 0;
         String stop = "budget_exhausted";
+
+        // Per run, not per instance: this Feature is registered once and serves every goal, so a
+        // field here would carry one goal's attempts into the next. Keyed by rid + label rather
+        // than by "n3", because the ordinal is positional and every re-projection renumbers.
+        Map<String, Integer> tried = new HashMap<>();
+        Map<String, String> last = new HashMap<>();
 
         // Before the screen is even read, not after. A host goal is unreachable on every screen, so
         // looking first only decides how much budget gets spent proving it.
@@ -193,12 +221,42 @@ final class DriveFeature implements Feature {
             record.put("more", view.more);
 
             if (best != null && bestScore >= SCORE_FLOOR) {
-                record.put("decision", "tap");
+                String key = progressKey(best);
+                int already = tried.containsKey(key) ? tried.get(key) : 0;
                 record.put("n", "n" + best.index);
                 record.put("label", best.label());
                 record.put("score", round(bestScore));
-                boolean ok = tap(best.node);
+                if (already > 0) {
+                    record.put("tried", already);
+                    record.put("last", last.get(key));
+                }
+
+                // The goal's own target is the thing that stalled, so pressing it again is the
+                // loop this closes. The screen has already settled by the time we get here, so a
+                // second identical tap gets an identical non-result — and before this, that spent
+                // the entire budget re-pressing one row, which read in a log as a helper that had
+                // hung rather than a rule with nothing left to try.
+                //
+                // Only the *winner* is consulted, which is the distinction the corpus exists to
+                // teach: a stalled node elsewhere on the screen means nothing, because the node
+                // the goal is about has never been touched. Stalled nodes are therefore scored
+                // normally and stay eligible to win; what changes is only what winning means when
+                // the winner is the one that already failed.
+                if (already > 0 && STALLED.contains(last.get(key))) {
+                    record.put("decision", "handoff");
+                    record.put("reason", "no_progress");
+                    steps.put(record);
+                    stop = "handoff";
+                    break;
+                }
+
+                record.put("decision", "tap");
+                String outcome = tap(best.node);
+                boolean ok = !BLOCKED.equals(outcome);
                 record.put("ok", ok);
+                record.put("outcome", outcome);
+                tried.put(key, already + 1);
+                last.put(key, outcome);
                 steps.put(record);
                 if (!ok) {
                     stop = "tap_failed";
@@ -438,18 +496,37 @@ final class DriveFeature implements Feature {
      *
      * <p>{@link FlowFeature} already had this wait, correct, for every step it executes; reusing it
      * rather than writing a second one is the whole reason its helpers were made package-private.
+     *
+     * @return {@code changed}, {@code unchanged}, or {@code blocked} — the {@code last} value the
+     *     next pass reads back. {@code unchanged} is the one that matters: it is a tap that landed
+     *     and did nothing, and it is the only evidence {@code no_progress} ever gets.
      */
-    private boolean tap(AccessibilityNodeInfo node) {
+    private String tap(AccessibilityNodeInfo node) {
         AccessibilityNodeInfo target = FlowFeature.clickable(node);
         if (target == null) {
-            return false;
+            return BLOCKED;
         }
         String before = flow.signature();
         if (!target.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-            return false;
+            return BLOCKED;
         }
-        flow.settle(before, FlowFeature.SETTLE_BUDGET_MS);
-        return true;
+        // `settle` already knows the answer — it is waiting on exactly this comparison — so it
+        // reports it rather than being asked again from out here, which would mean a second
+        // 400-node walk of the tree for something it has just computed.
+        return flow.settle(before, FlowFeature.SETTLE_BUDGET_MS) ? CHANGED : UNCHANGED;
+    }
+
+    /**
+     * What identifies a node across re-projections, for counting attempts against it.
+     *
+     * <p>Not the ordinal: {@code n3} is positional and every re-read of the tree renumbers, so
+     * counting against it would credit one row's stall to whatever landed in its slot next. The
+     * resource id plus the label is what stays put while the screen does, and the projection has
+     * already collapsed duplicate labels onto their actionable twin, so a collision costs two rows
+     * a shared counter and nothing worse.
+     */
+    private static String progressKey(Projection.Item item) {
+        return item.rid + "\u0000" + item.label();
     }
 
     /** Delegated so movement detection and settle behaviour have exactly one implementation. */

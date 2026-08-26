@@ -746,6 +746,51 @@ class DeviceStoodDownError(DeviceError):
     """
 
 
+class _DeviceLoan(NamedTuple):
+    """An open helper channel plus what the caller needs to report about the handover."""
+
+    channel: Any
+    serial: str
+    purpose: str
+    u2_was_connected: bool
+
+
+#: What to do about each way the handover can be refused. Keyed by the reason
+#: :meth:`Engine._device_agent_borrowed` journalled, so the advice and the diagnostic agree.
+_HANDOVER_HINTS = {
+    "platform_has_no_helper": "The on-device helper is Android-only today.",
+    "no_target_serial": "Connect a device or pass --serial.",
+    "auto_setup_disabled": "Set helper.auto_setup, or run `aua helper enable` yourself.",
+    "known_unavailable": "This target already refused `adb root` once this session.",
+    "not_rootable": "The helper needs `adb root`; use a debuggable emulator image.",
+    "setup_failed": "Try `aua helper install --reinstall`, then `aua helper enable`.",
+    "device_busy_in_background": "Something is still talking to the device; retry in a moment.",
+    "job_running": "A background job owns the device. Wait for it, or `aua job cancel`.",
+    "daemon_owns_device": "Set helper.offload_under_daemon, or run `aua daemon stop` first.",
+    "another_process_owns_device": "Another aua process owns this device.",
+    "capture_would_not_settle": "A screen capture is still in flight; retry in a moment.",
+    "not_bound_after_release": (
+        "Something is holding the UiAutomation slot — usually a warm daemon. "
+        "Run `aua daemon stop`, then try again."
+    ),
+}
+
+
+class _HandoverRefused(Exception):
+    """The UiAutomation slot could not be handed to the helper, and why.
+
+    Raised rather than returned so :meth:`Engine._device_agent_borrowed` can refuse from any depth
+    without every caller unpacking a union. It is already journalled by the time it is raised; the
+    caller's only remaining decision is whether a refusal is fatal for what it was doing.
+    """
+
+    def __init__(self, reason: str, serial: str | None, detail: str | None = None) -> None:
+        super().__init__(reason if detail is None else f"{reason}: {detail}")
+        self.reason = reason
+        self.serial = serial
+        self.detail = detail
+
+
 def _published_id(el: Element | None) -> ElementId | None:
     """The id an action reports for *el* — the same stable id its observation publishes.
 
@@ -4063,6 +4108,125 @@ class Engine:
                 extra=fields,
             )
 
+    @contextlib.contextmanager
+    def _device_agent_borrowed(self, *, purpose: str) -> Iterator[Any]:
+        """Hand Android's UiAutomation slot to the on-device helper and yield an open channel.
+
+        Every caller that runs work *inside* the device needs all of this, in this order, and none
+        of it is optional — each step here is a failure that was diagnosed on a real device, and
+        the comments say which. A second copy of this sequence would not learn the next fix, so
+        there is one, and the two things callers genuinely differ on are left to them:
+
+        * **What counts as enough work to be worth the handover.** The flow offload has
+          ``helper.min_flow_steps``; see :meth:`drive_on_device` for why an autonomous drive has no
+          equivalent floor.
+        * **Whether a refusal is fatal.** For the flow offload it is not — it is an optimisation, so
+          it journals and runs on the host. For a command the user asked for by name it is, because
+          silently doing nothing is the wrong answer to an explicit request. So this raises
+          :class:`_HandoverRefused` and the caller chooses.
+
+        The refusal is journalled here, at the point of refusal, so the diagnostic line is identical
+        whichever caller asked.
+        """
+
+        agent = None
+        serial: str | None = None
+        try:
+            agent = self.platform.capability("device_agent")
+        except Exception as exc:  # noqa: BLE001 - no helper on this platform
+            self._journal_helper("skipped", None, reason="platform_has_no_helper")
+            raise _HandoverRefused("platform_has_no_helper", None) from exc
+
+        # Deliberately NOT `self.device`: touching that connects uiautomator2, and connecting
+        # it is the single most expensive part of the handover. With the slot already taken
+        # the device has to give it up and wait for the helper to rebind — measured 2155ms,
+        # against 16ms when nothing ever attached. Resolving the serial on its own is what
+        # keeps the cheap path reachable, and drops the whole fixed cost from 2839ms to 682ms.
+        serial = self._leased_serial()
+        if serial is None:
+            self._journal_helper("skipped", None, reason="no_target_serial")
+            raise _HandoverRefused("no_target_serial", None)
+        self.begin_device_use(serial)
+        # Whether uiautomator2 is already attached is the single biggest factor in what this
+        # costs (682ms if not, 2839ms if so), so record it: a run that looks disappointing is
+        # usually one where something connected before the handover got a chance.
+        was_connected = self._device is not None
+
+        # Order matters. ``is_bound`` cannot be asked yet: this engine is holding a
+        # uiautomator2 connection, and Android suppresses every accessibility service
+        # while UiAutomation is held, so the helper would look absent no matter how
+        # healthy it is. ``is_enabled`` reads the setting, which suppression does not
+        # touch, so it is the one question worth asking first — and asking it first also
+        # means a device with no helper never pays for a pointless handover.
+        if not agent.is_enabled(serial):
+            if not self.config.helper.auto_setup:
+                self._journal_helper("skipped", serial, reason="auto_setup_disabled")
+                raise _HandoverRefused("auto_setup_disabled", serial)
+            # Ask cheaply whether root is even plausible before doing anything with a
+            # side effect: `adb root` restarts adbd and costs about a second, and on a
+            # retail phone or a Play image the answer is always no. Remembering that
+            # answer per serial is what keeps "just switch it on" from taxing every
+            # single run on a device that can never run the helper.
+            if serial in self._helper_unavailable:
+                self._journal_helper("skipped", serial, reason="known_unavailable")
+                raise _HandoverRefused("known_unavailable", serial)
+            if not agent.rootable(serial):
+                self._helper_unavailable.add(serial)
+                logger.debug("helper: %s cannot run adbd as root; using the polling path", serial)
+                self._journal_helper("skipped", serial, reason="not_rootable")
+                raise _HandoverRefused("not_rootable", serial)
+            try:
+                self._record_device_agent_change(serial)
+                agent.enable(serial)
+            except Exception as exc:  # noqa: BLE001 - setup is best-effort by design
+                self._helper_unavailable.add(serial)
+                logger.debug("helper setup failed on %s (%s); polling instead", serial, exc)
+                self._journal_helper("skipped", serial, reason="setup_failed", error=str(exc)[:160])
+                raise _HandoverRefused("setup_failed", serial, str(exc)[:160]) from exc
+
+        # Nothing else may be mid-call on this device when the slot changes hands.
+        if not self._quiesce_background_device_work():
+            self._journal_helper("skipped", serial, reason="device_busy_in_background")
+            raise _HandoverRefused("device_busy_in_background", serial)
+
+        blocker = self._device_is_spoken_for(serial)
+        if blocker is not None:
+            self._journal_helper("skipped", serial, reason=blocker)
+            raise _HandoverRefused(blocker, serial)
+
+        with self._device_stood_down() as device_is_quiet:
+            if not device_is_quiet:
+                # The capture buffer never went quiet, so a screenshot is still in flight
+                # and will reconnect uiautomator2 the moment it lands — mid-run, taking
+                # the slot back off the helper. Every observed failure of this kind looked
+                # like a broken helper and was this: the handover cost 10-13s and lost the
+                # accessibility service, against 1.7s when the buffer had settled.
+                self._journal_helper("skipped", serial, reason="capture_would_not_settle")
+                raise _HandoverRefused("capture_would_not_settle", serial)
+            agent.release_uiautomation(serial)
+
+            if not agent.is_bound(serial):
+                # Record whether the slot is *still* held. "Not bound" has two very
+                # different causes — a helper that will not start, and a uiautomator2
+                # server that outlived the release — and only the second is AUA's own
+                # doing.
+                self._journal_helper(
+                    "skipped",
+                    serial,
+                    reason="not_bound_after_release",
+                    u2_was_connected=was_connected,
+                    uiautomation_still_held=agent.uiautomation_held(serial),
+                )
+                raise _HandoverRefused("not_bound_after_release", serial)
+
+            channel = agent.open_channel(serial, timeout=self.config.helper.connect_timeout_s)
+            try:
+                yield _DeviceLoan(
+                    channel=channel, serial=serial, purpose=purpose, u2_was_connected=was_connected
+                )
+            finally:
+                channel.close()
+
     def _offload_steps_to_device(
         self,
         steps: list[RouteStep],
@@ -4101,112 +4265,27 @@ class Engine:
             )
             return 0
 
-        try:
-            agent = self.platform.capability("device_agent")
-        except Exception:  # noqa: BLE001 - no helper on this platform; host runs everything
-            self._journal_helper("skipped", None, reason="platform_has_no_helper")
-            return 0
-
-        # Deliberately NOT `self.device`: touching that connects uiautomator2, and connecting
-        # it is the single most expensive part of the handover. With the slot already taken
-        # the device has to give it up and wait for the helper to rebind — measured 2155ms,
-        # against 16ms when nothing ever attached. Resolving the serial on its own is what
-        # keeps the cheap path reachable, and drops the whole fixed cost from 2839ms to 682ms.
-        serial = self._leased_serial()
-        if serial is None:
-            self._journal_helper("skipped", None, reason="no_target_serial")
-            return 0
-        self.begin_device_use(serial)
-        # Whether uiautomator2 is already attached is the single biggest factor in what this
-        # costs (682ms if not, 2839ms if so), so record it: a run that looks disappointing is
-        # usually one where something connected before the offload got a chance.
-        was_connected = self._device is not None
         began = time.perf_counter()
         try:
-            # Order matters. ``is_bound`` cannot be asked yet: this engine is holding a
-            # uiautomator2 connection, and Android suppresses every accessibility service
-            # while UiAutomation is held, so the helper would look absent no matter how
-            # healthy it is. ``is_enabled`` reads the setting, which suppression does not
-            # touch, so it is the one question worth asking first — and asking it first also
-            # means a device with no helper never pays for a pointless handover.
-            if not agent.is_enabled(serial):
-                if not cfg.auto_setup:
-                    self._journal_helper("skipped", serial, reason="auto_setup_disabled")
-                    return 0
-                # Ask cheaply whether root is even plausible before doing anything with a
-                # side effect: `adb root` restarts adbd and costs about a second, and on a
-                # retail phone or a Play image the answer is always no. Remembering that
-                # answer per serial is what keeps "just switch it on" from taxing every
-                # single run on a device that can never run the helper.
-                if serial in self._helper_unavailable:
-                    self._journal_helper("skipped", serial, reason="known_unavailable")
-                    return 0
-                if not agent.rootable(serial):
-                    self._helper_unavailable.add(serial)
-                    logger.debug(
-                        "helper: %s cannot run adbd as root; using the polling path", serial
-                    )
-                    self._journal_helper("skipped", serial, reason="not_rootable")
-                    return 0
-                try:
-                    self._record_device_agent_change(serial)
-                    agent.enable(serial)
-                except Exception as exc:  # noqa: BLE001 - setup is best-effort by design
-                    self._helper_unavailable.add(serial)
-                    logger.debug("helper setup failed on %s (%s); polling instead", serial, exc)
-                    self._journal_helper(
-                        "skipped", serial, reason="setup_failed", error=str(exc)[:160]
-                    )
-                    return 0
-
-            # Nothing else may be mid-call on this device when the slot changes hands.
-            if not self._quiesce_background_device_work():
-                self._journal_helper("skipped", serial, reason="device_busy_in_background")
-                return 0
-
-            blocker = self._device_is_spoken_for(serial)
-            if blocker is not None:
-                self._journal_helper("skipped", serial, reason=blocker)
-                return 0
-
-            with self._device_stood_down() as device_is_quiet:
-                if not device_is_quiet:
-                    # The capture buffer never went quiet, so a screenshot is still in flight
-                    # and will reconnect uiautomator2 the moment it lands — mid-run, taking
-                    # the slot back off the helper. Every observed failure of this kind looked
-                    # like a broken helper and was this: the offload cost 10-13s and lost the
-                    # accessibility service, against 1.7s when the buffer had settled.
-                    self._journal_helper("skipped", serial, reason="capture_would_not_settle")
-                    return 0
-                agent.release_uiautomation(serial)
-
-                if not agent.is_bound(serial):
-                    # Record whether the slot is *still* held. "Not bound" has two very
-                    # different causes — a helper that will not start, and a uiautomator2
-                    # server that outlived the release — and only the second is AUA's own
-                    # doing.
-                    self._journal_helper(
-                        "skipped",
-                        serial,
-                        reason="not_bound_after_release",
-                        u2_was_connected=was_connected,
-                        uiautomation_still_held=agent.uiautomation_held(serial),
-                    )
-                    return 0
-
-                channel = agent.open_channel(serial, timeout=cfg.connect_timeout_s)
-                try:
-                    payload = [self._device_step_payload(s) for s in prefix]
-                    result = channel.request(
-                        "flow.run",
-                        {"steps": payload},
-                        timeout=max(30.0, 5.0 * len(prefix)),
-                    )
-                finally:
-                    channel.close()
+            with self._device_agent_borrowed(purpose="flow.run") as loan:
+                serial = loan.serial
+                was_connected = loan.u2_was_connected
+                payload = [self._device_step_payload(step) for step in prefix]
+                result = loan.channel.request(
+                    "flow.run",
+                    {"steps": payload},
+                    timeout=max(30.0, 5.0 * len(prefix)),
+                )
+        except _HandoverRefused:
+            # Already journalled, at the point of refusal, by the borrow. This path is strictly an
+            # optimisation, so a refusal is not an error: returning 0 leaves the caller's normal
+            # host path untouched.
+            return 0
         except Exception as exc:  # noqa: BLE001 - never let the shortcut break the run
             logger.debug("device flow offload unavailable (%s); running on the host", exc)
-            self._journal_helper("skipped", serial, reason="offload_failed", error=str(exc)[:160])
+            self._journal_helper(
+                "skipped", self._leased_serial(), reason="offload_failed", error=str(exc)[:160]
+            )
             return 0
 
         completed = int(result.get("completed") or 0)
@@ -4245,6 +4324,86 @@ class Engine:
                     }
                 )
         return completed
+
+    def drive_on_device(self, goal: str, *, budget: int = 8) -> dict[str, Any]:
+        """Hand a *goal* to the device and let it decide its own steps. Returns what it did.
+
+        This is the only way ``drive.run`` is reachable. Until it existed the feature was
+        registered in the APK and called by nothing, so the scoring rule inside it — the one
+        component of the policy experiment that has ever driven a real device — could not be run
+        against a device at all, and every change to it shipped unvalidated.
+
+        **Not the same trade as the flow offload, in two ways that matter.**
+
+        *There is no step floor.* ``helper.min_flow_steps`` exists because that path is strictly an
+        optimisation: the host can execute the very same steps, so a handover costing more than it
+        saves is pure loss, and two steps is where saving ~436ms each covers a ~682ms handover.
+        Nothing here is comparable. The host has no implementation of this rule, so there is no
+        cheaper path to be slower than — the choice is the device or nothing. The budget bounds the
+        run instead, and one step is a legitimate answer to a one-step goal.
+
+        *A refusal is fatal.* The flow offload swallows every refusal and runs on the host, because
+        the run still completes. Somebody who asked for this by name has no fallback, so a refusal
+        is raised with the reason the handover recorded — silently returning "nothing happened" to
+        an explicit request is the one behaviour this must not have.
+
+        ``helper.enabled`` is deliberately not consulted, matching every other ``aua helper``
+        command: that switch governs whether AUA reaches for the device *on its own*, and this is
+        somebody asking for it directly.
+        """
+
+        goal = (goal or "").strip()
+        if not goal:
+            raise UsageError(
+                "driving needs a goal",
+                hint='Say what to reach, e.g. `aua helper drive "open the display settings"`.',
+            )
+        budget = max(1, int(budget))
+
+        began = time.perf_counter()
+        try:
+            with self._device_agent_borrowed(purpose="drive.run") as loan:
+                result = loan.channel.request(
+                    "drive.run",
+                    {"goal": goal, "budget": budget},
+                    # The device settles after every tap, so a step costs far more than a replayed
+                    # one; budget the wait per step rather than for the run.
+                    timeout=max(30.0, 6.0 * budget),
+                )
+                serial = loan.serial
+                was_connected = loan.u2_was_connected
+        except _HandoverRefused as refused:
+            raise DeviceError(
+                f"the device could not be handed the goal ({refused.reason})",
+                hint=_HANDOVER_HINTS.get(
+                    refused.reason,
+                    "Run `aua helper status` to see whether the helper is installed and bound.",
+                ),
+            ) from refused
+
+        steps = list(result.get("steps") or [])
+        stop_reason = str(result.get("stop_reason") or "unknown")
+        self._journal_helper(
+            "drove",
+            serial,
+            goal=goal,
+            budget=budget,
+            stop_reason=stop_reason,
+            step_count=len(steps),
+            ms=round((time.perf_counter() - began) * 1000, 1),
+            u2_was_connected=was_connected,
+        )
+        return {
+            "ok": True,
+            "action": "helper-drive",
+            "goal": goal,
+            "budget": budget,
+            "serial": serial,
+            "ran_on": "device",
+            "stop_reason": stop_reason,
+            "step_count": len(steps),
+            "steps": steps,
+        }
 
     def _offload_from(
         self,
