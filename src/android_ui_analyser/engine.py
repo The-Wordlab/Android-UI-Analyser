@@ -10047,7 +10047,7 @@ class Engine:
                 phase.kind == "cleanup" and phase.satisfaction == "session_cleanup"
             )
         ]
-        if blocking_phases:
+        if blocking_phases and not allow_incomplete:
             fresh = self.analyze(source="hierarchy", with_ocr=False, no_cache=True)
             contract_observation = fresh
             if state.contract is not None:
@@ -10072,7 +10072,7 @@ class Engine:
                     phase.kind == "cleanup" and phase.satisfaction == "session_cleanup"
                 )
             ]
-            if incomplete and not allow_incomplete:
+            if incomplete:
                 progress = phase_progress(state)
                 return {
                     "ok": False,

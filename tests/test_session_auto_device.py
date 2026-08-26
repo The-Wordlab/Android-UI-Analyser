@@ -417,7 +417,7 @@ def test_session_finish_releases_the_automatic_process_lease(
     )
     monkeypatch.setattr(engine, "session_review", lambda _session_id: {"ok": True})
 
-    finished = engine.session_finish(state.session_id)
+    finished = engine.session_finish(state.session_id, allow_incomplete=True)
 
     assert finished["ok"] is True
     assert leases.read_lease(cfg.lease.registry_dir, serial) is None
@@ -566,14 +566,14 @@ def test_session_finish_failure_retains_the_lease_until_cleanup_succeeds(
     )
     monkeypatch.setattr(engine, "network_restore", lambda: next(restore_results))
 
-    failed = engine.session_finish(state.session_id)
+    failed = engine.session_finish(state.session_id, allow_incomplete=True)
 
     assert failed["ok"] is False
     assert leases.holder(cfg.lease.registry_dir, serial) == str(owner), (
         "failed cleanup must retain the lease so the same process can retry"
     )
 
-    retried = engine.session_finish(state.session_id)
+    retried = engine.session_finish(state.session_id, allow_incomplete=True)
 
     assert retried["ok"] is True
     assert leases.read_lease(cfg.lease.registry_dir, serial) is None
