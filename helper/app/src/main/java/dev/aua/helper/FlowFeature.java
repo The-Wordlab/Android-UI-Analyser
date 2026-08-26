@@ -71,7 +71,7 @@ final class FlowFeature implements Feature {
     private static final long STABLE_QUIET_MS = 600L;
 
     /** How long a step waits for the screen to react before moving on. */
-    private static final long SETTLE_BUDGET_MS = 1500L;
+    static final long SETTLE_BUDGET_MS = 1500L;
 
     @Override
     public String namespace() {
@@ -403,7 +403,7 @@ final class FlowFeature implements Feature {
     /**
      * A cheap signature of what is on screen: enough to notice a navigation, not a caret blink.
      */
-    private String signature() {
+    String signature() {
         AccessibilityService s = HelperService.awaitService(2500L);
         AccessibilityNodeInfo root = s == null ? null : s.getRootInActiveWindow();
         if (root == null) {
@@ -439,7 +439,7 @@ final class FlowFeature implements Feature {
      * run that never left the second page. Correctness first: a step is not done until the
      * screen it acted on has changed, or the budget says it never will.
      */
-    private void settle(String before, long budgetMs) {
+    void settle(String before, long budgetMs) {
         long deadline = System.currentTimeMillis() + budgetMs;
         while (System.currentTimeMillis() < deadline) {
             if (!signature().equals(before)) {
@@ -476,7 +476,7 @@ final class FlowFeature implements Feature {
      * clickable row. Calling ACTION_CLICK on the label is silently a no-op, so the run would
      * report success while the screen never moved.
      */
-    private static AccessibilityNodeInfo clickable(AccessibilityNodeInfo node) {
+    static AccessibilityNodeInfo clickable(AccessibilityNodeInfo node) {
         AccessibilityNodeInfo n = node;
         for (int depth = 0; n != null && depth < 8; depth++) {
             if (n.isClickable()) {

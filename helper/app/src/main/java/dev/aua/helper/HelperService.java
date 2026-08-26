@@ -52,7 +52,10 @@ public final class HelperService extends AccessibilityService {
                 EventsFeature e = new EventsFeature(c);
                 c.register(e);
                 c.register(new TreeFeature(CURRENT::get));
-                c.register(new FlowFeature());
+                FlowFeature flowFeature = new FlowFeature();
+                c.register(flowFeature);
+                // `drive.run` decides its own steps instead of replaying the host's.
+                c.register(new DriveFeature(flowFeature));
                 RecordFeature rec = new RecordFeature();
                 c.register(rec);
                 recorder = rec;

@@ -1,0 +1,489 @@
+package dev.aua.helper;
+
+import android.accessibilityservice.AccessibilityService;
+import android.view.accessibility.AccessibilityNodeInfo;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+
+/**
+ * {@code drive.run} — take a goal and reach it, deciding each step on the device.
+ *
+ * <p>Until now the helper replayed: {@code flow.run} takes a {@code steps} array the host already
+ * planned. This decides instead, which is what makes the loop autonomous — observe, choose, act,
+ * observe — with no host round trip and no model.
+ *
+ * <p><b>Why a scoring rule and not a language model.</b> On 26 goals against a live Android 16
+ * device, a fine-tuned 350M policy reached <b>0 of 19</b> reachable destinations and authored a
+ * selector that existed on screen <b>0 times out of 71</b>; every one of its 16 checkpoints scored
+ * zero on grounding. This rule reached <b>17 of 19</b>. The reason is structural rather than a
+ * matter of quality: this picks an element out of the list it was shown, so it cannot name one that
+ * does not exist, while a model that spells selector strings can and did — it emitted destinations
+ * from its training corpus.
+ *
+ * <p>The margin also shows how little of this task is difficult. Flat word overlap taps
+ * "Search settings" for any goal containing the word "settings" and reaches only 9 of 19; adding a
+ * first-token bonus and a score floor reaches 17. Tie-breaking, not understanding, decides most of
+ * it.
+ *
+ * <p><b>The two things this could not do</b> are now done, and neither needed a model.
+ *
+ * <ul>
+ *   <li><b>Recognise the impossible.</b> Four of seven goals needing a host capability ended stuck,
+ *       because "nothing scored well" read the same as "keep scrolling". {@link #HOST_TERMS} refuses
+ *       those from the goal text before a node is scored. The list is short because the admission
+ *       rule is strict in the expensive direction: see that field.
+ *   <li><b>Bridge a semantic gap.</b> Two of nineteen were missed where "the words simply do not
+ *       meet". They do meet — the tokeniser was dropping the joint. "Internet AndroidWifi" reduces
+ *       to {@code [internet, androidwifi]} and "Reset Bluetooth &amp; Wi-Fi" to {@code [..., wi,
+ *       fi]}, so a goal saying {@code wifi} scored zero against both. {@link #variants} reads the
+ *       joint in each direction. Capitalisation and punctuation, not meaning.
+ * </ul>
+ *
+ * <p>What remains is a true synonym — "make the text bigger" for "Display" — which is derivable
+ * from neither string. There is nowhere on the device to keep one: this class's word tables are
+ * {@code private static final}, the helper has no method through which the host can seed state, and
+ * the wire protocol has no field for it. That gap stays open.
+ *
+ * <p>Mirrors {@code experiments/functiongemma/v11_baseline.py}, whose tests are this class's
+ * specification; the two must agree. Scrolling and key presses are delegated to
+ * {@link FlowFeature} so settle, gesture dispatch and movement detection have one implementation.
+ * A tap acts on the chosen {@link AccessibilityNodeInfo} directly — the projection already holds
+ * it, so there is no selector to get wrong, and the duplicate-label problem that costs host-side
+ * drivers cannot arise.
+ */
+final class DriveFeature implements Feature {
+
+    /** Words that name no destination. Short on purpose: a long list starts encoding assumptions
+     * about phrasing, and we do not control how goals are worded. */
+    private static final Set<String> STOPWORDS = new HashSet<>(Arrays.asList(
+            "a", "an", "and", "the", "to", "of", "on", "in", "at", "for", "with", "from",
+            "me", "my", "i", "you", "it", "its", "this", "that", "these", "those",
+            "is", "are", "be", "was", "were", "do", "does", "did", "can", "could",
+            "would", "should", "will", "please", "just", "then", "now", "up",
+            "open", "go", "goto", "show", "find", "get", "reach", "take", "bring",
+            "land", "navigate", "screen", "page", "section", "settings", "setting",
+            "view", "tab", "prove", "confirm", "need", "want", "let", "make"));
+
+    /** Chrome present on nearly every screen and almost never the destination. Scoring it normally
+     * is exactly how flat overlap lost eight of its nineteen. */
+    private static final Set<String> CHROME = new HashSet<>(Arrays.asList(
+            "search settings", "search", "navigate up", "back", "more options", "options",
+            "home", "close", "cancel", "dismiss", "open features menu", "overflow"));
+
+    /**
+     * Words naming something only the host can do. A goal containing one is refused before any node
+     * is scored, because no amount of tapping reaches {@code aua screenshot}.
+     *
+     * <p>Two tests admit a word, and the second is why this list is short. It must name a capability
+     * the {@code aua} CLI has, <em>and</em> it must almost never appear in an on-screen label —
+     * every word here appears in at most 1% of the 638 real screens under
+     * {@code runs/functiongemma/screens}, and most in none of them.
+     *
+     * <p>The second test has to be made against screens somebody else's apps produced; checking a
+     * refusal list against a generated list of host goals proves only that one hand wrote both.
+     * Measured against the harvest, the words a <em>complete</em> list would need are exactly the
+     * ones that cannot be allowed: "system" is in 83% of real screens, "screen" 53%, "network" 3.4%,
+     * "clock" and "time" 4-7%. So "change the system time" and "turn the network off" are not
+     * refusable from goal text, and this does not try. The collision is structural — AUA's host
+     * capabilities are named after the same device concepts Settings exposes as destinations.
+     *
+     * <p>The trade leans hard towards precision because the errors are not comparable. A missed
+     * refusal costs a vaguer handoff: budget is spent, nothing matches, the run hands off as
+     * {@code target_absent} instead of {@code needs_host}, and the host gets control either way. A
+     * false refusal stops a run that would have succeeded, and nothing later recovers it.
+     *
+     * <p>Mirrors {@code v11_baseline.HOST_TERMS}, which records the two words measurement removed.
+     */
+    private static final Set<String> HOST_TERMS = new HashSet<>(Arrays.asList(
+            "adb", "apk", "capture", "database", "dump", "emulator", "host", "install",
+            "landscape", "logcat", "offline", "proxy", "query", "recording", "restore",
+            "rotate", "screenshot", "sqlite", "traffic"));
+
+    /**
+     * The decline control of a consent dialog — the only screen evidence that going on would mean
+     * granting something. Used for nothing but naming a refusal that was already happening.
+     *
+     * <p>Three labels and not six, on purpose. "Cancel" is already chrome, and "No thanks" / "Not
+     * now" are the buttons on rating prompts and update nags, which gate nothing.
+     */
+    private static final Set<String> DECLINE_LABELS = new HashSet<>(Arrays.asList(
+            "deny", "don't allow", "dont allow"));
+
+    private static final double SCORE_FLOOR = 1.0;
+    private static final double FIRST_TOKEN_BONUS = 1.5;
+    private static final double WORD_MATCH = 1.0;
+    private static final double RID_MATCH = 0.5;
+
+    private static final int DEFAULT_BUDGET = 8;
+    private static final int MAX_SCROLLS = 3;
+
+    private final FlowFeature flow;
+
+    DriveFeature(FlowFeature flow) {
+        this.flow = flow;
+    }
+
+    @Override
+    public String namespace() {
+        return "drive";
+    }
+
+    @Override
+    public JSONObject handle(String method, JSONObject params) throws Exception {
+        if (!"drive.run".equals(method)) {
+            throw new IllegalArgumentException("unknown method: " + method);
+        }
+        String goal = params.optString("goal", "");
+        if (goal.trim().isEmpty()) {
+            throw new IllegalArgumentException("drive.run needs a `goal`");
+        }
+        int budget = Math.max(1, params.optInt("budget", DEFAULT_BUDGET));
+
+        List<String> terms = terms(goal);
+        JSONArray steps = new JSONArray();
+        int scrolls = 0;
+        String stop = "budget_exhausted";
+
+        // Before the screen is even read, not after. A host goal is unreachable on every screen, so
+        // looking first only decides how much budget gets spent proving it.
+        String host = hostTerm(terms);
+        if (host != null) {
+            JSONObject refusal = new JSONObject();
+            refusal.put("step", 0);
+            refusal.put("decision", "handoff");
+            refusal.put("reason", "needs_host");
+            refusal.put("term", host);
+            steps.put(refusal);
+            JSONObject early = new JSONObject();
+            early.put("goal", goal);
+            early.put("stop_reason", "handoff");
+            early.put("steps", steps);
+            early.put("step_count", steps.length());
+            return early;
+        }
+
+        for (int step = 0; step < budget; step++) {
+            AccessibilityNodeInfo root = root();
+            Projection view = Projection.of(root);
+
+            Projection.Item best = null;
+            double bestScore = 0.0;
+            for (Projection.Item item : view.items) {
+                if (!item.tappable) {
+                    continue;
+                }
+                double s = score(terms, item);
+                if (s > bestScore) {
+                    bestScore = s;
+                    best = item;
+                }
+            }
+
+            JSONObject record = new JSONObject();
+            record.put("step", step);
+            record.put("shown", view.items.size());
+            record.put("more", view.more);
+
+            if (best != null && bestScore >= SCORE_FLOOR) {
+                record.put("decision", "tap");
+                record.put("n", "n" + best.index);
+                record.put("label", best.label());
+                record.put("score", round(bestScore));
+                boolean ok = tap(best.node);
+                record.put("ok", ok);
+                steps.put(record);
+                if (!ok) {
+                    stop = "tap_failed";
+                    break;
+                }
+                // Arrival is the caller's to judge: it holds the goal's success criteria and this
+                // does not. Reporting each step and stopping on budget keeps that boundary.
+                continue;
+            }
+
+            boolean canScroll = view.more || hasScrollable(view);
+            if (canScroll && scrolls < MAX_SCROLLS) {
+                record.put("decision", "scroll");
+                record.put("best_score", round(bestScore));
+                boolean ok = scroll();
+                record.put("ok", ok);
+                steps.put(record);
+                scrolls++;
+                if (!ok) {
+                    // Nothing moved, so there is no more screen to reveal and refusing is honest.
+                    // Named the same way as the branch below, so every refusal on a consent screen
+                    // reads `needs_auth` however the rule arrived at it.
+                    stop = "handoff";
+                    record.put("reason", atConsentGate(view) ? "needs_auth" : "target_absent");
+                    break;
+                }
+                continue;
+            }
+
+            // Refusing. The only question left is what to call it.
+            //
+            // A consent dialog on screen makes `needs_auth` the better name, and this is the only
+            // place the dialog is consulted — which is what makes the check safe. "A dialog is up"
+            // must never be grounds to stop, because pressing "Don't allow" is a legitimate move.
+            // Here nothing is being stopped: the rule had already given up. So whether the goal was
+            // "about declining" never has to be decided from its text — if word overlap can reach
+            // the decline control, the tap branch above already fired.
+            //
+            // `needs_auth` is also the more actionable name: it tells the host there is a consent
+            // gate to answer, where `target_absent` tells it to give up.
+            //
+            // What is left is weak by construction: "nothing matched and nothing left to reveal"
+            // cannot separate a target that is absent from one present under a name sharing no
+            // *concept* with the goal. Spelling is handled; a synonym is not.
+            record.put("decision", "handoff");
+            record.put("reason", atConsentGate(view) ? "needs_auth" : "target_absent");
+            record.put("best_score", round(bestScore));
+            steps.put(record);
+            stop = "handoff";
+            break;
+        }
+
+        JSONObject out = new JSONObject();
+        out.put("goal", goal);
+        out.put("stop_reason", stop);
+        out.put("steps", steps);
+        out.put("step_count", steps.length());
+        return out;
+    }
+
+    /** Goal reduced to the words that could name a destination. */
+    private static List<String> terms(String goal) {
+        List<String> out = new ArrayList<>();
+        for (String word : Projection.words(goal)) {
+            if (word.length() > 1 && !STOPWORDS.contains(word)) {
+                out.add(word);
+            }
+        }
+        return out;
+    }
+
+    /** The first goal term naming a host capability, or {@code null} when none does. */
+    private static String hostTerm(List<String> terms) {
+        for (String term : terms) {
+            if (HOST_TERMS.contains(term)) {
+                return term;
+            }
+        }
+        return null;
+    }
+
+    /** True when one of the listed nodes is a consent dialog's decline control. */
+    private static boolean atConsentGate(Projection view) {
+        for (Projection.Item item : view.items) {
+            if (DECLINE_LABELS.contains(item.label().trim().toLowerCase(Locale.ROOT))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The alphanumeric runs of a string with the original case kept — {@link Projection#words} with
+     * the lowercasing switched off, because a capital is the separator this reads.
+     */
+    private static List<String> runs(String value) {
+        List<String> out = new ArrayList<>();
+        if (value == null || value.isEmpty()) {
+            return out;
+        }
+        StringBuilder token = new StringBuilder();
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (Character.isLetterOrDigit(c)) {
+                token.append(c);
+            } else if (token.length() > 0) {
+                out.add(token.toString());
+                token.setLength(0);
+            }
+        }
+        if (token.length() > 0) {
+            out.add(token.toString());
+        }
+        return out;
+    }
+
+    /**
+     * {@code AndroidWifi} split at its internal capitals; empty when there is no such boundary.
+     *
+     * <p>A boundary is a lowercase letter or digit followed by an uppercase one, which is how Android
+     * names a compound label it has no room to space out.
+     */
+    private static List<String> caseParts(String token) {
+        List<String> parts = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        for (int i = 0; i < token.length(); i++) {
+            char c = token.charAt(i);
+            char previous = current.length() > 0 ? current.charAt(current.length() - 1) : 0;
+            if (Character.isUpperCase(c) && previous != 0
+                    && (Character.isLowerCase(previous) || Character.isDigit(previous))) {
+                parts.add(current.toString());
+                current = new StringBuilder();
+                current.append(c);
+            } else {
+                current.append(c);
+            }
+        }
+        if (current.length() > 0) {
+            parts.add(current.toString());
+        }
+        List<String> out = new ArrayList<>();
+        if (parts.size() < 2) {
+            return out;
+        }
+        for (String part : parts) {
+            if (part.length() > 1) {
+                out.add(part.toLowerCase(Locale.ROOT));
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Every spelling of a label's words that a goal might use, {@link Projection#words} included.
+     *
+     * <p>Three forms, all mechanical, none a synonym: the words themselves; each word split at its
+     * internal capitals ({@code AndroidWifi} gives {@code android}, {@code wifi}); and each adjacent
+     * pair of short words joined ({@code Wi-Fi} gives {@code wifi}). Both directions are needed —
+     * splitting reaches "Internet AndroidWifi", joining reaches "Reset Bluetooth &amp; Wi-Fi" — and
+     * keeping the unsplit word is what stops {@code WiFi}, which already read correctly, from
+     * breaking when the split turns it into {@code wi} + {@code fi}.
+     *
+     * <p>Deliberately <em>not</em> substring containment, which would reach the same two labels and
+     * far more besides: 664 of the harvest's 2,993 label words are a proper substring of another, so
+     * a goal about the {@code lock} screen would score against "Clock".
+     */
+    static List<String> variants(String label) {
+        List<String> base = Projection.words(label);
+        List<String> out = new ArrayList<>(base);
+        for (String run : runs(label)) {
+            out.addAll(caseParts(run));
+        }
+        for (int i = 0; i < base.size() - 1; i++) {
+            String left = base.get(i);
+            String right = base.get(i + 1);
+            if (left.length() <= 6 && right.length() <= 6) {
+                String joined = left + right;
+                if (joined.length() >= 4 && joined.length() <= 14) {
+                    out.add(joined);
+                }
+            }
+        }
+        return out;
+    }
+
+    /**
+     * How well one node answers the goal.
+     *
+     * <p>Chrome scores zero so the ever-present search row cannot win by sharing a single word. A
+     * hit on the node's first word counts for more than one later on, because an Android row reads
+     * "Title Summary" and the head is where it names itself.
+     */
+    private static double score(List<String> terms, Projection.Item item) {
+        String label = item.label();
+        if (CHROME.contains(label.trim().toLowerCase(Locale.ROOT))) {
+            return 0.0;
+        }
+        List<String> nodeWords = Projection.words(label);
+        if (nodeWords.isEmpty() && item.rid.isEmpty()) {
+            return 0.0;
+        }
+        // Membership is tested against every spelling; the head bonus is not. "First word" has to
+        // keep meaning the row's actual first word, or a join two thirds down the summary would
+        // collect the bonus meant for the row's own name.
+        List<String> spellings = variants(label);
+        List<String> ridWords = Projection.words(item.rid);
+        double total = 0.0;
+        for (int i = 0; i < terms.size(); i++) {
+            String term = terms.get(i);
+            if (spellings.contains(term)) {
+                boolean head = !nodeWords.isEmpty() && nodeWords.get(0).equals(term);
+                total += (head && i == 0) ? FIRST_TOKEN_BONUS : WORD_MATCH;
+            } else if (ridWords.contains(term)) {
+                total += RID_MATCH;
+            }
+        }
+        return total;
+    }
+
+    private static boolean hasScrollable(Projection view) {
+        for (Projection.Item item : view.items) {
+            if (item.scrollable) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Click the node we chose, then wait for the screen to stop moving.
+     *
+     * <p>No selector is involved, so none can be ambiguous. The settle is not optional: without it
+     * the loop re-read the tree before the transition finished, saw the screen it had just acted on,
+     * chose the same row again, and acted on a node the framework had already recycled — which took
+     * the accessibility service down with it and broke the channel for every later goal. Live, that
+     * looked like "tap Display, tap Display, zero nodes, service gone".
+     *
+     * <p>{@link FlowFeature} already had this wait, correct, for every step it executes; reusing it
+     * rather than writing a second one is the whole reason its helpers were made package-private.
+     */
+    private boolean tap(AccessibilityNodeInfo node) {
+        AccessibilityNodeInfo target = FlowFeature.clickable(node);
+        if (target == null) {
+            return false;
+        }
+        String before = flow.signature();
+        if (!target.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+            return false;
+        }
+        flow.settle(before, FlowFeature.SETTLE_BUDGET_MS);
+        return true;
+    }
+
+    /** Delegated so movement detection and settle behaviour have exactly one implementation. */
+    private boolean scroll() {
+        try {
+            JSONObject step = new JSONObject();
+            step.put("kind", "scroll");
+            step.put("arg", "up");
+            JSONArray steps = new JSONArray();
+            steps.put(step);
+            JSONObject params = new JSONObject();
+            params.put("steps", steps);
+            JSONObject result = flow.handle("flow.run", params);
+            return result.optInt("ok_count", result.optInt("total", 0)) > 0
+                    || result.optBoolean("ok", false);
+        } catch (Exception e) {
+            // `flow.run` throws when a scroll moved nothing, which is the answer, not an error.
+            return false;
+        }
+    }
+
+    private AccessibilityNodeInfo root() {
+        AccessibilityService service = HelperService.awaitService(2500L);
+        if (service == null) {
+            throw new IllegalStateException("accessibility service is not attached");
+        }
+        AccessibilityNodeInfo root = service.getRootInActiveWindow();
+        if (root == null) {
+            throw new IllegalStateException("no active window to read");
+        }
+        return root;
+    }
+
+    private static double round(double value) {
+        return Math.round(value * 100.0) / 100.0;
+    }
+}
