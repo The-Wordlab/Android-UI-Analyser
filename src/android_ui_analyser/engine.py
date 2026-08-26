@@ -14279,20 +14279,31 @@ class Engine:
         *,
         selector: dict[str, Any] | None = None,
         submit: bool = False,
+        send_key: str | None = None,
         observe: bool = True,
         with_image: bool | str | None = None,
     ) -> ActionResult:
+        if submit and send_key:
+            raise UsageError(
+                "input accepts either submit or send_key, not both",
+                hint="Use submit for the IME action, or send_key for an explicit app control.",
+            )
+        if send_key and not observe:
+            raise UsageError(
+                "send_key requires the post-action observation",
+                hint="Drop --no-observe so AUA can verify whether the composer cleared.",
+            )
         el = self._target(element_id, selector, verb="input")
         cx, cy = self._aim(el)
         # The step records the field's SHAPE only — the typed value is never persisted
         # (PRD §6b privacy; observe_action strips `text` defensively too).
-        step = self._step("input", el, submit=submit)
+        step = self._step("input", el, submit=submit or bool(send_key))
         before = el.text
         with self._acting(_action_mark("input", el)):
             self.device.input_text(cx, cy, text, clear=True, submit=submit)
         self._record_action_safe(step)
         verified = self._typed_text_landed(before, text, submit=submit)
-        return self._observe(
+        result = self._observe(
             ActionResult(
                 ok=verified is not False,
                 action="input",
@@ -14303,6 +14314,118 @@ class Engine:
             observe,
             with_image,
         )
+        if send_key:
+            if verified is False:
+                return result
+            sent = self.tap(
+                selector={"key": send_key},
+                observe=True,
+                with_image=with_image,
+            )
+            sent.action = "input-send"
+            sent.detail = "typed text and tapped the explicit semantic send control"
+            sent.submitted = self._submission_status(el, text, sent.observation)
+            if sent.submitted is False:
+                sent.note = (
+                    "The explicit send control was tapped, but the same input still contains "
+                    "the typed text. Do not type it again; inspect the returned observation."
+                )
+            return sent
+        if submit:
+            result.submitted = self._submission_status(el, text, result.observation)
+            if result.submitted is False:
+                result.note = (
+                    "The IME action did not submit: the same input still contains the typed "
+                    "text. Do not type it again; use recommended_call if present."
+                )
+                result.recommended_call = self._semantic_send_recommendation(
+                    result.observation,
+                    field=el,
+                )
+        return result
+
+    @staticmethod
+    def _submission_status(
+        field: Element,
+        text: str,
+        observation: AnalyzeResult | None,
+    ) -> bool | None:
+        """Whether the same composer visibly retained or cleared the submitted value."""
+        if observation is None or field.password or not text:
+            return None
+        field_id = _published_id(field)
+        matches = [
+            element
+            for element in observation.elements
+            if _published_id(element) == field_id
+            or (
+                field.resource_id is not None
+                and element.resource_id == field.resource_id
+            )
+        ]
+        if len(matches) != 1:
+            return None
+        after = (matches[0].text or "").strip()
+        typed = text.strip()
+        if typed and typed in after:
+            return False
+        before = (field.text or "").strip()
+        if not after or after == before:
+            return True
+        return None
+
+    @staticmethod
+    def _semantic_send_recommendation(
+        observation: AnalyzeResult | None,
+        *,
+        field: Element,
+    ) -> dict[str, Any] | None:
+        """Return one unique visible send/submit/confirm control, never a guessed coordinate."""
+        if observation is None:
+            return None
+        field_id = _published_id(field)
+        ranked: list[tuple[int, Element]] = []
+        for element in observation.elements:
+            if not element.clickable or _published_id(element) == field_id:
+                continue
+            rid = (_id_tail(element.resource_id) or "").casefold()
+            label = " ".join(
+                value for value in (element.text, element.content_desc) if value
+            ).casefold()
+            score = 0
+            if re.search(r"(?:^|[_-])(send|submit|confirm)(?:$|[_-])", rid):
+                score += 4
+            elif any(token in rid for token in ("send", "submit", "confirm")):
+                score += 3
+            if re.search(r"\b(send|submit|confirm)\b", label):
+                score += 2
+            if score:
+                ranked.append((score, element))
+        if not ranked:
+            return None
+        best = max(score for score, _element in ranked)
+        winners = [element for score, element in ranked if score == best]
+        if len(winners) != 1:
+            return None
+        control = winners[0]
+        control_rid = _id_tail(control.resource_id)
+        if control_rid:
+            cli = f"aua tap-and-analyze --rid {shlex.quote(control_rid)}"
+            mcp_args: dict[str, Any] = {"rid": control_rid}
+        else:
+            key = str(_published_id(control))
+            cli = f"aua tap-and-analyze {shlex.quote(key)}"
+            mcp_args = {"id": key}
+        return {
+            "kind": "semantic_send",
+            "cli": cli,
+            "mcp": {"tool": "tap", "arguments": mcp_args},
+            "reason": (
+                "The IME action left the text in the composer and this is the unique visible "
+                "send/submit/confirm control. Tap it without typing again."
+            ),
+            "executes": True,
+        }
 
     def _system_bar_top(self) -> int | None:
         """Top edge of the bottom system bar, or None when it cannot be established.

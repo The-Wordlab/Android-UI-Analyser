@@ -704,6 +704,14 @@ class ActionResult(BaseModel):
     id: ElementId | None = None
     target: list[int] | None = None  # coords or bounds acted on
     detail: str | None = None
+    # ``--submit`` dispatches an IME action, but many apps keep the text in the composer and
+    # expose their own semantic Send/Confirm control. Distinguish "text was typed" from "the
+    # app accepted a submission" so a caller never reports a sent message from the IME call
+    # alone. None means the returned frame could not prove either outcome.
+    submitted: bool | None = None
+    # One exact recovery call when the action itself can identify it, for example the unique
+    # semantic send control after an IME submit left the composer populated.
+    recommended_call: dict[str, Any] | None = None
     # The screen right after the action (when called with observe=True), so an agent gets
     # fresh element ids without a separate `analyze` round-trip (act + observe in one call).
     observation: AnalyzeResult | None = None

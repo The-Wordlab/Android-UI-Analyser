@@ -1060,13 +1060,20 @@ def _tool_definitions() -> list[types.Tool]:
         ),
         types.Tool(
             name="input",
-            description="Type text into the element with the given id; optional IME submit.",
+            description=(
+                "Type text into the element with the given id; optionally use the IME submit "
+                "action or name one explicit semantic app send control."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "id": {"type": ["integer", "string"]},
                     "text": {"type": "string"},
                     "submit": {"type": "boolean", "default": False},
+                    "send": {
+                        "type": "string",
+                        "description": "Stable id of the app's explicit send control.",
+                    },
                     "observe": _OBSERVE_PROP,
                     "with_image": _WITH_IMAGE_PROP,
                 },
@@ -2880,6 +2887,7 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 args["text"],
                 selector=_selector_from_args(args),
                 submit=args.get("submit", False),
+                send_key=args.get("send"),
                 observe=args.get("observe", True),
                 with_image=img,
             )

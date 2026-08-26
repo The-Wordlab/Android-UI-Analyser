@@ -15,8 +15,14 @@ ambiguous read into a failure would be a worse bug than the one being fixed.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+import pytest
+from typer.testing import CliRunner
+
+from android_ui_analyser import engine as engine_mod
+from android_ui_analyser.cli import app
 from android_ui_analyser.engine import Engine
 from conftest import FakeDevice, make_config
 
@@ -44,6 +50,35 @@ class _FieldDevice(FakeDevice):
 
     def focused_text(self) -> str | None:
         return self._reads_back
+
+
+class _SubmitDevice(_FieldDevice):
+    """A composer whose IME action either clears the field or leaves it populated."""
+
+    def __init__(self, *, ime_clears: bool, **kw: object) -> None:
+        super().__init__(starts_with="", reads_back="", **kw)
+        self._ime_clears = ime_clears
+        self._typed = ""
+
+    def send_text(self, text: str, *, clear: bool = True) -> None:
+        super().send_text(text, clear=clear)
+        self._typed = text
+        self._reads_back = text
+        self._xml = _FIELD.format(value=text)
+
+    def send_ime_action(self, action: str = "search") -> None:
+        super().send_ime_action(action)
+        if self._ime_clears:
+            self._typed = ""
+            self._reads_back = ""
+            self._xml = _FIELD.format(value="")
+
+    def click(self, x: int, y: int) -> None:
+        super().click(x, y)
+        if self._typed and y >= 700:
+            self._typed = ""
+            self._reads_back = ""
+            self._xml = _FIELD.format(value="")
 
 
 def _engine(dev: FakeDevice, tmp_path: Path) -> Engine:
@@ -87,6 +122,103 @@ def test_submit_leaves_the_field_empty_and_that_is_not_a_failure(tmp_path: Path)
     out = _engine(dev, tmp_path).input_text(0, "hello world", submit=True, observe=False)
     assert out.ok is True
     assert out.verified is None
+
+
+def test_ime_submit_that_leaves_text_in_the_composer_reports_not_submitted(
+    tmp_path: Path,
+) -> None:
+    dev = _SubmitDevice(ime_clears=False)
+
+    out = _engine(dev, tmp_path).input_text(0, "hello world", submit=True, observe=True)
+
+    assert out.ok is True
+    assert out.submitted is False
+    assert out.recommended_call == {
+        "kind": "semantic_send",
+        "cli": "aua tap-and-analyze --rid send",
+        "mcp": {"tool": "tap", "arguments": {"rid": "send"}},
+        "reason": (
+            "The IME action left the text in the composer and this is the unique visible "
+            "send/submit/confirm control. Tap it without typing again."
+        ),
+        "executes": True,
+    }
+    assert "Do not type it again" in str(out.note)
+
+
+def test_ime_submit_that_clears_the_composer_reports_submitted(tmp_path: Path) -> None:
+    dev = _SubmitDevice(ime_clears=True)
+
+    out = _engine(dev, tmp_path).input_text(0, "hello world", submit=True, observe=True)
+
+    assert out.ok is True
+    assert out.submitted is True
+    assert out.recommended_call is None
+
+
+def test_explicit_semantic_send_types_and_taps_in_one_top_level_call(tmp_path: Path) -> None:
+    dev = _SubmitDevice(ime_clears=False)
+
+    out = _engine(dev, tmp_path).input_text(
+        0,
+        "hello world",
+        send_key="rid:send",
+        observe=True,
+    )
+
+    assert out.ok is True
+    assert out.action == "input-send"
+    assert out.submitted is True
+    assert not any(call == "send_ime_action" for call, _args in dev.calls)
+    assert len([call for call, _args in dev.calls if call == "click"]) >= 2
+
+
+def test_cli_explicit_send_reaches_the_shared_engine_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    dev = _SubmitDevice(ime_clears=False)
+    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
+    monkeypatch.setenv("AUA_CACHE__DIR", str(tmp_path / "cache"))
+    monkeypatch.setenv("AUA_LEASE__REGISTRY_DIR", str(tmp_path / "cache"))
+    monkeypatch.setenv("AUA_MEMORY__DIR", str(tmp_path / "memory"))
+    monkeypatch.setenv("AUA_DAEMON__ENABLED", "false")
+
+    result = CliRunner().invoke(
+        app,
+        ["input-and-analyze", "--rid", "composer", "hello", "--send", "rid:send"],
+    )
+
+    assert result.exit_code == 0, result.stdout + str(result.stderr or "")
+    payload = json.loads(result.stdout)
+    assert payload["action"] == "input-send"
+    assert payload["submitted"] is True
+    assert not any(call == "send_ime_action" for call, _args in dev.calls)
+
+
+def test_cli_refuses_two_different_submission_mechanisms(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    dev = _SubmitDevice(ime_clears=False)
+    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
+    monkeypatch.setenv("AUA_CACHE__DIR", str(tmp_path / "cache"))
+    monkeypatch.setenv("AUA_LEASE__REGISTRY_DIR", str(tmp_path / "cache"))
+    monkeypatch.setenv("AUA_DAEMON__ENABLED", "false")
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "input-and-analyze",
+            "--rid",
+            "composer",
+            "hello",
+            "--submit",
+            "--send",
+            "rid:send",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "either --submit or --send" in result.stdout + str(result.stderr or "")
 
 
 def test_an_unreadable_field_is_unknown_rather_than_unchanged(tmp_path: Path) -> None:

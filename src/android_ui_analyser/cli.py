@@ -3131,6 +3131,15 @@ def input_cmd(
     # click's nearest-name hint here was "--index", which sends people further from the fix.
     text_opt: str | None = typer.Option(None, "--text", hidden=True),
     submit: bool = typer.Option(False, "--submit", help="Send the IME action after typing."),
+    send: str | None = typer.Option(
+        None,
+        "--send",
+        metavar="STABLE_ID",
+        help=(
+            "After typing, tap this explicit semantic app send control in the same call; "
+            "unlike --submit, this does not rely on the IME action."
+        ),
+    ),
     observe: bool = typer.Option(
         True,
         "--observe/--no-observe",
@@ -3156,6 +3165,11 @@ def input_cmd(
     """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
+        if submit and send:
+            raise UsageError(
+                "pass either --submit or --send, not both",
+                hint="Use --submit for the IME action or --send rid:<send-control> for the app control.",
+            )
         if text_opt is not None:
             raise UsageError(
                 "input-and-analyze takes the text to type positionally, not with --text",
@@ -3201,6 +3215,7 @@ def input_cmd(
                 selector=selector,
                 text=typed,
                 submit=submit,
+                send_key=send,
                 observe=observe,
                 with_image=_annotate_arg(with_image),
             ),
