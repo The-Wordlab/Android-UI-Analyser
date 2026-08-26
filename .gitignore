@@ -50,3 +50,6 @@ native/aua-fast/aua-fast
 # Agent worktrees are other sessions working copies, each its own git repo. `git add -A`
 # swept six of them in as gitlinks once; ignoring them makes that impossible to repeat.
 .claude/worktrees/
+
+# Stray dex from unpacking/inspecting the helper APK. Build artefacts, never sources.
+/classes*.dex
