@@ -131,6 +131,7 @@ from .selectors import (
     is_back_resource_id,
     match_selector,
     nearest_elements,
+    normalize_selector_prefix,
     ocr_added_app_content,
     selector_label,
 )
@@ -10996,6 +10997,8 @@ class Engine:
         this can confirm containers the parsed element list prunes (Maestro-style
         ``assertVisible: id:``). OCR fallback only applies to text lookups.
         """
+        query_field = "rid" if _is_resource_id_lookup(by) else "desc" if by == "desc" else "text"
+        text = normalize_selector_prefix(query_field, text) or text
         mode = MatchMode(match)
         device = self.device
         src = (source or "auto").lower()
@@ -13320,6 +13323,9 @@ class Engine:
         nearest candidates), :class:`SelectorAmbiguousError` on several (with all of them).
         A silent pick is indistinguishable from "the app ignored a valid tap".
         """
+        rid = normalize_selector_prefix("rid", rid)
+        text = normalize_selector_prefix("text", text)
+        desc = normalize_selector_prefix("desc", desc)
         selector = {"rid": rid, "text": text, "desc": desc}
         given = [field for field, value in selector.items() if value]
         if len(given) != 1:
@@ -14857,6 +14863,8 @@ class Engine:
         Only the first two are ``ok`` — the old version returned ``ok:false`` with exit 0,
         which is the same as saying nothing at all to an automated caller.
         """
+        query_field = "rid" if _is_resource_id_lookup(by) else "desc" if by == "desc" else "text"
+        query = normalize_selector_prefix(query_field, query) or query
         mode = MatchMode(match)
         step = self._step("scroll-to", arg=query)
         candidates = self._locale_candidates(self.device, query, by)
@@ -17189,7 +17197,11 @@ class Engine:
         assertion holds, which is what replaces a ``sleep`` guess — the flakiness the
         project's own testing guidance warns about.
         """
-        selector = {"rid": rid, "text": text, "desc": desc}
+        selector = {
+            "rid": normalize_selector_prefix("rid", rid),
+            "text": normalize_selector_prefix("text", text),
+            "desc": normalize_selector_prefix("desc", desc),
+        }
         if len([v for v in selector.values() if v]) != 1:
             raise UsageError(
                 "expect needs exactly one of --rid / --text / --desc",

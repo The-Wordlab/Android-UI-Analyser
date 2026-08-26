@@ -16,6 +16,7 @@ import pytest
 from typer.testing import CliRunner
 
 from android_ui_analyser import engine as engine_mod
+from android_ui_analyser.assertions import normalize_selector
 from android_ui_analyser.cli import app
 from android_ui_analyser.mcp_server import _SELECTOR_PROPS, _selector_from_args
 from conftest import FakeDevice
@@ -32,7 +33,10 @@ _HIERARCHY = """<?xml version="1.0" encoding="UTF-8"?>
 
 @pytest.fixture
 def patched_device(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeDevice:
-    device = FakeDevice(hierarchy_xml=_HIERARCHY)
+    device = FakeDevice(
+        hierarchy_xml=_HIERARCHY,
+        resource_index={"com.example.fiction:id/continue_btn": (40, 200, 1040, 320)},
+    )
     monkeypatch.setattr(engine_mod, "connect", lambda serial=None: device)
     monkeypatch.setenv("AUA_CACHE__DIR", str(tmp_path / "cache"))
     monkeypatch.setenv("AUA_LEASE__REGISTRY_DIR", str(tmp_path / "cache"))
@@ -46,6 +50,21 @@ def test_the_cli_taps_by_stable_key(patched_device: FakeDevice) -> None:
     assert result.exit_code == 0, result.stderr
     assert json.loads(result.stdout)["action"] == "tap"
     assert any(call[0] == "click" for call in patched_device.calls)
+
+
+def test_rid_flag_accepts_the_published_rid_prefix(patched_device: FakeDevice) -> None:
+    result = runner.invoke(app, ["tap-and-analyze", "--rid", "rid:continue_btn"])
+
+    assert result.exit_code == 0, result.stderr
+    assert json.loads(result.stdout)["action"] == "tap"
+    assert any(call[0] == "click" for call in patched_device.calls)
+
+
+def test_has_accepts_the_same_redundant_rid_prefix(patched_device: FakeDevice) -> None:
+    result = runner.invoke(app, ["has", "--rid", "rid:continue_btn"])
+
+    assert result.exit_code == 0, result.stderr
+    assert json.loads(result.stdout)["found"] is True
 
 
 def test_the_cli_needs_no_prior_analyze_to_use_a_key(patched_device: FakeDevice) -> None:
@@ -71,9 +90,15 @@ def test_mcp_advertises_stable_key_on_every_selector_tool() -> None:
             {"key": "tx:49e6d8ed09", "bounds": [10, 20, 30, 40]},
         ),
         ({"rid": "continue_btn"}, {"rid": "continue_btn", "text": None, "desc": None}),
+        ({"rid": "rid:continue_btn"}, {"rid": "continue_btn", "text": None, "desc": None}),
     ],
 )
 def test_mcp_turns_a_stable_key_into_an_identity_selector(
     args: dict[str, Any], expected: dict[str, Any]
 ) -> None:
     assert _selector_from_args(args) == expected
+
+
+def test_nested_selectors_accept_the_same_published_prefix() -> None:
+    assert normalize_selector({"rid": "rid:continue_btn"}) == {"rid": "continue_btn"}
+    assert normalize_selector({"id": "id:continue_btn"}) == {"rid": "continue_btn"}

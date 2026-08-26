@@ -13,7 +13,12 @@ from typing import TYPE_CHECKING, Any
 
 from .errors import SelectorAmbiguousError, UsageError
 from .schema import Element, ElementId, Source
-from .selectors import element_digest, match_selector, selector_label
+from .selectors import (
+    element_digest,
+    match_selector,
+    normalize_selector_prefix,
+    selector_label,
+)
 
 if TYPE_CHECKING:
     from .memory import RouteStep
@@ -72,7 +77,7 @@ def normalize_selector(value: Any, *, field: str = "selector") -> Selector:
     value_text = body[key]
     if not isinstance(value_text, str) or not value_text.strip():
         raise UsageError(f"{field}.{key} must be a non-empty string")
-    out: Selector = {key: value_text}
+    out: Selector = {key: normalize_selector_prefix(key, value_text)}
     if "index" in body:
         index = body["index"]
         if isinstance(index, bool) or not isinstance(index, int) or index < 0:
@@ -90,7 +95,8 @@ def parse_selector_expression(value: str, *, field: str) -> Selector:
             f"invalid {field} selector {value!r}",
             hint=f"Use {field} 'rid:container', 'text:Label', or 'desc:Description'.",
         )
-    return {"rid" if prefix == "id" else prefix: needle}
+    key = "rid" if prefix == "id" else prefix
+    return {key: normalize_selector_prefix(key, needle)}
 
 
 def _indexed_match(

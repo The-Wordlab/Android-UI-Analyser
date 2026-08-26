@@ -71,6 +71,7 @@ from .memory import (
 from .projection import Projection, render_action_tsv, trim_observation_payload
 from .reconcile import ReconciliationStore, ResearchReport, audit_map, summarize_audit
 from .schema import ActionResult, AnalyzeResult, OutputFormat, publish_ids
+from .selectors import normalize_selector_prefix
 
 logger = logging.getLogger("android_ui_analyser")
 
@@ -673,13 +674,13 @@ def _has_target(
                 "pass either a positional or one of --rid/--text/--desc, not both",
                 hint=f"Drop the positional: `aua has {flag} {value}`.",
             )
-        return value, kind
+        return normalize_selector_prefix(kind, value) or value, kind
     if positional is None:
         raise UsageError(
             "has needs something to look for",
             hint="`aua has 'Some label'` or `aua has --rid someId`.",
         )
-    return positional, by
+    return normalize_selector_prefix(by, positional) or positional, by
 
 
 def _selector(
@@ -714,7 +715,11 @@ def _selector(
                 f"--by {by} needs the value as the positional argument",
                 hint="e.g. `aua tap-and-analyze --by id homeTabBROWSE`",
             )
-        return {kind: ident, "index": index, "first": first}
+        return {
+            kind: normalize_selector_prefix(kind, ident),
+            "index": index,
+            "first": first,
+        }
     if key:
         # A stable_key names one element across frames, so it needs neither the id cache nor
         # index/first to be meaningful; ambiguity is answered with the candidates instead.
@@ -725,7 +730,13 @@ def _selector(
             )
         return {"key": key}
     if rid or text or desc:
-        return {"rid": rid, "text": text, "desc": desc, "index": index, "first": first}
+        return {
+            "rid": normalize_selector_prefix("rid", rid),
+            "text": normalize_selector_prefix("text", text),
+            "desc": normalize_selector_prefix("desc", desc),
+            "index": index,
+            "first": first,
+        }
     return None
 
 

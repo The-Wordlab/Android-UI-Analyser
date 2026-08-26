@@ -35,6 +35,7 @@ from .engine import (
 from .errors import AuaError, UsageError
 from .projection import Projection, trim_observation_payload
 from .schema import OutputFormat, publish_ids
+from .selectors import normalize_selector_prefix
 
 SERVER_NAME = "android-ui-analyser"
 
@@ -100,7 +101,11 @@ def _selector_from_args(args: dict[str, Any]) -> dict[str, Any] | None:
     rid, text, desc = args.get("rid"), args.get("text"), args.get("desc")
     if rid is None and text is None and desc is None:
         return None
-    sel: dict[str, Any] = {"rid": rid, "text": text, "desc": desc}
+    sel: dict[str, Any] = {
+        "rid": normalize_selector_prefix("rid", rid),
+        "text": normalize_selector_prefix("text", text),
+        "desc": normalize_selector_prefix("desc", desc),
+    }
     if args.get("index") is not None:
         sel["index"] = int(args["index"])
     if args.get("first"):

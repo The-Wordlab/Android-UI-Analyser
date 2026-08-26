@@ -19,6 +19,33 @@ _MAX_CANDIDATES = 8  # candidate elements echoed back in an ambiguous/not-found 
 _NEAREST_FLOOR = 0.3  # similarity below which a "did you mean" suggestion is noise
 
 
+def normalize_selector_prefix(field: str, value: str | None) -> str | None:
+    """Accept either a bare selector value or the published ``kind:value`` spelling.
+
+    Agents frequently paste ``rid:sendButton`` from an observation after already choosing a
+    ``--rid``/``rid`` field. Treating that as the literal resource-id ``rid:sendButton`` makes
+    an otherwise exact selector miss. Strip only a matching, redundant prefix; a text label
+    such as ``id: 42`` remains untouched when it is used with a text selector.
+    """
+
+    if value is None:
+        return None
+    accepted = {
+        "id": {"id", "rid"},
+        "rid": {"id", "rid"},
+        "text": {"text"},
+        "desc": {"desc"},
+    }.get(field.casefold())
+    if accepted is None:
+        return value
+    normalized = value
+    while True:
+        prefix, separator, remainder = normalized.partition(":")
+        if not separator or not remainder or prefix.casefold() not in accepted:
+            return normalized
+        normalized = remainder
+
+
 def is_back_resource_id(resource_id: str | None) -> bool:
     """True when the resource-id's final camel/snake token is exactly ``back``."""
     tail = (resource_id or "").rsplit("/", 1)[-1]
@@ -100,6 +127,9 @@ def match_selector(
     Tiering is what makes ``--text Browse`` usable on a screen that also has a
     "Browse more apps" row: an exact hit never gets drowned in substring hits.
     """
+    rid = normalize_selector_prefix("rid", rid)
+    text = normalize_selector_prefix("text", text)
+    desc = normalize_selector_prefix("desc", desc)
     tiers: dict[ElementId, list[Element]] = {}
     for el in elements:
         if rid:
