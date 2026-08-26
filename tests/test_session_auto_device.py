@@ -106,6 +106,83 @@ def test_app_bootstrap_provisionally_leases_and_skips_targets_without_app(
     assert leases.holder(registry, "emulator-5556") == "session-agent"
 
 
+def test_busy_app_pool_provisions_without_connecting_to_the_foreign_target(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    registry = tmp_path / "coordination"
+    cfg = make_config(
+        cache={"dir": str(tmp_path / "run")},
+        lease={"registry_dir": str(registry)},
+    )
+    engine = Engine(cfg)
+    engine._lease_owner = "session-agent"
+    online = [DeviceInfo(serial="emulator-5554", state="device")]
+    assert leases.acquire(registry, "emulator-5554", owner="rename-agent")
+    monkeypatch.setattr(engine, "_list_targets", lambda: list(online))
+    monkeypatch.setattr(engine.platform, "target_preference", lambda info: info.serial)
+    connected: list[str] = []
+
+    def connect(serial: str | None) -> Any:
+        assert serial is not None
+        connected.append(serial)
+        return SimpleNamespace(serial=serial, close=lambda: None)
+
+    monkeypatch.setattr(engine, "_connect_target", connect)
+    monkeypatch.setattr(
+        engine.platform,
+        "installed_app",
+        lambda runtime, app_id: InstalledApp(
+            app_id=app_id,
+            installed=runtime.serial == "emulator-5556",
+        ),
+    )
+
+    class VirtualDevices:
+        @staticmethod
+        def select_avd_for_session(avd: str | None, *, needs: list[str]) -> str:
+            assert avd is None
+            assert needs == []
+            return "luzia-ready"
+
+        @staticmethod
+        def start(avd: str, **_kwargs: Any) -> dict[str, Any]:
+            assert avd == "luzia-ready"
+            online.append(DeviceInfo(serial="emulator-5556", state="device"))
+            return {
+                "ok": True,
+                "serial": "emulator-5556",
+                "avd": avd,
+                "instance": "luzia-ready.p5556",
+                "pid": 6556,
+            }
+
+        @staticmethod
+        def stop_spawned_instance(**kwargs: Any) -> dict[str, Any]:
+            raise AssertionError(f"successful provisioning rolled back: {kwargs}")
+
+    virtual = VirtualDevices()
+    monkeypatch.setattr(
+        engine.platform,
+        "capability",
+        lambda name: virtual if name == "virtual_devices" else None,
+    )
+
+    prepared = engine._prepare_session_target(
+        wait_for_lease_s=0,
+        start_emulator=True,
+        headed=False,
+        audio=False,
+        avd=None,
+        package="com.example.notes",
+    )
+
+    assert prepared["serial"] == "emulator-5556"
+    assert prepared["emulator_started"] is True
+    assert connected == ["emulator-5556"]
+    assert leases.holder(registry, "emulator-5554") == "rename-agent"
+    assert leases.holder(registry, "emulator-5556") == "session-agent"
+
+
 def test_app_bootstrap_never_switches_a_sticky_target_missing_the_app(
     tmp_path: Path, monkeypatch: Any
 ) -> None:

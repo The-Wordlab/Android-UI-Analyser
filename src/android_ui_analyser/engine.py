@@ -1317,9 +1317,7 @@ class Engine:
                     "emulator_started": False,
                     "lease_waited_ms": self._lease_waited_ms,
                 }
-            if required_app:
-                if selection_error is not None:
-                    raise selection_error
+            if required_app and selection_error is None:
                 detail = (
                     f"; checked without finding it on {', '.join(sorted(excluded_for_missing_app))}"
                     if excluded_for_missing_app
@@ -1369,17 +1367,29 @@ class Engine:
             self._lease_serial = None
             self._leased_serial_resolved = None
             self._lease_owner_resolved = None
+            claimed: str | None = None
             try:
                 claimed = self._lease_device()
                 if claimed != serial:
                     raise DeviceError(
                         f"automatic session provisioning started {serial} but leased {claimed}"
                     )
+                if required_app and not self._selected_target_has_app(serial, required_app):
+                    raise DeviceError(
+                        f"{required_app} is not installed on provisioned target {serial}",
+                        code="required_app_not_installed",
+                        hint=(
+                            "Supply `--apk <bundle>` so AUA can install the app while "
+                            "provisioning. The unusable emulator was stopped."
+                        ),
+                    )
             except Exception:
                 # Roll back only what this boot demonstrably created — its own spawned
                 # process and instance record. A serial-scoped stop here once killed a
                 # foreign worker's emulator: the claim had failed precisely because that
                 # serial was somebody else's leased device.
+                if claimed == serial:
+                    self._release_failed_bootstrap_target(serial)
                 with contextlib.suppress(Exception):
                     emulator_mod.stop_spawned_instance(
                         instance=str(boot.get("instance") or ""),
