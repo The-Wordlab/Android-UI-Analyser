@@ -1,0 +1,75 @@
+# V11: an on-device driver, trained on LFM2.5-350M rather than FunctionGemma-270M.
+#
+# Why this base. FunctionGemma-270M spends 168M of its 268M parameters (63%) on a 262,144-token
+# multilingual vocabulary this task never uses, leaving ~100M doing the work. LFM2.5-350M has a
+# 65,536-token vocabulary (67M of 354M, 19%), leaving ~287M — 2.9x the non-embedding capacity at
+# 1.3x the total size. Measured locally under this exact LoRA configuration it is also *faster and
+# smaller in memory* despite being nominally larger: 13.2 it/s against 7.0, 2.9 GB peak against
+# 4.1, and 92 ms per decision against 234. The one capacity result already in EXPERIMENT_LOG.md
+# points the same way: Qwen3-1.7B beat FunctionGemma's mean across 16 checkpoints by 3.1 standard
+# errors with roughly half the spread.
+#
+# It also has an on-device deployment path, which FunctionGemma's MLX build does not: Liquid
+# publishes GGUF for llama.cpp and an Android/iOS SDK, and LFM2.5-350M quantises to 219 MB at
+# Q4 — small enough to ship beside the helper APK. That is the whole point of V11.
+#
+# Sizing. The corpus is 36,189 training rows. In mlx-lm 0.31.3 one iteration consumes exactly one
+# batch of `batch_size` — `grad_accumulation_steps` only gates the optimizer update, it does NOT
+# add sequences (see `mlx_lm/tuner/trainer.py`: the loop zips `range(1, iters+1)` against
+# `iterate_batches(batch_size=...)`). So a pass is 36189/8 = 4,524 iterations, and 9,216 is 2.04
+# passes. Note that this contradicts the arithmetic in the V9/V10 configs, which treated
+# 8,192 iterations as one pass over 66,000 rows and 32,768 as four passes over 262,584; under the
+# verified semantics those were 0.99 and 1.00 passes respectively. Every pass count in
+# EXPERIMENT_LOG.md is 4x too high for the same reason.
+#
+# Two passes is deliberate rather than cautious. V10's best refusal checkpoint (18/38) sat at 0.56
+# passes, and its refusal reading stayed noisy across checkpoints — so exposure was never the
+# binding constraint. Sixteen checkpoints at 576-iteration intervals give the selector something
+# to choose between; selection is on worst-family accuracy plus zero safety errors, never on
+# validation loss. V10's first run sat at 0.001 validation loss while refusing 0 of 38.
+#
+# max_seq_length must stay 1024: `train._validate_dataset` rejects the corpus outright if it
+# disagrees with `validation.json`, which this corpus wrote as 1024. The longest actual row is 720
+# tokens under LFM2.5's tokenizer, so there is real headroom and no truncation.
+#
+# batch_size 8 was measured optimal on an M5 Max (sequences/sec: 4 -> 14.0, 8 -> 15.1, 16 -> 11.4,
+# 32 -> 12.9). That sweep was on Metal; an L40S may well prefer a larger batch, so treat 8 as a
+# safe starting point rather than a tuned value, and re-sweep on the Pod before a long run.
+
+model: LiquidAI/LFM2.5-350M-MLX-bf16
+train: true
+test: false
+fine_tune_type: lora
+optimizer: adamw
+optimizer_config:
+  adamw:
+    weight_decay: 0.01
+
+data: runs/functiongemma/data-v11
+adapter_path: runs/functiongemma/adapters/lora-r32-lfm2.5-350m-v11-seed111
+seed: 111
+num_layers: -1
+batch_size: 8
+grad_accumulation_steps: 4
+iters: 9216
+# Warmup then cosine decay. A flat 1e-4 converged in 200 iterations on a smoke corpus, which is a
+# sign it is hot enough to be worth decaying over a 9,216-iteration run rather than holding.
+learning_rate: 1.0e-4
+lr_schedule:
+  name: cosine_decay
+  arguments: [1.0e-4, 9216, 1.0e-5]
+  warmup: 300
+  warmup_init: 1.0e-6
+steps_per_report: 50
+steps_per_eval: 576
+save_every: 576
+val_batches: 100
+max_seq_length: 1024
+mask_prompt: true
+grad_checkpoint: false
+report_to: null
+
+lora_parameters:
+  rank: 32
+  scale: 64.0
+  dropout: 0.05

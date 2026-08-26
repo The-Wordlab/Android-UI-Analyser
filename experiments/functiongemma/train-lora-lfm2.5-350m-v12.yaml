@@ -1,0 +1,83 @@
+# V12: the first run on a corpus where progress lives on the node instead of in a joinable list.
+#
+# The killed first attempt is why this file exists twice. It trained on a corpus whose shortcut gate
+# reported clean while a rule predicted `no_progress` at precision 1.000 over 1,004 rows: history
+# entries invented node ids from `randrange(1, 9)` while a real target id reaches n14, so "a history
+# entry names a node above n8" was a perfect tell. It passed every one of the search's firing
+# conditions and was invisible only because no gate feature read the number in an id. Worse, the two
+# families meant to share an evidence shape did not — repeated stalls on one real node scored
+# `no_progress` 377 times against `tap` 3 — so the probe testing that distinction was asking the
+# model to contradict its own training data, and the 68.8% reported as "ignored the history" was the
+# model being correct.
+#
+# The fix was to delete the join. The helper already holds every AccessibilityNodeInfo, so the device
+# can count attempts per node for free:
+#
+#   {"n": "n3", "text": "Wi-Fi", "tap": true, "tried": 2, "last": "unchanged"}
+#
+# `no_progress` is now one field on the node the goal names, reachable by the same word-overlap step
+# the shipped Java rule already performs. Measured on the rebuilt corpus:
+#
+#   a stalled node anywhere      -> tap 49.6%, no_progress 13.0%   (was 377 vs 3)
+#   the goal's own node stalled  -> no_progress 87%
+#
+# What else changed against V11, each measured in data-v12/manifest.json:
+#
+#   * the contract points instead of spelling. `tap(n="n3")` where V11 emitted
+#     `label="Display & touch Dark theme, font size, touch"` and grounded 0 of 496 answers. There is
+#     no field a name can be invented into — the same property that makes v11_baseline.py ground at
+#     100% while every V11 checkpoint grounded at 0%.
+#   * every row is built on one of 637 real screens harvested from live emulators (AOSP, third-party
+#     apps, and the same screens in English, Arabic and German)
+#   * verbatim-answer-in-goal 35.6%, down from 73.6%
+#   * the answer mix, reasons included, is flat across progress levels: worst class drift 0.001.
+#     V11's model chose its refusal *reason* by how much had happened, and the first V12 build
+#     balanced calls without reasons, leaving that mapping intact under a reported spread of 0.0001.
+#   * splits are by screen, not by row, so a test screen has never been trained on
+#   * the gate is clean with the numeric-id features it was previously missing
+#
+# Sizing: 45,917 rows at batch_size 8 is 5,740 iterations, exactly one pass. One pass because nothing
+# after iteration 784 helped in the killed run, and V11's validation loss bottomed at 0.12 passes.
+#
+# THE SCHEDULE WAS WRONG IN EVERY EARLIER CONFIG. mlx-lm gates `optimizer.update` on
+# `it % grad_accumulation_steps == 0`, and MLX schedules advance per *update*, not per iteration. With
+# grad_accumulation_steps 4 and iters 12544, the previous run had 3,136 updates against a schedule
+# configured for 12,544 decay steps — so its LR reached 8.7e-5 at the end instead of 1e-5. It was
+# warmup-then-constant-1e-4, and its best checkpoint was taken at 6.5e-5 on the way *up*. Every
+# schedule number here is therefore divided by grad_accumulation_steps: 1435 = 5740/4, warmup 75.
+
+model: LiquidAI/LFM2.5-350M-MLX-bf16
+train: true
+test: false
+fine_tune_type: lora
+optimizer: adamw
+optimizer_config:
+  adamw:
+    weight_decay: 0.01
+
+data: runs/functiongemma/data-v12
+adapter_path: runs/functiongemma/adapters/lora-r32-lfm2.5-350m-v12b-seed111
+seed: 111
+num_layers: -1
+batch_size: 8
+grad_accumulation_steps: 4
+iters: 5740
+learning_rate: 1.0e-4
+lr_schedule:
+  name: cosine_decay
+  arguments: [1.0e-4, 1435, 1.0e-5]
+  warmup: 75
+  warmup_init: 1.0e-6
+steps_per_report: 50
+steps_per_eval: 480
+save_every: 480
+val_batches: 100
+max_seq_length: 1024
+mask_prompt: true
+grad_checkpoint: false
+report_to: null
+
+lora_parameters:
+  rank: 32
+  scale: 64.0
+  dropout: 0.05
