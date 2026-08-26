@@ -127,6 +127,57 @@ def test_allow_incomplete_terminates_with_an_explicit_incomplete_verdict(
     assert finished["goal_progress"]["status"] == "terminated_incomplete"
 
 
+def test_finish_summary_keeps_the_closure_decision_without_the_full_timeline(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path, "phase-summary")
+    observed = _observation(
+        engine.device.serial,
+        screen="catalog",
+        title="Catalog",
+        controls=[],
+    )
+    started = engine.session_start("Inspect catalog. Then verify details", observation=observed)
+
+    finished = engine.session_finish(started["session_id"], summary=True)
+
+    assert finished["ok"] is False
+    assert finished["summary"] is True
+    assert finished["verdict"] == "incomplete"
+    assert finished["goal_progress"]["next_call"] is not None
+    assert "phases" not in finished["goal_progress"]
+    assert isinstance(finished["observation"]["element_count"], int)
+    assert "elements" not in finished["observation"]
+    assert finished["full_review_call"]["mcp"] == {
+        "tool": "session_review",
+        "arguments": {"session_id": started["session_id"]},
+    }
+
+
+def test_terminated_summary_keeps_accounting_but_drops_call_log(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path, "phase-summary-terminated")
+    observed = _observation(
+        engine.device.serial,
+        screen="catalog",
+        title="Catalog",
+        controls=[],
+    )
+    started = engine.session_start("Inspect catalog. Then verify details", observation=observed)
+
+    finished = engine.session_finish(
+        started["session_id"],
+        allow_incomplete=True,
+        summary=True,
+    )
+
+    assert finished["ok"] is True
+    assert finished["terminated"] is True
+    assert finished["review"]["accounting"]
+    assert "call_log" not in finished["review"]
+
+
 def test_arrived_title_prefers_requested_flow_preview_over_weak_child_control(
     tmp_path: Path,
 ) -> None:

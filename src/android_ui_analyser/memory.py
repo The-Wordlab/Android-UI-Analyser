@@ -5177,7 +5177,7 @@ def same_screen_family(app: AppMap, left: str | None, right: str | None) -> bool
     """Whether two mapped names are context variants of the same logical screen.
 
     Context-specific records deliberately have distinct route names (for example
-    ``apps_hub__apps_hub_experiment_a``), while ``logical_name`` preserves the product screen
+    ``catalog__layout_experiment_a``), while ``logical_name`` preserves the product screen
     they represent. Navigation arrival may cross that naming boundary, but it must not cross a
     distinct UI state or surface such as a loading shell or modal.
     """

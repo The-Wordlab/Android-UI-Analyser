@@ -974,7 +974,7 @@ def test_dashboard_database_operations_delegate_and_require_typed_confirmation(
 
     state = _dashboard_state(tmp_path)
     device = object()
-    monkeypatch.setattr("android_ui_analyser.device.connect", lambda serial: device)
+    monkeypatch.setattr(state.platform, "connect", lambda serial: device)
 
     calls: list[tuple[str, dict[str, object]]] = []
 

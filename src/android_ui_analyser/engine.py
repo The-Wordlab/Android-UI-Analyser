@@ -10049,11 +10049,142 @@ class Engine:
             out["path"] = str(path)
         return out
 
+    @staticmethod
+    def _session_finish_summary(result: dict[str, Any]) -> dict[str, Any]:
+        """Project closure onto the verdict, recovery, cleanup, and accounting essentials."""
+
+        keep = (
+            "ok",
+            "code",
+            "session_id",
+            "finished",
+            "terminated",
+            "verdict",
+            "missing_checkpoints",
+            "errors",
+            "hint",
+            "artifacts_dir",
+        )
+        summary = {key: result[key] for key in keep if key in result}
+        summary["summary"] = True
+
+        progress = result.get("goal_progress")
+        if isinstance(progress, dict):
+            compact_progress = {
+                key: progress[key]
+                for key in (
+                    "session_id",
+                    "completed",
+                    "total",
+                    "done",
+                    "terminated",
+                    "status",
+                    "next_call",
+                    "checkpoint",
+                    "blocking_phases",
+                )
+                if key in progress
+            }
+            current = progress.get("current")
+            if isinstance(current, dict):
+                compact_progress["current"] = {
+                    key: current[key]
+                    for key in ("id", "objective", "kind", "status")
+                    if key in current
+                }
+            else:
+                compact_progress["current"] = current
+            summary["goal_progress"] = compact_progress
+
+        cleanup_summary: list[dict[str, Any]] = []
+        for row in result.get("cleanup") or []:
+            if not isinstance(row, dict):
+                continue
+            compact_row = {key: row[key] for key in ("action", "ok") if key in row}
+            detail = row.get("result")
+            if isinstance(detail, dict):
+                selected = {
+                    key: detail[key]
+                    for key in (
+                        "detail",
+                        "serial",
+                        "released",
+                        "retained",
+                        "leased",
+                        "auto_stop",
+                        "idle_stop_s",
+                    )
+                    if key in detail
+                }
+                if selected:
+                    compact_row["result"] = selected
+            cleanup_summary.append(compact_row)
+        summary["cleanup"] = cleanup_summary
+
+        review = result.get("review")
+        if isinstance(review, dict):
+            summary["review"] = {
+                key: review[key]
+                for key in (
+                    "ok",
+                    "run_ok",
+                    "failures",
+                    "accounting",
+                    "duration_ms",
+                    "avoidable_calls",
+                    "estimated_calls_saved_next_run",
+                    "advice",
+                )
+                if key in review
+            }
+        observation = result.get("observation")
+        if isinstance(observation, dict):
+            screen = observation.get("screen") or {}
+            meta = observation.get("meta") or {}
+            summary["observation"] = {
+                "screen": {
+                    key: screen[key]
+                    for key in ("package", "activity", "width", "height")
+                    if key in screen
+                },
+                "meta": {
+                    key: meta[key]
+                    for key in ("known_screen", "fingerprint", "device_serial")
+                    if key in meta
+                },
+                "element_count": len(observation.get("elements") or []),
+            }
+        contract = result.get("contract_verdict")
+        if isinstance(contract, dict):
+            summary["contract_verdict"] = {
+                key: contract[key]
+                for key in ("ok", "code", "status", "checkpoint_id", "failures")
+                if key in contract
+            }
+        candidate = result.get("candidate_flow")
+        if isinstance(candidate, dict):
+            summary["candidate_flow"] = {
+                key: candidate[key]
+                for key in ("name", "verified", "hint", "error")
+                if key in candidate
+            }
+        session_id = result.get("session_id")
+        summary["full_review_call"] = {
+            "cli": f"aua session review --session-id {shlex.quote(str(session_id))}",
+            "mcp": {
+                "tool": "session_review",
+                "arguments": {"session_id": session_id},
+            },
+            "reason": "Fetch the full call timeline, patterns, and command counts only if needed.",
+        }
+        return summary
+
     def session_finish(
         self,
         session_id: str | None = None,
         *,
         allow_incomplete: bool = False,
+        summary: bool = False,
     ) -> dict[str, Any]:
         """Restore only reversible state created after this session started, then review it."""
         from .session import (
@@ -10100,7 +10231,7 @@ class Engine:
             ]
             if incomplete:
                 progress = phase_progress(state)
-                return {
+                result = {
                     "ok": False,
                     "code": (
                         "contract_incomplete"
@@ -10124,6 +10255,7 @@ class Engine:
                         "Use --allow-incomplete only to abandon the unfinished goal explicitly."
                     ),
                 }
+                return self._session_finish_summary(result) if summary else result
         candidate_payload: dict[str, Any] | None = None
         if state.contract is not None and all(
             phase.status == "completed" for phase in state.phases
@@ -10278,7 +10410,7 @@ class Engine:
             result["candidate_flow"] = candidate_payload
         if state.artifact_dir:
             result["artifacts_dir"] = state.artifact_dir
-        return result
+        return self._session_finish_summary(result) if summary else result
 
     def reach(
         self,

@@ -582,7 +582,8 @@ def _tool_definitions() -> list[types.Tool]:
             description=(
                 "Finish the session, restore session-owned reversible state, release its lease, "
                 "keep an AUA-started emulator warm until the lease-gated idle timeout, and return "
-                "the final efficiency review."
+                "a compact final verdict. Set summary=false only when the full review/evidence "
+                "payload is needed."
             ),
             inputSchema={
                 "type": "object",
@@ -594,6 +595,11 @@ def _tool_definitions() -> list[types.Tool]:
                         "description": (
                             "Explicitly terminate despite incomplete authored checkpoints."
                         ),
+                    },
+                    "summary": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "Compact verdict/cleanup/accounting instead of full detail.",
                     },
                 },
                 "additionalProperties": False,
@@ -2756,7 +2762,10 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
             )
         )
     if name == "session_finish":
-        finish_kwargs: dict[str, Any] = {"session_id": args.get("session_id")}
+        finish_kwargs: dict[str, Any] = {
+            "session_id": args.get("session_id"),
+            "summary": bool(args.get("summary", True)),
+        }
         if "allow_incomplete" in args:
             finish_kwargs["allow_incomplete"] = bool(args["allow_incomplete"])
         return _dump(_engine_method(engine, "session_finish")(**finish_kwargs))

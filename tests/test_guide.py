@@ -236,6 +236,25 @@ def test_agent_guidance_uses_the_sticky_lease_for_ordinary_commands() -> None:
     assert "aua emulator stop --serial <yours>" in full
 
 
+def test_guidance_teaches_the_agent_closure_recovery_contracts() -> None:
+    full = guide.render_markdown(brief=False)
+    brief = guide.render_brief()
+    skill = guide.render_skill_markdown()
+
+    for text in (full, brief, skill):
+        assert "compact" in text
+        assert "--full" in text
+        assert "--allow-incomplete" in text
+        assert "--submit" in text and "submitted" in text
+        assert "--send rid:<" in text
+        assert "`logical_name`" in text and "state" in text and "surface" in text
+        assert "leased" in text and "leaves" in text and "provision" in text
+
+    assert "redundant matching prefix" in full
+    assert "copied `rid:<resource-id>`" in brief
+    assert "paste it into `--rid`" in skill
+
+
 def test_guide_defines_authoritative_call_accounting_without_inflating_calls() -> None:
     protocol = dict(guide.SESSION_PROTOCOL)["Start from the user's goal"]
     brief = guide.render_brief()

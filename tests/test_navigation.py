@@ -358,13 +358,13 @@ def test_goto_accepts_a_fresh_context_variant_of_the_expected_screen(
     store = _build_three(tmp_path)
     app_map = store.load(P)
     assert app_map is not None
-    variant = "apps__apps_hub_experiment_a"
+    variant = "apps__layout_experiment_a"
     app_map.screens[variant] = app_map.screens["apps"].model_copy(
         update={
             "name": variant,
             "canonical_name": variant,
             "logical_name": "apps",
-            "variant": "apps_hub_experiment_a",
+            "variant": "layout_experiment_a",
         }
     )
     store.save(app_map)

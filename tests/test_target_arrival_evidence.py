@@ -84,22 +84,22 @@ def test_clickable_destination_row_does_not_prove_current_screen_arrival() -> No
 def test_bottom_navigation_does_not_cancel_mapped_identity_proof() -> None:
     app = AppMap(
         package="com.example.app",
-        screens={"apps_hub": _screen("apps_hub", logical_name="apps_hub")},
+        screens={"catalog": _screen("catalog", logical_name="catalog")},
     )
-    bottom_tab = _element(text="Apps Hub", clickable=True, y=2300)
+    bottom_tab = _element(text="Catalog", clickable=True, y=2300)
 
     evidence = target_arrival_evidence(
         app,
-        "apps_hub",
-        "Open Apps Hub",
+        "catalog",
+        "Open Catalog",
         [bottom_tab],
         screen_height=2400,
     )
 
     assert evidence == {
         "source": "mapped_identity",
-        "target": "apps_hub",
-        "value": "apps_hub",
+        "target": "catalog",
+        "value": "catalog",
     }
 
 
@@ -107,21 +107,21 @@ def test_context_variants_share_a_family_but_distinct_states_do_not() -> None:
     app = AppMap(
         package="com.example.app",
         screens={
-            "apps_hub": _screen("apps_hub", logical_name="apps_hub"),
-            "apps_hub__experiment_a": _screen(
-                "apps_hub__experiment_a",
-                logical_name="apps_hub",
+            "catalog": _screen("catalog", logical_name="catalog"),
+            "catalog__experiment_a": _screen(
+                "catalog__experiment_a",
+                logical_name="catalog",
             ),
-            "apps_hub__loading": _screen(
-                "apps_hub__loading",
-                logical_name="apps_hub",
+            "catalog__loading": _screen(
+                "catalog__loading",
+                logical_name="catalog",
                 state="loading",
             ),
         },
     )
 
-    assert same_screen_family(app, "apps_hub", "apps_hub__experiment_a") is True
-    assert same_screen_family(app, "apps_hub", "apps_hub__loading") is False
+    assert same_screen_family(app, "catalog", "catalog__experiment_a") is True
+    assert same_screen_family(app, "catalog", "catalog__loading") is False
 
 
 def test_container_title_does_not_prove_a_clickable_child_destination() -> None:

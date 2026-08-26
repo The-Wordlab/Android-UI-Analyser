@@ -142,17 +142,17 @@ def test_busy_app_pool_provisions_without_connecting_to_the_foreign_target(
         def select_avd_for_session(avd: str | None, *, needs: list[str]) -> str:
             assert avd is None
             assert needs == []
-            return "luzia-ready"
+            return "test-ready"
 
         @staticmethod
         def start(avd: str, **_kwargs: Any) -> dict[str, Any]:
-            assert avd == "luzia-ready"
+            assert avd == "test-ready"
             online.append(DeviceInfo(serial="emulator-5556", state="device"))
             return {
                 "ok": True,
                 "serial": "emulator-5556",
                 "avd": avd,
-                "instance": "luzia-ready.p5556",
+                "instance": "test-ready.p5556",
                 "pid": 6556,
             }
 

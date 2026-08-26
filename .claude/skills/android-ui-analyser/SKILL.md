@@ -17,53 +17,50 @@ Use `aua` for Android UI: act on returned IDs or stable selectors, never pixels,
 
 ## Operating loop
 
-1. Start with `aua session start --goal "<what must be verified>"`; it leases/provisions a
-   compatible target. `--app <package>` needs it installed; `--apk <bundle>` installs.
-   Add `--needs root,play,proxy`. Reuse its observation and follow its
-   exact `recommended_call`; do not immediately re-analyze. `--contract` requires fresh
-   proof and strict finish. `--artifacts-dir` records evidence; `--wait-for-lease` waits safely.
-2. Navigate in this order: verified `goto`, matching saved `flow`, proven deeplink,
-   then a manual analyzed action. Preview risky routes; goal text never authorizes destructive,
+1. Start with `aua session start --goal "<what must be verified>"`. It leases a free compatible
+   target; when all app-compatible targets are leased, it leaves them alone and provisions a
+   unique read-only instance. `--app` requires the package; `--apk` installs it. Reuse its
+   observation and `recommended_call`. `--contract` requires fresh proof and strict finish;
+   `--artifacts-dir` records it. `--wait-for-lease` waits safely.
+2. Navigate in this order: verified `goto`, saved `flow`, proven deeplink, manual action.
+   Screen-family arrival requires equal mapped `logical_name`, state, and surface. Preview risky routes; goal text never authorizes destructive,
    external, settings, data, payment, send, or sign-out effects.
-3. Use analyzed actions and consume their returned `observation`. Each `id` is a stable
-   identity (`rid:continue_btn`), so send it straight back on the next call. Pick the next
+3. Use analyzed actions and consume their `observation`. Each `id` is stable
+   (`rid:continue_btn`): send it back directly or paste it into `--rid`. Pick the next
    control by filtering `observation.elements` on `clickable` (`checked`/`scrollable` for
-   toggles and scrollers); a timed control carries its `cost`. An absent key was at
-   its **default, not unknown**; widen with `--observe-fields all`/`--observe-meta all`.
+   toggles/scrollers). `--submit` is IME-only: check `submitted`; if false, do not retype—use
+   its semantic-send `recommended_call`, or `--send rid:<control>` to type+tap in one call.
 4. Fold arrival into the action with a positive predicate:
    `--until 'rid:resultCard,!text:Loading'`. On `settled-unmet`, use its fresh destination and
-   corrected predicate; never repeat the action. Use `await-and-analyze` for absence-only checks
-   and `back-until-and-analyze` for nested returns.
+   corrected predicate; never repeat. Use `await-and-analyze` for absence-only checks and
+   `back-until-and-analyze` for nested returns.
 5. Keep perception hierarchy-first. Filter in AUA (`--where-rid`, `--where-text`, `--clickable`,
    `--region`); vision for opaque screens and `--deep` for grounding.
 6. Carry `goal_progress.checkpoint` on the next call with `--phase-done` (MCP: `phase_done`),
    not a separate progress call. Use `aua job start await ...` only for a
    read-only wait that may outlive one agent call. If `daemon_outcome_unknown` appears, never
    repeat the action: wait, then inspect a fresh screen.
-7. End with the returned cleanup call, normally `aua session finish`. Use `review.accounting`, not estimates:
+7. End with `aua session finish` (compact by default). Incomplete finish stays active and gives
+   the exact next call; `--allow-incomplete` abandons it, while `--full` gives all evidence. Use `review.accounting`, not estimates:
    `top_level_calls` counts caller-visible invocations = `lifecycle_calls` + `task_calls`;
    `journal_events` adds `folded_internal_events` such as an action-bound wait. The snapshot excludes
    this review/finish (`reporting_call_included` is false); `top_level_calls_including_reporting_call` adds it.
 8. After a contract passes, `session candidate-flow NAME --save` requires explicit
    `--reset-flow` and passing reset/replay.
 
-Flow previews expose value-free `selector_resilience`. Trust an unmapped arrival only when its
-source is `satisfied_action_until` from the preceding action's privacy-safe positive `--until`
-on the same package/context/frame.
+Flow previews expose `selector_resilience`; only a same-frame privacy-safe positive `--until`
+can yield an unmapped `satisfied_action_until` arrival.
 
 ## Device and safety rules
 
 - First call `session start`; never list/start devices, set `AUA_OWNER`, or acquire a lease.
-  It frees dead owners and provisions a capable match. One device
-  stays implicit: omit `--serial`; switching or transfer is explicit.
-- Use `--no-start-emulator` only when provisioning is forbidden; `--headed` only when
-  visibility is required. For voice add `--audio`, then `mic inject` or macOS `mic speak`;
-  never repeat late-delivery or uncertain-toggle errors.
+  It frees dead owners and provisions instead of touching a live owner's target. One device stays
+  implicit: omit `--serial`; switching or transfer is explicit.
+- `--no-start-emulator` forbids provisioning; `--headed` enables visibility. For voice add
+  `--audio`, then `mic inject`/`mic speak`; never repeat uncertain delivery.
 - Use `aua network offline --verify`; session cleanup restores it. Guarded `aua db` for
   debuggable SQLite.
-- A delivered deeplink, spinner disappearance, or unchanged short settle is not proof of the
-  requested destination — check `verified`, not just `ok`. Verify the final affordance
-  the user named.
+- Deeplink delivery or spinner disappearance is not arrival—check `verified` and the final affordance.
 - Assert observed text or `--rid` — labels render in `meta.device_locale`.
 - Never execute `policy_suggestion`; `session autopilot` is off by default and **taps only** —
   never start it on a login or text entry. Short goal in the screen's own words (`Open Catalog`):
@@ -74,5 +71,4 @@ on the same package/context/frame.
 - Run `aua guide --brief` for the selector, wait, navigation, map, flow, lease, and recovery
   field guide.
 - Run `aua capabilities --goal "<goal>"` for structured discovery.
-- Run `aua guide` for command/flag tables, databases, proxy/mock, capture, maps,
-  flow authoring, `aua helper`, troubleshooting, schema, and exit-code reference.
+- Run `aua guide` for the full command, flow, helper, troubleshooting, schema, and exit-code reference.

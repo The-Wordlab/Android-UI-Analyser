@@ -61,7 +61,11 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "analyzed response carries `observation_contract` with `reusable` and "
         "`analyze_needed`. A contracted `session finish` stays active and returns "
         "`contract_incomplete` until all checkpoints, including UI cleanup, pass; only explicit "
-        "`--allow-incomplete` bypasses that proof. Use `--wait-for-lease <seconds>` for bounded "
+        "`--allow-incomplete` abandons that proof and terminates the session. Normal incomplete "
+        "closure exits nonzero but preserves the lease/session and returns the missing "
+        "checkpoints plus one exact next call. Finish output is compact by default; use "
+        "`aua session finish --full` or the returned `full_review_call` only when you need the "
+        "full timeline and evidence. Use `--wait-for-lease <seconds>` for bounded "
         "contention without switching or stealing the requested device. Once complete, "
         "`session candidate-flow NAME` previews the exact post-watermark action window; "
         "`--save` first requires an explicit `--reset-flow` and a successful replay. "
@@ -86,8 +90,10 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "Do not list devices, start an emulator, set `AUA_OWNER`, or acquire a lease before "
         "goal work. `aua session start` probes every attached target, including leased ones so "
         "dead owner processes free immediately, and claims the first compatible free target for "
-        "the calling agent process. If none matches, it selects a configured AVD from "
-        "`--needs root,play,proxy` and boots it headless automatically. Use "
+        "the calling agent process. If no compatible target is free — including when every "
+        "app-compatible target is leased by another live agent — it leaves those targets alone, "
+        "selects a configured AVD from `--needs root,play,proxy`, and boots a unique read-only "
+        "instance headless automatically. Use "
         "`--no-start-emulator` only when provisioning is forbidden. "
         "For microphone/voice-input tests add `--audio`; the normal unattended default uses "
         "`-no-audio` to avoid unnecessary host audio initialization. "
@@ -257,7 +263,9 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "the expected mapped destination before declaring `wrong_screen`; a loading frame is "
         "not route-divergence evidence. It retries OCR only when hierarchy cannot match a "
         "selector or verify arrival; transit screens keep automatic OCR. `--plan` prints the "
-        "annotated route, including per-step risks, without acting. Before the first route step, "
+        "annotated route, including per-step risks, without acting. Context variants with the "
+        "same mapped `logical_name`, `state`, and `surface` count as one screen family for hop "
+        "and arrival proof; loading shells and modals remain distinct. Before the first route step, "
         "AUA refuses deeplinks, cross-package actions, settings/data/environment mutation, app "
         "lifecycle changes, and other non-navigation effects with a visible preview; review it "
         "before re-running with `--allow-unsafe`. Steps matching `memory.destructive_labels` "
@@ -339,6 +347,9 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "That `id` is the element's identity (`rid:continue_btn`, `tx:9f0c1a2b3c#2`), not a "
         "position, so it survives a re-analyze and you can send it straight back — no "
         "`aua resolve` step, no guessing that the same number still means the same control. "
+        "A published selector such as `rid:continue_btn` may be pasted either as this stable "
+        "id or into `--rid`; AUA strips the redundant matching prefix. The same applies to "
+        "`text:` with `--text` and `desc:` with `--desc`. "
         "Repeats on one screen are numbered `#1`, `#2` down the screen. Within the current frame: "
         '`aua tap-and-analyze <id>`, `aua input-and-analyze <id> "text"`, '
         "`aua swipe-and-analyze up`, `aua key-and-analyze back`. "
@@ -411,6 +422,11 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "`known_screen`, `action_diff_summary`, and `note`, so callers can "
         "branch on that single payload. `type → tap send` is two calls, not three, and `goto` "
         "returns the destination's `elements` too. "
+        "`input-and-analyze --submit` requests only the keyboard/IME action; inspect "
+        "`submitted` before claiming the message or form was sent. If it is false, do not type "
+        "again: execute the returned semantic-send `recommended_call`, or select the visible "
+        "control explicitly in the original call with `--send rid:<send-control>`. `--send` "
+        "types and taps that exact control in one top-level call. "
         "The MCP surface makes that contract visible in the method name: "
         "`tap_and_analyze`, `input_and_analyze`, `scroll_and_analyze`, and the corresponding "
         "names for every observed action. The ambiguous short MCP names are not exposed. On "
@@ -607,7 +623,10 @@ BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
         "MCP `phase_done` checkpoint on your next call "
         'after evidence is visible, rather than spending a call on progress. Use `aua capabilities --goal "…"` only '
         "when you need another goal-specific capability, and finish reversible work with "
-        "`aua session finish`. In its review, `top_level_calls` counts caller-visible invocations and "
+        "`aua session finish`. It returns a compact verdict by default; incomplete closure exits "
+        "nonzero and stays active with an exact next call. Use `--allow-incomplete` only to abandon "
+        "the goal, and `--full` or `full_review_call` only for the full timeline. In its review, "
+        "`top_level_calls` counts caller-visible invocations and "
         "equals `lifecycle_calls` + `task_calls`; `journal_events` additionally includes "
         "`folded_internal_events` such as an action-bound wait. The embedded snapshot precedes "
         "the current review/finish "
@@ -617,7 +636,9 @@ BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
     (
         "Attach automatically and clean up only what you started",
         "First call `session start`: it scans the host-wide pool, frees dead owners, matches "
-        "capabilities, and selects or boots a target. Never list/start/acquire manually. The sticky "
+        "capabilities, and selects or boots a target. When all compatible targets are leased, it "
+        "leaves them alone and provisions a unique read-only instance. Never list/start/acquire "
+        "manually. The sticky "
         "lease stays implicit; omit `--serial` from ordinary commands. Never steal. Add "
         "`--needs root,play,proxy`, `--headed`, or `--audio` only when required. "
         "`session finish` cleans up.",
@@ -626,7 +647,8 @@ BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
         "Observe once and use stable selectors",
         "Reuse the compact observation returned by session start. Without a goal session, use "
         "`aua --format tsv analyze --fields id,text,rid,clickable`. Each `id` is a stable "
-        "identity you can act on directly; `--rid <resource-id>` still works. An unlabeled actionable "
+        "identity you can act on directly; `--rid <resource-id>` still works, and a copied "
+        "`rid:<resource-id>` is accepted there too. An unlabeled actionable "
         "control may expose a `px:` perceptual crop fingerprint with rendering tolerance and a "
         "legacy geometry fallback. After state changes, consume the returned observation or use "
         "`aua resolve <stable_key>`; never replay an old numeric id. Numeric taps and long-presses "
@@ -641,33 +663,23 @@ BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
         "a known deeplink, and manual controls last. A delivered deeplink intent is not arrival: "
         "accept it only when the returned observation/activity proves the destination. Inspect a "
         "plan before any route that may delete, pay, send, sign out, mutate settings/data, use a "
-        "deeplink, or leave the app. `goto` refuses those routes before its first step and names "
+        "deeplink, or leave the app. Context variants count as the same arrival only when mapped "
+        "`logical_name`, `state`, and `surface` agree. `goto` refuses risky routes before its first step and names "
         "the required opt-in; exploration never supplies authorization for those effects.",
     ),
     (
         "Act and consume the returned screen",
-        "Use `tap-and-analyze`, `input-and-analyze`, `swipe-and-analyze`, and `key-and-analyze`; "
-        "their `observation` already contains fresh ids. Do not immediately call `analyze` again. "
-        "Verify the exact depth the user named: an intermediate card/detail page with an "
-        "`Open` control does not prove that a conversation, thread, document, or tool itself "
-        "opens. Pick each next control by filtering the returned `observation.elements` on "
-        "`clickable` (plus `checked`/`scrollable` for toggles and scrollers), until the "
-        "requested content and interactive affordance are visible. Never invent a rid that was "
-        "not returned. "
-        "For your action's expected result add `--until 'rid:resultCard'` or "
-        "`--until 'text:Results,!text:Loading'`; escape a literal comma as "
-        "`text:Hello\\, friend`. For a "
-        "nested journey, return in one bounded call with `aua back-until-and-analyze "
-        "'<known_screen>'` (or `'rid:<destination>'`) instead of replaying frame-local Back "
-        "ids. A bare value is a mapped `known_screen`; text/rid/desc evidence keeps its prefix. For an "
-        "unattached network-driven update use `wait-and-analyze --after-change --observe`. Prefer "
-        "a positive final affordance over a generic spinner disappearance. If a daemon call "
-        "reports `daemon_outcome_unknown`, never repeat the action: wait, then inspect one fresh "
-        "screen. AUA treats a live busy daemon as the device owner and will not spawn or fall "
-        "back to a competing controller; superseded daemon cleanup cannot remove its "
-        "successor's ownership files. If a read-only wait may exceed one agent call, use `aua job "
-        "start await --predicate '…'`; reconnect by its id with `job status`, or cancel it. Other "
-        "device operations stay serialized until that job ends.",
+        "Use analyzed actions; their `observation` has fresh ids, so do not re-analyze. "
+        "`--submit` is IME-only: check `submitted`. On false, do not retype; follow the "
+        "semantic-send `recommended_call`, or use `--send rid:<control>` to type and tap once. "
+        "Verify the exact depth named and choose only returned clickable controls. Add positive "
+        "arrival evidence with `--until 'rid:resultCard'` or "
+        "`--until 'text:Results,!text:Loading'`; a literal comma is `text:Hello\\, friend`. "
+        "Return through nesting with `back-until-and-analyze '<known_screen>'` or "
+        "`'rid:<destination>'`. For an unattached update use "
+        "`wait-and-analyze --after-change --observe`. On `daemon_outcome_unknown`, never repeat: "
+        "inspect once; a live busy daemon prevents a competing controller. For a long read-only "
+        "wait, use `job start await`, then `job status` or cancel.",
     ),
     (
         "Let automatic perception escalate",
@@ -728,8 +740,8 @@ ORIENTATION: tuple[tuple[str, str], ...] = (
     ),
     (
         "aua --format tsv analyze --fields id,text,rid,clickable",
-        "READ as rows — `rid` is the app's resource-id (pass with --rid); `id` is this call's "
-        "ordinal (positional, renumbered every analyze)",
+        "READ as rows — `rid` is the app's resource-id (pass bare or as rid:… with --rid); "
+        "`id` is a stable published selector that can be sent straight back",
     ),
     (
         'aua goto "<goal from # goto:>"',
@@ -751,7 +763,8 @@ ORIENTATION: tuple[tuple[str, str], ...] = (
     ),
     (
         "aua input-and-analyze --rid <resourceId> \"text\" --until 'rid:<result>,!text:Loading'",
-        "TYPE — text is positional, and --until belongs HERE, not on a later analyze",
+        "TYPE — text is positional, and --until belongs HERE; --submit is IME-only, while "
+        "--send rid:<control> explicitly types and taps send",
     ),
     (
         "aua back-until-and-analyze '<known_screen>' [--back-id <fresh-id>]",
@@ -1889,53 +1902,50 @@ Use `aua` for Android UI: act on returned IDs or stable selectors, never pixels,
 
 ## Operating loop
 
-1. Start with `aua session start --goal "<what must be verified>"`; it leases/provisions a
-   compatible target. `--app <package>` needs it installed; `--apk <bundle>` installs.
-   Add `--needs root,play,proxy`. Reuse its observation and follow its
-   exact `recommended_call`; do not immediately re-analyze. `--contract` requires fresh
-   proof and strict finish. `--artifacts-dir` records evidence; `--wait-for-lease` waits safely.
-2. Navigate in this order: verified `goto`, matching saved `flow`, proven deeplink,
-   then a manual analyzed action. Preview risky routes; goal text never authorizes destructive,
+1. Start with `aua session start --goal "<what must be verified>"`. It leases a free compatible
+   target; when all app-compatible targets are leased, it leaves them alone and provisions a
+   unique read-only instance. `--app` requires the package; `--apk` installs it. Reuse its
+   observation and `recommended_call`. `--contract` requires fresh proof and strict finish;
+   `--artifacts-dir` records it. `--wait-for-lease` waits safely.
+2. Navigate in this order: verified `goto`, saved `flow`, proven deeplink, manual action.
+   Screen-family arrival requires equal mapped `logical_name`, state, and surface. Preview risky routes; goal text never authorizes destructive,
    external, settings, data, payment, send, or sign-out effects.
-3. Use analyzed actions and consume their returned `observation`. Each `id` is a stable
-   identity (`rid:continue_btn`), so send it straight back on the next call. Pick the next
+3. Use analyzed actions and consume their `observation`. Each `id` is stable
+   (`rid:continue_btn`): send it back directly or paste it into `--rid`. Pick the next
    control by filtering `observation.elements` on `clickable` (`checked`/`scrollable` for
-   toggles and scrollers); a timed control carries its `cost`. An absent key was at
-   its **default, not unknown**; widen with `--observe-fields all`/`--observe-meta all`.
+   toggles/scrollers). `--submit` is IME-only: check `submitted`; if false, do not retype—use
+   its semantic-send `recommended_call`, or `--send rid:<control>` to type+tap in one call.
 4. Fold arrival into the action with a positive predicate:
    `--until 'rid:resultCard,!text:Loading'`. On `settled-unmet`, use its fresh destination and
-   corrected predicate; never repeat the action. Use `await-and-analyze` for absence-only checks
-   and `back-until-and-analyze` for nested returns.
+   corrected predicate; never repeat. Use `await-and-analyze` for absence-only checks and
+   `back-until-and-analyze` for nested returns.
 5. Keep perception hierarchy-first. Filter in AUA (`--where-rid`, `--where-text`, `--clickable`,
    `--region`); vision for opaque screens and `--deep` for grounding.
 6. Carry `goal_progress.checkpoint` on the next call with `--phase-done` (MCP: `phase_done`),
    not a separate progress call. Use `aua job start await ...` only for a
    read-only wait that may outlive one agent call. If `daemon_outcome_unknown` appears, never
    repeat the action: wait, then inspect a fresh screen.
-7. End with the returned cleanup call, normally `aua session finish`. Use `review.accounting`, not estimates:
+7. End with `aua session finish` (compact by default). Incomplete finish stays active and gives
+   the exact next call; `--allow-incomplete` abandons it, while `--full` gives all evidence. Use `review.accounting`, not estimates:
    `top_level_calls` counts caller-visible invocations = `lifecycle_calls` + `task_calls`;
    `journal_events` adds `folded_internal_events` such as an action-bound wait. The snapshot excludes
    this review/finish (`reporting_call_included` is false); `top_level_calls_including_reporting_call` adds it.
 8. After a contract passes, `session candidate-flow NAME --save` requires explicit
    `--reset-flow` and passing reset/replay.
 
-Flow previews expose value-free `selector_resilience`. Trust an unmapped arrival only when its
-source is `satisfied_action_until` from the preceding action's privacy-safe positive `--until`
-on the same package/context/frame.
+Flow previews expose `selector_resilience`; only a same-frame privacy-safe positive `--until`
+can yield an unmapped `satisfied_action_until` arrival.
 
 ## Device and safety rules
 
 - First call `session start`; never list/start devices, set `AUA_OWNER`, or acquire a lease.
-  It frees dead owners and provisions a capable match. One device
-  stays implicit: omit `--serial`; switching or transfer is explicit.
-- Use `--no-start-emulator` only when provisioning is forbidden; `--headed` only when
-  visibility is required. For voice add `--audio`, then `mic inject` or macOS `mic speak`;
-  never repeat late-delivery or uncertain-toggle errors.
+  It frees dead owners and provisions instead of touching a live owner's target. One device stays
+  implicit: omit `--serial`; switching or transfer is explicit.
+- `--no-start-emulator` forbids provisioning; `--headed` enables visibility. For voice add
+  `--audio`, then `mic inject`/`mic speak`; never repeat uncertain delivery.
 - Use `aua network offline --verify`; session cleanup restores it. Guarded `aua db` for
   debuggable SQLite.
-- A delivered deeplink, spinner disappearance, or unchanged short settle is not proof of the
-  requested destination — check `verified`, not just `ok`. Verify the final affordance
-  the user named.
+- Deeplink delivery or spinner disappearance is not arrival—check `verified` and the final affordance.
 - Assert observed text or `--rid` — labels render in `meta.device_locale`.
 - Never execute `policy_suggestion`; `session autopilot` is off by default and **taps only** —
   never start it on a login or text entry. Short goal in the screen's own words (`Open Catalog`):
@@ -1946,8 +1956,7 @@ on the same package/context/frame.
 - Run `aua guide --brief` for the selector, wait, navigation, map, flow, lease, and recovery
   field guide.
 - Run `aua capabilities --goal "<goal>"` for structured discovery.
-- Run `aua guide` for command/flag tables, databases, proxy/mock, capture, maps,
-  flow authoring, `aua helper`, troubleshooting, schema, and exit-code reference.
+- Run `aua guide` for the full command, flow, helper, troubleshooting, schema, and exit-code reference.
 """
 
 

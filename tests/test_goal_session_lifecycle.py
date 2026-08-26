@@ -328,23 +328,35 @@ def test_cli_finish_exits_nonzero_for_an_incomplete_session(
     from android_ui_analyser import cli
 
     engine = _engine(tmp_path, "incomplete-finish-cli")
+    routed: list[dict[str, Any]] = []
     monkeypatch.setattr(cli.GlobalOpts, "engine", lambda _self: engine)
-    monkeypatch.setattr(
-        cli,
-        "_route",
-        lambda *_args, **_kwargs: {
+
+    def finish_route(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        routed.append(kwargs)
+        return {
             "ok": False,
             "code": "session_incomplete",
             "finished": False,
             "terminated": False,
             "verdict": "incomplete",
-        },
+        }
+
+    monkeypatch.setattr(
+        cli,
+        "_route",
+        finish_route,
     )
 
     result = runner.invoke(app, ["session", "finish"])
 
     assert result.exit_code == 1
     assert __import__("json").loads(result.stdout)["verdict"] == "incomplete"
+    assert routed[-1]["summary"] is True
+
+    full = runner.invoke(app, ["session", "finish", "--full"])
+
+    assert full.exit_code == 1
+    assert routed[-1]["summary"] is False
 
 
 def test_generic_end_to_end_goal_accepts_two_concrete_observable_facts(

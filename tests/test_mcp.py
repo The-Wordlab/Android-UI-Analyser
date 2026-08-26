@@ -183,6 +183,7 @@ def test_mcp_accepts_intuitive_session_and_network_verification_options() -> Non
 
     assert tools["session_start"].inputSchema["properties"]["headed"]["default"] is False
     assert tools["session_autopilot"].inputSchema["properties"]["max_steps"]["default"] == 6
+    assert tools["session_finish"].inputSchema["properties"]["summary"]["default"] is True
     assert tools["network_status"].inputSchema["properties"]["verify"]["default"] is True
     assert tools["analyze_screen"].inputSchema["properties"]["no_cache"] == {
         "type": "boolean",
@@ -324,8 +325,10 @@ def test_mcp_session_and_reach_dispatch_contract(monkeypatch: pytest.MonkeyPatch
         calls.append(("session_autopilot", kwargs))
         return {"ok": True, "autopilot": {"steps_executed": 2}}
 
-    def session_finish(*, session_id: str | None = None) -> dict[str, object]:
-        calls.append(("session_finish", {"session_id": session_id}))
+    def session_finish(
+        *, session_id: str | None = None, summary: bool = False
+    ) -> dict[str, object]:
+        calls.append(("session_finish", {"session_id": session_id, "summary": summary}))
         return {"ok": True, "session_id": session_id}
 
     def reach(goal: str, **kwargs: object) -> dict[str, object]:
@@ -386,7 +389,7 @@ def test_mcp_session_and_reach_dispatch_contract(monkeypatch: pytest.MonkeyPatch
             "session_autopilot",
             {"session_id": "session-1", "max_steps": 4, "max_duration_ms": 12000},
         ),
-        ("session_finish", {"session_id": "session-1"}),
+        ("session_finish", {"session_id": "session-1", "summary": True}),
     ]
 
 

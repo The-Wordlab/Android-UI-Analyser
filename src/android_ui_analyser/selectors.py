@@ -22,8 +22,8 @@ _NEAREST_FLOOR = 0.3  # similarity below which a "did you mean" suggestion is no
 def normalize_selector_prefix(field: str, value: str | None) -> str | None:
     """Accept either a bare selector value or the published ``kind:value`` spelling.
 
-    Agents frequently paste ``rid:sendButton`` from an observation after already choosing a
-    ``--rid``/``rid`` field. Treating that as the literal resource-id ``rid:sendButton`` makes
+    Agents frequently paste ``rid:continueButton`` from an observation after choosing a
+    ``--rid``/``rid`` field. Treating that as the literal id ``rid:continueButton`` makes
     an otherwise exact selector miss. Strip only a matching, redundant prefix; a text label
     such as ``id: 42`` remains untouched when it is used with a text selector.
     """

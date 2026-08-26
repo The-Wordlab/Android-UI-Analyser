@@ -4314,8 +4314,13 @@ def session_finish_cmd(
         "--allow-incomplete",
         help="Explicitly terminate even though goal checkpoints are incomplete.",
     ),
+    summary: bool = typer.Option(
+        True,
+        "--summary/--full",
+        help="Return the compact closure verdict (default), or the complete review and evidence.",
+    ),
 ) -> None:
-    """Restore only session-owned reversible state and return the final review."""
+    """Restore session-owned state and return a compact final verdict; use --full for detail."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
         result = _route(
@@ -4323,6 +4328,7 @@ def session_finish_cmd(
             "session_finish",
             session_id=session_id,
             allow_incomplete=allow_incomplete,
+            summary=summary,
         )
         _emit(result, fmt)
         if isinstance(result, dict) and not result.get("ok", False):
