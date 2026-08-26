@@ -5107,6 +5107,8 @@ def target_arrival_evidence(
         _arrival_value_matches(value, terms)
         for element in elements
         if element.clickable is True
+        and not _system_chrome(element, screen_height)
+        and not _bottom_nav(element, screen_height)
         for value in (
             (element.text or "").strip(),
             (element.content_desc or "").strip(),
@@ -5169,6 +5171,32 @@ def target_arrival_evidence(
                     "value": anchor,
                 }
     return None
+
+
+def same_screen_family(app: AppMap, left: str | None, right: str | None) -> bool:
+    """Whether two mapped names are context variants of the same logical screen.
+
+    Context-specific records deliberately have distinct route names (for example
+    ``apps_hub__apps_hub_experiment_a``), while ``logical_name`` preserves the product screen
+    they represent. Navigation arrival may cross that naming boundary, but it must not cross a
+    distinct UI state or surface such as a loading shell or modal.
+    """
+
+    if not left or not right:
+        return False
+    if left.casefold() == right.casefold():
+        return True
+    left_record = app.screens.get(left)
+    right_record = app.screens.get(right)
+    if left_record is None or right_record is None:
+        return False
+    left_logical = left_record.logical_name or left_record.canonical_name or left_record.name
+    right_logical = right_record.logical_name or right_record.canonical_name or right_record.name
+    return (
+        left_logical.casefold() == right_logical.casefold()
+        and left_record.state == right_record.state
+        and left_record.surface == right_record.surface
+    )
 
 
 def screen_is_root(app: AppMap, screen: str, context_id: str | None = None) -> bool:

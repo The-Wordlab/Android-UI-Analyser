@@ -75,6 +75,7 @@ from .memory import (
     redact_label,
     resolve_goal,
     route_step_risks,
+    same_screen_family,
     screen_is_root,
     screen_skips_ocr,
     step_display,
@@ -5765,15 +5766,17 @@ class Engine:
         )
         memory = self._memory
         app = memory.load(res.screen.package) if memory is not None and res.screen.package else None
+        recognized = res.meta.known_screen
         proof = (
             target_arrival_evidence(
                 app,
-                target,
+                recognized or target,
                 target,
                 res.elements,
                 screen_height=res.screen.height,
             )
-            if app is not None and res.meta.known_screen == target
+            if app is not None
+            and same_screen_family(app, recognized, target)
             else None
         )
         return proof is not None, res
@@ -5887,18 +5890,19 @@ class Engine:
             }
 
         def arrival_proof(observation: AnalyzeResult) -> dict[str, str] | None:
-            if observation.meta.known_screen != target:
+            recognized = observation.meta.known_screen
+            if not same_screen_family(app, recognized, target):
                 return None
             return target_arrival_evidence(
                 app,
-                target,
+                recognized or target,
                 goal,
                 observation.elements,
                 screen_height=observation.screen.height,
             )
 
         mem.set_last_goal(serial, goal)  # remember intent for ranking even if we divert
-        if current == target and not transit_resume:  # mid-transit we are NOT on target
+        if same_screen_family(app, current, target) and not transit_resume:
             proof = arrival_proof(res)
             if proof is None:
                 return {
@@ -6227,7 +6231,7 @@ class Engine:
                             "action": edge.action,
                             "expected": edge.to_screen,
                             "known_screen": reached,
-                            "ok": reached == target,
+                            "ok": same_screen_family(app, reached, target),
                             "partial": True,
                             "executed_steps": edge_executed,
                             "failed_step": step_display(fail.step),
@@ -6240,12 +6244,12 @@ class Engine:
                     edge_executed
                     and edge.id
                     and reached
-                    and reached != edge.from_screen
+                    and not same_screen_family(app, reached, edge.from_screen)
                     and res.screen.package == package
                 ):
                     with contextlib.suppress(Exception):
                         mem.record_route_outcome(package, edge.id, ok=False, reached=reached)
-                if reached == target:
+                if same_screen_family(app, reached, target):
                     return arrived_result(early=True)
                 if edge_executed:
                     replanned = replan_from(reached, attempted_route=route[: i + 1])
@@ -6269,7 +6273,9 @@ class Engine:
                     hint=self._assist_suggestion(assist),
                 )
             reached = res.meta.known_screen
-            if reached != edge.to_screen and self._observation_is_loading(res):
+            if not same_screen_family(app, reached, edge.to_screen) and self._observation_is_loading(
+                res
+            ):
                 # An analyzed action can legitimately return the app's settled loading shell.
                 # That is evidence the tap landed, not evidence the learned route diverged.
                 # Reuse the read-only mapped-screen recognizer for one bounded arrival wait
@@ -6283,11 +6289,14 @@ class Engine:
                     if awaited.ok and awaited.observation is not None:
                         res = awaited.observation
                         reached = res.meta.known_screen
-            if reached != edge.to_screen and "apple_vision" not in res.meta.providers_used:
+            if (
+                not same_screen_family(app, reached, edge.to_screen)
+                and "apple_vision" not in res.meta.providers_used
+            ):
                 # A custom-rendered destination may not be recognisable from accessibility
                 # alone. Pay for one OCR retry before declaring that the route diverged.
                 retry = self.analyze(source="hierarchy", with_ocr=True)
-                if retry.meta.known_screen == edge.to_screen:
+                if same_screen_family(app, retry.meta.known_screen, edge.to_screen):
                     res = retry
                     reached = retry.meta.known_screen
             hops.append(
@@ -6295,7 +6304,8 @@ class Engine:
                     "action": edge.action,
                     "expected": edge.to_screen,
                     "known_screen": reached,
-                    "ok": reached in {edge.to_screen, target},
+                    "ok": same_screen_family(app, reached, edge.to_screen)
+                    or same_screen_family(app, reached, target),
                     **({"executed_steps": edge_executed} if len(edge_executed) > 1 else {}),
                 }
             )
@@ -6307,11 +6317,16 @@ class Engine:
             if edge.id:
                 with contextlib.suppress(Exception):
                     mem.record_route_outcome(
-                        package, edge.id, ok=reached == edge.to_screen, reached=reached
+                        package,
+                        edge.id,
+                        ok=same_screen_family(app, reached, edge.to_screen),
+                        reached=reached,
                     )
-            if reached == target:
-                return arrived_result(early=reached != edge.to_screen)
-            if reached != edge.to_screen:
+            if same_screen_family(app, reached, target):
+                return arrived_result(
+                    early=not same_screen_family(app, reached, edge.to_screen)
+                )
+            if not same_screen_family(app, reached, edge.to_screen):
                 replanned = replan_from(reached, attempted_route=route[: i + 1])
                 if replanned is not None:
                     return replanned
@@ -6330,7 +6345,7 @@ class Engine:
                     res,
                     hint=self._assist_suggestion(assist),
                 )
-        arrived = res.meta.known_screen == target
+        arrived = same_screen_family(app, res.meta.known_screen, target)
         if arrived:
             return arrived_result()
         return {
@@ -15461,7 +15476,7 @@ class Engine:
             # this read-only anchor recognition so the caller can reuse the final frame and so
             # the next Back is allowed only from a stable mapped intermediate screen.
             observation.meta.known_screen = actual
-            satisfied = bool(actual and actual.casefold() == resolved_target.casefold())
+            satisfied = same_screen_family(app, actual, resolved_target)
             elapsed = int((time.monotonic() - started_at) * 1000)
             if satisfied or time.monotonic() >= deadline:
                 outcome = "satisfied" if satisfied else "timeout"

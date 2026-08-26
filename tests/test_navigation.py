@@ -352,6 +352,46 @@ def test_goto_waits_for_a_loading_shell_before_calling_the_route_wrong(
     assert out["final_screen"] == "apps"
 
 
+def test_goto_accepts_a_fresh_context_variant_of_the_expected_screen(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store = _build_three(tmp_path)
+    app_map = store.load(P)
+    assert app_map is not None
+    variant = "apps__apps_hub_experiment_a"
+    app_map.screens[variant] = app_map.screens["apps"].model_copy(
+        update={
+            "name": variant,
+            "canonical_name": variant,
+            "logical_name": "apps",
+            "variant": "apps_hub_experiment_a",
+        }
+    )
+    store.save(app_map)
+    dev = ScriptedDevice([HOME], package=P, serial="emu-goto-variant")
+    eng = _engine(tmp_path, dev)
+    arrived = AnalyzeResult(
+        screen=Screen(width=400, height=800, package=P, source="hierarchy"),
+        elements=_elements(APPS),
+        meta=Meta(
+            duration_ms=10,
+            tier_used="hierarchy",
+            path="hierarchy",
+            known_screen=variant,
+            device_serial=dev.serial,
+        ),
+    )
+    monkeypatch.setattr(eng, "_run_steps", lambda *_args, **_kwargs: (None, arrived))
+
+    out = eng.goto("apps")
+
+    assert out["ok"] is True
+    assert out["arrived"] is True
+    assert out["target"] == "apps"
+    assert out["final_screen"] == variant
+    assert out["hops"][0]["ok"] is True
+
+
 def test_goto_records_last_goal(tmp_path: Path) -> None:
     store = _build_three(tmp_path)
     dev = ScriptedDevice([HOME, APPS, REPORTS], package=P, serial="emu-lg")

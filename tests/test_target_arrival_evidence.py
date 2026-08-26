@@ -10,6 +10,7 @@ from android_ui_analyser.memory import (
     RouteEdge,
     ScreenRecord,
     arrival_destination_terms,
+    same_screen_family,
     screen_is_root,
     target_arrival_evidence,
 )
@@ -78,6 +79,49 @@ def test_clickable_destination_row_does_not_prove_current_screen_arrival() -> No
     row = _element(text="Display preferences", clickable=True)
 
     assert target_arrival_evidence(app, "catalog", "Display preferences", [row]) is None
+
+
+def test_bottom_navigation_does_not_cancel_mapped_identity_proof() -> None:
+    app = AppMap(
+        package="com.example.app",
+        screens={"apps_hub": _screen("apps_hub", logical_name="apps_hub")},
+    )
+    bottom_tab = _element(text="Apps Hub", clickable=True, y=2300)
+
+    evidence = target_arrival_evidence(
+        app,
+        "apps_hub",
+        "Open Apps Hub",
+        [bottom_tab],
+        screen_height=2400,
+    )
+
+    assert evidence == {
+        "source": "mapped_identity",
+        "target": "apps_hub",
+        "value": "apps_hub",
+    }
+
+
+def test_context_variants_share_a_family_but_distinct_states_do_not() -> None:
+    app = AppMap(
+        package="com.example.app",
+        screens={
+            "apps_hub": _screen("apps_hub", logical_name="apps_hub"),
+            "apps_hub__experiment_a": _screen(
+                "apps_hub__experiment_a",
+                logical_name="apps_hub",
+            ),
+            "apps_hub__loading": _screen(
+                "apps_hub__loading",
+                logical_name="apps_hub",
+                state="loading",
+            ),
+        },
+    )
+
+    assert same_screen_family(app, "apps_hub", "apps_hub__experiment_a") is True
+    assert same_screen_family(app, "apps_hub", "apps_hub__loading") is False
 
 
 def test_container_title_does_not_prove_a_clickable_child_destination() -> None:
