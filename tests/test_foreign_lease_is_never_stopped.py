@@ -296,8 +296,8 @@ def test_spawned_rollback_is_atomic_against_a_concurrent_acquire(
     acquire_finished = threading.Event()
     outcomes: dict[str, Any] = {}
 
-    def slow_kill(target: str) -> None:
-        assert target == serial
+    def slow_kill(target: int, _signal: int) -> None:
+        assert target == 4242
         kill_entered.set()
         assert allow_kill.wait(timeout=2)
 
@@ -314,7 +314,7 @@ def test_spawned_rollback_is_atomic_against_a_concurrent_acquire(
         outcomes["acquired"] = leases.acquire(registry, serial, owner="new-owner")
         acquire_finished.set()
 
-    monkeypatch.setattr(em, "_adb_emu_kill", slow_kill)
+    monkeypatch.setattr(em.os, "killpg", slow_kill)
     rollback = threading.Thread(target=run_rollback)
     acquirer = threading.Thread(target=run_acquire)
     rollback.start()
@@ -489,7 +489,7 @@ def test_rollback_touches_nothing_when_the_lease_arrived_after_our_boot(
     assert record.exists()
 
 
-def test_rollback_with_no_record_signals_only_its_own_pid(
+def test_rollback_with_no_record_does_not_trust_an_unverified_pid(
     tmp_path: Path, _no_real_devices: dict[str, list]
 ) -> None:
     out = em.stop_spawned_instance(
@@ -502,7 +502,7 @@ def test_rollback_with_no_record_signals_only_its_own_pid(
 
     assert out["stopped"] == []
     assert _no_real_devices["killed"] == []
-    assert _no_real_devices["signalled"] == [777]
+    assert _no_real_devices["signalled"] == []
 
 
 # ----------------------------------------------------------------- lease atomicity

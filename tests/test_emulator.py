@@ -10,7 +10,7 @@ import pytest
 from typer.testing import CliRunner
 
 from android_ui_analyser.cli import app
-from android_ui_analyser.errors import UsageError
+from android_ui_analyser.errors import DeviceError, UsageError
 from conftest import make_config
 
 runner = CliRunner()
@@ -281,6 +281,56 @@ def test_start_parallel_allocates_port_and_owner(
     assert meta["port"] == 5554
 
 
+def test_start_inventory_failure_reaps_only_the_spawned_process(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from android_ui_analyser import emulator as emu
+
+    monkeypatch.setattr(
+        emu, "list_avds", lambda: {"ok": True, "avds": ["only"], "count": 1, "emulator": "x"}
+    )
+    monkeypatch.setattr(emu, "emulator_bin", lambda: "/fake/emulator")
+    monkeypatch.setattr(emu, "running_emulators", lambda: [])
+
+    class FakeProc:
+        pid = 4242
+
+        @staticmethod
+        def poll() -> None:
+            return None
+
+    monkeypatch.setattr(emu.subprocess, "Popen", lambda *_a, **_k: FakeProc())
+    monkeypatch.setattr(
+        emu,
+        "_wait_for_serial",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            DeviceError("inventory reset", code="adb_server_unavailable")
+        ),
+    )
+    signalled: list[int] = []
+    released: list[int | None] = []
+    monkeypatch.setattr(emu.os, "killpg", lambda pid, _sig: signalled.append(pid))
+    monkeypatch.setattr(emu, "release_console_port", released.append)
+    monkeypatch.setattr(
+        emu,
+        "_adb_emu_kill",
+        lambda serial: pytest.fail(f"startup rollback touched shared adb/foreign {serial}"),
+    )
+
+    with pytest.raises(DeviceError, match="inventory reset"):
+        emu.start(
+            "only",
+            cache_dir=tmp_path,
+            port=5554,
+            animations=True,
+            idle_timeout_s=0,
+        )
+
+    assert signalled == [4242]
+    assert released == [5554]
+    assert not (tmp_path / "emulator" / "only.p5554.json").exists()
+
+
 def test_parallel_second_instance_gets_next_port(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -461,8 +511,9 @@ def test_stop_mine_scoped_by_owner(
         json.dumps(
             {
                 "avd": "a",
+                "instance": "a.p5554",
                 "serial": "emulator-5554",
-                "pid": 1,
+                "pid": 101,
                 "owner": "agent-a",
                 "started_by_aua": True,
             }
@@ -473,8 +524,9 @@ def test_stop_mine_scoped_by_owner(
         json.dumps(
             {
                 "avd": "a",
+                "instance": "a.p5556",
                 "serial": "emulator-5556",
-                "pid": 2,
+                "pid": 102,
                 "owner": "agent-b",
                 "started_by_aua": True,
             }
@@ -486,7 +538,7 @@ def test_stop_mine_scoped_by_owner(
     monkeypatch.setattr(emu, "running_emulators", lambda: [])
     monkeypatch.setattr(emu.os, "killpg", lambda *a, **k: None)
     out = emu.stop(mine=True, owner="agent-a", cache_dir=tmp_path)
-    assert killed == ["emulator-5554"]
+    assert killed == [], "owned teardown must not involve the shared adb server"
     assert out["stopped"] == ["emulator-5554"]
     assert not (rec / "a.p5554.json").exists()
     assert (rec / "a.p5556.json").exists()
@@ -511,16 +563,107 @@ def test_stop_mine_kills_recorded(
     rec = tmp_path / "emulator"
     rec.mkdir()
     (rec / "only.json").write_text(
-        json.dumps({"avd": "only", "serial": "emulator-5554", "pid": 99}),
+        json.dumps(
+            {
+                "avd": "only",
+                "instance": "only",
+                "serial": "emulator-5554",
+                "pid": 99,
+                "started_by_aua": True,
+            }
+        ),
         encoding="utf-8",
     )
     killed: list[str] = []
     monkeypatch.setattr(emu, "_adb_emu_kill", lambda s: killed.append(s))
     monkeypatch.setattr(emu, "running_emulators", lambda: [])
+    monkeypatch.setattr(emu.os, "killpg", lambda *a, **k: None)
     out = emu.stop(mine=True, cache_dir=tmp_path)
-    assert killed == ["emulator-5554"]
+    assert killed == [], "owned teardown must not involve the shared adb server"
     assert out["stopped"] == ["emulator-5554"]
     assert not (rec / "only.json").exists()
+
+
+def test_stop_owned_serial_uses_recorded_pid_without_shared_adb(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from android_ui_analyser import emulator as emu
+
+    rec = tmp_path / "emulator"
+    rec.mkdir()
+    record = rec / "only.p5554.json"
+    record.write_text(
+        json.dumps(
+            {
+                "avd": "only",
+                "instance": "only.p5554",
+                "serial": "emulator-5554",
+                "pid": 4242,
+                "started_by_aua": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    signalled: list[int] = []
+    monkeypatch.setattr(emu.os, "killpg", lambda pid, _sig: signalled.append(pid))
+    monkeypatch.setattr(
+        emu,
+        "running_emulators",
+        lambda: pytest.fail("owned serial stop must not enumerate shared adb"),
+    )
+    monkeypatch.setattr(
+        emu,
+        "_adb_emu_kill",
+        lambda serial: pytest.fail(f"owned serial stop used shared adb for {serial}"),
+    )
+
+    out = emu.stop(serial="emulator-5554", cache_dir=tmp_path)
+
+    assert signalled == [4242]
+    assert out["stopped"] == ["emulator-5554"]
+    assert out["requested_via"] == "serial"
+    assert not record.exists()
+
+
+def test_stop_mine_never_signals_unverified_or_pid_one_records(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from android_ui_analyser import emulator as emu
+
+    rec = tmp_path / "emulator"
+    rec.mkdir()
+    (rec / "not-ours.json").write_text(
+        json.dumps({"avd": "foreign", "instance": "not-ours", "pid": 9001}),
+        encoding="utf-8",
+    )
+    (rec / "pid-one.json").write_text(
+        json.dumps(
+            {
+                "avd": "broken",
+                "instance": "pid-one",
+                "pid": 1,
+                "started_by_aua": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        emu.os,
+        "killpg",
+        lambda pid, _sig: pytest.fail(f"unverified record signalled pid {pid}"),
+    )
+    monkeypatch.setattr(
+        emu,
+        "running_emulators",
+        lambda: pytest.fail("owner-scoped record cleanup must not enumerate adb"),
+    )
+
+    out = emu.stop(mine=True, cache_dir=tmp_path)
+
+    assert out["stopped"] == []
+    assert len(out["considered"]) == 2
+    assert (rec / "not-ours.json").exists()
+    assert (rec / "pid-one.json").exists()
 
 
 def test_cli_emulator_list(monkeypatch: pytest.MonkeyPatch) -> None:

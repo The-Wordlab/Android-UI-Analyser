@@ -166,26 +166,20 @@ def run_watchdog(
             meta["watchdog_pid"] = None
             with __import__("contextlib").suppress(OSError):
                 path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
-            from .emulator import stop
+            from .emulator import stop_spawned_instance
 
             # Name ourselves in the stop record. A device that vanished under a live worker
             # could not be attributed to the watchdog or to a coordinator, and the two have
             # very different consequences: one is a timeout to lengthen, the other is a bug.
             with __import__("contextlib").suppress(Exception):
-                if serial:
-                    stop(
-                        serial=serial,
-                        cache_dir=cache,
-                        requested_by="idle-watchdog",
-                        lease_registry_dir=lease_registry,
-                    )
-                else:
-                    stop(
-                        avd=str(meta.get("avd") or instance),
-                        cache_dir=cache,
-                        requested_by="idle-watchdog",
-                        lease_registry_dir=lease_registry,
-                    )
+                stop_spawned_instance(
+                    instance=instance,
+                    pid=pid,
+                    cache_dir=cache,
+                    requested_by="idle-watchdog",
+                    lease_registry_dir=lease_registry,
+                    owner=str(meta.get("owner")) if meta.get("owner") else None,
+                )
             return 0
         time.sleep(_POLL_S)
 

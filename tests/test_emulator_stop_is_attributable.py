@@ -70,6 +70,7 @@ def _write_record(cache: Path, *, instance: str, serial: str, owner: str | None)
                 "instance": instance,
                 "serial": serial,
                 "owner": owner,
+                "pid": 4242,
                 "started_by_aua": True,
                 "last_activity": 0.0,
             }

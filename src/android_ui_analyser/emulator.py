@@ -857,9 +857,14 @@ def select_avd_for_session(
 def running_emulators() -> list[dict[str, Any]]:
     """Emulator serials currently visible to adb (``emulator-*``)."""
     from .device import list_devices
+    from .platforms import android_transport
 
     out: list[dict[str, Any]] = []
-    for d in list_devices():
+    # Emulator boot/wait/cleanup used to bypass AndroidPlatform.prepare_host. When the shared
+    # daemon disappeared mid-boot, every waiting process entered adbutils' implicit autostart at
+    # once. Inventory now stays inside the same endpoint-global transaction as adapter listing.
+    inventory = android_transport.run_adb_inventory_operation(None, list_devices)
+    for d in inventory:
         serial = d.serial or ""
         if serial.startswith("emulator-"):
             out.append(
@@ -1068,6 +1073,22 @@ def _kill_watchdog(meta: dict[str, Any] | None) -> None:
             os.kill(wpid, signal.SIGTERM)
 
 
+def _rollback_failed_start(
+    *,
+    pid: int,
+    meta: dict[str, Any],
+    meta_path: Path,
+    console_port: int | None,
+) -> None:
+    """Reap only the process this start spawned, without consulting shared ADB state."""
+
+    _kill_watchdog(meta)
+    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+        os.killpg(pid, signal.SIGTERM)
+    meta_path.unlink(missing_ok=True)
+    release_console_port(console_port)
+
+
 def _spawn_idle_watchdog(
     *,
     cache_dir: Path,
@@ -1222,7 +1243,19 @@ def start(
             meta_path.write_text(json.dumps(reserve, indent=2) + "\n", encoding="utf-8")
             wrote_reserve = True
 
-    before = {d["serial"] for d in running_emulators()}
+    def rollback_reservation() -> None:
+        release_console_port(console_port)
+        if wrote_reserve:
+            meta_path.unlink(missing_ok=True)
+
+    def reservation_step(operation: Callable[[], Any]) -> Any:
+        try:
+            return operation()
+        except BaseException:
+            rollback_reservation()
+            raise
+
+    before = reservation_step(lambda: {d["serial"] for d in running_emulators()})
     if expected_serial is not None and expected_serial in before:
         # The allocated port already answers as a live device: the used-port snapshot
         # missed it (adb blink, foreign worker's cache). Booting onto it would collide,
@@ -1236,7 +1269,7 @@ def start(
             f"({expected_serial})",
             hint="Another instance owns this serial; retry to allocate a different port.",
         )
-    bin_path = emulator_bin()
+    bin_path = reservation_step(emulator_bin)
     gpu_mode = (gpu or default_gpu_mode(headless=headless)).strip() or "auto"
     cmd = [bin_path, "-avd", avd]
     if headless:
@@ -1268,14 +1301,16 @@ def start(
     idle_timeout_s = max(0.0, float(idle_timeout_s))
 
     log_path = _pid_dir(cache_dir) / f"{inst}.log"
-    log_fh = open(log_path, "a")  # noqa: SIM115 — kept for child lifetime
+    log_fh = reservation_step(lambda: open(log_path, "a"))  # noqa: SIM115
     try:
-        proc = subprocess.Popen(  # noqa: S603
-            cmd,
-            stdout=log_fh,
-            stderr=log_fh,
-            start_new_session=True,
-            close_fds=True,
+        proc = reservation_step(
+            lambda: subprocess.Popen(  # noqa: S603
+                cmd,
+                stdout=log_fh,
+                stderr=log_fh,
+                start_new_session=True,
+                close_fds=True,
+            )
         )
     finally:
         log_fh.close()
@@ -1301,21 +1336,42 @@ def start(
         meta["serial"] = expected_serial
     if owner_tag:
         meta["owner"] = owner_tag
-    meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+
+    cleanup_done = False
+
+    def rollback_failed_start() -> None:
+        nonlocal cleanup_done
+        if cleanup_done:
+            return
+        cleanup_done = True
+        _rollback_failed_start(
+            pid=proc.pid,
+            meta=meta,
+            meta_path=meta_path,
+            console_port=console_port,
+        )
+
+    def startup_step(operation: Callable[[], Any]) -> Any:
+        try:
+            return operation()
+        except BaseException:
+            rollback_failed_start()
+            raise
+
+    startup_step(
+        lambda: meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+    )
 
     if expected_serial is not None:
-        serial = _wait_for_serial(expected_serial, timeout_s=wait_s, expect_avd=avd)
+        serial = startup_step(
+            lambda: _wait_for_serial(expected_serial, timeout_s=wait_s, expect_avd=avd)
+        )
     else:
-        serial = _wait_for_new_emulator(before, timeout_s=wait_s)
+        serial = startup_step(lambda: _wait_for_new_emulator(before, timeout_s=wait_s))
     if serial is None:
-        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-            os.killpg(proc.pid, signal.SIGTERM)
+        rollback_failed_start()
         with open(log_path, encoding="utf-8", errors="replace") as fh:
             tail = fh.read()[-800:]
-        meta_path.unlink(missing_ok=True)
-        # Hand the port back: this instance never bound it, so holding the reservation
-        # would shrink the range for everyone else.
-        release_console_port(console_port)
         raise DeviceError(
             f"emulator {avd!r} did not become ready within {int(wait_s)}s",
             hint=f"Check the log: {log_path}\n{tail}",
@@ -1327,8 +1383,7 @@ def start(
         # blink that hid a running instance during allocation). Fail before the proxy
         # cleanup below can mutate settings on a foreign target, and clean only our own
         # bookkeeping: the serial is explicitly not ours to stop.
-        meta_path.unlink(missing_ok=True)
-        release_console_port(console_port)
+        rollback_failed_start()
         raise DeviceError(
             f"emulator {avd!r} exited during startup while {serial} stayed online; "
             "that serial belongs to another instance",
@@ -1343,26 +1398,32 @@ def start(
     # settings this early, and removing a dead proxy before NetworkMonitor's first probe avoids
     # a transient offline classification. Android may restore the setting later in boot, though,
     # so the settled check below remains authoritative.
-    _clear_inherited_blackholed_proxy(serial, cache_dir=cache_dir)
+    startup_step(lambda: _clear_inherited_blackholed_proxy(serial, cache_dir=cache_dir))
 
     meta["serial"] = serial
     meta["last_activity"] = time.time()
     watchdog_pid = None
     meta["idle_stop_explicit"] = idle_stop_explicit
     if idle_timeout_s > 0:
-        watchdog_pid = _spawn_idle_watchdog(
-            cache_dir=Path(cache_dir).expanduser(),
-            instance=inst,
-            lease_registry_dir=lease_registry_dir,
+        watchdog_pid = startup_step(
+            lambda: _spawn_idle_watchdog(
+                cache_dir=Path(cache_dir).expanduser(),
+                instance=inst,
+                lease_registry_dir=lease_registry_dir,
+            )
         )
         meta["watchdog_pid"] = watchdog_pid
-    meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
-    shell = _serial_shell(serial)
+    startup_step(
+        lambda: meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+    )
+    shell = startup_step(lambda: _serial_shell(serial))
     # `adb state=device` precedes Android restoring persisted global settings. The live failure
     # behind this recovery read unproxied here, then became blackholed seconds later. Always wait
     # for the settled boot and check again; this is the result exposed to callers.
-    _wait_for_boot(shell, timeout_s=min(90.0, wait_s))
-    proxy_cleanup = _clear_inherited_blackholed_proxy(serial, cache_dir=cache_dir)
+    startup_step(lambda: _wait_for_boot(shell, timeout_s=min(90.0, wait_s)))
+    proxy_cleanup = startup_step(
+        lambda: _clear_inherited_blackholed_proxy(serial, cache_dir=cache_dir)
+    )
 
     # Animations off by default. Measured on a windowed AVD: a tap settles in 272ms instead
     # of 357ms, and the spread narrows from 225ms to 69ms — the predictability matters more
@@ -1697,6 +1758,24 @@ def _instance_identity(meta: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _owned_instance_pid(meta: dict[str, Any]) -> int | None:
+    """Recorded process id only for an exact, positive AUA instance identity."""
+
+    pid = meta.get("pid")
+    path = Path(str(meta.get("_path") or ""))
+    instance = meta.get("instance")
+    if (
+        meta.get("started_by_aua") is True
+        and isinstance(pid, int)
+        and pid > 1
+        and isinstance(instance, str)
+        and bool(instance)
+        and path.stem == instance
+    ):
+        return pid
+    return None
+
+
 def stop_spawned_instance(
     *,
     instance: str,
@@ -1705,6 +1784,7 @@ def stop_spawned_instance(
     lease_registry_dir: str | Path | None = None,
     owner: str | None = None,
     requested_by: str | None = None,
+    requested_via: str = "spawned-instance",
 ) -> dict[str, Any]:
     """Roll back exactly one boot this process performed — never an ambiguous serial.
 
@@ -1714,7 +1794,8 @@ def stop_spawned_instance(
     it down mid-run. A rollback owns only what it demonstrably created: the recorded
     emulator process and its instance record under this cache.
 
-    The serial is stopped gracefully only when no live foreign lease claims it. When a
+    The recorded process group is stopped only when its instance identity is exact and no newer
+    live foreign lease may have claimed it. The shared ADB server is never involved. When a
     foreign lease exists, the timeline decides what is still ours:
 
     * lease acquired **before** our boot record — the serial always belonged to the other
@@ -1730,10 +1811,8 @@ def stop_spawned_instance(
             loaded = json.loads(meta_path.read_text(encoding="utf-8"))
             if isinstance(loaded, dict):
                 meta = loaded
-    recorded_pid = meta.get("pid")
-    record_is_ours = bool(meta) and (
-        pid is None or not isinstance(recorded_pid, int) or recorded_pid == pid
-    )
+    positive_pid = _owned_instance_pid({**meta, "_path": str(meta_path or "")})
+    record_is_ours = positive_pid is not None and (pid is None or positive_pid == pid)
     serial = (
         str(meta["serial"])
         if record_is_ours and isinstance(meta.get("serial"), str) and meta.get("serial")
@@ -1741,7 +1820,7 @@ def stop_spawned_instance(
     )
     skipped: list[dict[str, Any]] = []
     stopped: list[str] = []
-    own_pid = pid if isinstance(pid, int) else (recorded_pid if record_is_ours else None)
+    own_pid = positive_pid if record_is_ours else None
     with _stop_lease_transaction(lease_registry_dir, serial):
         # The lease read and every process/device kill stay inside the same exclusive
         # target fence used by acquire/release/transfer. No process can claim this serial
@@ -1758,13 +1837,11 @@ def stop_spawned_instance(
                 # The lease may cover the device we just booted (claimed by another agent in
                 # the gap before our own claim). Terminating our process would kill it.
                 may_kill_own_process = False
-        elif serial:
-            with contextlib.suppress(Exception):
-                _adb_emu_kill(serial)
-                stopped.append(serial)
         if may_kill_own_process and isinstance(own_pid, int) and own_pid > 1:
             with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
                 os.killpg(own_pid, signal.SIGTERM)
+                if serial and foreign is None:
+                    stopped.append(serial)
         if record_is_ours and may_kill_own_process and meta_path is not None:
             _kill_watchdog(meta)
             meta_path.unlink(missing_ok=True)
@@ -1777,7 +1854,7 @@ def stop_spawned_instance(
     _log_stop(
         cache_dir,
         origin=origin,
-        requested_via="spawned-instance",
+        requested_via=requested_via,
         request={"instance": instance, "pid": pid, "serial": serial},
         matched=matched,
         stopped=stopped,
@@ -1789,7 +1866,7 @@ def stop_spawned_instance(
         "stopped": stopped,
         "matched": matched,
         "skipped_leased": skipped,
-        "requested_via": "spawned-instance",
+        "requested_via": requested_via,
         "origin": origin,
         "instance": instance or None,
     }
@@ -1823,7 +1900,6 @@ def stop(
     ``idle-watchdog`` from the watchdog), and the returned ``origin`` / ``requested_via`` are
     also appended to ``<cache>/emulator/stops.log``. See :func:`_log_stop`.
     """
-    targets = running_emulators()
     owner_tag = resolve_owner(owner)
     origin = _stop_origin(requested_by)
     request = {
@@ -1834,6 +1910,7 @@ def stop(
         "all": bool(all_devices),
     }
     if not serial and avd is None and not all_devices and not mine and not owner_tag:
+        targets = running_emulators()
         raise UsageError(
             "emulator stop needs a target: --serial, --avd, --owner, --mine, or --all",
             hint=(
@@ -1847,11 +1924,12 @@ def stop(
     # --owner alone (or with --mine): stop matching aua records.
     if (mine or owner_tag) and not serial and avd is None and not all_devices:
         all_records = _aua_started_records(cache_dir)
+        owned_records = [meta for meta in all_records if _owned_instance_pid(meta) is not None]
         if owner_tag:
-            records = [m for m in all_records if m.get("owner") == owner_tag]
+            records = [m for m in owned_records if m.get("owner") == owner_tag]
             detail = f"stopped emulators owned by {owner_tag!r}"
         else:
-            records = all_records
+            records = owned_records
             detail = "stopped emulators recorded as started by aua"
         # An owner-scoped stop must say exactly which instances it matched, so a caller can see
         # it hit one device and not several — the question nobody could answer after a worker
@@ -1898,14 +1976,12 @@ def stop(
                         {"serial": ser, "holder": str(foreign.get("owner") or "unknown")}
                     )
                     continue
-                if target_serial:
-                    with contextlib.suppress(Exception):
-                        _adb_emu_kill(target_serial)
-                        stopped_mine.append(target_serial)
-                pid = meta.get("pid")
-                if isinstance(pid, int):
+                pid = _owned_instance_pid(meta)
+                if pid is not None:
                     with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
                         os.killpg(pid, signal.SIGTERM)
+                        if target_serial:
+                            stopped_mine.append(target_serial)
                 _kill_watchdog(meta)
                 path = Path(str(meta.get("_path") or ""))
                 if path.is_file():
@@ -1932,6 +2008,31 @@ def stop(
             "detail": detail,
         }
 
+    if serial and avd is None and not all_devices:
+        serial_records = [
+            meta
+            for meta in _aua_started_records(cache_dir)
+            if meta.get("serial") == serial
+            and _owned_instance_pid(meta) is not None
+        ]
+        if len(serial_records) == 1:
+            record = serial_records[0]
+            return stop_spawned_instance(
+                instance=str(record.get("instance") or Path(str(record["_path"])).stem),
+                pid=_owned_instance_pid(record),
+                cache_dir=cache_dir,
+                lease_registry_dir=lease_registry_dir,
+                owner=lease_owner,
+                requested_by=requested_by,
+                requested_via="serial",
+            )
+
+    avd_has_owned_records = avd is not None and any(
+        _owned_instance_pid(meta) is not None
+        and (meta.get("avd") == avd or Path(str(meta.get("_path") or "")).stem == avd)
+        for meta in _aua_started_records(cache_dir)
+    )
+    targets = [] if avd_has_owned_records else running_emulators()
     if serial:
         targets = [t for t in targets if t["serial"] == serial]
 
@@ -1940,7 +2041,8 @@ def stop(
         avd_records = [
             m
             for m in _aua_started_records(cache_dir)
-            if m.get("avd") == avd or Path(str(m.get("_path") or "")).stem == avd
+            if _owned_instance_pid(m) is not None
+            and (m.get("avd") == avd or Path(str(m.get("_path") or "")).stem == avd)
         ]
         if avd_records:
             stopped_avd: list[str] = []
@@ -1957,14 +2059,12 @@ def stop(
                             {"serial": ser, "holder": str(foreign.get("owner") or "unknown")}
                         )
                         continue
-                    if target_serial:
-                        with contextlib.suppress(Exception):
-                            _adb_emu_kill(target_serial)
-                            stopped_avd.append(target_serial)
-                    pid = meta.get("pid")
-                    if isinstance(pid, int):
+                    pid = _owned_instance_pid(meta)
+                    if pid is not None:
                         with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
                             os.killpg(pid, signal.SIGTERM)
+                            if target_serial:
+                                stopped_avd.append(target_serial)
                     _kill_watchdog(meta)
                     path = Path(str(meta.get("_path") or ""))
                     if path.is_file():
@@ -2016,8 +2116,8 @@ def stop(
                     is not None
                 ):
                     continue  # a record whose device another live agent leases is not residue
-                pid = meta.get("pid")
-                if isinstance(pid, int):
+                pid = _owned_instance_pid({**meta, "_path": str(path)})
+                if pid is not None:
                     with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
                         os.killpg(pid, signal.SIGTERM)
                         stopped_pids.append(pid)

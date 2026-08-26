@@ -18,7 +18,6 @@ from pathlib import Path
 from .. import hierarchy
 from ..config import Config
 from ..device import Device
-from ..errors import DeviceError
 from ..memory import matches_any
 from ..providers.base import ScreenImage
 from ..schema import DeviceInfo, Element
@@ -181,20 +180,19 @@ class AndroidPlatform(PlatformAdapter):
         from .android_runtime import AndroidDeviceRuntime
 
         self.prepare_host()
-        return AndroidDeviceRuntime(device_mod.resolve_serial(target_id))
+        return android_transport.run_adb_server_operation(
+            self.config.lease.registry_dir,
+            lambda: AndroidDeviceRuntime(device_mod.resolve_serial(target_id)),
+        )
 
     def list_targets(self) -> list[DeviceInfo]:
         from .. import device as device_mod
 
         self.prepare_host()
-        try:
-            return device_mod.list_devices()
-        except DeviceError:
-            # The server can disappear after the readiness probe (SDK upgrades and external
-            # tools sometimes replace it). Re-enter the same coordinated bootstrap and retry
-            # enumeration once; never turn a transport failure into an empty target pool.
-            android_transport.ensure_adb_server_ready(self.config.lease.registry_dir)
-            return device_mod.list_devices()
+        return android_transport.run_adb_inventory_operation(
+            self.config.lease.registry_dir,
+            device_mod.list_devices,
+        )
 
     def target_preference(self, target: DeviceInfo) -> int:
         # Prefer a disposable emulator over a physical USB phone when the user did not pin one.

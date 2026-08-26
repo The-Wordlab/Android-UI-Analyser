@@ -21,6 +21,7 @@ def test_touch_activity_bumps_matching_serial(tmp_path: Path) -> None:
         json.dumps(
             {
                 "avd": "Pixel",
+                "instance": "Pixel",
                 "serial": "emulator-5554",
                 "started_by_aua": True,
                 "last_activity": 1.0,
@@ -41,6 +42,7 @@ def test_journal_record_touches_activity(tmp_path: Path) -> None:
         json.dumps(
             {
                 "avd": "Pixel",
+                "instance": "Pixel",
                 "serial": "emulator-5554",
                 "started_by_aua": True,
                 "last_activity": 1.0,
@@ -69,6 +71,7 @@ def test_watchdog_stops_when_idle(
         json.dumps(
             {
                 "avd": "Pixel",
+                "instance": "Pixel",
                 "serial": "emulator-5554",
                 "pid": 4242,
                 "started_by_aua": True,
@@ -98,13 +101,14 @@ def test_watchdog_stops_when_idle(
         path.unlink(missing_ok=True)
         return {"ok": True}
 
-    monkeypatch.setattr(emu, "stop", fake_stop)
+    monkeypatch.setattr(emu, "stop_spawned_instance", fake_stop)
     monkeypatch.setattr(wd.time, "sleep", lambda *_: (_ for _ in ()).throw(SystemExit(0)))
     # First loop should fire idle stop before sleep.
     monkeypatch.setattr(wd.time, "time", lambda: 100.0)
     code = wd.run_watchdog(cache_dir=str(tmp_path), instance="Pixel")
     assert code == 0
-    assert stopped and stopped[0].get("serial") == "emulator-5554"
+    assert stopped and stopped[0].get("instance") == "Pixel"
+    assert stopped[0].get("pid") == 4242
 
 
 def test_watchdog_exits_when_idle_disabled(tmp_path: Path) -> None:
@@ -133,6 +137,7 @@ def test_stop_mine_kills_watchdog(
         json.dumps(
             {
                 "avd": "only",
+                "instance": "only",
                 "serial": "emulator-5554",
                 "pid": 99,
                 "watchdog_pid": 8888,
@@ -156,7 +161,7 @@ def test_stop_mine_kills_watchdog(
         lambda pid, sig: None,
     )
     out = emu.stop(mine=True, cache_dir=tmp_path)
-    assert killed_emu == ["emulator-5554"]
+    assert killed_emu == [], "owned teardown must not involve the shared adb server"
     assert 8888 in killed_pids
     assert out["stopped"] == ["emulator-5554"]
     assert not (rec / "only.json").exists()
