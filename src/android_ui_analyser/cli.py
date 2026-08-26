@@ -4146,7 +4146,10 @@ def session_start_cmd(
         None,
         "--app",
         "--package",
-        help="Launch and observe this package before planning (aliases are equivalent).",
+        help=(
+            "Require an available target where this package is installed, then launch and "
+            "observe it before planning. With --apk, AUA installs it on the selected target."
+        ),
     ),
     activity: str | None = typer.Option(
         None,

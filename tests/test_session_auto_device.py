@@ -12,6 +12,7 @@ from android_ui_analyser import daemon as daemon_mod
 from android_ui_analyser import emulator, leases, network
 from android_ui_analyser.config import Config
 from android_ui_analyser.engine import Engine
+from android_ui_analyser.platforms.base import InstalledApp
 from android_ui_analyser.schema import DeviceInfo
 from android_ui_analyser.session import create_session_state
 from conftest import make_config
@@ -58,6 +59,156 @@ def test_two_run_caches_share_one_lease_authority(tmp_path: Path, monkeypatch: A
     assert leases.holder(registry, "emulator-5554") == "another-live-agent"
     assert leases.holder(registry, "emulator-5556") == "this-agent"
     assert not (Path(cfg.cache.dir) / "leases").exists()
+
+
+def test_app_bootstrap_provisionally_leases_and_skips_targets_without_app(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    registry = tmp_path / "coordination"
+    cfg = make_config(lease={"registry_dir": str(registry)})
+    engine = Engine(cfg)
+    engine._lease_owner = "session-agent"
+    targets = [
+        DeviceInfo(serial="emulator-5554", state="device"),
+        DeviceInfo(serial="emulator-5556", state="device"),
+    ]
+    monkeypatch.setattr(engine, "_list_targets", lambda: targets)
+    monkeypatch.setattr(engine.platform, "target_preference", lambda info: info.serial)
+    connected: list[str] = []
+
+    def connect(serial: str | None) -> Any:
+        assert serial is not None
+        connected.append(serial)
+        return SimpleNamespace(serial=serial, close=lambda: None)
+
+    monkeypatch.setattr(engine, "_connect_target", connect)
+    monkeypatch.setattr(
+        engine.platform,
+        "installed_app",
+        lambda runtime, app_id: InstalledApp(
+            app_id=app_id,
+            installed=runtime.serial == "emulator-5556",
+        ),
+    )
+
+    prepared = engine._prepare_session_target(
+        wait_for_lease_s=0,
+        start_emulator=True,
+        headed=False,
+        audio=False,
+        avd=None,
+        package="com.example.notes",
+    )
+
+    assert prepared["serial"] == "emulator-5556"
+    assert connected == ["emulator-5554", "emulator-5556"]
+    assert leases.holder(registry, "emulator-5554") is None
+    assert leases.holder(registry, "emulator-5556") == "session-agent"
+
+
+def test_app_bootstrap_never_switches_a_sticky_target_missing_the_app(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    from android_ui_analyser.errors import DeviceError
+
+    registry = tmp_path / "coordination"
+    cfg = make_config(lease={"registry_dir": str(registry)})
+    engine = Engine(cfg)
+    engine._lease_owner = "session-agent"
+    assert leases.acquire(registry, "emulator-5554", owner="session-agent")
+    targets = [
+        DeviceInfo(serial="emulator-5554", state="device"),
+        DeviceInfo(serial="emulator-5556", state="device"),
+    ]
+    monkeypatch.setattr(engine, "_list_targets", lambda: targets)
+    monkeypatch.setattr(engine.platform, "target_preference", lambda info: info.serial)
+    monkeypatch.setattr(
+        engine,
+        "_connect_target",
+        lambda serial: SimpleNamespace(serial=serial, close=lambda: None),
+    )
+    monkeypatch.setattr(
+        engine.platform,
+        "installed_app",
+        lambda _runtime, app_id: InstalledApp(app_id=app_id, installed=False),
+    )
+
+    with pytest.raises(DeviceError) as caught:
+        engine._prepare_session_target(
+            wait_for_lease_s=0,
+            start_emulator=True,
+            headed=False,
+            audio=False,
+            avd=None,
+            package="com.example.notes",
+        )
+
+    assert caught.value.code == "required_app_not_installed_on_leased_target"
+    assert leases.holder(registry, "emulator-5554") == "session-agent"
+    assert leases.holder(registry, "emulator-5556") is None
+
+
+def test_apk_bootstrap_does_not_require_the_app_to_be_preinstalled(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    registry = tmp_path / "coordination"
+    cfg = make_config(lease={"registry_dir": str(registry)})
+    engine = Engine(cfg)
+    engine._lease_owner = "session-agent"
+    monkeypatch.setattr(
+        engine,
+        "_list_targets",
+        lambda: [DeviceInfo(serial="emulator-5554", state="device")],
+    )
+    monkeypatch.setattr(
+        engine.platform,
+        "installed_app",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("checked before install")),
+    )
+
+    prepared = engine._prepare_session_target(
+        wait_for_lease_s=0,
+        start_emulator=True,
+        headed=False,
+        audio=False,
+        avd=None,
+        package="com.example.notes",
+        app_will_be_installed=True,
+    )
+
+    assert prepared["serial"] == "emulator-5554"
+    assert leases.holder(registry, "emulator-5554") == "session-agent"
+
+
+def test_inventory_failure_never_provisions_an_emulator(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    from android_ui_analyser.errors import DeviceError
+
+    cfg = make_config(lease={"registry_dir": str(tmp_path / "coordination")})
+    engine = Engine(cfg)
+    engine._lease_owner = "session-agent"
+
+    def fail_inventory() -> list[DeviceInfo]:
+        raise DeviceError("inventory failed", code="target_inventory_unavailable")
+
+    monkeypatch.setattr(engine, "_list_targets", fail_inventory)
+    monkeypatch.setattr(
+        engine.platform,
+        "capability",
+        lambda name: (_ for _ in ()).throw(AssertionError(f"provisioned through {name}")),
+    )
+
+    with pytest.raises(DeviceError) as caught:
+        engine._prepare_session_target(
+            wait_for_lease_s=0,
+            start_emulator=True,
+            headed=False,
+            audio=False,
+            avd=None,
+        )
+
+    assert caught.value.code == "target_inventory_unavailable"
 
 
 def test_dead_owner_is_reclaimed_during_the_same_selection(

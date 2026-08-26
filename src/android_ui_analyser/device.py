@@ -821,7 +821,7 @@ class Uiautomator2Device(Device):
         except Exception as exc:
             raise DeviceError(
                 f"could not connect to device '{self.serial}': {exc}",
-                hint="Run `aua devices` and check the emulator/phone is reachable via adb.",
+                hint="Run `aua doctor`, then inspect the target state with `aua devices`.",
             ) from exc
 
     def close(self) -> None:
@@ -1651,7 +1651,10 @@ class Uiautomator2Device(Device):
                     dest.unlink()
             raise DeviceError(
                 f"pulling the recording produced nothing usable at {dest}",
-                hint="Try `adb -s <serial> pull` by hand; the device file may be zero-length.",
+                hint=(
+                    "The device recording may be zero-length. Keep this AUA error as evidence "
+                    "and use `aua screenshot` as the bounded fallback."
+                ),
             )
         with contextlib.suppress(Exception):
             self._d.shell(f"rm {remote}")
@@ -1704,7 +1707,7 @@ class Uiautomator2Device(Device):
         except Exception as exc:
             raise DeviceError(
                 f"shell failed: {exc}",
-                hint="Check the device is online (`adb devices`) and the command is valid.",
+                hint="Run `aua doctor`, inspect `aua devices`, and verify the command is valid.",
             ) from exc
         return out if isinstance(out, str) else str(getattr(out, "output", out) or "")
 
@@ -2184,22 +2187,28 @@ def list_devices() -> list[DeviceInfo]:
         ) from exc
     out: list[DeviceInfo] = []
     try:
-        for dev in adbutils.adb.device_list():
-            state = "device"
-            model: str | None = None
+        # ``device_list()`` discards every transport whose state is not exactly ``device``.
+        # Preserve offline/unauthorized/booting targets so leasing can distinguish a successful
+        # inventory from a target that temporarily vanished; only enrich online targets.
+        for transport in adbutils.adb.list():
+            state = str(transport.state or "unknown")
+            tags = transport.tags if isinstance(transport.tags, dict) else {}
+            model: str | None = str(tags.get("model") or "") or None
             version: str | None = None
             locale: str | None = None
-            try:
-                model = dev.prop.model
-                version = dev.getprop("ro.build.version.release") or None
-                locale = parse_locale(
-                    dev.getprop("persist.sys.locale") or dev.getprop("ro.product.locale")
-                )
-            except Exception:  # pragma: no cover - offline device
-                state = "offline"
+            if state == "device":
+                dev = adbutils.adb.device(serial=transport.serial)
+                try:
+                    model = dev.prop.model or model
+                    version = dev.getprop("ro.build.version.release") or None
+                    locale = parse_locale(
+                        dev.getprop("persist.sys.locale") or dev.getprop("ro.product.locale")
+                    )
+                except Exception:  # pragma: no cover - target changed during enrichment
+                    state = "offline"
             out.append(
                 DeviceInfo(
-                    serial=dev.serial,
+                    serial=transport.serial,
                     model=model,
                     android_version=version,
                     locale=locale,
@@ -2209,6 +2218,9 @@ def list_devices() -> list[DeviceInfo]:
     except Exception as exc:
         raise DeviceError(
             f"could not list devices: {exc}",
-            hint="Is the adb server running? Try `adb devices`.",
+            hint=(
+                "Run `aua doctor`. AUA coordinates Android transport recovery; do not switch or "
+                "release an existing lease because inventory is currently unknown."
+            ),
         ) from exc
     return out

@@ -67,6 +67,7 @@ _OWNER_GUARD_STATE = threading.local()
 _LEASE_GUARD_STATE = threading.local()
 _DEVICE_GUARD_STATE = threading.local()
 _COMMAND_GUARD_STATE = threading.local()
+_HOST_GUARD_STATE = threading.local()
 _THREAD_LOCKS_GUARD = threading.Lock()
 _THREAD_LOCKS: dict[str, Any] = {}
 _THREAD_RW_LOCKS: dict[str, Any] = {}
@@ -665,6 +666,43 @@ def device_transaction(cache_dir: str | Path, serial: str) -> Iterator[None]:
 
     with _device_guard(cache_dir, serial):
         yield
+
+
+@contextlib.contextmanager
+def host_transaction(cache_dir: str | Path, key: str) -> Iterator[None]:
+    """Serialize one host-wide operation across AUA processes.
+
+    Device locks deliberately key on a target serial. Some platform facilities instead share
+    one host resource — Android's ADB server endpoint is the motivating example — and racing
+    their bootstrap can make every otherwise-independent target disappear at once. Keep this
+    primitive in the coordination layer so platform adapters can share the same portable POSIX /
+    Windows locking guarantees without pretending a host service is a device lease.
+    """
+
+    digest = hashlib.sha256(str(key).encode("utf-8")).hexdigest()
+    lock_key = f"host|{Path(cache_dir).expanduser()}|{digest}"
+    with _thread_lock(lock_key):
+        active = getattr(_HOST_GUARD_STATE, "digests", None)
+        if active is None:
+            active = set()
+            _HOST_GUARD_STATE.digests = active
+        if digest in active:
+            yield
+            return
+        path = lease_dir(cache_dir) / ".locks" / f"host-{digest}.lock"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = path.open("a+", encoding="utf-8")
+        backend: str | None = None
+        try:
+            backend = _acquire_file_lock(handle, exclusive=True)
+            active.add(digest)
+            yield
+        finally:
+            active.discard(digest)
+            if backend is not None:
+                with contextlib.suppress(Exception):
+                    _release_file_lock(handle, backend)
+            handle.close()
 
 
 @contextlib.contextmanager
@@ -1673,6 +1711,20 @@ def _choose_device_unlocked(
             renew(cache_dir, serial, owner=owner)
             return serial, "sticky"
 
+    missing_owned = [serial for serial in owned if serial not in known]
+    if missing_owned:
+        from .errors import LeasedTargetUnavailableError
+
+        serials = ", ".join(missing_owned)
+        raise LeasedTargetUnavailableError(
+            f"the leased target {serials} is temporarily unavailable",
+            hint=(
+                "The lease was retained and no device action ran. Retry the ordinary unpinned "
+                "AUA command; do not select or release another device. If it remains unavailable, "
+                "run `aua doctor` to inspect the shared transport."
+            ),
+        )
+
     if owned and not allow_replacement:
         _raise_switch_required(owner=owner, held=owned, requested=None, needs=needs)
 
@@ -1748,12 +1800,12 @@ def wait_for_device(
     it is only a bounded retry around :func:`choose_device`.
     """
 
-    from .errors import DeviceLeasedError
+    from .errors import DeviceLeasedError, LeasedTargetUnavailableError
 
     timeout = max(0.0, float(wait_s))
     started = monotonic()
     deadline = started + timeout
-    last_error: DeviceLeasedError | None = None
+    last_error: DeviceLeasedError | LeasedTargetUnavailableError | None = None
     while True:
         try:
             serial, why = choose_device(
@@ -1768,12 +1820,19 @@ def wait_for_device(
             return serial, why, int(max(0.0, monotonic() - started) * 1000)
         except DeviceLeasedError as exc:
             last_error = exc
+        except LeasedTargetUnavailableError as exc:
+            last_error = exc
         now = monotonic()
         if timeout <= 0 or now >= deadline:
             assert last_error is not None
             waited_ms = 0 if timeout <= 0 else int(max(0.0, now - started) * 1000)
             target = f" --serial {explicit}" if explicit else ""
-            raise DeviceLeasedError(
+            error_type = (
+                LeasedTargetUnavailableError
+                if isinstance(last_error, LeasedTargetUnavailableError)
+                else DeviceLeasedError
+            )
+            raise error_type(
                 f"{last_error.message} after waiting {waited_ms}ms",
                 hint=(
                     f"{last_error.hint or ''} Retry the bounded wait with "

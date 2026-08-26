@@ -267,7 +267,10 @@ def test_derived_identity_skips_shells(monkeypatch):
 
 import pytest  # noqa: E402
 
-from android_ui_analyser.errors import DeviceLeasedError  # noqa: E402
+from android_ui_analyser.errors import (  # noqa: E402
+    DeviceLeasedError,
+    LeasedTargetUnavailableError,
+)
 
 CANDIDATES = [
     ("emulator-5554", {"root": True, "play": True, "proxy": True}),
@@ -296,6 +299,23 @@ def test_an_agent_stays_on_its_device(tmp_path):
     assert (first, why1) == (second, "assigned") or why1 == "assigned"
     assert second == first
     assert why2 == "sticky"
+
+
+def test_missing_sticky_target_retains_lease_without_suggesting_a_switch(tmp_path):
+    assert L.acquire(tmp_path, "emulator-5554", owner="claude") is True
+
+    with pytest.raises(LeasedTargetUnavailableError) as caught:
+        L.choose_device(
+            tmp_path,
+            owner="claude",
+            explicit=None,
+            candidates=[],
+        )
+
+    assert caught.value.code == "leased_target_unavailable"
+    assert "no device action ran" in (caught.value.hint or "")
+    assert L.holder(tmp_path, "emulator-5554") == "claude"
+    assert L.holder(tmp_path, "emulator-5556") is None
 
 
 def test_emulator_preference_does_not_move_an_existing_sticky_phone_lease(tmp_path):

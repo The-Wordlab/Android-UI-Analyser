@@ -18,11 +18,12 @@ from pathlib import Path
 from .. import hierarchy
 from ..config import Config
 from ..device import Device
+from ..errors import DeviceError
 from ..memory import matches_any
 from ..providers.base import ScreenImage
 from ..schema import DeviceInfo, Element
 from ..scroll_geom import _iter_nodes, _node_box
-from . import android_apk
+from . import android_apk, android_transport
 from .base import AppBundle, InstalledApp, NormalizedTree, PlatformAdapter
 from .registry import register_platform
 
@@ -173,6 +174,7 @@ class AndroidPlatform(PlatformAdapter):
         from ..emulator import ensure_adb_on_path
 
         ensure_adb_on_path()
+        android_transport.ensure_adb_server_ready(self.config.lease.registry_dir)
 
     def connect(self, target_id: str | None = None) -> Device:
         from .. import device as device_mod
@@ -184,7 +186,14 @@ class AndroidPlatform(PlatformAdapter):
         from .. import device as device_mod
 
         self.prepare_host()
-        return device_mod.list_devices()
+        try:
+            return device_mod.list_devices()
+        except DeviceError:
+            # The server can disappear after the readiness probe (SDK upgrades and external
+            # tools sometimes replace it). Re-enter the same coordinated bootstrap and retry
+            # enumeration once; never turn a transport failure into an empty target pool.
+            android_transport.ensure_adb_server_ready(self.config.lease.registry_dir)
+            return device_mod.list_devices()
 
     def target_preference(self, target: DeviceInfo) -> int:
         # Prefer a disposable emulator over a physical USB phone when the user did not pin one.

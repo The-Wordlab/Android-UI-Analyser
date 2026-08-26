@@ -856,6 +856,8 @@ class Engine:
         self._lease_needs: list[str] | None = None
         self._lease_serial: str | None = None
         self._lease_owner_resolved: str | None = None
+        self._lease_selection_reason: str | None = None
+        self._lease_was_preexisting = False
         # Generation fences cached observations even when a lease leaves and later returns to
         # the same long-lived process identity (so owner equality alone cannot detect the gap).
         self._lease_generation_resolved: str | None = None
@@ -1127,7 +1129,7 @@ class Engine:
             self._mem.claim_session(self._device.serial, token)
             self._claimed_instance_token = token
 
-    def _lease_device(self) -> str | None:
+    def _lease_device(self, *, excluded: set[str] | None = None) -> str | None:
         """The serial this engine may use, claiming a lease on it.
 
         Without this, ``connect(None)`` takes "the only/first device" and two agents working
@@ -1146,6 +1148,8 @@ class Engine:
 
         needs = list(self._lease_needs or [])
 
+        excluded = excluded or set()
+
         def candidates() -> list[tuple[str, dict[str, Any]]]:
             infos = [device for device in self._list_targets() if device.state == "device"]
             # Preserve each platform's preference (Android, for example, favours a disposable
@@ -1157,18 +1161,24 @@ class Engine:
                     self.platform.probe_target_capabilities(info.serial) if needs else {},
                 )
                 for info in infos
-                if info.serial
+                if info.serial and info.serial not in excluded
             ]
 
-        try:
-            initial = candidates()
-        except Exception:
-            return explicit  # cannot enumerate; let connect() produce the real error
-        if not initial and not self._lease_wait_s:
-            return explicit
+        # Discovery failure is not an empty pool. Propagate the platform's typed transport error
+        # so session bootstrap never provisions or switches devices because ADB disappeared.
+        initial = candidates()
         owner = leases.resolve_owner(self._lease_owner)
+        held_before = set(leases.held_by(self._lease_registry_dir, owner))
+        if not initial and not self._lease_wait_s:
+            if explicit is not None:
+                # Explicit/injected targets retain the historical lazy-connect seam. The
+                # platform runtime will produce the authoritative reachability error without
+                # making a different target eligible.
+                return explicit
+            if not held_before:
+                return None
         if self._lease_wait_s:
-            serial, _why, waited_ms = leases.wait_for_device(
+            serial, why, waited_ms = leases.wait_for_device(
                 self._lease_registry_dir,
                 owner=owner,
                 explicit=explicit,
@@ -1180,7 +1190,7 @@ class Engine:
             )
             self._lease_waited_ms = waited_ms
         else:
-            serial, _why = leases.choose_device(
+            serial, why = leases.choose_device(
                 self._lease_registry_dir,
                 owner=owner,
                 explicit=explicit,
@@ -1192,7 +1202,45 @@ class Engine:
             self._lease_waited_ms = 0
         self._lease_serial = serial
         self._lease_owner_resolved = owner
+        self._lease_selection_reason = why
+        self._lease_was_preexisting = serial in held_before
         return serial
+
+    def _selected_target_has_app(self, serial: str, package: str) -> bool:
+        """Check app presence only after this caller has safely leased *serial*."""
+
+        if not self.platform.supports("app.status"):
+            raise DeviceError(
+                f"platform '{self.platform.name}' cannot select a target by installed app",
+                code="unsupported_capability",
+            )
+        runtime: Device | None = None
+        with self.device_use_context(serial):
+            try:
+                runtime = self._connect_target(serial)
+                return bool(self.platform.installed_app(runtime, package).installed)
+            finally:
+                if runtime is not None:
+                    with contextlib.suppress(Exception):
+                        runtime.close()
+
+    def _release_failed_bootstrap_target(self, serial: str) -> None:
+        """Release only a target this session bootstrap acquired and never acted on."""
+
+        from . import leases
+
+        owner = self._lease_owner_resolved
+        if not owner or not leases.release(self._lease_registry_dir, serial, owner=owner):
+            raise DeviceError(
+                f"could not release unused bootstrap target {serial}",
+                hint="Run `aua lease list`; no app action was attempted on the target.",
+            )
+        self._lease_serial = None
+        self._lease_owner_resolved = None
+        self._lease_selection_reason = None
+        self._lease_was_preexisting = False
+        self._lease_generation_resolved = None
+        self._leased_serial_resolved = None
 
     def _prepare_session_target(
         self,
@@ -1202,6 +1250,8 @@ class Engine:
         headed: bool,
         audio: bool,
         avd: str | None,
+        package: str | None = None,
+        app_will_be_installed: bool = False,
     ) -> dict[str, Any]:
         """Select/claim a compatible target, provisioning one only when the pool has none."""
 
@@ -1223,20 +1273,66 @@ class Engine:
         if audio and "audio" not in requested_needs:
             requested_needs.append("audio")
         self._lease_needs = requested_needs
+        required_app = package if package and not app_will_be_installed else None
+        excluded_for_missing_app: set[str] = set()
         selection_error: DeviceLeasedError | None = None
         try:
-            try:
-                selected = self._lease_device()
-            except DeviceLeasedError as exc:
-                selection_error = exc
-                selected = None
-            if selected:
+            while True:
+                try:
+                    selected = self._lease_device(excluded=excluded_for_missing_app)
+                except DeviceLeasedError as exc:
+                    selection_error = exc
+                    selected = None
+                if not selected:
+                    break
+                if required_app:
+                    try:
+                        app_installed = self._selected_target_has_app(selected, required_app)
+                    except Exception:
+                        if not self._lease_was_preexisting:
+                            self._release_failed_bootstrap_target(selected)
+                        raise
+                    if not app_installed:
+                        if self._lease_was_preexisting:
+                            raise DeviceError(
+                                f"{required_app} is not installed on leased target {selected}",
+                                code="required_app_not_installed_on_leased_target",
+                                hint=(
+                                    "The lease was retained. Supply `--apk <bundle>` to install "
+                                    "the app there, or explicitly replace the target after cleanup."
+                                ),
+                            )
+                        self._release_failed_bootstrap_target(selected)
+                        excluded_for_missing_app.add(selected)
+                        if self.config.device.serial:
+                            raise DeviceError(
+                                f"{required_app} is not installed on requested target {selected}",
+                                code="required_app_not_installed",
+                                hint="Supply `--apk <bundle>` or choose a target that has the app.",
+                            )
+                        continue
                 self.config.device.serial = selected
                 return {
                     "serial": selected,
                     "emulator_started": False,
                     "lease_waited_ms": self._lease_waited_ms,
                 }
+            if required_app:
+                if selection_error is not None:
+                    raise selection_error
+                detail = (
+                    f"; checked without finding it on {', '.join(sorted(excluded_for_missing_app))}"
+                    if excluded_for_missing_app
+                    else ""
+                )
+                raise DeviceError(
+                    f"no available target has required app {required_app}{detail}",
+                    code="required_app_not_installed",
+                    hint=(
+                        "Supply `--apk <bundle>` so AUA can provision and install it, or attach "
+                        "an unleased target where it is already installed."
+                    ),
+                )
             if self.config.device.serial:
                 if selection_error is not None:
                     raise selection_error
@@ -7366,6 +7462,8 @@ class Engine:
                 headed=headed,
                 audio=audio,
                 avd=avd,
+                package=package,
+                app_will_be_installed=bool(apk),
             )
             emulator_started = bool(prepared.get("emulator_started"))
             self._lease_waited_ms = int(prepared.get("lease_waited_ms") or 0)

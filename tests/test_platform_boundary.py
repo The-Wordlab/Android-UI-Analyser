@@ -45,6 +45,7 @@ ANDROID_BACKENDS = {
     "network.py",
     "network_profiles.py",
     "platforms/android.py",
+    "platforms/android_transport.py",
     "proxy_mock.py",
     "webview.py",
 }

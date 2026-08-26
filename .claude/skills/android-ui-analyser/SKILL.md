@@ -17,9 +17,9 @@ Use `aua` for Android UI: act on returned IDs or stable selectors, never pixels,
 
 ## Operating loop
 
-1. Start with `aua session start --goal "<what must be verified>"`; it provisions a
-   compatible target and leases it. Add `--needs root,play,proxy` and
-   `--app <package>` for an unrelated foreground app. Reuse its observation and follow its
+1. Start with `aua session start --goal "<what must be verified>"`; it leases/provisions a
+   compatible target. `--app <package>` needs it installed; `--apk <bundle>` installs.
+   Add `--needs root,play,proxy`. Reuse its observation and follow its
    exact `recommended_call`; do not immediately re-analyze. `--contract` requires fresh
    proof and strict finish. `--artifacts-dir` records evidence; `--wait-for-lease` waits safely.
 2. Navigate in this order: verified `goto`, matching saved `flow`, proven deeplink,

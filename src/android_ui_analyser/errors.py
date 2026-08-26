@@ -133,6 +133,17 @@ class DeviceLeasedError(AuaError):
     code = "device_leased"
 
 
+class LeasedTargetUnavailableError(DeviceError):
+    """The caller's sticky target temporarily vanished from platform discovery.
+
+    This is deliberately not a lease-conflict error: another free target is not a safe
+    substitute for a screen whose ids, app state, and session history belong to the retained
+    lease.
+    """
+
+    code = "leased_target_unavailable"
+
+
 class LeaseSwitchRequiredError(UsageError):
     """A caller already owns another device and must acknowledge replacing it."""
 
