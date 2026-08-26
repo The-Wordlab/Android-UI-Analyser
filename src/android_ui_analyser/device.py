@@ -878,13 +878,18 @@ class Uiautomator2Device(Device):
         except Exception as exc:
             _warn_reconnect(name, exc)
             try:
-                self._connect()
+                self._recover_connection(name, exc)
                 return invoke()
             except Exception as exc2:
                 raise DeviceError(
                     f"device operation '{name}' failed after reconnect: {exc2}",
                     hint="Check the device is still attached (`aua devices`).",
                 ) from exc2
+
+    def _recover_connection(self, name: str, error: Exception) -> None:
+        """Reconnect once; AndroidPlatform may refine teardown for known stale runtimes."""
+
+        self._connect()
 
     # -- capture -----------------------------------------------------------
 
@@ -2114,8 +2119,9 @@ class Uiautomator2Device(Device):
 # --------------------------------------------------------------------------- factory
 
 
-def connect(serial: str | None = None) -> Device:
-    """Connect to ``serial`` (or the only/first device). Raises DeviceError clearly."""
+def resolve_serial(serial: str | None = None) -> str:
+    """Resolve an optional Android serial without constructing an automation runtime."""
+
     if serial is None:
         devices = list_devices()
         online = [d for d in devices if d.state == "device"]
@@ -2133,7 +2139,13 @@ def connect(serial: str | None = None) -> Device:
         serial = online[0].serial
     else:
         _require_attached(serial)
-    return Uiautomator2Device(serial)
+    return serial
+
+
+def connect(serial: str | None = None) -> Device:
+    """Connect to ``serial`` (or the only/first device). Raises DeviceError clearly."""
+
+    return Uiautomator2Device(resolve_serial(serial))
 
 
 _MISSING_SERIAL_GRACE_S = 1.0

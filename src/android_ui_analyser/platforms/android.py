@@ -178,9 +178,10 @@ class AndroidPlatform(PlatformAdapter):
 
     def connect(self, target_id: str | None = None) -> Device:
         from .. import device as device_mod
+        from .android_runtime import AndroidDeviceRuntime
 
         self.prepare_host()
-        return device_mod.connect(target_id)
+        return AndroidDeviceRuntime(device_mod.resolve_serial(target_id))
 
     def list_targets(self) -> list[DeviceInfo]:
         from .. import device as device_mod
