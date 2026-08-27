@@ -9,7 +9,7 @@ contained them.
 So this contract removes the ability. Every argument is either an index out of the list the model was
 just shown, or a member of a closed set. There is no field a name can be invented into. That is not
 a quality improvement, it is a structural one: the same property is why the scoring rule in
-:mod:`v11_baseline` grounds at 100% while every trained checkpoint grounded at 0%.
+:mod:`drive_rule` grounds at 100% while every trained checkpoint grounded at 0%.
 
 Four calls, and the reason each exists:
 

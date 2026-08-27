@@ -41,7 +41,6 @@ from collections.abc import Mapping, MutableMapping, Sequence
 from typing import Any
 
 from experiments.functiongemma import v12_progress as prog
-from experiments.functiongemma.v11_projection import project
 from experiments.functiongemma.v12_contract import render, validate
 from experiments.functiongemma.v12_goals import (
     ARRIVAL_FRAMES,
@@ -50,6 +49,8 @@ from experiments.functiongemma.v12_goals import (
     goal_for,
     label_of,
 )
+
+from android_ui_analyser.drive_projection import project
 
 #: Sent once per conversation. It names no field the runtime might not have — the V11 policy told the
 #: model to prefer ``resource_id``, which 7.6% of live nodes carry — and it describes ``tried``/``last``

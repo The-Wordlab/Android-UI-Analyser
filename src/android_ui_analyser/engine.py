@@ -4460,6 +4460,150 @@ class Engine:
         # receives cannot drift apart.
         return payload
 
+    # ------------------------------------------------------------------ the lane that always works
+
+    def drive_on_host(self, goal: str, *, budget: int = 8) -> dict[str, Any]:
+        """Drive to *goal* from the host, one round trip per step. Returns what it did.
+
+        The same rule as :meth:`drive_on_device`, running here instead of inside the helper, because
+        the helper cannot run everywhere. Android will not bind a sideloaded accessibility service
+        unless adbd can run as root, which rules out every retail phone and every Play-image
+        emulator — and on such a device the *only* other autopilot, ``session autopilot``, needs a
+        local policy model that measured 17.5% correct node selection against this rule's 82.2%. So
+        the fast lane was the only lane, and it was unavailable on the most ordinary targets there
+        are.
+
+        The trade is plain and worth stating rather than hiding: a round trip per step, against none
+        for the device lane. That is the whole difference. It calls the same
+        :func:`drive_rule.decide`, so the two lanes cannot disagree about what to do — only about how
+        long it takes.
+
+        Progress is keyed by ``stable_key`` rather than by position. Element ids are frame-local
+        ordinals that renumber on every analyze, so keying by them would lose track of a node the
+        moment the screen redrew, and ``no_progress`` would never fire.
+        """
+
+        from .drive_projection import project
+        from .drive_rule import decide
+
+        goal = (goal or "").strip()
+        if not goal:
+            raise UsageError(
+                "driving needs a goal",
+                hint='Say what to reach, e.g. `aua drive "open the display settings"`.',
+            )
+        budget = max(1, int(budget))
+
+        tried: dict[str, int] = {}
+        last: dict[str, str] = {}
+        scrolls = 0
+        steps: list[dict[str, Any]] = []
+        stop_reason = "budget_exhausted"
+        began = time.perf_counter()
+
+        for index in range(budget):
+            observation = self.analyze()
+            elements = list(observation.elements)
+            # The screen as a set of identities, so "did anything change" is answerable without the
+            # meta fingerprint — that folds in the status-bar clock and ticks on its own.
+            before = {e.stable_key for e in elements if e.stable_key}
+
+            nodes: list[dict[str, Any]] = []
+            for element in elements:
+                key = element.stable_key
+                node: dict[str, Any] = {
+                    "text": element.text,
+                    "desc": element.content_desc,
+                    "rid": element.resource_id,
+                    "clickable": bool(element.clickable),
+                    "scrollable": bool(element.scrollable),
+                    # `project` copies `id` into its `keys`, so this is how the chosen node maps
+                    # back to something tappable. Frame-local and renumbered every analyze, which
+                    # is why progress is keyed by `stable_key` and not by this.
+                    "id": element.id,
+                }
+                if key and tried.get(key):
+                    node["tried"] = tried[key]
+                    node["last"] = last.get(key, "changed")
+                nodes.append(node)
+
+            key_of = {e.id: e.stable_key for e in elements}
+            projection = project(nodes)
+            shown = list(projection["nodes"])
+            ids = list(projection["keys"])
+            chosen = decide(goal, projection, scrolls_used=scrolls)
+
+            record: dict[str, Any] = {
+                "step": index,
+                "shown": len(shown),
+                "more": bool(projection.get("more")),
+                "decision": chosen["call"],
+            }
+
+            if chosen["call"] == "done":
+                record["ok"] = True
+                steps.append(record)
+                stop_reason = "done"
+                break
+
+            if chosen["call"] == "handoff":
+                record["reason"] = chosen.get("reason")
+                record["why"] = chosen.get("why")
+                steps.append(record)
+                stop_reason = "handoff"
+                break
+
+            if chosen["call"] == "scroll":
+                record["best_score"] = chosen.get("why")
+                action = self.scroll("up", observe=False)
+                moved = bool(getattr(action, "ok", False))
+                record["ok"] = moved
+                steps.append(record)
+                scrolls += 1
+                if not moved:
+                    # Nothing moved, so there is no more screen to reveal and refusing is honest.
+                    stop_reason = "handoff"
+                    record["reason"] = "target_absent"
+                    break
+                continue
+
+            position = next(
+                (i for i, n in enumerate(shown) if n.get("n") == chosen["n"]), None
+            )
+            if position is None:  # pragma: no cover - decide() only returns a listed node
+                stop_reason = "internal"
+                break
+            target = shown[position]
+            element_id = ids[position]
+            record["n"] = chosen["n"]
+            record["label"] = " ".join(
+                str(target.get(k) or "") for k in ("text", "desc")
+            ).strip()
+            record["score"] = chosen.get("score")
+            self.tap(element_id, observe=False)
+
+            after = {e.stable_key for e in self.analyze().elements if e.stable_key}
+            outcome = "changed" if after != before else "unchanged"
+            record["outcome"] = outcome
+            record["ok"] = True
+            steps.append(record)
+            stable = key_of.get(element_id)
+            if stable:
+                tried[stable] = tried.get(stable, 0) + 1
+                last[stable] = outcome
+
+        return {
+            "ok": True,
+            "action": "drive",
+            "goal": goal,
+            "budget": budget,
+            "ran_on": "host",
+            "stop_reason": stop_reason,
+            "step_count": len(steps),
+            "steps": steps,
+            "ms": round((time.perf_counter() - began) * 1000, 1),
+        }
+
     def _offload_from(
         self,
         steps: list[RouteStep],

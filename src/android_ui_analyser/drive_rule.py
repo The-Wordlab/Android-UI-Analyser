@@ -384,7 +384,7 @@ def decide(
 ) -> dict[str, Any]:
     """One decision: tap a node, scroll for more, or hand off.
 
-    ``projection`` is the output of :func:`v11_projection.project` — ``nodes``, ``more``, ``keys``.
+    ``projection`` is the output of :func:`drive_projection.project` — ``nodes``, ``more``, ``keys``.
     The returned ``n`` indexes straight back into ``keys``, so the caller always has a real element
     and never a string to resolve. That is the whole reason this grounds at 100%.
     """

@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from experiments.functiongemma.v11_projection import (  # noqa: E402
+from android_ui_analyser.drive_projection import (  # noqa: E402
     MAX_CONTEXT_NODES,
     MAX_NODES,
     is_structural,

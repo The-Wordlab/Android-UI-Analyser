@@ -283,6 +283,12 @@ def project(
             out["tap"] = True
         if node.get("scrollable"):
             out["scroll"] = True
+        # Progress has to survive projection or `drive_rule.decide` cannot see it, and its
+        # `no_progress` branch reads exactly these two fields off the winning node. Dropping them
+        # here left that branch dead for every caller that projects — which is every real one.
+        if node.get("tried"):
+            out["tried"] = node["tried"]
+            out["last"] = node.get("last") or "changed"
         nodes.append(out)
         keys.append(node.get("id"))
 

@@ -279,6 +279,27 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "of the recorded steps yourself).",
     ),
     (
+        "Let it find its own way to a goal (drive)",
+        '`aua drive "<goal>"` reads the screen, picks the control that best answers the goal, acts, '
+        "and repeats - one call for a short journey with no map, no saved flow and no deeplink. It "
+        "scores word overlap against every listed control with a bias toward the row's leading "
+        "words, so it reaches a named destination reliably and cannot invent one: it only ever taps "
+        "a control the screen actually showed. `--budget N` bounds the steps. `stop_reason` says "
+        "why it finished - `done`, `budget_exhausted`, or `handoff` with a reason: `needs_host` "
+        "(the goal needs the host, not the screen - a screenshot, the logs, the database), "
+        "`needs_auth` (going on would mean granting a permission), `no_progress` (the control the "
+        "goal needs was already tried and the screen did not move), `target_absent` (not here, and "
+        "nothing left to reveal). Each step reports `outcome`, so a run that got nowhere says so "
+        "rather than looking like a run that did nothing. `aua helper drive` is the same rule "
+        "running inside the on-device helper with no round trip per step - faster, but it needs a "
+        "rootable target; `aua drive` needs nothing and works on retail phones and Play-image "
+        "emulators. Two things it deliberately cannot do: judge that it has ARRIVED (it keeps "
+        "going until the budget ends, so state arrival yourself with `--until` on the next call or "
+        "`aua has`), and bridge words that do not meet - a goal saying \"wifi\" will not reach a "
+        "row labelled \"Internet\". For a mapped or repeatable journey prefer `goto`/`reach` or a "
+        "flow; this is for the unmapped stretch.",
+    ),
+    (
         "Replay whole journeys in one call (flows)",
         "A flow is a Maestro-style YAML journey you can AUTHOR directly (no walking needed) or "
         "record. There are two recorders and they take different inputs: `aua flow save` "

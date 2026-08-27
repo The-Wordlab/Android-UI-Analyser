@@ -2279,6 +2279,29 @@ app = typer.Typer(
 )
 
 
+@app.command("drive")
+def drive_cmd(
+    ctx: typer.Context,
+    goal: str = typer.Argument(..., help="What to reach, in plain words."),
+    budget: int = typer.Option(8, "--budget", help="Most steps to take before handing back."),
+) -> None:
+    """Find your way to a goal from the host — works on any device, no helper needed.
+
+    The same scoring rule as `aua helper drive`, running here instead of inside the helper APK. One
+    round trip per step rather than none, and in exchange it needs no root, no sideloaded
+    accessibility service and no permission grant — so it works on retail phones and Play-image
+    emulators, where the device lane cannot run at all.
+
+    Use `aua helper drive` when the target is rootable and the flow is long enough for the handover
+    to pay for itself. Use this everywhere else.
+    """
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(engine.drive_on_host(goal, budget=budget), fmt)
+
+    _run(ctx, go)
+
+
 @app.command("capabilities")
 def capabilities_cmd(
     ctx: typer.Context,

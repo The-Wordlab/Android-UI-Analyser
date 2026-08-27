@@ -28,7 +28,7 @@ import random
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from experiments.functiongemma.v11_baseline import CHROME, content_words, score, words
+from android_ui_analyser.drive_rule import CHROME, content_words, score, words
 
 #: Frames a goal without naming a destination. Deliberately varied and deliberately noisy: the V11
 #: corpus phrased every goal the same way, and the model learned the frame rather than the target.

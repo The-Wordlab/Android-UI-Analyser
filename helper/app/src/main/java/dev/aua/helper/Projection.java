@@ -36,7 +36,7 @@ import java.util.Set;
  * reports zero. On such a screen the honest answer is to hand off, and this makes that visible by
  * returning an empty or near-empty list rather than inventing a choice.
  *
- * <p>Mirrors {@code experiments/functiongemma/v11_projection.py}. That file is the reference and
+ * <p>Mirrors {@code src/android_ui_analyser/drive_projection.py}. That file is the reference and
  * carries the measurements; this is the on-device implementation, and the two must agree.
  */
 final class Projection {

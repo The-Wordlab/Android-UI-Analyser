@@ -27,7 +27,6 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from experiments.functiongemma.v11_baseline import content_words, score  # noqa: E402
 from experiments.functiongemma.v12_contract import CALLS, REASONS, render, validate  # noqa: E402
 from experiments.functiongemma.v12_corpus import (  # noqa: E402
     answer_of,
@@ -38,6 +37,8 @@ from experiments.functiongemma.v12_corpus import (  # noqa: E402
 )
 from experiments.functiongemma.v12_progress import STALLED, annotate, sample_tried  # noqa: E402
 from experiments.functiongemma.v12_shortcut_gate import check, features  # noqa: E402
+
+from android_ui_analyser.drive_rule import content_words, score  # noqa: E402
 
 SCREENS = Path(__file__).resolve().parents[1] / "runs/functiongemma/screens"
 

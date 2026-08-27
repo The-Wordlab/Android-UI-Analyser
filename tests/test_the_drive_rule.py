@@ -30,7 +30,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from experiments.functiongemma.v11_baseline import (  # noqa: E402
+from android_ui_analyser.drive_projection import project  # noqa: E402
+from android_ui_analyser.drive_rule import (  # noqa: E402
     HOST_TERMS,
     MAX_SCROLLS,
     content_words,
@@ -40,7 +41,6 @@ from experiments.functiongemma.v11_baseline import (  # noqa: E402
     variants,
     words,
 )
-from experiments.functiongemma.v11_projection import project  # noqa: E402
 
 SCREENS = Path(__file__).resolve().parents[1] / "runs/functiongemma/screens"
 

@@ -25,7 +25,7 @@
 #
 #   * the contract points instead of spelling. `tap(n="n3")` where V11 emitted
 #     `label="Display & touch Dark theme, font size, touch"` and grounded 0 of 496 answers. There is
-#     no field a name can be invented into — the same property that makes v11_baseline.py ground at
+#     no field a name can be invented into — the same property that makes drive_rule.py ground at
 #     100% while every V11 checkpoint grounded at 0%.
 #   * every row is built on one of 637 real screens harvested from live emulators (AOSP, third-party
 #     apps, and the same screens in English, Arabic and German)

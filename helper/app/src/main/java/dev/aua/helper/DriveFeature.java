@@ -62,7 +62,7 @@ import java.util.Set;
  * {@code private static final}, the helper has no method through which the host can seed state, and
  * the wire protocol has no field for it. That gap stays open.
  *
- * <p>Mirrors {@code experiments/functiongemma/v11_baseline.py}, whose tests are this class's
+ * <p>Mirrors {@code src/android_ui_analyser/drive_rule.py}, whose tests are this class's
  * specification; the two must agree. Scrolling and key presses are delegated to
  * {@link FlowFeature} so settle, gesture dispatch and movement detection have one implementation.
  * A tap acts on the chosen {@link AccessibilityNodeInfo} directly — the projection already holds
@@ -110,7 +110,7 @@ final class DriveFeature implements Feature {
      * {@code target_absent} instead of {@code needs_host}, and the host gets control either way. A
      * false refusal stops a run that would have succeeded, and nothing later recovers it.
      *
-     * <p>Mirrors {@code v11_baseline.HOST_TERMS}, which records the two words measurement removed.
+     * <p>Mirrors {@code drive_rule.HOST_TERMS}, which records the two words measurement removed.
      */
     private static final Set<String> HOST_TERMS = new HashSet<>(Arrays.asList(
             "adb", "apk", "capture", "database", "dump", "emulator", "host", "install",
