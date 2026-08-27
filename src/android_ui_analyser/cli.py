@@ -4185,11 +4185,22 @@ def session_start_cmd(
             "injection is available."
         ),
     ),
+    animations: bool = typer.Option(
+        False,
+        "--animations",
+        help=(
+            "Enable Android animations for this session and restore their prior scales at finish. "
+            "AUA also enables them when the goal explicitly names animation or motion."
+        ),
+    ),
     avd: str | None = typer.Option(None, "--avd", help="AVD name when several are configured."),
     needs: str | None = typer.Option(
         None,
         "--needs",
-        help="Required target capabilities: root, play, proxy. AUA selects or boots a match.",
+        help=(
+            "Requirements: root, play, proxy, animations. AUA selects/boots a matching target "
+            "and owns reversible session setup."
+        ),
     ),
     package: str | None = typer.Option(
         None,
@@ -4246,6 +4257,7 @@ def session_start_cmd(
             start_emulator=start_emulator,
             headed=headed,
             audio=audio,
+            animations=animations,
             avd=avd,
             needs=(
                 _split_needs(needs)
@@ -8600,6 +8612,38 @@ def capture_export_cmd(
     _run(ctx, go)
 
 
+@capture_app.command("sheet")
+def capture_sheet_cmd(
+    ctx: typer.Context,
+    path: str = typer.Argument(..., help="Output PNG path."),
+    seconds: float | None = typer.Option(None, "--seconds"),
+    since: str | None = typer.Option(None, "--since", help="last-action"),
+    max_frames: int = typer.Option(6, "--max-frames", min=1, max=24),
+    columns: int = typer.Option(3, "--columns", min=1, max=8),
+    timestamps: bool = typer.Option(
+        True, "--timestamps/--no-timestamps", help="Label frames with relative time/action."
+    ),
+) -> None:
+    """Export a bounded PNG contact sheet for fast transition inspection."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(
+            _route(
+                engine,
+                "capture_sheet",
+                path=path,
+                seconds=seconds,
+                since=since,
+                max_frames=max_frames,
+                columns=columns,
+                timestamps=timestamps,
+            ),
+            fmt,
+        )
+
+    _run(ctx, go)
+
+
 @capture_app.command("explain")
 def capture_explain_cmd(
     ctx: typer.Context,
@@ -8690,9 +8734,9 @@ def dev_show_cmd(ctx: typer.Context) -> None:
 @dev_app.command("anim")
 def dev_anim_cmd(
     ctx: typer.Context,
-    mode: str = typer.Argument(..., help="off|restore"),
+    mode: str = typer.Argument(..., help="on|off|restore"),
 ) -> None:
-    """Turn animations off (saving prior scales) or restore them."""
+    """Turn animations on/off (saving prior scales) or restore them."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
         _emit(engine.dev_anim(mode), fmt)

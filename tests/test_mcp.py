@@ -119,6 +119,7 @@ def test_mcp_lists_core_tools() -> None:
         "media_add",
         "screen_record_start",
         "screen_record_stop",
+        "capture_sheet",
         "clock_set",
         "app",
         "app_status",
@@ -182,6 +183,7 @@ def test_mcp_accepts_intuitive_session_and_network_verification_options() -> Non
     tools = {item.name: item for item in _tool_definitions()}
 
     assert tools["session_start"].inputSchema["properties"]["headed"]["default"] is False
+    assert tools["session_start"].inputSchema["properties"]["animations"]["default"] is False
     assert tools["session_autopilot"].inputSchema["properties"]["max_steps"]["default"] == 6
     assert tools["session_finish"].inputSchema["properties"]["summary"]["default"] is True
     assert tools["network_status"].inputSchema["properties"]["verify"]["default"] is True
@@ -366,6 +368,7 @@ def test_mcp_session_and_reach_dispatch_contract(monkeypatch: pytest.MonkeyPatch
                 "start_emulator": True,
                 "headed": True,
                 "audio": False,
+                "animations": False,
                 "avd": None,
                 "needs": None,
                 "package": None,

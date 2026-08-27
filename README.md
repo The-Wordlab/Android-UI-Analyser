@@ -162,6 +162,7 @@ aua session finish                  # restores state/releases lease; keeps its e
 aua session start --goal "record HTTPS" --needs root,proxy
 aua session start --goal "verify Play billing" --needs play
 aua session start --goal "show the QA run" --headed
+aua session start --goal "verify expand/collapse motion" --animations
 ```
 
 Each AUA-started emulator checks the inherited Android proxy setting before app launch. A proxy
@@ -448,6 +449,12 @@ uv tool install "git+ssh://git@github.com/The-Wordlab/Android-UI-Analyser.git"
 ```
 
 Core hierarchy analysis needs no extras; for the vision fallback on Compose/Flutter/WebView screens, add an OCR engine (see the [extras matrix](#optional-dependency-extras-matrix)). Pull plugin updates later with `/plugin update android-ui-analyser@the-wordlab`.
+
+The plugin also installs a Claude `PreToolUse` guard. It denies raw `adb` operations AUA already
+covers (UI input, recording, screenshots, logs, app lifecycle, settings, and app data), gives the
+exact AUA replacement, and asks for user approval on unknown raw-adb operations. Host build tools
+such as Gradle are unaffected. AUA-evidence ffmpeg commands are redirected to the built-in
+timestamped contact sheet.
 
 ### Option 2 — One-command bootstrap from a clone
 
@@ -1555,7 +1562,7 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 |---|---|
 | `aua doctor` | Check environment plus separate Claude/Codex installed-skill freshness |
 | `aua capabilities [--goal "…"]` | Discover the canonical CLI/MCP capability catalogue |
-| `aua session start --goal "…"` | Observe once and return one exact next call; optionally add `--contract`, `--artifacts-dir`, `--wait-for-lease` |
+| `aua session start --goal "…"` | Observe once and return one exact next call; optionally add `--contract`, `--artifacts-dir`, `--wait-for-lease`, `--animations` |
 | `aua session review\|finish` | Quantify calls; strict contracts keep finish active until proven (`--allow-incomplete` is explicit) |
 | `aua session candidate-flow NAME` | Preview a proven action window; reset + replay before `--save` |
 | `aua reach "<goal>" [--until …]` | Use verified goto then a matching safe flow, with semantic arrival proof |
@@ -1566,7 +1573,7 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 | `aua expect-and-analyze …` | Assert visibility / state (exit 8 on failure) |
 | `aua wait-and-analyze --for "<text>"` | Poll until text appears (`--idle` / `--for-stable` / `--changed`) |
 | `aua await-and-analyze '<predicate>'` | Wait on ANDed terms — `text:` `rid:` `desc:` `net:` `log:`, `!` = absent. Reports `await_outcome`: satisfied / screen-changed / timeout |
-| `aua lease list\|acquire\|release` | Who is driving which emulator (claimed automatically; `--needs root,play,proxy`) |
+| `aua lease list\|acquire\|release` | Who is driving which emulator (claimed automatically; `--needs root,play,proxy,animations`) |
 | `aua fanout …` | Run a command across multiple `--serials` |
 | `aua tap-and-analyze <id>` / `aua click-and-analyze <id>` | Tap an element by ID (also `--rid`/`--text`/`--desc`) |
 | `aua double-tap-and-analyze <id>` | Double-tap an element |
@@ -1585,7 +1592,8 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 | `aua network status\|offline\|restore` | Verified, saved, reversible network isolation |
 | `aua network profile list\|apply\|status\|restore` | Reversible Wi-Fi, cellular, slow, and lossy conditions |
 | `aua media add PATH` | Push media into the gallery |
-| `aua record start\|stop PATH` | Screen recording |
+| `aua record start\|stop PATH` | Screen recording; stop waits for and validates the finalized MP4 |
+| `aua capture sheet PATH.png --since last-action` | Timestamped, evenly sampled transition contact sheet (no ffmpeg) |
 | `aua mic inject PCM-WAV [CONTROL-ID]` | Inject emulator PCM; optional selector plus `--control-mode hold\|toggle` |
 | `aua mic speak "TEXT" [CONTROL-ID]` | macOS `say` → temporary PCM WAV → the same hold/toggle path |
 | `aua clock set --ms <unix-ms>` | Set device clock (emulator / rooted) |

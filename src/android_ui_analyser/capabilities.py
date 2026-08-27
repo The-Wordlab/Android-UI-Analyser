@@ -108,6 +108,25 @@ CAPABILITIES: tuple[Capability, ...] = (
         cleanup="aua network restore",
     ),
     Capability(
+        "animations",
+        "Keep Android animations enabled for visual timing/easing checks and restore prior scales.",
+        (
+            "animation",
+            "animations",
+            "animated",
+            "motion",
+            "transition",
+            "transitions",
+            "easing",
+            "tween",
+        ),
+        4,
+        'aua session start --goal "<goal>" --animations',
+        "session_start",
+        risk="reversible developer-setting mutation owned by the session",
+        cleanup="aua session finish",
+    ),
+    Capability(
         "network_profile",
         "Apply reversible Wi-Fi, cellular, slow, or lossy connectivity conditions.",
         ("wifi", "cellular", "slow", "lossy", "latency", "network"),
@@ -178,16 +197,29 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     Capability(
         "capture",
-        "Recover transient loading or animation frames from the daemon rolling buffer.",
+        "Recover transient frames and export a timestamped PNG contact sheet without ffmpeg.",
         ("video", "animation", "flash", "transition", "loading", "frame"),
         65,
-        "aua capture last",
-        "capture_last",
+        "aua capture sheet transition.png --since last-action --max-frames 6 --timestamps",
+        "capture_sheet",
     ),
     Capability(
         "logcat",
         "Mark and read only the device logs produced by the tested action.",
-        ("crash", "log", "error", "exception", "diagnose"),
+        (
+            "crash",
+            "log",
+            "error",
+            "exception",
+            "diagnose",
+            "backend",
+            "request",
+            "response",
+            "api",
+            "http",
+            "round-trip",
+            "round trip",
+        ),
         65,
         "aua logcat mark",
         "logcat_mark",
@@ -202,12 +234,12 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     Capability(
         "emulator",
-        "Discover, lease, boot, and clean up an appropriate Android emulator.",
+        "Let goal-session bootstrap discover, lease, boot, and clean up an Android target.",
         ("device", "emulator", "avd", "headed", "headless"),
         75,
-        "aua devices",
-        "list_devices",
-        cleanup="stop only an emulator this session started",
+        'aua session start --goal "<goal>" --headed',
+        "session_start",
+        cleanup="aua session finish",
     ),
     Capability(
         "install",
@@ -303,6 +335,9 @@ def render_mcp_instructions() -> str:
         "app. "
         "If a daemon call reports daemon_outcome_unknown, never repeat it: wait, then inspect "
         "one fresh screen. A busy live daemon remains the sole device controller. "
+        "For animation or motion goals, session_start enables animations and restores their "
+        "prior scales at session_finish. Use capture_sheet for a bounded timestamped PNG "
+        "timeline without ffmpeg. "
         "Unsafe or destructive effects require explicit "
         "authorization. capabilities(goal) provides progressive discovery for uncommon tasks."
     )

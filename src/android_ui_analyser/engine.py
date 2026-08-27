@@ -19,6 +19,7 @@ import shlex
 import sys
 import threading
 import time
+import uuid
 import weakref
 from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
@@ -141,6 +142,11 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from .policy import PolicyContext, PolicyDecision, PolicyMode, PolicySelector
 
 logger = logging.getLogger("android_ui_analyser.engine")
+
+_ANIMATION_GOAL_RE = re.compile(
+    r"\b(?:animation|animations|animated|motion|transition|transitions|easing|tween|tweening)\b",
+    re.IGNORECASE,
+)
 
 # Keep the historical module-level monkeypatch seams working for downstream tests and
 # integrations while production construction moves behind PlatformAdapter.
@@ -1297,6 +1303,7 @@ class Engine:
         headed: bool,
         audio: bool,
         avd: str | None,
+        animations: bool = False,
         package: str | None = None,
         app_will_be_installed: bool = False,
     ) -> dict[str, Any]:
@@ -1403,6 +1410,7 @@ class Engine:
             boot = emulator_mod.start(
                 selected_avd,
                 headless=not headed,
+                animations=animations,
                 audio=audio,
                 cache_dir=self.config.cache.dir,
                 lease_registry_dir=self._lease_registry_dir,
@@ -7793,6 +7801,7 @@ class Engine:
         start_emulator: bool = True,
         headed: bool = False,
         audio: bool = False,
+        animations: bool = False,
         avd: str | None = None,
         needs: list[str] | None = None,
         package: str | None = None,
@@ -7835,8 +7844,18 @@ class Engine:
             raise UsageError("--wait-for-lease must not be negative")
         if wait_for_lease_s and observation is not None:
             raise UsageError("wait_for_lease_s cannot be combined with an injected observation")
-        if needs is not None:
-            self._lease_needs = [str(item).strip().lower() for item in needs if str(item).strip()]
+        normalized_needs = (
+            [str(item).strip().lower() for item in needs if str(item).strip()]
+            if needs is not None
+            else list(self._lease_needs or [])
+        )
+        animations_requested = bool(
+            animations or "animations" in normalized_needs or _ANIMATION_GOAL_RE.search(goal)
+        )
+        # ``animations`` is a reversible session environment requirement, not a hardware
+        # capability. Do not reject otherwise compatible targets for lacking a probe key. Apply
+        # this even when needs came from config/engine state instead of the current CLI argument.
+        self._lease_needs = [item for item in normalized_needs if item != "animations"]
         self._lease_waited_ms = 0
         emulator_started = False
         if observation is None:
@@ -7846,13 +7865,48 @@ class Engine:
                 headed=headed,
                 audio=audio,
                 avd=avd,
+                animations=animations_requested,
                 package=package,
                 app_will_be_installed=bool(apk),
             )
             emulator_started = bool(prepared.get("emulator_started"))
             self._lease_waited_ms = int(prepared.get("lease_waited_ms") or 0)
         installed_bundle: dict[str, Any] | None = None
+        animation_backup_path: Path | None = None
+        animation_change_key: str | None = None
+        animations_enabled = False
         try:
+            if observation is None and animations_requested:
+                serial = str(prepared["serial"])
+                safe_serial = serial.replace(":", "_").replace("/", "_")
+                animation_backup_path = (
+                    Path(self.config.cache.dir).expanduser()
+                    / "session-devopts"
+                    / f"{safe_serial}-{uuid.uuid4().hex}.json"
+                )
+                animation_change_key = f"session_animations:{animation_backup_path.name}"
+                self.record_device_change(
+                    key=animation_change_key,
+                    kind="developer_settings",
+                    op="restore_developer_settings",
+                    args={"backup_path": str(animation_backup_path)},
+                    detail="animation scales enabled for animation-aware session",
+                    serial=serial,
+                )
+                devopts = self.platform.capability("developer_settings")
+                animation_state = devopts.anim_on(self.device.shell, animation_backup_path)
+                scales = (animation_state or {}).get("anim") or {}
+                animations_enabled = bool(scales) and all(
+                    str(value) in {"1", "1.0"} for value in scales.values()
+                )
+                if not animations_enabled:
+                    raise DeviceError(
+                        "could not enable Android animations for this session",
+                        hint=(
+                            "AUA read the animation scales back and at least one was not 1.0. "
+                            "The saved pre-session values will be restored."
+                        ),
+                    )
             if observation is None and apk:
                 # Install before the launch, not after: `--app` names the package to open, and a
                 # bootstrap that launched first would either open the previous build or fail on a
@@ -7919,6 +7973,16 @@ class Engine:
                         ),
                     )
         except Exception:
+            if animation_backup_path is not None and animation_backup_path.is_file():
+                try:
+                    self.platform.capability("developer_settings").anim_restore(
+                        self.device.shell, animation_backup_path
+                    )
+                    if animation_change_key is not None:
+                        self.forget_device_change(animation_change_key)
+                except Exception:
+                    # Leave the ledger entry intact: the teardown watchdog can still restore it.
+                    pass
             if emulator_started:
                 emulator_mod = self.platform.capability("virtual_devices")
 
@@ -7977,6 +8041,10 @@ class Engine:
             network_backup_preexisting=network_backup_preexisting,
             network_profile_preexisting=network_profile_preexisting,
             emulator_started=emulator_started,
+            animations_enabled=animations_enabled,
+            animation_backup_path=(
+                str(animation_backup_path) if animation_backup_path is not None else None
+            ),
             contract=contract,
             contract_yaml=canonical_contract_yaml,
             artifact_dir=None,
@@ -8049,6 +8117,7 @@ class Engine:
             owner=state.owner,
             serial=state.serial,
             cleanup=[
+                *(["animation_restore"] if animation_backup_path is not None else []),
                 "network_restore",
                 "network_profile_restore",
                 *(["owned_emulator_handoff"] if emulator_started else []),
@@ -8067,6 +8136,19 @@ class Engine:
                 ),
             },
             emulator_started=emulator_started,
+            animations={
+                "requested": animations_requested,
+                "enabled": animations_enabled,
+                "source": (
+                    "flag"
+                    if animations
+                    else "needs"
+                    if "animations" in normalized_needs
+                    else "goal"
+                    if _ANIMATION_GOAL_RE.search(goal)
+                    else "default"
+                ),
+            },
             lease_waited_ms=self._lease_waited_ms,
             artifacts_dir=state.artifact_dir,
             goal_progress=progress,
@@ -10656,6 +10738,21 @@ class Engine:
             except AuaError as exc:
                 errors.append({"action": name, "message": exc.message})
                 return None
+
+        if state.animation_backup_path:
+            animation_path = Path(state.animation_backup_path)
+            if animation_path.is_file():
+
+                def restore_session_animations() -> dict[str, Any]:
+                    restored = self.platform.capability("developer_settings").anim_restore(
+                        self.device.shell, animation_path
+                    )
+                    self.forget_device_change(
+                        f"session_animations:{animation_path.name}", serial=state.serial
+                    )
+                    return {"ok": True, "action": "animation-restore", **restored}
+
+                restore("animation_restore", restore_session_animations)
 
         if (
             not state.network_profile_preexisting
@@ -18341,22 +18438,26 @@ class Engine:
 
         path = self._dev_backup_path()
         m = (mode or "").lower()
-        if m == "off":
+        if m in {"on", "off"}:
             self.record_device_change(
                 key="developer_settings",
                 kind="developer_settings",
                 op="restore_developer_settings",
                 args={"backup_path": str(path)},
-                detail="animation scales set to 0",
+                detail=f"animation scales set to {'1' if m == 'on' else '0'}",
             )
-            state = devopts.anim_off(self.device.shell, path)
+            state = (
+                devopts.anim_on(self.device.shell, path)
+                if m == "on"
+                else devopts.anim_off(self.device.shell, path)
+            )
         elif m == "restore":
             state = devopts.anim_restore(self.device.shell, path)
             self.forget_device_change("developer_settings")
         else:
             raise UsageError(
                 f"unknown anim mode {mode!r}",
-                hint="Use `aua dev anim off` or `aua dev anim restore`.",
+                hint="Use `aua dev anim on`, `aua dev anim off`, or `aua dev anim restore`.",
             )
         return {"ok": True, "action": f"dev-anim-{m}", **state}
 
@@ -21480,6 +21581,58 @@ class Engine:
             return self._capture.export(path, seconds=seconds, since_ms=since_ms, fmt=fmt, fps=fps)
         except (ValueError, ImportError) as exc:
             raise UsageError(str(exc)) from exc
+
+    def capture_sheet(
+        self,
+        path: str,
+        *,
+        seconds: float | None = None,
+        since: str | None = None,
+        max_frames: int = 6,
+        columns: int = 3,
+        timestamps: bool = True,
+    ) -> dict[str, Any]:
+        """Export a bounded visual timeline without requiring ffmpeg."""
+
+        payload = self.capture_last(seconds=seconds, since=since)
+        from .capture import FrameEntry, export_contact_sheet
+
+        entries = [FrameEntry(**item) for item in payload.get("frames") or []]
+        try:
+            written, selected = export_contact_sheet(
+                entries,
+                Path(path),
+                max_frames=max_frames,
+                columns=columns,
+                timestamps=timestamps,
+            )
+        except ValueError as exc:
+            raise UsageError(str(exc)) from exc
+        provenance: dict[str, Any] = {
+            key: payload[key]
+            for key in (
+                "source",
+                "live",
+                "session_id",
+                "dir",
+                "indexed",
+                "available",
+                "newest_frame_age_ms",
+                "note",
+            )
+            if key in payload
+        }
+        return {
+            "ok": True,
+            "action": "capture-sheet",
+            **provenance,
+            "path": written,
+            "frames": len(selected),
+            "source_frames": len(entries),
+            "timestamps": timestamps,
+            "columns": min(columns, len(selected)),
+            "selected_timestamps_ms": [entry.t_ms for entry in selected],
+        }
 
     def capture_explain(
         self,

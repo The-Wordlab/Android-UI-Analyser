@@ -235,6 +235,8 @@ class SessionState(BaseModel):
     network_backup_preexisting: bool = False
     network_profile_preexisting: bool = False
     emulator_started: bool = False
+    animations_enabled: bool = False
+    animation_backup_path: str | None = None
     phases: list[GoalPhase] = Field(default_factory=list)
     contract: SessionContract | None = None
     contract_yaml: str | None = None
@@ -1950,6 +1952,8 @@ def create_session_state(
     network_backup_preexisting: bool,
     network_profile_preexisting: bool,
     emulator_started: bool = False,
+    animations_enabled: bool = False,
+    animation_backup_path: str | None = None,
     contract: SessionContract | None = None,
     contract_yaml: str | None = None,
     artifact_dir: str | None = None,
@@ -1980,6 +1984,8 @@ def create_session_state(
         network_backup_preexisting=network_backup_preexisting,
         network_profile_preexisting=network_profile_preexisting,
         emulator_started=emulator_started,
+        animations_enabled=animations_enabled,
+        animation_backup_path=animation_backup_path,
         phases=contract_phases(contract) if contract is not None else goal_phases(goal),
         contract=contract.model_copy(deep=True) if contract is not None else None,
         contract_yaml=canonical_contract_yaml,

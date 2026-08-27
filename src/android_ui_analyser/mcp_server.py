@@ -490,7 +490,10 @@ def _tool_definitions() -> list[types.Tool]:
                     },
                     "needs": {
                         "type": "array",
-                        "items": {"type": "string", "enum": ["root", "play", "proxy"]},
+                        "items": {
+                            "type": "string",
+                            "enum": ["root", "play", "proxy", "animations"],
+                        },
                         "description": "Required target capabilities used for selection/provisioning.",
                     },
                     "headed": {
@@ -506,6 +509,14 @@ def _tool_definitions() -> list[types.Tool]:
                         "description": (
                             "When start_emulator boots one, keep host audio enabled so "
                             "microphone injection is available."
+                        ),
+                    },
+                    "animations": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "Enable Android animations for this session and restore prior scales "
+                            "at finish; animation goals infer this automatically."
                         ),
                     },
                     "avd": {"type": "string", "description": "AVD name when several exist."},
@@ -1948,6 +1959,39 @@ def _tool_definitions() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="capture_sheet",
+            description=(
+                "Export an evenly sampled PNG contact sheet with relative timestamps; "
+                "does not require ffmpeg."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "seconds": {"type": "number"},
+                    "since": {
+                        "type": "string",
+                        "description": "Use 'last-action' for post-action frames.",
+                    },
+                    "max_frames": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 24,
+                        "default": 6,
+                    },
+                    "columns": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 8,
+                        "default": 3,
+                    },
+                    "timestamps": {"type": "boolean", "default": True},
+                },
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
             name="capture_explain",
             description="Narrate recent capture (local summary; optional LLM).",
             inputSchema={
@@ -2727,6 +2771,7 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
             "start_emulator": bool(args.get("start_emulator", True)),
             "headed": bool(args.get("headed", False)),
             "audio": bool(args.get("audio", False)),
+            "animations": bool(args.get("animations", False)),
             "avd": args.get("avd"),
             "needs": args.get("needs"),
             "package": args.get("package"),
@@ -3283,6 +3328,17 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 fps=float(args.get("fps") or 8.0),
             )
         )
+    if name == "capture_sheet":
+        return _dump(
+            engine.capture_sheet(
+                args["path"],
+                seconds=args.get("seconds"),
+                since=args.get("since"),
+                max_frames=int(args.get("max_frames", 6)),
+                columns=int(args.get("columns", 3)),
+                timestamps=bool(args.get("timestamps", True)),
+            )
+        )
     if name == "capture_explain":
         return _dump(
             engine.capture_explain(
@@ -3631,6 +3687,7 @@ _LEASE_FREE_TOOLS = frozenset(
         "capture_explain",
         "capture_export",
         "capture_last",
+        "capture_sheet",
         "capture_status",
         "configure",
         "emulator_list",

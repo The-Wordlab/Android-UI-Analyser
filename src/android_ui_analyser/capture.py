@@ -19,6 +19,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from math import ceil
 from pathlib import Path
 from typing import Any
 
@@ -696,6 +697,86 @@ def export_animation(
     raise ValueError(f"unsupported export format {fmt!r} (use gif or mp4)")
 
 
+def _sample_entries(entries: list[FrameEntry], max_frames: int) -> list[FrameEntry]:
+    """Evenly sample a timeline while preserving both transition endpoints."""
+
+    if max_frames < 1:
+        raise ValueError("max_frames must be at least 1")
+    if len(entries) <= max_frames:
+        return list(entries)
+    if max_frames == 1:
+        return [entries[-1]]
+    last = len(entries) - 1
+    indices = [round(i * last / (max_frames - 1)) for i in range(max_frames)]
+    return [entries[index] for index in dict.fromkeys(indices)]
+
+
+def export_contact_sheet(
+    entries: list[FrameEntry],
+    path: Path,
+    *,
+    max_frames: int = 6,
+    columns: int = 3,
+    timestamps: bool = True,
+    thumbnail_width: int = 320,
+) -> tuple[str, list[FrameEntry]]:
+    """Write an evenly sampled PNG contact sheet with relative-time/action labels."""
+
+    from PIL import Image, ImageDraw, ImageFont
+
+    if columns < 1:
+        raise ValueError("columns must be at least 1")
+    if thumbnail_width < 32:
+        raise ValueError("thumbnail_width must be at least 32")
+    selected = _sample_entries(entries, max_frames)
+    opened: list[tuple[FrameEntry, Any]] = []
+    for entry in selected:
+        try:
+            with Image.open(entry.path) as source:
+                image = source.convert("RGB")
+                height = max(1, round(image.height * thumbnail_width / image.width))
+                opened.append(
+                    (
+                        entry,
+                        image.resize(
+                            (thumbnail_width, height), Image.Resampling.LANCZOS
+                        ),
+                    )
+                )
+        except OSError:
+            continue
+    if not opened:
+        raise ValueError("could not open any frame images")
+
+    columns = min(columns, len(opened))
+    rows = ceil(len(opened) / columns)
+    label_height = 28 if timestamps else 0
+    cell_height = max(image.height for _entry, image in opened) + label_height
+    sheet = Image.new(
+        "RGB", (columns * thumbnail_width, rows * cell_height), (24, 24, 24)
+    )
+    draw = ImageDraw.Draw(sheet)
+    font = ImageFont.load_default()
+    t0 = opened[0][0].t_ms
+    for index, (entry, image) in enumerate(opened):
+        x = (index % columns) * thumbnail_width
+        y = (index // columns) * cell_height
+        if timestamps:
+            label = f"t+{max(0, entry.t_ms - t0)}ms"
+            if entry.action:
+                label += f"  {entry.action}"
+            draw.text((x + 8, y + 8), label[:64], fill=(255, 255, 255), font=font)
+        image_y = y + label_height
+        sheet.paste(image, (x, image_y))
+
+    out = path.expanduser()
+    if out.suffix.lower() != ".png":
+        out = out.with_suffix(".png")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    sheet.save(out, format="PNG", optimize=True)
+    return str(out), [entry for entry, _image in opened]
+
+
 def _changed_cells(path_a: str, path_b: str, *, grid: int, threshold: float) -> list[str]:
     import numpy as np
     from PIL import Image
@@ -869,6 +950,7 @@ __all__ = [
     "change_duration_ms",
     "diff_summary",
     "export_animation",
+    "export_contact_sheet",
     "frame_hash",
     "local_narration",
     "read_session_from_disk",

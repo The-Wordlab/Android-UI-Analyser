@@ -416,6 +416,7 @@ _LEASE_FREE_COMMANDS = frozenset(
         "capture_explain",
         "capture_export",
         "capture_last",
+        "capture_sheet",
         "capture_status",
         "flow_delete",
         "flow_save",
@@ -911,6 +912,9 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
         elif cmd == "capture_export":
             return _result_ok(engine.capture_export(**args))
 
+        elif cmd == "capture_sheet":
+            return _result_ok(engine.capture_sheet(**args))
+
         elif cmd == "capture_explain":
             return _result_ok(engine.capture_explain(**args))
 
@@ -951,6 +955,7 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
                 "suite_run, dev_show, dev_anim, dev_crashes, dev_profile, "
                 "a11y_scroll, a11y_action, flags_set, flags_apply, proxy_start, proxy_stop, "
                 "mock_map, mock_record, mock_replay, capture_status, capture_last, capture_export, "
+                "capture_sheet, "
                 "capture_explain, capture_on, capture_off, capture_prune, capture_start, capture_stop",
             )
 

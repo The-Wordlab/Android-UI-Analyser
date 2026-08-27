@@ -50,7 +50,7 @@ def _stub_runtime(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(emulator_watchdog, "_still_running", lambda serial, pid: True)
     monkeypatch.setattr(emulator_watchdog, "_POLL_S", 0.01)
     monkeypatch.setattr(
-        "android_ui_analyser.emulator.stop",
+        "android_ui_analyser.emulator.stop_spawned_instance",
         lambda **kw: stops.append(kw) or {"ok": True},
     )
     monkeypatch.setattr(emulator_watchdog, "_reset_device_changes", lambda cache, serial: None)
@@ -89,7 +89,7 @@ def test_an_idle_and_unleased_emulator_is_stopped(
 
     assert emulator_watchdog.run_watchdog(cache_dir=str(cache), instance="pixel") == 0
 
-    assert [s.get("serial") for s in _stub_runtime["stops"]] == ["emulator-5554"]
+    assert [s.get("instance") for s in _stub_runtime["stops"]] == ["pixel"]
     assert _stub_runtime["stops"][0]["requested_by"] == "idle-watchdog"
 
 
@@ -119,7 +119,7 @@ def test_a_dead_owners_lease_frees_the_emulator_immediately(
         os.waitpid(pid, 0)
 
     assert emulator_watchdog.run_watchdog(cache_dir=str(cache), instance="pixel") == 0
-    assert [s.get("serial") for s in _stub_runtime["stops"]] == ["emulator-5554"]
+    assert [s.get("instance") for s in _stub_runtime["stops"]] == ["pixel"]
 
 
 def test_an_unreadable_lease_directory_is_treated_as_held(tmp_path: Path) -> None:

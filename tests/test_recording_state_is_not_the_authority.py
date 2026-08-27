@@ -34,12 +34,26 @@ _PS_RECORDING = (
 )
 
 
+def _box(kind: bytes, payload: bytes = b"") -> bytes:
+    return (8 + len(payload)).to_bytes(4, "big") + kind + payload
+
+
+_VALID_MP4 = _box(b"ftyp", b"isom") + _box(b"mdat", b"frame") + _box(b"moov", b"index")
+
+
 class _FakeU2:
     """Just enough uiautomator2 surface for the recording paths: `shell` and `pull`."""
 
-    def __init__(self, ps_output: str | None, *, remote_exists: bool = True) -> None:
+    def __init__(
+        self,
+        ps_output: str | None,
+        *,
+        remote_exists: bool = True,
+        remote_bytes: bytes = _VALID_MP4,
+    ) -> None:
         self._ps = ps_output  # None → `ps` unreadable (raises, as an offline device would)
         self._remote_exists = remote_exists
+        self._remote_bytes = remote_bytes
         self.shell_calls: list[str] = []
         self.pulls: list[tuple[str, str]] = []
 
@@ -55,7 +69,7 @@ class _FakeU2:
 
     def pull(self, remote: str, local: str) -> None:
         self.pulls.append((remote, local))
-        Path(local).write_bytes(b"\x00fake mp4 payload")
+        Path(local).write_bytes(self._remote_bytes)
 
 
 def _device(u2: _FakeU2) -> Uiautomator2Device:
@@ -102,8 +116,11 @@ def test_stop_recovers_a_running_recording_when_the_handle_is_missing(
     """The cache-dir-changed case: the handle is gone, the recording is real, keep the video."""
     import subprocess
 
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: None)
+    def stop_remote(*args: Any, **kwargs: Any) -> None:
+        u2._ps = _PS_IDLE
+
     u2 = _FakeU2(_PS_RECORDING)
+    monkeypatch.setattr(subprocess, "run", stop_remote)
     dev = _device(u2)
     assert not dev._recording_state_path().exists()  # nothing local to recover from
 
@@ -111,7 +128,30 @@ def test_stop_recovers_a_running_recording_when_the_handle_is_missing(
 
     assert Path(dest).is_file() and Path(dest).stat().st_size > 0
     # It pulled the path the *device* reported, not a guess.
-    assert u2.pulls == [("/sdcard/aua_recording.mp4", dest)]
+    assert [remote for remote, _local in u2.pulls] == ["/sdcard/aua_recording.mp4"]
+
+
+def test_stop_rejects_a_nonempty_but_unfinalized_mp4_and_keeps_the_remote(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The exact ffmpeg failure: bytes exist, but screenrecord never wrote its moov box."""
+    import subprocess
+
+    corrupt = _box(b"ftyp", b"isom") + _box(b"mdat", b"partial frames")
+    u2 = _FakeU2(_PS_RECORDING, remote_bytes=corrupt)
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: setattr(u2, "_ps", _PS_IDLE))
+    dev = _device(u2)
+    existing = tmp_path / "evidence.mp4"
+    existing.write_bytes(_VALID_MP4)
+
+    with pytest.raises(DeviceError, match="moov box is missing"):
+        dev.stop_recording(str(existing))
+
+    assert existing.read_bytes() == _VALID_MP4
+    assert not any(call.startswith("rm ") for call in u2.shell_calls)
+    assert json.loads(dev._recording_state_path().read_text())["remote"] == (
+        "/sdcard/aua_recording.mp4"
+    )
 
 
 def test_stop_still_reports_nothing_when_the_device_agrees_nothing_runs() -> None:

@@ -56,7 +56,13 @@ def test_only_the_methods_with_no_durable_form_are_marked_daemon_only() -> None:
     for method in ("capture_on", "capture_off", "capture_prune", "job_start", "job_wait"):
         assert method in cli._DAEMON_ONLY_METHODS, method
     # Answerable from the on-disk index, so they must be free to restart and then to degrade.
-    for method in ("capture_status", "capture_last", "capture_export", "capture_explain"):
+    for method in (
+        "capture_status",
+        "capture_last",
+        "capture_export",
+        "capture_sheet",
+        "capture_explain",
+    ):
         assert method not in cli._DAEMON_ONLY_METHODS, method
     # Stateless calls must NOT be in the set — they degrade to in-process correctly.
     for method in ("analyze", "tap", "has"):

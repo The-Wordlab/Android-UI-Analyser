@@ -58,6 +58,7 @@ can yield an unmapped `satisfied_action_until` arrival.
   implicit: omit `--serial`; switching or transfer is explicit.
 - `--no-start-emulator` forbids provisioning; `--headed` enables visibility. For voice add
   `--audio`, then `mic inject`/`mic speak`; never repeat uncertain delivery.
+- Animation goals enable scales until finish. Use `capture sheet`; obey the raw-`adb` plugin guard.
 - Use `aua network offline --verify`; session cleanup restores it. Guarded `aua db` for
   debuggable SQLite.
 - Deeplink delivery or spinner disappearance is not arrival—check `verified` and the final affordance.

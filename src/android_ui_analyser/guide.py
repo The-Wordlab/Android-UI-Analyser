@@ -97,6 +97,8 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "`--no-start-emulator` only when provisioning is forbidden. "
         "For microphone/voice-input tests add `--audio`; the normal unattended default uses "
         "`-no-audio` to avoid unnecessary host audio initialization. "
+        "For animation/motion tests add `--animations` or `--needs animations` (goal text also "
+        "infers it); AUA enables the scales and restores their exact prior values at finish. "
         "When the user needs to watch, add `--headed`; it is valid with an already attached "
         "visible emulator, and if AUA must start one its ownership is recorded so "
         "`aua session finish` can restore state, release the lease, and keep that AVD warm for "
@@ -591,7 +593,8 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "token expiry; goal-session ownership remains separate. That explicit pending transfer "
         "is the sole exception to immediate process-death release: its reservation survives a "
         "source crash only until the token expires, so the spawned child cannot lose the device. "
-        "Ask for what the device must support with `aua session start --needs root,play,proxy`; "
+        "Ask for what the device/session must support with "
+        "`aua session start --needs root,play,proxy,animations`; "
         "AUA selects a capable free device or provisions a matching AVD automatically. "
         "**Exit 9 (`device_leased`) means another agent holds it.** If the serial was only a "
         "redundant stale pin, omit it and stay on your existing assignment. If the user explicitly "
@@ -661,7 +664,7 @@ BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
         "leaves them alone and provisions a unique read-only instance. Never list/start/acquire "
         "manually. The sticky "
         "lease stays implicit; omit `--serial` from ordinary commands. Never steal. Add "
-        "`--needs root,play,proxy`, `--headed`, or `--audio` only when required. "
+        "`--needs root,play,proxy,animations`, `--headed`, or `--audio` only when required. "
         "`session finish` cleans up.",
     ),
     (
@@ -1021,7 +1024,7 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "list|apply|status|restore` (all modes are saved, verified, and reversible), "
         "`media add PATH`, `mic inject PCM-WAV [CONTROL-ID] [--control-mode hold|toggle]`, "
         "`mic speak TEXT [CONTROL-ID]`, "
-        "`record start|stop PATH`, `clock set --ms <unix-ms>` / "
+        "`record start|stop PATH` (stop validates a finalized MP4), `clock set --ms <unix-ms>` / "
         "`clock restore` (time travel invalidates auth — always restore)",
     ),
     (
@@ -1064,7 +1067,8 @@ KEY_FLAGS: list[tuple[str, str]] = [
     (
         "capture",
         "`capture status|last [--seconds N|--since last-action] [--region center]|"
-        "export PATH.gif|explain [--llm]|on|off|prune|sidecar start|stop` — always-on "
+        "sheet PATH.png [--max-frames 6 --timestamps]|export PATH.gif|explain [--llm]|"
+        "on|off|prune|sidecar start|stop` — always-on "
         "rolling screencap with the daemon (deduped frames + diff summary / GIF); a response "
         "carrying `capture_hint` is telling you the frames can explain it — it appears only "
         "where something is wrong (a miss, `stale_risk`, an empty screen), never on a settled "
@@ -1090,7 +1094,7 @@ KEY_FLAGS: list[tuple[str, str]] = [
     ),
     (
         "dev",
-        "`dev show`, `dev anim off|restore`, `dev crashes on|off`, "
+        "`dev show`, `dev anim on|off|restore`, `dev crashes on|off`, "
         "`dev profile ac|default` (AC: anim off + crashes on; always restore)",
     ),
     (
@@ -1972,6 +1976,7 @@ can yield an unmapped `satisfied_action_until` arrival.
   implicit: omit `--serial`; switching or transfer is explicit.
 - `--no-start-emulator` forbids provisioning; `--headed` enables visibility. For voice add
   `--audio`, then `mic inject`/`mic speak`; never repeat uncertain delivery.
+- Animation goals enable scales until finish. Use `capture sheet`; obey the raw-`adb` plugin guard.
 - Use `aua network offline --verify`; session cleanup restores it. Guarded `aua db` for
   debuggable SQLite.
 - Deeplink delivery or spinner disappearance is not arrival—check `verified` and the final affordance.

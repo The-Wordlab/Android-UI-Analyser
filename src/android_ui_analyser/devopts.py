@@ -80,6 +80,15 @@ def anim_off(shell: ShellFn, backup_path: Path) -> dict[str, Any]:
     return read_state(shell)
 
 
+def anim_on(shell: ShellFn, backup_path: Path) -> dict[str, Any]:
+    """Enable all animation scales while preserving the exact prior values."""
+    state = read_state(shell)
+    save_backup(backup_path, state)
+    for ns, key in ANIM_KEYS:
+        _settings_put(shell, ns, key, "1")
+    return read_state(shell)
+
+
 def anim_restore(shell: ShellFn, backup_path: Path) -> dict[str, Any]:
     backup = load_backup(backup_path)
     if backup is None:
@@ -89,7 +98,9 @@ def anim_restore(shell: ShellFn, backup_path: Path) -> dict[str, Any]:
         anim = backup.get("anim") or {}
         for ns, key in ANIM_KEYS:
             _settings_put(shell, ns, key, str(anim.get(key, "1")))
-    return read_state(shell)
+    state = read_state(shell)
+    backup_path.unlink(missing_ok=True)
+    return state
 
 
 def crashes_set(shell: ShellFn, enabled: bool, backup_path: Path) -> dict[str, Any]:

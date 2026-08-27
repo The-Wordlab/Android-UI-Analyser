@@ -383,6 +383,7 @@ def test_session_provisions_matching_avd_and_claims_it_automatically(
     assert start["avd"] == "rootable-api34"
     assert start["headless"] is False
     assert start["audio"] is True
+    assert start["animations"] is False
     assert start["parallel"] is True
     assert leases.holder(cfg.lease.registry_dir, "emulator-5558") == "session-agent"
     assert all(name != "stop" for name, _detail in calls)

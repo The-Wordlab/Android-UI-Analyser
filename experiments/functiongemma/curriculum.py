@@ -182,6 +182,7 @@ PUBLIC_AUA_ARGUMENTS: dict[str, frozenset[str]] = {
             "start_emulator",
             "headed",
             "audio",
+            "animations",
             "avd",
             "needs",
             "package",

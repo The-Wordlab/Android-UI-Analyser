@@ -1,0 +1,17 @@
+{
+  "description": "Keep Android device operations inside AUA's leased, selector-safe surface.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/guard_device_bypass.py\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

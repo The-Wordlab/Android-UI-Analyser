@@ -16,6 +16,7 @@ import re
 import shlex
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -32,6 +33,7 @@ logger = logging.getLogger("android_ui_analyser.device")
 # `screenrecord` rejects a --time-limit above this and exits at once, so asking for
 # more records nothing. The platform also stops at this limit on its own.
 _SCREENRECORD_MAX_S = 180
+_SCREENRECORD_FINALIZE_TIMEOUT_S = 8.0
 
 # ``pm clear`` waits for app-data deletion, but Android may still be destroying a removed task.
 # Keep the launch side of ``launch --clear`` behind that lifecycle boundary. Android's activity
@@ -65,6 +67,48 @@ def parse_locale(raw: str | None) -> str | None:
     if not first or first.lower() in ("null", "undefined"):
         return None
     return first
+
+
+def finalized_mp4(path: Path) -> bool:
+    """Return whether *path* has a complete top-level MP4 container.
+
+    Android's ``screenrecord`` writes the ``moov`` box only while shutting down.  A non-empty
+    file (and even a successful ``adb pull``) is therefore not proof that a recording can be
+    decoded.  Walk the ISO BMFF top-level boxes instead of depending on ffmpeg being installed.
+    """
+
+    try:
+        total = path.stat().st_size
+        if total < 16:
+            return False
+        saw_ftyp = False
+        saw_moov = False
+        with path.open("rb") as handle:
+            offset = 0
+            while offset + 8 <= total:
+                handle.seek(offset)
+                header = handle.read(8)
+                if len(header) != 8:
+                    return False
+                box_size = int.from_bytes(header[:4], "big")
+                box_type = header[4:8]
+                header_size = 8
+                if box_size == 1:
+                    extended = handle.read(8)
+                    if len(extended) != 8:
+                        return False
+                    box_size = int.from_bytes(extended, "big")
+                    header_size = 16
+                elif box_size == 0:
+                    box_size = total - offset
+                if box_size < header_size or offset + box_size > total:
+                    return False
+                saw_ftyp = saw_ftyp or box_type == b"ftyp"
+                saw_moov = saw_moov or box_type == b"moov"
+                offset += box_size
+        return saw_ftyp and saw_moov and offset == total
+    except OSError:
+        return False
 
 
 _READ_ONLY_PM_ACTIONS = frozenset(
@@ -1597,6 +1641,17 @@ class Uiautomator2Device(Device):
             time.sleep(0.25)
         return False
 
+    def _wait_for_recording_exit(self, remote_path: str, *, timeout_s: float) -> bool:
+        """Wait until this recording process is gone, which is when ``moov`` is committed."""
+
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            observed, live_remote = self._live_recording()
+            if observed and live_remote != remote_path:
+                return True
+            time.sleep(0.1)
+        return False
+
     def stop_recording(self, local_path: str) -> str:
         state_file = self._recording_state_path()
         if self._recording_remote is None and state_file.exists():
@@ -1616,10 +1671,6 @@ class Uiautomator2Device(Device):
             )
         remote = self._recording_remote
         proc = self._recording_proc
-        self._recording_remote = None
-        self._recording_proc = None
-        with contextlib.suppress(Exception):
-            state_file.unlink()
         try:
             subprocess.run(  # noqa: S603
                 ["adb", "-s", self.serial, "shell", "pkill", "-l", "2", "screenrecord"],
@@ -1632,6 +1683,24 @@ class Uiautomator2Device(Device):
                 with contextlib.suppress(Exception):
                     proc.send_signal(signal.SIGINT)
                     proc.wait(timeout=5)
+        self._recording_proc = None
+
+        # SIGINT asks screenrecord to finalize; it does not mean finalization has completed.
+        # In the normal CLI shape ``record start`` and ``record stop`` are different processes,
+        # so there is no local Popen handle to await. The device process is authoritative.
+        if not self._wait_for_recording_exit(
+            remote, timeout_s=_SCREENRECORD_FINALIZE_TIMEOUT_S
+        ):
+            with contextlib.suppress(Exception):
+                state_file.parent.mkdir(parents=True, exist_ok=True)
+                state_file.write_text(json.dumps({"remote": remote}))
+            raise DeviceError(
+                "screenrecord did not finish finalizing its MP4 container",
+                hint=(
+                    f"The remote recording was kept at {remote}. Wait briefly and retry "
+                    "`aua record stop <path>`; do not process the partial file with ffmpeg."
+                ),
+            )
         dest = Path(local_path).expanduser().resolve()
         dest.parent.mkdir(parents=True, exist_ok=True)
         # `adb pull` of a remote path that does not exist creates a *directory* at the
@@ -1647,22 +1716,41 @@ class Uiautomator2Device(Device):
                     "written locally. Screenshots remain a valid evidence fallback."
                 ),
             )
-        self._call("pull", remote, str(dest))
-        if dest.is_dir() or not dest.is_file() or dest.stat().st_size == 0:
-            with contextlib.suppress(Exception):
-                if dest.is_dir():
-                    dest.rmdir()
-                elif dest.is_file():
-                    dest.unlink()
+        if dest.is_dir():
             raise DeviceError(
-                f"pulling the recording produced nothing usable at {dest}",
-                hint=(
-                    "The device recording may be zero-length. Keep this AUA error as evidence "
-                    "and use `aua screenshot` as the bounded fallback."
-                ),
+                f"recording destination is a directory: {dest}",
+                hint="Choose a file path ending in .mp4.",
             )
+
+        # Pull to a sibling temporary file. A corrupt new recording must not overwrite a valid
+        # piece of evidence already at the requested destination.
+        with tempfile.NamedTemporaryFile(
+            prefix=f".{dest.name}.", suffix=".partial", dir=dest.parent, delete=False
+        ) as partial_handle:
+            partial = Path(partial_handle.name)
+        try:
+            self._call("pull", remote, str(partial))
+            if not finalized_mp4(partial):
+                with contextlib.suppress(Exception):
+                    state_file.parent.mkdir(parents=True, exist_ok=True)
+                    state_file.write_text(json.dumps({"remote": remote}))
+                raise DeviceError(
+                    "screenrecord produced an incomplete MP4 (the moov box is missing)",
+                    hint=(
+                        f"The remote recording was kept at {remote}. Retry `aua record stop "
+                        "<path>`; AUA did not report or install the corrupt file as evidence."
+                    ),
+                )
+            os.replace(partial, dest)
+        finally:
+            with contextlib.suppress(OSError):
+                partial.unlink()
+
+        self._recording_remote = None
         with contextlib.suppress(Exception):
-            self._d.shell(f"rm {remote}")
+            state_file.unlink()
+        with contextlib.suppress(Exception):
+            self._d.shell(f"rm {shlex.quote(remote)}")
         return str(dest)
 
     def set_clock(self, timestamp_ms: int) -> None:

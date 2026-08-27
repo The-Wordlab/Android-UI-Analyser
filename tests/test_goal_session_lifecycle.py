@@ -594,6 +594,53 @@ def test_cli_headed_accepts_an_already_attached_emulator(monkeypatch: Any) -> No
     assert '"session_id"' in result.stdout
 
 
+def test_animation_goal_enables_scales_and_session_finish_restores_them(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    from android_ui_analyser import devopts
+
+    engine = _engine(tmp_path, "goal-animation")
+    setup_backup = tmp_path / "setup-animation.json"
+    devopts.anim_off(engine.device.shell, setup_backup)
+    monkeypatch.setattr(
+        engine, "analyze", lambda **_kwargs: _observation(engine.device.serial)
+    )
+
+    started = engine.session_start("verify the transition animation and easing")
+
+    assert started["animations"] == {"requested": True, "enabled": True, "source": "goal"}
+    assert devopts.read_state(engine.device.shell)["anim"]["window_animation_scale"] == "1"
+
+    finished = engine.session_finish(started["session_id"], allow_incomplete=True)
+
+    assert finished["ok"] is True
+    assert finished["cleanup"][0]["action"] == "animation_restore"
+    assert devopts.read_state(engine.device.shell)["anim"]["window_animation_scale"] == "0"
+
+
+@pytest.mark.parametrize(
+    ("session_kwargs", "source"),
+    [({"animations": True}, "flag"), ({"needs": ["animations"]}, "needs")],
+)
+def test_explicit_animation_session_controls_enable_and_restore(
+    session_kwargs: dict[str, Any], source: str, monkeypatch: Any, tmp_path: Path
+) -> None:
+    from android_ui_analyser import devopts
+
+    engine = _engine(tmp_path / source, f"goal-animation-{source}")
+    devopts.anim_off(engine.device.shell, tmp_path / f"setup-{source}.json")
+    monkeypatch.setattr(
+        engine, "analyze", lambda **_kwargs: _observation(engine.device.serial)
+    )
+
+    started = engine.session_start("inspect the final visual state", **session_kwargs)
+    assert started["animations"]["source"] == source
+    assert started["animations"]["enabled"] is True
+
+    engine.session_finish(started["session_id"], allow_incomplete=True)
+    assert devopts.read_state(engine.device.shell)["anim"]["window_animation_scale"] == "0"
+
+
 def test_session_start_app_alias_launches_and_reuses_that_observation(
     monkeypatch: Any, tmp_path: Path
 ) -> None:

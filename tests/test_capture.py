@@ -16,6 +16,7 @@ from android_ui_analyser.capture import (
     CaptureCfgView,
     FrameEntry,
     diff_summary,
+    export_contact_sheet,
     frame_hash,
 )
 from android_ui_analyser.engine import Engine
@@ -308,6 +309,37 @@ def test_export_gif_and_explain(tmp_path: Path) -> None:
     explained = buf.explain_local()
     assert "narration" in explained
     buf.stop()
+
+
+def test_contact_sheet_evenly_samples_endpoints_and_labels_timeline(tmp_path: Path) -> None:
+    entries: list[FrameEntry] = []
+    for index in range(10):
+        path = tmp_path / f"{index}.jpg"
+        Image.new("RGB", (40, 60), (index * 20, 10, 10)).save(path)
+        entries.append(
+            FrameEntry(
+                t_ms=1_000 + index * 100,
+                path=str(path),
+                hash=str(index),
+                bytes=path.stat().st_size,
+                w=40,
+                h=60,
+                action="tap:Expand" if index == 0 else None,
+            )
+        )
+
+    written, selected = export_contact_sheet(
+        entries,
+        tmp_path / "transition.png",
+        max_frames=4,
+        columns=2,
+        timestamps=True,
+        thumbnail_width=100,
+    )
+
+    assert [entry.t_ms for entry in selected] == [1_000, 1_300, 1_600, 1_900]
+    with Image.open(written) as sheet:
+        assert sheet.size == (200, 356)
 
 
 def test_suite_failure_attaches_capture(tmp_path: Path) -> None:
