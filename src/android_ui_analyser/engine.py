@@ -4086,14 +4086,43 @@ class Engine:
                 idle = False
         return idle
 
-    def _journal_helper(self, outcome: str, serial: str | None, **fields: Any) -> None:
-        """Record what the offload decided, so it can be diagnosed after the run.
+    def _journal_helper(
+        self,
+        outcome: str,
+        serial: str | None,
+        *,
+        cmd: str | None = None,
+        ok: bool | None = None,
+        args: dict[str, Any] | None = None,
+        result: Any = None,
+        **fields: Any,
+    ) -> None:
+        """Record what the helper decided, so it can be diagnosed after the run.
 
         The helper is the one subsystem that can silently do nothing: it declines for half a
         dozen legitimate reasons and the run still succeeds, just slower. Without a line in
         the journal there is no way to answer "did it fire, and if not why" once the run is
         over — which is exactly the question worth asking while its thresholds are still
         being tuned on real flows.
+
+        The keyword arguments exist because this started out serving one caller and now serves
+        two with genuinely different needs, and the difference was visible in the dashboard as
+        three separate wrong things:
+
+        ``cmd``
+            Outcomes are past-tense — ``offloaded``, ``skipped``, ``partial`` — which reads
+            correctly for a decision the offload made on its own. Composed into ``helper.<outcome>``
+            for a *user-invoked* command it produced ``helper.drove``, which the dashboard shows in
+            the slot where the command the caller ran belongs. A reader sees a command name that
+            does not exist and cannot be searched for.
+        ``ok``
+            Derived as ``outcome in {"offloaded", "partial"}``, so any outcome added later is false
+            by construction. A drive that reached its goal was rendered with a red FAIL badge.
+        ``args`` / ``result``
+            Everything used to go to ``extra``, which the dashboard does not render. Its two panels
+            read ``args`` and the response, so a successful drive showed an empty request and a bare
+            ``{"ok": false}`` — the goal, the budget, the steps and the stop reason all present in
+            the journal and none of them on screen.
         """
 
         from . import journal
@@ -4103,8 +4132,10 @@ class Engine:
                 cache_dir=self.config.cache.dir,
                 serial=serial,
                 source="helper",
-                cmd=f"helper.{outcome}",
-                ok=outcome in {"offloaded", "partial"},
+                cmd=cmd or f"helper.{outcome}",
+                args=args,
+                ok=(outcome in {"offloaded", "partial"}) if ok is None else ok,
+                result=result,
                 extra=fields,
             )
 
@@ -4373,6 +4404,23 @@ class Engine:
                 serial = loan.serial
                 was_connected = loan.u2_was_connected
         except _HandoverRefused as refused:
+            # The borrow already journalled *why* it refused, under its own cmd. This adds the
+            # caller's line: without it the dashboard shows a helper decision and no record that a
+            # `helper drive` was ever asked for, which is the question a reader starts from.
+            self._journal_helper(
+                "refused",
+                # From the refusal, not from `loan`: the borrow can decline before a serial is even
+                # resolved, and reading `loan.serial` here raised UnboundLocalError on every refused
+                # drive — turning a clear error into a crash inside the error path.
+                refused.serial,
+                cmd="helper.drive",
+                ok=False,
+                args={"goal": goal, "budget": budget},
+                result={"ok": False, "reason": refused.reason, "detail": refused.detail},
+                reason=refused.reason,
+                detail=refused.detail,
+                ms=round((time.perf_counter() - began) * 1000, 1),
+            )
             raise DeviceError(
                 f"the device could not be handed the goal ({refused.reason})",
                 hint=_HANDOVER_HINTS.get(
@@ -4383,17 +4431,7 @@ class Engine:
 
         steps = list(result.get("steps") or [])
         stop_reason = str(result.get("stop_reason") or "unknown")
-        self._journal_helper(
-            "drove",
-            serial,
-            goal=goal,
-            budget=budget,
-            stop_reason=stop_reason,
-            step_count=len(steps),
-            ms=round((time.perf_counter() - began) * 1000, 1),
-            u2_was_connected=was_connected,
-        )
-        return {
+        payload = {
             "ok": True,
             "action": "helper-drive",
             "goal": goal,
@@ -4404,6 +4442,23 @@ class Engine:
             "step_count": len(steps),
             "steps": steps,
         }
+        self._journal_helper(
+            "drove",
+            serial,
+            # `helper.drive` is the command a reader can search for; `helper.drove` is not. And `ok`
+            # is stated rather than derived — a drive that reached its goal was showing FAIL.
+            cmd="helper.drive",
+            ok=True,
+            args={"goal": goal, "budget": budget},
+            result=payload,
+            stop_reason=stop_reason,
+            step_count=len(steps),
+            ms=round((time.perf_counter() - began) * 1000, 1),
+            u2_was_connected=was_connected,
+        )
+        # The same object the journal recorded, so what the dashboard shows and what the caller
+        # receives cannot drift apart.
+        return payload
 
     def _offload_from(
         self,

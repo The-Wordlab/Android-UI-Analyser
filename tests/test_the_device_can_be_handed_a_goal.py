@@ -308,3 +308,104 @@ def test_the_bundled_apk_and_the_host_agree_on_the_protocol() -> None:
         "InfoFeature.PROTOCOL and device_agent.PROTOCOL must be bumped together"
     )
     assert device_agent.PROTOCOL >= 2
+
+
+# --------------------------------------------------------------------------- what a reader sees
+
+
+def _journal_events(engine: Engine, serial: str | None = None) -> list[dict[str, Any]]:
+    """Journal lines for a serial. The journal is *per device*, so the serial has to match.
+
+    A refused drive journals under the refusal's serial, which is ``None`` when the borrow declines
+    before resolving one; a successful drive journals under the device's. Reading the wrong file
+    returns an empty list, which looks exactly like "nothing was recorded".
+    """
+
+    from android_ui_analyser import journal
+
+    return list(
+        journal.read_since(engine.config.cache.dir, serial, limit=200, include_dashboard=True)
+    )
+
+
+def test_a_successful_drive_is_journalled_as_a_command_that_exists(tmp_path: Path) -> None:
+    """Reported from the dashboard: a drive that worked showed a red FAIL badge on `helper.drove`.
+
+    Three separate bugs in one journal call, all visible in one screenshot:
+
+    ``helper.drove`` came from composing ``f"helper.{outcome}"`` with a past-tense outcome. That
+    reads correctly for a decision the offload made on its own — ``helper.skipped`` — but the
+    dashboard puts it in the slot where the command the caller ran belongs, so a reader saw a
+    command name that does not exist and cannot be searched for.
+
+    The FAIL badge came from ``ok=outcome in {"offloaded", "partial"}``, which makes every outcome
+    added later false by construction.
+
+    And the request and response panels were empty, because everything went to ``extra``, which the
+    dashboard does not render. The goal, budget, steps and stop reason were all in the journal and
+    none of them on screen.
+    """
+
+    agent = _Agent()
+    engine = _engine(tmp_path, agent)
+    got = engine.drive_on_device("open the display settings", budget=5)
+
+    # From the payload, not `engine.device.serial` — reading that property goes out to real adb and
+    # fails on whatever the host happens to have attached.
+    serial = got["serial"]
+    drives = [
+        e
+        for e in _journal_events(engine, serial)
+        if str(e.get("cmd", "")).startswith("helper.driv")
+    ]
+    assert drives, "a drive left no journal line a reader could find"
+    event = drives[0]
+
+    assert event["cmd"] == "helper.drive", "a command name that does not exist is unsearchable"
+    assert event["ok"] is True, "a drive that reached its goal must not render as FAIL"
+    assert (event.get("args") or {}).get("goal") == "open the display settings"
+    assert (event.get("args") or {}).get("budget") == 5
+    assert "helper.drove" not in {str(e.get("cmd")) for e in _journal_events(engine, serial)}
+
+
+def test_a_refused_drive_still_leaves_the_caller_a_line_with_its_reason(tmp_path: Path) -> None:
+    """The borrow journals its own refusal, but nothing recorded that a drive was ever asked for.
+
+    A reader then sees a helper decision and no request, which is the wrong end to start from. This
+    also pins the crash found while fixing it: the refusal path read the serial off the loan, which
+    does not exist when the borrow declines before resolving one — so an ``UnboundLocalError`` fired
+    inside the error path and replaced a clear message with a traceback.
+    """
+
+    engine = _engine(tmp_path, None)
+    with pytest.raises(DeviceError):
+        engine.drive_on_device("open the display settings")
+
+    drives = [e for e in _journal_events(engine) if e.get("cmd") == "helper.drive"]
+    assert drives, "a refused drive left no line saying it was asked for"
+    assert drives[0]["ok"] is False
+    assert (drives[0].get("args") or {}).get("goal") == "open the display settings"
+
+
+def test_the_journalled_result_is_the_object_the_caller_gets(tmp_path: Path) -> None:
+    """One payload, so the dashboard and the caller cannot disagree about what happened."""
+
+    agent = _Agent()
+    engine = _engine(tmp_path, agent)
+    returned = engine.drive_on_device("open Display", budget=3)
+
+    from android_ui_analyser import journal
+
+    serial = returned["serial"]
+    drives = [e for e in _journal_events(engine, serial) if e.get("cmd") == "helper.drive"]
+    detail_id = drives[0].get("detail_id")
+    assert detail_id, "no detail row to read the response back from"
+    detail = journal.read_detail(engine.config.cache.dir, serial, detail_id)
+    assert detail is not None
+    # The dashboard's response panel renders `response`, which starts life as just `{"ok": ok}` and
+    # only gains `result` when one is passed. That is precisely what the screenshot showed: a bare
+    # `{"ok": false}` for a drive that had worked.
+    recorded = (detail.get("response") or {}).get("result")
+    assert recorded is not None, "the response panel had nothing to show"
+    for key in ("goal", "budget", "stop_reason", "step_count"):
+        assert recorded.get(key) == returned.get(key), f"{key} drifted between journal and caller"
