@@ -184,3 +184,49 @@ def test_context_never_displaces_an_actionable_node() -> None:
     out = project(elements)
     assert len(out["nodes"]) == MAX_NODES
     assert all(node.get("tap") for node in out["nodes"])
+
+
+def test_a_fixed_bottom_bar_survives_a_long_list_above_it() -> None:
+    """The first live drive on a real app failed exactly here, and the shape is general.
+
+    Asked to reach an app's Apps section, the on-device driver scrolled three times and reported
+    ``target_absent`` while an "Apps" control sat plainly on screen. A fixed bottom navigation bar is
+    last in tree order and first in importance: the chat list ahead of it filled all 14 slots, so the
+    bar was truncated away — and because a fixed bar is not inside the scrollable list, scrolling
+    could never have revealed it. The refusal was internally consistent and factually wrong.
+
+    This reproduces the screen shape rather than the app: eighteen actionable rows, a repetitive list
+    first and the navigation last. It fails at ``MAX_NODES = 14`` and passes at 28.
+    """
+
+    elements = [
+        {"rid": "bannerGreeting", "text": "Greeting How can I help you today?", "clickable": True},
+        *[
+            {"text": f"A conversation {index}", "clickable": True}
+            for index in range(14)
+        ],
+        {"rid": "navBarPrimary", "text": "Sprockets", "clickable": True},
+        {"rid": "navBarSecondary", "text": "Grommets", "clickable": True},
+        {"rid": "navBarTertiary", "text": "Widgets", "clickable": True},
+    ]
+    projection = project(elements)
+    labels = {str(node.get("text") or node.get("desc") or "") for node in projection["nodes"]}
+    assert "Widgets" in labels, (
+        "the fixed navigation bar was truncated away by the node cap; "
+        f"shown {len(projection['nodes'])} of {len(elements)}"
+    )
+    # And the whole bar survives, not just its last entry — a driver that can reach one tab and not
+    # its neighbours is a worse failure than one that reaches none, because it looks like it works.
+    assert {"Sprockets", "Grommets", "Widgets"} <= labels
+
+
+def test_the_cap_is_high_enough_for_nine_screens_in_ten() -> None:
+    """Chosen from the harvest, not picked: p90 is 17 actionable nodes and p95 is 22.
+
+    A cap of 14 truncated 13.2% of the 638 harvested screens. Truncation is not merely lossy — it
+    changes what the right answer *is*, because with content hidden "the target is absent" stops being
+    provable and scrolling becomes the only sound step. For a fixed bar, scrolling is not sound
+    either, which is how the live run got stuck.
+    """
+
+    assert MAX_NODES >= 22, "below p95 of real screens"

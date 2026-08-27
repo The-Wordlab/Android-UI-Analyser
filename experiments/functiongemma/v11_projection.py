@@ -78,9 +78,30 @@ import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
-#: Nodes shown to the model. Real screens have a median of 6 actionable nodes, so this leaves
-#: headroom for dense ones while keeping the prompt small enough for an on-device budget.
-MAX_NODES = 14
+#: Nodes offered to whatever decides. Raised from 14 after the first live drive on a real app
+#: failed on it.
+#:
+#: 14 was a *model-era* number — the original comment said "keeping the prompt small enough for an
+#: on-device budget", and that budget was a language model's context. What decides on the device is
+#: now a scoring rule that walks the list once, so nodes cost nothing to show and the only reason to
+#: cap at all is to keep an absurd screen bounded.
+#:
+#: The live failure is worth stating exactly, because the shape of it is general. Asked to reach the
+#: app's Apps section, the driver scrolled three times and reported ``target_absent`` while an "Apps"
+#: control sat plainly on screen. A fixed bottom navigation bar is *last in tree order and first in
+#: importance*: the chat list ahead of it consumed all 14 slots, so the bar was truncated away, and
+#: because it is not inside the scrollable list, scrolling could never reveal it. The refusal was
+#: internally consistent and factually wrong — the worst combination available.
+#:
+#: Measured over the 638 harvested screens, actionable nodes per screen are p50 7, p90 17, p95 22:
+#:
+#:     cap 14 truncates 13.2% of screens      cap 24 truncates 2.7%
+#:     cap 18 truncates  8.3% of screens      cap 28 truncates 2.0%
+#:     cap 22 truncates  4.4% of screens      cap 32 truncates 2.0%
+#:
+#: 28 is where more stops buying anything: the remaining 2% are screens with 48 to 72 actionable
+#: nodes, which no reachable cap fixes and which ``more`` reports honestly.
+MAX_NODES = 28
 
 #: Windows that are never the app under test. `analyze` folds them into one tree.
 FOREIGN_PACKAGES = ("com.android.systemui",)

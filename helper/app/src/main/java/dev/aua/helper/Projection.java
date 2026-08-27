@@ -14,8 +14,7 @@ import java.util.Set;
  *
  * <p>Measured against 638 screens harvested from live emulators — stock AOSP, third-party apps, and
  * the same screens under English, Arabic and German. A real screen has a median of 41 nodes and
- * about 6 that can be acted on; this keeps the actionable ones and at most two lines of context,
- * which took the median shown to 9.
+ * about 6 that can be acted on; this keeps the actionable ones and at most two lines of context.
  *
  * <p>Three facts from that harvest shaped this, and each contradicted an earlier assumption:
  *
@@ -42,8 +41,25 @@ import java.util.Set;
  */
 final class Projection {
 
-    /** Nodes offered to the decider. Real screens median 6 actionable, so this leaves headroom. */
-    static final int MAX_NODES = 14;
+    /**
+     * Nodes offered to the decider. Raised from 14 after the first live drive on a real app failed
+     * on it.
+     *
+     * <p>14 was a model-era number: it existed to keep a language model's prompt small. What decides
+     * here is a scoring rule that walks the list once, so nodes cost nothing to show.
+     *
+     * <p>The live failure generalises. Asked to reach an app's Apps section, this scrolled three
+     * times and reported {@code target_absent} while an "Apps" control sat plainly on screen. A fixed
+     * bottom navigation bar is <em>last in tree order and first in importance</em>: the list above it
+     * consumed all 14 slots, and because the bar is not inside the scrollable list, scrolling could
+     * never reveal it. The refusal was internally consistent and factually wrong.
+     *
+     * <p>Over the 638 harvested screens, actionable nodes per screen are p50 7, p90 17, p95 22. A cap
+     * of 14 truncates 13.2% of screens, 22 truncates 4.4%, 28 truncates 2.0%, and 32 also truncates
+     * 2.0% — so 28 is where more stops buying anything. The remaining 2% carry 48 to 72 actionable
+     * nodes, which no reachable cap fixes and which {@code more} reports honestly.
+     */
+    static final int MAX_NODES = 28;
 
     /** Context lines kept — normally the screen's heading. Capped so a status bar cannot crowd
      * out a control: actionable nodes are ranked first and never displaced. */
