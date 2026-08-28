@@ -2,15 +2,29 @@
 
 `aua` is a fast, configurable CLI that gives an AI agent structured "what's on screen and where" for Android UI testing. It reads the accessibility/view hierarchy first — returning every element with a stable integer ID, type, text, and bounding box in tens of milliseconds — and falls back to image-based detection and OCR (and optionally a grounding VLM) only on screens the hierarchy cannot see (Compose without semantics, Flutter, WebViews, canvas, games). The agent acts on **integer IDs, not pixels**: `aua tap-and-analyze 4` and `aua input-and-analyze 2 "hello"` compute coordinates internally, eliminating coordinate hallucination and shrinking the token footprint to a compact JSON list.
 
-> **Using Claude Code or Codex?** Install the AUA plugin: it supplies the skill and starts the
-> matching released MCP server through `uvx`, so AUA itself needs no permanent install. Full
-> details: [Use AUA from Claude Code or Codex](#use-it-from-claude-code-or-codex).
+> **New here?** Start with [Installation help](#installation-help). Claude Code and Codex users
+> can install one plugin that supplies the AUA skill and starts the matching released MCP server;
+> no clone or permanent AUA install is required.
 
 ---
 
-## Requirements
+## Installation help
 
-`aua` is a Python CLI that talks to an Android device or emulator over **adb**, using [`uiautomator2`](https://github.com/openatx/uiautomator2). You need three things on the host:
+Choose the path that matches how you want to use AUA:
+
+| You want to… | Recommended path | Is AUA permanently installed? |
+|---|---|---|
+| Use AUA from **Claude Code** | [Install the Claude Code plugin](#claude-code-plugin) | No |
+| Use AUA from **Codex** | [Install the Codex plugin](#codex-plugin) | No |
+| Run one CLI command or pin AUA in automation | [Run it with `uvx`](#run-the-cli-without-installing-aua) | No |
+| Use the `aua` command everywhere or contribute | [Clone and bootstrap](#install-the-cli-permanently) | Yes |
+
+The plugin paths are the easiest option for agents: each bundles the operating skill and starts
+the local MCP server from the Git tag matching the plugin version.
+
+### Prerequisites
+
+`aua` is a Python CLI that talks to an Android device or emulator over **adb**, using [`uiautomator2`](https://github.com/openatx/uiautomator2). Every installation path needs these four things on the host:
 
 | Requirement | Version | Why / how to get it |
 |---|---|---|
@@ -44,26 +58,123 @@ export PATH="$HOME/Library/Android/sdk/platform-tools:$PATH"   # add to ~/.zshrc
 adb version   # confirm it resolves
 ```
 
----
+### Claude Code plugin
 
-## Install
+Run these commands inside Claude Code:
 
-Run a pinned release once, without installing AUA:
+```text
+/plugin marketplace add The-Wordlab/Android-UI-Analyser
+/plugin install android-ui-analyser@the-wordlab
+```
+
+Open a new Claude Code session after installation. The plugin supplies the generated AUA skill,
+the selector-safety hook, and the MCP server configuration automatically.
+
+### Codex plugin
+
+Run these commands in a terminal:
+
+```bash
+codex plugin marketplace add The-Wordlab/Android-UI-Analyser
+codex plugin add android-ui-analyser@the-wordlab
+```
+
+Open a new Codex session after installation. The plugin supplies the same generated AUA skill and
+pinned MCP server as the Claude Code plugin. See OpenAI's
+[marketplace CLI documentation](https://developers.openai.com/plugins/build/plugins#add-a-marketplace-from-the-cli)
+for the underlying repository-marketplace flow.
+
+### Run the CLI without installing AUA
+
+Install [`uv`](https://docs.astral.sh/uv/getting-started/installation/), then run a pinned release
+directly from GitHub:
 
 ```bash
 uvx --from \
-  'android-ui-analyser[apple,rapidocr,audio] @ git+https://github.com/The-Wordlab/Android-UI-Analyser.git@v0.13.0' \
+  'android-ui-analyser[apple,rapidocr,audio] @ git+https://github.com/The-Wordlab/Android-UI-Analyser.git@v0.14.0' \
   aua --version
 ```
 
-`uvx` creates an isolated environment and caches it for later calls. Replace `v0.13.0` with the
+`uvx` creates an isolated environment and caches it for later calls. Replace `v0.14.0` with the
 release you want; no clone, `git pull`, editable environment, or global `aua` executable is needed.
-The shorter `uvx aua` will become possible after the distribution is published to PyPI under that
-name. Until then the explicit Git source keeps the release origin and version visible.
+The command is `uvx --from … aua`, not `uv aua`: the shorter `uvx aua` becomes possible only after
+the distribution is published to PyPI. Until then the explicit Git source keeps the release origin
+and version visible.
 
-For a persistent developer install, use one of the following paths.
+For automation, replace `aua --version` with any AUA command while keeping the pinned `--from`
+argument. The [latest GitHub Release](https://github.com/The-Wordlab/Android-UI-Analyser/releases/latest)
+shows the current tag and its release notes.
 
-Base install (macOS / Apple Silicon, recommended extras — Python 3.11+ per [Requirements](#requirements)):
+### Install the CLI permanently
+
+Clone the repository and run the idempotent bootstrap:
+
+```bash
+git clone https://github.com/The-Wordlab/Android-UI-Analyser.git
+cd Android-UI-Analyser
+./install.sh                       # add --with-policy for the optional local policy runtime
+./install.sh --print-plan          # preview without changing anything
+```
+
+The script installs `aua` globally through `uv tool` or `pipx` (with a project-venv fallback),
+installs equivalent user-level Claude Code and Codex skills, and runs `aua doctor`.
+
+### Connect and verify
+
+Start an emulator or attach an Android device with USB debugging enabled, then check that `adb`
+can see it:
+
+```bash
+adb devices
+```
+
+For a permanent CLI install, verify everything and start goal-oriented work:
+
+```bash
+aua doctor
+aua session start --goal "inspect the current screen"
+```
+
+For a plugin install, open a new Claude Code or Codex session and ask: **“Use AUA to list the
+Android devices.”** The agent should use the plugin's MCP server; a global `aua` command is not
+required. See [Connect a device or emulator](#connect-a-device-or-emulator) for physical-device,
+AVD, Docker, and multi-agent setup.
+
+### Update later
+
+Claude Code plugin:
+
+```text
+/plugin update android-ui-analyser@the-wordlab
+```
+
+Codex plugin:
+
+```bash
+codex plugin marketplace upgrade the-wordlab
+codex plugin add android-ui-analyser@the-wordlab
+```
+
+Permanent CLI installs can check the latest release with `aua update --check`; clone-based installs
+upgrade by checking out the newer tag and re-running `./install.sh`. See
+[Releases and updating](#releases-and-updating) for the automation exit-code contract.
+
+### Common setup problems
+
+| Symptom | Fix |
+|---|---|
+| `uvx: command not found` | [Install `uv`](https://docs.astral.sh/uv/getting-started/installation/), then open a new terminal. |
+| `adb: command not found` | Install Android platform-tools and follow [Installing `adb`](#installing-adb-platform-tools). |
+| `adb devices` is empty | Boot an emulator, or enable USB debugging on the phone and accept its authorization prompt. |
+| The plugin is installed but AUA is unavailable | Confirm `uvx --version` works, then open a new Claude Code or Codex session so the plugin's MCP server starts. |
+| `./install.sh` succeeded but `aua` is not found | Run `uv tool update-shell` (or `pipx ensurepath`), then open a new terminal. The bootstrap prints an absolute fallback path if it had to use `.venv`. |
+
+### Developer and source-install details
+
+If you are developing AUA itself, use one of the following editable-install paths.
+
+Base install (macOS / Apple Silicon, recommended extras — Python 3.11+ per
+[Prerequisites](#prerequisites)):
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
@@ -197,7 +308,7 @@ Pin a clone-based install to a release instead of tracking `main`:
 
 ```bash
 git fetch --tags
-git checkout v0.13.0
+git checkout v0.14.0
 ./install.sh
 ```
 
@@ -487,7 +598,7 @@ five minutes so the spawned receiver cannot lose the device before accepting the
 
 ---
 
-## Use it from Claude Code or Codex
+## What the Claude Code and Codex plugins install
 
 `aua` ships one generated skill plus a local MCP server. The skill auto-activates when you ask an
 agent to test or inspect an Android app, and the plugin starts the matching released MCP server
@@ -495,74 +606,22 @@ through `uvx`.
 
 The plugin path needs `uv`, `adb`, and a device/emulator. It does **not** need `aua` installed
 globally: the MCP process runs from the Git tag matching the plugin version. The first start builds
-and caches an isolated environment; later starts reuse it.
+and caches an isolated environment; later starts reuse it. Copy-paste setup and update commands
+are collected in [Installation help](#installation-help).
 
-### Claude Code plugin
-
-This repo is its own Claude Code **plugin marketplace**. In Claude Code, run:
-
-```
-/plugin marketplace add The-Wordlab/Android-UI-Analyser
-/plugin install android-ui-analyser@the-wordlab
-```
-
-That installs the generated skill, the selector-safety hook, and the MCP server configuration. The
-MCP server starts automatically when the plugin is enabled; no separate CLI install is required.
-Install released updates with:
-
-```
-/plugin update android-ui-analyser@the-wordlab
-```
-
-The plugin also installs a Claude `PreToolUse` guard. It denies raw `adb` operations AUA already
+The Claude Code plugin also installs a `PreToolUse` guard. It denies raw `adb` operations AUA already
 covers (UI input, recording, screenshots, logs, app lifecycle, settings, and app data), gives the
 exact AUA replacement, and asks for user approval on unknown raw-adb operations. Host build tools
 such as Gradle are unaffected. AUA-evidence ffmpeg commands are redirected to the built-in
 timestamped contact sheet.
 
-### Codex plugin
-
-The same repository is a Codex-compatible plugin marketplace. From a terminal, run:
-
-```bash
-codex plugin marketplace add The-Wordlab/Android-UI-Analyser
-codex plugin add android-ui-analyser@the-wordlab
-```
-
-The Codex plugin uses the same generated skill and pinned `uvx` MCP server. Refresh the marketplace
-and reinstall the plugin after a release:
-
-```bash
-codex plugin marketplace upgrade the-wordlab
-codex plugin add android-ui-analyser@the-wordlab
-```
-
 [OpenAI's public plugin submission currently requires a remote MCP endpoint](https://developers.openai.com/plugins/guides/submit-claude-plugin),
 so AUA's local stdio MCP plugin is distributed from this repository. A skills-only public listing
 can be submitted separately without changing the repository plugin.
 
-### One-command bootstrap from a clone
+### Goal-first sessions and acceptance evidence
 
-Prefer to do everything (binary **and** skill) in one shot? Clone and run the idempotent [`install.sh`](install.sh):
-
-```bash
-git clone git@github.com:The-Wordlab/Android-UI-Analyser.git
-cd Android-UI-Analyser
-./install.sh                       # add --with-policy for the optional local policy runtime
-./install.sh --print-plan          # show what would be installed, touching nothing
-```
-
-It installs `aua` globally (via `uv tool`/`pipx`, with a venv fallback), installs equivalent
-Claude Code (`~/.claude/skills/`) and Codex (`$CODEX_HOME/skills/`, default `~/.codex/skills/`)
-skills at user level, and runs `aua doctor`. The repo's [`CLAUDE.md`](CLAUDE.md) is auto-loaded
-when Claude Code opens the clone, so you can also just tell a fresh session:
-
-> "Clone `git@github.com:The-Wordlab/Android-UI-Analyser.git` and run its `install.sh` to set up the `aua` Android UI testing skill, then use it to &lt;your task&gt;."
-
-### Then: connect a device
-
-Every path leaves one thing to do: attach a [device or emulator](#connect-a-device-or-emulator).
-For a global CLI install, run `aua doctor` until `adb` and `devices` show OK, then start with
+After [connecting a device or emulator](#connect-a-device-or-emulator), CLI users start with
 `aua session start --goal "<what must be verified>"`. Plugin users call MCP `session_start`; the
 server provides the same goal-first protocol during initialization.
 
@@ -1394,7 +1453,7 @@ Example MCP client config (Claude Desktop / `claude_desktop_config.json`):
       "args": [
         "--quiet",
         "--from",
-        "android-ui-analyser[apple,rapidocr,audio] @ git+https://github.com/The-Wordlab/Android-UI-Analyser.git@v0.13.0",
+        "android-ui-analyser[apple,rapidocr,audio] @ git+https://github.com/The-Wordlab/Android-UI-Analyser.git@v0.14.0",
         "aua",
         "mcp"
       ]
@@ -1407,7 +1466,7 @@ Example MCP client config (Claude Desktop / `claude_desktop_config.json`):
 
 ## CLAUDE.md snippet
 
-> Most users should instead install the **plugin** (see [Use it from Claude Code or Codex](#use-it-from-claude-code-or-codex)) — it activates automatically and keeps the skill and MCP server on the same release. Use the snippet below only if you prefer inline per-project instructions over the plugin.
+> Most users should instead install the **plugin** (see [Installation help](#installation-help)) — it activates automatically and keeps the skill and MCP server on the same release. Use the snippet below only if you prefer inline per-project instructions over the plugin.
 
 Paste this into your project's `CLAUDE.md` to teach Claude Code how to use `aua`:
 
