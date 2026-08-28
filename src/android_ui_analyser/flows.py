@@ -315,6 +315,62 @@ def _step_error(index: int, msg: str, hint: str | None = None) -> UsageError:
     return UsageError(f"flow step {index + 1}: {msg}", hint=hint)
 
 
+#: What `analyze` puts in front of a published element id, and whether a saved flow can use it.
+#: Only `rid:` names something a *later* frame can resolve. The rest are fingerprints of the frame
+#: they were published in — `tx:` hashes the visible text, `cd:` the description, `geo:`/`px:`
+#: encode position — so they identify an element this run and nothing at all next run.
+_PUBLISHED_ID_PREFIXES: dict[str, str | None] = {
+    "rid": None,  # the resource id itself, once the prefix is removed
+    "tx": "text",
+    "cd": "desc",
+    "geo": None,
+    "px": None,
+}
+
+
+def _resource_id(value: Any, *, field: str, index: int) -> str | None:
+    """A resource id, accepting the ``rid:``-prefixed form ``analyze`` publishes.
+
+    ``aua analyze`` reports a node as ``"id": "rid:navBarPrimary"`` while a flow's ``id:`` wants the
+    resource id bare, and pasting the published value across produced ``element_not_found`` — the
+    worst shape of failure available, because the flow reads correctly and the control really is on
+    screen. The two spellings now mean the same thing.
+
+    The other published prefixes are refused by name rather than passed through. ``tx:9db2c18ecb``
+    sits in the same output right beside ``rid:``, looks equally like a selector, and is a hash of
+    this frame's text: it cannot resolve in a saved flow and would fail later, somewhere else, with
+    no clue as to why. Better to say so here, and say which field to use instead.
+
+    Android's fully-qualified ``com.example.app:id/navBarPrimary`` carries a colon of its own and is
+    left alone — its head is a package name, not one of these prefixes.
+    """
+
+    text = _string(value, field=field, index=index)
+    if text is None:
+        return None
+    head, separator, tail = text.partition(":")
+    if not separator or head not in _PUBLISHED_ID_PREFIXES:
+        return text
+    if head == "rid":
+        if not tail.strip():
+            raise _step_error(index, f"{field} is just the `rid:` prefix with no resource id")
+        return tail
+    instead = _PUBLISHED_ID_PREFIXES[head]
+    raise _step_error(
+        index,
+        f"{field} is `{head}:` — a published id for one frame, not a selector a saved flow can use",
+        hint=(
+            f"`{head}:` fingerprints the element as it appeared in that observation. "
+            + (
+                f"Use `{instead}:` with the element's actual {'visible text' if instead == 'text' else 'content description'} instead."
+                if instead
+                else "It encodes position, which moves. Use `id:` with the resource id, or "
+                "`text:`/`desc:` with what the element says."
+            )
+        ),
+    )
+
+
 def _strict_int(value: Any, *, field: str, index: int, minimum: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise _step_error(index, f"{field} must be an integer, got {value!r}")
@@ -680,7 +736,7 @@ def _parse_step(item: Any, index: int) -> RouteStep:
         raw_rid = v.pop("rid", None)
         if raw_id is not None and raw_rid is not None:
             raise _step_error(index, "assert accepts `id:` or `rid:`, not both")
-        kw["resource_id"] = _string(
+        kw["resource_id"] = _resource_id(
             raw_id if raw_id is not None else raw_rid, field="assert id", index=index
         )
         kw["content_desc"] = _string(v.pop("desc", None), field="assert desc", index=index)
@@ -813,7 +869,7 @@ def _parse_step(item: Any, index: int) -> RouteStep:
         explicit_by = v.pop("by", None)
         if explicit_by not in (None, "id", "desc", "text"):
             raise _step_error(index, f"{key} `by:` must be id, desc, or text")
-        kw["resource_id"] = _string(v.pop("id", None), field=f"{key} id", index=index)
+        kw["resource_id"] = _resource_id(v.pop("id", None), field=f"{key} id", index=index)
         kw["content_desc"] = _string(v.pop("desc", None), field=f"{key} desc", index=index)
         raw_text = v.pop("text", None)
         raw_label = v.pop("label", None)
@@ -847,7 +903,7 @@ def _parse_step(item: Any, index: int) -> RouteStep:
         explicit_by = v.pop("by", None)
         if explicit_by not in (None, "id", "desc", "text"):
             raise _step_error(index, "input `by:` must be id, desc, or text")
-        kw["resource_id"] = _string(v.pop("id", None), field="input id", index=index)
+        kw["resource_id"] = _resource_id(v.pop("id", None), field="input id", index=index)
         kw["content_desc"] = _string(v.pop("desc", None), field="input desc", index=index)
         kw["label"] = _string(v.pop("label", None), field="input label", index=index)
         raw_input = v.pop("text", None)
@@ -894,7 +950,7 @@ def _parse_step(item: Any, index: int) -> RouteStep:
         raw_rid = v.pop("rid", None)
         if raw_id is not None and raw_rid is not None:
             raise _step_error(index, "a11y_scroll accepts `id:` or `rid:`, not both")
-        kw["resource_id"] = _string(
+        kw["resource_id"] = _resource_id(
             raw_id if raw_id is not None else raw_rid,
             field="a11y_scroll id",
             index=index,
@@ -1031,7 +1087,7 @@ def _parse_step(item: Any, index: int) -> RouteStep:
             "assert-visible",
             "assert-not-visible",
         ):
-            rid = _string(v.pop("id", None), field=f"{key} id", index=index)
+            rid = _resource_id(v.pop("id", None), field=f"{key} id", index=index)
             if rid is not None:
                 kw["arg"] = rid
                 kw["by"] = "id"
@@ -1672,15 +1728,43 @@ def recorded_step_blockers(steps: list[RouteStep], where: str = "") -> list[str]
     must never be advertised as an exact reusable capture.
     """
     out: list[str] = []
+    # Each message says what was lost AND what to write instead, because the docstring above is the
+    # only place the way forward was ever stated and no caller reads it. Almost every real journey
+    # scrolls, so "scroll capture omits container/pages/end-condition/percentage" was the first wall
+    # anyone met when saving a recording — accurate, and it read like a dead end.
     lossy = {
-        "long-press": "long-press capture omits the requested hold duration",
-        "double-tap": "double-tap has no flow replay step",
-        "a11y-action": "accessibility action name cannot be replayed by a flow",
-        "swipe": "swipe capture omits coordinates/container/percentage",
-        "scroll": "scroll capture omits container/pages/end-condition/percentage",
-        "scroll-to": "scroll-to capture omits match/case/direction/limit/percentage",
-        "paste": "paste capture omits the clipboard value it depends on",
-        "open-link": "open-link capture omits package-pinning and chooser policy",
+        "long-press": (
+            "long-press capture omits the requested hold duration; author "
+            "`long_press: {id: <resourceId>, ms: <hold>}` by hand"
+        ),
+        "double-tap": (
+            "double-tap has no flow replay step; author the two taps by hand, or use a "
+            "`long_press` if that is what the control actually needs"
+        ),
+        "a11y-action": (
+            "accessibility action name cannot be replayed by a flow; author the equivalent "
+            "`tap`/`scroll`/`input` step by hand"
+        ),
+        "swipe": (
+            "swipe capture omits coordinates/container/percentage; author `scroll: up` by hand "
+            "instead — a scroll names its container and replays, where a raw swipe is positional"
+        ),
+        "scroll": (
+            "scroll capture omits container/pages/end-condition/percentage; author "
+            "`scroll: up` (or `scroll: {dir: up, pages: N}`) by hand"
+        ),
+        "scroll-to": (
+            "scroll-to capture omits match/case/direction/limit/percentage; author "
+            "`scroll_to: <text>` by hand"
+        ),
+        "paste": (
+            "paste capture omits the clipboard value it depends on; author the value into an "
+            "`input` step by hand so the flow carries it"
+        ),
+        "open-link": (
+            "open-link capture omits package-pinning and chooser policy; author "
+            "`open_link: {url: <deeplink>, package: <pkg>}` by hand"
+        ),
     }
     replayable = {
         "tap",
