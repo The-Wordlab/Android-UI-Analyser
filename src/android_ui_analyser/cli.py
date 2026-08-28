@@ -18,7 +18,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, TypeVar
@@ -2312,6 +2312,43 @@ def capabilities_cmd(
 
     payload = capabilities_for_goal(goal) if goal else capability_manifest()
     _echo_json({"goal": goal, "capabilities": payload}, _opts(ctx).fmt())
+
+
+@app.command("update")
+def update_cmd(
+    check: bool = typer.Option(
+        False,
+        "--check",
+        help="Check the latest release (the default; explicit for automation).",
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Print one machine-readable JSON object."),
+    force: bool = typer.Option(False, "--force", help="Bypass the one-hour release cache."),
+) -> None:
+    """Check for a newer AUA release without pulling main or touching a device.
+
+    Exit 0 means this version is current, 10 means an update is available, and 1 means the
+    check could not run. The distinct update exit lets an automation branch without parsing text.
+    """
+    import json
+
+    from .release_check import check_for_update, format_status
+
+    # `--check` names the safe operation for scripts; with no future mutating mode to select,
+    # the same check is also the command's default.
+    _ = check
+    status = check_for_update(force=force)
+
+    repo = Path(__file__).resolve().parents[2]
+    repo_dir = str(repo) if (repo / ".git").exists() else None
+    if as_json:
+        typer.echo(json.dumps(asdict(status), ensure_ascii=False, separators=(",", ":")))
+    else:
+        typer.echo(format_status(status, repo_dir=repo_dir))
+
+    if status.error is not None:
+        raise typer.Exit(int(ExitCode.INTERNAL))
+    if status.update_available:
+        raise typer.Exit(10)
 
 
 @app.callback()

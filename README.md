@@ -140,6 +140,53 @@ they are hundreds of megabytes of Apple-silicon-only ML runtime for a lane that 
 and needs a separately downloaded base model. When one is configured but absent, `aua doctor`
 reports it with the exact install command instead of leaving autopilot to hand off every step.
 
+## Releases and updating
+
+AUA follows Semantic Versioning. Every release is a `vX.Y.Z` git tag with a matching
+[GitHub Release](https://github.com/The-Wordlab/Android-UI-Analyser/releases); its notes come from
+[CHANGELOG.md](CHANGELOG.md), so the release page says what changed without requiring a pull of
+`main` or a read through commit history.
+
+Check the installed version against the latest release without touching a device:
+
+```bash
+aua update --check          # installed vs latest, release notes, and the upgrade command
+aua update --check --json   # one JSON object for automation
+```
+
+The exit code is `0` when current, `10` when an update is available, and `1` when the check could
+not run. A CI gate can branch on that contract without parsing human text:
+
+```bash
+if aua update --check --json > /tmp/aua-update.json; then
+  echo "AUA is up to date"
+else
+  case $? in
+    10) jq -r '"new AUA: \(.latest) — \(.release_url)"' /tmp/aua-update.json ;;
+    *)  cat /tmp/aua-update.json >&2; exit 1 ;;
+  esac
+fi
+```
+
+Without AUA installed, the equivalent release lookup is one API call:
+
+```bash
+curl -fsSL https://api.github.com/repos/The-Wordlab/Android-UI-Analyser/releases/latest \
+  | jq -r .tag_name
+```
+
+Pin a clone-based install to a release instead of tracking `main`:
+
+```bash
+git fetch --tags
+git checkout v0.13.0
+./install.sh
+```
+
+Upgrade by checking out the newer tag and re-running `./install.sh`. Return to the moving branch
+with `git checkout main && git pull && ./install.sh`. Maintainers cut releases using the procedure
+in [docs/RELEASING.md](docs/RELEASING.md).
+
 ---
 
 ## Connect a device or emulator
@@ -448,7 +495,7 @@ uv tool install "git+ssh://git@github.com/The-Wordlab/Android-UI-Analyser.git"
 # or:  pipx install "git+ssh://git@github.com/The-Wordlab/Android-UI-Analyser.git"
 ```
 
-Core hierarchy analysis needs no extras; for the vision fallback on Compose/Flutter/WebView screens, add an OCR engine (see the [extras matrix](#optional-dependency-extras-matrix)). Pull plugin updates later with `/plugin update android-ui-analyser@the-wordlab`.
+Core hierarchy analysis needs no extras; for the vision fallback on Compose/Flutter/WebView screens, add an OCR engine (see the [extras matrix](#optional-dependency-extras-matrix)). Install released plugin updates with `/plugin update android-ui-analyser@the-wordlab`; see [Releases and updating](#releases-and-updating) for the CLI version check.
 
 The plugin also installs a Claude `PreToolUse` guard. It denies raw `adb` operations AUA already
 covers (UI input, recording, screenshots, logs, app lifecycle, settings, and app data), gives the
@@ -514,7 +561,8 @@ The reset and candidate must both pass; an existing saved flow is never overwrit
 
 The SKILL.md and Codex `agents/openai.yaml` are **generated** from the same source as `aua guide`,
 so they do not drift from the CLI/MCP capability contract. After upgrading, re-run `./install.sh`;
-`aua doctor` reports Claude and Codex skill drift separately.
+`aua doctor` reports Claude and Codex skill drift separately. Use the
+[release flow](#releases-and-updating) to choose the version before reinstalling.
 
 ### Prefer MCP?
 

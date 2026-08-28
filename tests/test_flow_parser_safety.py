@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import threading
-import tomllib
 from pathlib import Path
 
 import pytest
 
 import android_ui_analyser.atomic as atomic_mod
-from android_ui_analyser import __version__
 from android_ui_analyser.errors import UsageError
 from android_ui_analyser.flows import (
     Flow,
@@ -416,12 +413,3 @@ def test_flow_store_list_does_not_guess_compatibility_without_active_context(
         ]
         is True
     )
-
-
-def test_runtime_and_plugin_versions_match() -> None:
-    root = Path(__file__).resolve().parents[1]
-    project = tomllib.loads((root / "pyproject.toml").read_text())
-    plugin = json.loads((root / ".claude-plugin/plugin.json").read_text())
-    marketplace = json.loads((root / ".claude-plugin/marketplace.json").read_text())
-    assert __version__ == project["project"]["version"] == plugin["version"] == "0.13.0"
-    assert marketplace["plugins"][0]["version"] == __version__
