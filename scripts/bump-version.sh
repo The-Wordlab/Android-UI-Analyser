@@ -194,14 +194,18 @@ changelog += (
 
 paths["pyproject.toml"].write_text(pyproject, encoding="utf-8")
 paths["src/android_ui_analyser/__init__.py"].write_text(init, encoding="utf-8")
-paths[".claude-plugin/plugin.json"].write_text(json.dumps(plugin, indent=2) + "\n", encoding="utf-8")
+paths[".claude-plugin/plugin.json"].write_text(
+    json.dumps(plugin, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+)
 paths[".claude-plugin/marketplace.json"].write_text(
-    json.dumps(marketplace, indent=2) + "\n", encoding="utf-8"
+    json.dumps(marketplace, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
 )
 paths[".codex-plugin/plugin.json"].write_text(
-    json.dumps(codex_plugin, indent=2) + "\n", encoding="utf-8"
+    json.dumps(codex_plugin, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
 )
-paths[".mcp.json"].write_text(json.dumps(mcp, indent=2) + "\n", encoding="utf-8")
+paths[".mcp.json"].write_text(
+    json.dumps(mcp, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+)
 changelog_path.write_text(changelog, encoding="utf-8")
 PY
 
