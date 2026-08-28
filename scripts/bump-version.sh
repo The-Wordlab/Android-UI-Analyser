@@ -133,12 +133,19 @@ paths = {
     "src/android_ui_analyser/__init__.py": root / "src/android_ui_analyser/__init__.py",
     ".claude-plugin/plugin.json": root / ".claude-plugin/plugin.json",
     ".claude-plugin/marketplace.json": root / ".claude-plugin/marketplace.json",
+    ".codex-plugin/plugin.json": root / ".codex-plugin/plugin.json",
+    ".mcp.json": root / ".mcp.json",
 }
 
 pyproject = paths["pyproject.toml"].read_text(encoding="utf-8")
 init = paths["src/android_ui_analyser/__init__.py"].read_text(encoding="utf-8")
 plugin = json.loads(paths[".claude-plugin/plugin.json"].read_text(encoding="utf-8"))
 marketplace = json.loads(paths[".claude-plugin/marketplace.json"].read_text(encoding="utf-8"))
+codex_plugin = json.loads(paths[".codex-plugin/plugin.json"].read_text(encoding="utf-8"))
+mcp = json.loads(paths[".mcp.json"].read_text(encoding="utf-8"))
+mcp_args = mcp["mcpServers"]["android-ui-analyser"]["args"]
+mcp_source = mcp_args[2]
+mcp_tag = re.search(r"@v([^@\s]+)$", mcp_source)
 pyproject_match = re.search(r'^version = "([^"]+)"$', pyproject, re.MULTILINE)
 init_match = re.search(r'^__version__ = "([^"]+)"$', init, re.MULTILINE)
 found = {
@@ -146,6 +153,8 @@ found = {
     "src/android_ui_analyser/__init__.py": init_match.group(1) if init_match else None,
     ".claude-plugin/plugin.json": plugin.get("version"),
     ".claude-plugin/marketplace.json": marketplace.get("plugins", [{}])[0].get("version"),
+    ".codex-plugin/plugin.json": codex_plugin.get("version"),
+    ".mcp.json": mcp_tag.group(1) if mcp_tag else None,
 }
 drift = {path: version for path, version in found.items() if version != current}
 if drift:
@@ -171,6 +180,8 @@ pyproject = pyproject[: pyproject_match.start(1)] + target + pyproject[pyproject
 init = init[: init_match.start(1)] + target + init[init_match.end(1) :]
 plugin["version"] = target
 marketplace["plugins"][0]["version"] = target
+codex_plugin["version"] = target
+mcp_args[2] = re.sub(r"@v[^@\s]+$", f"@v{target}", mcp_source)
 
 new_release = f"## [Unreleased]\n\n## [{target}] - {release_date}\n\n{notes}\n\n"
 changelog = changelog[: unreleased.start()] + new_release + changelog[unreleased.end() :]
@@ -187,6 +198,10 @@ paths[".claude-plugin/plugin.json"].write_text(json.dumps(plugin, indent=2) + "\
 paths[".claude-plugin/marketplace.json"].write_text(
     json.dumps(marketplace, indent=2) + "\n", encoding="utf-8"
 )
+paths[".codex-plugin/plugin.json"].write_text(
+    json.dumps(codex_plugin, indent=2) + "\n", encoding="utf-8"
+)
+paths[".mcp.json"].write_text(json.dumps(mcp, indent=2) + "\n", encoding="utf-8")
 changelog_path.write_text(changelog, encoding="utf-8")
 PY
 

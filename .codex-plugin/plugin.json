@@ -1,0 +1,40 @@
+{
+  "name": "android-ui-analyser",
+  "version": "0.13.0",
+  "description": "Drive and inspect Android apps through AUA's selector-safe CLI and MCP server.",
+  "author": {
+    "name": "Eiliya",
+    "url": "https://github.com/eiliyaabedini"
+  },
+  "homepage": "https://github.com/The-Wordlab/Android-UI-Analyser#readme",
+  "repository": "https://github.com/The-Wordlab/Android-UI-Analyser",
+  "license": "MIT AND LicenseRef-Gemma-Terms-of-Use",
+  "keywords": [
+    "android",
+    "ui-testing",
+    "accessibility",
+    "mcp",
+    "automation"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Android UI Analyser",
+    "shortDescription": "Inspect and drive Android apps by semantic element ID",
+    "longDescription": "AUA gives Codex structured Android UI observations, selector-safe actions, automatic emulator leasing, and verifiable test evidence.",
+    "developerName": "Eiliya",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/The-Wordlab/Android-UI-Analyser",
+    "defaultPrompt": [
+      "Use AUA to inspect the current Android screen.",
+      "Use AUA to verify this Android behavior.",
+      "Use AUA to automate this Android flow safely."
+    ],
+    "brandColor": "#65A30D"
+  }
+}

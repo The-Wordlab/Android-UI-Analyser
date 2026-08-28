@@ -318,6 +318,16 @@ def test_skill_frontmatter_has_name_and_trigger_description() -> None:
     meta = yaml.safe_load(front)
     assert meta["name"] == "android-ui-analyser"
     assert "android" in meta["description"].lower()  # trigger description preserved
+    assert "mcp" in meta["description"].lower()
+
+
+def test_compact_skill_works_with_plugin_mcp_without_a_global_cli() -> None:
+    skill = guide.render_skill_markdown()
+
+    assert 'session_start(goal="<what must be verified>")' in skill
+    assert "MCP `session_finish`" in skill
+    assert 'capabilities(goal="<goal>")' in skill
+    assert "plugin does not put `aua` on `PATH`" in skill
 
 
 def test_codex_metadata_and_bundle_share_the_canonical_skill(tmp_path: Path) -> None:

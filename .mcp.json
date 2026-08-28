@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "android-ui-analyser": {
+      "command": "uvx",
+      "args": [
+        "--quiet",
+        "--from",
+        "android-ui-analyser[apple,rapidocr,audio] @ git+https://github.com/The-Wordlab/Android-UI-Analyser.git@v0.13.0",
+        "aua",
+        "mcp"
+      ]
+    }
+  }
+}

@@ -2,8 +2,8 @@ name: Release
 
 # CI runs on branches and pull requests only, so pushing a tag used to run nothing at all —
 # a tag was just a label on a commit nobody had re-checked. This workflow makes `git push
-# --follow-tags` the whole release: it refuses a tag whose version disagrees with the four
-# manifests or has no changelog entry, re-runs the full suite at the tagged commit, and only
+# --follow-tags` the whole release: it refuses a tag whose version disagrees with any package or
+# plugin surface or has no changelog entry, re-runs the full suite at the tagged commit, and only
 # then publishes a GitHub Release with notes lifted straight out of CHANGELOG.md.
 on:
   push:
@@ -52,7 +52,7 @@ jobs:
           set -euo pipefail
 
           # On a tag push the tag is the source of truth. A manual dry run has no tag, so
-          # pyproject supplies the version and the same four-way comparison still runs.
+          # pyproject supplies the version and the same six-way comparison still runs.
           if [ "${{ github.event_name }}" = "push" ]; then
             version="${GITHUB_REF_NAME#v}"
           else
@@ -61,21 +61,26 @@ jobs:
           fi
           echo "Releasing version: $version"
 
-          # The version lives in four hand-maintained files. Any one of them drifting ships a
-          # CLI that reports a version its plugin manifest disagrees with, so name the file
-          # that is wrong rather than failing with a bare mismatch.
+          # Six release surfaces must agree: package, runtime, both plugin manifests, Claude's
+          # marketplace listing, and the git tag uvx starts for the bundled MCP server. Name the
+          # one that is wrong rather than failing with a bare mismatch.
           python3 - "$version" <<'PY'
           import json, pathlib, re, sys, tomllib
 
           want = sys.argv[1]
           init = pathlib.Path("src/android_ui_analyser/__init__.py").read_text()
           match = re.search(r'^__version__ = "([^"]+)"', init, re.MULTILINE)
+          mcp = json.loads(pathlib.Path(".mcp.json").read_text())
+          mcp_source = mcp["mcpServers"]["android-ui-analyser"]["args"][2]
+          mcp_match = re.search(r"@v([^@\s]+)$", mcp_source)
 
           found = {
               "pyproject.toml": tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"],
               "src/android_ui_analyser/__init__.py": match.group(1) if match else "<no __version__ line>",
               ".claude-plugin/plugin.json": json.loads(pathlib.Path(".claude-plugin/plugin.json").read_text())["version"],
               ".claude-plugin/marketplace.json": json.loads(pathlib.Path(".claude-plugin/marketplace.json").read_text())["plugins"][0]["version"],
+              ".codex-plugin/plugin.json": json.loads(pathlib.Path(".codex-plugin/plugin.json").read_text())["version"],
+              ".mcp.json pinned git tag": mcp_match.group(1) if mcp_match else "<no vX.Y.Z source tag>",
           }
 
           disagree = {path: got for path, got in found.items() if got != want}
@@ -85,7 +90,7 @@ jobs:
               print(f"Release version {want} does not match: {', '.join(disagree)}", file=sys.stderr)
               print("Fix with: scripts/bump-version.sh " + want, file=sys.stderr)
               sys.exit(1)
-          print(f"All four manifests agree on {want}.")
+          print(f"All six release surfaces agree on {want}.")
           PY
 
           # The whole point of the release is telling people what changed, so an entry is

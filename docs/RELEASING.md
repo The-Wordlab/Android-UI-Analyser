@@ -32,7 +32,7 @@ you exactly what to fix.
 
 ## Where the version lives
 
-Four files, and they must agree:
+Six release surfaces, and they must agree:
 
 | file | who reads it |
 |---|---|
@@ -40,12 +40,14 @@ Four files, and they must agree:
 | `src/android_ui_analyser/__init__.py` → `__version__` | `aua --version`, and the daemon's identity string |
 | `.claude-plugin/plugin.json` → `version` | the installed Claude Code plugin |
 | `.claude-plugin/marketplace.json` → `plugins[].version` | what `/plugin update` compares against |
+| `.codex-plugin/plugin.json` → `version` | the installed Codex plugin |
+| `.mcp.json` → pinned `@vX.Y.Z` source | the exact AUA release both plugins start through `uvx` |
 
 `tests/test_the_version_is_the_same_everywhere.py` fails if any of them drift apart, because a
-version that is true in three places and stale in the fourth is worse than no version at all — it
-reports success while handing someone the wrong thing. The last two both matter: bump only
-`plugin.json` and `/plugin update android-ui-analyser@the-wordlab` never offers the new version,
-because the marketplace entry is what the client diffs (also called out in `CLAUDE.md`).
+version that is true in five places and stale in the sixth is worse than no version at all — it
+reports success while handing someone the wrong thing. The marketplace listing and MCP source both
+matter: a stale marketplace never offers the update, while a stale MCP tag advertises the new
+plugin but silently runs the old server.
 
 Use `scripts/bump-version.sh`, never a hand edit. It also refreshes `uv.lock`, which pins the root
 package version — and CI runs `uv sync --frozen`, which does **not** validate the lock, so a stale
@@ -59,12 +61,13 @@ lock would otherwise disagree with `pyproject.toml` silently and forever.
    time produces a list nobody reads. One line per user-visible change, in the release, or it did
    not happen.
 2. `scripts/bump-version.sh --minor` (or `--major` / `--patch`, or an explicit `0.14.0`). It moves
-   the four files, refreshes `uv.lock`, and promotes `## [Unreleased]` to `## [0.14.0] - 2026-08-28`.
-3. **Read the diff.** It should be exactly the four version files, `uv.lock`, and the changelog
+   all six release surfaces, refreshes `uv.lock`, and promotes `## [Unreleased]` to
+   `## [0.14.0] - 2026-08-28`.
+3. **Read the diff.** It should be exactly the six release surfaces, `uv.lock`, and the changelog
    heading. Anything else means the script picked up an edit you did not intend to release.
 4. `git commit -m "release: v0.14.0"`
 5. `git tag -a v0.14.0 -m "v0.14.0" && git push origin main --follow-tags`
-6. The `release` workflow fires on the `v*` tag. It re-checks that the tag matches the four version
+6. The `release` workflow fires on the `v*` tag. It re-checks that the tag matches all six release
    files, runs ruff, mypy and the suite (the ordinary CI workflow does **not** run on tags, so the
    release workflow runs them itself — a tag that publishes untested code is the one failure mode
    worth spending a few minutes of CI on), builds the wheel and sdist, and publishes the GitHub
@@ -95,6 +98,14 @@ curl -fsSL https://api.github.com/repos/The-Wordlab/Android-UI-Analyser/releases
   | jq -r .tag_name
 ```
 
+Run a pinned release without installing it:
+
+```bash
+uvx --from \
+  'android-ui-analyser[apple,rapidocr,audio] @ git+https://github.com/The-Wordlab/Android-UI-Analyser.git@v0.14.0' \
+  aua --version
+```
+
 **Pin a clone to a release, and upgrade deliberately.**
 
 ```bash
@@ -113,6 +124,13 @@ contains the version, so it retires itself after a version change anyway.
 
 ```
 /plugin update android-ui-analyser@the-wordlab
+```
+
+**Codex plugin users** refresh this repository marketplace, then reinstall its current snapshot:
+
+```bash
+codex plugin marketplace upgrade the-wordlab
+codex plugin add android-ui-analyser@the-wordlab
 ```
 
 ## What we promise

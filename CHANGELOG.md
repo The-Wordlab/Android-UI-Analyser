@@ -11,6 +11,14 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Added
+
+- Claude Code and Codex plugins now start the AUA MCP server from the matching GitHub release
+  through `uvx`. Plugin users need `uv`, `adb`, and a device/emulator, but no clone or permanent
+  AUA installation; the generated skill now teaches the MCP-first operating path.
+- Any released AUA CLI can be run without installation by passing its Git tag to `uvx`, and the
+  repository ships a Codex plugin manifest alongside its existing Claude marketplace.
+
 ## [0.13.0] - 2026-08-28
 
 First tagged release. AUA has been developed in the open since 2026-08-20 with no tags, no

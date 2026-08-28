@@ -24,14 +24,12 @@ from .projection import FIELD_ALIASES, TSV_DEFAULT_FIELDS
 # auto-activate the skill on Android-UI tasks — keep it stable across regenerations.
 SKILL_NAME = "android-ui-analyser"
 SKILL_DESCRIPTION = (
-    "Drive, inspect, and verify Android app UIs on a device/emulator with the `aua` CLI. It "
-    "returns stable element IDs and bounds, then acts by ID instead of guessed pixels. Use for "
-    "Android device/emulator tasks: inspect a screen, act on a control, automate "
-    "or debug a UI flow, verify a change, test offline/network or emulator microphone/voice "
-    "input, or inspect/seed a debuggable app's SQLite database. Start goal-oriented work with "
-    "`aua session start --goal`. AUA is hierarchy-first and falls back to OCR, detection, or "
-    "grounding vision for Compose/Flutter/WebView/canvas/game screens the accessibility tree "
-    "cannot describe."
+    "Drive, inspect, and verify Android app UIs on a device/emulator with AUA MCP tools or the "
+    "`aua` CLI. It returns stable element IDs and acts by ID instead of guessed pixels. Use for "
+    "Android tasks: inspect a screen, act on controls, automate or debug a flow, verify a change, "
+    "test offline/network or voice input, or inspect/seed a debuggable SQLite database. Start with "
+    "MCP `session_start` or CLI `aua session start --goal`. AUA is hierarchy-first with OCR, "
+    "detection, and grounding fallbacks for opaque screens."
 )
 
 DEFAULT_SKILL_PATH = Path(".claude/skills/android-ui-analyser/SKILL.md")
@@ -1931,11 +1929,13 @@ def render_skill_markdown() -> str:
     """Compact triggered instructions; deeper guidance stays in the CLI manual."""
     return """# Android UI Analyser
 
-Use `aua` for Android UI: act on returned IDs or stable selectors, never pixels, never raw `adb`.
+Use AUA MCP tools when present; otherwise use the equivalent `aua` CLI. Act on returned IDs or
+stable selectors, never pixels or raw `adb`. The plugin does not put `aua` on `PATH`.
 
 ## Operating loop
 
-1. Start with `aua session start --goal "<what must be verified>"`. It leases a free compatible
+1. Start with MCP `session_start(goal="<what must be verified>")`, or
+   `aua session start --goal "<what must be verified>"`. It leases a free compatible
    target; when all app-compatible targets are leased, it leaves them alone and provisions a
    unique read-only instance. `--app` requires the package; `--apk` installs it. Reuse its
    observation and `recommended_call`. `--contract` requires fresh proof and strict finish;
@@ -1958,7 +1958,7 @@ Use `aua` for Android UI: act on returned IDs or stable selectors, never pixels,
    not a separate progress call. Use `aua job start await ...` only for a
    read-only wait that may outlive one agent call. If `daemon_outcome_unknown` appears, never
    repeat the action: wait, then inspect a fresh screen.
-7. End with `aua session finish` (compact by default). Incomplete finish stays active and gives
+7. End with MCP `session_finish`, or CLI `aua session finish` (compact by default). Incomplete finish stays active and gives
    the exact next call; `--allow-incomplete` abandons it, while `--full` gives all evidence. Use `review.accounting`, not estimates:
    `top_level_calls` counts caller-visible invocations = `lifecycle_calls` + `task_calls`;
    `journal_events` adds `folded_internal_events` such as an action-bound wait. The snapshot excludes
@@ -1987,10 +1987,8 @@ can yield an unmapped `satisfied_action_until` arrival.
 
 ## Load more when needed
 
-- Run `aua guide --brief` for the selector, wait, navigation, map, flow, lease, and recovery
-  field guide.
-- Run `aua capabilities --goal "<goal>"` for structured discovery.
-- Run `aua guide` for the full command, flow, helper, troubleshooting, schema, and exit-code reference.
+- Call MCP `capabilities(goal="<goal>")`, or CLI `aua capabilities --goal "<goal>"`, for discovery.
+- Run `aua guide` for the full reference or `aua guide --brief` for the field guide.
 """
 
 

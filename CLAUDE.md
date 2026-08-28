@@ -65,17 +65,17 @@ Requirements: **Python 3.11+**, **`adb` on PATH** (Android SDK platform-tools), 
   Codex UI metadata is `skills/android-ui-analyser/agents/openai.yaml`. The pre-commit hook
   regenerates and stages all three from `guide.py` on every commit. To regenerate by hand use
   `aua guide --emit-skill <path>` / `aua guide --emit-codex-metadata <path>`.
-- **Release every user-visible change deliberately.** The version lives in `pyproject.toml`,
-  `src/android_ui_analyser/__init__.py`, `.claude-plugin/plugin.json`, and
-  `.claude-plugin/marketplace.json`; `tests/test_the_version_is_the_same_everywhere.py` fails if
-  they drift. Add the user-visible note under `## [Unreleased]` in `CHANGELOG.md` in the same
-  commit. Cut the version with `scripts/bump-version.sh`, then create the annotated tag;
+- **Release every user-visible change deliberately.** The package/runtime version, both plugin
+  manifests, Claude marketplace listing, and the Git tag pinned by `.mcp.json` must agree;
+  `tests/test_the_version_is_the_same_everywhere.py` fails if they drift. Add the user-visible note
+  under `## [Unreleased]` in `CHANGELOG.md` in the same commit. Cut the version with
+  `scripts/bump-version.sh`, then create the annotated tag;
   `.github/workflows/release.yml` verifies, tests, builds, and publishes it. Full procedure:
   `docs/RELEASING.md`.
-- **Plugin/marketplace**: the repo is its own Claude Code plugin marketplace
+- **Plugin/marketplace**: the repo is its own Claude Code and Codex marketplace
   (`.claude-plugin/marketplace.json`, name `the-wordlab`) exposing the `android-ui-analyser`
-  plugin (`.claude-plugin/plugin.json`). The MCP server (`aua mcp`) is intentionally not
-  bundled — it needs the `aua` binary on PATH.
+  plugin through `.claude-plugin/plugin.json` and `.codex-plugin/plugin.json`. Its shared
+  `.mcp.json` starts the matching release with `uvx`; plugin users need `uv`, not `aua` on PATH.
 - Adding a perception provider: subclass in `providers/`, register with the decorator in
   `providers/registry.py`, add a `models.<name>` config block — no edits to `engine.py`/`cli.py`.
 - Adding any device-facing feature: follow the platform boundary below. A new Android/ADB feature
