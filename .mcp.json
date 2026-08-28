@@ -5,7 +5,7 @@
       "args": [
         "--quiet",
         "--from",
-        "android-ui-analyser[apple,rapidocr,audio] @ git+https://github.com/The-Wordlab/Android-UI-Analyser.git@v0.14.0",
+        "android-ui-analyser[apple,rapidocr,audio] @ git+https://github.com/The-Wordlab/Android-UI-Analyser.git@v0.14.1",
         "aua",
         "mcp"
       ]

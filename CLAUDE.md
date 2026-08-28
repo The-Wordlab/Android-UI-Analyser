@@ -29,7 +29,7 @@ Then connect an Android device or emulator (README → "Connect a device or emul
 guidance. The operating manual is `aua guide --brief`.
 
 Requirements: **Python 3.11+**, **`adb` on PATH** (Android SDK platform-tools), and a
-**device/emulator** (Android 7.0+). See README → Requirements.
+**device/emulator** (Android 7.0+). See README → Installation help → Prerequisites.
 
 ## If you're DEVELOPING the tool
 
@@ -66,7 +66,8 @@ Requirements: **Python 3.11+**, **`adb` on PATH** (Android SDK platform-tools), 
   regenerates and stages all three from `guide.py` on every commit. To regenerate by hand use
   `aua guide --emit-skill <path>` / `aua guide --emit-codex-metadata <path>`.
 - **Release every user-visible change deliberately.** The package/runtime version, both plugin
-  manifests, Claude marketplace listing, and the Git tag pinned by `.mcp.json` must agree;
+  manifests, Claude marketplace listing, the Git tag pinned by `.mcp.json`, and README install
+  examples must agree;
   `tests/test_the_version_is_the_same_everywhere.py` fails if they drift. Add the user-visible note
   under `## [Unreleased]` in `CHANGELOG.md` in the same commit. Cut the version with
   `scripts/bump-version.sh`, then create the annotated tag;

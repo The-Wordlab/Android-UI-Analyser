@@ -1,8 +1,9 @@
 """A release cannot have different answers to "which version is this?".
 
-The CLI, Python package, Claude/Codex plugins, marketplace, and uvx MCP source travel through
-different paths. A stale plugin manifest fails silently: an update may never appear or may start
-an older server. Name every disagreement so a maintainer fixes the source instead of the consumer.
+The CLI, Python package, Claude/Codex plugins, marketplace, uvx MCP source, and README install
+commands travel through different paths. A stale plugin manifest or copy-paste command fails
+silently: an update may never appear or may start an older server. Name every disagreement so a
+maintainer fixes the source instead of the consumer.
 """
 
 from __future__ import annotations
@@ -59,6 +60,20 @@ def test_the_version_is_the_same_everywhere() -> None:
 def test_the_published_version_is_semver() -> None:
     version = _published_versions()["pyproject.toml"]
     assert SEMVER.fullmatch(version), f"pyproject.toml version {version!r} is not valid SemVer"
+
+
+def test_readme_install_examples_pin_the_published_release() -> None:
+    readme = (REPO / "README.md").read_text(encoding="utf-8")
+    pins = re.findall(
+        r"Android-UI-Analyser\.git@v([^'\"\s]+)", readme
+    ) + re.findall(r"^git checkout v([^\s]+)$", readme, re.MULTILINE)
+    expected = _published_versions()["pyproject.toml"]
+
+    assert pins, "README.md must include a pinned release installation example"
+    assert set(pins) == {expected}, (
+        f"README.md install examples must pin v{expected}; found "
+        f"{', '.join(f'v{version}' for version in sorted(set(pins)))}"
+    )
 
 
 def test_both_plugins_share_the_pinned_uvx_mcp_server() -> None:

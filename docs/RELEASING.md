@@ -32,7 +32,7 @@ you exactly what to fix.
 
 ## Where the version lives
 
-Six release surfaces, and they must agree:
+Seven release surfaces, and they must agree:
 
 | file | who reads it |
 |---|---|
@@ -42,6 +42,7 @@ Six release surfaces, and they must agree:
 | `.claude-plugin/marketplace.json` → `plugins[].version` | what `/plugin update` compares against |
 | `.codex-plugin/plugin.json` → `version` | the installed Codex plugin |
 | `.mcp.json` → pinned `@vX.Y.Z` source | the exact AUA release both plugins start through `uvx` |
+| `README.md` → pinned install examples | the exact release users copy into `uvx` and clone commands |
 
 `tests/test_the_version_is_the_same_everywhere.py` fails if any of them drift apart, because a
 version that is true in five places and stale in the sixth is worse than no version at all — it
@@ -61,13 +62,13 @@ lock would otherwise disagree with `pyproject.toml` silently and forever.
    time produces a list nobody reads. One line per user-visible change, in the release, or it did
    not happen.
 2. `scripts/bump-version.sh --minor` (or `--major` / `--patch`, or an explicit `0.14.0`). It moves
-   all six release surfaces, refreshes `uv.lock`, and promotes `## [Unreleased]` to
+   all seven release surfaces, refreshes `uv.lock`, and promotes `## [Unreleased]` to
    `## [0.14.0] - 2026-08-28`.
-3. **Read the diff.** It should be exactly the six release surfaces, `uv.lock`, and the changelog
+3. **Read the diff.** It should be exactly the seven release surfaces, `uv.lock`, and the changelog
    heading. Anything else means the script picked up an edit you did not intend to release.
 4. `git commit -m "release: v0.14.0"`
 5. `git tag -a v0.14.0 -m "v0.14.0" && git push origin main --follow-tags`
-6. The `release` workflow fires on the `v*` tag. It re-checks that the tag matches all six release
+6. The `release` workflow fires on the `v*` tag. It re-checks that the tag matches all seven release
    files, runs ruff, mypy and the suite (the ordinary CI workflow does **not** run on tags, so the
    release workflow runs them itself — a tag that publishes untested code is the one failure mode
    worth spending a few minutes of CI on), builds the wheel and sdist, and publishes the GitHub

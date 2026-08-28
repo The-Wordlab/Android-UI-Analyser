@@ -1,6 +1,6 @@
 {
   "name": "android-ui-analyser",
-  "version": "0.14.0",
+  "version": "0.14.1",
   "description": "Drive and inspect Android apps through AUA's selector-safe CLI and MCP server.",
   "author": {
     "name": "Eiliya",

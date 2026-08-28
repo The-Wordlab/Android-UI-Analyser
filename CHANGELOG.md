@@ -11,10 +11,14 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-08-28
+
 ### Changed
 
 - The README now collects prerequisites, Claude Code and Codex plugin setup, no-install `uvx`
   usage, permanent CLI setup, verification, and updates into one copy-paste installation guide.
+- Version bumps now update and verify the release tags in the README's copy-paste install commands,
+  preventing installation help from silently pointing users at an older release.
 
 ## [0.14.0] - 2026-08-28
 
@@ -257,5 +261,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.13.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.13.0
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.14.0...HEAD
 [0.14.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.14.0
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.14.1...HEAD
+[0.14.1]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.14.1

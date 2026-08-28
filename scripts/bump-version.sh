@@ -143,6 +143,8 @@ plugin = json.loads(paths[".claude-plugin/plugin.json"].read_text(encoding="utf-
 marketplace = json.loads(paths[".claude-plugin/marketplace.json"].read_text(encoding="utf-8"))
 codex_plugin = json.loads(paths[".codex-plugin/plugin.json"].read_text(encoding="utf-8"))
 mcp = json.loads(paths[".mcp.json"].read_text(encoding="utf-8"))
+readme_path = root / "README.md"
+readme = readme_path.read_text(encoding="utf-8")
 mcp_args = mcp["mcpServers"]["android-ui-analyser"]["args"]
 mcp_source = mcp_args[2]
 mcp_tag = re.search(r"@v([^@\s]+)$", mcp_source)
@@ -160,6 +162,16 @@ drift = {path: version for path, version in found.items() if version != current}
 if drift:
     details = ", ".join(f"{path}={version!r}" for path, version in drift.items())
     raise SystemExit(f"version files disagree with pyproject {current}: {details}")
+
+readme_pins = re.findall(
+    r"Android-UI-Analyser\.git@v([^'\"\s]+)", readme
+) + re.findall(r"^git checkout v([^\s]+)$", readme, re.MULTILINE)
+stale_readme_pins = sorted({version for version in readme_pins if version != current})
+if not readme_pins or stale_readme_pins:
+    raise SystemExit(
+        "README.md install examples must pin the current release "
+        f"{current}; found {sorted(set(readme_pins)) or '<none>'}"
+    )
 
 changelog_path = root / "CHANGELOG.md"
 changelog = changelog_path.read_text(encoding="utf-8")
@@ -182,6 +194,9 @@ plugin["version"] = target
 marketplace["plugins"][0]["version"] = target
 codex_plugin["version"] = target
 mcp_args[2] = re.sub(r"@v[^@\s]+$", f"@v{target}", mcp_source)
+readme = readme.replace(f"@v{current}", f"@v{target}")
+readme = readme.replace(f"`v{current}`", f"`v{target}`")
+readme = readme.replace(f"git checkout v{current}", f"git checkout v{target}")
 
 new_release = f"## [Unreleased]\n\n## [{target}] - {release_date}\n\n{notes}\n\n"
 changelog = changelog[: unreleased.start()] + new_release + changelog[unreleased.end() :]
@@ -206,6 +221,7 @@ paths[".codex-plugin/plugin.json"].write_text(
 paths[".mcp.json"].write_text(
     json.dumps(mcp, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
 )
+readme_path.write_text(readme, encoding="utf-8")
 changelog_path.write_text(changelog, encoding="utf-8")
 PY
 
