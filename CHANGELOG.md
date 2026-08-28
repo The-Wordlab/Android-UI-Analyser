@@ -11,6 +11,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-08-28
+
 ### Added
 
 - Claude Code and Codex plugins now start the AUA MCP server from the matching GitHub release
@@ -248,5 +250,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
   (never airplane mode) to prove offline behaviour, and `network_restore` or `session finish` to put it
   back.
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.13.0...HEAD
 [0.13.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.13.0
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.14.0
