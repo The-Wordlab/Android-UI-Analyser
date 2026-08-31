@@ -250,6 +250,22 @@ final class DriveFeature implements Feature {
                     break;
                 }
 
+                // Pressed already, and it worked. Measured live, this was the budget burn: one
+                // control tapped three times in a row, every tap reporting {@code changed}, because
+                // nothing had stalled and this loop had no notion of having finished.
+                //
+                // {@code done} claims the *action* is complete and nothing more: the control the
+                // goal named was pressed and the screen moved. Whether the destination is right is
+                // the caller's to judge — it holds the goal's success criteria and this does not.
+                // That narrowness is why the check needs no vocabulary and no arrival heuristic.
+                if (already > 0) {
+                    record.put("decision", "done");
+                    record.put("tried", already);
+                    steps.put(record);
+                    stop = "done";
+                    break;
+                }
+
                 record.put("decision", "tap");
                 String outcome = tap(best.node);
                 boolean ok = !BLOCKED.equals(outcome);

@@ -336,6 +336,18 @@ def _node_text(node: Mapping[str, Any]) -> str:
     return " ".join(str(node.get(key) or "") for key in ("text", "desc")).strip()
 
 
+def touched(node: Mapping[str, Any]) -> bool:
+    """This node has been acted on at least once during the run.
+
+    Written onto the node by whatever is driving — the helper counts per run, the host loop keys by
+    ``stable_key`` — so no history list has to be joined against the screen. Omitted entirely when
+    zero, which is why this reads truthiness rather than comparing to 0: a runtime that sends
+    ``"tried": 0`` and one that sends nothing must mean the same thing.
+    """
+
+    return bool(node.get("tried"))
+
+
 def stalled(node: Mapping[str, Any]) -> bool:
     """This node was acted on and the screen did not move. The whole of ``no_progress``, per node.
 
@@ -434,6 +446,26 @@ def decide(
                 "why": (
                     f"best match was tried {nodes[best_index].get('tried')} time(s) and last "
                     f"{nodes[best_index].get('last')}"
+                ),
+            }
+        # Pressed already, and it worked. Measured live, this was the budget burn: "Apps" tapped
+        # three times, each tap reporting `changed`, because nothing had stalled and the driver had
+        # no notion of having finished. It simply re-pressed the best match until the budget ran out.
+        #
+        # `done` here claims the *action* is complete and nothing more. The control the goal named
+        # was pressed and the screen moved; whether the destination is correct is the caller's to
+        # judge, and no reading of this lets it skip that. That narrowness is the point — it needs no
+        # vocabulary, no arrival heuristic, and it cannot manufacture a false claim about what the
+        # screen shows, because it is a fact about what this driver did.
+        if touched(nodes[best_index]):
+            return {
+                "call": "done",
+                "n": nodes[best_index].get("n"),
+                "stable_key": keys[best_index] if best_index < len(keys) else None,
+                "score": round(best_score, 2),
+                "why": (
+                    f"best match was pressed {nodes[best_index].get('tried')} time(s) and the "
+                    f"screen changed; the action the goal named is carried out"
                 ),
             }
         return {

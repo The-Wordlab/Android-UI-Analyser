@@ -431,3 +431,70 @@ def test_an_untried_target_is_reached_even_after_a_stall_elsewhere_and_scrolls_s
     got = decide("open Storage", _projection(nodes, more=True), scrolls_used=MAX_SCROLLS)
     assert got["call"] == "tap"
     assert got["n"] == "n2"
+
+
+# --------------------------------------------------------------------------- it stops when it is done
+
+
+def test_it_stops_once_it_has_pressed_the_control_the_goal_named() -> None:
+    """The budget burn, measured live: "Apps" tapped three times, each one reporting `changed`.
+
+        step 0   tap n19 'Apps'  -> CHANGED
+        step 1   tap n23 'Apps'  -> CHANGED
+        step 2   tap n20 'Apps'  -> CHANGED
+
+    `no_progress` did not catch it because nothing stalled — every tap really did change the screen
+    (a tab re-selects, a list scrolls back to top). The driver simply had no notion of having
+    finished, so it re-pressed the best match until the budget ran out.
+
+    This needs no vocabulary and no arrival judgement, which is why it is the fix worth having:
+    "the control the goal names was pressed and the screen moved" is a fact about what this driver
+    did, not a claim about what the screen now shows. It says the *action* is complete and nothing
+    more — the caller still has to verify the outcome, and no wording here lets it skip that.
+    """
+
+    nodes = [
+        {"n": "n1", "text": "Chat", "tap": True},
+        {"n": "n2", "text": "Ideas", "tap": True},
+        {"n": "n3", "text": "Widgets", "tap": True, "tried": 1, "last": "changed"},
+    ]
+    got = decide("navigate to the widgets section", _projection(nodes))
+    assert got["call"] == "done", f"re-pressed a control it had already pressed: {got}"
+
+
+def test_a_stall_on_the_goals_control_still_reports_no_progress() -> None:
+    """The two outcomes on the same control mean opposite things, and both must survive.
+
+    `changed` says the goal was carried out. `unchanged` says it was attempted and went nowhere. A
+    single "already tried" rule would collapse them and lose the distinction the corpus was built to
+    teach.
+    """
+
+    nodes = [{"n": "n1", "text": "Widgets", "tap": True, "tried": 2, "last": "unchanged"}]
+    got = decide("go to widgets", _projection(nodes))
+    assert got["call"] == "handoff"
+    assert got["reason"] == "no_progress"
+
+
+def test_a_control_someone_else_pressed_does_not_end_the_run() -> None:
+    """Only the goal's own control counts. A stray `changed` elsewhere means nothing.
+
+    Same shape as the `no_progress` rule: consult the winner, never the screen at large. Otherwise
+    any run that had already acted once would declare itself finished.
+    """
+
+    nodes = [
+        {"n": "n1", "text": "Something Else", "tap": True, "tried": 1, "last": "changed"},
+        {"n": "n2", "text": "Widgets", "tap": True},
+    ]
+    got = decide("go to widgets", _projection(nodes))
+    assert got["call"] == "tap"
+    assert got["n"] == "n2"
+
+
+def test_it_does_not_claim_done_before_it_has_done_anything() -> None:
+    """An untouched control is work to do, not work completed."""
+
+    nodes = [{"n": "n1", "text": "Widgets", "tap": True}]
+    got = decide("go to widgets", _projection(nodes))
+    assert got["call"] == "tap"
