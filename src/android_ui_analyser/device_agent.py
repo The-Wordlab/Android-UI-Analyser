@@ -317,11 +317,29 @@ def enable(serial: str) -> dict[str, Any]:
 
 
 def disable(serial: str) -> dict[str, Any]:
-    """Remove only our entry, leaving any other accessibility service enabled."""
+    """Remove only our entry, leaving any other accessibility service enabled.
 
-    remaining = [s for s in _setting(serial, _SECURE_SERVICES).split(":") if s and s != SERVICE]
-    _shell(serial, f"settings put {_SECURE_SERVICES} {':'.join(remaining)}")
-    if not remaining:
+    Surgical rather than a blanket clear because another service may be someone's only way to use
+    the device; a QA helper must not take it away.
+
+    **The empty case needs ``delete``, not ``put``.** ``settings put <key>`` with no value is
+    rejected by the platform — literally ``Bad arguments`` — and ``_shell`` does not check the exit
+    status, so ``':'.join([])`` failed silently and left the helper listed. The master switch was
+    then set to 0, so nothing was running and the device *looked* clean, which is what made it hard
+    to notice: the helper returned the moment any other accessibility service was enabled, as a
+    service the user had never re-consented to.
+    """
+
+    listed = [s for s in _setting(serial, _SECURE_SERVICES).split(":") if s]
+    if SERVICE not in listed:
+        # Nothing of ours to remove. Writing anyway would rewrite a list we do not own.
+        return {"enabled": False, "remaining": listed}
+
+    remaining = [s for s in listed if s != SERVICE]
+    if remaining:
+        _shell(serial, f"settings put {_SECURE_SERVICES} {':'.join(remaining)}")
+    else:
+        _shell(serial, f"settings delete {_SECURE_SERVICES}")
         _shell(serial, f"settings put {_SECURE_ENABLED} 0")
     return {"enabled": False, "remaining": remaining}
 

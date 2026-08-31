@@ -117,3 +117,76 @@ def test_enable_refuses_without_root_and_changes_nothing(monkeypatch) -> None:
     assert installed == [], "nothing may be installed on a device that cannot run it"
     mutations = [c for c in ran if "settings put" in c or "appops" in c or "pm install" in c]
     assert mutations == [], f"refusing must not change the device: {mutations}"
+
+
+# --------------------------------------------------------------------------- disable really disables
+
+
+def _disable_with(monkeypatch, listed: str) -> tuple[dict, list[str]]:
+    """Run `disable` against a device whose accessibility list is *listed*, capturing the shell."""
+
+    from android_ui_analyser import device_agent
+
+    ran: list[str] = []
+
+    def shell(serial: str, command: str, **_kw: object) -> str:
+        ran.append(command)
+        if command.startswith("settings get secure enabled_accessibility_services"):
+            return listed
+        if command.startswith("settings get secure accessibility_enabled"):
+            return "1"
+        return ""
+
+    monkeypatch.setattr(device_agent, "_shell", shell)
+    return device_agent.disable("serial"), ran
+
+
+def test_disable_actually_clears_the_list_when_we_were_the_only_service(monkeypatch) -> None:
+    """`disable` reported success and left the helper listed, which is its whole job undone.
+
+    ``settings put <key> <value>`` with an empty value is rejected by the platform — literally
+    ``Bad arguments`` — and ``_shell`` does not check the exit status, so the write failed silently.
+    With no other service enabled, ``':'.join([])`` produced exactly that command. The master switch
+    was then set to 0, so nothing was running and the device *looked* clean; the helper came back the
+    moment any other accessibility service was enabled, which is a service the user never re-consented
+    to. Clearing needs ``settings delete``.
+    """
+
+    from android_ui_analyser import device_agent
+
+    result, ran = _disable_with(monkeypatch, device_agent.SERVICE)
+    writes = [c for c in ran if c.startswith("settings put secure enabled_accessibility_services")]
+    assert not any(
+        c.rstrip().endswith("enabled_accessibility_services") for c in writes
+    ), f"wrote an empty value, which the platform rejects: {writes}"
+    assert any(
+        c.startswith("settings delete secure enabled_accessibility_services") for c in ran
+    ), f"the list was never cleared: {ran}"
+    assert result == {"enabled": False, "remaining": []}
+
+
+def test_disable_leaves_another_service_alone(monkeypatch) -> None:
+    """The reason this is surgical rather than a blanket clear: TalkBack may be someone's only
+    way to use the device, and a QA helper must not take it away."""
+
+    from android_ui_analyser import device_agent
+
+    other = "com.example.reader/com.example.reader.ReaderService"
+    result, ran = _disable_with(monkeypatch, f"{other}:{device_agent.SERVICE}")
+
+    assert result["remaining"] == [other]
+    assert f"settings put secure enabled_accessibility_services {other}" in ran
+    assert not any(c.startswith("settings delete") for c in ran), "cleared a list still in use"
+    # The master switch stays on, or the surviving service would be disabled by proxy.
+    assert "settings put secure accessibility_enabled 0" not in ran
+
+
+def test_disable_is_idempotent_when_the_helper_was_never_listed(monkeypatch) -> None:
+    """Called twice, or on a device that never had it, this must be a no-op and not an error."""
+
+
+    result, ran = _disable_with(monkeypatch, "")
+    assert result["enabled"] is False
+    assert not any(
+        c.startswith("settings put secure enabled_accessibility_services") for c in ran
+    ), f"wrote to a list that had nothing of ours in it: {ran}"
