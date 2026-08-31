@@ -7654,6 +7654,12 @@ def remember(
         "--launch-activity",
         help="Pin the MAIN/LAUNCHER Activity bare `app launch` should cold-start.",
     ),
+    calls: list[str] = typer.Option(
+        [],
+        "--calls",
+        metavar="TERM=LABEL",
+        help="What this app calls something: --calls feed=Ideas. Repeat for more.",
+    ),
     app_pkg: str | None = typer.Option(None, "--app", help="Package (default: current)."),
 ) -> None:
     """Teach the app playbook: a description, a quirk note, a login/etc. recipe, or a deeplink.
@@ -7691,6 +7697,15 @@ def remember(
             # overwrite the entry someone deliberately taught.
             entry = store.remember_launch_entry(pkg, launch_activity, source="user")
             did.append(f"launch:{entry.activity}" if entry is not None else "launch")
+        for pair in calls:
+            term, _, label = pair.partition("=")
+            if not term.strip() or not label.strip():
+                raise UsageError(
+                    f"--calls needs TERM=LABEL, got {pair!r}",
+                    hint='e.g. --calls feed=Ideas — the term a task uses, then the app\'s own label.',
+                )
+            known = store.remember_vocabulary(pkg, term, [label])
+            did.append(f"calls:{term.strip().casefold()}={','.join(known)}")
         if note and not recipe and not deeplink:
             store.remember_note(pkg, note)
             did.append("note")

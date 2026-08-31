@@ -300,6 +300,22 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "flow; this is for the unmapped stretch.",
     ),
     (
+        "Teach the app its own words, once",
+        "When a task's wording and the app's labels disagree, write it down instead of re-deriving "
+        "it: `aua remember --calls feed=Ideas`. Both `aua drive` and `aua helper drive` then fold "
+        "the app's own words into any goal naming that concept, so a goal saying \"open the feed "
+        "tab\" reaches a control labelled \"Ideas\" - which it cannot otherwise, because word "
+        "overlap scores zero when the words do not meet. It ADDS rather than replaces, so a goal "
+        "already using the app's words stays correct, and the goal reported back to you is the one "
+        "you asked for, not the expansion. Matching is per-phrase and case-insensitive: "
+        "`--calls \"lock screen=Security\"` fires on \"lock screen\" and not on the bare word "
+        "\"screen\". A term made only of stopwords is refused, because it would append its label to "
+        "nearly every goal and make every screen look like it held the target. Teach one the moment "
+        "a goal fails on vocabulary rather than on structure - the next task starts informed, and on "
+        "a suite sharing one app that is the difference between paying the tax once and paying it "
+        "per scenario.",
+    ),
+    (
         "Replay whole journeys in one call (flows)",
         "A flow is a Maestro-style YAML journey you can AUTHOR directly (no walking needed) or "
         "record. There are two recorders and they take different inputs: `aua flow save` "

@@ -508,6 +508,11 @@ class AppMap(BaseModel):
     deeplinks: list[Deeplink] = Field(default_factory=list)  # shortcuts (set flags, jump)
     recipes: list[Recipe] = Field(default_factory=list)  # login_full, etc.
     notes: list[str] = Field(default_factory=list)  # quirks worth remembering
+    # What this app calls things, when its words differ from the ones a task is written in.
+    # `{"feed": ["Ideas"]}` — a spec says Feed, the tab is labelled Ideas, and without this every
+    # task touching that tab re-derives the mapping. Read by `drive_rule.expand_goal`, which folds
+    # the app's words into a goal before it reaches either driving lane.
+    vocabulary: dict[str, list[str]] = Field(default_factory=dict)
     launch: LaunchEntry | None = None  # pinned cold-start Activity (multi-launcher builds)
     # Last-seen MAIN/LAUNCHER set when no pin exists yet (surfaces ambiguity in the playbook).
     launcher_activities: list[str] = Field(default_factory=list)
@@ -3188,6 +3193,41 @@ class AppMemoryStore:
             app.notes.append(note)
             self._upsert_knowledge_in_map(app, "note", note, source="user")
             self.save(app)
+
+    def remember_vocabulary(self, package: str, term: str, calls_it: Sequence[str]) -> list[str]:
+        """Record what this app calls *term*, and return every spelling now known for it.
+
+        Learned once and spent once. Without somewhere to put it, a task whose words differ from the
+        app's re-derives the mapping every time — a spec saying "Feed" against a tab labelled
+        "Ideas" cost a wasted step per scenario, and one app's suite has a hundred of them.
+
+        Refused rather than stored: a term that is only stopwords, which would fire on nearly every
+        goal and make every screen look like it held the target. Better a clear error at the moment
+        someone teaches it than a vocabulary that quietly degrades every later run.
+        """
+
+        if not self.cfg.enabled or not term.strip():
+            return []
+        spellings = [str(v).strip() for v in calls_it if str(v).strip()]
+        if not spellings:
+            return []
+        # Validated by the reader, so the rule and the store cannot drift on what is acceptable.
+        from .drive_rule import expand_goal
+
+        expand_goal(term, {term: spellings})
+
+        app = self.load(package) or AppMap(package=package)
+        key = term.strip().casefold()
+        known = list(app.vocabulary.get(key) or [])
+        for spelling in spellings:
+            if spelling not in known:
+                known.append(spelling)
+        app.vocabulary[key] = known
+        self._upsert_knowledge_in_map(
+            app, "note", f"this app calls {key!r}: {', '.join(known)}", source="user"
+        )
+        self.save(app)
+        return known
 
     def remember_launch_entry(
         self,

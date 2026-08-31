@@ -409,3 +409,35 @@ def test_the_journalled_result_is_the_object_the_caller_gets(tmp_path: Path) -> 
     assert recorded is not None, "the response panel had nothing to show"
     for key in ("goal", "budget", "stop_reason", "step_count"):
         assert recorded.get(key) == returned.get(key), f"{key} drifted between journal and caller"
+
+
+def test_the_device_receives_the_goal_in_its_own_apps_words(tmp_path: Path, monkeypatch) -> None:
+    """The helper cannot read the app map, so the expansion has to happen before the wire.
+
+    Its word tables are compiled into the APK and there is no way to seed them, so teaching the
+    scoring rule a vocabulary would give the host lane one the device lane lacks — two lanes
+    disagreeing about one goal, which `test_the_drive_and_the_offload_share_one_slot_handover` and
+    its neighbours exist to prevent. Folding the app's own words into the goal here is how the device
+    gets the vocabulary at all.
+    """
+
+    agent = _Agent()
+    engine = _engine(tmp_path, agent)
+    monkeypatch.setattr(
+        type(engine),
+        "_goal_in_the_apps_words",
+        lambda self, goal: f"{goal} Ideas",
+    )
+
+    engine.drive_on_device("open the feed tab", budget=3)
+
+    sent = agent.requests[0]["params"]["goal"]
+    assert sent == "open the feed tab Ideas", f"the device got the unexpanded goal: {sent!r}"
+
+
+def test_an_untaught_app_sends_the_goal_exactly_as_asked(tmp_path: Path) -> None:
+    """No vocabulary taught, no change — the expansion must be free when nothing was learned."""
+
+    agent = _Agent()
+    _engine(tmp_path, agent).drive_on_device("open the display settings", budget=3)
+    assert agent.requests[0]["params"]["goal"] == "open the display settings"

@@ -4404,7 +4404,9 @@ class Engine:
             with self._device_agent_borrowed(purpose="drive.run") as loan:
                 result = loan.channel.request(
                     "drive.run",
-                    {"goal": goal, "budget": budget},
+                    # Expanded here, so the device receives a goal already in its own app's words.
+                    # The helper cannot read the app map; this is how it gets the vocabulary anyway.
+                    {"goal": self._goal_in_the_apps_words(goal), "budget": budget},
                     # The device settles after every tap, so a step costs far more than a replayed
                     # one; budget the wait per step rather than for the run.
                     timeout=max(30.0, 6.0 * budget),
@@ -4468,6 +4470,28 @@ class Engine:
         # receives cannot drift apart.
         return payload
 
+    def _goal_in_the_apps_words(self, goal: str) -> str:
+        """Fold the current app's own vocabulary into *goal*, if any has been taught.
+
+        Both lanes call this before deciding anything, so a term learned once is spent once. The
+        expansion happens here rather than inside the rule because the helper's word tables are
+        compiled into the APK: teaching `score()` would give the host lane a vocabulary the device
+        lane lacks, and the two lanes are tested for agreeing about a goal.
+
+        Best-effort by design — a missing memory backend, an unknown package or an unreadable map
+        must degrade to the goal as written, never to an error. Nothing here is required for driving.
+        """
+
+        with contextlib.suppress(Exception):
+            mem = self._memory
+            package = self.current_package()
+            app = mem.load(package) if mem is not None and package else None
+            if app is not None and app.vocabulary:
+                from .drive_rule import expand_goal
+
+                return expand_goal(goal, app.vocabulary)
+        return goal
+
     # ------------------------------------------------------------------ the lane that always works
 
     def drive_on_host(self, goal: str, *, budget: int = 8) -> dict[str, Any]:
@@ -4501,6 +4525,9 @@ class Engine:
                 hint='Say what to reach, e.g. `aua drive "open the display settings"`.',
             )
         budget = max(1, int(budget))
+        # The app's own words for what the goal names, if any were taught. Kept separate from `goal`
+        # so what is reported back is what the caller asked for, not the expansion.
+        driving_goal = self._goal_in_the_apps_words(goal)
 
         tried: dict[str, int] = {}
         last: dict[str, str] = {}
@@ -4539,7 +4566,7 @@ class Engine:
             projection = project(nodes)
             shown = list(projection["nodes"])
             ids = list(projection["keys"])
-            chosen = decide(goal, projection, scrolls_used=scrolls)
+            chosen = decide(driving_goal, projection, scrolls_used=scrolls)
 
             record: dict[str, Any] = {
                 "step": index,

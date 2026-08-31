@@ -336,6 +336,55 @@ def _node_text(node: Mapping[str, Any]) -> str:
     return " ".join(str(node.get(key) or "") for key in ("text", "desc")).strip()
 
 
+def expand_goal(goal: str, vocabulary: Mapping[str, Sequence[str]] | None) -> str:
+    """Fold an app's own words for a concept into *goal*, once, wherever the concept is named.
+
+    The case this exists for, from a real run: a scenario says **Feed**, the app's control is
+    labelled **Ideas**, and the goal scored zero against every control on screen while the target was
+    plainly visible. Nothing was wrong with the rule — the words genuinely do not meet — and nothing
+    was wrong with the scenario. There was simply nowhere to write the mapping down, so every scenario
+    touching that tab re-derived it.
+
+    **Why the goal and not the rule.** The helper's word tables are compiled into the APK with no way
+    to seed them, so teaching :func:`score` would give the host lane a vocabulary the device lane
+    lacks — the two lanes disagreeing about one goal, which is the thing they are tested not to do.
+    Expanding here happens before the goal is sent anywhere, so both lanes get it, no protocol
+    changes, and there is no second implementation to keep in step.
+
+    Adds rather than replaces, so a goal already using the app's words stays correct, and a wrong
+    vocabulary entry costs a weak extra match rather than losing the right one.
+    """
+
+    if not vocabulary:
+        return goal
+
+    lowered = f" {' '.join(words(goal))} "
+    present = set(words(goal))
+    additions: list[str] = []
+    for term, spellings in vocabulary.items():
+        keys = words(term)
+        if not keys:
+            continue
+        # A key that is a stopword — or only stopwords — would fire on nearly every goal and make
+        # every screen look like it contained the target. Refuse rather than degrade every later run.
+        if all(key in STOPWORDS for key in keys):
+            raise ValueError(
+                f"vocabulary term {term!r} is a stopword and would match almost every goal; "
+                f"it is too common to name a destination"
+            )
+        # Phrase match, so "lock screen" cannot fire on the bare word "screen" — which appears in
+        # more than half of real harvested screens.
+        if f" {' '.join(keys)} " not in lowered:
+            continue
+        for spelling in spellings:
+            if not spelling:
+                continue
+            if all(part in present for part in words(spelling)):
+                continue  # the goal already says it; saying it twice is noise in every log
+            additions.append(str(spelling))
+    return f"{goal} {' '.join(additions)}".strip() if additions else goal
+
+
 def touched(node: Mapping[str, Any]) -> bool:
     """This node has been acted on at least once during the run.
 
