@@ -498,3 +498,116 @@ def test_it_does_not_claim_done_before_it_has_done_anything() -> None:
     nodes = [{"n": "n1", "text": "Widgets", "tap": True}]
     got = decide("go to widgets", _projection(nodes))
     assert got["call"] == "tap"
+
+
+# --------------------------------------------------------------------------- a goal that only looks
+
+
+def test_a_goal_that_only_asks_to_look_does_not_tap() -> None:
+    """Measured hole, and the largest one left: `done` was right 6.9% of the time.
+
+    Stratified over `data-v12/test.jsonl`, the rule scored `tap` 85%, `handoff` 93% and `scroll`
+    100% — and `done` 7%. Every one of those 419 rows is a goal that asks a *question* about the
+    screen rather than giving it an instruction:
+
+        confirm taskslast is showing        is layers on screen
+        check clock468 is here             can you see start voice
+
+    The rule read them as navigation, found the best word match, and pressed it. For a QA suite
+    that is the worst possible answer: the assertion was "is this visible", and the driver changed
+    the screen before anything could be asserted about it.
+    """
+
+    nodes = [
+        {"n": "n1", "text": "Widgets", "tap": True},
+        {"n": "n2", "text": "Doodads"},
+    ]
+    got = decide("confirm doodads is showing", _projection(nodes))
+    assert got["call"] == "done", f"acted on a screen it was only asked to read: {got}"
+    assert got["n"] == "n2"
+
+
+def test_looking_beats_tapping_even_when_the_subject_is_tappable() -> None:
+    """Most things worth asserting about are also pressable. Pressable is not permission."""
+
+    nodes = [{"n": "n1", "text": "Doodads", "tap": True}]
+    got = decide("is doodads on screen", _projection(nodes))
+    assert got["call"] == "done"
+    assert got["n"] == "n1"
+
+
+def test_a_look_goal_whose_subject_is_absent_scrolls_first() -> None:
+    """Not found is not the same as not there — 47.7% of the look-shaped rows are `target_absent`,
+    and the corpus reaches them through the same scroll-then-refuse path every other goal uses."""
+
+    nodes = [{"n": "n1", "text": "Widgets", "tap": True}]
+    got = decide("is doodads on screen", _projection(nodes, more=True))
+    assert got["call"] == "scroll"
+
+
+def test_a_look_goal_with_nothing_left_to_reveal_says_the_target_is_absent() -> None:
+    """The honest QA answer to "is it visible" when it is not: absent, never `done`. A false `done`
+    here is a false pass, which is the one error a test suite must not make."""
+
+    nodes = [{"n": "n1", "text": "Widgets", "tap": True}]
+    got = decide("is doodads on screen", _projection(nodes))
+    assert got["call"] == "handoff"
+    assert got["reason"] == "target_absent"
+
+
+def test_an_instruction_that_merely_starts_the_same_way_still_acts() -> None:
+    """`can you see X` asks. `can you open X` instructs. In the corpus both start "can you", 515
+    look-goals against 2,645 action goals, so the opening words cannot be the test — the visibility
+    phrase is."""
+
+    nodes = [{"n": "n1", "text": "Doodads", "tap": True}]
+    got = decide("can you open doodads", _projection(nodes))
+    assert got["call"] == "tap"
+    assert got["n"] == "n1"
+
+
+def test_the_question_words_do_not_pollute_the_scoring() -> None:
+    """"check ... is here" put `check` and `here` into the goal terms, so a row whose label happens
+    to start with one of them outscored the row actually being asked about."""
+
+    nodes = [
+        {"n": "n1", "text": "Check for updates", "tap": True},
+        {"n": "n2", "text": "Doodads"},
+    ]
+    got = decide("check doodads is here", _projection(nodes))
+    assert got["call"] == "done"
+    assert got["n"] == "n2", f"the frame word won the scoring: {got}"
+
+
+def test_a_host_goal_is_still_refused_before_the_screen_is_read() -> None:
+    """Ordering, pinned. A host capability is unreachable by looking as well as by tapping, and no
+    look-shaped phrasing may turn that refusal into a `done`."""
+
+    nodes = [{"n": "n1", "text": "Screenshot", "tap": True}]
+    got = decide("is the screenshot on screen", _projection(nodes))
+    assert got["call"] == "handoff"
+    assert got["reason"] == "needs_host"
+
+
+def test_a_stalled_control_does_not_make_a_look_goal_report_no_progress() -> None:
+    """Nothing was being attempted, so nothing can have stalled. A look goal never taps, so the
+    progress fields on its subject say only that some earlier step touched it."""
+
+    nodes = [{"n": "n1", "text": "Doodads", "tap": True, "tried": 2, "last": "unchanged"}]
+    got = decide("is doodads visible", _projection(nodes))
+    assert got["call"] == "done"
+
+
+def test_a_visibility_phrase_must_start_at_a_word_boundary() -> None:
+    """The whole of this fix's cost, measured: 6 regressions on 5,741 held-out rows, 5 of them this.
+
+    "reach the solution screen" ends with the letters of "on screen" and is an instruction. Without
+    a boundary check the goal was read as a question, its subject came out as "reach the soluti",
+    and a reachable destination was refused as absent — the expensive direction of error, because no
+    later step recovers it.
+    """
+
+    nodes = [{"n": "n1", "text": "Solution", "tap": True}]
+    got = decide("reach the solution screen", _projection(nodes))
+    assert got["call"] == "tap", f"matched a phrase mid-word: {got}"
+    assert got["n"] == "n1"

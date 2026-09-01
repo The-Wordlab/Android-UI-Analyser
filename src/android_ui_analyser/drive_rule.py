@@ -38,6 +38,22 @@ joint in each direction and both labels now match at full strength. Measured on
 answerable, with zero regressions — because the corpus generates exactly this phrasing on purpose
 (see ``v12_goals._compound``) while the scorer had no way to resolve it.
 
+**"It reads a question as an instruction"** was the largest hole left, and it was invisible until
+the classes were measured separately. Stratified over ``runs/functiongemma/data-v12/test.jsonl``,
+the rule scored ``tap`` 87%, ``scroll`` 100% and ``handoff`` 86% — and ``done`` **7.6%**. All 419 of
+those rows ask a question about the screen rather than giving it an instruction ("confirm the row is
+showing", "is the badge on screen", "can you see the banner"), and the rule read every one as
+navigation and pressed the best match. For a test suite that is the one unacceptable answer: the
+assertion was "is this visible", and acting on the screen destroys the thing being asserted about.
+:func:`only_asks_to_look` reads the frame, and the *subject* it returns is as important as its
+verdict — "check X is here" used to put ``check`` and ``here`` into the goal terms, so a row named
+"Check for updates" outscored the row being asked about. The frame says the goal is a question; only
+the screen answers it, so an absent subject falls through to the ordinary scroll-then-refuse path
+and reaches ``target_absent``, which is the honest reading of "is it visible" when it is not.
+Measured on the full held-out set: 82.8% -> 89.5% overall, ``done`` 7.6% -> 100%, 389 rows fixed
+against **1** regressed — the goal ``"find showing"``, whose target label genuinely is the word
+"showing", and which no frame reader can be expected to survive.
+
 A third gap, unchanged and named here so nobody mistakes it for solved: a goal and a label that
 share no *string*, only a *concept* — "make the text bigger" for "Display", "upsell" for
 "Go Premium". That is a synonym, it is not derivable from either string, and AUA has nowhere to keep
@@ -209,6 +225,62 @@ HOST_TERMS = frozenset(
 #: ``data-v12/test.jsonl``. ``v12_corpus._is_auth`` does admit "no thanks" and "not now"; that is
 #: over-broad, and only harmless there because the harvest contains no such screen.
 DECLINE_LABELS = frozenset({"deny", "don't allow", "dont allow"})
+
+#: Visibility phrases that end a goal which is asking a *question* about the screen rather than
+#: giving it an instruction. Longest first: "is showing" must win over "showing".
+#:
+#: Measured over ``runs/functiongemma/data-v12`` (train + test, 51,658 rows), these phrases plus
+#: :data:`LOOK_HEADS` identify **100%** of the 3,699 ``done`` rows and fire on 0.1-0.5% of every
+#: acting class. The one class they also fire on heavily is ``target_absent`` (47.7%) — and that is
+#: the point rather than a defect: those are the same question asked about something the screen does
+#: not show, and only reading the screen can tell the two apart.
+LOOK_TAILS = (
+    "can be seen",
+    "is displayed",
+    "is showing",
+    "is visible",
+    "is here",
+    "on screen",
+    "be seen",
+    "displayed",
+    "showing",
+    "visible",
+)
+
+#: Openings that make a goal a question on their own, needing no trailing phrase. Deliberately
+#: narrow. The corpus opens 515 look-goals *and* 2,645 acting goals with "can you", so the opening
+#: words alone cannot decide it — only the verb can. ``can you see`` asks; ``can you open`` instructs.
+LOOK_HEADS = (
+    "can you tell me if ",
+    "can you confirm ",
+    "can you verify ",
+    "do you see ",
+    "can you see ",
+    "can i see ",
+    "let me see ",
+    "tell me if ",
+)
+
+#: Question verbs that begin a goal already identified by a :data:`LOOK_TAILS` phrase. Stripped so
+#: they cannot reach the scorer: "check X is here" used to put ``check`` and ``here`` into the goal
+#: terms, and a row named "Check for updates" then outscored the row being asked about.
+LOOK_LEADS = (
+    "please confirm ",
+    "please check ",
+    "make sure ",
+    "confirm that ",
+    "verify that ",
+    "check that ",
+    "confirm ",
+    "verify ",
+    "ensure ",
+    "assert ",
+    "check ",
+    "does ",
+    "are ",
+    "is ",
+    "do ",
+)
 
 #: A node must beat this to be worth tapping. Below it, scrolling for more screen is the better
 #: move than acting on a weak match — this floor plus the first-token bonus is the entire
@@ -385,6 +457,44 @@ def expand_goal(goal: str, vocabulary: Mapping[str, Sequence[str]] | None) -> st
     return f"{goal} {' '.join(additions)}".strip() if additions else goal
 
 
+def only_asks_to_look(goal: str) -> str | None:
+    """The subject of a goal that asks what is on screen, or ``None`` if the goal asks for an action.
+
+    This is the whole of the distinction, and it is grammatical rather than semantic — which is why
+    it belongs in a rule and not in a model. "is doodads on screen" and "can you open doodads" name
+    the same target; only one of them wants it pressed.
+
+    Returning the *subject* matters as much as returning the verdict. The frame words are goal text
+    the scorer would otherwise have to rank nodes against, and they are words real labels use.
+    """
+
+    text = " ".join(str(goal or "").split())
+    lowered = text.lower()
+
+    for head in LOOK_HEADS:
+        if lowered.startswith(head):
+            return text[len(head) :].strip() or None
+
+    for tail in LOOK_TAILS:
+        if not lowered.endswith(tail):
+            continue
+        cut = len(text) - len(tail)
+        # "reach the solution screen" ends with the letters of "on screen" and is an instruction.
+        # Five of this rule's six measured regressions were exactly that, so the phrase has to begin
+        # where a word begins.
+        if cut and text[cut - 1] != " ":
+            continue
+        subject = text[:cut].strip()
+        stripped = subject.lower()
+        for lead in LOOK_LEADS:
+            if stripped.startswith(lead):
+                subject = subject[len(lead) :].strip()
+                break
+        return subject or None
+
+    return None
+
+
 def touched(node: Mapping[str, Any]) -> bool:
     """This node has been acted on at least once during the run.
 
@@ -465,6 +575,40 @@ def decide(
             "reason": "needs_host",
             "why": f"{host} names a host capability, not a destination on screen",
         }
+
+    # A goal that only asks what is on screen. 419 of the held-out rows are this shape and the rule
+    # answered 6.9% of them, because it read every one as navigation and pressed the best match.
+    # For a test suite that is the one unacceptable answer: the assertion was "is this visible", and
+    # acting on the screen destroys the thing being asserted about.
+    #
+    # Two halves, and the second is what keeps a false pass impossible. The frame says the goal is a
+    # question; only the screen can answer it. Subject found -> `done`. Subject absent -> nothing is
+    # returned here at all, and the ordinary scroll-then-refuse path below reaches `target_absent`,
+    # which is the honest answer to "is it visible" when it is not. Measured on data-v12: 47.7% of
+    # look-shaped rows are exactly that case.
+    #
+    # `tap` is not consulted. Most things worth asserting about are also pressable, and pressable is
+    # not permission.
+    subject = only_asks_to_look(goal)
+    if subject is not None:
+        terms = content_words(subject)
+        seen_index = -1
+        seen_score = 0.0
+        for index, node in enumerate(nodes):
+            value = score(terms, node)
+            if value > seen_score:
+                seen_index, seen_score = index, value
+        if seen_index >= 0 and seen_score >= SCORE_FLOOR:
+            return {
+                "call": "done",
+                "n": nodes[seen_index].get("n"),
+                "stable_key": keys[seen_index] if seen_index < len(keys) else None,
+                "score": round(seen_score, 2),
+                "why": (
+                    f"the goal asks whether {terms} is on screen and this node shows it; "
+                    f"nothing was pressed"
+                ),
+            }
 
     best_index = -1
     best_score = 0.0

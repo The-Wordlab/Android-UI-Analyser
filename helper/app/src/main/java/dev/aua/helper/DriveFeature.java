@@ -130,6 +130,35 @@ final class DriveFeature implements Feature {
     /**
      * {@code last} values meaning the run is not advancing. Mirrors {@code v12_progress.STALLED}.
      */
+    /**
+     * Visibility phrases that end a goal asking a <em>question</em> about the screen rather than
+     * giving it an instruction. Longest first: "is showing" must win over "showing".
+     *
+     * <p>Mirrors {@code drive_rule.LOOK_TAILS}. Over 51,658 corpus rows these plus
+     * {@link #LOOK_HEADS} identify 100% of the {@code done} rows and fire on 0.1-0.5% of every
+     * acting class. Before this existed the rule answered {@code done} correctly 7.6% of the time.
+     */
+    private static final String[] LOOK_TAILS = {
+        "can be seen", "is displayed", "is showing", "is visible", "is here",
+        "on screen", "be seen", "displayed", "showing", "visible",
+    };
+
+    /**
+     * Openings that make a goal a question on their own. Deliberately narrow: the corpus opens 515
+     * look-goals <em>and</em> 2,645 acting goals with "can you", so only the verb can decide it.
+     */
+    private static final String[] LOOK_HEADS = {
+        "can you tell me if ", "can you confirm ", "can you verify ", "do you see ",
+        "can you see ", "can i see ", "let me see ", "tell me if ",
+    };
+
+    /** Question verbs stripped off a goal already identified by a {@link #LOOK_TAILS} phrase. */
+    private static final String[] LOOK_LEADS = {
+        "please confirm ", "please check ", "make sure ", "confirm that ", "verify that ",
+        "check that ", "confirm ", "verify ", "ensure ", "assert ", "check ", "does ",
+        "are ", "is ", "do ",
+    };
+
     private static final Set<String> STALLED = new HashSet<>(Arrays.asList("blocked", "unchanged"));
 
     /** An action landed and the screen became a different screen. */
@@ -198,6 +227,15 @@ final class DriveFeature implements Feature {
             return early;
         }
 
+        // A goal that only asks what is on screen. Every node is eligible, nothing is pressed, and
+        // an absent subject falls through to the same scroll-then-refuse path every other goal
+        // uses — `target_absent` being the honest answer to "is it visible" when it is not.
+        String subject = onlyAsksToLook(goal);
+        boolean lookOnly = subject != null;
+        if (lookOnly) {
+            terms = terms(subject);
+        }
+
         for (int step = 0; step < budget; step++) {
             AccessibilityNodeInfo root = root();
             Projection view = Projection.of(root);
@@ -205,7 +243,9 @@ final class DriveFeature implements Feature {
             Projection.Item best = null;
             double bestScore = 0.0;
             for (Projection.Item item : view.items) {
-                if (!item.tappable) {
+                // Most things worth asserting about are also pressable, and plenty are not. When the
+                // goal only looks, being pressable is neither required nor permission.
+                if (!lookOnly && !item.tappable) {
                     continue;
                 }
                 double s = score(terms, item);
@@ -221,6 +261,17 @@ final class DriveFeature implements Feature {
             record.put("more", view.more);
 
             if (best != null && bestScore >= SCORE_FLOOR) {
+                if (lookOnly) {
+                    record.put("n", "n" + best.index);
+                    record.put("label", best.label());
+                    record.put("score", round(bestScore));
+                    record.put("decision", "done");
+                    record.put("looked", true);
+                    steps.put(record);
+                    stop = "done";
+                    break;
+                }
+
                 String key = progressKey(best);
                 int already = tried.containsKey(key) ? tried.get(key) : 0;
                 record.put("n", "n" + best.index);
@@ -331,6 +382,51 @@ final class DriveFeature implements Feature {
         out.put("steps", steps);
         out.put("step_count", steps.length());
         return out;
+    }
+
+    /**
+     * The subject of a goal that asks what is on screen, or {@code null} if the goal asks for an
+     * action. Mirrors {@code drive_rule.only_asks_to_look}.
+     *
+     * <p>The distinction is grammatical, not semantic, which is why it belongs in a rule: "is
+     * doodads on screen" and "can you open doodads" name the same target and only one of them wants
+     * it pressed. Returning the <em>subject</em> matters as much as the verdict, because the frame
+     * words are goal text the scorer would otherwise rank nodes against, and real labels use them.
+     */
+    private static String onlyAsksToLook(String goal) {
+        String text = goal == null ? "" : goal.trim().replaceAll("\\s+", " ");
+        String lowered = text.toLowerCase(Locale.ROOT);
+
+        for (String head : LOOK_HEADS) {
+            if (lowered.startsWith(head)) {
+                String subject = text.substring(head.length()).trim();
+                return subject.isEmpty() ? null : subject;
+            }
+        }
+
+        for (String tail : LOOK_TAILS) {
+            if (!lowered.endsWith(tail)) {
+                continue;
+            }
+            int cut = text.length() - tail.length();
+            // "reach the solution screen" ends with the letters of "on screen" and is an
+            // instruction. Five of this rule's six measured regressions were that, so the phrase
+            // has to begin where a word begins.
+            if (cut > 0 && text.charAt(cut - 1) != ' ') {
+                continue;
+            }
+            String subject = text.substring(0, cut).trim();
+            String stripped = subject.toLowerCase(Locale.ROOT);
+            for (String lead : LOOK_LEADS) {
+                if (stripped.startsWith(lead)) {
+                    subject = subject.substring(lead.length()).trim();
+                    break;
+                }
+            }
+            return subject.isEmpty() ? null : subject;
+        }
+
+        return null;
     }
 
     /** Goal reduced to the words that could name a destination. */

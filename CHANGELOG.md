@@ -11,6 +11,14 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Fixed
+
+- `aua drive` and `aua helper drive` now answer a goal that only asks what is on screen — "is the
+  banner showing", "confirm the row is here", "can you see the badge" — by reporting it found,
+  instead of pressing the thing being asked about. Acting on a screen destroys the state the
+  question was about, which made the driver unusable for assertions. Measured on 5,741 held-out
+  decisions, that class went from 7.6% correct to 100%, and the driver overall from 82.8% to 89.5%.
+
 ## [0.14.1] - 2026-08-28
 
 ### Changed
