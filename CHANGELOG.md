@@ -25,6 +25,10 @@ notes, so you can check for a newer version — and read what changed — withou
   navigation to a real destination that uses it. Measured on the same 5,741 decisions, that class
   went from 68.1% to 89.8% and the driver overall from 89.5% to 92.3%, with no other class affected.
   Goals naming the device clock stay unrefusable on purpose: Date & time is a real destination.
+- `aua shell dumpsys audio` and `aua shell dumpsys media.audio_flinger` are now allowed. Both are
+  read-only state dumps, and they are the only way to prove from the host that a device is actually
+  producing sound — the check a "does Pause really stop the audio" test rests on. Refusing them
+  pushed that test back to raw `adb`, outside the lease that keeps two agents off one device.
 
 ## [0.14.1] - 2026-08-28
 

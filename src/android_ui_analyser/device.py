@@ -154,6 +154,21 @@ _READ_ONLY_SIMPLE_COMMANDS = frozenset(
 )
 
 
+#: ``dumpsys`` services admitted for a **bare** dump, with no arguments at all.
+#:
+#: A bare ``dumpsys <service>`` invokes that service's ``dump()`` and nothing else, so the risk lives
+#: entirely in the arguments — ``battery set level 5`` and ``deviceidle force-idle`` mutate, while
+#: ``dumpsys battery`` does not. These are therefore admitted argument-free rather than the branch
+#: being opened up per service.
+#:
+#: Kept to services a run actually needs by name. ``audio`` and ``media.audio_flinger`` are how an
+#: active playback track is proven, which the QA scenario text and its decisions log both name
+#: explicitly. Refusing them did not make anything safer: the run that needed the answer fell back to
+#: raw ``adb shell``, which is the platform-boundary bypass this surface exists to prevent. A
+#: read-only surface that refuses the sanctioned read just gets walked around.
+_READ_ONLY_DUMPSYS_BARE_SERVICES = frozenset({"audio", "media.audio_flinger"})
+
+
 def _android_shell_is_read_only(argv: list[str]) -> bool:
     """Conservatively recognize commands that cannot intentionally change Android state.
 
@@ -208,6 +223,8 @@ def _android_shell_is_read_only(argv: list[str]) -> bool:
             return bool(args) and "--reset" not in args and "reset" not in args
         if service == "gfxinfo":
             return bool(args) and "reset" not in args
+        if service in _READ_ONLY_DUMPSYS_BARE_SERVICES:
+            return not args
         return False
     if command == "ip" and rest:
         forbidden = {"add", "change", "delete", "del", "flush", "replace", "set"}
