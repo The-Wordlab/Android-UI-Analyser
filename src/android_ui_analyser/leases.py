@@ -1681,14 +1681,30 @@ def _choose_device_unlocked(
             # the same screen. A caller who named a device must never be handed someone else's;
             # the only safe moves are wait, bring your own, or prove you are the holder.
             lifetime = _lease_lifetime_hint([current], ttl_s)
+            # Naming the wrong difference sends the caller at the wrong remedy. When the label
+            # already matches, `--owner <that same label>` cannot change the answer, so the only
+            # route left in the old wording was `--force` — which is exactly the wrong move
+            # against a sibling that is still alive. Say what actually differs: the run cache.
+            if str(current.get("owner") or "") == owner:
+                mine = (
+                    f"You are `{owner}` too, so the difference is the run cache: this lease was "
+                    f"taken under a different `AUA_CACHE__DIR` (or `AUA_WORKER_SCOPE`), which "
+                    f"makes it a sibling worker's, not yours. Re-run with that worker's "
+                    f"`AUA_CACHE__DIR` to renew it, or `aua lease release {explicit} --force` "
+                    f"only if you know that worker is gone."
+                )
+            else:
+                mine = (
+                    f"You are `{owner}`: pass `--owner {current.get('owner')}` only if that "
+                    f"holder is you under another name, or `aua lease release {explicit} "
+                    f"--force` if you know it is a dead run."
+                )
             hint = (
                 f"Do NOT switch devices — you asked for {explicit}, and another agent's screen "
                 f"is not a substitute for it. Wait only if that holder is expected to finish. "
                 f"{lifetime} Or bring your own with `aua emulator start --headless --parallel` "
                 f"and pass "
-                f"the serial it returns. You are `{owner}`: pass "
-                f"`--owner {current.get('owner')}` only if that holder is you under another "
-                f"name, or `aua lease release {explicit} --force` if you know it is a dead run."
+                f"the serial it returns. {mine}"
             )
             raise DeviceLeasedError(
                 f"{explicit} is leased by {current.get('owner')} "

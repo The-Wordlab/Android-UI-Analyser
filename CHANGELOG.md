@@ -13,6 +13,13 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- A device refused because a *sibling worker* holds it now says so. Per-worker lease scoping made
+  the old message read as a contradiction — "emulator-5556 is leased by rec-probe … You are
+  `rec-probe`: pass `--owner rec-probe`" — advice that cannot work, leaving `--force` as the only
+  route the message offered, against a worker that may still be alive. It now names the run cache
+  (`AUA_CACHE__DIR` / `AUA_WORKER_SCOPE`) as the thing that differs. A genuinely different owner
+  still gets the old advice.
+
 - `aua record stop` now returns a playable MP4 instead of failing with "the moov box is missing".
   It sent the on-device SIGINT and then immediately signalled its own `adb shell` client, which tore
   the shell session down and killed `screenrecord` while the muxer was still writing the file's index
