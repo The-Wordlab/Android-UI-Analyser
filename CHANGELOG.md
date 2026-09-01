@@ -18,6 +18,13 @@ notes, so you can check for a newer version — and read what changed — withou
   instead of pressing the thing being asked about. Acting on a screen destroys the state the
   question was about, which made the driver unusable for assertions. Measured on 5,741 held-out
   decisions, that class went from 7.6% correct to 100%, and the driver overall from 82.8% to 89.5%.
+- `aua drive` and `aua helper drive` now recognise a host capability named by two ordinary words —
+  "copy a photo into the gallery", "record a video of the screen", "list the connected devices",
+  "check the app logs for errors" — and hand back immediately instead of hunting the screen for a
+  button that cannot exist. Neither word of such a pair can be refused on its own without breaking
+  navigation to a real destination that uses it. Measured on the same 5,741 decisions, that class
+  went from 68.1% to 89.8% and the driver overall from 89.5% to 92.3%, with no other class affected.
+  Goals naming the device clock stay unrefusable on purpose: Date & time is a real destination.
 
 ## [0.14.1] - 2026-08-28
 

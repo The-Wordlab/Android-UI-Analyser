@@ -32,8 +32,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from android_ui_analyser.drive_projection import project  # noqa: E402
 from android_ui_analyser.drive_rule import (  # noqa: E402
+    HOST_PAIRS,
     HOST_TERMS,
     MAX_SCROLLS,
+    STOPWORDS,
     content_words,
     decide,
     score,
@@ -611,3 +613,111 @@ def test_a_visibility_phrase_must_start_at_a_word_boundary() -> None:
     got = decide("reach the solution screen", _projection(nodes))
     assert got["call"] == "tap", f"matched a phrase mid-word: {got}"
     assert got["n"] == "n1"
+
+
+# --------------------------------------------------------------------------- refusing by a pair
+
+
+def test_a_host_capability_named_by_two_ordinary_words_is_still_refused() -> None:
+    """`needs_host` was the weakest class left at 68.1%, and every one of the 238 misses named a
+    capability whose words are individually too common to refuse.
+
+    "copy a photo into the gallery" is `aua media add`. No word in it can join `HOST_TERMS`:
+    measured over the 638 harvested screens, "photo" is on 4.4% and "gallery" on 4.5%, and a false
+    refusal on a reachable destination is the error no later step recovers. The *pair* is on 0.0%.
+
+    That is the whole idea — the admission rule was only ever applied to single words, and a pair of
+    ordinary words can be rare when neither word is.
+    """
+
+    nodes = [{"n": "n1", "text": "Photos", "tap": True}]
+    got = decide("copy a photo into the gallery", _projection(nodes))
+    assert got["call"] == "handoff", f"tried to reach a host capability on screen: {got}"
+    assert got["reason"] == "needs_host"
+
+
+def test_each_half_of_a_pair_on_its_own_still_navigates() -> None:
+    """The pair is the refusal, never either word. Both halves have to stay usable in a goal that
+    names a real destination, or this trades a vague handoff for a broken run."""
+
+    for goal, label in (
+        ("go to the photo settings", "Photo & video"),
+        ("open the gallery", "Gallery"),
+        ("go to connected devices", "Connected devices"),
+        ("open verbose logs", "Verbose logs"),
+        ("record a memo", "Record a memo"),
+        ("list my alarms", "Alarms"),
+    ):
+        nodes = [{"n": "n1", "text": label, "tap": True}]
+        got = decide(goal, _projection(nodes))
+        assert got["call"] == "tap", f"{goal!r} was refused: {got}"
+
+
+def test_the_pair_is_what_makes_the_logs_word_usable_at_all() -> None:
+    """`HOST_TERMS` records dropping ``logs`` after measurement: it rescued "check the app logs" but
+    refused "open verbose logs" on a real developer screen. Requiring a partner word is what settles
+    that — the capability is refused and the destination is still reachable, which neither the word
+    on its own nor its absence could manage."""
+
+    logs_row = [{"n": "n1", "text": "Verbose logs", "tap": True}]
+    assert decide("open verbose logs", _projection(logs_row))["call"] == "tap"
+
+    refused = decide("check the app logs for errors", _projection(logs_row))
+    assert refused["call"] == "handoff"
+    assert refused["reason"] == "needs_host"
+
+
+def test_a_pair_is_admitted_on_the_same_evidence_as_a_single_word() -> None:
+    """The bar does not get lower because there are two words. Every pair must be measured on the
+    harvest and clear the same 1% ceiling, and the ones that cannot are named in `HOST_PAIRS`."""
+
+    screens = sorted(SCREENS.glob("*.jsonl")) if SCREENS.exists() else []
+    if not screens:
+        pytest.skip("harvested screens are not present")
+
+    bags = []
+    for path in screens:
+        for line in path.read_text().splitlines():
+            if not line.strip():
+                continue
+            bag: set[str] = set()
+            for element in json.loads(line).get("elements") or []:
+                for field in ("text", "desc", "rid"):
+                    value = element.get(field)
+                    if value:
+                        bag |= set(variants(value)) | set(words(value))
+            bags.append(bag)
+
+    ceiling = len(bags) // 100
+    for pair in HOST_PAIRS:
+        seen = sum(1 for bag in bags if all(term in bag for term in pair))
+        assert seen <= ceiling, (
+            f"{sorted(pair)} is on {seen}/{len(bags)} real screens, above the {ceiling} ceiling"
+        )
+
+
+def test_the_clock_stays_unrefusable_and_that_is_recorded_not_forgotten() -> None:
+    """Two of the six failing shapes are not fixable this way and must not be forced.
+
+    "change the system time" and "set the device clock to midnight" are `aua clock set`. Their pairs
+    are ordinary Settings vocabulary — "system"+"time" is on 6.3% of harvested screens and
+    "set"+"clock" on 48.9% — because Date & time is a real destination one screen away. Refusing
+    them would break navigation to it, so they stay `target_absent`, which still hands the run back.
+    """
+
+    nodes = [{"n": "n1", "text": "Date & time", "tap": True}]
+    assert decide("go to date and time", _projection(nodes))["call"] == "tap"
+    for unrefusable in (frozenset({"system", "time"}), frozenset({"set", "clock"})):
+        assert unrefusable not in HOST_PAIRS
+
+
+def test_no_pair_is_made_of_a_word_the_goal_never_keeps() -> None:
+    """A pair holding a stopword is not weak, it is unreachable — `content_words` strips the word
+    before any pair is tested, so the entry can never fire and reads as coverage that is not there.
+
+    Two such pairs were written and removed: "record"+"screen" and "recording"+"screen" both cleared
+    the harvest measurement, and "screen" is a stopword.
+    """
+
+    for pair in HOST_PAIRS:
+        assert not (pair & STOPWORDS), f"{sorted(pair)} can never fire: {sorted(pair & STOPWORDS)}"

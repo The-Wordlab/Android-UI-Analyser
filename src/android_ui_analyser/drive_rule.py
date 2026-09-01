@@ -38,6 +38,17 @@ joint in each direction and both labels now match at full strength. Measured on
 answerable, with zero regressions — because the corpus generates exactly this phrasing on purpose
 (see ``v12_goals._compound``) while the scorer had no way to resolve it.
 
+**"It cannot say impossible" was only half-answered**, and the other half was hiding behind the
+word "word". :data:`HOST_TERMS` admits a term only if real screens almost never use it, which is
+right and is why the list is short — but the rule was only ever applied to *single* words, and that
+left ``needs_host`` the weakest class at 68.1%. All 238 misses name a capability whose words are
+individually far too common to refuse: "copy a photo into the gallery" is ``aua media add``, and
+"photo" is on 4.4% of the harvest while "gallery" is on 4.5%. The pair is on 0.0%.
+:data:`HOST_PAIRS` holds the pairs that clear the same 1% ceiling, and the ones measurement refused
+are recorded there too — both clock capabilities among them, because Date & time is a real
+destination one tap away. Measured on the full held-out set: 89.5% -> 92.3% overall, ``needs_host``
+68.1% -> 89.8%, 162 rows fixed and **no other class touched**.
+
 **"It reads a question as an instruction"** was the largest hole left, and it was invisible until
 the classes were measured separately. Stratified over ``runs/functiongemma/data-v12/test.jsonl``,
 the rule scored ``tap`` 87%, ``scroll`` 100% and ``handoff`` 86% — and ``done`` **7.6%**. All 419 of
@@ -212,6 +223,63 @@ HOST_TERMS = frozenset(
         "screenshot",
         "sqlite",
         "traffic",
+    }
+)
+
+#: Host capabilities named by two ordinary words. The admission rule for :data:`HOST_TERMS` was only
+#: ever applied to single words, and that is what left ``needs_host`` the weakest class at 68.1%: all
+#: 238 misses on the held-out set name a capability whose words are individually far too common to
+#: refuse. "copy a photo into the gallery" is ``aua media add``, and over the 638 harvested screens
+#: "photo" is on 4.4% and "gallery" on 4.5% — both well over the 1% ceiling, both correctly excluded.
+#: The **pair** is on 0.0%.
+#:
+#: Every pair here clears exactly the same bar as a single word, and
+#: ``test_a_pair_is_admitted_on_the_same_evidence_as_a_single_word`` re-measures all of them against
+#: the harvest rather than trusting this comment:
+#:
+#:     copy+gallery 0.0%   copy+photo 0.0%   copy+image 0.0%   copy+video 0.0%
+#:     push+photo 0.0%     photo+album 0.0%  image+gallery 0.5%
+#:     record+video 0.9%
+#:     list+devices 0.5%   attached+devices 0.0%   list+emulators 0.0%
+#:     app+logs 0.6%       errors+logs 0.0%   read+logs 0.2%   check+logs 0.2%   device+logs 0.3%
+#:
+#: **The pairs measurement refused are as informative as the ones it admitted, and both clock
+#: capabilities are among them.** ``aua clock set`` is named by "change the system time" and "set the
+#: device clock to midnight"; ``system``+``time`` is on 6.3% of harvested screens and ``set``+``clock``
+#: on 48.9%, because Date & time is a real destination one tap away. Refusing either would break
+#: navigation to it, so 76 of the 238 misses stay unfixed and hand off as ``target_absent`` — still
+#: giving the host control, just under a vaguer name. ``video``+``gallery`` (4.1%) and
+#: ``connected``+``devices`` (1.9%) were refused the same way, which is why the list reaches those
+#: capabilities through a different pair instead.
+#:
+#: A caveat on the *lift*, so nobody reads more into it than was measured: the held-out set contains
+#: only six distinct ``needs_host`` goal shapes. The pairs were chosen from AUA's actual command
+#: surface and validated against screens somebody else's apps produced, but how well they generalise
+#: to phrasings a real agent invents is not something this corpus can answer.
+#:
+#: **No pair may contain a** :data:`STOPWORDS` **member.** The goal is reduced by
+#: :func:`content_words` before any pair is tested, so such a pair is silently unreachable rather
+#: than merely useless. ``record``+``screen`` and ``recording``+``screen`` were both measured
+#: admissible and both removed for exactly this reason — ``screen`` never survives to be tested — and
+#: ``test_no_pair_is_made_of_a_word_the_goal_never_keeps`` fails on the next one.
+HOST_PAIRS = frozenset(
+    {
+        frozenset({"copy", "gallery"}),
+        frozenset({"copy", "photo"}),
+        frozenset({"copy", "image"}),
+        frozenset({"copy", "video"}),
+        frozenset({"push", "photo"}),
+        frozenset({"photo", "album"}),
+        frozenset({"image", "gallery"}),
+        frozenset({"record", "video"}),
+        frozenset({"list", "devices"}),
+        frozenset({"attached", "devices"}),
+        frozenset({"list", "emulators"}),
+        frozenset({"app", "logs"}),
+        frozenset({"errors", "logs"}),
+        frozenset({"read", "logs"}),
+        frozenset({"check", "logs"}),
+        frozenset({"device", "logs"}),
     }
 )
 
@@ -575,6 +643,18 @@ def decide(
             "reason": "needs_host",
             "why": f"{host} names a host capability, not a destination on screen",
         }
+
+    present = set(terms)
+    for pair in HOST_PAIRS:
+        if pair <= present:
+            return {
+                "call": "handoff",
+                "reason": "needs_host",
+                "why": (
+                    f"{sorted(pair)} together name a host capability; neither word alone could be "
+                    f"refused without breaking navigation"
+                ),
+            }
 
     # A goal that only asks what is on screen. 419 of the held-out rows are this shape and the rule
     # answered 6.9% of them, because it read every one as navigation and pressed the best match.

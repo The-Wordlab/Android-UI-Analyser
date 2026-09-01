@@ -124,6 +124,28 @@ final class DriveFeature implements Feature {
      * <p>Three labels and not six, on purpose. "Cancel" is already chrome, and "No thanks" / "Not
      * now" are the buttons on rating prompts and update nags, which gate nothing.
      */
+    /**
+     * Host capabilities named by two ordinary words. Mirrors {@code drive_rule.HOST_PAIRS}, which
+     * carries the measurement and the pairs measurement refused.
+     *
+     * <p>The {@link #HOST_TERMS} admission rule was only ever applied to single words, and that is
+     * what left {@code needs_host} the weakest class at 68.1%. "copy a photo into the gallery" is
+     * {@code aua media add}: over the 638 harvested screens "photo" is on 4.4% and "gallery" on
+     * 4.5%, both correctly excluded — and the pair is on 0.0%. Both clock capabilities stay
+     * unrefusable, because "system"+"time" is on 6.3% of real screens and "set"+"clock" on 48.9%.
+     *
+     * <p>No pair may hold a {@link #STOPWORDS} member: the goal is reduced before any pair is
+     * tested, so such an entry is unreachable rather than merely weak.
+     */
+    private static final String[][] HOST_PAIRS = {
+        {"copy", "gallery"}, {"copy", "photo"}, {"copy", "image"}, {"copy", "video"},
+        {"push", "photo"}, {"photo", "album"}, {"image", "gallery"},
+        {"record", "video"},
+        {"list", "devices"}, {"attached", "devices"}, {"list", "emulators"},
+        {"app", "logs"}, {"errors", "logs"}, {"read", "logs"}, {"check", "logs"},
+        {"device", "logs"},
+    };
+
     private static final Set<String> DECLINE_LABELS = new HashSet<>(Arrays.asList(
             "deny", "don't allow", "dont allow"));
 
@@ -211,7 +233,12 @@ final class DriveFeature implements Feature {
 
         // Before the screen is even read, not after. A host goal is unreachable on every screen, so
         // looking first only decides how much budget gets spent proving it.
+        // Neither word of a pair could join HOST_TERMS without breaking navigation to a real
+        // destination that uses it, and the pair is rarer than either half. See HOST_PAIRS.
         String host = hostTerm(terms);
+        if (host == null) {
+            host = hostPair(terms);
+        }
         if (host != null) {
             JSONObject refusal = new JSONObject();
             refusal.put("step", 0);
@@ -451,6 +478,19 @@ final class DriveFeature implements Feature {
     }
 
     /** True when one of the listed nodes is a consent dialog's decline control. */
+    /**
+     * The host capability a goal names with two ordinary words, or {@code null}. Rendered as
+     * "copy+gallery" for the refusal record.
+     */
+    private static String hostPair(List<String> terms) {
+        for (String[] pair : HOST_PAIRS) {
+            if (terms.contains(pair[0]) && terms.contains(pair[1])) {
+                return pair[0] + "+" + pair[1];
+            }
+        }
+        return null;
+    }
+
     private static boolean atConsentGate(Projection view) {
         for (Projection.Item item : view.items) {
             if (DECLINE_LABELS.contains(item.label().trim().toLowerCase(Locale.ROOT))) {
