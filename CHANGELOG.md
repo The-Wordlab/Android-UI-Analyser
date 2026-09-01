@@ -29,6 +29,12 @@ notes, so you can check for a newer version — and read what changed — withou
   read-only state dumps, and they are the only way to prove from the host that a device is actually
   producing sound — the check a "does Pause really stop the audio" test rests on. Refusing them
   pushed that test back to raw `adb`, outside the lease that keeps two agents off one device.
+- Two agents running inside one process — parallel subagents of the same coding assistant — no
+  longer collapse into a single lease holder. Ownership was derived from the process alone, so
+  `aua lease list` told both siblings the same device was `mine:true` and both drove it at once,
+  interleaving taps on one screen. Each worker's lease now records the cache it was given, and a
+  worker only recognises a lease as its own. A lease written before this shipped carries no
+  such mark and is treated as foreign, so it ages out with its process instead of being adopted.
 
 ## [0.14.1] - 2026-08-28
 

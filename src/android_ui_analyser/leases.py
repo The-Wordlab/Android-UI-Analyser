@@ -326,6 +326,41 @@ def _process_exists(pid: int) -> bool:
     return True
 
 
+def _worker_scope() -> str:
+    """Which of several agents inside one ancestor process this caller is, or ``""`` for the only one.
+
+    :func:`_derived_owner` is right about *when* an owner starts and ends, and blind to *how many*
+    agents live inside it. Three QA workers running as subagents of one ``claude`` process all
+    resolved to ``claude-1708-2:242026``; :func:`select` handed two of them the same device through
+    its sticky branch and they drove one screen for six overlapping minutes without an error.
+
+    An explicit run-cache override is the discriminator because a parallel harness is already
+    required to give each worker its own, so this asks callers nothing new.
+
+    **This is deliberately not folded into the owner label.** A first attempt did that and broke
+    eleven tests in ``test_an_agent_keeps_one_name_across_commands``, because ``tests/conftest.py``
+    sets ``AUA_CACHE__DIR`` for every test — the real lesson being that an explicit run cache is far
+    more common than "a parallel worker", so it must not rewrite an identity other machinery parses
+    back (lease expiry reads the pid and start time out of the stored owner string). As a record
+    field it leaves every label byte-identical and every existing lease valid.
+
+    Not to be confused with :attr:`LeaseCfg.registry_dir`, which stays independent of ``cache.dir``
+    on purpose. That is lease *storage*: if the registry followed the override, two agents would each
+    read an empty registry and see the same device as free. Matching is the opposite case — two
+    callers with different run caches are, by the harness contract, two different callers.
+
+    Only the environment is read. A ``--cache-dir`` flag differing between siblings in one process is
+    not covered; that gap is left open rather than papered over, because no such caller has been seen
+    and the flag cannot be reached here without threading config through fifteen call sites.
+    """
+
+    raw = (os.environ.get("AUA_CACHE__DIR") or "").strip()
+    if not raw:
+        return ""
+    # By path, not by spelling: one worker naming its own directory two ways is one worker.
+    return hashlib.sha256(str(Path(raw).expanduser()).encode("utf-8")).hexdigest()[:8]
+
+
 def _derived_owner() -> LeaseOwner:
     """The first ancestor that outlives one command: the agent process, stable for its whole run.
 
@@ -820,6 +855,12 @@ def entry_owned_by(entry: dict[str, Any] | None, owner: str) -> bool:
 def _entry_matches_owner(entry: dict[str, Any], owner: str) -> bool:
     if entry.get("owner") != str(owner):
         return False
+    # Same label, different agent inside the same process. A lease written before scoping existed
+    # carries no scope and cannot be attributed to one sibling over another, so a scoped caller
+    # treats it as foreign and routes elsewhere; the orphan ages out with its process. Wasting a
+    # device once on upgrade beats two workers sharing one screen.
+    if str(entry.get("scope") or "") != _worker_scope():
+        return False
     incoming = _owner_process(owner)
     stored_pid = entry.get("owner_pid")
     stored_started = entry.get("owner_started")
@@ -995,6 +1036,9 @@ def _acquire_unlocked(
         "needs": list(needs or []),
         "app": app,
     }
+    scope = _worker_scope()
+    if scope:
+        entry["scope"] = scope
     if replacement_from:
         entry["replacement_from"] = list(replacement_from)
     owner_process = _owner_process(owner)
