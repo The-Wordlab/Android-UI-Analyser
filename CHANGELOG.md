@@ -13,6 +13,19 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- A goal phase that says something is *labelled* missing no longer asks for it to be off the screen.
+  "Cook Assistant excludes ingredients the user marked as missing" parsed as
+  `expected: "absent"` over its own subject terms, so no fact about the feature working could
+  acknowledge the phase — `session finish` refused a run that was finished and validated, and the
+  only exit recorded it as `incomplete`. `marked/flagged/labelled as missing` is a label something
+  carries, not a claim that it is gone. Real absence claims ("the banner is absent", "the spinner
+  is not visible", "no error banner is shown") are unchanged.
+- `--by id` now accepts the element id AUA published. A Compose/Flutter input with no resource-id is
+  offered as `px:EditText:0005…` or `geo:EditText:q51:…`, and pasting that back under `--by id`
+  became a lookup for a resource-id of that name, which cannot exist — while the identical string as
+  a bare positional worked. `--by id` still means resource-id for everything else, bare tail
+  included.
+
 - A device refused because a *sibling worker* holds it now says so. Per-worker lease scoping made
   the old message read as a contradiction — "emulator-5556 is leased by rec-probe … You are
   `rec-probe`: pass `--owner rec-probe`" — advice that cannot work, leaving `--force` as the only

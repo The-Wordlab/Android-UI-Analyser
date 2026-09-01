@@ -88,6 +88,21 @@ def stable_key(el: Element | dict) -> str:
     return f"geo:{typ}:{q}:{digest}"
 
 
+#: The prefixes ``stable_key`` mints for a node with no resource-id.
+#:
+#: ``rid:`` is deliberately not here. That one *is* a resource-id, so a selector field spelled
+#: ``id``/``rid`` already resolves it; the rest name an element AUA identified some other way
+#: (pixel signature, geometry, label hash) and can only be resolved as a key. A caller pasting
+#: one back under ``--by id`` means "the id you published", not "a resource-id that happens to
+#: start with px:" — a resource-id cannot contain a colon-separated prefix of these shapes.
+PUBLISHED_KEY_PREFIXES = ("px:", "geo:", "cd:", "tx:")
+
+
+def is_published_key(value: str | None) -> bool:
+    """Whether *value* is an element id AUA minted rather than a resource-id."""
+    return bool(value) and str(value).startswith(PUBLISHED_KEY_PREFIXES)
+
+
 #: Separates a base key from the ordinal that makes it unique on one screen (``rid:row#2``).
 #:
 #: ``#`` and not ``_``: an Android resource id may legitimately be named ``row_1``, so an
@@ -386,9 +401,7 @@ def find_by_stable_key(elements: Sequence[Element], key: str) -> list[Element]:
     return [el for distance, el in scored if distance == best]
 
 
-def closest_by_bounds(
-    elements: Sequence[Element], bounds: Sequence[int] | None
-) -> Element | None:
+def closest_by_bounds(elements: Sequence[Element], bounds: Sequence[int] | None) -> Element | None:
     """The candidate overlapping *bounds* most, or ``None`` when none of them overlaps it.
 
     A ``stable_key`` deliberately carries no exact position — that is what lets it survive a

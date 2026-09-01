@@ -618,6 +618,12 @@ _ABSENCE_SUFFIX = re.compile(
     r"(?:^|[;,]|\b(?:and|but|while|then|plus)\b)\s*"
     r"(?P<subject>[A-Za-z0-9](?:(?!\b(?:and|but|while|then|plus)\b)[^.;,]){0,56}?)\s+"
     r"(?:(?:is|are|was|were|remains?)\s+)?"
+    # `as` in front turns the state word into a *label something carries*, which is the
+    # opposite of that thing being gone: "ingredients the user marked as missing", "the row
+    # is flagged as missing". Without this, a goal taken from such a scenario title asked for
+    # its own subject terms to be off the screen, so no fact about the feature working could
+    # close the phase and `session finish` refused a run that was finished and validated.
+    r"(?<!\bas\s)"
     r"(?:absent|missing|not\s+(?:present|visible|shown))\b",
     re.IGNORECASE,
 )

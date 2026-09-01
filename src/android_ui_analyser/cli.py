@@ -59,6 +59,7 @@ from .errors import (
     UsageError,
     emit_error,
 )
+from .identity import is_published_key
 from .memory import (
     DEFAULT_CONTEXT_ID,
     AppMap,
@@ -715,6 +716,13 @@ def _selector(
                 f"--by {by} needs the value as the positional argument",
                 hint="e.g. `aua tap-and-analyze --by id homeTabBROWSE`",
             )
+        # `--by id px:EditText:0005…` used to become a lookup for a *resource-id* named
+        # `px:EditText:0005…`, which cannot exist — while the same string as a bare positional
+        # resolved fine. One spelling working and the other refusing is a trap, not a limit:
+        # a Compose/Flutter input with no resource-id has no other handle, and `id` is exactly
+        # what the payload calls the thing being pasted back.
+        if kind == "rid" and is_published_key(ident):
+            return {"key": ident}
         return {
             kind: normalize_selector_prefix(kind, ident),
             "index": index,
@@ -1779,9 +1787,7 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
     """
     cfg = engine.config
     journal_privacy_cmd_raw = kwargs.pop("_journal_privacy_cmd", None)
-    journal_privacy_cmd = (
-        str(journal_privacy_cmd_raw) if journal_privacy_cmd_raw else None
-    )
+    journal_privacy_cmd = str(journal_privacy_cmd_raw) if journal_privacy_cmd_raw else None
     # Resolve the process-bound lease *before* choosing a daemon socket.  A daemon is bound
     # to one physical device, so routing an unpinned call through the unsuffixed socket and
     # leasing only inside that daemon can make the lease registry say "emulator-5558" while
@@ -1872,9 +1878,7 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
                 live_runtime: str | None | bool = False
                 with contextlib.suppress(Exception):
                     live_runtime = daemon_mod.running_runtime_fingerprint(cfg)
-                runtime_mismatch = (
-                    live_runtime is not False and live_runtime != expected_runtime
-                )
+                runtime_mismatch = live_runtime is not False and live_runtime != expected_runtime
                 if runtime_mismatch and _replace_runtime_mismatched_daemon(
                     daemon_mod, cfg, expected_runtime
                 ):
@@ -1913,9 +1917,7 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
                 if journal_privacy_cmd:
                     client_options["journal_privacy_cmd"] = journal_privacy_cmd
                 client_options["policy_fingerprint"] = expected_policy
-                client_options["runtime_fingerprint"] = (
-                    daemon_mod.runtime_config_fingerprint(cfg)
-                )
+                client_options["runtime_fingerprint"] = daemon_mod.runtime_config_fingerprint(cfg)
                 # The warm daemon owns the long-lived Engine/provider cache. Ask it to attach
                 # goal progress and optional policy output before journaling/serialization so a
                 # short-lived CLI process never reloads the local model for the same response.
@@ -1941,9 +1943,7 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
                             args=kwargs,
                             invocation_id=_INVOCATION_ID,
                         )
-                    daemon_serial = (
-                        getattr(engine, "_lease_serial", None) or cfg.device.serial
-                    )
+                    daemon_serial = getattr(engine, "_lease_serial", None) or cfg.device.serial
                     detail_id = resp.get("journal_detail_id")
                     return _remember_cli_journal(
                         result,
@@ -2184,8 +2184,7 @@ class GuidingGroup(TyperGroup):
             # `aua --help | grep <name>` found nothing. Agents answered that by guessing
             # names, failing, and re-reading page 1 — measured 110 help calls in one run.
             "All commands (`aua <command> --help` for one):",
-            *textwrap.wrap(", ".join(names), width=76, initial_indent="  ",
-                           subsequent_indent="  "),
+            *textwrap.wrap(", ".join(names), width=76, initial_indent="  ", subsequent_indent="  "),
             "",
         ]
         body = "\n".join([*head, rendered.rstrip("\n")])
@@ -2705,12 +2704,8 @@ def screenshot(
         def emit_captured(captured: Any) -> None:
             journal_context = _take_cli_journal(captured)
             ok = captured.get("ok") if isinstance(captured, dict) else captured.ok
-            action = (
-                captured.get("action") if isinstance(captured, dict) else captured.action
-            )
-            detail = (
-                captured.get("detail") if isinstance(captured, dict) else captured.detail
-            )
+            action = captured.get("action") if isinstance(captured, dict) else captured.action
+            detail = captured.get("detail") if isinstance(captured, dict) else captured.detail
             # Routing decoration belongs to the daemon/session journal, but screenshot's public
             # response has always been the three-field ActionResult. Rebuild that response so
             # fixing the transport does not silently change the CLI contract.
@@ -4217,10 +4212,7 @@ def session_start_cmd(
     audio: bool = typer.Option(
         False,
         "--audio/--no-audio",
-        help=(
-            "When AUA boots one, keep host audio enabled so microphone "
-            "injection is available."
-        ),
+        help=("When AUA boots one, keep host audio enabled so microphone injection is available."),
     ),
     animations: bool = typer.Option(
         False,
@@ -4690,9 +4682,7 @@ def fanout(
         )
 
     def one(ser: str) -> dict[str, Any]:
-        scoped_owner = (
-            str(base_owner) if ser in base_held else f"{base_owner}:fanout:{ser}"
-        )
+        scoped_owner = str(base_owner) if ser in base_held else f"{base_owner}:fanout:{ser}"
         cmd = [
             "aua",
             "--owner",
@@ -6431,9 +6421,22 @@ def dashboard_cmd(
         "--port",
         help="Dedicated exact dashboard port; never shifts if occupied (default 48765, or 80 with --name).",
     ),
-    lan: bool | None = typer.Option(None, "--lan/--local", help="--lan serves every interface, --local serves loopback only. Default comes from `dashboard.lan`."),
-    hostname: str | None = typer.Option(None, "--name", help="mDNS hostname to publish; `aua` serves http://aua.local/ and implies --lan. Pass `--name ""` to publish nothing. Default comes from `dashboard.name`."),
-    auth: bool | None = typer.Option(None, "--auth/--no-auth", help="--auth requires an access token on network access; --no-auth serves the LAN with no token, so anything that can reach the port gets full device control. Default comes from `dashboard.auth`."),
+    lan: bool | None = typer.Option(
+        None,
+        "--lan/--local",
+        help="--lan serves every interface, --local serves loopback only. Default comes from `dashboard.lan`.",
+    ),
+    hostname: str | None = typer.Option(
+        None,
+        "--name",
+        help="mDNS hostname to publish; `aua` serves http://aua.local/ and implies --lan. Pass `--name "
+        "` to publish nothing. Default comes from `dashboard.name`.",
+    ),
+    auth: bool | None = typer.Option(
+        None,
+        "--auth/--no-auth",
+        help="--auth requires an access token on network access; --no-auth serves the LAN with no token, so anything that can reach the port gets full device control. Default comes from `dashboard.auth`.",
+    ),
     open_browser: bool = typer.Option(
         True, "--open/--no-open", help="Open the detached dashboard in your default browser."
     ),
@@ -6463,9 +6466,22 @@ def dashboard_start_cmd(
     port: int | None = typer.Option(
         None, "--port", help="Dedicated exact dashboard port (default 48765, or 80 with --name)."
     ),
-    lan: bool | None = typer.Option(None, "--lan/--local", help="--lan serves every interface, --local serves loopback only. Default comes from `dashboard.lan`."),
-    hostname: str | None = typer.Option(None, "--name", help="mDNS hostname to publish; `aua` serves http://aua.local/ and implies --lan. Pass `--name ""` to publish nothing. Default comes from `dashboard.name`."),
-    auth: bool | None = typer.Option(None, "--auth/--no-auth", help="--auth requires an access token on network access; --no-auth serves the LAN with no token, so anything that can reach the port gets full device control. Default comes from `dashboard.auth`."),
+    lan: bool | None = typer.Option(
+        None,
+        "--lan/--local",
+        help="--lan serves every interface, --local serves loopback only. Default comes from `dashboard.lan`.",
+    ),
+    hostname: str | None = typer.Option(
+        None,
+        "--name",
+        help="mDNS hostname to publish; `aua` serves http://aua.local/ and implies --lan. Pass `--name "
+        "` to publish nothing. Default comes from `dashboard.name`.",
+    ),
+    auth: bool | None = typer.Option(
+        None,
+        "--auth/--no-auth",
+        help="--auth requires an access token on network access; --no-auth serves the LAN with no token, so anything that can reach the port gets full device control. Default comes from `dashboard.auth`.",
+    ),
     open_browser: bool = typer.Option(
         True, "--open/--no-open", help="Open the dashboard after ensuring it is running."
     ),
@@ -6578,9 +6594,22 @@ def dashboard_run_cmd(
     port: int | None = typer.Option(
         None, "--port", help="Exact foreground dashboard port (default 48765, or 80 with --name)."
     ),
-    lan: bool | None = typer.Option(None, "--lan/--local", help="--lan serves every interface, --local serves loopback only. Default comes from `dashboard.lan`."),
-    hostname: str | None = typer.Option(None, "--name", help="mDNS hostname to publish; `aua` serves http://aua.local/ and implies --lan. Pass `--name ""` to publish nothing. Default comes from `dashboard.name`."),
-    auth: bool | None = typer.Option(None, "--auth/--no-auth", help="--auth requires an access token on network access; --no-auth serves the LAN with no token, so anything that can reach the port gets full device control. Default comes from `dashboard.auth`."),
+    lan: bool | None = typer.Option(
+        None,
+        "--lan/--local",
+        help="--lan serves every interface, --local serves loopback only. Default comes from `dashboard.lan`.",
+    ),
+    hostname: str | None = typer.Option(
+        None,
+        "--name",
+        help="mDNS hostname to publish; `aua` serves http://aua.local/ and implies --lan. Pass `--name "
+        "` to publish nothing. Default comes from `dashboard.name`.",
+    ),
+    auth: bool | None = typer.Option(
+        None,
+        "--auth/--no-auth",
+        help="--auth requires an access token on network access; --no-auth serves the LAN with no token, so anything that can reach the port gets full device control. Default comes from `dashboard.auth`.",
+    ),
     open_browser: bool = typer.Option(
         True, "--open/--no-open", help="Open the page in your default browser."
     ),
@@ -6984,9 +7013,7 @@ def lease_cmd(
                             reset = engine.teardown_run(serial=old_serial, force=True)
                             resets.append({"serial": old_serial, "result": reset})
                         failed = [
-                            item
-                            for item in resets
-                            if not _lease_cleanup_complete(item["result"])
+                            item for item in resets if not _lease_cleanup_complete(item["result"])
                         ]
                         if failed:
                             if serial not in previous:
@@ -7161,9 +7188,7 @@ def lease_cmd(
             return
         raise UsageError(
             f"unknown lease action {verb!r}",
-            hint=(
-                "Use list, acquire, renew, release, transfer, accept or cancel-transfer."
-            ),
+            hint=("Use list, acquire, renew, release, transfer, accept or cancel-transfer."),
         )
 
     _run(ctx, go)
@@ -7702,7 +7727,7 @@ def remember(
             if not term.strip() or not label.strip():
                 raise UsageError(
                     f"--calls needs TERM=LABEL, got {pair!r}",
-                    hint='e.g. --calls feed=Ideas — the term a task uses, then the app\'s own label.',
+                    hint="e.g. --calls feed=Ideas — the term a task uses, then the app's own label.",
                 )
             known = store.remember_vocabulary(pkg, term, [label])
             did.append(f"calls:{term.strip().casefold()}={','.join(known)}")
@@ -9401,7 +9426,7 @@ def mock_rewrite_cmd(
             if not sep or not field.strip():
                 raise UsageError(
                     f"--set {item!r} is not `path=value`",
-                    hint='Example: --set \'items[0].title="hi"\' or --set enabled=false.',
+                    hint="Example: --set 'items[0].title=\"hi\"' or --set enabled=false.",
                 )
             try:
                 sets[field.strip()] = json.loads(raw)
