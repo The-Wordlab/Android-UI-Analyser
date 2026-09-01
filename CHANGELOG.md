@@ -33,8 +33,10 @@ notes, so you can check for a newer version — and read what changed — withou
   longer collapse into a single lease holder. Ownership was derived from the process alone, so
   `aua lease list` told both siblings the same device was `mine:true` and both drove it at once,
   interleaving taps on one screen. Each worker's lease now records the cache it was given, and a
-  worker only recognises a lease as its own. A lease written before this shipped carries no
-  such mark and is treated as foreign, so it ages out with its process instead of being adopted.
+  worker only recognises a lease as its own. A warm daemon holds the lease as the caller that
+  started it rather than deriving its own identity, so a caller is never refused its own device.
+  A lease written before this shipped carries no such mark and is treated as foreign, so it ages
+  out with its process instead of being adopted.
 
 ## [0.14.1] - 2026-08-28
 

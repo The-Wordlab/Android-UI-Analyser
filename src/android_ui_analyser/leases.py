@@ -354,6 +354,14 @@ def _worker_scope() -> str:
     and the flag cannot be reached here without threading config through fifteen call sites.
     """
 
+    # A warm daemon serves one caller and must hold the lease as that caller. It cannot derive
+    # this for itself: its environment always carries a pinned ``AUA_CACHE__DIR`` (see
+    # ``daemon._daemon_environment``, which is right about cache isolation), so a daemon started
+    # by a caller who set nothing would invent a scope its own caller does not have — and the
+    # caller then reads back its own lease as foreign and refuses the device it is holding.
+    # Present-but-empty is a real answer, so the key's presence decides, not its truthiness.
+    if "AUA_WORKER_SCOPE" in os.environ:
+        return os.environ["AUA_WORKER_SCOPE"].strip()
     raw = (os.environ.get("AUA_CACHE__DIR") or "").strip()
     if not raw:
         return ""

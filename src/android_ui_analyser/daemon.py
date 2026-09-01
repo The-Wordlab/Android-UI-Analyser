@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .errors import AuaError, DaemonOutcomeUnknownError, UsageError
+from .leases import _worker_scope
 from .schema import publish_ids
 
 if TYPE_CHECKING:
@@ -150,6 +151,9 @@ def _daemon_environment(config: Config) -> dict[str, str]:
     # QA run. Pin the effective values into the child instead of inheriting whatever happened
     # to be in the launching shell. A later caller compares a digest and replaces this daemon
     # before it can serve state from another run's cache.
+    # Identity is the caller's, not this directory's: the line below pins a cache dir into the
+    # child whether or not the caller ever set one, and lease ownership must not be read off it.
+    env["AUA_WORKER_SCOPE"] = _worker_scope()
     env["AUA_CACHE__DIR"] = str(config.cache.dir)
     env["AUA_LEASE__REGISTRY_DIR"] = str(config.lease.registry_dir)
     return env
