@@ -46,6 +46,17 @@ notes, so you can check for a newer version — and read what changed — withou
   holder still owns them, so releasing unblocks that cleanup rather than discarding it. Asking for
   a device that is *also* offline changes nothing, and an unpinned call still keeps its own
   vanished target rather than being rerouted to a stranger's screen.
+- A flow whose first step is `stop_app` now runs from wherever the device is sitting, instead of
+  being refused because its own app is not already in the foreground. `stop_app` kills the app and
+  leaves the launcher, exactly as `clear_data` does — and `clear_data` was already allowed to
+  establish a flow's own origin for that reason. Such a flow used to pass only when a previous run
+  happened to leave the app in front, and fail from a cold start; one suite has 27 of 54 flows in
+  that shape.
+- `aua logcat` no longer loses an entire dump to a single byte an app logged that is not valid
+  UTF-8. A window that was clean at 60 seconds failed at 300, 900 and 1800 with `can't decode byte
+  0xc0`, and `--tag` could not narrow past it because filtering happens after the decode. Undecodable
+  bytes are replaced, as `aua shell` already did, so one bad line costs one character rather than
+  every other line.
 
 ## [0.14.1] - 2026-08-28
 

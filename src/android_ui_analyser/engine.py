@@ -335,6 +335,12 @@ def _split_await_terms(predicate: str) -> list[str]:
 _AWAIT_PREDICATE_HELD = frozenset({"satisfied", "absence-satisfied"})
 
 
+#: Leading flow steps that leave the flow's own app dead and the device on the launcher. A flow
+#: opening with these cannot be expected to find that app already in the foreground — it is about
+#: to put it there itself. See :meth:`Engine._flow_leading_launch_establishes_origin`.
+_FLOW_SELF_CLEARING_STEPS = frozenset({"clear-data", "stop-app"})
+
+
 def _parse_await_terms(predicate: str, *, require_positive: bool = False) -> list[_AwaitTerm]:
     """``"rid:resultCard,!text:Generating"`` → two terms, ANDed.
 
@@ -5730,23 +5736,28 @@ class Engine:
         ``0`` means the flow depends on whatever is already in the foreground, so the
         precondition this backs must hold. A flow that opens with ``launch_app`` for its own
         package obviously satisfies it — the flow is *about* to make itself true (returns
-        ``1``). The same holds for a flow that opens with one or more ``clear_data`` steps
-        immediately followed by ``launch_app``: ``clear_data`` is the only way a flow can wipe
-        an app and start it fresh, and it always kills the app and drops the device on the
-        launcher — so *by design* the very first run of such a setup flow leaves nothing in
-        the foreground for a *second* run to match. Without this, a setup flow could run
-        exactly once, ever (returns the number of leading ``clear_data`` steps, plus the
-        ``launch_app`` that follows them).
+        ``1``). The same holds for a flow that opens with one or more ``clear_data`` or
+        ``stop_app`` steps immediately followed by ``launch_app``: both kill the app and drop
+        the device on the launcher — so *by design* the very first run of such a setup flow
+        leaves nothing in the foreground for a *second* run to match. Without this, a setup
+        flow could run exactly once, ever (returns the number of leading self-clearing steps,
+        plus the ``launch_app`` that follows them).
 
-        Only a leading, uninterrupted run of the flow's OWN ``clear_data`` steps followed by
-        its OWN ``launch_app`` counts — any other step first, or a clear/launch of a different
+        ``stop_app`` was missing here at first, and the same docstring already justified its
+        inclusion. Twenty-seven of one suite's fifty-four flows open with it, so they ran
+        whenever a previous scenario happened to leave the app in the foreground and were
+        refused whenever a lane started cold — the worst shape a precondition can have.
+
+        Only a leading, uninterrupted run of the flow's OWN such steps followed by its OWN
+        ``launch_app`` counts — any other step first, or a stop/clear/launch of a different
         package, still has to prove the precondition normally. A flow that genuinely depends
-        on a specific starting foreground is therefore not silently let through.
+        on a specific starting foreground is therefore not silently let through, and killing
+        an app without relaunching it is not a route to that app.
         """
         if not flow.app:
             return 0
         for offset, step in enumerate(steps):
-            if step.kind == "clear-data" and (step.arg or flow.app) == flow.app:
+            if step.kind in _FLOW_SELF_CLEARING_STEPS and (step.arg or flow.app) == flow.app:
                 continue
             if step.kind == "launch-app" and (step.arg or flow.app) == flow.app:
                 return offset + 1
