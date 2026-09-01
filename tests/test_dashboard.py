@@ -20,6 +20,13 @@ import pytest
 
 from android_ui_analyser.errors import DeviceError, UsageError
 
+# This one test drives eleven requests against a local server whose `/api/devices` costs ~0.5s
+# on an idle host (measured) because a tile for an offline serial waits on the device. Two
+# seconds left 1.5s of headroom, which the full suite spends: eight parallel workers, emulators
+# booting. It failed only in full runs and passed 3/3 alone. The endpoint is not slow, the host
+# is busy, so this is a timeout number and not a guard.
+_LOCAL_HTTP_TIMEOUT_S = 15
+
 
 def test_dashboard_service_uses_one_exact_dedicated_port(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1247,7 +1254,7 @@ def test_dashboard_journal_detail_is_token_protected_and_serial_scoped(
     detail_url = root_url + f"api/event?detail_id={detail_id}&serial=emulator-5554"
     try:
         with urllib.request.urlopen(
-            root_url + "api/events?serial=emulator-5554&limit=1", timeout=2
+            root_url + "api/events?serial=emulator-5554&limit=1", timeout=_LOCAL_HTTP_TIMEOUT_S
         ) as response:
             compact = json.loads(response.read())
         assert compact["events"][0]["detail_id"] == detail_id
@@ -1256,14 +1263,14 @@ def test_dashboard_journal_detail_is_token_protected_and_serial_scoped(
         assert full_only not in json.dumps(compact)
 
         with pytest.raises(urllib.error.HTTPError) as unauthorized:
-            urllib.request.urlopen(detail_url, timeout=2)
+            urllib.request.urlopen(detail_url, timeout=_LOCAL_HTTP_TIMEOUT_S)
         assert unauthorized.value.code == 403
 
         authorized = urllib.request.Request(
             detail_url,
             headers={"X-AUA-Dashboard-Token": state.database_token},
         )
-        with urllib.request.urlopen(authorized, timeout=2) as response:
+        with urllib.request.urlopen(authorized, timeout=_LOCAL_HTTP_TIMEOUT_S) as response:
             payload = json.loads(response.read())
         assert payload["detail"]["request"] == {
             "cmd": "analyze",
@@ -1282,17 +1289,17 @@ def test_dashboard_journal_detail_is_token_protected_and_serial_scoped(
             result={"ok": True, "full_only": "final agent response"},
         )
         with urllib.request.urlopen(
-            root_url + "api/events?serial=emulator-5554&limit=1", timeout=2
+            root_url + "api/events?serial=emulator-5554&limit=1", timeout=_LOCAL_HTTP_TIMEOUT_S
         ) as response:
             revised_compact = json.loads(response.read())
         assert revised_compact["detail_revision"] != initial_detail_revision
-        with urllib.request.urlopen(authorized, timeout=2) as response:
+        with urllib.request.urlopen(authorized, timeout=_LOCAL_HTTP_TIMEOUT_S) as response:
             revised_payload = json.loads(response.read())
         assert revised_payload["detail"]["response"]["result"]["full_only"] == (
             "final agent response"
         )
 
-        with urllib.request.urlopen(root_url + "api/devices", timeout=2) as response:
+        with urllib.request.urlopen(root_url + "api/devices", timeout=_LOCAL_HTTP_TIMEOUT_S) as response:
             devices = json.loads(response.read())
         assert devices["mode"] == "detail"
         assert [device["serial"] for device in devices["devices"]] == ["emulator-5554"]
@@ -1303,20 +1310,20 @@ def test_dashboard_journal_detail_is_token_protected_and_serial_scoped(
             headers={"X-AUA-Dashboard-Token": state.database_token},
         )
         with pytest.raises(urllib.error.HTTPError) as not_found:
-            urllib.request.urlopen(wrong_serial, timeout=2)
+            urllib.request.urlopen(wrong_serial, timeout=_LOCAL_HTTP_TIMEOUT_S)
         assert not_found.value.code == 400
 
         with pytest.raises(urllib.error.HTTPError) as events_out_of_scope:
-            urllib.request.urlopen(root_url + "api/events?serial=emulator-9999&limit=1", timeout=2)
+            urllib.request.urlopen(root_url + "api/events?serial=emulator-9999&limit=1", timeout=_LOCAL_HTTP_TIMEOUT_S)
         assert events_out_of_scope.value.code == 400
 
         with pytest.raises(urllib.error.HTTPError) as logs_out_of_scope:
-            urllib.request.urlopen(root_url + "api/logcat?serial=emulator-9999", timeout=2)
+            urllib.request.urlopen(root_url + "api/logcat?serial=emulator-9999", timeout=_LOCAL_HTTP_TIMEOUT_S)
         assert logs_out_of_scope.value.code == 400
 
         injected_serial = root_url + "?serial=%27%3BglobalThis.SERIAL_XSS%3Dtrue%3B%2F%2F"
         with pytest.raises(urllib.error.HTTPError) as injected:
-            urllib.request.urlopen(injected_serial, timeout=2)
+            urllib.request.urlopen(injected_serial, timeout=_LOCAL_HTTP_TIMEOUT_S)
         assert injected.value.code == 404
         assert state.database_token not in injected.value.read().decode()
 
@@ -1325,7 +1332,7 @@ def test_dashboard_journal_detail_is_token_protected_and_serial_scoped(
             headers={"X-AUA-Dashboard-Token": state.database_token},
         )
         with pytest.raises(urllib.error.HTTPError) as invalid:
-            urllib.request.urlopen(malformed, timeout=2)
+            urllib.request.urlopen(malformed, timeout=_LOCAL_HTTP_TIMEOUT_S)
         assert invalid.value.code == 400
     finally:
         server.shutdown()
