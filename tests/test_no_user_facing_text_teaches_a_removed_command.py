@@ -34,6 +34,13 @@ _DOC_EXCLUDES = {
     "build",
     "dist",
     "runs",
+    # A worktree is another checkout of another ref, so its docs are that ref's text, not this
+    # tree's. Excluding them is not a loosening: `test_worktrees_stay_inside_the_repo` REQUIRES
+    # worktrees to live at `.worktree/`, so without this the two tests contradict each other —
+    # obeying that one puts a second checkout inside the glob and this one fails on its old
+    # SKILL.md. Found exactly that way on 2026-09-01, moving a worktree in to satisfy the sibling.
+    ".worktree",
+    "worktrees",
 }
 
 # `aua`, any global flags, then a bare removed name not already followed by `-and-analyze`
