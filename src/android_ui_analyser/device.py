@@ -2135,6 +2135,12 @@ class Uiautomator2Device(Device):
             check=True,
             capture_output=True,
             text=True,
+            # Logcat carries whatever bytes an app logged; it is not a UTF-8 channel. A strict
+            # decode let one misbehaving line delete every other line for the reader — a dump
+            # was clean at 60s and raised `can't decode byte 0xc0` at 300s, 900s and 1800s,
+            # one bad byte further in each time. Filtering happens after the decode, so `--tag`
+            # could not narrow past it either. A replacement character in one line beats none.
+            errors="replace",
             timeout=60,
         )
         return proc.stdout or ""
