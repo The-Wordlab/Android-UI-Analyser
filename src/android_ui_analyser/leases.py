@@ -1703,7 +1703,24 @@ def _choose_device_unlocked(
                 f"{explicit} does not satisfy: {', '.join(missing)}",
                 hint=f"free and matching: {_free_report()}",
             )
-        previous = [serial for serial in all_owned if serial != explicit]
+        # A lease outlives its emulator — process-bound leases do not age out while the owning
+        # process lives — so a stopped emulator's lease refused every later `--serial` with
+        # `lease_switch_required` naming a device that was not attached, and pointed the caller
+        # at a cleanup for state that no longer exists. Only a device the platform actually
+        # reported online can require a handoff.
+        #
+        # Dropping the dead lease rather than merely ignoring it is the part that matters. Left
+        # in place it would make the owner hold two leases, and the next unpinned call would
+        # fail with "multiple legacy leases" — a worse refusal than the one being fixed. Nothing
+        # is lost by dropping it: pending undos live in the device ledger, not in the lease, and
+        # `teardown.reap` explicitly declines to run them while a live holder still owns them.
+        # Releasing therefore unblocks that cleanup instead of discarding it.
+        if explicit in known:
+            for stale in [s for s in all_owned if s != explicit and s not in known]:
+                release(cache_dir, stale, owner=owner)
+        previous = [
+            serial for serial in all_owned if serial != explicit and serial in known
+        ]
         if previous and not allow_replacement:
             _raise_switch_required(
                 owner=owner,

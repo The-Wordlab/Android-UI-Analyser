@@ -37,6 +37,15 @@ notes, so you can check for a newer version — and read what changed — withou
   started it rather than deriving its own identity, so a caller is never refused its own device.
   A lease written before this shipped carries no such mark and is treated as foreign, so it ages
   out with its process instead of being adopted.
+- Naming a device is no longer refused by a lease on a device that no longer exists. A lease
+  outlives its emulator — it is bound to the owning process, which for a long-running agent stays
+  alive — so once an emulator was stopped, every later `--serial` failed with
+  `lease_switch_required` naming a device that was not attached, and pointed at a cleanup for
+  state that had gone. Such a lease is now dropped when another device is asked for. Nothing is
+  lost: pending undos live in the device ledger, and teardown declines to run them while a live
+  holder still owns them, so releasing unblocks that cleanup rather than discarding it. Asking for
+  a device that is *also* offline changes nothing, and an unpinned call still keeps its own
+  vanished target rather than being rerouted to a stranger's screen.
 
 ## [0.14.1] - 2026-08-28
 
