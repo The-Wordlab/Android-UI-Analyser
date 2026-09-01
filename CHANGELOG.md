@@ -13,6 +13,14 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- `aua record stop` now returns a playable MP4 instead of failing with "the moov box is missing".
+  It sent the on-device SIGINT and then immediately signalled its own `adb shell` client, which tore
+  the shell session down and killed `screenrecord` while the muxer was still writing the file's index
+  — so every recording froze at a 3 KB header, for a four-second clip and a two-minute one alike, and
+  a whole QA sweep shipped screenshots in place of video. `record stop` now waits for the device
+  process to finish before touching the local client. A second `record start` in the same session
+  also works again, and each `record stop` names its own `--remote` path rather than the first one's.
+
 - `aua drive` and `aua helper drive` now answer a goal that only asks what is on screen — "is the
   banner showing", "confirm the row is here", "can you see the badge" — by reporting it found,
   instead of pressing the thing being asked about. Acting on a screen destroys the state the

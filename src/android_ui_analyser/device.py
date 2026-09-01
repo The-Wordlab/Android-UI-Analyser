@@ -1587,11 +1587,27 @@ class Uiautomator2Device(Device):
     ) -> str:
         state = self._recording_state_path()
         observed, live_remote = self._live_recording()
-        if self._recording_remote is not None or live_remote is not None:
+        if live_remote is not None:
             raise DeviceError(
                 "a screen recording is already in progress",
                 hint="Run `aua record stop <path>` before starting another.",
             )
+        if self._recording_remote is not None:
+            if not observed:
+                # `ps` unreadable: trust the handle rather than start a second recorder.
+                raise DeviceError(
+                    "a screen recording is already in progress",
+                    hint="Run `aua record stop <path>` before starting another.",
+                )
+            # A stop that raised leaves this set. In the warm-daemon shape start and stop
+            # share one Device, so that handle refused every later `record start` and made
+            # every later `record stop` report on the *first* recording's remote path. The
+            # on-disk handle already defers to `ps`; so does this one.
+            logger.info(
+                "clearing an in-memory recording handle the device is not honouring: %s",
+                self._recording_remote,
+            )
+            self._recording_remote = None
         if state.exists():
             if not observed:
                 # `ps` unreadable: fall back to trusting the handle, as before. Refusing on
@@ -1688,26 +1704,33 @@ class Uiautomator2Device(Device):
             )
         remote = self._recording_remote
         proc = self._recording_proc
-        try:
-            subprocess.run(  # noqa: S603
-                ["adb", "-s", self.serial, "shell", "pkill", "-l", "2", "screenrecord"],
-                check=False,
-                capture_output=True,
-                timeout=10,
-            )
-        finally:
-            if proc is not None and proc.poll() is None:
-                with contextlib.suppress(Exception):
-                    proc.send_signal(signal.SIGINT)
-                    proc.wait(timeout=5)
-        self._recording_proc = None
+        subprocess.run(  # noqa: S603
+            ["adb", "-s", self.serial, "shell", "pkill", "-l", "2", "screenrecord"],
+            check=False,
+            capture_output=True,
+            timeout=10,
+        )
 
         # SIGINT asks screenrecord to finalize; it does not mean finalization has completed.
         # In the normal CLI shape ``record start`` and ``record stop`` are different processes,
         # so there is no local Popen handle to await. The device process is authoritative.
-        if not self._wait_for_recording_exit(
+        #
+        # Wait for it *before* touching the local ``adb shell`` client. Signalling that client
+        # tears down the device-side shell session and takes ``screenrecord`` with it while the
+        # muxer is still writing the moov box: measured on emulator-5556, the remote file froze
+        # at 3232 bytes — ftyp plus the ``free`` placeholder the moov box was going to fill —
+        # for a 4-second clip and for a two-minute one alike, and every recording in a QA sweep
+        # was lost. Left alone, the client exits by itself once the device process is done.
+        finished = self._wait_for_recording_exit(
             remote, timeout_s=_SCREENRECORD_FINALIZE_TIMEOUT_S
-        ):
+        )
+        if proc is not None:
+            with contextlib.suppress(Exception):
+                if not finished and proc.poll() is None:
+                    proc.send_signal(signal.SIGINT)
+                proc.wait(timeout=5)
+        self._recording_proc = None
+        if not finished:
             with contextlib.suppress(Exception):
                 state_file.parent.mkdir(parents=True, exist_ok=True)
                 state_file.write_text(json.dumps({"remote": remote}))
