@@ -34,6 +34,18 @@ def test_no_method_is_defined_twice_in_one_class(module: Path) -> None:
             continue
         seen: dict[str, int] = {}
         for item in node.body:
+            if isinstance(item, ast.Assign):
+                # ``name = module.function`` binds a method as well — ``Engine`` attaches its
+                # domain modules this way — and a second binding loses the first just as silently.
+                for target in item.targets:
+                    if isinstance(target, ast.Name):
+                        if target.id in seen:
+                            duplicates.append(
+                                f"{node.name}.{target.id} rebound at line {item.lineno} "
+                                f"(first at line {seen[target.id]}) — the first one never runs"
+                            )
+                        seen[target.id] = item.lineno
+                continue
             if not isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef):
                 continue
             # An overload or a conditional redefinition is deliberate; a decorator such as

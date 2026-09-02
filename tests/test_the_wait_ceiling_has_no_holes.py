@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -277,7 +278,10 @@ def test_there_is_exactly_one_clamp_function() -> None:
     from android_ui_analyser import engine as engine_mod
     from android_ui_analyser import perf as perf_mod
 
-    src = inspect.getsource(engine_mod)
+    # The engine is engine.py plus its engine_*.py domain modules; a clamp hiding in any of them
+    # is the hole this guards against.
+    engine_dir = Path(engine_mod.__file__).parent
+    src = "\n".join(p.read_text(encoding="utf-8") for p in sorted(engine_dir.glob("engine*.py")))
     assert src.count("def _bounded_wait_ms") == 1
     assert inspect.getsource(perf_mod).count("def clamp_wait_ms") == 1
     # The ceiling is read from config in exactly one place — `_bounded_wait_ms`. A second read

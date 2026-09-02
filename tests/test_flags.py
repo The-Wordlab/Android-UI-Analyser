@@ -9,6 +9,7 @@ cold start is actually re-read.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -59,9 +60,11 @@ def shell_commands(device: FakeDevice) -> list[str]:
 @pytest.fixture(autouse=True)
 def _no_waiting(monkeypatch: pytest.MonkeyPatch) -> None:
     """The fake writes prefs and starts activities instantly; no poll windows needed."""
-    monkeypatch.setattr(engine_mod, "_FLAGS_VERIFY_DEADLINE_S", 0.0)
-    monkeypatch.setattr(engine_mod, "_FLAGS_ENTRY_TIMEOUT_S", 0.0)
-    monkeypatch.setattr(engine_mod, "_FLAGS_FOREGROUND_TIMEOUT_S", 0.0)
+    # These constants are read by flags_set and its helpers from their own module's globals.
+    flags_home = sys.modules[Engine.flags_set.__module__]
+    monkeypatch.setattr(flags_home, "_FLAGS_VERIFY_DEADLINE_S", 0.0)
+    monkeypatch.setattr(flags_home, "_FLAGS_ENTRY_TIMEOUT_S", 0.0)
+    monkeypatch.setattr(flags_home, "_FLAGS_FOREGROUND_TIMEOUT_S", 0.0)
 
 
 class AppLifecycleDevice(FakeDevice):

@@ -223,3 +223,65 @@ selections were zero. V4 remains ignored and unbundled. The next iteration needs
 data and evaluation that stay independent from training. This is why the guard, non-executing
 modes, and exact-cardinality boundary are architectural constraints rather than documentation
 caveats.
+
+---
+
+## 10. Engine layout: one class, thirteen files
+
+`Engine` is still a single class — the CLI, MCP server, daemon and dashboard all call
+`engine.<method>(...)` and every test that patches `Engine.<method>` or `engine.<method>` keeps
+working — but its methods no longer live in one 21,000-line file. `engine.py` holds what is
+genuinely core; every other method is a module-level function in the domain module its name
+suggests, with the `Engine` instance as its first parameter (still called `self`), and the class
+body binds it back:
+
+```python
+# engine_flows.py
+def flow_run(self: Engine, name: str, *, params: dict[str, str] | None = None) -> FlowRunResult:
+    ...
+
+# engine.py
+class Engine:
+    ...
+    flow_run = engine_flows.flow_run
+    _flow_ref_key = staticmethod(engine_flows._flow_ref_key)
+```
+
+Binding a plain function in the class body makes it an ordinary method: `self` binds, `mypy`
+type-checks the body against `Engine`, `inspect.getsource`, `__doc__` and `__module__` work, and a
+`monkeypatch.setattr(Engine, "flow_run", ...)` replaces it like any other attribute. The split was
+mechanical and verbatim — every function's AST and comments are identical to the original — so the
+history of a method continues in its new file.
+
+| Module | Owns |
+|---|---|
+| `engine.py` | construction, properties and context managers, device connect and lease lifecycle, the read-only device shell, the device-change ledger and teardown, on-device helper handover, the last-analyze id cache, foreground package/activity reads, caller-turn telemetry |
+| `engine_analyze.py` | perceiving the screen: hierarchy, OCR and vision capture, the analyze pipeline and semantic query, screenshot/inspect/annotate, provider status |
+| `engine_observation.py` | the post-action `observation`: the shared `_observe` pipeline, loading/readiness and settle waits, arrival and stale-risk verdicts, before/after change summary, crash and app-log evidence |
+| `engine_actions.py` | acting by id: target and selector resolution, tap/long-press/double-tap, text input, clear/erase, mic injection, swipe/scroll/key, keyboard, clipboard paste/copy, a11y actions |
+| `engine_waits.py` | has/expect, wait/wait_stable/wait_changed/await_predicate, the locale bridge, the caller-sized wait budget, hierarchy change detection, background jobs |
+| `engine_navigation.py` | goto over the learned map, navigate and reach, the drive lanes, back_until, open_link, map_find |
+| `engine_flows.py` | saved flows: flow_run/save/list/delete, the step executor and its on-device offload, nested-flow preflight, demo recording, suite_run |
+| `engine_sessions.py` | session_start → session_finish: goal planning, phase progress, recommended-call ranking, candidate flows, session review |
+| `engine_policy.py` | the optional local policy: model_control, policy tap-candidate and selection helpers, the session policy side channel, session_autopilot |
+| `engine_memory.py` | learning into per-app memory and reading it back: recorded screens, actions and timings, the runtime flag context, learned control costs, `memory update`, orient, explore mine/plan |
+| `engine_apps.py` | the app under test: launch/stop/clear/install and the launch observation, feature flags, private databases, logcat and per-app log preferences, process bookkeeping |
+| `engine_environment.py` | the conditions the app runs under: network, airplane and profiles, the mock proxy, clock, location, orientation, clipboard, media, developer options |
+| `engine_capture.py` | pixel evidence over time: the rolling capture buffer and its views, the capture sidecar, the capture hint, screen recording |
+| `engine_support.py` | constants, record types and pure helpers that more than one of the above reads |
+
+Rules that keep this shape honest:
+
+- A domain module imports `engine_support` and the rest of the package, never `engine` at
+  runtime (only under `TYPE_CHECKING`, for the `self: Engine` annotation) and never a sibling
+  `engine_*` module — both are import cycles. A helper two modules need moves to `engine_support`.
+- New method bodies go in the domain module; `engine.py` grows only by the one-line binding.
+  `tests/test_no_shadowed_methods.py` fails if the same name is bound twice.
+- The architecture guards treat `engine.py` and `engine_*.py` as one unit: the platform-boundary
+  test scans all of them as generic layers, and the source-scanning guards (one wait clamp, every
+  process-replacing call tells the adapter, the `record_ids` exemption is documented) read them
+  together.
+- A method reads module constants from *its own* module's globals. A test that wants to shorten a
+  timeout patches the module that holds the method — `sys.modules[Engine.flags_set.__module__]` —
+  not `android_ui_analyser.engine`. The two patch seams that tests do rely on in `engine.py`,
+  `connect` and `list_devices`, stay there because their only readers do.

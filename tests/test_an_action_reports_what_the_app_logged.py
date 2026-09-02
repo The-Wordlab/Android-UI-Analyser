@@ -403,12 +403,13 @@ def test_every_process_replacing_call_tells_the_adapter_about_it() -> None:
     import ast
     from pathlib import Path
 
-    src = Path(__file__).resolve().parents[1] / "src" / "android_ui_analyser" / "engine.py"
-    tree = ast.parse(src.read_text(encoding="utf-8"))
+    src_dir = Path(__file__).resolve().parents[1] / "src" / "android_ui_analyser"
+    # engine.py and its engine_*.py domain modules together are "the engine"
+    trees = [ast.parse(p.read_text(encoding="utf-8")) for p in sorted(src_dir.glob("engine*.py"))]
     replacing = {"stop_app", "clear_app", "launch_app", "install_app_bundle", "uninstall_app"}
 
     offenders: list[str] = []
-    for node in ast.walk(tree):
+    for node in (n for tree in trees for n in ast.walk(tree)):
         if not isinstance(node, ast.FunctionDef):
             continue
         called = {

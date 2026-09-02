@@ -49,6 +49,6 @@ def test_the_dashboard_never_asks_for_an_unrecorded_analyze() -> None:
 
 def test_the_engine_still_documents_why_it_opts_out() -> None:
     """The exemption is narrow on purpose, so it must stay explained where it is used."""
-    text = (SOURCE / "engine.py").read_text(encoding="utf-8")
+    text = "\n".join(p.read_text(encoding="utf-8") for p in sorted(SOURCE.glob("engine*.py")))
     assert "record_ids=False" in text, "no internal read opts out; has the seam been removed?"
     assert "record_ids:" in text, "the engine no longer accepts the parameter it threads"

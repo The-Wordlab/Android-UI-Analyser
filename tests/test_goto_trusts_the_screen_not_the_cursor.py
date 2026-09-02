@@ -19,9 +19,9 @@ that sent us there, and the cursor is the only thing that knows the journey.
 
 from __future__ import annotations
 
+import sys
 from typing import Any
 
-from android_ui_analyser import engine as engine_mod
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.memory import AppMemoryStore, RouteStep, SessionState
 from conftest import FakeDevice, make_config
@@ -98,7 +98,8 @@ def test_a_clickable_destination_row_cannot_prove_already_there(
     )
     # Pin the defensive contract independently of fuzzy ranking: even if a future resolver
     # again mistakes the launcher row for current-screen identity, goto may not claim success.
-    monkeypatch.setattr(engine_mod, "resolve_goal", lambda *_args, **_kwargs: "catalog_home")
+    goto_home = sys.modules[Engine.goto.__module__]
+    monkeypatch.setattr(goto_home, "resolve_goal", lambda *_args, **_kwargs: "catalog_home")
 
     result = engine.goto("Display preferences")
 

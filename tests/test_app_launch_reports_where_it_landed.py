@@ -9,12 +9,14 @@ screen in; this pins that launch does too, and that `--no-observe` still opts ou
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from android_ui_analyser.cli import _daemon_error
+from android_ui_analyser.engine import Engine
 from android_ui_analyser.errors import DeviceError, ExitCode
 from android_ui_analyser.schema import ActionResult
 from conftest import FakeDevice
@@ -309,7 +311,8 @@ def test_launch_refuses_a_persistently_mixed_package_hierarchy(
 
     monkeypatch.setattr("android_ui_analyser.engine.time.monotonic", tick)
     monkeypatch.setattr("android_ui_analyser.engine.time.sleep", lambda _seconds: None)
-    monkeypatch.setattr("android_ui_analyser.engine._LAUNCH_HIERARCHY_SETTLE_S", 0.05)
+    launch_home = sys.modules[Engine._await_launch_hierarchy.__module__]
+    monkeypatch.setattr(launch_home, "_LAUNCH_HIERARCHY_SETTLE_S", 0.05)
 
     with pytest.raises(DeviceError) as raised:
         eng.app("launch", package=P)

@@ -8,6 +8,8 @@ from pathlib import Path
 ROOT = Path(__file__).parents[1] / "src" / "android_ui_analyser"
 GENERIC_MODULES = (
     "engine.py",
+    # The Engine's domain modules (engine_*.py) are the same reusable layer under other names.
+    *sorted(p.name for p in ROOT.glob("engine_*.py")),
     "cli.py",
     "mcp_server.py",
     "dashboard.py",

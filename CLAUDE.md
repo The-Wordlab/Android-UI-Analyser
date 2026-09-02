@@ -77,6 +77,17 @@ Requirements: **Python 3.11+**, **`adb` on PATH** (Android SDK platform-tools), 
   (`.claude-plugin/marketplace.json`, name `the-wordlab`) exposing the `android-ui-analyser`
   plugin through `.claude-plugin/plugin.json` and `.codex-plugin/plugin.json`. Its shared
   `.mcp.json` starts the matching release with `uvx`; plugin users need `uv`, not `aua` on PATH.
+- **`Engine` is one class spread over `engine.py` plus the `engine_*.py` domain modules.**
+  `engine.py` keeps the constructor, properties, context managers and the device
+  connect/lease core; every other method is a module-level function in the domain module its
+  name suggests (`engine_flows.py`, `engine_navigation.py`, `engine_sessions.py`, …) whose first
+  parameter is the `Engine`, bound back as a method in the class body
+  (`flow_run = engine_flows.flow_run`). Add a new method in its domain module, then attach it in
+  `Engine`; never add method bodies to `engine.py` itself. Helpers shared by several modules live
+  in `engine_support.py`; a domain module may import `engine_support` but never `engine` or a
+  sibling (that is a cycle). A test that patches a module constant the method reads must patch
+  the module that holds the method: `sys.modules[Engine.flags_set.__module__]`. Rationale and the
+  module map: `docs/ARCHITECTURE.md` → "Engine layout".
 - Adding a perception provider: subclass in `providers/`, register with the decorator in
   `providers/registry.py`, add a `models.<name>` config block — no edits to `engine.py`/`cli.py`.
 - Adding any device-facing feature: follow the platform boundary below. A new Android/ADB feature
