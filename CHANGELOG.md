@@ -11,6 +11,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.14.2] - 2026-09-04
+
 ### Fixed
 
 - A goal phase that says something is *labelled* missing no longer asks for it to be off the screen.
@@ -338,5 +340,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.14.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.14.0
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.14.1...HEAD
 [0.14.1]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.14.1
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.14.2...HEAD
+[0.14.2]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.14.2
