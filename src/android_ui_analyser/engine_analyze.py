@@ -1,4 +1,4 @@
-"""Perceiving the screen for `aua analyze`: hierarchy, OCR and vision capture, the analyze pipeline and its semantic query path, screenshot/inspect/annotate, and perception-provider status.
+"""Perceiving the screen for `aua analyze`: hierarchy, OCR and vision capture, the analyze pipeline and its semantic query path, the cached element-id lookup (`_resolve`) every action goes through, screenshot/inspect/annotate, ask_screen, and perception-provider status.
 
 Engine methods for analyze. Each function's first parameter ``self`` is the
 :class:`~android_ui_analyser.engine.Engine`; ``Engine`` binds these functions as methods in its

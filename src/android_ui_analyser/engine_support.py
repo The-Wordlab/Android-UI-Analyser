@@ -18,9 +18,14 @@ logger = logging.getLogger("android_ui_analyser.engine")
 _ASSIST_MAX_STEPS = 6  # bound on planner actions per recovery attempt (opt-in only)
 
 
+# A bottom system bar starts within this fraction of the screen height. Wide enough for a
+# tall three-button bar, narrow enough that a systemui sheet or the expanded notification
+# shade can never be mistaken for it (see Engine._system_bar_top).
 _SYSTEM_BAR_BAND = 0.85
 
 
+# Terms that describe the surrounding UI rather than a user's intended control. A single match
+# on one of these is not enough to turn a visible multi-word control into an execution proposal.
 _GENERIC_MANUAL_MATCH_TERMS = frozenset(
     {"action", "button", "control", "item", "menu", "option", "page", "settings", "ui", "view"}
 )
@@ -169,9 +174,6 @@ def _parse_await_terms(predicate: str, *, require_positive: bool = False) -> lis
             ),
         )
     return terms
-
-
-_WAIT_FOR_FIELDS = {k: v for k, v in _AWAIT_PREFIXES.items() if v in {"text", "rid", "desc"}}
 
 
 def _is_resource_id_lookup(by: str) -> bool:

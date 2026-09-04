@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 from .assertions import Selector, apply_structural_filters, check_contains_all, normalize_selector
 from .device import Device
 from .engine_support import (
-    _WAIT_FOR_FIELDS,
+    _AWAIT_PREFIXES,
     _AwaitTerm,
     _is_resource_id_lookup,
     _label,
@@ -57,7 +57,18 @@ if TYPE_CHECKING:
 _LOCALE_CANDIDATE_CAP = 3  # translated-label retries per text miss (generic labels fan out)
 
 
+#: ``await_outcome`` values that mean the predicate held. Two names rather than one because
+#: ``absence-satisfied`` holds on weaker evidence — every term was negated, so what the caller
+#: left is gone and nothing here evidences what arrived. Anything that treats arrival as
+#: *learnable* keeps comparing against ``satisfied`` alone: an absence-only predicate is not a
+#: route's arrival proof and must never be recorded as one.
 _AWAIT_PREDICATE_HELD = frozenset({"satisfied", "absence-satisfied"})
+
+
+# `wait --for` restricted to fields `find_text`/`wait_for` can actually search — `net:`/`log:`
+# are off-screen evidence with no `by=` equivalent on this path, so they are deliberately not
+# offered here even though `_AWAIT_PREFIXES` knows them.
+_WAIT_FOR_FIELDS = {k: v for k, v in _AWAIT_PREFIXES.items() if v in {"text", "rid", "desc"}}
 
 
 def _parse_wait_for_predicate(for_: str, *, by: str, absent: bool) -> tuple[str, str, bool]:

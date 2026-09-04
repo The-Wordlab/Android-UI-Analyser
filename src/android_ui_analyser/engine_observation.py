@@ -24,6 +24,9 @@ if TYPE_CHECKING:
     from .engine import Engine
 
 
+# A hierarchy dump quicker than this can outrun the screen it is reading, so a post-action
+# sample may catch a half-attached tree; a slower one cannot (the render has finished by the
+# time it returns). Measured ~150ms headless vs 600-1200ms windowed on the same emulator.
 _FAST_DUMP_MS = 250.0
 
 

@@ -95,41 +95,6 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 _DEFAULT_ANDROID_CONNECT = connect
 _DEFAULT_ANDROID_LIST_DEVICES = list_devices
 
-# A run of text one line tall measures roughly two to three average character widths
-# in height; a wrapped paragraph measures many. Used to decide whether aiming at a
-# phrase inside an element can only move horizontally.
-# A bottom system bar starts within this fraction of the screen height. Wide enough for a
-# tall three-button bar, narrow enough that a systemui sheet or the expanded notification
-# shade can never be mistaken for it (see Engine._system_bar_top).
-# A hierarchy dump quicker than this can outrun the screen it is reading, so a post-action
-# sample may catch a half-attached tree; a slower one cannot (the render has finished by the
-# time it returns). Measured ~150ms headless vs 600-1200ms windowed on the same emulator.
-# Package-name fragments that mark a surface AUA is never *testing* — the system launcher and
-# the system UI. Scoping an action's log window to one of these is not a smaller answer, it is a
-# wrong one: measured on a real device, a Back to home attached 20 lines of `LauncherStateManager`
-# animation state under a field that claims to be the app's own output.
-# Foreground ownership can lead accessibility-window attachment briefly on a cold launch. Retry
-# only while the requested package demonstrably remains foreground, and never beyond this budget.
-# Terms that describe the surrounding UI rather than a user's intended control. A single match
-# on one of these is not enough to turn a visible multi-word control into an execution proposal.
-
-
-#: ``await_outcome`` values that mean the predicate held. Two names rather than one because
-#: ``absence-satisfied`` holds on weaker evidence — every term was negated, so what the caller
-#: left is gone and nothing here evidences what arrived. Anything that treats arrival as
-#: *learnable* keeps comparing against ``satisfied`` alone: an absence-only predicate is not a
-#: route's arrival proof and must never be recorded as one.
-
-
-#: Leading flow steps that leave the flow's own app dead and the device on the launcher. A flow
-#: opening with these cannot be expected to find that app already in the foreground — it is about
-#: to put it there itself. See :meth:`Engine._flow_leading_launch_establishes_origin`.
-
-
-# `wait --for` restricted to fields `find_text`/`wait_for` can actually search — `net:`/`log:`
-# are off-screen evidence with no `by=` equivalent on this path, so they are deliberately not
-# offered here even though `_AWAIT_PREFIXES` knows them.
-
 
 def _regex_literal_hint(predicate: str) -> str | None:
     """Explain regex-looking action predicates, which deliberately use literal matching."""
@@ -185,10 +150,6 @@ def _package_from_xml(xml: str, ignore: Sequence[str] = ("com.android.systemui",
     return counts.most_common(1)[0][0]
 
 
-# u2 accepts these names (plus KEYCODE_* / a numeric keycode); anything else reaches the
-# device as a no-op-or-crash, so it is rejected up front rather than looking like it worked.
-
-
 # Engines with possibly-unflushed async map writes. Weak so holding one here never keeps an
 # Engine (and its device connection) alive; see :func:`_flush_memory_writers_at_exit`.
 _LIVE_ENGINES: weakref.WeakSet[Engine] = weakref.WeakSet()
@@ -223,10 +184,6 @@ class _DeviceLoan(NamedTuple):
     serial: str
     purpose: str
     u2_was_connected: bool
-
-
-#: What to do about each way the handover can be refused. Keyed by the reason
-#: :meth:`Engine._device_agent_borrowed` journalled, so the advice and the diagnostic agree.
 
 
 def _actionable_keys(elements: Sequence[Element]) -> frozenset[str]:
@@ -1601,10 +1558,6 @@ class Engine:
             finally:
                 channel.close()
 
-    # ------------------------------------------------------------------ the lane that always works
-
-    # -- recording a human's journey ---------------------------------------
-
     # ----------------------------------------------------------------- flows (§6b)
 
     def close(self) -> None:
@@ -2006,13 +1959,6 @@ class Engine:
     #: tens of seconds on an emulator for no change in state.
     INSTALL_MODES = ("if-needed", "reinstall", "fresh")
 
-    # ----------------------------------------------------------------- logcat / suite
-
-    # -- per-app log preferences -------------------------------------------
-    # `config.logs` is one setting for every app on the host. These two are the per-app, across
-    # sessions half of it: what an agent learns about one app's loggers is worth keeping, and
-    # re-learning it every session is exactly the cost the digest exists to avoid.
-
     # ----------------------------------------------------------------- annotate
 
     #: Frames kept per device per suffix once AUA is naming the files itself. Enough to look
@@ -2197,7 +2143,7 @@ class Engine:
     # To add a method: write it in the domain module, then attach it below.
     # ------------------------------------------------------------------------------------
 
-    # engine_analyze: Perceiving the screen for `aua analyze`: hierarchy, OCR and vision capture, the analyze pipeline and its semantic query path, screenshot/inspect/annotate, and perception-provider status.
+    # engine_analyze: Perceiving the screen for `aua analyze`: hierarchy, OCR and vision capture, the analyze pipeline and its semantic query path, the cached element-id lookup (`_resolve`) every action goes through, screenshot/inspect/annotate, ask_screen, and perception-provider status
     _effective_with_image = engine_analyze._effective_with_image
     _context = engine_analyze._context
     _capture_hierarchy = engine_analyze._capture_hierarchy

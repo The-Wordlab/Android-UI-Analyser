@@ -721,7 +721,7 @@ MUTATION_CATALOGUE: dict[str, Mutation] = {
     ),
     "app_data": Mutation(
         "app_data",
-        "engine.py:app",
+        "engine_apps.py:app",
         None,
         "`app clear` is the caller's explicit destructive intent, confirmed at the CLI; "
         "restoring it would undo what the agent asked for.",

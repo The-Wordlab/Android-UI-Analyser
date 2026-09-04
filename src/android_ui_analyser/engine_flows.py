@@ -66,6 +66,9 @@ class _ResolvedFlowPlan(NamedTuple):
     cassettes: dict[int, _ResolvedCassetteResource]
 
 
+#: Leading flow steps that leave the flow's own app dead and the device on the launcher. A flow
+#: opening with these cannot be expected to find that app already in the foreground — it is about
+#: to put it there itself. See :meth:`Engine._flow_leading_launch_establishes_origin`.
 _FLOW_SELF_CLEARING_STEPS = frozenset({"clear-data", "stop-app"})
 
 

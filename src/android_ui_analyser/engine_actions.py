@@ -58,6 +58,9 @@ if TYPE_CHECKING:
     from .engine import Engine
 
 
+# A run of text one line tall measures roughly two to three average character widths
+# in height; a wrapped paragraph measures many. Used to decide whether aiming at a
+# phrase inside an element can only move horizontally.
 _SINGLE_LINE_HEIGHT_RATIO = 3.5
 
 
@@ -71,6 +74,8 @@ def _action_mark(verb: str, el: Element) -> str:
     return f"{verb}:{text}"
 
 
+# u2 accepts these names (plus KEYCODE_* / a numeric keycode); anything else reaches the
+# device as a no-op-or-crash, so it is rejected up front rather than looking like it worked.
 _KEY_NAMES = frozenset(
     {
         "home",

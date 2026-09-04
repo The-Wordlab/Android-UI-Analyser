@@ -111,6 +111,8 @@ def _goto_handoff(
     return out
 
 
+#: What to do about each way the handover can be refused. Keyed by the reason
+#: :meth:`Engine._device_agent_borrowed` journalled, so the advice and the diagnostic agree.
 _HANDOVER_HINTS = {
     "platform_has_no_helper": "The on-device helper is Android-only today.",
     "no_target_serial": "Connect a device or pass --serial.",

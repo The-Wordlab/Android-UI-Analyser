@@ -29,6 +29,10 @@ if TYPE_CHECKING:
     from .engine import Engine
 
 
+# Package-name fragments that mark a surface AUA is never *testing* — the system launcher and
+# the system UI. Scoping an action's log window to one of these is not a smaller answer, it is a
+# wrong one: measured on a real device, a Back to home attached 20 lines of `LauncherStateManager`
+# animation state under a field that claims to be the app's own output.
 _NOT_THE_APP_UNDER_TEST = ("launcher", "systemui", "com.android.systemui", ".home")
 
 
@@ -65,6 +69,8 @@ _FLAGS_ENTRY_TIMEOUT_S = 3.0  # how long a pinned entry Activity gets before the
 _FLAGS_FOREGROUND_TIMEOUT_S = 6.0  # how long the relaunched app gets to reach the foreground
 
 
+# Foreground ownership can lead accessibility-window attachment briefly on a cold launch. Retry
+# only while the requested package demonstrably remains foreground, and never beyond this budget.
 _LAUNCH_HIERARCHY_SETTLE_S = 2.0
 
 
@@ -1303,6 +1309,9 @@ def logcat(
     }
 
 
+# `config.logs` is one setting for every app on the host. These two are the per-app, across
+# sessions half of it: what an agent learns about one app's loggers is worth keeping, and
+# re-learning it every session is exactly the cost the digest exists to avoid.
 def app_log_prefs(self: Engine, *, app: str | None = None) -> dict[str, Any]:
     """What this host has been told to keep or drop from *app*'s action log windows."""
     package = self._app_for_log_prefs(app)
