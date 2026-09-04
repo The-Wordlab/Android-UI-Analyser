@@ -11,6 +11,13 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Fixed
+
+- Scroll verification now recognizes coherent movement in rows and grids whose unlabelled items all
+  fall back to the same Android class name. Repeated items are paired along the requested axis, with
+  jitter and cross-axis motion excluded, so a real thumbnail-strip or icon-grid swipe no longer
+  reports `already-at-end` solely because every visible item has the same fallback label.
+
 ## [0.14.2] - 2026-09-04
 
 ### Fixed

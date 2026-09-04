@@ -98,6 +98,74 @@ def test_a_real_scroll_has_a_measurable_shift() -> None:
     assert bool(dy) is True
 
 
+def test_turnover_with_identical_fallback_labels_is_still_scroll_evidence() -> None:
+    """Unlabelled rows (icons, thumbnails) fall back to a shared class-name label in
+    `region_probe`, so every item in the sample can carry the identical label. Diffing by
+    label counts alone sees the same tally before and after and calls this `already-at-end`
+    even though every item's position changed — exactly the false negative reported for
+    horizontal attachment strips and image grids.
+    """
+    before = (
+        ("android.widget.ImageView", 20, 400),
+        ("android.widget.ImageView", 220, 400),
+        ("android.widget.ImageView", 420, 400),
+    )
+    after = (
+        ("android.widget.ImageView", -130, 400),
+        ("android.widget.ImageView", 70, 400),
+        ("android.widget.ImageView", 270, 400),
+    )
+
+    distance, moved, evidence = scroll_movement(
+        before,
+        after,
+        "left",
+        allow_content_turnover=True,
+    )
+
+    assert distance == 150
+    assert moved is True
+    assert evidence == "axis-shift"
+
+
+def test_identical_fallback_labels_with_layout_jitter_are_not_scroll_evidence() -> None:
+    before = (
+        ("android.widget.ImageView", 20, 400),
+        ("android.widget.ImageView", 220, 400),
+        ("android.widget.ImageView", 420, 400),
+    )
+    after = (
+        ("android.widget.ImageView", 21, 399),
+        ("android.widget.ImageView", 219, 401),
+        ("android.widget.ImageView", 422, 400),
+    )
+
+    assert scroll_movement(before, after, "left", allow_content_turnover=True) == (
+        0,
+        False,
+        None,
+    )
+
+
+def test_identical_fallback_labels_moving_only_cross_axis_are_not_scroll_evidence() -> None:
+    before = (
+        ("android.widget.ImageView", 20, 400),
+        ("android.widget.ImageView", 220, 400),
+        ("android.widget.ImageView", 420, 400),
+    )
+    after = (
+        ("android.widget.ImageView", 20, 350),
+        ("android.widget.ImageView", 220, 350),
+        ("android.widget.ImageView", 420, 350),
+    )
+
+    assert scroll_movement(before, after, "left", allow_content_turnover=True) == (
+        0,
+        False,
+        None,
+    )
+
+
 def test_horizontal_scroll_reads_the_x_axis() -> None:
     """A vertical-only shift must not count as horizontal movement, and vice versa."""
     before = [("Card A", 100, 500), ("Card B", 700, 500)]

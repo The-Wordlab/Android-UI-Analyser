@@ -17,6 +17,7 @@ logger = logging.getLogger("android_ui_analyser.scroll_geom")
 _XML_BOUNDS_RE = re.compile(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]")
 Box = tuple[int, int, int, int]
 Sample = tuple[tuple[str, int, int], ...]
+_SCROLL_JITTER_PX = 8
 
 
 def _node_box(node: Any) -> Box | None:
@@ -122,6 +123,49 @@ def travel(before: Sample, after: Sample) -> tuple[int, int, bool]:
     return dx, dy, moved
 
 
+def _repeated_label_shift(before: Sample, after: Sample, direction: str) -> int:
+    """Return a coherent axis shift for labels that cannot be paired uniquely.
+
+    Unlabelled image rows and icon grids fall back to a shared class-name label. Pairing
+    those occurrences in axis order is useful only when at least two pairs move by more
+    than normal hierarchy jitter and the median movement is coherent.
+    """
+    horizontal = direction in ("left", "right")
+
+    def axis_position(item: tuple[str, int, int]) -> int:
+        return item[1] if horizontal else item[2]
+
+    def cross_position(item: tuple[str, int, int]) -> int:
+        return item[2] if horizontal else item[1]
+
+    before_by_label: dict[str, list[tuple[str, int, int]]] = {}
+    after_by_label: dict[str, list[tuple[str, int, int]]] = {}
+    for item in before:
+        before_by_label.setdefault(item[0], []).append(item)
+    for item in after:
+        after_by_label.setdefault(item[0], []).append(item)
+
+    shifts: list[int] = []
+    for label in before_by_label.keys() & after_by_label.keys():
+        old = before_by_label[label]
+        new = after_by_label[label]
+        if len(old) < 2 or len(old) != len(new):
+            continue
+        old = sorted(old, key=lambda item: (axis_position(item), cross_position(item)))
+        new = sorted(new, key=lambda item: (axis_position(item), cross_position(item)))
+        shifts.extend(
+            axis_position(old_item) - axis_position(new_item)
+            for old_item, new_item in zip(old, new, strict=True)
+        )
+
+    material = [shift for shift in shifts if abs(shift) > _SCROLL_JITTER_PX]
+    if len(material) < 2:
+        return 0
+    median = _median(material)
+    same_direction = sum(1 for shift in material if shift * median > 0)
+    return median if median and same_direction * 2 > len(material) else 0
+
+
 def scroll_movement(
     before: Sample,
     after: Sample,
@@ -135,8 +179,11 @@ def scroll_movement(
     sticky tabs/headings at fixed coordinates while replacing every visible card, though, so
     their shared-label median is zero even after a real scroll. Inside a hierarchy-declared
     scrollable container, removing and adding at least two labels is independent evidence of
-    content turnover. Requiring turnover on both sides keeps a one-off toast, loading badge, or
-    ripple from turning a no-op into a successful scroll.
+    content turnover. An unlabelled row of icons or thumbnails falls back to its class name in
+    :func:`region_probe`, so repeated occurrences are paired in axis order and accepted only
+    when at least two move coherently beyond normal hierarchy jitter. Requiring multiple
+    changed items keeps a one-off toast, loading badge, ripple, or layout wobble from turning
+    a no-op into a successful scroll.
     """
     dx, dy, changed = travel(before, after)
     distance = dx if direction in ("left", "right") else dy
@@ -144,6 +191,10 @@ def scroll_movement(
         return distance, True, "axis-shift"
     if not changed or not allow_content_turnover:
         return 0, False, None
+
+    repeated_shift = _repeated_label_shift(before, after, direction)
+    if repeated_shift:
+        return repeated_shift, True, "axis-shift"
 
     before_labels = Counter(label for label, _x, _y in before)
     after_labels = Counter(label for label, _x, _y in after)
