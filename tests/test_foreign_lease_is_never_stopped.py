@@ -505,6 +505,50 @@ def test_rollback_with_no_record_does_not_trust_an_unverified_pid(
     assert _no_real_devices["signalled"] == []
 
 
+@pytest.mark.parametrize("replacement", [False, True])
+def test_neutral_android_cleanup_requires_the_unique_boot_even_without_a_pid(
+    tmp_path: Path, _no_real_devices: dict[str, list], replacement: bool,
+) -> None:
+    from android_ui_analyser.platforms import OwnedVirtualTargetStopRequest
+
+    cache = tmp_path / "cache"
+    record = _boot_record(cache, serial=SER_GUARD, pid=4242, started_at=time.time())
+    original_token = "fake.p5554@" + "a" * 32
+    metadata = json.loads(record.read_text())
+    metadata["instance_token"] = "fake.p5554@" + ("b" if replacement else "a") * 32
+    record.write_text(json.dumps(metadata))
+
+    result = em.stop_virtual_target_instance(OwnedVirtualTargetStopRequest(
+        instance_token=original_token, cache_dir=cache, lease_registry_dir=tmp_path / "registry",
+    ))
+
+    assert result.stopped_target_ids == (() if replacement else (SER_GUARD,))
+    assert _no_real_devices["signalled"] == ([] if replacement else [4242])
+    assert record.exists() is replacement
+
+
+def test_a_reused_host_pid_cannot_be_killed_from_a_stale_owned_boot_record(
+    tmp_path: Path, _no_real_devices: dict[str, list], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from android_ui_analyser.platforms import OwnedVirtualTargetStopRequest
+
+    cache = tmp_path / "cache"
+    record = _boot_record(cache, serial=SER_GUARD, pid=4242, started_at=time.time())
+    token = "fake.p5554@" + "a" * 32
+    metadata = json.loads(record.read_text())
+    metadata.update(instance_token=token, process_started="original-process")
+    record.write_text(json.dumps(metadata))
+    monkeypatch.setattr(leases, "_proc_started", lambda _pid: "another-process")
+
+    result = em.stop_virtual_target_instance(OwnedVirtualTargetStopRequest(
+        instance_token=token, cache_dir=cache, lease_registry_dir=tmp_path / "registry",
+    ))
+
+    assert not result.stopped_target_ids
+    assert not _no_real_devices["signalled"]
+    assert record.exists()
+
+
 # ----------------------------------------------------------------- lease atomicity
 
 

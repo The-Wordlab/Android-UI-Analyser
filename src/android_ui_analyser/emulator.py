@@ -13,6 +13,7 @@ import logging
 import os
 import platform
 import re
+import secrets
 import shutil
 import signal
 import subprocess
@@ -1332,10 +1333,15 @@ def start(
         log_fh.close()
 
     now = time.time()
+    from .leases import _proc_started
+
+    boot_token = f"{inst}@{secrets.token_hex(16)}"
     meta: dict[str, Any] = {
         "avd": avd,
         "instance": inst,
+        "instance_token": boot_token,
         "pid": proc.pid,
+        "process_started": _proc_started(proc.pid),
         "headless": headless,
         "gpu": gpu_mode,
         "cmd": cmd,
@@ -1474,6 +1480,7 @@ def start(
         "action": "emulator-start",
         "avd": avd,
         "instance": inst,
+        "instance_token": boot_token,
         "serial": serial,
         "port": console_port,
         "owner": owner_tag,
@@ -1801,6 +1808,7 @@ def stop_spawned_instance(
     owner: str | None = None,
     requested_by: str | None = None,
     requested_via: str = "spawned-instance",
+    expected_instance_token: str | None = None,
 ) -> dict[str, Any]:
     """Roll back exactly one boot this process performed — never an ambiguous serial.
 
@@ -1820,6 +1828,8 @@ def stop_spawned_instance(
       device between our boot and our failed claim, so nothing here is ours to touch.
     """
     origin = _stop_origin(requested_by)
+    if instance and (Path(instance).name != instance or instance in {".", ".."}):
+        raise UsageError("invalid Android instance identity")
     meta_path = _pid_dir(cache_dir) / f"{instance}.json" if instance else None
     meta: dict[str, Any] = {}
     if meta_path is not None and meta_path.is_file():
@@ -1828,7 +1838,11 @@ def stop_spawned_instance(
             if isinstance(loaded, dict):
                 meta = loaded
     positive_pid = _owned_instance_pid({**meta, "_path": str(meta_path or "")})
-    record_is_ours = positive_pid is not None and (pid is None or positive_pid == pid)
+    record_is_ours = (
+        positive_pid is not None
+        and (pid is None or positive_pid == pid)
+        and (expected_instance_token is None or meta.get("instance_token") == expected_instance_token)
+    )
     serial = (
         str(meta["serial"])
         if record_is_ours and isinstance(meta.get("serial"), str) and meta.get("serial")
@@ -1838,6 +1852,24 @@ def stop_spawned_instance(
     stopped: list[str] = []
     own_pid = positive_pid if record_is_ours else None
     with _stop_lease_transaction(lease_registry_dir, serial):
+        # Re-read after obtaining the target fence. A new boot can replace a record while
+        # cleanup was waiting; neither its process nor its bookkeeping belongs to this call.
+        if record_is_ours and meta_path is not None:
+            try:
+                current = json.loads(meta_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                current = None
+            identity_fields = ("instance", "instance_token", "pid", "started_at", "serial")
+            if not isinstance(current, dict) or any(current.get(k) != meta.get(k) for k in identity_fields):
+                record_is_ours = False
+                own_pid = None
+            started = meta.get("process_started")
+            if record_is_ours and started:
+                from .leases import _proc_started
+
+                if _proc_started(int(positive_pid or 0)) != started:
+                    record_is_ours = False
+                    own_pid = None
         # The lease read and every process/device kill stay inside the same exclusive
         # target fence used by acquire/release/transfer. No process can claim this serial
         # after the check and before the kill.
@@ -2243,7 +2275,7 @@ def _virtual_instance(
     payload: dict[str, Any], *, require_owned_token: bool
 ) -> VirtualTargetInstance:
     target_id = str(payload.get("serial") or payload.get("target_id") or "").strip()
-    token = str(payload.get("instance") or payload.get("instance_token") or "").strip() or None
+    token = str(payload.get("instance_token") or payload.get("instance") or "").strip() or None
     if require_owned_token and token is None:
         raise DeviceError(
             "Android virtual-target startup returned no owned instance token",
@@ -2473,9 +2505,16 @@ def stop_virtual_target_instance(
 ) -> VirtualTargetStopResult:
     """Roll back exactly one Android boot using its opaque owned-instance token."""
 
+    stem, separator, nonce = request.instance_token.rpartition("@")
+    scoped_token = bool(separator and stem and re.fullmatch(r"[0-9a-f]{32}", nonce))
+    if not scoped_token and request.expected_pid is None:
+        # Old metadata stems identify a reusable AVD/port, not a boot. They need an explicit
+        # captured pid; current starts always carry a unique token instead.
+        raise UsageError("legacy Android instance cleanup requires the original process id")
     payload = stop_spawned_instance(
-        instance=request.instance_token,
+        instance=stem if scoped_token else request.instance_token,
         pid=request.expected_pid,
+        expected_instance_token=request.instance_token if scoped_token else None,
         cache_dir=request.cache_dir,
         lease_registry_dir=request.lease_registry_dir,
         # The opaque owner may be a LeaseOwner carrying pid/start metadata used by the lease gate.
