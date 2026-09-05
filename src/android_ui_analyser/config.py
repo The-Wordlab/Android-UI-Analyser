@@ -37,6 +37,9 @@ _SECRET_KEY_PARTS = {
     "credentials",
     "key",
     "password",
+    "passphrase",
+    "authorization",
+    "cookie",
     "secret",
     "token",
 }
@@ -788,7 +791,9 @@ class Config(BaseModel):
         """
 
         key = (name or self.device.platform).strip().lower()
-        return dict(self.platforms.get(key, {}))
+        # Use exactly the JSON representation transported to workers (TOML may otherwise
+        # leave datetime/date objects here while detached processes receive strings).
+        return dict(self.model_dump(mode="json")["platforms"].get(key, {}))
 
 
 def _secretish_key(value: object) -> bool:
@@ -796,6 +801,8 @@ def _secretish_key(value: object) -> bool:
     snake = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", raw).lower()
     if snake.endswith("_env"):
         return False
+    if snake in {"tokens", "pin", "passwords", "secrets", "api_keys", "access_tokens", "refresh_tokens"}:
+        return True
     parts = {part for part in re.split(r"[^a-z0-9]+", snake) if part}
     return bool(parts & _SECRET_KEY_PARTS) or "apikey" in parts
 
@@ -807,22 +814,29 @@ def _secret_bearing_url(value: str) -> bool:
         parsed = urlsplit(value)
         if parsed.scheme and parsed.netloc and (parsed.username is not None or parsed.password is not None):
             return True
-        return any(_secretish_key(key) for key, _item in parse_qsl(parsed.query, keep_blank_values=True))
+        return any(
+            _secretish_key(key)
+            for component in (parsed.query, parsed.fragment)
+            for key, _item in parse_qsl(component, keep_blank_values=True)
+        )
     except ValueError:
         # A malformed URL is not proof of a secret. Its owning key is still checked separately.
-        return False
+        return "://" in value and "@" in value
 
 
 def _mask_in_place(obj: Any) -> None:
     if isinstance(obj, dict):
         for k, v in obj.items():
-            if isinstance(v, str) and (_secretish_key(k) or _secret_bearing_url(v)):
+            if _secretish_key(k) or (isinstance(v, str) and _secret_bearing_url(v)):
                 obj[k] = "***"
             else:
                 _mask_in_place(v)
     elif isinstance(obj, list):
-        for item in obj:
-            _mask_in_place(item)
+        for index, item in enumerate(obj):
+            if isinstance(item, str) and _secret_bearing_url(item):
+                obj[index] = "***"
+            else:
+                _mask_in_place(item)
 
 
 # --------------------------------------------------------------------------- helpers

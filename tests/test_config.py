@@ -232,3 +232,24 @@ def test_registry_and_doctor_know_planner_kind() -> None:
     from android_ui_analyser.providers.registry import _KINDS
 
     assert "planner" in _KINDS
+
+
+def test_nested_platform_credentials_are_masked_in_all_json_shapes() -> None:
+    cfg = Config.model_validate({"platforms": {"fixture": {
+        "tokens": ["private-token"],
+        "credentials": {"value": "private-credential"},
+        "pin": 12345,
+        "endpoints": ["https://user:private-password@example.invalid"],
+        "endpoint": "https://example.invalid/#access_token=private-fragment",
+        "token_env": "FIXTURE_TOKEN",
+    }}})
+    masked = cfg.masked_dict()["platforms"]["fixture"]
+    assert "private-" not in str(masked)
+    assert masked["token_env"] == "FIXTURE_TOKEN"
+
+
+def test_platform_option_view_uses_the_same_json_types_as_worker_transport() -> None:
+    from datetime import date
+
+    cfg = Config.model_validate({"platforms": {"fixture": {"day": date(2026, 9, 5)}}})
+    assert cfg.platform_options("fixture") == {"day": "2026-09-05"}

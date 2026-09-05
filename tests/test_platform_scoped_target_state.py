@@ -11,7 +11,7 @@ from android_ui_analyser import capture_sidecar, daemon, device_ledger, journal,
 from android_ui_analyser.capture import CaptureBuffer, CaptureCfgView
 from android_ui_analyser.config import Config
 from android_ui_analyser.engine import Engine
-from android_ui_analyser.platforms.identity import AppRef, TargetRef
+from android_ui_analyser.platforms.identity import AppRef, TargetRef, safe_component
 from android_ui_analyser.session import active_session_metadata, create_session_state
 
 
@@ -64,7 +64,7 @@ def test_target_ref_preserves_android_paths_and_namespaces_plugins(tmp_path: Pat
 
     assert android.storage_key == "shared_id"
     assert not android.storage_key.startswith("android--")
-    assert ios.storage_key.startswith("ios--shared_id")
+    assert ios.storage_key == "@ios@shared%2Fid"
     assert android.storage_key != ios.storage_key
 
     assert leases.acquire(tmp_path, android, owner="same-worker")
@@ -80,6 +80,32 @@ def test_target_ref_preserves_android_paths_and_namespaces_plugins(tmp_path: Pat
     ios_app = AppRef("ios", "com.example.notes")
     assert android_app.package == android_app.app_id
     assert android_app.storage_key != ios_app.storage_key
+
+
+def test_plugin_storage_keys_cannot_alias_platforms_or_legacy_android(tmp_path: Path) -> None:
+    refs = [
+        TargetRef("alpha--beta", "gamma"),
+        TargetRef("alpha", "beta--gamma"),
+        TargetRef("android", "alpha--beta--gamma"),
+        TargetRef("alpha", "a/b"),
+        TargetRef("alpha", "a%2Fb"),
+        TargetRef("alpha", "../target"),
+    ]
+    assert len({ref.storage_key for ref in refs}) == len(refs)
+    for index, ref in enumerate(refs):
+        assert leases.acquire(tmp_path, ref, owner=f"worker-{index}")
+        _record(ref, tmp_path)
+    for index, ref in enumerate(refs):
+        assert leases.holder(tmp_path, ref) == f"worker-{index}"
+        assert device_ledger.read_ledger(ref)[0].target_id == ref.target_id
+    assert len({AppRef(ref.platform, ref.target_id).storage_key for ref in refs}) == len(refs)
+
+
+def test_platform_path_components_never_traverse_or_alias_escaped_names() -> None:
+    names = [".", "..", "a/b", "a%2Fb", "a@b", "a--b", "a_b", "Mixed", "mixed"]
+    components = [safe_component(name) for name in names]
+    assert len({value.casefold() for value in components}) == len(names)
+    assert all(Path(value).name == value and value not in {".", ".."} for value in components)
 
 
 def test_legacy_lease_without_platform_is_android_only(tmp_path: Path) -> None:

@@ -7,7 +7,7 @@
 
 | thing | lives until |
 |---|---|
-| `http_proxy` (device-global setting) | someone changes it, or the device reboots |
+| `http_proxy` (device-global setting) | someone changes or resets the persisted setting |
 | `adb reverse` tunnel | the adb transport drops |
 | `mitmdump` | it is killed — it is spawned with `start_new_session=True`, so it survives its parent |
 
@@ -66,8 +66,11 @@ Four properties do the work:
 - **Keyed, so re-recording replaces.** `reverse_port:49097` keeps two different tunnels apart while
   making the same change recorded twice a single undo.
 
-`instance_token` is the device's boot id. A reboot already undid the change, so the entry is dropped
-without touching the target — the same guard `network_profiles` applies to its own restore points.
+`instance_token` identifies the target boot. A changed or unreadable token does not prove that
+persisted settings, app permissions, or files disappeared. AUA retains their undos and reports
+that deliberate recovery is required, without replaying onto an unproven boot. This also applies
+to target-facing services such as helper removal. Host-only residue can still be cleaned.
+Missing backup files and unreadable ledgers are failures, never successful empty cleanup.
 
 ### 2. Deciding when it is safe to replay
 

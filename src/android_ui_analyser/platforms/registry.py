@@ -6,7 +6,7 @@ import importlib
 from collections.abc import Callable, Mapping
 from importlib import metadata
 from types import MappingProxyType
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, TypeVar, cast
 
 from ..errors import (
     ConfigError,
@@ -46,11 +46,24 @@ def register_platform(name: str) -> Callable[[_AdapterT], _AdapterT]:
         if not issubclass(adapter, PlatformAdapter):
             raise TypeError(f"{adapter!r} is not a PlatformAdapter")
         existing = _REGISTRY.get(key)
-        if existing is not None and existing is not adapter:
+        if (
+            existing is not None
+            and existing is not adapter
+            and getattr(existing, "_aua_registration_source", None) is not adapter
+        ):
             raise ConfigError(f"platform '{key}' is already registered")
-        adapter.name = key
-        _REGISTRY[key] = adapter
-        return adapter
+        if existing is not None:
+            return cast(_AdapterT, existing)
+        # A distribution may expose the same implementation through multiple entry points.
+        # Never mutate that shared class: doing so changes the identity of live adapters and
+        # can redirect their leases, worker sockets, and undo records to the other platform.
+        bound = cast(_AdapterT, type(adapter.__name__, (adapter,), {
+            "name": key,
+            "__module__": adapter.__module__,
+            "_aua_registration_source": adapter,
+        }))
+        _REGISTRY[key] = bound
+        return bound
 
     return decorate
 
@@ -140,7 +153,7 @@ def _load_selected_entry_point(name: str) -> type[PlatformAdapter] | None:
     try:
         loaded = entry.load()
     except Exception as exc:
-        raise PlatformPluginLoadError(name, f"{type(exc).__name__}: {exc}") from exc
+        raise PlatformPluginLoadError(name, f"plugin import failed ({type(exc).__name__})") from None
     adapter = _validate_adapter_type(name, loaded)
     return register_platform(name)(adapter)
 
@@ -193,23 +206,19 @@ class PlatformFactory:
         _validate_adapter_type(key, adapter_type)
         try:
             adapter = adapter_type(self.config)
-        except ConfigError:
-            raise
         except Exception as exc:
             raise PlatformPluginLoadError(
                 key,
-                f"adapter initialization failed ({type(exc).__name__}: {exc})",
-            ) from exc
+                f"adapter initialization failed ({type(exc).__name__})",
+            ) from None
         try:
             validated_options = adapter.validate_options(self.config.platform_options(key))
-        except ConfigError:
-            raise
         except Exception as exc:
             raise ConfigError(
-                f"platform {key!r} rejected its configuration: {type(exc).__name__}: {exc}",
+                f"platform {key!r} rejected its configuration ({type(exc).__name__})",
                 hint="Fix the selected platform's options and retry.",
                 code="platform_options_invalid",
-            ) from exc
+            ) from None
         if not isinstance(validated_options, Mapping):
             raise ConfigError(
                 f"platform {key!r} returned invalid normalized options",

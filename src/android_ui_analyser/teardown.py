@@ -130,17 +130,26 @@ def reap(
             "failed": [],
         }
 
-    active_fingerprint = options_fingerprint or _active_options_fingerprint(
-        platform, ref.platform
-    )
+    try:
+        active_fingerprint = options_fingerprint or _active_options_fingerprint(platform, ref.platform)
+    except Exception:
+        return {
+            **ref.to_json(),
+            "code": "platform_options_identity_unavailable",
+            "skipped": "cannot verify platform options; restore the original local identity key",
+            "identity_key": str(device_ledger.ledger_dir() / ".platform-options-hmac-key"),
+            "undone": [], "failed": [], "remaining": len(entries),
+        }
     if not device_ledger.options_match(entries, active_fingerprint):
         return {
             **ref.to_json(),
             "code": "platform_options_recovery_mismatch",
             "skipped": (
                 "selected platform options do not match the adapter configuration that "
-                "recorded these changes"
+                "recorded these changes; restore both the original configuration and its "
+                "local identity key"
             ),
+            "identity_key": str(device_ledger.ledger_dir() / ".platform-options-hmac-key"),
             "undone": [],
             "failed": [],
             "remaining": len(entries),
@@ -168,15 +177,15 @@ def reap(
             token = device.instance_token()
 
     needs_device = any(
-        device_ledger.UNDO_OPS[e.op].needs_device for e in entries if e.op in device_ledger.UNDO_OPS
+        device_ledger.UNDO_OPS[e.op].needs_target for e in entries if e.op in device_ledger.UNDO_OPS
     )
     if device is None and needs_device:
-        # An offline device forgot its settings anyway; the host-side residue has not. Replay
-        # only what needs no target, and leave the rest for when the device comes back.
+        # Being offline does not erase persistent settings. Replay only host-side residue,
+        # leaving target mutations pending until the original instance can be verified.
         entries = [
             e
             for e in entries
-            if e.op in device_ledger.UNDO_OPS and not device_ledger.UNDO_OPS[e.op].needs_device
+            if e.op in device_ledger.UNDO_OPS and not device_ledger.UNDO_OPS[e.op].needs_target
         ]
         if not entries:
             return {

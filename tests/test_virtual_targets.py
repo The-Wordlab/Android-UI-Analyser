@@ -22,6 +22,7 @@ from android_ui_analyser.errors import (
 from android_ui_analyser.mcp_server import _dispatch as mcp_dispatch
 from android_ui_analyser.mcp_server import _tool_definitions
 from android_ui_analyser.platforms import NormalizedTree, PlatformAdapter
+from android_ui_analyser.platforms.identity import TargetRef
 from android_ui_analyser.platforms.virtual_targets import (
     OwnedVirtualTargetStopRequest,
     VirtualTargetCreateRequest,
@@ -331,17 +332,17 @@ def test_mcp_cleanup_checks_the_selected_platform_lease_namespace(
 
     def fake_read_lease(
         _registry: str | Path,
-        _target_id: object,
+        target: TargetRef,
         *,
         platform: str = "android",
     ) -> None:
-        checked_platforms.append(platform)
+        checked_platforms.append(target.platform)
         return None
 
     monkeypatch.setattr(leases, "read_lease", fake_read_lease)
-    mcp_server._MCP_STARTED_SERIALS.clear()
-    mcp_server._MCP_STARTED_OWNERS.clear()
-    mcp_server._MCP_STARTED_SERIALS.add("attached-target")
+    mcp_server._MCP_STARTED_TARGETS.clear()
+    engine = Engine(cfg, platform=platform)
+    mcp_dispatch(engine, "virtual_target_start", {})
 
     result = mcp_server.cleanup_mcp_emulators(
         tmp_path / "cache",
@@ -351,6 +352,37 @@ def test_mcp_cleanup_checks_the_selected_platform_lease_namespace(
 
     assert checked_platforms == ["strict-fake"]
     assert result["stopped"] == ["attached-target"]
+    assert not any(name == "stop" for name, _request in service.calls)
+    request = dict(service.calls)["stop_instance"]
+    assert request.instance_token == "owned-boot-token"
+
+
+def test_mcp_cleanup_retains_original_strategy_and_does_not_stop_reused_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ReusedTargetService(_StrictVirtualTargets):
+        def stop_virtual_target_instance(
+            self, request: OwnedVirtualTargetStopRequest,
+        ) -> VirtualTargetStopResult:
+            assert request.instance_token == "owned-boot-token"
+            self.calls.append(("stop_instance", request))
+            return VirtualTargetStopResult(preserved_target_ids=("attached-target",))
+
+        def stop_virtual_targets(self, request: VirtualTargetStopRequest) -> VirtualTargetStopResult:
+            pytest.fail("target-id/owner stop would terminate the replacement boot")
+
+    mcp_server._MCP_STARTED_TARGETS.clear()
+    service = ReusedTargetService()
+    engine = _engine(tmp_path, service)
+    mcp_dispatch(engine, "virtual_target_start", {})
+    monkeypatch.setattr(mcp_server, "load_config", lambda: pytest.fail("rediscovered another config"))
+    engine.config.cache.dir = str(tmp_path / "different-cwd-cache")
+    result = mcp_server.cleanup_mcp_emulators()
+    assert result["stopped"] == []
+    assert result["preserved"] == ["attached-target"]
+    request = dict(service.calls)["stop_instance"]
+    assert request.cache_dir == str(tmp_path / "cache")
+    assert not mcp_server._MCP_STARTED_TARGETS
 
 
 def test_session_provisioning_uses_neutral_service_and_exact_rollback_token(

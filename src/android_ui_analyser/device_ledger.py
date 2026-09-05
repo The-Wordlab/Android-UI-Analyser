@@ -178,28 +178,42 @@ def read_ledger(
     path = ledger_path(ref)
     try:
         doc = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except FileNotFoundError:
         return []
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ConfigError(
+            f"cannot read pending device changes for {ref.platform}:{ref.target_id}",
+            hint="Recover the existing ledger before recording or replaying changes.",
+            code="device_ledger_unreadable",
+        ) from exc
     if not isinstance(doc, dict):
-        return []
+        raise ConfigError("invalid device ledger document", code="device_ledger_invalid")
     stored = target_from_metadata(doc, fallback_id=ref.target_id)
     if stored is None or stored != ref:
         # A mismatched record is never safe to replay through the requested adapter. This is
         # fail-closed even if a user manually renamed files in the ledger directory.
-        return []
+        raise ConfigError(
+            "device ledger target identity does not match its storage path",
+            code="device_ledger_invalid",
+        )
     raw = doc.get("entries")
     if not isinstance(raw, list):
-        return []
+        raise ConfigError("invalid device ledger entries", code="device_ledger_invalid")
     out = []
     for item in raw:
         if not isinstance(item, dict):
-            continue
-        entry = Entry.from_json(item, target=ref)
+            raise ConfigError("invalid device ledger entry", code="device_ledger_invalid")
+        try:
+            entry = Entry.from_json(item, target=ref)
+        except (ValueError, TypeError) as exc:
+            raise ConfigError("invalid device ledger entry", code="device_ledger_invalid") from exc
         if entry is not None and (entry.platform, entry.target_id) == (
             ref.platform,
             ref.target_id,
         ):
             out.append(entry)
+        else:
+            raise ConfigError("invalid device ledger entry identity", code="device_ledger_invalid")
     return out
 
 
@@ -578,7 +592,7 @@ def _undo_restore_network_controls(ctx: UndoContext, args: dict[str, Any]) -> st
     cache = Path(str(args.get("cache_dir") or "~/.cache/android-ui-analyser")).expanduser()
     backup = network.load_backup(network.backup_path(cache, ctx.serial))
     if backup is None:
-        return "no saved network state"
+        raise RuntimeError("saved network state is missing; undo remains pending")
     network.restore_controls(ctx.require_device(), backup.state)
     return "network controls restored"
 
@@ -594,12 +608,12 @@ def _undo_restore_network_profile(ctx: UndoContext, args: dict[str, Any]) -> str
     cache = Path(str(args.get("cache_dir") or "~/.cache/android-ui-analyser")).expanduser()
     backup = profiles.load_profile(profiles.profile_path(cache, ctx.serial))
     if backup is None:
-        return "no saved network profile"
+        raise RuntimeError("saved network profile is missing; undo remains pending")
     if profiles.stale_profile(backup, ctx.require_device()):
-        return f"restore point for {backup.profile} predates this boot — already gone"
+        raise RuntimeError("saved network profile belongs to another boot; undo remains pending")
     if backup.profile == "slow":
         if backup.emulator_shape is None:
-            return f"restore point for {backup.profile} has no original shape"
+            raise RuntimeError("saved network profile has no original shape; undo remains pending")
         profiles.restore_emulator_shape(ctx.serial, backup.emulator_shape)
         return "emulator link shaping restored"
     if backup.profile in profiles.PROFILE_NAMES and backup.interface:
@@ -625,7 +639,7 @@ def _undo_restore_developer_settings(ctx: UndoContext, args: dict[str, Any]) -> 
     devsettings = ctx.require_capability("developer_settings")
     path = Path(str(args.get("backup_path") or ""))
     if not path.is_file():
-        return "no saved developer settings"
+        raise RuntimeError("saved developer settings are missing; undo remains pending")
     devsettings.profile_default(ctx.require_device(), path)
     return "developer settings restored"
 
@@ -706,7 +720,7 @@ def _undo_discard_recording(ctx: UndoContext, args: dict[str, Any]) -> str:
 def _undo_set_clock(ctx: UndoContext, args: dict[str, Any]) -> str:
     previous = args.get("timestamp_ms")
     if not isinstance(previous, int):
-        return "no saved clock"
+        raise RuntimeError("saved clock is missing; undo remains pending")
     # A clock set N seconds ago must land back on *now*, not on the instant it was saved.
     drift_ms = int((time.time() - float(args.get("saved_at") or time.time())) * 1000)
     ctx.require_device("device.clock").set_clock(previous + max(0, drift_ms))
@@ -723,7 +737,7 @@ def _undo_restore_app_prefs(ctx: UndoContext, args: dict[str, Any]) -> str:
     flags = ctx.require_capability("feature_flags")
     path = Path(str(args.get("backup_path") or ""))
     if not path.is_file():
-        return "no saved app preferences"
+        raise RuntimeError("saved app preferences are missing; undo remains pending")
     return flags.restore_prefs(ctx.require_device(), path)
 
 
@@ -753,6 +767,13 @@ class UndoOp:
     needs_device: bool
     order: int
     summary: str
+    # Service-based undos may touch a target without consuming a connected runtime. They
+    # need the same boot identity guard as runtime operations, unlike host-only residue.
+    target_bound: bool = False
+
+    @property
+    def needs_target(self) -> bool:
+        return self.needs_device or self.target_bound
 
 
 UNDO_OPS: dict[str, UndoOp] = {
@@ -769,7 +790,7 @@ UNDO_OPS: dict[str, UndoOp] = {
     "set_airplane_mode": UndoOp(_undo_set_airplane_mode, True, 32, "restore airplane mode"),
     "set_orientation": UndoOp(_undo_set_orientation, True, 33, "restore screen orientation"),
     "restore_adbd_root": UndoOp(
-        _undo_restore_adbd_root, False, 39, "restore temporary adb root escalation"
+        _undo_restore_adbd_root, False, 39, "restore temporary adb root escalation", target_bound=True
     ),
     "restore_developer_settings": UndoOp(
         _undo_restore_developer_settings, True, 40, "restore developer settings"
@@ -792,12 +813,15 @@ UNDO_OPS: dict[str, UndoOp] = {
         False,
         59,
         "stop the on-device helper touch capture",
+        target_bound=True,
     ),
     "disable_device_agent": UndoOp(
-        _undo_disable_device_agent, False, 60, "restore the on-device helper setup state"
+        _undo_disable_device_agent, False, 60, "restore the on-device helper setup state",
+        target_bound=True,
     ),
     "remove_device_agent": UndoOp(
-        _undo_remove_device_agent, False, 61, "remove an automatically installed helper package"
+        _undo_remove_device_agent, False, 61, "remove an automatically installed helper package",
+        target_bound=True,
     ),
     "kill_host_process": UndoOp(
         _undo_kill_host_process, False, 90, "stop the host helper process"
@@ -1065,12 +1089,16 @@ def replay(
 ) -> dict[str, Any]:
     """Run the pending undos for *serial*. Safe to call twice; each success is forgotten.
 
-    A reboot since the record was written means the device already forgot the mutation, so the
-    entry is dropped without touching the target — the same guard ``network_profiles`` applies
-    to its own backups via ``instance_token``.
+    A changed or unreadable boot identity is not evidence that a persistent setting, permission,
+    or file disappeared. Leave those entries pending for deliberate recovery, without touching
+    an unproven target. Host-only residue may still be cleaned independently.
     """
     ref = target_ref(target, platform=platform)
     pending = read_ledger(ref) if entries is None else entries
+    if context.target_ref != ref or any(
+        (entry.platform, entry.target_id) != (ref.platform, ref.target_id) for entry in pending
+    ):
+        raise ConfigError("undo context does not match recorded target", code="device_ledger_invalid")
     ordered = sorted(pending, key=lambda e: (UNDO_OPS[e.op].order if e.op in UNDO_OPS else 999))
     done: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
@@ -1079,17 +1107,16 @@ def replay(
         if op is None:
             failed.append({"key": entry.key, "error": f"unknown undo op {entry.op!r}"})
             continue
-        rebooted = (
+        unproven_instance = (
             entry.instance_token is not None
-            and context.instance_token is not None
             and entry.instance_token != context.instance_token
         )
-        if rebooted and op.needs_device:
-            done.append(
-                {"key": entry.key, "kind": entry.kind, "result": "already gone (target rebooted)"}
-            )
-            if not dry_run:
-                forget(ref, entry.key)
+        if unproven_instance and op.needs_target:
+            failed.append({
+                "key": entry.key,
+                "kind": entry.kind,
+                "error": "target instance changed or is unknown; undo retained for deliberate recovery",
+            })
             continue
         if dry_run:
             done.append({"key": entry.key, "kind": entry.kind, "result": f"would {op.summary}"})

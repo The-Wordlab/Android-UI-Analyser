@@ -39,6 +39,7 @@ import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 from .atomic import atomic_create_text, atomic_write_text
 from .platforms.identity import (
@@ -988,16 +989,16 @@ def _lease_metadata_paths(cache_dir: str | Path) -> list[Path]:
 def _path_may_belong_to_platform(path: Path, platform: str) -> bool:
     name = str(platform).strip().lower()
     if name == LEGACY_PLATFORM:
-        return "--" not in path.stem
-    return path.stem.startswith(f"{safe_component(name)}--")
+        return not path.stem.startswith("@")
+    return path.stem.startswith(f"@{safe_component(name)}@")
 
 
 def _inaccessible_entry(path: Path, platform: str, owner: str, *, corrupt: bool) -> dict[str, Any]:
     name = str(platform).strip().lower()
     target_id = path.stem
-    prefix = f"{safe_component(name)}--"
+    prefix = f"@{safe_component(name)}@"
     if name != LEGACY_PLATFORM and target_id.startswith(prefix):
-        target_id = target_id[len(prefix) :]
+        target_id = unquote(target_id[len(prefix) :])
     out: dict[str, Any] = {
         "platform": name,
         "target_id": target_id,

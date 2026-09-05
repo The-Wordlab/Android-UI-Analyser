@@ -199,7 +199,14 @@ class Engine:
             # A factory-created adapter already carries an immutable normalized option map, so
             # avoid invoking a plugin's validation hook twice when that object is injected.
             if not isinstance(platform.options, MappingProxyType):
-                options = platform.validate_options(config.platform_options(platform.name))
+                try:
+                    options = platform.validate_options(config.platform_options(platform.name))
+                except Exception as exc:
+                    raise ConfigError(
+                        f"platform {platform.name!r} rejected its configuration ({type(exc).__name__})",
+                        hint="Fix the selected platform's options and retry.",
+                        code="platform_options_invalid",
+                    ) from None
                 if not isinstance(options, Mapping):
                     raise ConfigError(
                         f"platform {platform.name!r} returned invalid normalized options",
@@ -1152,11 +1159,21 @@ class Engine:
             ]
         else:
             reports = []
-            adapters: dict[str, PlatformAdapter] = {self.platform.name: self.platform}
+            adapters = {self._platform.name: self._platform} if self._platform is not None else {}
             for target in device_ledger.pending_targets():
                 adapter = adapters.get(target.platform)
                 if adapter is None:
-                    adapter = self._platform_factory.create(target.platform)
+                    try:
+                        adapter = self._platform_factory.create(target.platform)
+                    except Exception as exc:
+                        reports.append({
+                            **target.to_json(),
+                            "code": getattr(exc, "code", "platform_recovery_unavailable"),
+                            "skipped": f"no adapter available for platform {target.platform!r}",
+                            "undone": [], "failed": [],
+                            "remaining": len(device_ledger.read_ledger(target)),
+                        })
+                        continue
                     adapters[target.platform] = adapter
                 reports.append(
                     teardown.reap(
@@ -1172,12 +1189,13 @@ class Engine:
                 )
         undone = sum(len(r.get("undone") or ()) for r in reports)
         failed = sum(len(r.get("failed") or ()) for r in reports)
+        blocked = sum(bool(r.get("code")) for r in reports)
         return {
-            "ok": failed == 0,
+            "ok": failed == 0 and blocked == 0,
             "action": "teardown-run",
             "dry_run": dry_run,
             "reports": reports,
-            "detail": f"{undone} change(s) undone, {failed} failed",
+            "detail": f"{undone} change(s) undone, {failed} failed, {blocked} target(s) blocked",
         }
 
     def renew_lease(self) -> None:

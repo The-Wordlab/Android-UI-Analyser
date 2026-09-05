@@ -55,6 +55,21 @@ API v1 is exported as `PLATFORM_API_VERSION == 1`. These selection failures have
 `validate_options()` should reject unknown keys. Keep credentials out of configuration; accept an
 environment-variable name and resolve it inside the adapter when needed.
 
+Use explicit JSON-compatible routing options and `*_env` (or camel-case `*Env`) references.
+Do not derive target identity from an undocumented ambient variable or process working directory.
+The core transports exactly the selected JSON option mapping by inherited descriptor; it fingerprints
+the full mapping and the current values of its named environment references. Those values remain
+inside a local HMAC, never in the persisted digest. Startup/validation errors expose the exception
+type, not arbitrary plugin exception text that may contain credentials. Plugins remain responsible
+for keeping their own runtime logs and operation errors free of secrets.
+
+Empty option mappings use a constant non-secret identity, so default Android recovery needs no
+key file. Nonempty mappings use a local `.platform-options-hmac-key`: ledger/watchdog identity
+lives in `~/.cache/android-ui-analyser/device-state`, and worker identity keys live under `cache.dir`.
+Back up the ledger and its key together. Losing or corrupting that key cannot be repaired by
+re-entering the same options: restore the original key as well. AUA retains the pending undo and
+names the missing identity proof; `--force` does not authorize a different endpoint or boot.
+
 ## Attached-target contract
 
 An adapter that passes the API-v1 attached-target profile declares:
@@ -145,6 +160,8 @@ compatibility projections, not identities a new adapter needs to model as Androi
 Two platforms may return the same `target_id`. Shared coordination uses
 `TargetRef(platform, target_id)`, so their leases, sessions, journals, captures, diagnostic marks,
 and teardown records remain separate. Bare legacy serials are interpreted as Android only.
+Plugin storage components are percent-encoded, including uppercase bytes on case-insensitive
+hosts, and use a delimiter that cannot occur in Android's legacy keys.
 
 ## Coordinate contract
 

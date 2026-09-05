@@ -16,6 +16,7 @@ import contextlib
 import json
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,7 @@ from .engine import (
     _safe_adopted_change,
 )
 from .errors import AuaError, UsageError
+from .platforms import PlatformAdapter, TargetRef
 from .projection import Projection, trim_observation_payload
 from .schema import OutputFormat, publish_ids
 from .selectors import normalize_selector_prefix
@@ -2958,12 +2960,7 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         if isinstance(started, dict) and (
             started.get("virtual_target_started") or started.get("emulator_started")
         ):
-            serial = started.get("serial")
-            if isinstance(serial, str) and serial:
-                _mcp_started_serials().add(serial)
-            owner = started.get("owner")
-            if owner:
-                _mcp_started_owners().add(str(owner))
+            _track_mcp_target(engine, started)
         return started
     if name == "session_review":
         return _dump(_engine_method(engine, "session_review")(session_id=args.get("session_id")))
@@ -3295,11 +3292,7 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
             )
         else:
             out = engine.virtual_target_start(args.get("definition_id"), **common)
-        target_id = out.get("target_id") if isinstance(out, dict) else None
-        if isinstance(target_id, str) and target_id:
-            _mcp_started_serials().add(target_id)
-            if out.get("owner"):
-                _mcp_started_owners().add(str(out["owner"]))
+        _track_mcp_target(engine, out)
         return out
     if name == "virtual_target_create":
         replace_existing = bool(args.get("replace", False))
@@ -3332,8 +3325,7 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         )
         stopped = out.get("stopped_target_ids") if isinstance(out, dict) else None
         if isinstance(stopped, list):
-            for target_id in stopped:
-                _mcp_started_serials().discard(str(target_id))
+            _forget_mcp_targets(engine, stopped)
             attached = getattr(engine, "_device", None)
             if attached is not None and attached.target_id in stopped:
                 engine.close()
@@ -3367,13 +3359,7 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
             read_only=args.get("read_only"),
             owner=args.get("owner"),
         )
-        # Track for MCP process exit cleanup (agents that forget emulator_stop).
-        ser = out.get("serial") if isinstance(out, dict) else None
-        if isinstance(ser, str) and ser:
-            _mcp_started_serials().add(ser)
-            if out.get("owner"):
-                # Also remember owner so --mine scoped cleanup works at exit.
-                _mcp_started_owners().add(str(out["owner"]))
+        _track_mcp_target(engine, out)
         return out
     if name == "emulator_stop":
         from . import leases as leases_mod
@@ -3388,9 +3374,7 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         )
         stopped = out.get("stopped") if isinstance(out, dict) else None
         if isinstance(stopped, list):
-            tracked = _mcp_started_serials()
-            for s in stopped:
-                tracked.discard(s)
+            _forget_mcp_targets(engine, stopped)
             # A long-lived MCP Engine may otherwise keep a Device and memory cursor bound to
             # the boot that was just stopped. Drop only when its attached serial was stopped;
             # the next tool call reconnects and claims the new boot instance before reading.
@@ -3923,9 +3907,18 @@ def _image_block(name: str, payload: Any) -> types.ImageContent | None:
 # --------------------------------------------------------------------------- server
 
 
-# Emulators started via MCP in this process — stopped on stdio exit if the agent forgot.
-_MCP_STARTED_SERIALS: set[str] = set()
-_MCP_STARTED_OWNERS: set[str] = set()
+@dataclass(frozen=True)
+class _McpStartedTarget:
+    target: TargetRef
+    instance_token: str
+    expected_pid: int | None
+    config: Config
+    platform: PlatformAdapter
+
+
+# A native id and an owner label can both be reused. Retain the exact adapter/configuration
+# and boot token from startup; no exit path may widen this to target-id or owner-wide stop.
+_MCP_STARTED_TARGETS: dict[tuple[int, str, str], _McpStartedTarget] = {}
 _LEASE_FREE_TOOLS = frozenset(
     {
         "app_log_prefs_get",
@@ -3976,12 +3969,31 @@ _LEASE_FREE_TOOLS = frozenset(
 )
 
 
-def _mcp_started_serials() -> set[str]:
-    return _MCP_STARTED_SERIALS
+def _track_mcp_target(engine: Engine, result: Any) -> None:
+    if not isinstance(result, dict):
+        return
+    target_id = result.get("target_id") or result.get("serial")
+    token = (
+        result.get("instance_token")
+        or result.get("virtual_target_instance_token")
+        or result.get("instance")
+    )
+    if not isinstance(target_id, str) or not isinstance(token, str) or not token:
+        return  # No exact ownership proof: never manufacture a broad cleanup request.
+    selected = engine.platform
+    _MCP_STARTED_TARGETS[(id(selected), target_id, token)] = _McpStartedTarget(
+        target=TargetRef(selected.name, target_id),
+        instance_token=token,
+        expected_pid=result.get("pid") if isinstance(result.get("pid"), int) else None,
+        config=engine.config.model_copy(deep=True),
+        platform=selected,
+    )
 
 
-def _mcp_started_owners() -> set[str]:
-    return _MCP_STARTED_OWNERS
+def _forget_mcp_targets(engine: Engine, target_ids: list[Any]) -> None:
+    for key, started in list(_MCP_STARTED_TARGETS.items()):
+        if started.platform is engine.platform and started.target.target_id in target_ids:
+            del _MCP_STARTED_TARGETS[key]
 
 
 def cleanup_mcp_emulators(
@@ -3990,36 +4002,27 @@ def cleanup_mcp_emulators(
     platform: Any | None = None,
     lease_registry_dir: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Best-effort stop of emulators this MCP process started and forgot to tear down."""
-    import contextlib
+    """Stop only exact owned boots, through their original Engine strategy.
 
-    if not _MCP_STARTED_SERIALS and not _MCP_STARTED_OWNERS:
-        return {
-            "ok": True,
-            "action": "mcp-emulator-cleanup",
-            "stopped": [],
-            "preserved": [],
-        }
-
-    from .config import load_config
-    from .platforms import PlatformFactory
-
-    cfg = load_config()
-    selected = platform or PlatformFactory(cfg).create()
-    virtual_targets = selected.capability("virtual_targets")
-    platform_name = selected.name
-    cache = cache_dir or cfg.cache.dir
-    lease_registry = lease_registry_dir or cache
+    Optional arguments filter the historical cleanup surface; they never substitute another
+    platform or configuration for a tracked boot. Failed cleanup remains retryable at atexit.
+    """
     from . import leases
-    from .platforms.virtual_targets import VirtualTargetStopRequest, VirtualTargetStopResult
 
     stopped: list[str] = []
     preserved: list[str] = []
     caller = leases.owner_caller(leases.resolve_owner()) or {}
     caller_process = (caller.get("pid"), caller.get("started"))
-    serials = list(_MCP_STARTED_SERIALS)
-    for ser in serials:
-        lease = leases.read_lease(lease_registry, ser, platform=platform_name)
+    for key, started in list(_MCP_STARTED_TARGETS.items()):
+        if platform is not None and started.platform is not platform:
+            continue
+        if cache_dir is not None and Path(started.config.cache.dir) != Path(cache_dir):
+            continue
+        registry = started.config.lease.registry_dir or started.config.cache.dir
+        if lease_registry_dir is not None and Path(registry) != Path(lease_registry_dir):
+            continue
+        ser = started.target.target_id
+        lease = leases.read_lease(registry, started.target)
         lease_process = (
             lease.get("owner_pid") if lease else None,
             lease.get("owner_started") if lease else None,
@@ -4031,38 +4034,22 @@ def cleanup_mcp_emulators(
             # The orchestrator may have handed the running emulator to a child. Its lifecycle
             # safety net must not tear down a device that now has a different live agent.
             preserved.append(ser)
-            _MCP_STARTED_SERIALS.discard(ser)
+            del _MCP_STARTED_TARGETS[key]
             continue
-        with contextlib.suppress(Exception):
-            out = virtual_targets.stop_virtual_targets(
-                VirtualTargetStopRequest(
-                    target_id=ser,
-                    cache_dir=cache,
-                    lease_registry_dir=lease_registry,
-                    lease_owner=leases.resolve_owner(),
-                    requested_by="mcp-exit-cleanup",
-                )
+        try:
+            cleanup_engine = Engine(started.config, platform=started.platform)
+            out = cleanup_engine.virtual_target_stop_instance(
+                started.instance_token,
+                expected_pid=started.expected_pid,
+                owner=leases.resolve_owner(),
+                requested_by="mcp-exit-cleanup",
             )
-            if isinstance(out, VirtualTargetStopResult):
-                stopped.extend(out.stopped_target_ids)
-        _MCP_STARTED_SERIALS.discard(ser)
-    # Owner-scoped leftover (parallel) if target-id stop missed a record.
-    for owner in list(_MCP_STARTED_OWNERS):
-        if not preserved:
-            with contextlib.suppress(Exception):
-                out = virtual_targets.stop_virtual_targets(
-                    VirtualTargetStopRequest(
-                        mine=True,
-                        owner=owner,
-                        cache_dir=cache,
-                        lease_registry_dir=lease_registry,
-                        lease_owner=leases.resolve_owner(),
-                        requested_by="mcp-exit-cleanup",
-                    )
-                )
-                if isinstance(out, VirtualTargetStopResult):
-                    stopped.extend(out.stopped_target_ids)
-        _MCP_STARTED_OWNERS.discard(owner)
+        except Exception:
+            preserved.append(ser)
+            continue
+        stopped.extend(out.get("stopped_target_ids", []))
+        preserved.extend(out.get("preserved_target_ids", []))
+        del _MCP_STARTED_TARGETS[key]
     return {
         "ok": True,
         "action": "mcp-emulator-cleanup",

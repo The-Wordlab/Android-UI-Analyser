@@ -99,7 +99,7 @@ def test_selected_plugin_import_failure_is_precise(monkeypatch: pytest.MonkeyPat
         factory.create()
 
     assert exc.value.code == "platform_plugin_load_failed"
-    assert "native bridge not installed" in exc.value.message
+    assert "ImportError" in exc.value.message
 
 
 def test_plugin_api_version_mismatch_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -196,3 +196,51 @@ def test_selected_plugin_owns_and_normalizes_its_namespaced_options(
     assert isinstance(platform, OptionsPlugin)
     assert platform.seen == {"endpoint": "https://example.invalid/"}
     assert dict(platform.options) == {"endpoint": "https://example.invalid"}
+
+
+def test_registering_an_alias_never_changes_a_live_platform_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SharedPlugin(_PluginPlatform):
+        pass
+
+    monkeypatch.setattr(registry, "_REGISTRY", {})
+    first = _EntryPoint("first", "test:Shared", result=SharedPlugin)
+    second = _EntryPoint("second", "test:Shared", result=SharedPlugin)
+    _entries(monkeypatch, first=first, second=second)
+    cfg = Config.model_validate({"device": {"platform": "first"}})
+    factory = registry.PlatformFactory(cfg)
+    platform = factory.create()
+    assert platform.name == "first"
+    alias = factory.create("second")
+    assert alias.name == "second"
+    assert platform.name == "first"
+
+
+@pytest.mark.parametrize("stage", ["import", "init", "options"])
+def test_plugin_errors_never_echo_raw_option_values(
+    monkeypatch: pytest.MonkeyPatch, stage: str,
+) -> None:
+    secret = "fixture-private-credential"
+
+    class RejectingPlugin(_PluginPlatform):
+        def __init__(self, config: Config) -> None:
+            if stage == "init":
+                raise ConfigError(f"failed with password={secret}")
+            super().__init__(config)
+
+        def validate_options(self, options: Mapping[str, Any]) -> Mapping[str, Any]:
+            raise ConfigError(f"invalid password: {options['password']}")
+
+    entry = _EntryPoint(
+        f"registry-secret-{stage}", "test:RejectingPlugin", result=RejectingPlugin,
+        error=ImportError(secret) if stage == "import" else None,
+    )
+    _entries(monkeypatch, **{entry.name: entry})
+    cfg = Config.model_validate({
+        "device": {"platform": entry.name}, "platforms": {entry.name: {"password": secret}},
+    })
+    with pytest.raises(ConfigError) as caught:
+        registry.PlatformFactory(cfg).create()
+    assert secret not in str(caught.value.to_dict())
+    assert caught.value.__suppress_context__

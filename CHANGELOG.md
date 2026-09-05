@@ -17,6 +17,9 @@ notes, so you can check for a newer version — and read what changed — withou
   fall back to the same Android class name. Repeated items are paired along the requested axis, with
   jitter and cross-axis motion excluded, so a real thumbnail-strip or icon-grid swipe no longer
   reports `already-at-end` solely because every visible item has the same fallback label.
+- Recovery retains undos when boot identity or backup evidence is missing, and refuses to overwrite
+  unreadable ledgers. One unavailable platform plugin no longer prevents other targets' cleanup.
+  MCP exit cleanup stops only its exact owned boot, preserving replacements and handoffs.
 
 ### Added
 

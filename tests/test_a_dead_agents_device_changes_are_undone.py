@@ -183,9 +183,12 @@ def test_an_unknown_owner_is_undone_once_the_grace_period_lapses(tmp_path: Path)
     assert ("set_http_proxy", None) in device.calls, lapsed
 
 
-def test_a_reboot_since_the_change_is_not_replayed_onto_the_fresh_boot(tmp_path: Path) -> None:
-    """The device already forgot the setting; re-applying an undo would be a change of its own."""
-    rebooted = _Device(token="boot-2")
+@pytest.mark.parametrize("token", ["boot-2", None])
+def test_a_changed_or_unreadable_boot_retains_undo_without_touching_the_target(
+    tmp_path: Path, token: str | None,
+) -> None:
+    """Reboot/offline is not evidence that retained settings and files disappeared."""
+    rebooted = _Device(token=token)
     _record_proxy("emulator-5554", owner_pid=_dead_pid(), cache_dir=tmp_path)
 
     report = teardown.reap(
@@ -193,8 +196,100 @@ def test_a_reboot_since_the_change_is_not_replayed_onto_the_fresh_boot(tmp_path:
     )
 
     assert rebooted.calls == [], report
-    assert all("rebooted" in item["result"] for item in report["undone"]), report
-    assert device_ledger.read_ledger("emulator-5554") == []
+    assert not report["undone"]
+    assert len(report["failed"]) == 2
+    assert len(device_ledger.read_ledger("emulator-5554")) == 2
+
+
+def test_a_corrupt_ledger_cannot_be_overwritten_by_a_new_mutation(tmp_path: Path) -> None:
+    path = device_ledger.ledger_path("corrupt-target")
+    path.write_text('{"entries": [', encoding="utf-8")
+    with pytest.raises(ConfigError, match="cannot read pending"):
+        device_ledger.record("corrupt-target", key="new", kind="new", op="set_http_proxy")
+    assert path.read_text(encoding="utf-8") == '{"entries": ['
+
+
+@pytest.mark.parametrize("operation", [
+    "restore_adbd_root", "disable_device_agent", "remove_device_agent",
+    "stop_device_agent_touch_capture",
+])
+def test_target_services_require_the_same_instance_proof_as_runtime_undos(
+    tmp_path: Path, operation: str,
+) -> None:
+    device_ledger.record(
+        "service-target", key=operation, kind=operation, op=operation,
+        instance_token="original-boot", cache_dir=tmp_path,
+    )
+    calls: list[str] = []
+    result = device_ledger.replay("service-target", context=device_ledger.UndoContext(
+        serial="service-target", instance_token="replacement-boot",
+        capability=lambda name: calls.append(name),
+    ))
+    assert calls == []
+    assert result["remaining"] == 1
+    assert result["failed"]
+
+
+@pytest.mark.parametrize("operation", ["restore_developer_settings", "restore_app_prefs"])
+def test_a_missing_backup_is_not_a_successful_undo(tmp_path: Path, operation: str) -> None:
+    device_ledger.record(
+        "backup-target", key=operation, kind=operation, op=operation,
+        args={"backup_path": str(tmp_path / "missing.json")},
+    )
+    result = device_ledger.replay("backup-target", context=device_ledger.UndoContext(
+        serial="backup-target", capability=lambda name: object(),
+    ))
+    assert result["remaining"] == 1
+    assert "missing" in result["failed"][0]["error"]
+
+
+def test_teardown_run_continues_past_an_unavailable_recorded_plugin(tmp_path: Path) -> None:
+    from android_ui_analyser.engine import Engine
+    from conftest import make_config
+
+    device_ledger.record("gone", platform="aaa-uninstalled", key="proxy", kind="proxy", op="set_http_proxy")
+    _record_proxy("emulator-5554", owner_pid=_dead_pid(), cache_dir=tmp_path)
+    engine = Engine(make_config(cache={"dir": str(tmp_path)}))
+    original = _Platform(_Device())
+
+    def create(name: str) -> Any:
+        if name == "aaa-uninstalled":
+            raise ConfigError("plugin unavailable")
+        assert name == "android"
+        return original
+
+    engine._platform_factory.create = create  # type: ignore[method-assign]
+    result = engine.teardown_run(force=True)
+    assert result["ok"] is False
+    assert len(result["reports"]) == 2
+    assert result["reports"][0]["skipped"].startswith("no adapter available")
+    assert not device_ledger.read_ledger("emulator-5554")
+    assert device_ledger.read_ledger("gone", platform="aaa-uninstalled")
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_missing_or_corrupt_option_key_retains_nonempty_configuration_undos(
+    tmp_path: Path, corrupt: bool,
+) -> None:
+    from android_ui_analyser.config import Config
+
+    cfg = Config.model_validate({"platforms": {"android": {"endpoint": "https://grid.invalid"}}})
+    options = cfg.platform_options()
+    fingerprint = _options_fingerprint(options)
+    device_ledger.record("configured-target", key="proxy", kind="proxy", op="set_http_proxy",
+                         platform_options_fingerprint=fingerprint)
+    key = device_ledger.ledger_dir() / ".platform-options-hmac-key"
+    if corrupt:
+        key.write_bytes(b"short")
+    else:
+        key.unlink()
+    platform = _Platform(_Device())
+    platform.config = cfg
+    result = teardown.reap("configured-target", platform=platform, force=True)
+    assert result["code"] in {"platform_options_recovery_mismatch", "platform_options_identity_unavailable"}
+    assert result["identity_key"] == str(key)
+    assert result["remaining"] == 1
+    assert not platform.device.calls
 
 
 def test_host_residue_is_cleaned_up_even_when_the_target_is_unreachable(tmp_path: Path) -> None:

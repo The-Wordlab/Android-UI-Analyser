@@ -18,9 +18,10 @@ from mcp.shared.memory import create_connected_server_and_client_session
 import android_ui_analyser.engine as engine_mod
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.mcp_server import (
+    _MCP_STARTED_TARGETS,
     _fold_action_until,
-    _mcp_started_serials,
     _tool_definitions,
+    _track_mcp_target,
     build_server,
 )
 from android_ui_analyser.schema import ActionResult, AnalyzeResult
@@ -420,10 +421,11 @@ def test_mcp_finish_keeps_a_warm_handoff_tracked_for_process_exit_cleanup(
             "errors": [],
         },
     )
-    tracked = _mcp_started_serials()
-    previous = set(tracked)
+    tracked = _MCP_STARTED_TARGETS
+    previous = dict(tracked)
     tracked.clear()
-    tracked.update({"emulator-5592", "emulator-5594"})
+    for serial in ("emulator-5592", "emulator-5594"):
+        _track_mcp_target(engine, {"serial": serial, "instance": f"boot-{serial}"})
 
     async def run() -> dict[str, object]:
         server = build_server(engine)
@@ -434,7 +436,9 @@ def test_mcp_finish_keeps_a_warm_handoff_tracked_for_process_exit_cleanup(
     try:
         output = anyio.run(run)
         assert output["ok"] is True
-        assert tracked == {"emulator-5592", "emulator-5594"}
+        assert {item.target.target_id for item in tracked.values()} == {
+            "emulator-5592", "emulator-5594",
+        }
     finally:
         tracked.clear()
         tracked.update(previous)
@@ -1053,27 +1057,31 @@ def test_mcp_resolve_dispatch_stub() -> None:
     assert data["ok"] is True and data.get("to_id") == 2
 
 
-def test_mcp_emulator_cleanup_tracks_serials(
+def test_mcp_emulator_cleanup_uses_the_exact_android_instance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from android_ui_analyser import mcp_server as mcp
 
-    mcp._MCP_STARTED_SERIALS.clear()
-    mcp._MCP_STARTED_OWNERS.clear()
-    mcp._MCP_STARTED_SERIALS.add("emulator-9998")
+    mcp._MCP_STARTED_TARGETS.clear()
+    engine = _engine()
+    engine.config.cache.dir = str(tmp_path)
+    engine.config.lease.registry_dir = str(tmp_path)
+    mcp._track_mcp_target(engine, {
+        "serial": "emulator-9998", "instance": "original-boot", "pid": 12345,
+    })
     stopped: list[str] = []
 
     def fake_stop(**kwargs):  # type: ignore[no-untyped-def]
-        ser = kwargs.get("serial")
-        if ser:
-            stopped.append(str(ser))
-            return {"ok": True, "stopped": [ser]}
-        return {"ok": True, "stopped": []}
+        assert kwargs["instance"] == "original-boot"
+        assert kwargs["pid"] == 12345
+        stopped.append("emulator-9998")
+        return {"ok": True, "stopped": ["emulator-9998"]}
 
-    monkeypatch.setattr("android_ui_analyser.emulator.stop", fake_stop)
+    monkeypatch.setattr("android_ui_analyser.emulator.stop_spawned_instance", fake_stop)
+    monkeypatch.setattr("android_ui_analyser.emulator.stop", lambda **_kw: pytest.fail("broad stop"))
     out = mcp.cleanup_mcp_emulators(tmp_path)
     assert "emulator-9998" in out["stopped"]
-    assert "emulator-9998" not in mcp._MCP_STARTED_SERIALS
+    assert not mcp._MCP_STARTED_TARGETS
 
 
 def test_mcp_emulator_cleanup_preserves_a_transferred_live_lease(
@@ -1091,33 +1099,20 @@ def test_mcp_emulator_cleanup_preserves_a_transferred_live_lease(
     assert leases.acquire(tmp_path, serial, owner=source)
     offered = leases.create_handoff(tmp_path, serial, owner=source)
     leases.accept_handoff(tmp_path, offered["token"], owner=child)
-    mcp._MCP_STARTED_SERIALS.clear()
-    mcp._MCP_STARTED_OWNERS.clear()
-    mcp._MCP_STARTED_SERIALS.add(serial)
-    mcp._MCP_STARTED_OWNERS.add("started-by-orchestrator")
+    mcp._MCP_STARTED_TARGETS.clear()
+    engine = _engine()
+    engine.config.cache.dir = str(tmp_path)
+    engine.config.lease.registry_dir = str(tmp_path)
+    mcp._track_mcp_target(engine, {"serial": serial, "instance": "owned-boot"})
     stopped: list[dict[str, object]] = []
-
-    class EmulatorService:
-        def stop_virtual_targets(self, request: object) -> object:
-            from android_ui_analyser.platforms.virtual_targets import (
-                VirtualTargetStopResult,
-            )
-
-            stopped.append({"request": request})
-            return VirtualTargetStopResult(stopped_target_ids=(serial,))
-
-    class Platform:
-        name = "android"
-
-        def capability(self, name: str) -> EmulatorService:
-            assert name == "virtual_targets"
-            return EmulatorService()
-
-    result = mcp.cleanup_mcp_emulators(tmp_path, platform=Platform())
+    monkeypatch.setattr(
+        "android_ui_analyser.emulator.stop_spawned_instance",
+        lambda **kwargs: stopped.append(kwargs),
+    )
+    result = mcp.cleanup_mcp_emulators(tmp_path, platform=engine.platform)
 
     assert result["stopped"] == []
     assert result["preserved"] == [serial]
     assert stopped == []
     assert leases.holder(tmp_path, serial) == "child"
-    assert not mcp._MCP_STARTED_SERIALS
-    assert not mcp._MCP_STARTED_OWNERS
+    assert not mcp._MCP_STARTED_TARGETS

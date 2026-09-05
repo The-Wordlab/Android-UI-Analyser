@@ -210,3 +210,28 @@ def test_unknown_legacy_capture_sidecar_is_retired_not_adopted(
     assert result["status"] == "started"
     assert result["socket"] == scoped
     assert f"{legacy}:stop" in stopped
+
+
+def test_empty_platform_options_need_no_local_key_even_if_one_is_corrupt(tmp_path: Path) -> None:
+    key = tmp_path / ".platform-options-hmac-key"
+    first = platform_options_fingerprint({}, key_dir=tmp_path)
+    assert not key.exists()
+    key.write_bytes(b"broken")
+    assert platform_options_fingerprint({}, key_dir=tmp_path) == first
+    key.unlink()
+    assert platform_options_fingerprint({}, key_dir=tmp_path) == first
+
+
+def test_option_identity_covers_referenced_environment_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    options = {"endpointEnv": "FIXTURE_ENDPOINT", "nested": {"token_env": "FIXTURE_TOKEN"}}
+    monkeypatch.setenv("FIXTURE_ENDPOINT", "https://one.invalid")
+    monkeypatch.setenv("FIXTURE_TOKEN", "credential-one")
+    first = platform_options_fingerprint(options, key_dir=tmp_path)
+    monkeypatch.setenv("FIXTURE_ENDPOINT", "https://two.invalid")
+    second = platform_options_fingerprint(options, key_dir=tmp_path)
+    monkeypatch.setenv("FIXTURE_TOKEN", "credential-two")
+    third = platform_options_fingerprint(options, key_dir=tmp_path)
+    assert len({first, second, third}) == 3
+    assert "credential" not in first + second + third

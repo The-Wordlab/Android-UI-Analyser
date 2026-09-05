@@ -1,9 +1,9 @@
 # Platform foundation v1
 
-Status: implemented and locally verified on `refactor/platform-foundation-v1`; independent Claude
-Fable 5.1 review is pending subscription availability.
+Status: implemented on `refactor/platform-foundation-v1`, rebased onto `713223a`; the 2026-09-05
+Codex and Claude Fable 5.1 review corrections are being verified before merge.
 
-This milestone makes AUA's existing platform strategy a complete, enforceable boundary. Its
+This milestone gives AUA's existing platform strategy a versioned, enforceable boundary. Its
 definition of done is deliberately stronger than "an adapter class exists": an independently
 packaged, non-Android adapter must be able to implement an attached target and optional virtual
 target without changing the Engine, CLI, MCP server, daemon, dashboard, teardown, or shared
@@ -31,7 +31,8 @@ renamed after the fact.
   `AppRef(platform, app_id)`. Existing untagged state remains Android-compatible; explicitly
   referenced caller-authored flow files may remain portable.
 - Detached workers receive only the selected opaque option mapping through an inherited anonymous
-  file descriptor. A local keyed digest identifies the complete mapping without persisting its
+  file descriptor. A local keyed digest identifies the complete mapping and named environment
+  references without persisting their
   contents; changed or missing configuration fails closed instead of replaying against an unknown
   endpoint. Plugin option redaction covers nested/camel/snake secret names and credential-bearing
   URLs.
@@ -50,7 +51,9 @@ Recovery deliberately stores a configuration fingerprint, not plugin credentials
 adapter. Therefore a target ID must be routable within the selected platform configuration.
 Process-death recovery recreates the adapter from that same configuration; if it has changed or is
 unavailable, AUA leaves the undo pending and tells the operator to restore with the original
-configuration.
+configuration and its original local identity key. Empty option mappings need no key. A missing
+or changed boot identity also leaves target-bound undos pending; a reboot is not evidence that
+persisted settings, permissions, or files disappeared.
 
 ## Compatibility policy
 
@@ -157,13 +160,14 @@ instance token are separate values; rollback consumes only the instance token.
 
 ### Attached-target gate
 
-Result: passed by the installed-wheel conformance profile plus the shared Engine/transport
-integration matrix.
+Result: the installed-wheel attached UI/input profile passed. Shared Engine workflows and
+transports have separate integration coverage; they are not all exercised through that wheel.
 
 An external adapter can discover and connect to an already-running target, analyze hierarchy and
 visual sources, tap/type/swipe/wait, and use history/flows/goto without changing shared source. A
 missing optional feature produces the same typed error through Engine, CLI, and MCP. Android tooling
-is unavailable during this test.
+is unavailable during the installed-wheel profile, which covers hierarchy, screenshot geometry,
+tap/type/key/wait, and verified swipe. History/flows/goto use separate repository tests.
 
 ### Coexistence and recovery gate
 
@@ -184,13 +188,15 @@ can still use attached targets and receives a typed refusal if provisioning is r
 
 ### Plugin-only gate
 
-Result: passed for capabilities a plugin declares. This does not require parity with optional
-Android-only services or remove Android dependencies from AUA's own installation.
+Result: passed for the published attached-target profile. Optional provisioning and process
+recovery have separate typed-fake integration tests, not one installed-wheel end-to-end scenario.
+This does not require parity with Android-only services or remove Android dependencies from AUA.
 
 The fake adapter is packaged and loaded through the `aua.platforms` entry point, supplies its own
 configuration and native runtime, and passes the published conformance profiles with zero shared
-source changes. This is the point at which AUA may promise that a future iOS implementation is
-plugin-only.
+source changes. This provides the implementation seam for a future iOS plugin, not proof of an
+unimplemented native transport. A contributor must validate every optional capability they add;
+the current evidence does not promise that all future native edge cases need zero core changes.
 
 ## Verification
 
@@ -218,12 +224,36 @@ environment mutation with explicit restore, and teardown with no pending ledger 
   positive/negative wait predicates, app status, an idempotent helper-APK install, orientation
   `natural -> landscape/left -> natural`, successful session finish, lease release, owned virtual-
   target handoff, and a final teardown status with zero pending device changes.
-- Claude Fable 5.1 review remains intentionally separate. The earlier subscription limit does not
-  affect local implementation or verification; request that review when access is available.
+- This historical record predates the review corrections below and is not the final merge gate.
+
+### Review corrections — 2026-09-05
+
+Claude Code selected `claude-fable-5-1` for an independent read-only review of `713223a..d65e5d3`
+(session `0e7e4922-2d6e-40df-9911-52790be9344e`). Its initial verdict was do not merge. The review
+confirmed three fixes found independently and identified two additional recovery issues:
+
+- Disjoint, reversible storage encoding prevents delimiter collisions, escaped-name collisions,
+  path traversal, and plugin-id case folding on macOS while retaining Android's legacy paths.
+- Entry-point aliases use bound subclasses without renaming live adapters.
+- MCP exit cleanup retains the original strategy/configuration and exact instance token, calls
+  the shared Engine exact-instance operation, and preserves transferred or replacement boots.
+- All-target teardown reports an unavailable recorded plugin and continues with other platforms.
+- Empty configurations no longer depend on a local HMAC key. Nonempty configurations retain the
+  fail-closed rule if the key is missing/corrupt, with a per-target report naming that key.
+  An automatic or broad force bypass was intentionally rejected: configuration loss must not
+  authorize replay against an unproven endpoint. Back up the key with pending ledgers.
+
+Additional review hardening keeps unreadable/malformed ledgers from being overwritten, retains
+undos when backups or recorded boot identity are unavailable, applies boot guards to target-facing
+services as well as runtime calls, covers environment-reference values in option identity, and
+prevents plugin configuration exceptions and nested credential values from leaking into output.
+
+Final suite, static checks, fresh Android smoke evidence, and follow-up Claude verdict: pending.
 
 ## Claude review brief
 
-Review `main...refactor/platform-foundation-v1` as an architecture and safety review; do not add
+Review `origin/main...refactor/platform-foundation-v1` and any explicitly identified corrective
+working-tree diff as an architecture and safety review; do not add
 iOS code. Treat a finding as blocking when it shows that a separately packaged adapter must change
 shared AUA source for its declared capabilities, a non-Android path can reach Android tooling, or a
 persistent mutation/recovery path can act on the wrong target/configuration or lose its undo.

@@ -12,7 +12,6 @@ is interpreted as Android for backwards compatibility.
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 from typing import Any
 
@@ -27,14 +26,19 @@ def _required(value: object, *, field: str) -> str:
 
 
 def safe_component(value: object) -> str:
-    """A readable filesystem component with a collision-resistant suffix when escaped."""
+    """An unambiguous component, including on case-insensitive host filesystems.
+
+    Percent and the namespace separator are escaped too. Uppercase bytes are encoded so two
+    case-sensitive native ids cannot alias on macOS. Dot path components never traverse.
+    """
 
     raw = _required(value, field="identity component")
-    safe = "".join(char if char.isalnum() or char in "-_." else "_" for char in raw)
-    if safe == raw:
-        return safe
-    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
-    return f"{safe}-{digest}"
+    if raw in {".", ".."}:
+        return raw.replace(".", "%2E")
+    return "".join(
+        chr(byte) if byte in b"abcdefghijklmnopqrstuvwxyz0123456789-_." else f"%{byte:02X}"
+        for byte in raw.encode("utf-8")
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,7 +67,9 @@ class TargetRef:
         )
         if self.platform == LEGACY_PLATFORM:
             return legacy
-        return f"{safe_component(self.platform)}--{safe_component(self.target_id)}"
+        # '@' cannot occur in a legacy Android key or an encoded component. Delimiting both
+        # components therefore separates plugins from Android and from one another.
+        return f"@{safe_component(self.platform)}@{safe_component(self.target_id)}"
 
     def to_json(self) -> dict[str, str]:
         """Compatibility metadata: neutral fields plus the historical ``serial`` alias."""
@@ -114,7 +120,7 @@ class AppRef:
         )
         if self.platform == LEGACY_PLATFORM:
             return legacy
-        return f"{safe_component(self.platform)}--{safe_component(self.app_id)}"
+        return f"@{safe_component(self.platform)}@{safe_component(self.app_id)}"
 
     def to_json(self) -> dict[str, str]:
         return {

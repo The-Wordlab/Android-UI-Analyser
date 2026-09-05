@@ -95,4 +95,4 @@ def test_selected_platform_reaches_child_and_namespaces_socket(monkeypatch, tmp_
     argv = _spawn_argv(monkeypatch, tmp_path, cfg, serial=None)
 
     assert argv[argv.index("--platform") + 1] == "ios"
-    assert argv[argv.index("--socket") + 1].endswith(".ios--shared-id")
+    assert argv[argv.index("--socket") + 1].endswith(".@ios@shared-id")

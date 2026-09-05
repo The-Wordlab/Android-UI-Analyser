@@ -14,6 +14,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 from collections.abc import Mapping
 from pathlib import Path
@@ -37,7 +38,9 @@ def selected_platform_options(
 ) -> dict[str, Any]:
     """Return one plugin's JSON-compatible effective option mapping."""
 
-    data = config.masked_dict() if mask_secrets else config.model_dump(mode="json")
+    if not mask_secrets:
+        return config.platform_options(platform)
+    data = config.masked_dict()
     platforms = data.get("platforms")
     if not isinstance(platforms, dict):  # pragma: no cover - Config guarantees this shape
         return {}
@@ -120,7 +123,27 @@ def platform_options_fingerprint(
 ) -> str:
     """Keyed identity for the full opaque mapping, safe to persist and compare."""
 
-    payload = encode_platform_options(options)
+    if not options:
+        # An empty mapping contains no secret or routing choice to hide. Default Android
+        # must not become unrecoverable just because a cache-pruner removed a local key.
+        return hashlib.sha256(b"aua-empty-platform-options-v1").hexdigest()
+    referenced: dict[str, str | None] = {}
+
+    def collect(value: Any) -> None:
+        if isinstance(value, Mapping):
+            for key, item in value.items():
+                snake = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", str(key)).lower()
+                if snake.endswith("_env") and isinstance(item, str) and item:
+                    referenced[item] = os.environ.get(item)
+                else:
+                    collect(item)
+        elif isinstance(value, list):
+            for item in value:
+                collect(item)
+
+    collect(options)
+    identity = {"options": dict(options), "referenced_environment": referenced}
+    payload = encode_platform_options(identity)
     return hmac.new(_fingerprint_key(key_dir), payload, hashlib.sha256).hexdigest()
 
 
