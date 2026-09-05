@@ -101,6 +101,11 @@ destroy another worker's recovery evidence. This is a deliberate operator decisi
 automatic retry strategy or proof that device state was restored. MCP exposes the same Engine
 operations as `teardown_status`, `teardown_run`, and `teardown_discard`.
 
+MCP is a trusted-client boundary: `confirmed: true` is an explicit request, not independent proof
+of human approval. Restrict recovery tools in the MCP client's allow-list or permission policy;
+an agent must obtain user authorization before forced replay or discard. With leasing disabled,
+the operator must additionally establish that no live worker still relies on the selected undos.
+
 ### 2. Deciding when it is safe to replay
 
 `device_ledger.reapable()` returns a reason, or `None` for "leave it alone". Undoing a running

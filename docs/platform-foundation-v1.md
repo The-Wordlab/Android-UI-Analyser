@@ -1,7 +1,7 @@
 # Platform foundation v1
 
-Status: implemented on `refactor/platform-foundation-v1`, rebased onto `713223a`; the 2026-09-05
-Codex and Claude Fable 5.1 review corrections are being verified before merge.
+Status: implemented and verified, based on `713223a`. Codex and Claude Fable 5.1 architecture,
+safety, and corrective reviews completed on 2026-09-05.
 
 This milestone gives AUA's existing platform strategy a versioned, enforceable boundary. Its
 definition of done is deliberately stronger than "an adapter class exists": an independently
@@ -252,8 +252,8 @@ prevents plugin configuration exceptions and nested credential values from leaki
 
 ### Final verification — 2026-09-05
 
-- Full suite at `93791aa`: 4,434 passed, 16 skipped, 5 expected xfails, 3 optional-provider warnings
-  in 90.41 seconds. Ruff, Mypy (135 source files), and `git diff --check` passed.
+- Final full suite at `8001ea2`: 4,446 passed, 16 skipped, 5 expected xfails, 3 optional-provider
+  warnings in 95.84 seconds. Ruff, Mypy (135 source files), and `git diff --check` passed.
 - Fresh unpinned Android session `7c3c9d6faf74413ba08024176d652140` automatically provisioned a
   read-only `Medium_Phone` target. Public Settings UI checks covered launch/status, hierarchy and
   mixed analysis, semantic search tap, verified `Display` input and clear, folded waits, a
@@ -262,17 +262,24 @@ prevents plugin configuration exceptions and nested credential values from leaki
   this was not evidence of a fresh APK transfer.
 - A separate real MCP call started a parallel read-only target with a unique boot nonce, verified
   its owned status, exercised MCP exit cleanup, and observed that exact target disconnect. The
-  original leased target remained available.
+  original leased target remained available. This smoke passed again after the final corrective
+  source commit (`9b7f634`). Host-only CLI teardown status also succeeded with an unavailable
+  platform selected, without loading its adapter.
 - Teardown reported zero pending device changes. Session finish returned `verdict=passed`,
   released its lease, and handed its owned target to the warm pool. Private runtime artifacts
-  remain outside the repository under `/tmp/aua-platform-review-xtORZn`.
+  remain outside the repository under `/tmp/aua-platform-review-xtORZn`. At review completion,
+  the temporary warm target was explicitly retired through the Engine exact-instance operation
+  with its captured process id; no foreign target was stopped.
 - Claude Fable 5.1 accepted the identity, cleanup, and key-loss safety decisions on follow-up,
   subject to final verification. It requested two operability fixes: an audited way to abandon
   unrecoverable stale records and per-file isolation/reporting of corrupt ledgers. Both are now
   implemented with Engine/CLI/MCP coverage. Explicit discard requires named keys, a reason and
   confirmation, refuses live leases, archives evidence first, and never loads a platform or
   touches a device. Proven-dead Android boot bookkeeping is also retired without signalling
-  potentially recycled process/watchdog ids. Final recheck and updated suite count: pending.
+  potentially recycled process/watchdog ids. Claude's final focused recheck of `93791aa..9b7f634`
+  returned **safe to merge**, conditional on the full suite and repeated MCP boot smoke; both
+  conditions passed. The subsequent `8001ea2` commit only isolates a test's live-pid probe from
+  actual host process state. No code-review blockers remain.
 
 ## Claude review brief
 
