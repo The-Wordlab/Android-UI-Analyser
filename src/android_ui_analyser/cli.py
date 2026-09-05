@@ -7573,7 +7573,7 @@ def lease_cmd(
 @app.command(name="teardown")
 def teardown_cmd(
     ctx: typer.Context,
-    action: str = typer.Argument("status", metavar="ACTION", help="status|run"),
+    action: str = typer.Argument("status", metavar="ACTION", help="status|run|discard"),
     serial_arg: str | None = typer.Option(
         None, "--serial-target", help="Only this device (defaults to every dirty device)."
     ),
@@ -7584,6 +7584,11 @@ def teardown_cmd(
     ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Say what would be undone without touching any device."
+    ),
+    keys: list[str] | None = typer.Option(None, "--key", help="Exact undo key to discard (repeatable)."),
+    reason: str = typer.Option("", "--reason", help="Why automatic recovery is being abandoned."),
+    confirmed: bool = typer.Option(
+        False, "--confirmed", help="Confirm discard: archive undo evidence without restoring the device."
     ),
 ) -> None:
     """Show or undo persistent device changes AUA is still holding on your behalf.
@@ -7611,7 +7616,14 @@ def teardown_cmd(
             result = engine.teardown_run(serial=serial_arg, force=force, dry_run=dry_run)
             _emit(result, fmt)
             return
-        raise UsageError(f"unknown teardown action {verb!r}", hint="Use `status` or `run`.")
+        if verb == "discard":
+            if not serial_arg or force or dry_run:
+                raise UsageError("discard needs --serial-target and does not accept --force or --dry-run")
+            _emit(engine.teardown_discard(
+                serial=serial_arg, keys=list(keys or []), reason=reason, confirmed=confirmed,
+            ), fmt)
+            return
+        raise UsageError(f"unknown teardown action {verb!r}", hint="Use `status`, `run`, or `discard`.")
 
     _run(ctx, go)
 

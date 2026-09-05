@@ -1127,13 +1127,13 @@ class Engine:
             grace_s=float(self.config.teardown.grace_s),
         )
         return {
-            "ok": True,
+            "ok": not any(item.get("code") for item in pending),
             "action": "teardown-status",
             "devices": pending,
             "detail": (
                 "no device has pending changes"
                 if not pending
-                else f"{len(pending)} device(s) carry changes AUA can undo"
+                else f"{len(pending)} ledger(s) have pending changes or need recovery"
             ),
         }
 
@@ -1158,7 +1158,7 @@ class Engine:
                 )
             ]
         else:
-            reports = []
+            reports = device_ledger.blocked_ledgers()
             adapters = {self._platform.name: self._platform} if self._platform is not None else {}
             for target in device_ledger.pending_targets():
                 adapter = adapters.get(target.platform)
@@ -1171,7 +1171,7 @@ class Engine:
                             "code": getattr(exc, "code", "platform_recovery_unavailable"),
                             "skipped": f"no adapter available for platform {target.platform!r}",
                             "undone": [], "failed": [],
-                            "remaining": len(device_ledger.read_ledger(target)),
+                            "remaining": None,
                         })
                         continue
                     adapters[target.platform] = adapter
@@ -1197,6 +1197,8 @@ class Engine:
             "reports": reports,
             "detail": f"{undone} change(s) undone, {failed} failed, {blocked} target(s) blocked",
         }
+
+    teardown_discard = engine_environment.teardown_discard
 
     def renew_lease(self) -> None:
         """Heartbeat the current lease — called from inside long waits.

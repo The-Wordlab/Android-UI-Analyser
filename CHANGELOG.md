@@ -20,6 +20,9 @@ notes, so you can check for a newer version — and read what changed — withou
 - Recovery retains undos when boot identity or backup evidence is missing, and refuses to overwrite
   unreadable ledgers. One unavailable platform plugin no longer prevents other targets' cleanup.
   MCP exit cleanup stops only its exact owned boot, preserving replacements and handoffs.
+- `aua teardown discard` and matching MCP recovery operations provide explicit, audited archival
+  of stale undo keys when the original target/configuration is gone. They do not restore device
+  state. Corrupt ledger files are reported individually without blocking other targets' cleanup.
 
 ### Added
 

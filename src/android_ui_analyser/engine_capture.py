@@ -99,8 +99,10 @@ def record_start(self: Engine, path: str | None = None) -> ActionResult:
             "an earlier screen recording still has pending target-side cleanup",
             code="recording_cleanup_pending",
             hint=(
-                "Run `aua teardown run --serial <target> --force` with the original platform "
-                "options before starting another recording."
+                "Use `aua teardown run --serial-target <target>` with the original configuration "
+                "and boot. If that boot is gone, inspect `aua teardown status` and explicitly "
+                "archive the stale screen_recording undo with `aua teardown discard`; this does "
+                "not restore the device."
             ),
         )
     self.record_device_change(

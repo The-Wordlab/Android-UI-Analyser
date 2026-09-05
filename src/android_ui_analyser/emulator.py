@@ -1851,6 +1851,7 @@ def stop_spawned_instance(
     skipped: list[dict[str, Any]] = []
     stopped: list[str] = []
     own_pid = positive_pid if record_is_ours else None
+    process_gone = False
     with _stop_lease_transaction(lease_registry_dir, serial):
         # Re-read after obtaining the target fence. A new boot can replace a record while
         # cleanup was waiting; neither its process nor its bookkeeping belongs to this call.
@@ -1868,8 +1869,15 @@ def stop_spawned_instance(
                 from .leases import _proc_started
 
                 if _proc_started(int(positive_pid or 0)) != started:
-                    record_is_ours = False
                     own_pid = None
+                    try:
+                        os.kill(int(positive_pid or 0), 0)
+                    except ProcessLookupError:
+                        process_gone = True
+                    except OSError:
+                        record_is_ours = False  # Inaccessible is not proof of death.
+                    else:
+                        record_is_ours = False  # A live replacement pid is never ours.
         # The lease read and every process/device kill stay inside the same exclusive
         # target fence used by acquire/release/transfer. No process can claim this serial
         # after the check and before the kill.
@@ -1891,10 +1899,11 @@ def stop_spawned_instance(
                 if serial and foreign is None:
                     stopped.append(serial)
         if record_is_ours and may_kill_own_process and meta_path is not None:
-            _kill_watchdog(meta)
+            if not process_gone:
+                _kill_watchdog(meta)
             meta_path.unlink(missing_ok=True)
             port = meta.get("port")
-            if isinstance(port, int):
+            if isinstance(port, int) and not process_gone:
                 release_console_port(port)
     matched = (
         [_instance_identity({**meta, "_path": str(meta_path)})] if record_is_ours else []

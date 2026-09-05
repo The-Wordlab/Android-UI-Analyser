@@ -1474,6 +1474,36 @@ def _tool_definitions() -> list[types.Tool]:
             inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
         ),
         types.Tool(
+            name="teardown_status",
+            description="List pending undos and blocked ledger files without connecting to a target.",
+            inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
+        ),
+        types.Tool(
+            name="teardown_run",
+            description="Replay safe pending undos; force bypasses leases, never boot/configuration proof.",
+            inputSchema={
+                "type": "object", "properties": {
+                    "target_id": {"type": "string"},
+                    "force": {"type": "boolean", "default": False},
+                    "dry_run": {"type": "boolean", "default": False},
+                }, "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="teardown_discard",
+            description=("Explicitly abandon named stale undos on an unleased target. Archives evidence "
+                         "but does not connect to or restore the device. Requires human authorization."),
+            inputSchema={
+                "type": "object", "properties": {
+                    "target_id": {"type": "string", "minLength": 1},
+                    "keys": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
+                    "reason": {"type": "string", "minLength": 1},
+                    "confirmed": {"type": "boolean", "default": False},
+                }, "required": ["target_id", "keys", "reason", "confirmed"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
             name="virtual_target_list",
             description="List reusable virtual-target definitions for the selected platform.",
             inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
@@ -3268,6 +3298,18 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         )
     if name == "list_devices":
         return [d.model_dump(mode="json") for d in engine.list_devices()]
+    if name == "teardown_status":
+        return engine.teardown_status()
+    if name == "teardown_run":
+        return engine.teardown_run(
+            serial=args.get("target_id"), force=bool(args.get("force", False)),
+            dry_run=bool(args.get("dry_run", False)),
+        )
+    if name == "teardown_discard":
+        return engine.teardown_discard(
+            serial=str(args["target_id"]), keys=list(args["keys"]), reason=str(args["reason"]),
+            confirmed=bool(args.get("confirmed", False)),
+        )
     if name == "virtual_target_list":
         return engine.virtual_target_list()
     if name == "virtual_target_status":
@@ -3957,6 +3999,9 @@ _LEASE_FREE_TOOLS = frozenset(
         "session_start",
         "session_progress",
         "session_review",
+        "teardown_status",
+        "teardown_run",
+        "teardown_discard",
         "virtual_target_create",
         "virtual_target_delete",
         "virtual_target_list",

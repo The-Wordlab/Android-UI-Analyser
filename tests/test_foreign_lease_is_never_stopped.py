@@ -549,6 +549,33 @@ def test_a_reused_host_pid_cannot_be_killed_from_a_stale_owned_boot_record(
     assert record.exists()
 
 
+def test_a_proven_dead_boot_drops_only_its_bookkeeping_without_signalling_pids(
+    tmp_path: Path, _no_real_devices: dict[str, list], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from android_ui_analyser.platforms import OwnedVirtualTargetStopRequest
+
+    cache = tmp_path / "cache"
+    record = _boot_record(cache, serial=SER_GUARD, pid=4242, started_at=time.time())
+    token = "fake.p5554@" + "a" * 32
+    metadata = json.loads(record.read_text())
+    metadata.update(instance_token=token, process_started="original-process")
+    record.write_text(json.dumps(metadata))
+    monkeypatch.setattr(leases, "_proc_started", lambda _pid: "")
+
+    def probe(pid: int, sig: int) -> None:
+        assert (pid, sig) == (4242, 0)
+        raise ProcessLookupError
+
+    monkeypatch.setattr(em.os, "kill", probe)
+    monkeypatch.setattr(em, "_kill_watchdog", lambda _meta: pytest.fail("unverified watchdog pid"))
+    result = em.stop_virtual_target_instance(OwnedVirtualTargetStopRequest(
+        instance_token=token, cache_dir=cache, lease_registry_dir=tmp_path / "registry",
+    ))
+    assert not result.stopped_target_ids
+    assert not _no_real_devices["signalled"]
+    assert not record.exists()
+
+
 # ----------------------------------------------------------------- lease atomicity
 
 

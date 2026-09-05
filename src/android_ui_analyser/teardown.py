@@ -33,6 +33,7 @@ from typing import Any
 
 from . import device_ledger
 from .atomic import atomic_write_text
+from .errors import ConfigError
 from .platforms.identity import LEGACY_PLATFORM, TargetLike, TargetRef, target_ref
 from .platforms.options_transport import (
     encode_platform_options,
@@ -109,6 +110,10 @@ def reap(
     restore lands on a device that never had the mutation.
     """
     ref = target_ref(serial, platform=platform_name)
+    try:
+        entries = device_ledger.read_ledger(ref)
+    except ConfigError as exc:
+        return device_ledger.blocked_report(ref, exc, path=device_ledger.ledger_path(ref))
     adapter_name = getattr(platform, "name", None)
     if isinstance(adapter_name, str) and adapter_name.strip().lower() != ref.platform:
         return {
@@ -119,9 +124,8 @@ def reap(
             ),
             "undone": [],
             "failed": [],
-            "remaining": len(device_ledger.read_ledger(ref)),
+            "remaining": len(entries),
         }
-    entries = device_ledger.read_ledger(ref)
     if not entries:
         return {
             **ref.to_json(),
@@ -230,7 +234,7 @@ def sweep(
     *skip* is the caller's own serial: its changes are live by definition, and re-checking them
     on every command would be pure cost.
     """
-    out = []
+    out = device_ledger.blocked_ledgers()
     current_name = str(getattr(platform, "name", LEGACY_PLATFORM) or LEGACY_PLATFORM).lower()
     skip_ref = target_ref(skip, platform=current_name) if skip is not None else None
     adapters: dict[str, Any] = {current_name: platform}
@@ -252,7 +256,7 @@ def sweep(
                     "skipped": f"no adapter available for platform {ref.platform!r}",
                     "undone": [],
                     "failed": [],
-                    "remaining": len(device_ledger.read_ledger(ref)),
+                    "remaining": None,
                 }
             )
             continue
@@ -264,7 +268,7 @@ def sweep(
             grace_s=grace_s,
             dry_run=dry_run,
         )
-        if report.get("undone") or report.get("failed"):
+        if report.get("undone") or report.get("failed") or report.get("code"):
             out.append(report)
     return out
 

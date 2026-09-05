@@ -27,6 +27,19 @@ if TYPE_CHECKING:
     from .engine import Engine
 
 
+def teardown_discard(
+    self: Engine, *, serial: str, keys: list[str], reason: str, confirmed: bool = False,
+) -> dict[str, Any]:
+    """Explicitly abandon named stale undos; no platform loading or target connection."""
+    from . import device_ledger
+
+    name = self._platform.name if self._platform is not None else self.config.device.platform
+    return device_ledger.discard(
+        TargetRef(name, serial), keys=keys, reason=reason, confirmed=confirmed,
+        lease_registry_dir=self._lease_registry_dir,
+    )
+
+
 def _runtime_capability(self: Engine, capability: str) -> Device:
     return self.platform.runtime_capability(capability, self.device)
 
@@ -195,7 +208,8 @@ def network_offline(self: Engine, *, verify: bool = True, timeout_ms: int = 10_0
     if self._pending_device_change("radio_profile", serial=device.target_id) is not None:
         raise UsageError(
             "a network profile recorded by AUA is active for this target",
-            hint="Run `aua network profile restore` before entering offline mode.",
+            hint="Run `aua network profile restore` on the original boot. If it is gone, inspect "
+                 "`aua teardown status` and explicitly archive its stale undo with `aua teardown discard`.",
         )
     profile = network_profiles.load_profile(
         network_profiles.profile_path(self.config.cache.dir, device.serial)
@@ -413,12 +427,14 @@ def network_profile_apply(
     if self._pending_device_change("radio_profile", serial=device.target_id) is not None:
         raise UsageError(
             "a network profile is already active for this target",
-            hint="Run `aua network profile restore` before applying another profile.",
+            hint="Run `aua network profile restore` on the original boot. If it is gone, inspect "
+                 "`aua teardown status` and explicitly archive its stale undo with `aua teardown discard`.",
         )
     if self._pending_device_change("network_controls", serial=device.target_id) is not None:
         raise UsageError(
             "verified offline mode is active for this target",
-            hint="Run `aua network restore` before applying a network profile.",
+            hint="Run `aua network restore` on the original boot. If it is gone, inspect "
+                 "`aua teardown status` and explicitly archive its stale undo with `aua teardown discard`.",
         )
     path = network_profiles.profile_path(self.config.cache.dir, device.serial)
     initial = network.read_network_state(device)

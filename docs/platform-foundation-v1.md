@@ -237,6 +237,8 @@ confirmed three fixes found independently and identified two additional recovery
 - Entry-point aliases use bound subclasses without renaming live adapters.
 - MCP exit cleanup retains the original strategy/configuration and exact instance token, calls
   the shared Engine exact-instance operation, and preserves transferred or replacement boots.
+  Android starts now publish a fresh nonce token, not a reusable AVD/port stem; cleanup verifies
+  the token and recorded process-start identity and re-reads metadata under the target fence.
 - All-target teardown reports an unavailable recorded plugin and continues with other platforms.
 - Empty configurations no longer depend on a local HMAC key. Nonempty configurations retain the
   fail-closed rule if the key is missing/corrupt, with a per-target report naming that key.
@@ -248,7 +250,29 @@ undos when backups or recorded boot identity are unavailable, applies boot guard
 services as well as runtime calls, covers environment-reference values in option identity, and
 prevents plugin configuration exceptions and nested credential values from leaking into output.
 
-Final suite, static checks, fresh Android smoke evidence, and follow-up Claude verdict: pending.
+### Final verification — 2026-09-05
+
+- Full suite at `93791aa`: 4,434 passed, 16 skipped, 5 expected xfails, 3 optional-provider warnings
+  in 90.41 seconds. Ruff, Mypy (135 source files), and `git diff --check` passed.
+- Fresh unpinned Android session `7c3c9d6faf74413ba08024176d652140` automatically provisioned a
+  read-only `Medium_Phone` target. Public Settings UI checks covered launch/status, hierarchy and
+  mixed analysis, semantic search tap, verified `Display` input and clear, folded waits, a
+  visually inspected landscape screenshot, and `natural -> landscape/left -> natural` followed
+  by explicit orientation restore. The helper APK install check was already-present/no-push;
+  this was not evidence of a fresh APK transfer.
+- A separate real MCP call started a parallel read-only target with a unique boot nonce, verified
+  its owned status, exercised MCP exit cleanup, and observed that exact target disconnect. The
+  original leased target remained available.
+- Teardown reported zero pending device changes. Session finish returned `verdict=passed`,
+  released its lease, and handed its owned target to the warm pool. Private runtime artifacts
+  remain outside the repository under `/tmp/aua-platform-review-xtORZn`.
+- Claude Fable 5.1 accepted the identity, cleanup, and key-loss safety decisions on follow-up,
+  subject to final verification. It requested two operability fixes: an audited way to abandon
+  unrecoverable stale records and per-file isolation/reporting of corrupt ledgers. Both are now
+  implemented with Engine/CLI/MCP coverage. Explicit discard requires named keys, a reason and
+  confirmation, refuses live leases, archives evidence first, and never loads a platform or
+  touches a device. Proven-dead Android boot bookkeeping is also retired without signalling
+  potentially recycled process/watchdog ids. Final recheck and updated suite count: pending.
 
 ## Claude review brief
 

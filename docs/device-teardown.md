@@ -72,6 +72,35 @@ that deliberate recovery is required, without replaying onto an unproven boot. T
 to target-facing services such as helper removal. Host-only residue can still be cleaned.
 Missing backup files and unreadable ledgers are failures, never successful empty cleanup.
 
+### Explicit recovery when the original boot or configuration is gone
+
+`aua teardown status` reports each blocked target or corrupt ledger file separately. A malformed
+file does not hide the remaining targets or stop their cleanup. Repair an unreadable file from a
+backup at the reported `ledger_path`; AUA cannot infer its original target or undo arguments.
+
+If the original boot still exists, restore its configuration (including referenced environment
+values and `.platform-options-hmac-key`) and use `aua teardown run --serial-target <id>`.
+`--force` only overrides a live-holder check; it never bypasses boot or configuration identity.
+Credential rotation while undos are pending therefore blocks new mutations until the original
+value is restored and the pending changes are undone.
+
+If an operator has established that a disposable boot is permanently gone, they can explicitly
+abandon individual recovery records after finishing/releasing its lease:
+
+```sh
+aua --platform example-os teardown discard --serial-target retired-target \
+  --key screen_recording --reason 'Disposable boot was retired' --confirmed
+```
+
+This command never loads an adapter or connects to a target, so it also works for an uninstalled
+plugin or lost configuration key. It archives the named entries, reason, and requester pid under
+the ledger directory's private `discarded/` directory **before** removing them from automatic
+replay. The result names that recoverable archive and explicitly says `restored: false`.
+Other undo keys remain pending. A live lease refuses discard; confirmation is not authority to
+destroy another worker's recovery evidence. This is a deliberate operator decision, not an
+automatic retry strategy or proof that device state was restored. MCP exposes the same Engine
+operations as `teardown_status`, `teardown_run`, and `teardown_discard`.
+
 ### 2. Deciding when it is safe to replay
 
 `device_ledger.reapable()` returns a reason, or `None` for "leave it alone". Undoing a running

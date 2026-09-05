@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import Any
 
 from .atomic import atomic_write_text
-from .errors import ConfigError
+from .errors import ConfigError, UsageError
 from .platforms.identity import (
     LEGACY_PLATFORM,
     TargetLike,
@@ -221,8 +221,7 @@ def _write_ledger(target: TargetLike, entries: list[Entry], *, platform: str = L
     ref = target_ref(target, platform=platform)
     path = ledger_path(ref)
     if not entries:
-        with contextlib.suppress(OSError):
-            path.unlink()
+        path.unlink(missing_ok=True)
         return
     payload = {
         "version": LEDGER_VERSION,
@@ -353,19 +352,100 @@ def clear(target: TargetLike, *, platform: str = LEGACY_PLATFORM) -> None:
     _write_ledger(target, [], platform=platform)
 
 
-def pending_targets() -> list[TargetRef]:
-    """Every platform-scoped target with at least one pending undo."""
+def blocked_report(target: TargetRef | None, error: ConfigError, *, path: Path) -> dict[str, Any]:
+    """A readable blocked ledger is not the same thing as an empty ledger."""
+    return {
+        **(target.to_json() if target is not None else {}),
+        "ledger_path": str(path),
+        "code": error.code,
+        "skipped": error.message,
+        "undone": [], "failed": [], "changes": [], "remaining": None,
+    }
 
-    out: list[TargetRef] = []
+
+def _ledger_inventory() -> tuple[list[TargetRef], list[dict[str, Any]]]:
+    targets: list[TargetRef] = []
+    blocked: list[dict[str, Any]] = []
     for path in sorted(ledger_dir().glob("*.json")):
-        with contextlib.suppress(OSError, json.JSONDecodeError):
+        ref = None
+        try:
             doc = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(doc, dict) or not doc.get("entries"):
-                continue
+            if not isinstance(doc, dict):
+                raise ConfigError("invalid device ledger document", code="device_ledger_invalid")
             ref = target_from_metadata(doc)
-            if ref is not None:
-                out.append(ref)
-    return out
+            if ref is None or ledger_path(ref) != path:
+                raise ConfigError("device ledger identity is invalid", code="device_ledger_invalid")
+            if read_ledger(ref):
+                targets.append(ref)
+        except FileNotFoundError:
+            continue  # A concurrent successful undo removed it.
+        except (OSError, json.JSONDecodeError):
+            blocked.append(blocked_report(ref, ConfigError(
+                "cannot read pending device changes; recover this ledger file",
+                code="device_ledger_unreadable",
+            ), path=path))
+        except ConfigError as exc:
+            blocked.append(blocked_report(ref, exc, path=path))
+    return targets, blocked
+
+
+def pending_targets() -> list[TargetRef]:
+    """Valid targets ready for inspection; unreadable files appear in blocked_ledgers()."""
+    return _ledger_inventory()[0]
+
+
+def blocked_ledgers() -> list[dict[str, Any]]:
+    """Report every unreadable/invalid file without guessing its native target identity."""
+    return _ledger_inventory()[1]
+
+
+def discard(
+    target: TargetLike, *, keys: list[str], reason: str, confirmed: bool,
+    lease_registry_dir: str | Path,
+) -> dict[str, Any]:
+    """Archive then drop explicitly named undos, without connecting or restoring a device.
+
+    This is deliberately not a force-replay escape hatch. The operator acknowledges that
+    AUA can no longer restore these changes automatically, e.g. after a disposable boot died.
+    """
+    from . import leases
+
+    ref = target_ref(target)
+    if not confirmed or not keys or any(not key.strip() for key in keys) or not reason.strip():
+        raise UsageError("discard requires explicit keys, a reason, and confirmed=true")
+    with leases.device_transaction(lease_registry_dir, ref):
+        entries = read_ledger(ref)
+        for directory in _lease_dirs(entries, lease_registry_dir):
+            if leases.read_lease(directory, ref) is not None:
+                raise UsageError(
+                    "cannot discard recovery evidence for a leased target",
+                    hint="Finish or release the session before explicitly discarding stale undos.",
+                    code="teardown_discard_leased",
+                )
+        selected = set(keys)
+        if missing := selected - {entry.key for entry in entries}:
+            raise UsageError(f"unknown pending undo key(s): {', '.join(sorted(missing))}")
+        archive_dir = ledger_dir() / "discarded"
+        archive_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        archive_dir.chmod(0o700)
+        archive = archive_dir / f"{ref.storage_key}.{time.time_ns()}.{os.getpid()}.json"
+        # Archive before removal. A crash leaves at worst a redundant archive, never lost
+        # evidence. Full entry data remains recoverable locally, outside automatic replay.
+        atomic_write_text(archive, json.dumps({
+            "action": "teardown-discard", **ref.to_json(),
+            "discarded_at": time.time(), "requested_by_pid": os.getpid(),
+            "reason": reason.strip(), "discarded_keys": sorted(selected),
+            "entries": [entry.to_json() for entry in entries if entry.key in selected],
+        }, indent=2) + "\n")
+        archive.chmod(0o600)
+        kept = [entry for entry in entries if entry.key not in selected]
+        _write_ledger(ref, kept)
+    return {
+        "ok": True, "action": "teardown-discard", **ref.to_json(),
+        "discarded": sorted(selected), "remaining": len(kept), "archive_path": str(archive),
+        "device_touched": False, "restored": False,
+        "detail": "undo records archived and discarded; device state was not restored",
+    }
 
 
 def pending_serials(*, platform: str = LEGACY_PLATFORM) -> list[str]:
@@ -1123,11 +1203,11 @@ def replay(
             continue
         try:
             detail = op.handler(context, entry.args)
+            forget(ref, entry.key)
         except Exception as exc:  # keep going: one stuck undo must not block the rest
             logger.warning("undo %s on %s failed: %s", entry.key, ref.target_id, exc)
             failed.append({"key": entry.key, "kind": entry.kind, "error": str(exc)})
             continue
-        forget(ref, entry.key)
         done.append({"key": entry.key, "kind": entry.kind, "result": detail})
     return {
         **ref.to_json(),
@@ -1144,9 +1224,13 @@ def status(
     grace_s: float = DEFAULT_GRACE_S,
 ) -> list[dict[str, Any]]:
     """What is pending, per target, and whether it may be reaped right now."""
-    out = []
+    out = blocked_ledgers()
     for ref in pending_targets():
-        entries = read_ledger(ref)
+        try:
+            entries = read_ledger(ref)
+        except ConfigError as exc:
+            out.append(blocked_report(ref, exc, path=ledger_path(ref)))
+            continue
         why = reapable(
             ref,
             entries=entries,
