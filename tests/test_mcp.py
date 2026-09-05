@@ -863,9 +863,9 @@ def test_mcp_has_tool_roundtrip() -> None:
 
 
 def test_mcp_analyze_via_monkeypatched_connect(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Same as AC8 but exercising the lazy connect path (engine.connect patched)."""
+    """Same as AC8 but exercising the lazy connect path (_connect_target patched)."""
     device = FakeDevice(hierarchy_xml=HIERARCHY_XML)
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: device)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: device)
     server = build_server(Engine(make_config()))  # no device passed → lazy connect
 
     async def run() -> str:
@@ -972,7 +972,7 @@ def test_mcp_navigate_requires_planner(monkeypatch) -> None:
     from android_ui_analyser.engine import Engine
 
     device = FakeDevice(hierarchy_xml=HIERARCHY_XML)
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: device)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: device)
     server = build_server(Engine(make_config()))
 
     async def run() -> dict:
@@ -1098,13 +1098,19 @@ def test_mcp_emulator_cleanup_preserves_a_transferred_live_lease(
     stopped: list[dict[str, object]] = []
 
     class EmulatorService:
-        def stop(self, **kwargs: object) -> dict[str, object]:
-            stopped.append(kwargs)
-            return {"ok": True, "stopped": [serial]}
+        def stop_virtual_targets(self, request: object) -> object:
+            from android_ui_analyser.platforms.virtual_targets import (
+                VirtualTargetStopResult,
+            )
+
+            stopped.append({"request": request})
+            return VirtualTargetStopResult(stopped_target_ids=(serial,))
 
     class Platform:
+        name = "android"
+
         def capability(self, name: str) -> EmulatorService:
-            assert name == "virtual_devices"
+            assert name == "virtual_targets"
             return EmulatorService()
 
     result = mcp.cleanup_mcp_emulators(tmp_path, platform=Platform())

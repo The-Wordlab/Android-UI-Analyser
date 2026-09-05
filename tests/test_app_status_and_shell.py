@@ -22,7 +22,7 @@ from android_ui_analyser.device import (
     _android_shell_is_read_only,
 )
 from android_ui_analyser.engine import Engine
-from android_ui_analyser.errors import DeviceError, UsageError
+from android_ui_analyser.errors import UnsupportedPlatformCapabilityError, UsageError
 from android_ui_analyser.mcp_server import _dispatch as mcp_dispatch
 from android_ui_analyser.mcp_server import _tool_definitions
 from android_ui_analyser.platforms import InstalledApp
@@ -137,13 +137,13 @@ def test_unsupported_platform_refuses_before_touching_the_target(
     target = ReadOnlyShellDevice()
     engine = Engine(cfg, device=target, platform=NoStatusShellPlatform(cfg))
 
-    with pytest.raises(DeviceError) as raised:
+    with pytest.raises(UnsupportedPlatformCapabilityError) as raised:
         if method == "app_status":
             engine.app_status("com.example.app")
         else:
             engine.shell(["getprop", "ro.build.version.sdk"])
 
-    assert raised.value.code == "unsupported_capability"
+    assert raised.value.code == "platform_capability_unsupported"
     assert target.calls == []
 
 

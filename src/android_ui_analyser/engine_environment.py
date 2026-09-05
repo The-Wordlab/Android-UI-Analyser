@@ -10,59 +10,114 @@ it in ``Engine``.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import time
 from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .device import Device
 from .engine_support import _ResolvedCassetteResource, logger
 from .errors import DeviceError, UsageError
 from .memory import RouteStep
-from .schema import ActionResult, NetworkResult
+from .platforms.identity import TargetRef
+from .platforms.runtime import TargetRuntime as Device
+from .schema import ActionResult, AppContext, NetworkResult
 
 if TYPE_CHECKING:
     from .engine import Engine
 
 
+def _runtime_capability(self: Engine, capability: str) -> Device:
+    return self.platform.runtime_capability(capability, self.device)
+
+
 def clipboard_set(self: Engine, text: str) -> ActionResult:
-    self.device.set_clipboard(text)
+    _runtime_capability(self, "device.clipboard").set_clipboard(text)
     return ActionResult(ok=True, action="clipboard-set", detail=text)
 
 
 def clipboard_get(self: Engine) -> ActionResult:
-    text = self.device.get_clipboard()
+    text = _runtime_capability(self, "device.clipboard").get_clipboard()
     return ActionResult(ok=True, action="clipboard-get", detail=text)
 
 
 def location_set(self: Engine, lat: float, lon: float) -> ActionResult:
-    self.device.set_location(lat, lon)
+    _runtime_capability(self, "device.location").set_location(lat, lon)
     return ActionResult(ok=True, action="location-set", detail=f"{lat},{lon}")
 
 
 def orientation_set(self: Engine, mode: str) -> ActionResult:
+    runtime = _runtime_capability(self, "device.orientation")
+    requested = str(mode or "").strip()
+    if requested.casefold() == "restore":
+        existing = self._pending_device_change(
+            "orientation", serial=runtime.target_id
+        )
+        previous = str(existing.args.get("mode") or "") if existing is not None else ""
+        if not previous or previous.casefold() == "unknown":
+            raise UsageError(
+                "no saved orientation to restore",
+                hint="Change orientation through AUA first, then use `orientation set restore`.",
+            )
+        with self._acting():
+            runtime.set_orientation(previous)
+        self.forget_device_change("orientation")
+        return ActionResult(ok=True, action="orientation-restore", detail=previous)
+
+    previous = runtime.get_orientation()
+    if not previous or previous.casefold() == "unknown":
+        raise DeviceError(
+            "cannot change orientation without reading its current state",
+            code="orientation_state_unknown",
+            hint="No change was made; repair target orientation access and retry.",
+        )
+    existing = self._pending_device_change("orientation", serial=runtime.target_id)
+    if existing is None:
+        self.record_device_change(
+            key="orientation",
+            kind="orientation",
+            op="set_orientation",
+            args={"mode": previous},
+            detail=f"orientation changed from {previous}",
+        )
     with self._acting():
-        self.device.set_orientation(mode)
-    return ActionResult(ok=True, action="orientation-set", detail=mode)
+        runtime.set_orientation(requested)
+    return ActionResult(ok=True, action="orientation-set", detail=requested)
 
 
 def orientation_get(self: Engine) -> ActionResult:
-    mode = self.device.get_orientation()
+    mode = _runtime_capability(self, "device.orientation").get_orientation()
     return ActionResult(ok=True, action="orientation-get", detail=mode)
 
 
 def airplane_set(self: Engine, enabled: bool) -> ActionResult:
-    if enabled:
-        previous = self.device.get_airplane_mode()
+    runtime = _runtime_capability(self, "device.airplane")
+    previous = runtime.get_airplane_mode()
+    if previous is None:
+        raise DeviceError(
+            "cannot change airplane mode without reading its current state",
+            code="airplane_state_unknown",
+            hint="No change was made; repair target settings access and retry.",
+        )
+
+    target = runtime.target_id
+    existing = self._pending_device_change("airplane_mode", serial=target)
+    original = (
+        bool(existing.args.get("enabled"))
+        if existing is not None and "enabled" in existing.args
+        else bool(previous)
+    )
+    if previous != enabled and existing is None:
         self.record_device_change(
             key="airplane_mode",
             kind="airplane_mode",
             op="set_airplane_mode",
             args={"enabled": bool(previous)},
-            detail="airplane mode turned on",
+            detail=f"airplane mode changed from {'on' if previous else 'off'}",
         )
-    self.device.set_airplane_mode(enabled)
-    if not enabled:
+    if previous != enabled:
+        runtime.set_airplane_mode(enabled)
+    if enabled == original:
         self.forget_device_change("airplane_mode")
     return ActionResult(
         ok=True,
@@ -79,27 +134,29 @@ def airplane_set(self: Engine, enabled: bool) -> ActionResult:
 
 
 def airplane_toggle(self: Engine) -> ActionResult:
-    cur = self.device.get_airplane_mode()
-    enabled = not cur if cur is not None else True
-    self.device.set_airplane_mode(enabled)
-    return ActionResult(
-        ok=True,
-        action="airplane-toggle",
-        detail="on" if enabled else "off",
-        note=(
-            "airplane mode is not proof of offline connectivity; use verified reversible "
-            "`network offline` for offline tests"
-            if enabled
-            else None
-        ),
-    )
+    current = _runtime_capability(self, "device.airplane").get_airplane_mode()
+    if current is None:
+        raise DeviceError(
+            "cannot toggle airplane mode without reading its current state",
+            code="airplane_state_unknown",
+            hint="No change was made; repair target settings access and retry.",
+        )
+    result = airplane_set(self, not current)
+    result.action = "airplane-toggle"
+    return result
 
 
 def network_status(self: Engine) -> NetworkResult:
     network = self.platform.capability("network")
 
-    device = self.device
-    path = network.backup_path(self.config.cache.dir, device.serial)
+    device = _runtime_capability(self, "device.proxy")
+    pending = self._pending_device_change("network_controls", serial=device.target_id)
+    cache_dir = (
+        str(pending.args.get("cache_dir"))
+        if pending is not None and pending.args.get("cache_dir")
+        else self.config.cache.dir
+    )
+    path = network.backup_path(cache_dir, device.serial)
     backup = network.load_backup(path)
     state = network.read_network_state(device)
     return NetworkResult(
@@ -117,6 +174,29 @@ def network_offline(self: Engine, *, verify: bool = True, timeout_ms: int = 10_0
     network_profiles = self.platform.capability("network_profiles")
 
     device = self.device
+    pending = self._pending_device_change("network_controls", serial=device.target_id)
+    current_token = device.instance_token()
+    if (
+        pending is not None
+        and pending.instance_token is not None
+        and current_token is not None
+        and pending.instance_token != current_token
+    ):
+        # Rebooting clears the controls the old entry owned. Drop that stale ownership before
+        # replacing its host-side restore point for the new device instance.
+        self.forget_device_change("network_controls")
+        pending = self._pending_device_change("network_controls", serial=device.target_id)
+        if pending is not None:
+            raise DeviceError(
+                "could not retire network state from the previous device boot",
+                code="network_restore_point_cleanup_failed",
+                hint="No network controls were changed; repair the device ledger and retry.",
+            )
+    if self._pending_device_change("radio_profile", serial=device.target_id) is not None:
+        raise UsageError(
+            "a network profile recorded by AUA is active for this target",
+            hint="Run `aua network profile restore` before entering offline mode.",
+        )
     profile = network_profiles.load_profile(
         network_profiles.profile_path(self.config.cache.dir, device.serial)
     )
@@ -125,16 +205,26 @@ def network_offline(self: Engine, *, verify: bool = True, timeout_ms: int = 10_0
             f"network profile {profile.profile!r} is active",
             hint="Run `aua network profile restore` before entering offline mode.",
         )
-    path = network.backup_path(self.config.cache.dir, device.serial)
-    initial = network.read_network_state(device)
-    backup = network.save_backup(path, device=device, state=initial)
-    self.record_device_change(
-        key="network_controls",
-        kind="network_controls",
-        op="restore_network_controls",
-        args={"cache_dir": str(self.config.cache.dir)},
-        detail="Wi-Fi / mobile data / airplane forced offline",
+    cache_dir = (
+        str(pending.args.get("cache_dir"))
+        if pending is not None and pending.args.get("cache_dir")
+        else self.config.cache.dir
     )
+    path = network.backup_path(cache_dir, device.serial)
+    initial = network.read_network_state(device)
+    if pending is not None:
+        # A repeated request on the same boot is idempotent. In particular, an Engine using a
+        # different cache directory must retain the first agent's original online baseline.
+        backup = network.require_current_backup(path, device=device)
+    else:
+        backup = network.save_backup(path, device=device, state=initial)
+        self.record_device_change(
+            key="network_controls",
+            kind="network_controls",
+            op="restore_network_controls",
+            args={"cache_dir": str(self.config.cache.dir)},
+            detail="Wi-Fi / mobile data / airplane forced offline",
+        )
     network.apply_offline_controls(device, initial)
     if verify:
         state, verified = network.wait_for_state(
@@ -169,7 +259,13 @@ def network_restore(self: Engine, *, timeout_ms: int = 15_000) -> NetworkResult:
     network = self.platform.capability("network")
 
     device = self.device
-    path = network.backup_path(self.config.cache.dir, device.serial)
+    pending = self._pending_device_change("network_controls", serial=device.target_id)
+    cache_dir = (
+        str(pending.args.get("cache_dir"))
+        if pending is not None and pending.args.get("cache_dir")
+        else self.config.cache.dir
+    )
+    path = network.backup_path(cache_dir, device.serial)
     backup = network.require_current_backup(path, device=device)
     network.restore_controls(device, backup.state)
     state, verified = network.wait_for_state(
@@ -233,7 +329,13 @@ def network_profile_status(self: Engine) -> NetworkResult:
     network_profiles = self.platform.capability("network_profiles")
 
     device = self.device
-    path = network_profiles.profile_path(self.config.cache.dir, device.serial)
+    pending = self._pending_device_change("radio_profile", serial=device.target_id)
+    cache_dir = (
+        str(pending.args.get("cache_dir"))
+        if pending is not None and pending.args.get("cache_dir")
+        else self.config.cache.dir
+    )
+    path = network_profiles.profile_path(cache_dir, device.serial)
     backup = network_profiles.load_profile(path)
     state = network.read_network_state(device)
     if backup is None:
@@ -308,6 +410,16 @@ def network_profile_apply(
     if not 0.1 <= loss_percent <= 100:
         raise UsageError("--loss-percent must be between 0.1 and 100")
     device = self.device
+    if self._pending_device_change("radio_profile", serial=device.target_id) is not None:
+        raise UsageError(
+            "a network profile is already active for this target",
+            hint="Run `aua network profile restore` before applying another profile.",
+        )
+    if self._pending_device_change("network_controls", serial=device.target_id) is not None:
+        raise UsageError(
+            "verified offline mode is active for this target",
+            hint="Run `aua network restore` before applying a network profile.",
+        )
     path = network_profiles.profile_path(self.config.cache.dir, device.serial)
     initial = network.read_network_state(device)
     if (
@@ -375,6 +487,14 @@ def network_profile_apply(
             and current_shape.max_latency_ms >= 400
         )
     else:
+        was_root = network_profiles.root_enabled(device.serial)
+        self.record_device_change(
+            key="radio_profile_root",
+            kind="temporary_adbd_root",
+            op="restore_adbd_root",
+            args={"was_root": was_root},
+            detail="adb root may be enabled while packet-loss shaping is prepared",
+        )
         interface, original_qdisc, was_root = network_profiles.prepare_loss(device.serial)
         try:
             backup = network_profiles.save_profile(
@@ -393,6 +513,10 @@ def network_profile_apply(
                 was_root=was_root,
             )
             raise
+        # The durable profile now contains the same root baseline plus qdisc ownership, so it
+        # supersedes the narrow crash-window entry. If forgetting fails, replaying both is
+        # idempotent and still ordered profile first, root state second.
+        self.forget_device_change("radio_profile_root")
         shaping = network_profiles.set_loss(
             device.serial,
             interface=interface,
@@ -428,7 +552,13 @@ def network_profile_restore(self: Engine, *, timeout_ms: int = 20_000) -> Networ
     network_profiles = self.platform.capability("network_profiles")
 
     device = self.device
-    path = network_profiles.profile_path(self.config.cache.dir, device.serial)
+    pending = self._pending_device_change("radio_profile", serial=device.target_id)
+    cache_dir = (
+        str(pending.args.get("cache_dir"))
+        if pending is not None and pending.args.get("cache_dir")
+        else self.config.cache.dir
+    )
+    path = network_profiles.profile_path(cache_dir, device.serial)
     backup = network_profiles.require_current_profile(path, device=device)
     shaping = None
     if backup.profile in ("wifi-only", "cellular-only"):
@@ -471,8 +601,32 @@ def network_profile_restore(self: Engine, *, timeout_ms: int = 20_000) -> Networ
     return result
 
 
-def media_add(self: Engine, path: str, *, remote_dir: str = "/sdcard/DCIM/Camera") -> ActionResult:
-    remote = self.device.add_media(path, remote_dir=remote_dir)
+def media_add(self: Engine, path: str, *, remote_dir: str | None = None) -> ActionResult:
+    runtime = _runtime_capability(self, "device.media")
+    source = Path(path).expanduser().resolve()
+    if not source.is_file():
+        raise UsageError(f"media file not found: {source}")
+    remote_dir = runtime.media_directory(remote_dir)
+    identity = hashlib.sha256(f"{source}\0{remote_dir}".encode()).hexdigest()[:20]
+    key = f"added_media:{identity}"
+    already_recorded = self._pending_device_change(key, serial=runtime.target_id) is not None
+    if not already_recorded:
+        self.record_device_change(
+            key=key,
+            kind="added_media",
+            op="remove_added_media",
+            args={"local_path": str(source), "remote_dir": remote_dir},
+            detail=f"media file {source.name} added to the target gallery",
+        )
+    try:
+        remote = runtime.add_media(str(source), remote_dir=remote_dir)
+    except DeviceError as exc:
+        # Android detects a destination collision before pushing any bytes. Keeping the
+        # write-ahead undo in that proven no-mutation case would later delete somebody else's
+        # pre-existing gallery file.
+        if exc.code == "media_already_exists" and not already_recorded:
+            self.forget_device_change(key)
+        raise
     return ActionResult(ok=True, action="media-add", detail=remote)
 
 
@@ -491,21 +645,28 @@ def clock_set(self: Engine, *, timestamp_ms: int | None = None, restore: bool = 
                 hint="Run `aua clock set --ms …` first; it saves the prior wall clock.",
             )
         previous = int(path.read_text(encoding="utf-8").strip())
-        self.device.set_clock(previous)
+        _runtime_capability(self, "device.clock").set_clock(previous)
         path.unlink(missing_ok=True)
         self.forget_device_change("wall_clock")
         return ActionResult(ok=True, action="clock-restore", detail=str(previous))
     if timestamp_ms is None:
         raise UsageError("clock set needs --ms <unix-ms> (or --restore)")
     # Save current clock once so restore is possible.
-    current = self.device.get_clock_ms()
-    if current is not None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if not path.is_file():
-            path.write_text(str(current), encoding="utf-8")
+    runtime = _runtime_capability(self, "device.clock")
+    current = runtime.get_clock_ms()
+    if current is None:
+        raise DeviceError(
+            "cannot change the device clock without reading its current time",
+            code="clock_state_unknown",
+            hint="No change was made; repair target clock access and retry.",
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.is_file():
+        path.write_text(str(current), encoding="utf-8")
+    if self._pending_device_change("wall_clock", serial=runtime.target_id) is None:
         # The undo carries the value *and* when it was taken: a device restored an hour later
         # must land on now, not on the instant the backup was written, or every token is
-        # stale again for a different reason.
+        # stale again for a different reason. Repeated time travel preserves this first value.
         self.record_device_change(
             key="wall_clock",
             kind="wall_clock",
@@ -513,7 +674,7 @@ def clock_set(self: Engine, *, timestamp_ms: int | None = None, restore: bool = 
             args={"timestamp_ms": int(current), "saved_at": time.time()},
             detail=f"wall clock moved to {timestamp_ms} (was {current})",
         )
-    self.device.set_clock(timestamp_ms)
+    runtime.set_clock(timestamp_ms)
     return ActionResult(
         ok=True,
         action="clock-set",
@@ -523,14 +684,33 @@ def clock_set(self: Engine, *, timestamp_ms: int | None = None, restore: bool = 
 
 def _clock_backup_path(self: Engine) -> Path:
     serial = self._device.serial if self._device else (self.config.device.serial or "default")
-    safe = str(serial).replace(":", "_")
-    return Path(self.config.cache.dir).expanduser() / f"clock_backup_{safe}.txt"
+    key = TargetRef(self.platform.name, str(serial)).storage_key
+    return Path(self.config.cache.dir).expanduser() / f"clock_backup_{key}.txt"
 
 
 def _dev_backup_path(self: Engine) -> Path:
     serial = self._device.serial if self._device else (self.config.device.serial or "default")
-    safe = str(serial).replace(":", "_")
-    return Path(self.config.cache.dir).expanduser() / f"devopts_backup_{safe}.json"
+    key = TargetRef(self.platform.name, str(serial)).storage_key
+    return Path(self.config.cache.dir).expanduser() / f"devopts_backup_{key}.json"
+
+
+def _developer_restore_point(self: Engine) -> tuple[Path, bool]:
+    """First pending developer snapshot, even when a later caller uses another cache."""
+
+    pending = self._pending_device_change("developer_settings")
+    if pending is None:
+        return self._dev_backup_path(), False
+    path = Path(str(pending.args.get("backup_path") or ""))
+    if not path.is_file():
+        raise DeviceError(
+            "the pending developer-settings restore point is unavailable",
+            code="developer_settings_restore_missing",
+            hint=(
+                "Do not apply another developer profile; recover the recorded backup path "
+                "or explicitly clear the pending teardown entry after inspecting the target."
+            ),
+        )
+    return path, True
 
 
 def _proxy_port(self: Engine) -> int | None:
@@ -553,30 +733,38 @@ def _proxy_port(self: Engine) -> int | None:
 def dev_show(self: Engine) -> dict[str, Any]:
     devopts = self.platform.capability("developer_settings")
 
-    state = devopts.read_state(self.device.shell)
+    state = devopts.read_state(self.device)
     return {"ok": True, "action": "dev-show", **state}
 
 
 def dev_anim(self: Engine, mode: str) -> dict[str, Any]:
     devopts = self.platform.capability("developer_settings")
 
-    path = self._dev_backup_path()
+    path, already_recorded = self._developer_restore_point()
     m = (mode or "").lower()
     if m in {"on", "off"}:
-        self.record_device_change(
-            key="developer_settings",
-            kind="developer_settings",
-            op="restore_developer_settings",
-            args={"backup_path": str(path)},
-            detail=f"animation scales set to {'1' if m == 'on' else '0'}",
-        )
+        if not already_recorded:
+            self.record_device_change(
+                key="developer_settings",
+                kind="developer_settings",
+                op="restore_developer_settings",
+                args={"backup_path": str(path)},
+                detail=f"animation scales set to {'1' if m == 'on' else '0'}",
+            )
         state = (
-            devopts.anim_on(self.device.shell, path)
+            devopts.anim_on(self.device, path)
             if m == "on"
-            else devopts.anim_off(self.device.shell, path)
+            else devopts.anim_off(self.device, path)
         )
     elif m == "restore":
-        state = devopts.anim_restore(self.device.shell, path)
+        if not path.is_file():
+            raise UsageError(
+                "no saved developer settings to restore",
+                hint="Change developer settings through AUA before asking to restore them.",
+            )
+        # One write-ahead snapshot covers every developer knob AUA owns. Restoring only the
+        # animation subset would forget the ledger while a prior `dev crashes` remained active.
+        state = devopts.profile_default(self.device, path)
         self.forget_device_change("developer_settings")
     else:
         raise UsageError(
@@ -589,7 +777,16 @@ def dev_anim(self: Engine, mode: str) -> dict[str, Any]:
 def dev_crashes(self: Engine, enabled: bool) -> dict[str, Any]:
     devopts = self.platform.capability("developer_settings")
 
-    state = devopts.crashes_set(self.device.shell, enabled, self._dev_backup_path())
+    path, already_recorded = self._developer_restore_point()
+    if not already_recorded:
+        self.record_device_change(
+            key="developer_settings",
+            kind="developer_settings",
+            op="restore_developer_settings",
+            args={"backup_path": str(path)},
+            detail=f"crash and ANR dialogs {'shown' if enabled else 'hidden'}",
+        )
+    state = devopts.crashes_set(self.device, enabled, path)
     return {
         "ok": True,
         "action": "dev-crashes-on" if enabled else "dev-crashes-off",
@@ -600,12 +797,26 @@ def dev_crashes(self: Engine, enabled: bool) -> dict[str, Any]:
 def dev_profile(self: Engine, name: str) -> dict[str, Any]:
     devopts = self.platform.capability("developer_settings")
 
-    path = self._dev_backup_path()
+    path, already_recorded = self._developer_restore_point()
     n = (name or "").lower()
     if n == "ac":
-        state = devopts.profile_ac(self.device.shell, path)
+        if not already_recorded:
+            self.record_device_change(
+                key="developer_settings",
+                kind="developer_settings",
+                op="restore_developer_settings",
+                args={"backup_path": str(path)},
+                detail="AC developer profile enabled",
+            )
+        state = devopts.profile_ac(self.device, path)
     elif n == "default":
-        state = devopts.profile_default(self.device.shell, path)
+        if not path.is_file():
+            raise UsageError(
+                "no saved developer settings to restore",
+                hint="Apply `aua dev profile ac` before restoring the previous profile.",
+            )
+        state = devopts.profile_default(self.device, path)
+        self.forget_device_change("developer_settings")
     else:
         raise UsageError(
             f"unknown dev profile {name!r}",
@@ -704,12 +915,14 @@ def proxy_start(
     # Relaunching the foreground app makes it inherit Zygote CA mounts.
     pkg = None
     with contextlib.suppress(Exception):
-        pkg = (device.current_app() or {}).get("package")
+        tree = self.platform.runtime_capability("ui.tree", device)
+        pkg = AppContext.coerce(tree.current_app()).app_id
     if pkg and ca_info and ca_info.get("ok"):
         with contextlib.suppress(Exception):
             self._app_process_replaced(pkg)
-            device.stop_app(pkg)
-            device.launch_app(pkg)
+            lifecycle = self.platform.runtime_capability("app.lifecycle", device)
+            lifecycle.stop_app(pkg)
+            lifecycle.launch_app(pkg)
     out: dict[str, Any] = {
         "ok": True,
         "action": "proxy-start",
@@ -776,6 +989,7 @@ def _claim_or_reap_proxy(self: Engine, device: Device) -> None:
         teardown.reap(
             device.serial,
             platform=self.platform,
+            platform_name=self.platform.name,
             cache_dir=self.config.cache.dir,
             grace_s=float(self.config.teardown.grace_s),
             force=True,
@@ -786,14 +1000,15 @@ def _claim_or_reap_proxy(self: Engine, device: Device) -> None:
 
 def proxy_stop(self: Engine) -> dict[str, Any]:
     pm = self.platform.capability("proxy")
+    device = _runtime_capability(self, "device.proxy")
 
     cache = Path(self.config.cache.dir).expanduser()
     p = self._proxy_port()
     with contextlib.suppress(Exception):
-        self.device.set_http_proxy(None)
+        device.set_http_proxy(None)
     if p is not None:
         with contextlib.suppress(Exception):
-            self.device.remove_reverse_port(p)
+            device.remove_reverse_port(p)
     stopped = pm.stop_mitm(cache)
     # Undone deliberately, so the journal must forget it: a pending undo the reaper would
     # replay later is a promise to un-point a device that some *later* proxy may own.
@@ -801,7 +1016,7 @@ def proxy_stop(self: Engine) -> dict[str, Any]:
     if p is not None:
         self.forget_device_change(f"reverse_port:{p}")
     with contextlib.suppress(Exception):
-        pm.clear_state(self.device.serial)
+        pm.clear_state(device.serial)
     return {"ok": True, "action": "proxy-stop", "stopped": stopped, "port": p}
 
 
@@ -1311,9 +1526,10 @@ def mock_record(
         pm.stop_mitm(cache)
         pid, listen = pm.start_mitm(cache_dir=cache, port=prev, mode="record", serial=target)
         self._refresh_proxy_ownership_pid(pm, listen, pid)
+        runtime = _runtime_capability(self, "device.proxy")
         with contextlib.suppress(Exception):
-            self.device.reverse_port(listen, listen)
-            self.device.set_http_proxy(f"127.0.0.1:{listen}")
+            runtime.reverse_port(listen, listen)
+            runtime.set_http_proxy(f"127.0.0.1:{listen}")
         rec_out: dict[str, Any] = {
             "ok": True,
             "action": "mock-record-start",
@@ -1344,9 +1560,10 @@ def mock_record(
         pm.stop_mitm(cache)
         pid, listen = pm.start_mitm(cache_dir=cache, port=prev, mode="map", serial=target)
         self._refresh_proxy_ownership_pid(pm, listen, pid)
+        runtime = _runtime_capability(self, "device.proxy")
         with contextlib.suppress(Exception):
-            self.device.reverse_port(listen, listen)
-            self.device.set_http_proxy(f"127.0.0.1:{listen}")
+            runtime.reverse_port(listen, listen)
+            runtime.set_http_proxy(f"127.0.0.1:{listen}")
         out: dict[str, Any] = {
             "ok": True,
             "action": "mock-record-stop",

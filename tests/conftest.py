@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import io
 import time
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,7 @@ import pytest
 from android_ui_analyser.config import Config
 from android_ui_analyser.device import Device
 from android_ui_analyser.engine import Engine
+from android_ui_analyser.errors import DeviceError
 from android_ui_analyser.providers.base import (
     Availability,
     Bounds,
@@ -137,6 +139,8 @@ class FakeDevice(Device):
         self._mobile_data_enabled = True
         self._network_preference = network_preference
         self._location: tuple[float, float] | None = None
+        self._granted_permissions: set[str] = set()
+        self._media: set[str] = set()
         self._recording: str | None = None
         self._logcat_lines: list[str] = []
         self._logcat_cleared = False
@@ -225,6 +229,15 @@ class FakeDevice(Device):
 
     def grant_permissions(self, package: str) -> None:
         self.calls.append(("grant_permissions", (package,)))
+        self._granted_permissions.add("org.example.permission.RUNTIME")
+
+    def granted_permissions(self, package: str) -> list[str]:
+        self.calls.append(("granted_permissions", (package,)))
+        return sorted(self._granted_permissions)
+
+    def restore_permissions(self, package: str, granted: Sequence[str]) -> None:
+        self.calls.append(("restore_permissions", (package, tuple(granted))))
+        self._granted_permissions = set(granted)
 
     def double_click(self, x: int, y: int) -> None:
         self.calls.append(("double_click", (x, y)))
@@ -268,18 +281,42 @@ class FakeDevice(Device):
 
         name = Path(local_path).name
         remote = f"{remote_dir.rstrip('/')}/{name}"
+        if remote in self._media:
+            raise DeviceError(
+                f"refusing to overwrite existing target media: {remote}",
+                code="media_already_exists",
+            )
+        self._media.add(remote)
         self.calls.append(("add_media", (local_path, remote_dir)))
         return remote
+
+    def remove_added_media(
+        self, local_path: str, *, remote_dir: str = "/sdcard/DCIM/Camera"
+    ) -> None:
+        from pathlib import Path
+
+        remote = f"{remote_dir.rstrip('/')}/{Path(local_path).name}"
+        self._media.discard(remote)
+        self.calls.append(("remove_added_media", (local_path, remote_dir)))
 
     def start_recording(self, remote_path: str = "/sdcard/aua_recording.mp4") -> str:
         self._recording = remote_path
         self.calls.append(("start_recording", (remote_path,)))
         return remote_path
 
+    def active_recording(self) -> str | None:
+        self.calls.append(("active_recording", ()))
+        return self._recording
+
     def stop_recording(self, local_path: str) -> str:
         self.calls.append(("stop_recording", (local_path,)))
         self._recording = None
         return local_path
+
+    def discard_recording(self, remote_path: str) -> None:
+        self.calls.append(("discard_recording", (remote_path,)))
+        if self._recording == remote_path:
+            self._recording = None
 
     def set_clock(self, timestamp_ms: int) -> None:
         self.calls.append(("set_clock", (timestamp_ms,)))

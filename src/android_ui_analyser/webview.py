@@ -19,6 +19,7 @@ import logging
 import re
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from .hierarchy import _attr, _is_true, _parse_bounds, _short_type
@@ -26,6 +27,9 @@ from .identity import attach_stable_keys
 from .schema import Element, Source, center_of
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from .platforms.runtime import TargetRuntime
 
 _WEBVIEW_CLASS = re.compile(r"(?:^|\.)WebView$", re.I)
 _ATTR_RE = re.compile(r"""([\w:-]+)\s*=\s*["']([^"']*)["']""")
@@ -200,14 +204,28 @@ def try_cdp_dom(
 def enrich(
     xml: str,
     *,
+    runtime: TargetRuntime | None = None,
     screen_size: tuple[int, int] | None = None,
     shell: Callable[[str], str] | None = None,
     cdp: bool = False,
 ) -> list[Element]:
-    """Best-effort WebView elements; empty when nothing useful is found."""
+    """Best-effort Android WebView elements; empty when nothing useful is found.
+
+    ``runtime`` is the neutral service-contract input used by the engine. Resolving Android's
+    native shell surface happens here, inside the Android-only service loaded by
+    :class:`AndroidPlatform`. ``shell`` remains as a compatibility/testing seam for direct
+    callers and is never supplied by generic engine code.
+    """
     elements = enrich_from_hierarchy(xml, screen_size=screen_size)
     if elements:
         return elements
+    if shell is None and runtime is not None:
+        candidate: Any = getattr(runtime, "shell", None)
+        if callable(candidate):
+            def native_shell(command: str) -> str:
+                return str(candidate(command))
+
+            shell = native_shell
     if not cdp or shell is None:
         return []
     for wv in webview_nodes(xml):

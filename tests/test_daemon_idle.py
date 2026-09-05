@@ -203,6 +203,16 @@ def test_pidfile_roundtrip_and_legacy_parse(tmp_path: Path) -> None:
     assert daemon_mod.read_pidfile(path) == (None, None)
 
 
+def test_pidfile_records_platform_scoped_target_identity(tmp_path: Path) -> None:
+    path = tmp_path / "d.sock.pid"
+    daemon_mod.write_pidfile(path, platform="ios", target_id="simulator-1")
+
+    metadata = daemon_mod.read_pidfile_metadata(path)
+    assert metadata["platform"] == "ios"
+    assert metadata["target_id"] == "simulator-1"
+    assert metadata["serial"] == "simulator-1"
+
+
 def test_busy_live_pid_counts_as_running_without_spawning_a_competitor(
     tmp_path: Path, monkeypatch
 ) -> None:

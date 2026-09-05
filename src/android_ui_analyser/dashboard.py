@@ -19,6 +19,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import webbrowser
@@ -31,6 +32,14 @@ from urllib.request import urlopen
 
 from . import bonjour
 from .errors import AuaError, DaemonOutcomeUnknownError, UsageError
+from .platforms.options_transport import (
+    encode_platform_options,
+    platform_options_fingerprint,
+    read_platform_options_fd,
+    scrub_platform_option_environment,
+    selected_platform_options,
+)
+from .platforms.supervision import TargetSupervisionStatus
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, so the runtime import stays lazy
     from .projection import Projection
@@ -200,8 +209,16 @@ def _script_json(value: Any) -> str:
     )
 
 
-def _safe_serial(serial: str) -> str:
-    return str(serial).replace(":", "_").replace("/", "_")
+def _platform_name(config: Any) -> str:
+    return str(
+        getattr(getattr(config, "device", None), "platform", None) or "android"
+    ).strip().lower()
+
+
+def _safe_serial(serial: str, *, platform: str = "android") -> str:
+    from .capture import _serial_dir_name
+
+    return _serial_dir_name(serial, platform=platform)
 
 
 def list_online_serials(config: Any | None = None) -> list[str]:
@@ -275,63 +292,24 @@ def resolve_dashboard_targets(
     }
 
 
-def _emulator_meta_for_serial(cache_dir: str | Path, serial: str) -> dict[str, Any] | None:
-    """Return the newest AUA emulator record for *serial*, ignoring sidecar metadata."""
-
-    root = Path(cache_dir).expanduser() / "emulator"
-    if not root.is_dir():
-        return None
-    matches: list[tuple[float, dict[str, Any]]] = []
-    for path in root.glob("*.json"):
-        try:
-            meta = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if not isinstance(meta, dict) or meta.get("serial") != serial:
-            continue
-        stamp = float(meta.get("started_at") or 0)
-        with contextlib.suppress(OSError):
-            stamp = max(stamp, path.stat().st_mtime)
-        matches.append((stamp, dict(meta)))
-    return max(matches, key=lambda item: item[0])[1] if matches else None
-
-
-def owner_for_serial(cache_dir: str | Path, serial: str) -> str | None:
-    """Look up the owner tag that started the AUA-managed emulator, if any."""
-
-    meta = _emulator_meta_for_serial(cache_dir, serial)
-    owner = meta.get("owner") if meta else None
-    return str(owner) if owner else None
-
-
-def _pid_is_alive(pid: Any) -> bool:
-    if not isinstance(pid, int) or pid <= 1:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
-
-
 def device_runtime_status(
     cache_dir: str | Path,
     serial: str,
     *,
     lease_registry_dir: str | Path | None = None,
     now: float | None = None,
+    platform: str = "android",
+    supervision: TargetSupervisionStatus | None = None,
 ) -> dict[str, Any]:
-    """Describe the live lease and AUA emulator idle-stop watchdog for the dashboard."""
+    """Describe one target's live lease and optional idle-stop supervision."""
 
     from . import journal as journal_mod
     from . import leases
 
     current_time = time.time() if now is None else now
-    lease = leases.read_lease(lease_registry_dir or cache_dir, serial)
+    lease = leases.read_lease(
+        lease_registry_dir or cache_dir, serial, platform=platform
+    )
     lease_status: dict[str, Any] = {"held": lease is not None}
     if lease is not None:
         last_lease_activity = float(lease.get("last_activity") or 0)
@@ -347,12 +325,11 @@ def device_runtime_status(
             }
         )
 
-    meta = _emulator_meta_for_serial(cache_dir, serial)
-    watchdog: dict[str, Any] = {"managed": bool(meta and meta.get("started_by_aua"))}
-    if watchdog["managed"] and meta is not None:
-        timeout_s = max(0.0, float(meta.get("idle_timeout_s") or 0))
-        last_activity = float(meta.get("last_activity") or meta.get("started_at") or 0)
-        journal_path = journal_mod.journal_path(cache_dir, serial)
+    watchdog: dict[str, Any] = {"managed": bool(supervision and supervision.managed)}
+    if watchdog["managed"] and supervision is not None:
+        timeout_s = max(0.0, float(supervision.idle_timeout_s or 0))
+        last_activity = float(supervision.last_activity or supervision.started_at or 0)
+        journal_path = journal_mod.journal_path(cache_dir, serial, platform=platform)
         if journal_path.is_file():
             with contextlib.suppress(OSError):
                 last_activity = max(last_activity, journal_path.stat().st_mtime)
@@ -361,23 +338,33 @@ def device_runtime_status(
         watchdog.update(
             {
                 "enabled": enabled,
-                "running": enabled and _pid_is_alive(meta.get("watchdog_pid")),
+                "running": enabled and supervision.monitor_running,
                 "idle_s": idle_s,
                 "timeout_s": timeout_s,
                 "remaining_s": max(0.0, timeout_s - idle_s) if enabled else None,
-                "instance": meta.get("instance") or meta.get("avd"),
-                "explicit": bool(meta.get("idle_stop_explicit")),
+                "instance": supervision.instance_id,
+                "explicit": supervision.idle_stop_explicit,
             }
         )
-    return {"lease": lease_status, "watchdog": watchdog}
+    return {
+        "owner": supervision.owner if supervision is not None else None,
+        "lease": lease_status,
+        "watchdog": watchdog,
+    }
 
 
-def captures_root(cache_dir: str | Path, serial: str) -> Path:
-    return Path(cache_dir).expanduser() / "captures" / _safe_serial(serial)
+def captures_root(
+    cache_dir: str | Path, serial: str, *, platform: str = "android"
+) -> Path:
+    return Path(cache_dir).expanduser() / "captures" / _safe_serial(
+        serial, platform=platform
+    )
 
 
-def latest_frame(cache_dir: str | Path, serial: str) -> Path | None:
-    root = captures_root(cache_dir, serial)
+def latest_frame(
+    cache_dir: str | Path, serial: str, *, platform: str = "android"
+) -> Path | None:
+    root = captures_root(cache_dir, serial, platform=platform)
     if not root.is_dir():
         return None
     frames = list(root.glob("*/frames/*.jpg"))
@@ -386,9 +373,15 @@ def latest_frame(cache_dir: str | Path, serial: str) -> Path | None:
     return max(frames, key=lambda p: p.stat().st_mtime_ns)
 
 
-def recent_marks(cache_dir: str | Path, serial: str, *, limit: int = 40) -> list[dict[str, Any]]:
+def recent_marks(
+    cache_dir: str | Path,
+    serial: str,
+    *,
+    limit: int = 40,
+    platform: str = "android",
+) -> list[dict[str, Any]]:
     """Parse the newest session index.jsonl for action-stamped frames."""
-    root = captures_root(cache_dir, serial)
+    root = captures_root(cache_dir, serial, platform=platform)
     if not root.is_dir():
         return []
     sessions = sorted(
@@ -430,18 +423,25 @@ def ensure_capture(*, serial: str, config: Any, allow_sidecar: bool = True) -> d
     Prefer the warm daemon's buffer; otherwise start the host capture sidecar so a
     headless agent run becomes watchable even when no daemon was started.
 
-    *allow_sidecar*: when False (multi-device grid), skip the single-serial sidecar —
-    the dashboard falls back to adb screenshots per tile so agents are not disrupted.
+    *allow_sidecar*: when False (multi-target grid), skip the single-target sidecar —
+    the dashboard asks the selected platform for snapshots per tile so agents are not disrupted.
     """
     cache = Path(config.cache.dir).expanduser()
-    out: dict[str, Any] = {"ok": True, "serial": serial, "via": None}
+    platform_name = _platform_name(config)
+    out: dict[str, Any] = {
+        "ok": True,
+        "serial": serial,
+        "target_id": serial,
+        "platform": platform_name,
+        "via": None,
+    }
 
     # 1) Warm daemon (agent may already be using it).
     try:
         from . import daemon as daemon_mod
 
-        candidates = [daemon_mod.socket_path(config, serial)]
-        base = os.path.expanduser(config.daemon.socket)
+        candidates = [daemon_mod.socket_path(config, serial, platform=platform_name)]
+        base = daemon_mod.socket_path(config, platform=platform_name)
         if base not in candidates:
             candidates.append(base)
         for sock in candidates:
@@ -462,7 +462,7 @@ def ensure_capture(*, serial: str, config: Any, allow_sidecar: bool = True) -> d
     # 2) Capture sidecar (independent process — ideal for sneak-peek).
     if not allow_sidecar:
         out["via"] = "screencap"
-        out["hint"] = "no daemon; grid uses adb screencap per tile"
+        out["hint"] = "no daemon; grid uses direct platform screenshots per tile"
         return out
     if not getattr(config.capture, "sidecar", True):
         raise UsageError(
@@ -475,7 +475,8 @@ def ensure_capture(*, serial: str, config: Any, allow_sidecar: bool = True) -> d
         serial=serial,
         cache_dir=cache,
         cfg=config.capture,
-        platform=str(config.device.platform),
+        platform=platform_name,
+        platform_options=selected_platform_options(config, platform_name),
     )
     out["via"] = "sidecar"
     out["capture"] = started
@@ -752,6 +753,8 @@ def service_status(
             "bind": health.get("bind"),
             "lan": lan,
             "authenticated": bool(health.get("authenticated")),
+            "platform": health.get("platform"),
+            "options_fingerprint": health.get("options_fingerprint"),
             **_service_urls(
                 port=port,
                 lan=lan,
@@ -790,6 +793,10 @@ def start_service(
     platform: str | None = None,
 ) -> dict[str, Any]:
     """Start one idempotent detached dashboard on an exact localhost/LAN port."""
+    platform_name = str(platform or _platform_name(config)).strip().lower()
+    platform_options = selected_platform_options(config, platform_name)
+    cache = Path(config.cache.dir).expanduser()
+    options_fingerprint = platform_options_fingerprint(platform_options, key_dir=cache)
     if hostname:
         hostname = bonjour.normalise_hostname(hostname)
         if not lan:
@@ -818,6 +825,22 @@ def start_service(
 
     current = service_status(config, port=port)
     if current.get("running"):
+        running_platform = current.get("platform")
+        running_fingerprint = current.get("options_fingerprint")
+        legacy_default_android = (
+            running_platform is None
+            and running_fingerprint is None
+            and platform_name == "android"
+            and not platform_options
+        )
+        if not legacy_default_android and (
+            running_platform != platform_name or running_fingerprint != options_fingerprint
+        ):
+            raise UsageError(
+                "dashboard is already running with a different platform configuration",
+                hint="Run `aua dashboard stop`, then start it again with the selected platform/profile.",
+                code="dashboard_platform_configuration_mismatch",
+            )
         if bool(current.get("lan")) != bool(lan):
             raise UsageError(
                 "dashboard is already running with a different network scope",
@@ -841,7 +864,6 @@ def start_service(
             hint=f"Stop that process or choose one dedicated port with `--port`; AUA will not move away from {port} automatically.",
         )
 
-    cache = Path(config.cache.dir).expanduser()
     cache.mkdir(parents=True, exist_ok=True)
     require_auth = bool(lan and auth)
     token = secrets.token_urlsafe(32) if require_auth else ""
@@ -854,6 +876,8 @@ def start_service(
         "hostname": hostname or "",
         "auth": require_auth,
         "access_token": token,
+        "platform": platform_name,
+        "options_fingerprint": options_fingerprint,
         "started_at_ms": int(time.time() * 1000),
     }
     state_path = _write_service_state(cache, initial_state)
@@ -885,17 +909,28 @@ def start_service(
         cmd += ["--config", str(Path(explicit_config).expanduser().resolve())]
     if profile:
         cmd += ["--profile", profile]
-    if platform:
-        cmd += ["--platform", platform]
+    cmd += ["--platform", platform_name]
 
-    with open(log_path, "a", encoding="utf-8") as log_fh:  # noqa: SIM115
-        proc = subprocess.Popen(
-            cmd,
-            stdout=log_fh,
-            stderr=log_fh,
-            start_new_session=True,
-            close_fds=True,
-        )
+    with tempfile.TemporaryFile(mode="w+b") as options_file:
+        options_file.write(encode_platform_options(platform_options))
+        options_file.seek(0)
+        options_fd = options_file.fileno()
+        cmd += [
+            "--platform-options-fd",
+            str(options_fd),
+            "--platform-options-fingerprint",
+            options_fingerprint,
+        ]
+        with open(log_path, "a", encoding="utf-8") as log_fh:  # noqa: SIM115
+            proc = subprocess.Popen(
+                cmd,
+                stdout=log_fh,
+                stderr=log_fh,
+                start_new_session=True,
+                close_fds=True,
+                pass_fds=(options_fd,),
+                env=scrub_platform_option_environment(),
+            )
     initial_state["pid"] = proc.pid
     _write_service_state(cache, initial_state)
 
@@ -5226,6 +5261,7 @@ class _DashboardState:
         require_auth: bool = False,
         access_token: str | None = None,
         hostname: str | None = None,
+        options_fingerprint: str | None = None,
     ) -> None:
         self.serials = list(serials)
         self._online_serials = set(serials)
@@ -5245,6 +5281,11 @@ class _DashboardState:
         from .platforms import PlatformFactory
 
         self.platform = PlatformFactory(config).create()
+        self.platform_name = str(getattr(self.platform, "name", _platform_name(config))).lower()
+        self.options_fingerprint = options_fingerprint or platform_options_fingerprint(
+            selected_platform_options(config, self.platform_name),
+            key_dir=cache_dir,
+        )
         # serial -> (bytes, taken_at, mime). The mime travels with the bytes: a cached
         # PNG served as image/jpeg is a broken image in the tile.
         self._fallback: dict[str, tuple[bytes, float, str]] = {}
@@ -5285,7 +5326,9 @@ class _DashboardState:
         from . import leases
 
         try:
-            lease = leases.read_lease(self.cache_dir, serial)
+            lease = leases.read_lease(
+                self.cache_dir, serial, platform=self.platform_name
+            )
         except Exception:  # noqa: BLE001 — a watcher never fails on a bookkeeping read
             return False
         if not lease:
@@ -5310,7 +5353,7 @@ class _DashboardState:
 
     def _served_frame(self, serial: str) -> Path | None:
         """The capture file ``frame_bytes`` will serve, or None when it must screencap."""
-        frame = latest_frame(self.cache_dir, serial)
+        frame = latest_frame(self.cache_dir, serial, platform=self.platform_name)
         if frame is None or not frame.is_file():
             return None
         if self._capture_live.get(serial) is not False:
@@ -5366,7 +5409,12 @@ class _DashboardState:
             # Analyze/tap operations use a process-bound dashboard owner. If the emulator dies,
             # keeping that live owner's lease would block the same serial after it boots again.
             with contextlib.suppress(Exception):
-                leases.release(self.cache_dir, serial, owner=self._inspection_owner)
+                leases.release(
+                    self.cache_dir,
+                    serial,
+                    owner=self._inspection_owner,
+                    platform=self.platform_name,
+                )
 
     def _require_online(self, serial: str) -> None:
         """Refuse a device action when authoritative discovery says it detached."""
@@ -5400,9 +5448,13 @@ class _DashboardState:
         try:
             from . import daemon as daemon_mod
 
-            sock = daemon_mod.socket_path(self.config, serial)
+            sock = daemon_mod.socket_path(
+                self.config, serial, platform=self.platform_name
+            )
             if not Path(sock).exists():
-                base = os.path.expanduser(self.config.daemon.socket)
+                base = daemon_mod.socket_path(
+                    self.config, platform=self.platform_name
+                )
                 if Path(base).exists():
                     sock = base
                 else:
@@ -5485,7 +5537,12 @@ class _DashboardState:
         return self._daemon_call(serial, cmd, **call_args)
 
     def _inspection_path(self, serial: str, inspection_id: str) -> Path:
-        safe_serial = "".join(char if char.isalnum() or char in "-_." else "_" for char in serial)
+        from .platforms.identity import TargetRef
+
+        # Dashboard inspection files historically used the broad alnum/-_. sanitizer rather
+        # than capture's colon/slash-only spelling. TargetRef preserves that Android key while
+        # adding the platform prefix plugins need.
+        safe_serial = TargetRef(self.platform_name, serial).storage_key
         root = self.cache_dir / "dashboard-inspection" / safe_serial
         root.mkdir(parents=True, exist_ok=True)
         return root / f"{inspection_id}.png"
@@ -5817,11 +5874,23 @@ class _DashboardState:
         cached = self._runtime_cache.get(serial)
         if cached and (now - cached[1]) < 1.0:
             return cached[0]
+        supervision: TargetSupervisionStatus | None = None
+        try:
+            service = self.platform.capability("target_supervision")
+            supervision = service.target_supervision_status(
+                serial, cache_dir=self.cache_dir
+            )
+        except AuaError as exc:
+            logger.debug("target supervision unavailable: %s", exc)
+        except Exception as exc:  # noqa: BLE001 — optional status never breaks the panel
+            logger.debug("target supervision failed: %s", exc)
         status = device_runtime_status(
             self.cache_dir,
             serial,
             lease_registry_dir=self.config.lease.registry_dir,
             now=now,
+            platform=self.platform_name,
+            supervision=supervision,
         )
         self._runtime_cache[serial] = (status, now)
         return status
@@ -5836,8 +5905,11 @@ class _DashboardState:
             return cached[0]
         pkg: str | None = None
         try:
-            info = self.platform.connect(ser).current_app() or {}
-            pkg = info.get("package") or None
+            from .schema import AppContext
+
+            runtime = self.platform.connect(ser)
+            tree = self.platform.runtime_capability("ui.tree", runtime)
+            pkg = AppContext.coerce(tree.current_app()).app_id
         except Exception as exc:  # noqa: BLE001
             logger.debug("current_app failed: %s", exc)
         self._pkg_cache[ser] = (pkg or None, now)
@@ -5969,13 +6041,27 @@ class _DashboardState:
         from . import journal as journal_mod
 
         ser = self._scoped_serial(serial)
-        events = journal_mod.read_since(self.cache_dir, ser, since_ms=since_ms, limit=limit)
-        window = journal_mod.read_since(self.cache_dir, ser, since_ms=None, limit=400)
+        events = journal_mod.read_since(
+            self.cache_dir,
+            ser,
+            since_ms=since_ms,
+            limit=limit,
+            platform=self.platform_name,
+        )
+        window = journal_mod.read_since(
+            self.cache_dir,
+            ser,
+            since_ms=None,
+            limit=400,
+            platform=self.platform_name,
+        )
         stats = journal_mod.failure_stats(window)
         return {
             "events": events,
             "stats": stats,
-            "detail_revision": journal_mod.detail_revision(self.cache_dir, ser),
+            "detail_revision": journal_mod.detail_revision(
+                self.cache_dir, ser, platform=self.platform_name
+            ),
         }
 
     def journal_detail(self, detail_id: str, serial: str | None = None) -> dict[str, Any] | None:
@@ -5987,7 +6073,12 @@ class _DashboardState:
             or not all(char.isalnum() or char in "-_." for char in detail_id)
         ):
             raise UsageError("invalid dashboard journal detail id")
-        return journal_mod.read_detail(self.cache_dir, self._scoped_serial(serial), detail_id)
+        return journal_mod.read_detail(
+            self.cache_dir,
+            self._scoped_serial(serial),
+            detail_id,
+            platform=self.platform_name,
+        )
 
     def map_payload(self, serial: str | None = None) -> dict[str, Any]:
         ser = serial or self.focus
@@ -6009,7 +6100,7 @@ class _DashboardState:
         try:
             from .flows import FlowStore
 
-            flow_store = FlowStore(self.config.memory)
+            flow_store = FlowStore(self.config.memory, platform=self.platform_name)
             flow_entries = flow_store.list()
             for entry in flow_entries:
                 detail = dict(entry)
@@ -6029,7 +6120,12 @@ class _DashboardState:
 
             from .memory import AppMemoryStore
 
-            store = AppMemoryStore(self.config.memory)
+            factory = getattr(AppMemoryStore, "from_config", None)
+            store = (
+                factory(self.config, platform=self.platform_name)
+                if callable(factory)
+                else AppMemoryStore(self.config.memory, platform=self.platform_name)
+            )
             out["map_count"] = len(store.list_apps())
             pkg = self.foreground_package(ser)
             out["package"] = pkg
@@ -6138,8 +6234,13 @@ class _DashboardState:
         from .flows import FlowStore
         from .memory import AppMemoryStore
 
-        memory = AppMemoryStore(self.config.memory)
-        flows = FlowStore(self.config.memory)
+        factory = getattr(AppMemoryStore, "from_config", None)
+        memory = (
+            factory(self.config, platform=self.platform_name)
+            if callable(factory)
+            else AppMemoryStore(self.config.memory, platform=self.platform_name)
+        )
+        flows = FlowStore(self.config.memory, platform=self.platform_name)
         if action == "route-delete":
             package = self._navigation_text(payload, "package", maximum=255)
             route_id = self._navigation_text(payload, "route_id", maximum=255)
@@ -6223,8 +6324,8 @@ class _DashboardState:
         ser = self._scoped_serial(payload.get("serial"))
         self._require_lease_confirmation(payload, f"FORCE UNLEASE {ser}")
         registry = self.config.lease.registry_dir
-        with leases.device_transaction(registry, ser):
-            entry = leases.read_lease(registry, ser)
+        with leases.device_transaction(registry, ser, platform=self.platform_name):
+            entry = leases.read_lease(registry, ser, platform=self.platform_name)
             previous_owner = str((entry or {}).get("owner") or "") or None
             reset = self._dashboard_engine().teardown_run(serial=ser, force=True)
             if not teardown.cleanup_complete(reset):
@@ -6233,7 +6334,9 @@ class _DashboardState:
                     code="dashboard_lease_cleanup_failed",
                     hint="Run `aua teardown status`, fix the reported undo, then retry.",
                 )
-            released = leases.release(registry, ser, owner=None)
+            released = leases.release(
+                registry, ser, owner=None, platform=self.platform_name
+            )
         if not released:
             raise UsageError(
                 f"{ser} was cleaned but its lease file could not be removed",
@@ -6262,11 +6365,16 @@ class _DashboardState:
         self._require_navigation_confirmation(payload, f"CLEAR JOURNAL {ser}")
         from . import journal as journal_mod
 
-        deleted = journal_mod.clear(self.cache_dir, ser, include_host=True)
+        deleted = journal_mod.clear(
+            self.cache_dir,
+            ser,
+            include_host=True,
+            platform=self.platform_name,
+        )
         return {"ok": True, "action": "journal-clear", "serial": ser, "deleted": len(deleted)}
 
     def device_tile(self, serial: str) -> dict[str, Any]:
-        frame = latest_frame(self.cache_dir, serial)
+        frame = latest_frame(self.cache_dir, serial, platform=self.platform_name)
         age_ms = None
         if frame is not None:
             age_ms = int((time.time() - frame.stat().st_mtime) * 1000)
@@ -6287,7 +6395,6 @@ class _DashboardState:
         runtime = self.device_runtime(serial)
         return {
             "serial": serial,
-            "owner": owner_for_serial(self.cache_dir, serial),
             **runtime,
             "package": pkg,
             "via": via,
@@ -6355,13 +6462,13 @@ class _DashboardState:
         if discovery_error is None:
             self._online_serials = set(online)
             self.serials = list(dict.fromkeys([*self.serials, *online]))
-        frame = latest_frame(self.cache_dir, ser)
+        frame = latest_frame(self.cache_dir, ser, platform=self.platform_name)
         age_ms = None
         session_id = None
         if frame is not None:
             age_ms = int((time.time() - frame.stat().st_mtime) * 1000)
             session_id = frame.parent.parent.name
-        marks = recent_marks(self.cache_dir, ser)
+        marks = recent_marks(self.cache_dir, ser, platform=self.platform_name)
         via = self._ensure_via(ser)
         capture_running = frame is not None and (age_ms is not None and age_ms < 15_000)
         # Frame age cannot decide this: the capture ring dedupes unchanged screens.
@@ -6371,7 +6478,9 @@ class _DashboardState:
             if via == "sidecar":
                 from . import capture_sidecar as cs
 
-                sock = cs.socket_path(self.cache_dir)
+                sock = cs.socket_path(
+                    self.cache_dir, serial=ser, platform=self.platform_name
+                )
                 if Path(sock).exists():
                     detail = cs.call(sock, "status")
                     capture_running = bool(detail.get("running")) and not detail.get("paused")
@@ -6400,7 +6509,6 @@ class _DashboardState:
         return {
             "ok": True,
             "serial": ser,
-            "owner": owner_for_serial(self.cache_dir, ser),
             **runtime,
             "via": via,
             "package": pkg,
@@ -6627,13 +6735,15 @@ class _DashboardState:
             # Screenshotting here attaches uiautomator2 and takes the UiAutomation slot
             # from the agent that holds this device — for a preview thumbnail. Whatever
             # capture already wrote is the honest picture; a watcher never interrupts.
-            stale = latest_frame(self.cache_dir, ser)
+            stale = latest_frame(self.cache_dir, ser, platform=self.platform_name)
             if stale is not None and stale.is_file():
                 with contextlib.suppress(OSError):
                     return stale.read_bytes(), "image/jpeg"
             return _PLACEHOLDER_PNG, "image/png"
         try:
-            img = self.platform.connect(ser).screenshot()
+            screenshots = self.platform.adapter_capability("ui.screenshot")
+            runtime = self.platform.connect(ser)
+            img = screenshots.capture_screenshot(runtime)
             raw = getattr(img, "png_bytes", None)
             if raw is None and hasattr(img, "pil"):
                 import io
@@ -6650,7 +6760,7 @@ class _DashboardState:
         except Exception as exc:  # noqa: BLE001
             logger.debug("fallback screencap failed: %s", exc)
         # Screencap is gone too - a stale frame still says more than a blank tile.
-        stale = latest_frame(self.cache_dir, ser)
+        stale = latest_frame(self.cache_dir, ser, platform=self.platform_name)
         if stale is not None and stale.is_file():
             with contextlib.suppress(OSError):
                 return stale.read_bytes(), "image/jpeg"
@@ -6659,7 +6769,8 @@ class _DashboardState:
     def log_lines(self, serial: str, lines: int = 80, *, app_id: str | None = None) -> list[str]:
         n = max(1, min(int(lines), 500))
         try:
-            return self.platform.recent_logs(serial, limit=n, app_id=app_id)
+            logs = self.platform.adapter_capability("device.logs")
+            return logs.recent_logs(serial, limit=n, app_id=app_id)
         except Exception as exc:  # noqa: BLE001 — dashboard remains available
             return [f"<device logs failed: {exc}>"]
 
@@ -6793,6 +6904,8 @@ def _make_handler(state: _DashboardState) -> type[BaseHTTPRequestHandler]:
                         "bind": state.bind_host,
                         "lan": state.bind_host == "0.0.0.0",
                         "authenticated": state.require_auth,
+                        "platform": state.platform_name,
+                        "options_fingerprint": state.options_fingerprint,
                         "name": state.hostname,
                         "name_resolved": state.name_resolved,
                     }
@@ -6996,7 +7109,9 @@ def _make_handler(state: _DashboardState) -> type[BaseHTTPRequestHandler]:
                 if ser is None:
                     return
                 rel = (qs.get("path") or [""])[0]
-                root = captures_root(state.cache_dir, ser).resolve()
+                root = captures_root(
+                    state.cache_dir, ser, platform=state.platform_name
+                ).resolve()
                 target = Path(rel).expanduser().resolve()
                 if not str(target).startswith(str(root)) or not target.is_file():
                     self._send(404, b"not found", "text/plain")
@@ -7130,6 +7245,7 @@ def run(
     access_token: str | None = None,
     hostname: str | None = None,
     announce: bool = True,
+    options_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     """Ensure capture, serve the dashboard, optionally open a browser.
 
@@ -7173,6 +7289,7 @@ def run(
         require_auth=require_auth,
         access_token=access_token,
         hostname=hostname,
+        options_fingerprint=options_fingerprint,
     )
     state.discovery_error = discovery_error
     handler = _make_handler(state)
@@ -7305,6 +7422,8 @@ def _service_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config")
     parser.add_argument("--profile")
     parser.add_argument("--platform")
+    parser.add_argument("--platform-options-fd", type=int)
+    parser.add_argument("--platform-options-fingerprint")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--grid", action="store_true")
     mode.add_argument("--detail", action="store_true")
@@ -7322,6 +7441,27 @@ def _service_main(argv: list[str] | None = None) -> int:
 
     from .config import load_config
 
+    transported_options = (
+        read_platform_options_fd(args.platform_options_fd, consumer="dashboard")
+        if args.platform_options_fd is not None
+        else None
+    )
+    if transported_options is not None:
+        actual_fingerprint = platform_options_fingerprint(
+            transported_options,
+            key_dir=args.cache_dir,
+        )
+        expected_fingerprints = {
+            str(value)
+            for value in (
+                args.platform_options_fingerprint,
+                launch_state.get("options_fingerprint"),
+            )
+            if value
+        }
+        if expected_fingerprints != {actual_fingerprint}:
+            logger.error("dashboard platform-option identity does not match its launch state")
+            return 2
     overrides: dict[str, Any] = {"cache": {"dir": args.cache_dir}}
     if args.platform:
         overrides["device"] = {"platform": args.platform}
@@ -7330,6 +7470,11 @@ def _service_main(argv: list[str] | None = None) -> int:
         profile=args.profile,
         cli_overrides=overrides,
     )
+    if transported_options is not None:
+        platform_name = str(args.platform or _platform_name(cfg)).strip().lower()
+        # The parent already resolved every layer. Never merge in stale cwd/user options found
+        # by this detached child.
+        cfg.platforms[platform_name] = transported_options
 
     # Raise into ``run``'s normal finally path so the listening socket closes immediately.
     def _terminate(_signum: int, _frame: Any) -> None:
@@ -7352,6 +7497,7 @@ def _service_main(argv: list[str] | None = None) -> int:
             access_token=access_token or None,
             hostname=args.hostname or None,
             announce=False,
+            options_fingerprint=args.platform_options_fingerprint,
         )
     except AuaError as exc:
         logger.error("dashboard service failed: %s", exc)

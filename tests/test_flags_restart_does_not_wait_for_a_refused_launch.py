@@ -56,6 +56,20 @@ class _RestartDevice:
         return None
 
 
+class _RestartPlatform:
+    """Only the neutral adapter operations this focused Engine shell exercises."""
+
+    def runtime_capability(self, capability: str, runtime: _RestartDevice) -> _RestartDevice:
+        assert capability in {"app.lifecycle", "ui.tree"}
+        return runtime
+
+    def forget_app_process(self, app_id: str | None = None) -> None:
+        return None
+
+    def diagnostic_source_policy(self, app_id: str | None = None) -> object:
+        return type("_Policy", (), {"app_is_subject": True})()
+
+
 def _restart(engine: engine_mod.Engine, device: _RestartDevice, monkeypatch):
     # `device` is a property on Engine, so patch the class rather than the instance.
     monkeypatch.setattr(engine_mod.Engine, "device", property(lambda self: device))
@@ -65,6 +79,7 @@ def _restart(engine: engine_mod.Engine, device: _RestartDevice, monkeypatch):
 @pytest.fixture()
 def engine(monkeypatch: pytest.MonkeyPatch) -> engine_mod.Engine:
     eng = engine_mod.Engine.__new__(engine_mod.Engine)
+    eng._platform = _RestartPlatform()  # type: ignore[assignment]
     monkeypatch.setattr(
         engine_mod.Engine, "_acting", lambda self: contextlib.nullcontext()
     )

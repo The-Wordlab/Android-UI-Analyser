@@ -7,7 +7,9 @@ good news is false — and a caller acts on it instead of recovering.
 
 from __future__ import annotations
 
+from android_ui_analyser.config import Config
 from android_ui_analyser.engine import Engine
+from android_ui_analyser.platforms.android import AndroidPlatform
 from android_ui_analyser.projection import Projection
 from android_ui_analyser.schema import (
     ActionResult,
@@ -32,6 +34,17 @@ def _obs(*rids: str | None) -> AnalyzeResult:
         elements=[_element(r) for r in rids],
         meta=Meta(duration_ms=1, tier_used=Tier.hierarchy, path=PathKind.hierarchy),
     )
+
+
+def _android_exit(
+    before: str | None, after: str | None, observation: AnalyzeResult
+) -> dict[str, object] | None:
+    evidence = AndroidPlatform(Config()).app_exit_evidence(
+        before,
+        after,
+        observation.elements,
+    )
+    return evidence.as_dict() if evidence is not None else None
 
 
 # --------------------------------------------------------------- --where-rid OR filtering
@@ -65,7 +78,7 @@ def test_where_text_is_not_split_because_real_copy_contains_commas() -> None:
 
 
 def test_crash_to_launcher_is_reported() -> None:
-    left = Engine._app_left_foreground(
+    left = _android_exit(
         "com.example.app/.MainActivity",
         "com.google.android.apps.nexuslauncher/.NexusLauncherActivity",
         _obs("launcher"),
@@ -78,7 +91,7 @@ def test_crash_to_launcher_is_reported() -> None:
 
 
 def test_the_system_crash_dialog_is_reported_even_off_a_launcher() -> None:
-    left = Engine._app_left_foreground(
+    left = _android_exit(
         "com.example.app/.MainActivity",
         "android/com.android.server.am.AppErrorDialog",
         _obs("android:id/aerr_close"),
@@ -91,7 +104,7 @@ def test_an_ordinary_app_to_app_handoff_is_not_reported() -> None:
     # A share sheet or a browser is a legitimate destination; flagging it would cry wolf on
     # every deliberate hand-off.
     assert (
-        Engine._app_left_foreground(
+        _android_exit(
             "com.example.app/.MainActivity",
             "com.example.other/.ShareActivity",
             _obs("share_list"),
@@ -102,7 +115,7 @@ def test_an_ordinary_app_to_app_handoff_is_not_reported() -> None:
 
 def test_staying_in_the_same_package_is_not_reported() -> None:
     assert (
-        Engine._app_left_foreground(
+        _android_exit(
             "com.example.app/.MainActivity",
             "com.example.app/.DetailActivity",
             _obs("detail"),
@@ -112,10 +125,10 @@ def test_staying_in_the_same_package_is_not_reported() -> None:
 
 
 def test_unknown_activities_are_not_guessed_at() -> None:
-    assert Engine._app_left_foreground(None, "com.x/.A", _obs()) is None
-    assert Engine._app_left_foreground("com.x/.A", None, _obs()) is None
+    assert _android_exit(None, "com.x/.A", _obs()) is None
+    assert _android_exit("com.x/.A", None, _obs()) is None
     # No "/" means we cannot name a package, so we must not invent one.
-    assert Engine._app_left_foreground("com.x", "nexuslauncher", _obs()) is None
+    assert _android_exit("com.x", "nexuslauncher", _obs()) is None
 
 
 def test_detected_crash_attaches_the_last_action_error_logs(monkeypatch) -> None:

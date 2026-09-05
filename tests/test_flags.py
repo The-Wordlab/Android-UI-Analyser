@@ -446,7 +446,7 @@ def test_cli_flags_set_exits_non_zero_when_a_key_does_not_land(
 ) -> None:
     """A dropped flag is a broken precondition for whatever runs next, not a success."""
     device = device_with({"hub": "a"})
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: device)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: device)
 
     res = runner.invoke(
         app,
@@ -464,7 +464,7 @@ def test_cli_flags_set_exits_zero_when_every_key_lands(
     config_file: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     device = device_with({"hub": "a"})
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: device)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: device)
 
     res = runner.invoke(
         app, ["--config", str(config_file), "flags", "set", PKG, "hub=a", "--no-observe"]
@@ -481,7 +481,7 @@ def test_cli_flags_set_exits_non_zero_when_the_app_does_not_come_back(
 ) -> None:
     """Flags set but no live app is still a broken precondition — and a distinct code."""
     device = lifecycle_device(exported=False, launchable=False)
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: device)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: device)
 
     res = runner.invoke(
         app, ["--config", str(config_file), "flags", "set", PKG, "hub=a", "--no-observe"]
@@ -494,7 +494,7 @@ def test_cli_flags_set_exits_non_zero_when_the_app_does_not_come_back(
 
 def test_cli_flags_set_no_restart(config_file: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     device = device_with({"hub": "a"})
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: device)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: device)
 
     res = runner.invoke(
         app,
@@ -518,7 +518,7 @@ def test_cli_flags_set_without_a_template_is_a_usage_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     device = device_with({})
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: device)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: device)
 
     res = runner.invoke(app, ["flags", "set", "com.other.app", "hub=a", "--no-observe"])
 

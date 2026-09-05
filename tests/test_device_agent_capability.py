@@ -184,9 +184,94 @@ def test_disable_leaves_another_service_alone(monkeypatch) -> None:
 def test_disable_is_idempotent_when_the_helper_was_never_listed(monkeypatch) -> None:
     """Called twice, or on a device that never had it, this must be a no-op and not an error."""
 
+    from android_ui_analyser import device_agent
 
     result, ran = _disable_with(monkeypatch, "")
     assert result["enabled"] is False
     assert not any(
         c.startswith("settings put secure enabled_accessibility_services") for c in ran
     ), f"wrote to a list that had nothing of ours in it: {ran}"
+    assert (
+        f"cmd appops set {device_agent.PACKAGE} ACCESS_RESTRICTED_SETTINGS default" in ran
+    ), "disabling must retract the restricted-settings grant even after the service vanished"
+
+
+def test_restore_state_reinstates_master_appop_and_non_root_adbd(monkeypatch) -> None:
+    from android_ui_analyser import device_agent
+
+    other = "com.example.reader/com.example.reader.ReaderService"
+    ran: list[str] = []
+    unrooted: list[str] = []
+    services = f"{other}:{device_agent.SERVICE}"
+    master = "1"
+    appop = "allow"
+
+    def shell(serial: str, command: str, **_kw: object) -> str:
+        nonlocal appop, master, services
+        ran.append(command)
+        if command == "settings get secure enabled_accessibility_services":
+            return services
+        if command == "settings get secure accessibility_enabled":
+            return master
+        if command.startswith("settings put secure enabled_accessibility_services "):
+            services = command.rsplit(" ", 1)[-1]
+        elif command == "settings delete secure enabled_accessibility_services":
+            services = ""
+        elif command.startswith("settings put secure accessibility_enabled "):
+            master = command.rsplit(" ", 1)[-1]
+        elif command == "settings delete secure accessibility_enabled":
+            master = ""
+        elif command.startswith(
+            f"cmd appops set {device_agent.PACKAGE} ACCESS_RESTRICTED_SETTINGS "
+        ):
+            appop = command.rsplit(" ", 1)[-1]
+        elif command == (
+            f"cmd appops get {device_agent.PACKAGE} ACCESS_RESTRICTED_SETTINGS"
+        ):
+            return f"ACCESS_RESTRICTED_SETTINGS: {appop}"
+        return ""
+
+    monkeypatch.setattr(device_agent, "_shell", shell)
+    monkeypatch.setattr(
+        device_agent,
+        "unroot",
+        lambda serial: unrooted.append(serial) or {"root": False},
+    )
+
+    result = device_agent.restore_state(
+        "serial",
+        {
+            "enabled_services": [other],
+            "accessibility_enabled": "0",
+            "restricted_settings_appop": "ignore",
+            "adbd_root": False,
+        },
+    )
+
+    assert result == {"enabled": False, "remaining": [other]}
+    assert f"settings put secure enabled_accessibility_services {other}" in ran
+    assert "settings put secure accessibility_enabled 0" in ran
+    assert (
+        f"cmd appops set {device_agent.PACKAGE} ACCESS_RESTRICTED_SETTINGS ignore" in ran
+    )
+    assert unrooted == ["serial"]
+
+
+def test_strict_touch_cleanup_refuses_to_claim_a_live_capture_was_removed(
+    monkeypatch,
+) -> None:
+    from android_ui_analyser import device_agent
+
+    commands: list[str] = []
+
+    def shell(serial: str, command: str, **_kw: object) -> str:
+        commands.append(command)
+        return "sh -c getevent -lt" if command == "ps -A -o ARGS" else ""
+
+    monkeypatch.setattr(device_agent, "_shell", shell)
+
+    with pytest.raises(device_agent.HelperUnavailableError) as raised:
+        device_agent.discard_touch_capture("serial")
+
+    assert raised.value.code == "helper_touch_capture_cleanup_failed"
+    assert not any(command.startswith("rm -f") for command in commands)

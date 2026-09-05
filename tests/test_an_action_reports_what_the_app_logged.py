@@ -20,6 +20,7 @@ noise, and ``D`` is kept because that is where an app writes its own breadcrumbs
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Sequence
 
 import pytest
@@ -29,6 +30,13 @@ from android_ui_analyser.engine import Engine
 from android_ui_analyser.logcat import DEFAULT_LEVELS, digest_app_logs
 from android_ui_analyser.platforms.android import AndroidPlatform
 from android_ui_analyser.platforms.base import NormalizedTree, PlatformAdapter
+from android_ui_analyser.platforms.diagnostics import (
+    DiagnosticEvent,
+    DiagnosticLevel,
+    DiagnosticWindow,
+    UnknownDiagnosticMark,
+)
+from android_ui_analyser.platforms.identity import TargetRef
 from android_ui_analyser.schema import (
     ActionResult,
     AnalyzeResult,
@@ -273,6 +281,7 @@ class _FakeLogPlatform(PlatformAdapter):
     def __init__(self, config: Config) -> None:
         super().__init__(config)
         self.calls: list[dict[str, object]] = []
+        self.marks: dict[str, int] = {}
 
     def connect(self, target_id: str | None = None) -> object:
         raise AssertionError("the engine already holds its runtime")
@@ -293,8 +302,68 @@ class _FakeLogPlatform(PlatformAdapter):
         since_ms: int | None = None,
         app_id: str | None = None,
     ) -> str:
+        return self.diagnostic_window(
+            runtime,
+            lines=lines,
+            since=since_ms if since_ms is not None else 0,
+            app_id=app_id,
+        ).text
+
+    def diagnostic_window(
+        self,
+        runtime: object,
+        *,
+        lines: int = 400,
+        since: str | int | None = None,
+        app_id: str | None = None,
+    ) -> DiagnosticWindow:
+        if isinstance(since, str):
+            if since not in self.marks:
+                raise UnknownDiagnosticMark(since, self.marks)
+            since_ms = self.marks[since]
+            since_label = since
+        else:
+            since_ms = int(since or 0)
+            since_label = str(since) if since is not None else "30s"
         self.calls.append({"lines": lines, "since_ms": since_ms, "app_id": app_id})
-        return _line("E", "Checkout", "refused: quota exceeded")
+        rendered = _line("E", "Checkout", "refused: quota exceeded")
+        return DiagnosticWindow(
+            events=(
+                DiagnosticEvent(
+                    message="refused: quota exceeded",
+                    level=DiagnosticLevel.ERROR,
+                    source="Checkout",
+                    display_text=rendered,
+                    app_id=app_id,
+                ),
+            ),
+            target=TargetRef(self.name, "fake-target"),
+            since=since_label,
+            since_unix_ms=since_ms,
+            clock="target",
+        )
+
+    def mark_diagnostics(
+        self,
+        runtime: object,
+        name: str = "default",
+        *,
+        clear: bool = False,
+        refresh_clock: bool = False,
+    ) -> dict[str, object]:
+        del runtime, clear, refresh_clock
+        unix_ms = int(time.time() * 1000)
+        self.marks[name] = unix_ms
+        return {"name": name, "unix_ms": unix_ms, "iso": "fake", "clock": "target"}
+
+    def clear_diagnostics(self, runtime: object) -> None:
+        del runtime
+
+    def recent_logs(
+        self, target_id: str, *, limit: int = 80, app_id: str | None = None
+    ) -> list[str]:
+        del target_id, limit, app_id
+        return []
 
 
 class _NoLogPlatform(_FakeLogPlatform):
@@ -326,7 +395,6 @@ def test_a_platform_that_cannot_serve_logs_costs_the_action_nothing() -> None:
     cfg = make_config(memory={"enabled": False}, lease={"enabled": False})
     device = FakeDevice(package=APP)
     engine = Engine(cfg, device=device, platform=_NoLogPlatform(cfg))
-    engine.logcat_mark("last-action")
 
     assert engine._app_logs(APP) is None
 

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from android_ui_analyser import device_ledger
 from android_ui_analyser import engine as engine_mod
 from android_ui_analyser.cli import app
 from android_ui_analyser.daemon import dispatch
@@ -119,6 +120,26 @@ def test_profile_refuses_to_stack_on_verified_offline_mode(tmp_path: Path) -> No
     assert engine.network_restore(timeout_ms=0).ok is True
 
 
+def test_network_profile_restore_uses_the_first_cross_cache_restore_point(
+    tmp_path: Path,
+) -> None:
+    device = FakeDevice(serial="cross-cache-profile", network_preference="wifi")
+    first = Engine(
+        make_config(cache={"dir": str(tmp_path / "first-cache")}),
+        device=device,
+    )
+    second = Engine(
+        make_config(cache={"dir": str(tmp_path / "second-cache")}),
+        device=device,
+    )
+
+    assert first.network_profile_apply("wifi-only", timeout_ms=0).ok is True
+    with pytest.raises(UsageError, match="already active"):
+        second.network_profile_apply("cellular-only", timeout_ms=0)
+    assert second.network_profile_restore(timeout_ms=0).ok is True
+    assert device_ledger.read_ledger(device.serial, platform=second.platform.name) == []
+
+
 def test_slow_profile_saves_applies_and_restores_shape(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -174,7 +195,15 @@ def test_lossy_profile_uses_readback_and_restores(
     from android_ui_analyser.schema import NetworkShaping
 
     engine, device = _engine(tmp_path)
-    monkeypatch.setattr(network_profiles, "prepare_loss", lambda serial: ("wlan0", "mq", False))
+    def prepare_loss(serial: str) -> tuple[str, str, bool]:
+        pending = device_ledger.read_ledger(serial, platform=engine.platform.name)
+        assert any(
+            entry.kind == "temporary_adbd_root" and entry.op == "restore_adbd_root"
+            for entry in pending
+        ), "adb root preparation began before its durable root-state restore"
+        return "wlan0", "mq", False
+
+    monkeypatch.setattr(network_profiles, "prepare_loss", prepare_loss)
     monkeypatch.setattr(
         network_profiles,
         "set_loss",
@@ -216,6 +245,10 @@ def test_lossy_profile_uses_readback_and_restores(
     assert applied.ok is True
     assert applied.shaping is not None
     assert applied.shaping.loss_percent == 12.5
+    assert not any(
+        entry.kind == "temporary_adbd_root"
+        for entry in device_ledger.read_ledger(device.serial, platform=engine.platform.name)
+    )
     assert engine.network_profile_status().verified is True
     assert engine.network_profile_restore().ok is True
     assert not profile_path(tmp_path, device.serial).exists()
@@ -226,7 +259,7 @@ def test_cli_and_daemon_profile_surface(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     device = FakeDevice(serial="fake-profile-cli", network_preference="wifi")
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: device)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: device)
 
     listed = runner.invoke(app, ["network", "profile", "list"])
     assert listed.exit_code == 0

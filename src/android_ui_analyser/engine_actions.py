@@ -33,9 +33,11 @@ from .errors import (
     UsageError,
 )
 from .memory import RouteStep, _id_tail, recorded_selector
+from .platforms.runtime import TargetRuntime
 from .schema import (
     ActionResult,
     AnalyzeResult,
+    AppContext,
     Element,
     ElementId,
     MatchMode,
@@ -58,6 +60,14 @@ if TYPE_CHECKING:
     from .engine import Engine
 
 
+def _input_runtime(self: Engine) -> TargetRuntime:
+    return self.platform.runtime_capability("ui.input", self.device)
+
+
+def _touch_runtime(self: Engine) -> TargetRuntime:
+    return self.platform.runtime_capability("device.touch", self.device)
+
+
 # A run of text one line tall measures roughly two to three average character widths
 # in height; a wrapped paragraph measures many. Used to decide whether aiming at a
 # phrase inside an element can only move horizontally.
@@ -72,33 +82,6 @@ def _action_mark(verb: str, el: Element) -> str:
     if len(text) > 40:
         text = text[:37] + "…"
     return f"{verb}:{text}"
-
-
-# u2 accepts these names (plus KEYCODE_* / a numeric keycode); anything else reaches the
-# device as a no-op-or-crash, so it is rejected up front rather than looking like it worked.
-_KEY_NAMES = frozenset(
-    {
-        "home",
-        "back",
-        "left",
-        "right",
-        "up",
-        "down",
-        "center",
-        "menu",
-        "search",
-        "enter",
-        "delete",
-        "del",
-        "recent",
-        "recents",
-        "volume_up",
-        "volume_down",
-        "volume_mute",
-        "camera",
-        "power",
-    }
-)
 
 
 def _published_id(el: Element | None) -> ElementId | None:
@@ -377,7 +360,7 @@ def _resolve_container_rid(self: Engine, rid: str) -> Element | None:
         raises :class:`SelectorNotFoundError` with its candidate list. ``id=-1`` marks an
         element that never came from an ``analyze``, so it is not in the id cache.
         """
-    bounds = self.device.find_text(rid, match=MatchMode.exact, by="id")
+    bounds = _input_runtime(self).find_text(rid, match=MatchMode.exact, by="id")
     if bounds is None:
         return None
     return Element(
@@ -801,7 +784,7 @@ def tap(
     _, cy = self._aim(el)
     step = self._step("tap", el)  # built pre-action: needs the cached package
     with self._acting(_action_mark("tap", el), capture_pre_action=not _hierarchy_settle):
-        self.device.click(cx, cy)
+        _input_runtime(self).click(cx, cy)
     self._record_action_safe(step)
     return self._observe(
         ActionResult(
@@ -835,7 +818,7 @@ def tap_point(
         """
     step = self._step("tap-point", arg=f"{x},{y}")
     with self._acting(f"tap-point:{x},{y}"):
-        self.device.click(x, y)
+        _input_runtime(self).click(x, y)
     self._record_action_safe(step)
     return self._observe(
         ActionResult(ok=True, action="tap-point", target=[x, y]), observe, with_image
@@ -856,7 +839,7 @@ def long_press(
     cx, cy = self._aim(el)
     step = self._step("long-press", el)
     with self._acting(_action_mark("long-press", el)):
-        self.device.long_click(cx, cy, ms)
+        _input_runtime(self).long_click(cx, cy, ms)
     self._record_action_safe(step)
     return self._observe(
         ActionResult(
@@ -901,11 +884,13 @@ def mic_inject(
     acting: dict[str, Any] | None = None
     target: list[int] | None = None
     toggle_owner: str | None = None
+    tree_runtime: TargetRuntime | None = None
     if has_control:
+        tree_runtime = self.platform.runtime_capability("ui.tree", self.device)
         verb = "tap" if control_mode == "toggle" else "long-press"
         if control_mode == "toggle":
-            owner_before_target = self.device.current_app()
-            toggle_owner = str(owner_before_target.get("package") or "")
+            owner_before_target = AppContext.coerce(tree_runtime.current_app())
+            toggle_owner = str(owner_before_target.app_id or "")
             if not toggle_owner:
                 raise DeviceError(
                     "could not prove which foreground app owns the toggle control",
@@ -942,8 +927,8 @@ def mic_inject(
             needle = (selector or {}).get("text") if el.id == named.id else None
             cx, _ = self._tap_point(el, needle)
             _, cy = self._aim(el)
-            owner = self.device.current_app()
-            current_owner = str(owner.get("package") or "")
+            owner = AppContext.coerce(tree_runtime.current_app())
+            current_owner = str(owner.app_id or "")
             if not current_owner or current_owner != toggle_owner:
                 raise DeviceError(
                     "the foreground app changed after resolving the toggle control",
@@ -975,14 +960,16 @@ def mic_inject(
 
     def toggle_owner_failure(stage: str) -> DeviceError | None:
         try:
-            current = self.device.current_app()
+            if tree_runtime is None:
+                raise DeviceError("microphone toggle has no foreground-app observation runtime")
+            current = AppContext.coerce(tree_runtime.current_app())
         except BaseException as exc:
             return DeviceError(
                 f"could not prove toggle control ownership {stage}: {type(exc).__name__}",
                 code="mic_toggle_owner_unknown",
                 hint="Do not tap or retry blindly; recording state may be unknown.",
             )
-        current_package = str(current.get("package") or "")
+        current_package = str(current.app_id or "")
         if not current_package or current_package != toggle_owner:
             return DeviceError(
                 f"the foreground app changed {stage}",
@@ -999,7 +986,7 @@ def mic_inject(
                         # DOWN can land before its response is lost. Mark the attempt first
                         # so cleanup sends the harmless matching UP even when this raises.
                         down_attempted = True
-                        self.device.touch_down(*target)
+                        _touch_runtime(self).touch_down(*target)
                         control_started = True
                     else:
                         owner_error = toggle_owner_failure("immediately before toggle START")
@@ -1007,7 +994,7 @@ def mic_inject(
                             action_error = owner_error
                         else:
                             try:
-                                self.device.click_once(*target)
+                                _touch_runtime(self).click_once(*target)
                             except BaseException as exc:
                                 # Never compensate for an ambiguous START: a second tap could
                                 # either stop a delivered first tap or start recording itself.
@@ -1074,14 +1061,14 @@ def mic_inject(
                     assert target is not None
                     try:
                         if should_finish_hold:
-                            self.device.touch_up(*target)
+                            _touch_runtime(self).touch_up(*target)
                         else:
                             owner_error = toggle_owner_failure("before toggle STOP")
                             if owner_error is not None:
                                 raise owner_error
                             # Exact snapshotted point, exactly once; never re-resolve a
                             # label whose meaning may have changed from Start to Stop.
-                            self.device.click_once(*target)
+                            _touch_runtime(self).click_once(*target)
                     except BaseException as exc:
                         finish_stage = (
                             "touch_release" if control_mode == "hold" else "toggle_stop"
@@ -1229,7 +1216,7 @@ def double_tap(
     cx, cy = self._aim(el)
     step = self._step("double-tap", el)
     with self._acting(_action_mark("double-tap", el)):
-        self.device.double_click(cx, cy)
+        _input_runtime(self).double_click(cx, cy)
     self._record_action_safe(step)
     return self._observe(
         ActionResult(ok=True, action="double-tap", id=_published_id(el), target=[cx, cy]),
@@ -1266,7 +1253,7 @@ def input_text(
     step = self._step("input", el, submit=submit or bool(send_key))
     before = el.text
     with self._acting(_action_mark("input", el)):
-        self.device.input_text(cx, cy, text, clear=True, submit=submit)
+        _input_runtime(self).input_text(cx, cy, text, clear=True, submit=submit)
     self._record_action_safe(step)
     verified = self._typed_text_landed(before, text, submit=submit)
     result = self._observe(
@@ -1534,18 +1521,38 @@ def clear(
     cx, cy = el.center
     step = self._step("clear", el)
     with self._acting(_action_mark("clear", el)):
-        self.device.click(cx, cy)
-        self.device.clear_text()
+        runtime = _input_runtime(self)
+        runtime.click(cx, cy)
+        runtime.clear_text()
     self._record_action_safe(step)
     return self._observe(ActionResult(ok=True, action="clear", id=_published_id(el)), observe, with_image)
 
 
 def _dump(self: Engine) -> str:
-    return self.platform.dump_tree(self.device)
+    runtime = self.platform.runtime_capability("ui.tree", self.device)
+    return self.platform.dump_tree(runtime)
+
+
+def _scroll_elements(self: Engine, raw_tree: str = "") -> list[Element]:
+    """Normalize one native hierarchy before shared scroll geometry inspects it."""
+
+    runtime = self.platform.runtime_capability("ui.tree", self.device)
+    size = runtime.window_size()
+    normalized = self.platform.normalize_tree(
+        raw_tree or self.platform.dump_tree(runtime),
+        size,
+        geometry=runtime.display_geometry(),
+        ignored_app_ids=self.config.memory.ignore_packages,
+    )
+    return normalized.elements
 
 
 def _scroll_box(
-    self: Engine, *, from_id: int | None = None, selector: dict[str, Any] | None = None, xml: str = ""
+    self: Engine,
+    *,
+    from_id: int | None = None,
+    selector: dict[str, Any] | None = None,
+    raw_tree: str = "",
 ) -> tuple[Box, bool]:
     """``(box, is_real_container)`` — where a directional swipe should actually happen.
 
@@ -1557,7 +1564,7 @@ def _scroll_box(
     device = self.device
     w, h = device.window_size()
     screen: Box = (0, 0, w, h)
-    boxes = scrollable_boxes(xml or self._dump(), (w, h))
+    boxes = scrollable_boxes(self._scroll_elements(raw_tree), (w, h))
     if not boxes:
         return screen, False
     anchor = None
@@ -1612,7 +1619,8 @@ def _settle_after_swipe(self: Engine) -> None:
     deadline = time.monotonic() + 0.9
     while time.monotonic() < deadline:
         try:
-            if gs.feed(device.screenshot()):
+            frame = self.platform.adapter_capability("ui.screenshot").capture_screenshot(device)
+            if gs.feed(frame):
                 return
         except Exception:
             break
@@ -1621,7 +1629,7 @@ def _settle_after_swipe(self: Engine) -> None:
 
 
 def _probe(self: Engine, box: Box) -> Sample:
-    return region_probe(self._dump(), box, ignore_packages=self.config.memory.ignore_packages)
+    return region_probe(self._scroll_elements(), box)
 
 
 def _swipe_once(
@@ -1644,7 +1652,7 @@ def _swipe_once(
         """
     before = self._probe(box)
     x1, y1, x2, y2 = self._swipe_path(box, direction, percent)
-    self.device.swipe(x1, y1, x2, y2)
+    _input_runtime(self).swipe(x1, y1, x2, y2)
     self._settle_after_swipe()
     return scroll_movement(
         before,
@@ -1666,7 +1674,7 @@ def swipe(
     verify: bool = False,
     with_image: bool | str | None = None,
 ) -> ActionResult:
-    device = self.device
+    device = _input_runtime(self)
     if coords is not None:
         x1, y1, x2, y2 = coords
         step = self._step("swipe", arg="coords")
@@ -1833,12 +1841,13 @@ def scroll_to(
 
     def locate() -> tuple[int, int, int, int] | None:
         nonlocal matched_via
-        b = self.device.find_text(query, match=mode, ignore_case=ignore_case, by=by)
+        runtime = _input_runtime(self)
+        b = runtime.find_text(query, match=mode, ignore_case=ignore_case, by=by)
         if b is not None:
             matched_via = None
             return b
         for cand in candidates:
-            b = self.device.find_text(cand[0], match=mode, ignore_case=ignore_case, by=by)
+            b = runtime.find_text(cand[0], match=mode, ignore_case=ignore_case, by=by)
             if b is not None:
                 matched_via = cand
                 return b
@@ -1922,24 +1931,14 @@ def key(
     with_image: bool | str | None = None,
     _hierarchy_settle: bool = False,
 ) -> ActionResult:
-    candidate = name.strip()
-    known = (
-        candidate.lower() in _KEY_NAMES
-        or candidate.upper().startswith("KEYCODE_")
-        or candidate.isdigit()
-    )
-    if not known:
-        raise UsageError(
-            f"unknown key '{name}'",
-            hint="Valid: "
-            + ", ".join(sorted(_KEY_NAMES))
-            + ", KEYCODE_*, or a keycode number.",
-        )
+    candidate = self.platform.normalize_key(name)
     step = self._step("key", arg=name)
     with self._acting(f"key:{name}", capture_pre_action=not _hierarchy_settle):
-        self.device.press(name)
+        _input_runtime(self).press(candidate)
     self._record_action_safe(step)
-    return self._observe(ActionResult(ok=True, action="key", detail=name), observe, with_image)
+    return self._observe(
+        ActionResult(ok=True, action="key", detail=candidate), observe, with_image
+    )
 
 
 def hide_keyboard(
@@ -1952,7 +1951,7 @@ def hide_keyboard(
         """
     step = self._step("hide-keyboard")
     with self._acting("hide-keyboard"):
-        self.device.hide_keyboard()
+        self.platform.runtime_capability("device.keyboard", self.device).hide_keyboard()
     self._record_action_safe(step)
     # Verify, don't assume. This returned ok=True unconditionally, and an IME that stays
     # up is not a cosmetic miss: it covers the bottom of the screen, so the button the
@@ -1972,12 +1971,14 @@ def _ime_shown(self: Engine) -> bool | None:
         Tri-state on purpose: "cannot tell" must not read as "hidden", or this check would
         recreate the very false-success it exists to catch.
         """
-    return self.device.keyboard_visible()
+    return self.platform.runtime_capability(
+        "device.keyboard", self.device
+    ).keyboard_visible()
 
 
 def paste(self: Engine, *, observe: bool = True, with_image: bool | str | None = None) -> ActionResult:
     with self._acting():
-        self.device.paste()
+        self.platform.runtime_capability("device.clipboard", self.device).paste()
     # The clipboard value is deliberately not captured. Keep a lossy journal marker so a
     # recorded-flow preview refuses to pretend the resulting journey is self-contained.
     self._record_action_safe(RouteStep(kind="paste"))
@@ -1997,7 +1998,7 @@ def copy_text(
             "element has no text or content-desc to copy",
             hint="Pick a labelled element, or use `clipboard set` for a literal.",
         )
-    self.device.set_clipboard(text)
+    self.platform.runtime_capability("device.clipboard", self.device).set_clipboard(text)
     return ActionResult(ok=True, action="copy", id=_published_id(el), detail=text)
 
 
@@ -2021,7 +2022,9 @@ def a11y_scroll(
     cx, cy = el.center
     step = self._step("a11y-scroll", el, arg=d)
     with self._acting(f"a11y-scroll:{d}"):
-        self.device.a11y_action(cx, cy, action)
+        self.platform.runtime_capability(
+            "device.accessibility", self.device
+        ).a11y_action(cx, cy, action)
     self._record_action_safe(step)
     return self._observe(
         ActionResult(ok=True, action="a11y-scroll", detail=f"{d} @{el.id}"),
@@ -2044,7 +2047,9 @@ def a11y_action(
     act = (action or "CLICK").strip().upper()
     step = self._step("a11y-action", el, arg=act)
     with self._acting(f"a11y:{act}"):
-        self.device.a11y_action(cx, cy, act)
+        self.platform.runtime_capability(
+            "device.accessibility", self.device
+        ).a11y_action(cx, cy, act)
     self._record_action_safe(step)
     return self._observe(
         ActionResult(ok=True, action="a11y-action", detail=f"{act} @{el.id}"),
@@ -2071,11 +2076,11 @@ def erase(
     with self._acting():
         if el is not None:
             cx, cy = el.center
-            self.device.click(cx, cy)
+            _input_runtime(self).click(cx, cy)
         if chars is None or chars <= 0:
-            self.device.clear_text()
+            _input_runtime(self).clear_text()
         else:
-            self.device.erase_chars(chars)
+            self.platform.runtime_capability("device.keyboard", self.device).erase_chars(chars)
     detail = "all" if not chars or chars <= 0 else str(chars)
     return self._observe(
         ActionResult(ok=True, action="erase", id=_published_id(el), detail=detail),

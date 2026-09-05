@@ -50,6 +50,14 @@ class _Agent:
     def rootable(self, serial: str) -> bool:
         return self.can_root
 
+    def snapshot_state(self, serial: str) -> dict[str, Any]:
+        return {
+            "enabled_services": [],
+            "accessibility_enabled": "0",
+            "restricted_settings_appop": "default",
+            "adbd_root": False,
+        }
+
     def uiautomation_held(self, serial: str) -> bool:
         return False
 

@@ -4,7 +4,7 @@ Covers the flags an agent reaches for instead of hand-writing a JSON filter
 (``--fields``/``--format tsv``/``--nonempty``/``--no-system``/``--where-*``/``--clickable``/
 ``--region``/``--limit``/``--meta``), the interaction-state fields those flags expose,
 ``screenshot --region/--scale/--max-width``, and ``daemon start --quiet`` / ``aua orient``.
-Device-less: :class:`FakeDevice` is injected by patching ``engine.connect``.
+Device-less: :class:`FakeDevice` is injected by patching ``Engine._connect_target``.
 """
 
 from __future__ import annotations
@@ -78,7 +78,7 @@ def isolated_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 @pytest.fixture
 def device(monkeypatch: pytest.MonkeyPatch) -> FakeDevice:
     dev = FakeDevice(hierarchy_xml=SCREEN_XML)
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: dev)
     return dev
 
 
@@ -136,7 +136,11 @@ def test_unknown_field_never_touches_the_device(monkeypatch: pytest.MonkeyPatch)
     def explode(serial: str | None = None) -> FakeDevice:  # pragma: no cover - must not run
         raise AssertionError("validation must fail before connecting")
 
-    monkeypatch.setattr(engine_mod, "connect", explode)
+    monkeypatch.setattr(
+        engine_mod.Engine,
+        "_connect_target",
+        lambda _engine, serial=None: explode(serial),
+    )
     _run("analyze", "--fields", "nope", code=2)
 
 
@@ -247,7 +251,7 @@ def test_scrollable_lands_on_the_list_container(device: FakeDevice) -> None:
 def test_missing_attributes_are_null_not_false(monkeypatch: pytest.MonkeyPatch) -> None:
     """"Off" and "unknown" must stay distinguishable."""
     dev = FakeDevice(hierarchy_xml=SPARSE_XML)
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: dev)
     element = json.loads(_run("analyze", "--source", "hierarchy"))["elements"][0]
     for name in ("checkable", "checked", "selected", "scrollable", "long_clickable", "password"):
         assert element[name] is None, name

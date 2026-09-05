@@ -502,7 +502,7 @@ def test_session_start_uses_exactly_one_analyze(monkeypatch, tmp_path) -> None:
             "reason": (
                 "Run this once when finished. It restores only session-owned reversible state, "
                 "releases the device lease, and returns the efficiency review. An AUA-started "
-                "emulator remains warm until its lease-gated idle timeout; do not restore the "
+                    "virtual target remains warm until its lease-gated idle timeout; do not restore the "
                 "network separately first."
             ),
         }

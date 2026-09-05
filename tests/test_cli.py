@@ -2,8 +2,8 @@
 
 The CLI is a thin Typer adapter over the engine. We drive it with Typer's
 ``CliRunner`` and inject a device-less :class:`FakeDevice` by monkeypatching
-``android_ui_analyser.engine.connect`` (and ``list_devices`` where needed), so no phone
-is required. Logs go to stderr; JSON results go to stdout — we assert both streams.
+``Engine._connect_target`` (and ``Engine._list_targets`` where needed), so no phone is
+required. Logs go to stderr; JSON results go to stdout — we assert both streams.
 """
 
 from __future__ import annotations
@@ -42,12 +42,12 @@ HIERARCHY_XML = """<?xml version="1.0" encoding="UTF-8"?>
 
 @pytest.fixture
 def patched_device(monkeypatch: pytest.MonkeyPatch) -> FakeDevice:
-    """Patch engine.connect to return a FakeDevice with the labeled hierarchy."""
+    """Patch Engine._connect_target to return a FakeDevice with the labeled hierarchy."""
     device = FakeDevice(
         hierarchy_xml=HIERARCHY_XML,
         text_index={"Continue": (40, 200, 1040, 320), "Welcome": (0, 0, 1080, 120)},
     )
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: device)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: device)
     return device
 
 
@@ -202,7 +202,7 @@ def test_has_ocr_fallback_found_via_ocr(monkeypatch: pytest.MonkeyPatch) -> None
 
     # Empty hierarchy text_index → hierarchy miss; engine falls back to OCR.
     device = FakeDevice(text_index={})
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: device)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: device)
 
     real_engine = engine_mod.Engine
 
@@ -222,7 +222,7 @@ def test_has_ocr_fallback_found_via_ocr(monkeypatch: pytest.MonkeyPatch) -> None
 def test_has_no_ocr_fallback_misses(monkeypatch: pytest.MonkeyPatch) -> None:
     """With --no-ocr-fallback, a hierarchy miss is final (exit 1), OCR never consulted."""
     device = FakeDevice(text_index={})
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: device)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: device)
     result = runner.invoke(app, ["has", "Checkout", "--no-ocr-fallback"])
     assert result.exit_code == 1
     assert json.loads(result.stdout)["found"] is False
@@ -350,7 +350,7 @@ def test_doctor_no_device_no_secret_leak(monkeypatch: pytest.MonkeyPatch) -> Non
     def boom() -> list:
         raise DeviceError("no device found")
 
-    monkeypatch.setattr(engine_mod, "list_devices", boom)
+    monkeypatch.setattr(engine_mod.Engine, "_list_targets", lambda _engine: boom())
 
     result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0, result.stderr
@@ -364,7 +364,7 @@ def test_doctor_no_device_no_secret_leak(monkeypatch: pytest.MonkeyPatch) -> Non
 
 def test_doctor_json_no_device(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GEMINI_API_KEY", "another-secret")
-    monkeypatch.setattr(engine_mod, "list_devices", lambda: [])
+    monkeypatch.setattr(engine_mod.Engine, "_list_targets", lambda _engine: [])
     result = runner.invoke(app, ["--format", "json", "doctor"])
     assert result.exit_code == 0, result.stderr
     report = json.loads(result.stdout)
@@ -381,7 +381,7 @@ def test_devices_lists_json(monkeypatch: pytest.MonkeyPatch) -> None:
     from android_ui_analyser.schema import DeviceInfo
 
     infos = [DeviceInfo(serial="emulator-5554", model="Pixel", android_version="14")]
-    monkeypatch.setattr(engine_mod, "list_devices", lambda: infos)
+    monkeypatch.setattr(engine_mod.Engine, "_list_targets", lambda _engine: infos)
     result = runner.invoke(app, ["devices"])
     assert result.exit_code == 0, result.stderr
     data = json.loads(result.stdout)
@@ -401,9 +401,9 @@ def test_lease_acquire_positional_serial_overrides_ambient_pin(
     config.write_text("{}\n", encoding="utf-8")
     monkeypatch.setenv("AUA_SERIAL", "emulator-5554")
     monkeypatch.setattr(
-        engine_mod,
-        "list_devices",
-        lambda: [
+        engine_mod.Engine,
+        "_list_targets",
+        lambda _engine: [
             DeviceInfo(serial="phone-123", model="Phone", android_version="14"),
             DeviceInfo(serial="emulator-5554", model="Emulator", android_version="14"),
         ],
@@ -440,9 +440,9 @@ def test_unpinned_lease_acquire_prefers_emulator_when_phone_is_listed_first(
     config.write_text("{}\n", encoding="utf-8")
     monkeypatch.delenv("AUA_SERIAL", raising=False)
     monkeypatch.setattr(
-        engine_mod,
-        "list_devices",
-        lambda: [
+        engine_mod.Engine,
+        "_list_targets",
+        lambda _engine: [
             DeviceInfo(serial="phone-123", model="Phone", android_version="14"),
             DeviceInfo(serial="emulator-5554", model="Emulator", android_version="14"),
         ],
@@ -471,9 +471,9 @@ def test_lease_acquire_without_positional_serial_preserves_aua_serial(
     config.write_text("{}\n", encoding="utf-8")
     monkeypatch.setenv("AUA_SERIAL", "phone-123")
     monkeypatch.setattr(
-        engine_mod,
-        "list_devices",
-        lambda: [
+        engine_mod.Engine,
+        "_list_targets",
+        lambda _engine: [
             DeviceInfo(serial="phone-123", model="Phone", android_version="14"),
             DeviceInfo(serial="emulator-5554", model="Emulator", android_version="14"),
         ],
@@ -502,9 +502,9 @@ def test_lease_switch_requires_warning_then_cleans_and_replaces(
     config.write_text("{}\n", encoding="utf-8")
     monkeypatch.delenv("AUA_SERIAL", raising=False)
     monkeypatch.setattr(
-        engine_mod,
-        "list_devices",
-        lambda: [
+        engine_mod.Engine,
+        "_list_targets",
+        lambda _engine: [
             DeviceInfo(serial="emulator-5554", model="First", android_version="14"),
             DeviceInfo(serial="emulator-5556", model="Second", android_version="14"),
         ],
@@ -547,9 +547,9 @@ def test_lease_replace_keeps_old_lease_when_offline_cleanup_is_deferred(
     owner = leases.resolve_owner("agent-a")
     assert leases.acquire(isolated_cache, "emulator-5554", owner=owner)
     monkeypatch.setattr(
-        engine_mod,
-        "list_devices",
-        lambda: [
+        engine_mod.Engine,
+        "_list_targets",
+        lambda _engine: [
             DeviceInfo(serial="emulator-5554", model="First", android_version="14"),
             DeviceInfo(serial="emulator-5556", model="Second", android_version="14"),
         ],
@@ -596,9 +596,9 @@ def test_lease_replace_recovers_multiple_legacy_primary_leases(
         role="primary",
     )
     monkeypatch.setattr(
-        engine_mod,
-        "list_devices",
-        lambda: [
+        engine_mod.Engine,
+        "_list_targets",
+        lambda _engine: [
             DeviceInfo(serial="emulator-5554", model="First", android_version="14"),
             DeviceInfo(serial="emulator-5556", model="Second", android_version="14"),
         ],
@@ -691,12 +691,22 @@ def test_lease_list_mine_requires_the_same_process_not_only_the_same_label(
         owner=leases.resolve_owner("shared-label"),
     )
     monkeypatch.setattr(
-        engine_mod,
-        "list_devices",
-        lambda: [
+        engine_mod.Engine,
+        "_list_targets",
+        lambda _engine: [
             DeviceInfo(serial="emulator-5554", model="Emulator", android_version="14")
         ],
     )
+    listed_platforms: list[str | None] = []
+    original_list_leases = leases.list_leases
+
+    def list_leases_for_selected_platform(
+        cache_dir: str | Path, *, platform: str | None = None
+    ) -> list[dict[str, object]]:
+        listed_platforms.append(platform)
+        return original_list_leases(cache_dir, platform=platform or "android")
+
+    monkeypatch.setattr(leases, "list_leases", list_leases_for_selected_platform)
     current[0] = leases.LeaseOwner("second-process", pid=222, started="second")
 
     listed = runner.invoke(app, ["--owner", "shared-label", "lease", "list"])
@@ -705,6 +715,7 @@ def test_lease_list_mine_requires_the_same_process_not_only_the_same_label(
     row = json.loads(listed.stdout)["devices"][0]
     assert row["owner"] == "shared-label"
     assert row["mine"] is False
+    assert listed_platforms == ["android"]
 
 
 def test_lease_release_keeps_ownership_when_cleanup_fails(
@@ -801,6 +812,27 @@ def test_fanout_uses_one_stable_scoped_owner_per_extra_target(
 
     owner = leases.resolve_owner("agent-a")
     assert leases.acquire(isolated_cache, "emulator-5554", owner=owner)
+    queried_platforms: list[str | None] = []
+    original_primary_held_by = leases.primary_held_by
+
+    def primary_held_by_for_selected_platform(
+        cache_dir: str | Path,
+        lease_owner: str,
+        *,
+        platform: str | None = None,
+    ) -> list[str]:
+        queried_platforms.append(platform)
+        return original_primary_held_by(
+            cache_dir,
+            lease_owner,
+            platform=platform or "android",
+        )
+
+    monkeypatch.setattr(
+        leases,
+        "primary_held_by",
+        primary_held_by_for_selected_platform,
+    )
     calls: list[list[str]] = []
     original_run = subprocess.run
 
@@ -838,3 +870,51 @@ def test_fanout_uses_one_stable_scoped_owner_per_extra_target(
         "--serial",
         "emulator-5556",
     ]
+    assert [call[call.index("--platform") + 1] for call in calls] == ["android", "android"]
+    assert queried_platforms == ["android"]
+
+
+def test_fanout_propagates_profile_selected_platform_to_children(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = tmp_path / "aua.yaml"
+    config_path.write_text(
+        "lease:\n"
+        "  enabled: false\n"
+        "profiles:\n"
+        "  plugin-run:\n"
+        "    device:\n"
+        "      platform: strict-external\n",
+        encoding="utf-8",
+    )
+    calls: list[list[str]] = []
+
+    original_run = subprocess.run
+
+    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if not command or command[0] != "aua":
+            return original_run(command, **kwargs)
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout='{"ok":true}\n', stderr="")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    result = runner.invoke(
+        app,
+        [
+            "--config",
+            str(config_path),
+            "--profile",
+            "plugin-run",
+            "fanout",
+            "--serials",
+            "shared-target",
+            "analyze",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert len(calls) == 1
+    child = calls[0]
+    assert child[child.index("--platform") + 1] == "strict-external"
+    assert child[child.index("--profile") + 1] == "plugin-run"
+    assert child[child.index("--config") + 1] == str(config_path)

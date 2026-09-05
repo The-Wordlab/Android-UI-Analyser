@@ -122,7 +122,7 @@ def _flows_for(self: Engine, package: str | None) -> list[str]:
                 context_id = session.active_context_id
     from .flows import FlowStore
 
-    store = FlowStore(self.config.memory)
+    store = FlowStore(self.config.memory, platform=self.platform.name)
     fingerprint: tuple[tuple[str, int, int], ...] = ()
     with contextlib.suppress(OSError):
         fingerprint = tuple(
@@ -221,10 +221,12 @@ def _run_flow_order_assertion(self: Engine, step: RouteStep) -> tuple[bool, str]
     timeout_ms, _clamped_from, _ceiling = self._bounded_wait_ms(step.timeout_ms or 0)
     deadline = time.monotonic() + timeout_ms / 1000.0
     while True:
-        raw_tree = self.platform.dump_tree(self.device)
+        runtime = self.platform.runtime_capability("ui.tree", self.device)
+        raw_tree = self.platform.dump_tree(runtime)
         elements = self.platform.normalize_tree(
             raw_tree,
-            self.device.window_size(),
+            runtime.window_size(),
+            geometry=runtime.display_geometry(),
             ignored_app_ids=self.config.memory.ignore_packages,
         ).elements
         order = evaluate_order(elements, axis=axis, selectors=selectors)
@@ -517,6 +519,8 @@ def _recorder(self: Engine) -> tuple[Any, str]:
                 f"{serial} cannot run the on-device helper, which recording needs",
                 hint="The helper needs `adb root`; use a debuggable emulator image.",
             )
+        if not agent.is_installed(serial):
+            self._record_device_agent_install(serial)
         self._record_device_agent_change(serial)
         agent.enable(serial)
     # Something else may be holding the slot from an earlier command in this session.
@@ -541,6 +545,69 @@ def _recorder(self: Engine) -> tuple[Any, str]:
     return agent, serial
 
 
+def helper_status(self: Engine) -> dict[str, Any]:
+    """Report optional on-device agent state through the selected platform service."""
+
+    agent = self.platform.capability("device_agent")
+    state = agent.status(self.device.target_id)
+    return {"ok": True, "action": "helper-status", **state}
+
+
+def helper_install(
+    self: Engine, *, reinstall: bool = False, force: bool = False
+) -> dict[str, Any]:
+    """Explicitly stage the helper package; unlike auto-setup, this is retained intent."""
+
+    agent = self.platform.capability("device_agent")
+    result = agent.install(self.device.target_id, reinstall=reinstall, force=force)
+    # An earlier automatic enable may have scheduled package removal. The explicit install now
+    # says to retain it, so that stale automatic cleanup must not override the caller's request.
+    self.forget_device_change("automatic_device_agent_package")
+    return {"ok": True, "action": "helper-install", **result}
+
+
+def helper_enable(self: Engine) -> dict[str, Any]:
+    """Enable the optional device agent with write-ahead service/package cleanup."""
+
+    agent = self.platform.capability("device_agent")
+    serial = self.device.target_id
+    if agent.is_enabled(serial):
+        return {"ok": True, "action": "helper-enable", **agent.status(serial)}
+    if not agent.is_installed(serial):
+        self._record_device_agent_install(serial)
+    self._record_device_agent_change(serial)
+    result = agent.enable(serial)
+    return {"ok": True, "action": "helper-enable", **result}
+
+
+def helper_disable(self: Engine) -> dict[str, Any]:
+    """Disable the helper and retire the matching service-state undo after success."""
+
+    agent = self.platform.capability("device_agent")
+    serial = self.device.target_id
+    pending = self._pending_device_change("device_agent_service", serial=serial)
+    result = (
+        agent.restore_state(serial, pending.args)
+        if pending is not None
+        else agent.disable(serial)
+    )
+    self.forget_device_change("device_agent_service")
+    return {"ok": True, "action": "helper-disable", **result}
+
+
+def helper_remove(self: Engine) -> dict[str, Any]:
+    """Explicitly disable and remove AUA's helper package."""
+
+    agent = self.platform.capability("device_agent")
+    serial = self.device.target_id
+    pending = self._pending_device_change("device_agent_service", serial=serial)
+    if pending is not None:
+        agent.restore_state(serial, pending.args)
+    result = agent.remove(serial)
+    self.forget_device_change("device_agent_service", "automatic_device_agent_package")
+    return {"ok": True, "action": "helper-remove", **result}
+
+
 def demo_record_start(self: Engine) -> dict[str, Any]:
     """Arm the device's recorder, then get out of the way.
 
@@ -561,9 +628,18 @@ def demo_record_start(self: Engine) -> dict[str, Any]:
     # touch stream. Best effort — a target that will not give it up simply records what it
     # always did, with the gaps still reported honestly.
     touches = False
-    with contextlib.suppress(Exception):
-        agent.start_touch_capture(serial)
-        touches = True
+    start_touch_capture = getattr(agent, "start_touch_capture", None)
+    if callable(start_touch_capture):
+        with contextlib.suppress(Exception):
+            self.record_device_change(
+                key="device_agent_touch_capture",
+                kind="device_agent_touch_capture",
+                op="stop_device_agent_touch_capture",
+                detail="detached on-device touch capture started for a human journey",
+                serial=serial,
+            )
+            start_touch_capture(serial)
+            touches = True
     return {
         "ok": True,
         "action": "demo-record-start",
@@ -612,9 +688,14 @@ def demo_record_stop(self: Engine, *, save: str | None = None, force: bool = Fal
 
     touches: list[Any] = []
     captured = False
-    with contextlib.suppress(Exception):
-        touches = list(agent.stop_touch_capture(serial))
-        captured = True
+    stop_touch_capture = getattr(agent, "stop_touch_capture", None)
+    touch_pending = self._pending_device_change("device_agent_touch_capture", serial=serial)
+    if touch_pending is not None and callable(stop_touch_capture):
+        with contextlib.suppress(Exception):
+            touches = list(stop_touch_capture(serial))
+            agent.discard_touch_capture(serial)
+            self.forget_device_change("device_agent_touch_capture", serial=serial)
+            captured = True
     draft = steps_from_recording(
         (result or {}).get("steps") or [],
         touches=touches,
@@ -663,7 +744,7 @@ def demo_record_stop(self: Engine, *, save: str | None = None, force: bool = Fal
             ),
         )
     flow = Flow(name=save, steps=draft.steps, params=draft.params)
-    path = FlowStore(self.config.memory).save(flow, force=force)
+    path = FlowStore(self.config.memory, platform=self.platform.name).save(flow, force=force)
     payload["saved"] = str(path)
     return payload
 
@@ -1222,7 +1303,7 @@ def _resolve_nested_flow_node(self: Engine, ref: str, flow_dir: Path | None) -> 
         resolve_params,
     )
 
-    store = FlowStore(self.config.memory)
+    store = FlowStore(self.config.memory, platform=self.platform.name)
     if not looks_like_path(ref):
         # Names repeat across apps now, so the referring flow's own directory decides which
         # sibling is meant; an unqualified name matching two apps is refused, not guessed.
@@ -1296,7 +1377,14 @@ def _preflight_nested_flow_graph(
                 plan=plan,
                 goto_allowed=False,
             )
-        if step.kind == "flags-apply":
+        if step.kind == "key":
+            if not step.arg:
+                raise UsageError("key step needs a non-empty key name")
+            # Parsing owns the finite saved-flow vocabulary; the selected adapter owns its native
+            # mapping and may reject an otherwise portable key. Do that while the complete graph
+            # is still in preflight, before an earlier step can mutate the target.
+            self.platform.normalize_key(step.arg)
+        elif step.kind == "flags-apply":
             if not step.arg:
                 raise UsageError("flags_apply step needs a flags file")
             flags = self.platform.capability("feature_flags")
@@ -1916,7 +2004,7 @@ def flow_run(
         flow = parse_flow_yaml(yaml, name="inline")
         root_source_id = "inline:" + hashlib.sha256(yaml.encode("utf-8")).hexdigest()
     elif name is not None:
-        store = FlowStore(self.config.memory)
+        store = FlowStore(self.config.memory, platform=self.platform.name)
         # The flow's own directory — not the library root — is the base a composed `flow:`
         # and a relative host path resolve against, so an app's flows can reference each
         # other by bare name once they are filed together.
@@ -1953,7 +2041,9 @@ def flow_run(
             junit=junit,
             screenshot=lambda path: str(self.screenshot(str(path)).detail or path),
             diagnostics=lambda: (
-                self.platform.diagnostic_logs(self.device, lines=400)
+                self.platform.adapter_capability("device.logs").diagnostic_logs(
+                    self.device, lines=400
+                )
                 if self.platform.supports("device.logs")
                 else None
             ),
@@ -2406,7 +2496,7 @@ def flow_save(
         item.model_dump(mode="json") for item in recorded_selector_resilience(selected)
     ]
 
-    store = FlowStore(self.config.memory)
+    store = FlowStore(self.config.memory, platform=self.platform.name)
     # Collision is per app: the same name under a different package is a different flow.
     path = store.path(name, app=origin)
     existed_before = path.is_file()
@@ -2556,7 +2646,7 @@ def flow_delete(self: Engine, name: str) -> dict[str, Any]:
         """
     from .flows import FlowStore, split_flow_ref
 
-    store = FlowStore(self.config.memory)
+    store = FlowStore(self.config.memory, platform=self.platform.name)
     found = store.find(name)
     deleted = store.delete(name)
     # Report the file that was removed; an absent flow still names where it would have been.
@@ -2608,7 +2698,7 @@ def flow_list(self: Engine, *, app: str | None = None) -> dict[str, Any]:
                 if session.package == package:
                     context_id = session.active_context_id
     return {
-        "flows": FlowStore(self.config.memory).list(
+        "flows": FlowStore(self.config.memory, platform=self.platform.name).list(
             app=app,
             active_package=package if context_id is not None else None,
             active_context_id=context_id,

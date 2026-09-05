@@ -24,7 +24,7 @@ BUTTON_XML = """<?xml version="1.0" encoding="UTF-8"?>
 @pytest.fixture
 def cli_device(tmp_path, monkeypatch):  # type: ignore[no-untyped-def]
     device = FakeDevice(hierarchy_xml=BUTTON_XML)
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: device)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: device)
     monkeypatch.setenv("AUA_CACHE__DIR", str(tmp_path / "cache"))
     monkeypatch.setenv("AUA_MEMORY__DIR", str(tmp_path / "memory"))
     monkeypatch.setenv("AUA_DAEMON__ENABLED", "false")

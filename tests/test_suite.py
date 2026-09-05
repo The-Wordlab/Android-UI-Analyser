@@ -141,7 +141,7 @@ def test_cli_suite_run_pass_and_fail(tmp_path: Path, monkeypatch) -> None:
         text_index={"Notifications": (40, 100, 1040, 180), "Done": (40, 300, 1040, 380)},
         resource_index={"com.test.app:id/notificationsButton": (40, 100, 1040, 180)},
     )
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: dev)
 
     r = runner.invoke(app, ["suite", "run", str(path)])
     assert r.exit_code == 0, r.stderr
@@ -174,7 +174,7 @@ def test_cli_suite_stdin(monkeypatch) -> None:
         hierarchy_xml=_XML,
         text_index={"Notifications": (40, 100, 1040, 180)},
     )
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: dev)
     yaml_text = 'name: stdin_ac\nchecks:\n  - has: "Notifications"\n'
     r = runner.invoke(app, ["suite", "run", "-", "--json"], input=yaml_text)
     assert r.exit_code == 0, r.stderr

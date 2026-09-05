@@ -69,6 +69,7 @@ from .memory import (
     find_result,
     render_map,
 )
+from .platforms.identity import LEGACY_PLATFORM
 from .projection import Projection, render_action_tsv, trim_observation_payload
 from .reconcile import ReconciliationStore, ResearchReport, audit_map, summarize_audit
 from .schema import ActionResult, AnalyzeResult, OutputFormat, publish_ids
@@ -371,6 +372,7 @@ def _journal_cli_recovery(
         journal_mod.record(
             cache_dir=cfg.cache.dir,
             serial=(opts.serial if opts is not None else None) or cfg.device.serial,
+            platform=cfg.device.platform,
             source="cli",
             cmd=f"cli_{event}",
             args={"command": command_path, "argv": redacted_argv(argv or [])},
@@ -549,7 +551,7 @@ def _apply_answers(engine: Engine, answers: tuple[str, ...]) -> None:
             "--answers needs to know which app it is about, and no package is in the foreground",
             hint="Run it alongside a command that touches the app, e.g. `aua analyze --answers …`.",
         )
-    store = ReconciliationStore(AppMemoryStore(engine.config.memory))
+    store = ReconciliationStore(AppMemoryStore.from_config(engine.config))
     pairs: list[tuple[str, str]] = []
     for pair in answers:
         task_id, sep, value = pair.partition("=")
@@ -883,6 +885,7 @@ _EMITTED_FINGERPRINT: str | None = None
 class _CliJournalContext:
     cache_dir: str | Path
     serial: str | None
+    platform: str
     invocation_id: str
     detail_id: str | None
     cmd: str
@@ -942,6 +945,24 @@ def _cli_request_context() -> dict[str, Any]:
     return context
 
 
+def _selected_platform_name(engine: Engine) -> str:
+    """Return the selected strategy name without forcing any target connection.
+
+    A real ``Engine`` always owns a resolved adapter.  Keeping the configured-name fallback makes
+    the CLI's journal boundary usable with lightweight transport fakes and older embedders that
+    provide the documented config surface but not the newly exposed adapter attribute.
+    """
+
+    # Soft lints call this before/after daemon routing and must remain host-only. Inspect the
+    # already-injected strategy rather than touching ``engine.platform``, whose lazy property
+    # constructs and validates a plugin adapter.
+    name = getattr(getattr(engine, "_platform", None), "name", None)
+    if isinstance(name, str) and name:
+        return name.strip().lower()
+    configured = getattr(getattr(engine.config, "device", None), "platform", None)
+    return str(configured).strip().lower() if configured else LEGACY_PLATFORM
+
+
 def _remember_cli_journal(
     result: Any,
     *,
@@ -957,6 +978,7 @@ def _remember_cli_journal(
         _CLI_JOURNAL_CONTEXTS[id(result)] = _CliJournalContext(
             cache_dir=engine.config.cache.dir,
             serial=serial,
+            platform=_selected_platform_name(engine),
             invocation_id=_INVOCATION_ID,
             detail_id=detail_id,
             cmd=cmd,
@@ -984,6 +1006,7 @@ def _record_cli_emitted(
         journal_mod.record_emitted_response(
             cache_dir=context.cache_dir,
             serial=context.serial,
+            platform=context.platform,
             invocation_id=context.invocation_id,
             detail_id=context.detail_id,
             cmd=context.cmd,
@@ -1338,7 +1361,12 @@ def _warn_if_redundant_analyze(engine: Engine, args: dict[str, Any] | None = Non
     try:
         from . import journal as journal_mod
 
-        events = journal_mod.read_since(cfg.cache.dir, serial, limit=4)
+        events = journal_mod.read_since(
+            cfg.cache.dir,
+            serial,
+            limit=4,
+            platform=_selected_platform_name(engine),
+        )
     except Exception:  # pragma: no cover - best effort
         return
     if len(events) < 2:
@@ -1403,7 +1431,12 @@ def _warn_if_wait_could_have_been_until(engine: Engine, waited_for: str | None) 
     try:
         from . import journal as journal_mod
 
-        events = journal_mod.read_since(cfg.cache.dir, serial, limit=4)
+        events = journal_mod.read_since(
+            cfg.cache.dir,
+            serial,
+            limit=4,
+            platform=_selected_platform_name(engine),
+        )
     except Exception:  # pragma: no cover - best effort
         return
     # Unlike the redundant-analyze lint, this runs BEFORE its own command is journaled, so the
@@ -1767,7 +1800,7 @@ def _replace_policy_mismatched_daemon(daemon_mod: Any, cfg: Any, expected: str) 
 
 
 def _replace_runtime_mismatched_daemon(daemon_mod: Any, cfg: Any, expected: str) -> bool:
-    """Replace a per-device daemon that was born in another run's cache authority."""
+    """Replace a per-target daemon born with different runtime configuration."""
 
     if _daemon_is_mid_job(daemon_mod, cfg):
         return False
@@ -1886,7 +1919,7 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
                     runtime_mismatch = False
                 if runtime_mismatch:
                     raise UsageError(
-                        "the running daemon belongs to a different cache/lease runtime",
+                        "the running daemon uses a different target runtime configuration",
                         hint=_restart_hint(daemon_mod, cfg),
                         code="daemon_runtime_mismatch",
                     )
@@ -2001,6 +2034,7 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
             detail_id = journal_mod.record(
                 cache_dir=cfg.cache.dir,
                 serial=serial,
+                platform=_selected_platform_name(engine),
                 source="cli",
                 cmd=_DAEMON_CMD.get(method, method),
                 args=kwargs,
@@ -2036,6 +2070,7 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
             journal_mod.record(
                 cache_dir=cfg.cache.dir,
                 serial=serial,
+                platform=_selected_platform_name(engine),
                 source="cli",
                 cmd=_DAEMON_CMD.get(method, method),
                 args=kwargs,
@@ -4199,7 +4234,12 @@ def session_start_cmd(
     start_emulator: bool = typer.Option(
         True,
         "--start-emulator/--no-start-emulator",
-        help="Automatically boot a compatible AVD when no matching unleased device is online.",
+        help="Android compatibility alias for --provision-target/--no-provision-target.",
+    ),
+    provision_target: bool | None = typer.Option(
+        None,
+        "--provision-target/--no-provision-target",
+        help="Start a compatible selected-platform virtual target when none is available.",
     ),
     headed: bool = typer.Option(
         False,
@@ -4223,6 +4263,11 @@ def session_start_cmd(
         ),
     ),
     avd: str | None = typer.Option(None, "--avd", help="AVD name when several are configured."),
+    virtual_target: str | None = typer.Option(
+        None,
+        "--virtual-target",
+        help="Selected-platform virtual-target definition; --avd remains an Android alias.",
+    ),
     needs: str | None = typer.Option(
         None,
         "--needs",
@@ -4284,10 +4329,12 @@ def session_start_cmd(
             junit=junit,
             wait_for_lease_s=wait_for_lease,
             start_emulator=start_emulator,
+            provision_target=provision_target,
             headed=headed,
             audio=audio,
             animations=animations,
             avd=avd,
+            virtual_target=virtual_target,
             needs=(
                 _split_needs(needs)
                 if needs is not None
@@ -4666,8 +4713,15 @@ def fanout(
     from . import leases as lease_mod
 
     opts = _opts(ctx)
+    cfg = opts.load()
     base_owner = lease_mod.resolve_owner(opts.owner)
-    base_held = set(lease_mod.primary_held_by(opts.load().lease.registry_dir, base_owner))
+    base_held = set(
+        lease_mod.primary_held_by(
+            cfg.lease.registry_dir,
+            base_owner,
+            platform=cfg.device.platform,
+        )
+    )
     targets = [s.strip() for s in (serials or "").split(",") if s.strip()]
     if not targets:
         targets = [
@@ -4691,12 +4745,17 @@ def fanout(
             ser,
             "--format",
             "compact",
-            *command,
+            # The parent may have selected this through a profile or environment rather than an
+            # explicit flag. Child processes must drive the same strategy that discovered and
+            # leased these target ids.
+            "--platform",
+            cfg.device.platform,
         ]
-        if opts.platform:
-            cmd[1:1] = ["--platform", opts.platform]
         if opts.config:
-            cmd[1:1] = ["--config", opts.config]
+            cmd.extend(["--config", opts.config])
+        if opts.profile:
+            cmd.extend(["--profile", opts.profile])
+        cmd.extend(command)
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         except subprocess.TimeoutExpired:
@@ -4753,7 +4812,8 @@ _EMULATOR_PROGRESS_INTERVAL_S = 10.0
 @contextlib.contextmanager
 def _emulator_start_progress(
     *,
-    avd: str | None,
+    avd: str | None = None,
+    definition_id: str | None = None,
     headless: bool,
     wait_s: float,
     action: str = "emulator-start",
@@ -4776,11 +4836,14 @@ def _emulator_start_progress(
         payload = {
             "action": action,
             "stage": stage,
-            "avd": avd or "auto",
             "mode": "headless" if headless else "windowed",
             "elapsed_s": round(max(0.0, time.monotonic() - started), 1),
             "message": message,
         }
+        if definition_id is not None or action.startswith("virtual-target"):
+            payload["definition_id"] = definition_id or "auto"
+        else:
+            payload["avd"] = avd or "auto"
         with contextlib.suppress(OSError):
             typer.echo(
                 "AUA_PROGRESS " + json.dumps(payload, separators=(",", ":"), ensure_ascii=False),
@@ -4824,13 +4887,275 @@ def _emulator_start_progress(
             emit("failed", "startup failed; the structured error follows on stderr")
 
 
+virtual_target_app = typer.Typer(
+    help="List, create, provision, start, inspect, and stop platform virtual targets.",
+    no_args_is_help=True,
+)
+app.add_typer(virtual_target_app, name="virtual-target")
+
+
+def _virtual_target_options(values: list[str]) -> dict[str, Any]:
+    """Parse repeatable plugin-owned ``KEY=JSON`` options without interpreting their names."""
+
+    import json
+
+    options: dict[str, Any] = {}
+    for raw in values:
+        key, separator, value = raw.partition("=")
+        key = key.strip()
+        if not separator or not key:
+            raise UsageError(
+                f"virtual-target option must be KEY=VALUE, got {raw!r}",
+                hint='Repeat --option for more values; JSON scalars/arrays/objects are accepted.',
+            )
+        if key in options:
+            raise UsageError(f"duplicate virtual-target option {key!r}")
+        try:
+            options[key] = json.loads(value)
+        except json.JSONDecodeError:
+            options[key] = value
+    return options
+
+
+@virtual_target_app.command("list")
+def virtual_target_list_cmd(ctx: typer.Context) -> None:
+    """List reusable virtual-target definitions for the selected platform."""
+
+    try:
+        _emulator_emit(_opts(ctx).engine().virtual_target_list(), ctx)
+    except AuaError as err:
+        emit_error(err)
+        raise typer.Exit(int(err.exit_code)) from err
+
+
+@virtual_target_app.command("status")
+def virtual_target_status_cmd(ctx: typer.Context) -> None:
+    """Show configured, running, and AUA-owned virtual targets."""
+
+    try:
+        _emulator_emit(_opts(ctx).engine().virtual_target_status(), ctx)
+    except AuaError as err:
+        emit_error(err)
+        raise typer.Exit(int(err.exit_code)) from err
+
+
+@virtual_target_app.command("start")
+def virtual_target_start_cmd(
+    ctx: typer.Context,
+    definition_id: str | None = typer.Option(
+        None,
+        "--definition",
+        help="Platform-local reusable target definition (auto-select when omitted).",
+    ),
+    headless: bool = typer.Option(True, "--headless/--windowed"),
+    audio: bool = typer.Option(False, "--audio/--no-audio"),
+    animations: bool = typer.Option(False, "--animations/--no-animations"),
+    wait: float = typer.Option(120, "--wait", min=0),
+    owner: str | None = typer.Option(None, "--owner"),
+    parallel: bool = typer.Option(False, "--parallel"),
+    option: list[str] | None = typer.Option(
+        None,
+        "--option",
+        metavar="KEY=VALUE",
+        help="Adapter-owned start option; repeat for more (VALUE accepts JSON).",
+    ),
+) -> None:
+    """Start one selected-platform virtual target without opening a goal session."""
+
+    try:
+        with _emulator_start_progress(
+            definition_id=definition_id,
+            headless=headless,
+            wait_s=wait,
+            action="virtual-target-start",
+        ):
+            payload = _opts(ctx).engine().virtual_target_start(
+                definition_id,
+                headless=headless,
+                audio=audio,
+                animations=animations,
+                wait_s=wait,
+                owner=owner,
+                parallel=parallel,
+                options=_virtual_target_options(option or []),
+            )
+        _emulator_emit(payload, ctx)
+    except AuaError as err:
+        emit_error(err)
+        raise typer.Exit(int(err.exit_code)) from err
+
+
+@virtual_target_app.command("provision")
+def virtual_target_provision_cmd(
+    ctx: typer.Context,
+    definition_id: str | None = typer.Option(None, "--definition"),
+    needs: str | None = typer.Option(
+        None,
+        "--needs",
+        help="Comma-separated target requirements interpreted by the selected adapter.",
+    ),
+    headless: bool = typer.Option(True, "--headless/--windowed"),
+    audio: bool = typer.Option(False, "--audio/--no-audio"),
+    animations: bool = typer.Option(False, "--animations/--no-animations"),
+    wait: float = typer.Option(120, "--wait", min=0),
+    owner: str | None = typer.Option(None, "--owner"),
+    parallel: bool = typer.Option(True, "--parallel/--no-parallel"),
+    option: list[str] | None = typer.Option(
+        None,
+        "--option",
+        metavar="KEY=VALUE",
+        help="Adapter-owned provisioning option; repeat for more (VALUE accepts JSON).",
+    ),
+) -> None:
+    """Select and start a compatible virtual target through one Engine operation."""
+
+    try:
+        with _emulator_start_progress(
+            definition_id=definition_id,
+            headless=headless,
+            wait_s=wait,
+            action="virtual-target-provision",
+        ):
+            payload = _opts(ctx).engine().virtual_target_provision(
+                definition_id,
+                needs=_split_needs(needs) if needs is not None else [],
+                headless=headless,
+                audio=audio,
+                animations=animations,
+                wait_s=wait,
+                owner=owner,
+                parallel=parallel,
+                options=_virtual_target_options(option or []),
+            )
+        _emulator_emit(payload, ctx)
+    except AuaError as err:
+        emit_error(err)
+        raise typer.Exit(int(err.exit_code)) from err
+
+
+@virtual_target_app.command("create")
+def virtual_target_create_cmd(
+    ctx: typer.Context,
+    definition_id: str = typer.Argument(..., help="Platform-local definition id."),
+    replace_existing: bool = typer.Option(False, "--replace"),
+    yes: bool = typer.Option(False, "--yes", help="Required with --replace."),
+    option: list[str] | None = typer.Option(
+        None,
+        "--option",
+        metavar="KEY=VALUE",
+        help="Adapter-owned creation option; repeat for more (VALUE accepts JSON).",
+    ),
+) -> None:
+    """Create or reuse one virtual-target definition."""
+
+    try:
+        if replace_existing and not yes:
+            raise UsageError(
+                "--replace needs --yes",
+                hint="Replacement may discard the existing virtual target's saved data.",
+            )
+        _emulator_emit(
+            _opts(ctx).engine().virtual_target_create(
+                definition_id,
+                replace=replace_existing,
+                options=_virtual_target_options(option or []),
+            ),
+            ctx,
+        )
+    except AuaError as err:
+        emit_error(err)
+        raise typer.Exit(int(err.exit_code)) from err
+
+
+@virtual_target_app.command("delete")
+def virtual_target_delete_cmd(
+    ctx: typer.Context,
+    definition_id: str = typer.Argument(..., help="Stopped definition id to delete."),
+    yes: bool = typer.Option(False, "--yes", help="Confirm deletion and its saved target data."),
+    option: list[str] | None = typer.Option(
+        None,
+        "--option",
+        metavar="KEY=VALUE",
+        help="Adapter-owned deletion option; repeat for more (VALUE accepts JSON).",
+    ),
+) -> None:
+    """Delete a stopped virtual-target definition after explicit confirmation."""
+
+    try:
+        _emulator_emit(
+            _opts(ctx).engine().virtual_target_delete(
+                definition_id,
+                confirmed=yes,
+                options=_virtual_target_options(option or []),
+            ),
+            ctx,
+        )
+    except AuaError as err:
+        emit_error(err)
+        raise typer.Exit(int(err.exit_code)) from err
+
+
+@virtual_target_app.command("stop")
+def virtual_target_stop_cmd(
+    ctx: typer.Context,
+    target_id: str | None = typer.Option(None, "--target-id"),
+    definition_id: str | None = typer.Option(None, "--definition"),
+    owner: str | None = typer.Option(None, "--owner"),
+    mine: bool = typer.Option(False, "--mine"),
+    all_targets: bool = typer.Option(False, "--all"),
+) -> None:
+    """Stop explicitly selected virtual targets, preserving foreign live leases."""
+
+    from . import leases
+
+    try:
+        _emulator_emit(
+            _opts(ctx).engine().virtual_target_stop(
+                target_id=target_id,
+                definition_id=definition_id,
+                owner=owner,
+                mine=mine,
+                all_targets=all_targets,
+                lease_owner=leases.resolve_owner(owner),
+            ),
+            ctx,
+        )
+    except AuaError as err:
+        emit_error(err)
+        raise typer.Exit(int(err.exit_code)) from err
+
+
+@virtual_target_app.command("reclaim")
+def virtual_target_reclaim_cmd(
+    ctx: typer.Context,
+    idle_stop: float | None = typer.Option(
+        None,
+        "--idle-stop",
+        min=0,
+        help="Retirement timeout; default comes from teardown.emulator_idle_stop_s.",
+    ),
+) -> None:
+    """Re-arm retirement supervision for AUA-owned orphan instances."""
+
+    opts = _opts(ctx)
+    cfg = opts.load()
+    timeout = (
+        float(idle_stop)
+        if idle_stop is not None
+        else float(getattr(cfg.teardown, "emulator_idle_stop_s", 1200.0))
+    )
+    try:
+        _emulator_emit(opts.engine().virtual_target_reclaim(idle_timeout_s=timeout), ctx)
+    except AuaError as err:
+        emit_error(err)
+        raise typer.Exit(int(err.exit_code)) from err
+
+
 @emulator_app.command("list")
 def emulator_list_cmd(ctx: typer.Context) -> None:
     """List configured AVDs (marks Play Store vs rootable Google APIs)."""
-    emulator_mod = _platform_capability(ctx, "virtual_devices")
-
     try:
-        _emulator_emit(emulator_mod.list_avds(), ctx)
+        _emulator_emit(_opts(ctx).engine().emulator_list(), ctx)
     except AuaError as err:
         emit_error(err)
         raise typer.Exit(int(err.exit_code)) from err
@@ -4851,10 +5176,10 @@ def emulator_recommend_proxy_cmd(
     Google Play images refuse `adb root`, so mitm system-CA install fails. This prints
     the package + commands; does not download or create anything.
     """
-    emulator_mod = _platform_capability(ctx, "virtual_devices")
-
     try:
-        _emulator_emit(emulator_mod.recommend_proxy_avd(api=api, name=name), ctx)
+        _emulator_emit(
+            _opts(ctx).engine().emulator_recommend_proxy(api=api, name=name), ctx
+        )
     except AuaError as err:
         emit_error(err)
         raise typer.Exit(int(err.exit_code)) from err
@@ -4883,18 +5208,15 @@ def emulator_ensure_proxy_cmd(
     over Google Play AVDs — those block `adb root`. Downloads can take several minutes.
     """
     opts = _opts(ctx)
-    cfg = opts.load()
-    emulator_mod = _platform_capability(ctx, "virtual_devices")
+    engine = opts.engine()
     try:
-        payload = emulator_mod.ensure_proxy_avd(name=name, api=api, force=force)
+        payload = engine.emulator_ensure_proxy(name=name, api=api, force=force)
         if start_after:
             with _emulator_start_progress(avd=name, headless=True, wait_s=float(wait)):
-                boot = emulator_mod.start(
+                boot = engine.emulator_start(
                     name,
                     headless=True,
                     wait_s=float(wait),
-                    cache_dir=cfg.cache.dir,
-                    lease_registry_dir=cfg.lease.registry_dir,
                 )
             payload["started"] = boot
             payload["hint"] = (
@@ -4912,10 +5234,8 @@ def emulator_ensure_proxy_cmd(
 def emulator_status_cmd(ctx: typer.Context) -> None:
     """SDK / AVD tooling + currently running emulator-* serials."""
     opts = _opts(ctx)
-    cfg = opts.load()
-    emulator_mod = _platform_capability(ctx, "virtual_devices")
     try:
-        _emulator_emit(emulator_mod.status(cache_dir=cfg.cache.dir), ctx)
+        _emulator_emit(opts.engine().emulator_status(), ctx)
     except AuaError as err:
         emit_error(err)
         raise typer.Exit(int(err.exit_code)) from err
@@ -5021,7 +5341,7 @@ def emulator_start_cmd(
     """
     opts = _opts(ctx)
     cfg = opts.load()
-    emulator_mod = _platform_capability(ctx, "virtual_devices")
+    engine = opts.engine()
     if (launch or reinstall or fresh) and not apk:
         err = UsageError(
             "--launch/--reinstall/--fresh only apply to --apk",
@@ -5031,14 +5351,12 @@ def emulator_start_cmd(
         raise typer.Exit(int(err.exit_code))
     try:
         with _emulator_start_progress(avd=avd, headless=headless, wait_s=float(wait)):
-            booted = emulator_mod.start(
+            booted = engine.emulator_start(
                 avd,
                 headless=headless,
                 animations=animations,
                 audio=audio,
                 wait_s=float(wait),
-                cache_dir=cfg.cache.dir,
-                lease_registry_dir=cfg.lease.registry_dir,
                 gpu=gpu,
                 # No `if headless` gate: a windowed AVD nobody has touched for the timeout is just
                 # as forgotten as a headless one, and it was the case with no safety net at all.
@@ -5129,8 +5447,6 @@ def emulator_stop_cmd(
     parallel agents share a host).
     """
     opts = _opts(ctx)
-    cfg = opts.load()
-    emulator_mod = _platform_capability(ctx, "virtual_devices")
     # A *global* `--serial` — written before the subcommand, the position every other command
     # wants it in — used to be dropped on the floor here. `emulator stop` declares its own
     # `--serial`, so `hoist_global_options` rightly leaves the subcommand's flag alone, and this
@@ -5151,16 +5467,14 @@ def emulator_stop_cmd(
 
     try:
         _emulator_emit(
-            emulator_mod.stop(
+            opts.engine().emulator_stop(
                 serial=serial,
                 avd=avd,
                 all_devices=all_devices,
                 mine=mine,
                 owner=owner,
-                cache_dir=cfg.cache.dir,
                 # A target another live agent leases is skipped, never killed; the caller's
                 # own lease (matched by process identity) still authorises its own stop.
-                lease_registry_dir=cfg.lease.registry_dir,
                 lease_owner=leases.resolve_owner(owner),
             ),
             ctx,
@@ -6039,8 +6353,10 @@ app.add_typer(media_app, name="media")
 def media_add_cmd(
     ctx: typer.Context,
     path: str = typer.Argument(..., help="Local image/video file to push."),
-    remote_dir: str = typer.Option(
-        "/sdcard/DCIM/Camera", "--dir", help="Remote folder under which to store the file."
+    remote_dir: str | None = typer.Option(
+        None,
+        "--dir",
+        help="Target folder override; the selected platform chooses its default when omitted.",
     ),
 ) -> None:
     def go(engine: Engine, fmt: OutputFormat) -> None:
@@ -6253,8 +6569,10 @@ app.add_typer(record_app, name="record")
 @record_app.command("start")
 def record_start_cmd(
     ctx: typer.Context,
-    remote: str = typer.Option(
-        "/sdcard/aua_recording.mp4", "--remote", help="Path on the device while recording."
+    remote: str | None = typer.Option(
+        None,
+        "--remote",
+        help="Target path override; the selected platform chooses its default when omitted.",
     ),
 ) -> None:
     def go(engine: Engine, fmt: OutputFormat) -> None:
@@ -6942,6 +7260,7 @@ def lease_cmd(
         from .teardown import cleanup_complete as _lease_cleanup_complete
 
         cache = engine.config.lease.registry_dir
+        platform_name = engine.platform.name
         owner = lease_mod.resolve_owner(_opts(ctx).owner)
         verb = (action or "list").strip().lower()
 
@@ -6951,7 +7270,10 @@ def lease_cmd(
             raise UsageError("--force is only valid with `lease release`")
 
         if verb == "list":
-            live = {e["serial"]: e for e in lease_mod.list_leases(cache)}
+            live = {
+                e["serial"]: e
+                for e in lease_mod.list_leases(cache, platform=platform_name)
+            }
             rows = []
             for d in engine.list_devices():
                 held = live.get(d.serial)
@@ -6983,7 +7305,7 @@ def lease_cmd(
                 # The positional target is more specific than an ambient config/env pin.
                 if serial_arg:
                     engine.config.device.serial = serial_arg
-                previous = lease_mod.held_by(cache, owner)
+                previous = lease_mod.held_by(cache, owner, platform=platform_name)
                 engine._lease_allow_replacement = replace_lease
                 try:
                     serial = engine._lease_device()
@@ -6999,9 +7321,18 @@ def lease_cmd(
                     with contextlib.ExitStack() as cleanup_locks:
                         for locked_serial in sorted({serial, *replaced}):
                             cleanup_locks.enter_context(
-                                lease_mod.device_transaction(cache, locked_serial)
+                                lease_mod.device_transaction(
+                                    cache,
+                                    locked_serial,
+                                    platform=platform_name,
+                                )
                             )
-                        if not lease_mod.renew(cache, serial, owner=owner):
+                        if not lease_mod.renew(
+                            cache,
+                            serial,
+                            owner=owner,
+                            platform=platform_name,
+                        ):
                             raise DeviceError(
                                 f"the replacement reservation on {serial} changed before cleanup",
                                 hint=(
@@ -7017,7 +7348,12 @@ def lease_cmd(
                         ]
                         if failed:
                             if serial not in previous:
-                                lease_mod.release(cache, serial, owner=owner)
+                                lease_mod.release(
+                                    cache,
+                                    serial,
+                                    owner=owner,
+                                    platform=platform_name,
+                                )
                             raise DeviceError(
                                 "the replacement device was reserved, but the previous device "
                                 "could not be cleaned; the original lease was kept",
@@ -7029,7 +7365,12 @@ def lease_cmd(
                         unreleased = [
                             old_serial
                             for old_serial in replaced
-                            if not lease_mod.release(cache, old_serial, owner=owner)
+                            if not lease_mod.release(
+                                cache,
+                                old_serial,
+                                owner=owner,
+                                platform=platform_name,
+                            )
                         ]
                         if unreleased:
                             raise DeviceError(
@@ -7037,7 +7378,12 @@ def lease_cmd(
                                 f"{', '.join(unreleased)}",
                                 hint="Run `aua lease list`, then retry the replacement.",
                             )
-                        if not lease_mod.promote_replacement(cache, serial, owner=owner):
+                        if not lease_mod.promote_replacement(
+                            cache,
+                            serial,
+                            owner=owner,
+                            platform=platform_name,
+                        ):
                             raise DeviceError(
                                 f"{serial} is reserved but could not be promoted",
                                 hint=(
@@ -7068,7 +7414,12 @@ def lease_cmd(
                     "`lease transfer` needs a serial",
                     hint="e.g. `aua lease transfer emulator-5554`.",
                 )
-            handoff = lease_mod.create_handoff(cache, target, owner=owner)
+            handoff = lease_mod.create_handoff(
+                cache,
+                target,
+                owner=owner,
+                platform=platform_name,
+            )
             token = str(handoff["token"])
             _echo_json(
                 {
@@ -7092,7 +7443,12 @@ def lease_cmd(
                     "`lease cancel-transfer` needs a serial",
                     hint="e.g. `aua lease cancel-transfer emulator-5554`.",
                 )
-            cancelled = lease_mod.cancel_handoff(cache, target, owner=owner)
+            cancelled = lease_mod.cancel_handoff(
+                cache,
+                target,
+                owner=owner,
+                platform=platform_name,
+            )
             if not cancelled:
                 raise UsageError(
                     f"{target} has no pending handoff owned by this agent",
@@ -7115,7 +7471,12 @@ def lease_cmd(
                     "`lease accept` needs the one-time token",
                     hint="The current holder gets it from `aua lease transfer <serial>`.",
                 )
-            accepted = lease_mod.accept_handoff(cache, serial_arg, owner=owner)
+            accepted = lease_mod.accept_handoff(
+                cache,
+                serial_arg,
+                owner=owner,
+                platform=platform_name,
+            )
             _echo_json(
                 {
                     "ok": True,
@@ -7137,7 +7498,12 @@ def lease_cmd(
                 hint="e.g. `aua lease release emulator-5554`, or pass --serial.",
             )
         if verb == "renew":
-            ok = lease_mod.renew(cache, target, owner=owner)
+            ok = lease_mod.renew(
+                cache,
+                target,
+                owner=owner,
+                platform=platform_name,
+            )
             _echo_json({"ok": ok, "action": "lease-renew", "serial": target, "owner": owner}, fmt)
             if not ok:
                 raise DeviceLeasedError(
@@ -7149,8 +7515,13 @@ def lease_cmd(
             # Handing the device back means handing it back *clean*. Releasing the lease and
             # then resetting it races the next acquirer; reset while it is still quarantined by
             # this lease, and keep the lease if cleanup fails.
-            with lease_mod.device_transaction(cache, target):
-                owned = force or lease_mod.renew(cache, target, owner=owner)
+            with lease_mod.device_transaction(cache, target, platform=platform_name):
+                owned = force or lease_mod.renew(
+                    cache,
+                    target,
+                    owner=owner,
+                    platform=platform_name,
+                )
                 if not owned:
                     raise DeviceLeasedError(
                         f"{target} is held by another agent",
@@ -7169,7 +7540,12 @@ def lease_cmd(
                         ),
                     )
                 # `--force` skips ownership only after operator-authorized cleanup.
-                ok = lease_mod.release(cache, target, owner=None if force else owner)
+                ok = lease_mod.release(
+                    cache,
+                    target,
+                    owner=None if force else owner,
+                    platform=platform_name,
+                )
             _echo_json(
                 {
                     "ok": ok,
@@ -7546,7 +7922,7 @@ def map_cmd(
         import json
 
         opts = _opts(ctx)
-        store = AppMemoryStore(opts.load().memory)
+        store = AppMemoryStore.from_config(opts.load())
         pkg = _resolve_package(engine, app_pkg)
         app_map = store.load(pkg) or AppMap(package=pkg)
         selected_context = context or _active_map_context(
@@ -7701,7 +8077,7 @@ def remember(
         import json
 
         opts = _opts(ctx)
-        store = AppMemoryStore(opts.load().memory)
+        store = AppMemoryStore.from_config(opts.load())
         pkg = _resolve_package(engine, app_pkg)
         did: list[str] = []
         if about:
@@ -7758,7 +8134,7 @@ def about(
         import json
 
         opts = _opts(ctx)
-        store = AppMemoryStore(opts.load().memory)
+        store = AppMemoryStore.from_config(opts.load())
         pkg = _resolve_package(engine, app_pkg)
         app_map = store.load(pkg)
         if app_map is None:
@@ -7818,7 +8194,7 @@ def knowledge_list(
 
         opts = _opts(ctx)
         pkg = _resolve_package(engine, app_pkg)
-        app_map = AppMemoryStore(opts.load().memory).load(pkg) or AppMap(package=pkg)
+        app_map = AppMemoryStore.from_config(opts.load()).load(pkg) or AppMap(package=pkg)
         items = [
             item.model_dump(mode="json")
             for item in app_map.knowledge
@@ -7842,7 +8218,7 @@ def knowledge_show(
 
         opts = _opts(ctx)
         pkg = _resolve_package(engine, app_pkg)
-        app_map = AppMemoryStore(opts.load().memory).load(pkg) or AppMap(package=pkg)
+        app_map = AppMemoryStore.from_config(opts.load()).load(pkg) or AppMap(package=pkg)
         item = next((known for known in app_map.knowledge if known.id == knowledge_id), None)
         if item is None:
             raise UsageError(f"unknown knowledge item: {knowledge_id}")
@@ -7877,7 +8253,7 @@ def knowledge_add(
         allowed_sources = {"user", "agent", "runtime", "source"}
         if kind not in allowed_kinds or source not in allowed_sources:
             raise UsageError("invalid knowledge kind or source")
-        item = AppMemoryStore(opts.load().memory).remember_knowledge(
+        item = AppMemoryStore.from_config(opts.load()).remember_knowledge(
             pkg,
             kind=kind,  # type: ignore[arg-type]
             text=text,
@@ -7906,7 +8282,7 @@ def knowledge_stale(
 
         opts = _opts(ctx)
         pkg = _resolve_package(engine, app_pkg)
-        store = AppMemoryStore(opts.load().memory)
+        store = AppMemoryStore.from_config(opts.load())
         app_map = store.load(pkg) or AppMap(package=pkg)
         item = next((known for known in app_map.knowledge if known.id == knowledge_id), None)
         if item is None:
@@ -7950,7 +8326,7 @@ def reconcile_plan(
 
         opts = _opts(ctx)
         pkg = _resolve_package(engine, app_pkg)
-        store = AppMemoryStore(opts.load().memory)
+        store = AppMemoryStore.from_config(opts.load())
         selected_context = context or _active_map_context(
             engine,
             opts,
@@ -7985,7 +8361,9 @@ def reconcile_submit(
         pkg = _resolve_package(engine, app_pkg)
         try:
             parsed = ResearchReport.model_validate(_read_json_document(report))
-            result = ReconciliationStore(AppMemoryStore(opts.load().memory)).submit(pkg, parsed)
+            result = ReconciliationStore(AppMemoryStore.from_config(opts.load())).submit(
+                pkg, parsed
+            )
         except (ValueError, OSError) as exc:
             raise UsageError(str(exc)) from exc
         typer.echo(json.dumps(result, indent=2, ensure_ascii=False))
@@ -8035,7 +8413,7 @@ def reconcile_answers(
                 "answers must be an object of task_id: name, or a list of {task_id, value}"
             )
         try:
-            result = ReconciliationStore(AppMemoryStore(opts.load().memory)).answer_many(
+            result = ReconciliationStore(AppMemoryStore.from_config(opts.load())).answer_many(
                 pkg, pairs, agent="bulk", dry_run=dry_run
             )
         except (ValueError, OSError) as exc:
@@ -8057,7 +8435,7 @@ def reconcile_status(
 
         opts = _opts(ctx)
         pkg = _resolve_package(engine, app_pkg)
-        result = ReconciliationStore(AppMemoryStore(opts.load().memory)).status(pkg)
+        result = ReconciliationStore(AppMemoryStore.from_config(opts.load())).status(pkg)
         typer.echo(json.dumps(result, indent=2, ensure_ascii=False))
 
     _run(ctx, go)
@@ -8076,7 +8454,7 @@ def reconcile_apply(
 
         opts = _opts(ctx)
         pkg = _resolve_package(engine, app_pkg)
-        store = AppMemoryStore(opts.load().memory)
+        store = AppMemoryStore.from_config(opts.load())
         app_map = store.load(pkg) or AppMap(package=pkg)
         raw = next(
             (item for item in app_map.pending_reports if item.get("task_id") == task_id),
@@ -8105,7 +8483,7 @@ def reconcile_rollback(
         opts = _opts(ctx)
         pkg = _resolve_package(engine, app_pkg)
         try:
-            event = ReconciliationStore(AppMemoryStore(opts.load().memory)).rollback(
+            event = ReconciliationStore(AppMemoryStore.from_config(opts.load())).rollback(
                 pkg, rollback_id
             )
         except ValueError as exc:
@@ -8127,7 +8505,7 @@ def memory_show(
         import json
 
         opts = _opts(ctx)
-        store = AppMemoryStore(opts.load().memory)
+        store = AppMemoryStore.from_config(opts.load())
         pkg = _resolve_package(engine, app_pkg)
         app_map = store.load(pkg)
         if app_map is None:
@@ -8157,7 +8535,7 @@ def memory_path(
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
         opts = _opts(ctx)
-        store = AppMemoryStore(opts.load().memory)
+        store = AppMemoryStore.from_config(opts.load())
         pkg = _resolve_package(engine, app_pkg)
         typer.echo(str(store.app_dir(pkg)))
 
@@ -8195,7 +8573,7 @@ def memory_forget(
                 "memory forget requires --app <package>",
                 hint="Scope the deletion explicitly, e.g. `aua memory forget --app com.x`.",
             )
-        store = AppMemoryStore(_opts(ctx).load().memory)
+        store = AppMemoryStore.from_config(_opts(ctx).load())
         result = store.forget(app_pkg, screen)
         typer.echo(
             json.dumps({"ok": True, "action": "memory-forget", **result}, ensure_ascii=False)
@@ -8415,7 +8793,7 @@ def flow_show_cmd(
     def go(engine: Engine, fmt: OutputFormat) -> None:
         from .flows import FlowStore
 
-        store = FlowStore(_opts(ctx).load().memory)
+        store = FlowStore(engine.config.memory, platform=engine.platform.name)
         typer.echo(store.resolve(name).read_text(encoding="utf-8"))
 
     _run(ctx, go)
@@ -9216,11 +9594,7 @@ def helper_status_cmd(ctx: typer.Context) -> None:
     """Report whether the helper is installed, enabled, and actually bound."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        agent = engine.platform.capability("device_agent")
-        state = agent.status(engine.device.serial)
-        state["ok"] = True
-        state["action"] = "helper-status"
-        _emit(state, fmt)
+        _emit(_route(engine, "helper_status"), fmt)
 
     _run(ctx, go)
 
@@ -9236,9 +9610,10 @@ def helper_install_cmd(
     """Push the bundled helper APK to the target (does not switch it on)."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        agent = engine.platform.capability("device_agent")
-        result = agent.install(engine.device.serial, reinstall=reinstall, force=force)
-        _emit({"ok": True, "action": "helper-install", **result}, fmt)
+        _emit(
+            _route(engine, "helper_install", reinstall=reinstall, force=force),
+            fmt,
+        )
 
     _run(ctx, go)
 
@@ -9248,9 +9623,7 @@ def helper_enable_cmd(ctx: typer.Context) -> None:
     """Install if needed and switch the service on. Requires a rootable target."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        agent = engine.platform.capability("device_agent")
-        result = agent.enable(engine.device.serial)
-        _emit({"ok": True, "action": "helper-enable", **result}, fmt)
+        _emit(_route(engine, "helper_enable"), fmt)
 
     _run(ctx, go)
 
@@ -9260,9 +9633,7 @@ def helper_disable_cmd(ctx: typer.Context) -> None:
     """Switch the service off, leaving any other accessibility service alone."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        agent = engine.platform.capability("device_agent")
-        result = agent.disable(engine.device.serial)
-        _emit({"ok": True, "action": "helper-disable", **result}, fmt)
+        _emit(_route(engine, "helper_disable"), fmt)
 
     _run(ctx, go)
 
@@ -9272,9 +9643,7 @@ def helper_remove_cmd(ctx: typer.Context) -> None:
     """Switch off and uninstall the helper."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        agent = engine.platform.capability("device_agent")
-        result = agent.remove(engine.device.serial)
-        _emit({"ok": True, "action": "helper-remove", **result}, fmt)
+        _emit(_route(engine, "helper_remove"), fmt)
 
     _run(ctx, go)
 

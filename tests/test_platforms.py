@@ -18,6 +18,7 @@ from android_ui_analyser.errors import (
 )
 from android_ui_analyser.platforms import (
     CAPABILITY_METHODS,
+    DisplayGeometry,
     NormalizedTree,
     PlatformAdapter,
     PlatformFactory,
@@ -25,6 +26,13 @@ from android_ui_analyser.platforms import (
     registered_platforms,
 )
 from android_ui_analyser.platforms.android import AndroidPlatform
+from android_ui_analyser.platforms.diagnostics import (
+    CrashEvidence,
+    DiagnosticEvent,
+    DiagnosticLevel,
+    DiagnosticWindow,
+)
+from android_ui_analyser.platforms.identity import TargetRef
 from android_ui_analyser.schema import DeviceInfo, Element
 from conftest import FakeDevice
 
@@ -45,12 +53,15 @@ class _RegisteredPlatform(PlatformAdapter):
         screen_size: tuple[int, int],
         *,
         ignored_app_ids: Sequence[str] = (),
+        geometry: DisplayGeometry | None = None,
     ) -> NormalizedTree:
+        del geometry
         return NormalizedTree([])
 
 
 class _InjectedPlatform(_RegisteredPlatform):
     name = "injected"
+    capabilities = frozenset({"ui.tree", "ui.screenshot"})
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
@@ -60,13 +71,18 @@ class _InjectedPlatform(_RegisteredPlatform):
         self.calls.append(("dump", compact))
         return "native-tree"
 
+    def capture_screenshot(self, runtime: Device):
+        return runtime.screenshot()
+
     def normalize_tree(
         self,
         raw_tree: str,
         screen_size: tuple[int, int],
         *,
         ignored_app_ids: Sequence[str] = (),
+        geometry: DisplayGeometry | None = None,
     ) -> NormalizedTree:
+        del geometry
         self.calls.append(("normalize", (raw_tree, screen_size, tuple(ignored_app_ids))))
         element = Element(
             id=0,
@@ -124,6 +140,65 @@ class _LogPlatform(_InjectedPlatform):
             "java.lang.IllegalStateException: broken\n"
         )
 
+    def diagnostic_window(
+        self,
+        runtime: Device,
+        *,
+        lines: int = 400,
+        since: str | int | None = None,
+        app_id: str | None = None,
+    ) -> DiagnosticWindow:
+        self.calls.append(("diagnostic_window", (runtime, lines, since, app_id)))
+        records = (
+            DiagnosticEvent(
+                message="FATAL EXCEPTION: main",
+                level=DiagnosticLevel.ERROR,
+                source="native-runtime",
+                display_text="native fatal: FATAL EXCEPTION: main",
+                app_id=app_id,
+            ),
+            DiagnosticEvent(
+                message="java.lang.IllegalStateException: broken",
+                level=DiagnosticLevel.ERROR,
+                source="native-runtime",
+                display_text="native fatal: java.lang.IllegalStateException: broken",
+                app_id=app_id,
+            ),
+        )
+        return DiagnosticWindow(
+            events=records,
+            target=TargetRef(self.name, runtime.target_id),
+            since="last-action",
+            since_unix_ms=123456,
+            clock="target",
+            crash_evidence=CrashEvidence(
+                kind="fatal",
+                events=records,
+                total_count=len(records),
+                matched_app=True,
+            ),
+        )
+
+    def mark_diagnostics(
+        self,
+        runtime: Device,
+        name: str = "default",
+        *,
+        clear: bool = False,
+        refresh_clock: bool = False,
+    ) -> dict[str, object]:
+        del runtime, clear, refresh_clock
+        return {"name": name, "unix_ms": 123456, "iso": "fake", "clock": "target"}
+
+    def clear_diagnostics(self, runtime: Device) -> None:
+        del runtime
+
+    def recent_logs(
+        self, target_id: str, *, limit: int = 80, app_id: str | None = None
+    ) -> list[str]:
+        del target_id, limit, app_id
+        return []
+
 
 def test_android_is_the_only_builtin_platform() -> None:
     builtins = registered_platforms()
@@ -149,7 +224,7 @@ def test_missing_optional_capability_is_a_typed_platform_refusal() -> None:
 
     assert exc.value.code == "platform_capability_unsupported"
     assert "test-native" in exc.value.message
-    assert "virtual_devices" in exc.value.message
+    assert "virtual_targets" in exc.value.message
 
 
 def test_android_capabilities_are_lazy_and_memoized(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -157,9 +232,11 @@ def test_android_capabilities_are_lazy_and_memoized(monkeypatch: pytest.MonkeyPa
     loaded: list[str] = []
 
     class Service:
-        adopt_idle_watchdogs = ensure_proxy_avd = list_avds = recommend_proxy_avd = (
-            select_avd_for_session
-        ) = start = status = stop = stop_spawned_instance = lambda: None
+        create_virtual_target = delete_virtual_target = list_virtual_targets = (
+            provision_virtual_target
+        ) = reclaim_virtual_targets = select_virtual_target = start_virtual_target = (
+            stop_virtual_targets
+        ) = stop_virtual_target_instance = virtual_target_status = lambda *args, **kwargs: None
 
     sentinel = Service()
     monkeypatch.setattr(platform, "prepare_host", lambda: None)
@@ -343,9 +420,9 @@ def test_crash_evidence_uses_the_selected_platform_log_capability() -> None:
     assert evidence["available"] is True
     assert evidence["kind"] == "fatal"
     assert "IllegalStateException" in "\n".join(evidence["lines"])
-    diagnostic_call = next(call for call in platform.calls if call[0] == "diagnostic_logs")
+    diagnostic_call = next(call for call in platform.calls if call[0] == "diagnostic_window")
     assert diagnostic_call[1][0] is runtime
-    assert isinstance(diagnostic_call[1][2], int)
+    assert diagnostic_call[1][2] is None, "the adapter owns resolving its diagnostic cursor"
     assert not any(name == "logcat" for name, _args in runtime.calls), (
         "the engine must use the selected adapter, not reach an Android runtime directly"
     )

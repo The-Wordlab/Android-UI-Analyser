@@ -76,6 +76,18 @@ def test_content_words_drops_the_verbs_every_goal_shares() -> None:
 # --------------------------------------------------------------------------- the chrome trap
 
 
+def test_normalized_system_and_ime_windows_never_reach_the_driver() -> None:
+    projection = project(
+        [
+            {"id": "sys", "text": "Power off", "clickable": True, "window": "system"},
+            {"id": "ime", "text": "Search", "clickable": True, "window": "ime"},
+            {"id": "app", "text": "Continue", "clickable": True, "window": "app"},
+        ]
+    )
+
+    assert [node["text"] for node in projection["nodes"]] == ["Continue"]
+
+
 def test_chrome_never_wins_which_is_the_whole_9_to_17_difference() -> None:
     """A flat overlap score taps "Search settings" for any goal mentioning settings: 9/19.
 

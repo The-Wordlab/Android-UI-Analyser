@@ -9,7 +9,9 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, cast
+
+from .errors import DeviceError
 
 # settings namespace → key
 ANIM_KEYS = (
@@ -26,18 +28,38 @@ DONT_KEEP_KEY = ("global", "always_finish_activities")
 ShellFn = Callable[[str], str]
 
 
-def _settings_get(shell: ShellFn, namespace: str, key: str) -> str:
-    raw = shell(f"settings get {namespace} {key}").strip()
+class ShellRuntime(Protocol):
+    """Android-owned view of a connected runtime used by this service."""
+
+    def shell(self, command: str) -> str: ...
+
+
+ShellSource = ShellFn | ShellRuntime
+
+
+def _shell(source: ShellSource) -> ShellFn:
+    """Accept the historic callable or a neutral runtime at the Android service boundary."""
+
+    if callable(source):
+        return source
+    operation = getattr(source, "shell", None)
+    if not callable(operation):
+        raise TypeError("Android developer settings need a runtime with shell support")
+    return cast(ShellFn, operation)
+
+
+def _settings_get(shell: ShellSource, namespace: str, key: str) -> str:
+    raw = _shell(shell)(f"settings get {namespace} {key}").strip()
     if raw in ("null", "None", ""):
         return "1" if namespace == "global" and "animation" in key else "0"
     return raw
 
 
-def _settings_put(shell: ShellFn, namespace: str, key: str, value: str) -> None:
-    shell(f"settings put {namespace} {key} {value}")
+def _settings_put(shell: ShellSource, namespace: str, key: str, value: str) -> None:
+    _shell(shell)(f"settings put {namespace} {key} {value}")
 
 
-def read_state(shell: ShellFn) -> dict[str, Any]:
+def read_state(shell: ShellSource) -> dict[str, Any]:
     """Snapshot of the knobs we manage."""
     anim = {
         key: _settings_get(shell, ns, key) for ns, key in ANIM_KEYS
@@ -72,7 +94,7 @@ def load_backup(path: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def anim_off(shell: ShellFn, backup_path: Path) -> dict[str, Any]:
+def anim_off(shell: ShellSource, backup_path: Path) -> dict[str, Any]:
     state = read_state(shell)
     save_backup(backup_path, state)
     for ns, key in ANIM_KEYS:
@@ -80,7 +102,7 @@ def anim_off(shell: ShellFn, backup_path: Path) -> dict[str, Any]:
     return read_state(shell)
 
 
-def anim_on(shell: ShellFn, backup_path: Path) -> dict[str, Any]:
+def anim_on(shell: ShellSource, backup_path: Path) -> dict[str, Any]:
     """Enable all animation scales while preserving the exact prior values."""
     state = read_state(shell)
     save_backup(backup_path, state)
@@ -89,7 +111,7 @@ def anim_on(shell: ShellFn, backup_path: Path) -> dict[str, Any]:
     return read_state(shell)
 
 
-def anim_restore(shell: ShellFn, backup_path: Path) -> dict[str, Any]:
+def anim_restore(shell: ShellSource, backup_path: Path) -> dict[str, Any]:
     backup = load_backup(backup_path)
     if backup is None:
         for ns, key in ANIM_KEYS:
@@ -103,7 +125,7 @@ def anim_restore(shell: ShellFn, backup_path: Path) -> dict[str, Any]:
     return state
 
 
-def crashes_set(shell: ShellFn, enabled: bool, backup_path: Path) -> dict[str, Any]:
+def crashes_set(shell: ShellSource, enabled: bool, backup_path: Path) -> dict[str, Any]:
     state = read_state(shell)
     save_backup(backup_path, state)
     # hide_error_dialogs=0 → show; =1 → hide
@@ -112,14 +134,14 @@ def crashes_set(shell: ShellFn, enabled: bool, backup_path: Path) -> dict[str, A
     return read_state(shell)
 
 
-def dont_keep_set(shell: ShellFn, enabled: bool, backup_path: Path) -> dict[str, Any]:
+def dont_keep_set(shell: ShellSource, enabled: bool, backup_path: Path) -> dict[str, Any]:
     state = read_state(shell)
     save_backup(backup_path, state)
     _settings_put(shell, *DONT_KEEP_KEY, "1" if enabled else "0")
     return read_state(shell)
 
 
-def profile_ac(shell: ShellFn, backup_path: Path) -> dict[str, Any]:
+def profile_ac(shell: ShellSource, backup_path: Path) -> dict[str, Any]:
     """AC-friendly: animations off, crash/ANR dialogs visible."""
     state = read_state(shell)
     save_backup(backup_path, state)
@@ -130,38 +152,45 @@ def profile_ac(shell: ShellFn, backup_path: Path) -> dict[str, Any]:
     return read_state(shell)
 
 
-def profile_default(shell: ShellFn, backup_path: Path) -> dict[str, Any]:
+def profile_default(shell: ShellSource, backup_path: Path) -> dict[str, Any]:
     """Restore everything from the backup file (or sane defaults)."""
     backup = load_backup(backup_path)
     if backup is None:
+        expected_anim = {key: "1" for _namespace, key in ANIM_KEYS}
+        expected_hide = "1"
+        expected_anr = "0"
+        expected_dont_keep = "0"
         for ns, key in ANIM_KEYS:
-            _settings_put(shell, ns, key, "1")
-        _settings_put(shell, "global", "hide_error_dialogs", "1")
-        _settings_put(shell, "secure", "anr_show_background", "0")
-        _settings_put(shell, *DONT_KEEP_KEY, "0")
+            _settings_put(shell, ns, key, expected_anim[key])
     else:
         anim = backup.get("anim") or {}
+        expected_anim = {key: str(anim.get(key, "1")) for _namespace, key in ANIM_KEYS}
+        expected_hide = str(backup.get("hide_error_dialogs", "1"))
+        expected_anr = str(backup.get("anr_show_background", "0"))
+        expected_dont_keep = str(backup.get("always_finish_activities", "0"))
         for ns, key in ANIM_KEYS:
-            _settings_put(shell, ns, key, str(anim.get(key, "1")))
-        _settings_put(
-            shell,
-            "global",
-            "hide_error_dialogs",
-            str(backup.get("hide_error_dialogs", "1")),
+            _settings_put(shell, ns, key, expected_anim[key])
+    _settings_put(shell, "global", "hide_error_dialogs", expected_hide)
+    _settings_put(shell, "secure", "anr_show_background", expected_anr)
+    _settings_put(shell, *DONT_KEEP_KEY, expected_dont_keep)
+    state = read_state(shell)
+    raw_anim = state.get("anim")
+    actual_anim = raw_anim if isinstance(raw_anim, dict) else {}
+    restored = (
+        all(str(actual_anim.get(key)) == value for key, value in expected_anim.items())
+        and str(state.get("hide_error_dialogs")) == expected_hide
+        and str(state.get("anr_show_background")) == expected_anr
+        and str(state.get("always_finish_activities")) == expected_dont_keep
+    )
+    if not restored:
+        raise DeviceError(
+            "developer settings restore could not be verified",
+            code="developer_settings_restore_unverified",
+            hint=f"The restore point was kept at {backup_path}; repair settings access and retry.",
         )
-        _settings_put(
-            shell,
-            "secure",
-            "anr_show_background",
-            str(backup.get("anr_show_background", "0")),
-        )
-        _settings_put(
-            shell,
-            *DONT_KEEP_KEY,
-            str(backup.get("always_finish_activities", "0")),
-        )
+    if backup is not None:
         backup_path.unlink(missing_ok=True)
-    return read_state(shell)
+    return state
 
 
 __all__ = [

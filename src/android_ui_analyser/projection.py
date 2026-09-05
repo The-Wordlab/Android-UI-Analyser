@@ -854,6 +854,8 @@ def _is_ime(element: dict[str, Any]) -> bool:
 
 
 def _is_system(element: dict[str, Any], screen_height: int) -> bool:
+    if element.get("window") == "system":
+        return True
     if is_system_rid(element.get("resource_id")):
         return True
     desc = element.get("content_desc") or ""

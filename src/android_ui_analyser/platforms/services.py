@@ -1,24 +1,119 @@
 """Stable structural contracts for optional platform capability services.
 
-The target runtime (`Device`) covers common screen/input/app operations. These named services
+The neutral ``TargetRuntime`` covers common screen/input/app operations. These named services
 cover operations that are host-wide or not universal. A plugin may implement only the services
 it supports, but claiming a service means implementing its complete structural surface below.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Sequence
+from inspect import Parameter, signature
+from pathlib import Path
+from typing import Any, Final, Protocol, runtime_checkable
 
-APP_DATABASE = "app_database"
-DEVICE_AGENT = "device_agent"
-DEVELOPER_SETTINGS = "developer_settings"
-FEATURE_FLAGS = "feature_flags"
-MICROPHONE = "microphone"
-NETWORK = "network"
-NETWORK_PROFILES = "network_profiles"
-PROXY = "proxy"
-VIRTUAL_DEVICES = "virtual_devices"
-WEBVIEW = "webview"
+from .supervision import TargetSupervisionStatus
+from .virtual_targets import (
+    OwnedVirtualTargetStopRequest,
+    VirtualTargetCreateRequest,
+    VirtualTargetCreateResult,
+    VirtualTargetDefinition,
+    VirtualTargetDeleteRequest,
+    VirtualTargetDeleteResult,
+    VirtualTargetInstance,
+    VirtualTargetList,
+    VirtualTargetProvisionRequest,
+    VirtualTargetReclaimRequest,
+    VirtualTargetStartRequest,
+    VirtualTargetStatus,
+    VirtualTargetStopRequest,
+    VirtualTargetStopResult,
+)
+
+APP_DATABASE: Final = "app_database"
+DEVICE_AGENT: Final = "device_agent"
+DEVELOPER_SETTINGS: Final = "developer_settings"
+FEATURE_FLAGS: Final = "feature_flags"
+MICROPHONE: Final = "microphone"
+NETWORK: Final = "network"
+NETWORK_PROFILES: Final = "network_profiles"
+PROXY: Final = "proxy"
+TARGET_SUPERVISION: Final = "target_supervision"
+# ``virtual_targets`` is the API-v1 capability.  The capability normalizer accepts the
+# historical ``virtual_devices``/``emulator`` spellings, and the public constants remain so
+# downstream imports do not need a flag day.
+VIRTUAL_TARGETS: Final = "virtual_targets"
+VIRTUAL_DEVICES: Final = "virtual_devices"
+WEBVIEW: Final = "webview"
+
+
+@runtime_checkable
+class VirtualTargetsService(Protocol):
+    """Typed host-service contract for simulator/emulator provisioning.
+
+    The request and result values deliberately contain no native process or command grammar.
+    Plugins implement this protocol structurally and return it from
+    :meth:`PlatformAdapter.load_capability` when declaring ``virtual_targets``.
+    """
+
+    def list_virtual_targets(self) -> VirtualTargetList: ...
+
+    def select_virtual_target(
+        self,
+        definition_id: str | None = None,
+        *,
+        needs: Sequence[str] | None = None,
+    ) -> VirtualTargetDefinition: ...
+
+    def start_virtual_target(
+        self, request: VirtualTargetStartRequest
+    ) -> VirtualTargetInstance: ...
+
+    def provision_virtual_target(
+        self, request: VirtualTargetProvisionRequest
+    ) -> VirtualTargetInstance: ...
+
+    def virtual_target_status(
+        self, *, cache_dir: str | Path | None
+    ) -> VirtualTargetStatus: ...
+
+    def stop_virtual_targets(
+        self, request: VirtualTargetStopRequest
+    ) -> VirtualTargetStopResult: ...
+
+    def stop_virtual_target_instance(
+        self, request: OwnedVirtualTargetStopRequest
+    ) -> VirtualTargetStopResult: ...
+
+    def reclaim_virtual_targets(
+        self, request: VirtualTargetReclaimRequest
+    ) -> tuple[VirtualTargetInstance, ...]: ...
+
+    def create_virtual_target(
+        self, request: VirtualTargetCreateRequest
+    ) -> VirtualTargetCreateResult: ...
+
+    def delete_virtual_target(
+        self, request: VirtualTargetDeleteRequest
+    ) -> VirtualTargetDeleteResult: ...
+
+
+@runtime_checkable
+class TargetSupervisionService(Protocol):
+    """Typed host-service contract for optional AUA-owned target lifecycle metadata."""
+
+    def target_supervision_status(
+        self,
+        target_id: str,
+        *,
+        cache_dir: str | Path,
+    ) -> TargetSupervisionStatus | None: ...
+
+
+CAPABILITY_PROTOCOLS: dict[str, type[Any]] = {
+    VIRTUAL_TARGETS: VirtualTargetsService,
+    TARGET_SUPERVISION: TargetSupervisionService,
+}
 
 CAPABILITY_METHODS: dict[str, frozenset[str]] = {
     APP_DATABASE: frozenset(
@@ -39,6 +134,7 @@ CAPABILITY_METHODS: dict[str, frozenset[str]] = {
         {
             "HelperUnavailableError",
             "disable",
+            "discard_touch_capture",
             "enable",
             "install",
             "is_bound",
@@ -47,8 +143,10 @@ CAPABILITY_METHODS: dict[str, frozenset[str]] = {
             "open_channel",
             "release_uiautomation",
             "remove",
+            "restore_state",
             "root_available",
             "rootable",
+            "snapshot_state",
             "start_touch_capture",
             "status",
             "stop_touch_capture",
@@ -115,6 +213,7 @@ CAPABILITY_METHODS: dict[str, frozenset[str]] = {
             "remove_loss",
             "require_current_profile",
             "restore_emulator_shape",
+            "restore_root",
             "restore_radio_profile",
             "root_enabled",
             "safe_unroot_after_failed_apply",
@@ -178,31 +277,122 @@ CAPABILITY_METHODS: dict[str, frozenset[str]] = {
             "write_state",
         }
     ),
-    VIRTUAL_DEVICES: frozenset(
+    # Optional lifecycle metadata for targets started and monitored by AUA. This is separate
+    # from virtual-target provisioning: the dashboard needs to describe ownership and automatic
+    # retirement without knowing how a platform stores process records or names its monitor.
+    TARGET_SUPERVISION: frozenset({"target_supervision_status"}),
+    VIRTUAL_TARGETS: frozenset(
         {
+            "create_virtual_target",
+            "delete_virtual_target",
+            "list_virtual_targets",
+            "provision_virtual_target",
             # A platform that can boot throwaway targets must also be able to reclaim the ones
             # its own supervisor lost track of, or "aua started it" becomes "aua leaked it".
-            "adopt_idle_watchdogs",
-            "ensure_proxy_avd",
-            "list_avds",
-            "recommend_proxy_avd",
-            "select_avd_for_session",
-            "start",
-            "status",
-            "stop",
-            # Rollback teardown scoped to one boot this process performed. A bare serial
-            # can name a foreign device after a provisioning collision, so provisioning
-            # rollbacks must be able to stop by owned instance/pid, never by serial.
-            "stop_spawned_instance",
+            "reclaim_virtual_targets",
+            "select_virtual_target",
+            "start_virtual_target",
+            "stop_virtual_targets",
+            # Rollback teardown is scoped to the opaque token returned by the exact boot. A bare
+            # target id can name a foreign instance after a provisioning collision.
+            "stop_virtual_target_instance",
+            "virtual_target_status",
         }
     ),
     WEBVIEW: frozenset({"enrich", "should_try_webview"}),
 }
 
+# Structural services are operations except for these deliberately published data attributes.
+# A present ``None`` operation is not an implementation and must fail at capability resolution.
+CAPABILITY_DATA_MEMBERS: dict[str, frozenset[str]] = {
+    NETWORK_PROFILES: frozenset({"PROFILE_NAMES"}),
+}
+
 
 def missing_members(capability: str, service: Any) -> list[str]:
-    """Members absent from a service that claims *capability*."""
+    """Members absent or non-callable on a service that claims *capability*."""
 
-    return sorted(
-        name for name in CAPABILITY_METHODS.get(capability, ()) if not hasattr(service, name)
-    )
+    data_members = CAPABILITY_DATA_MEMBERS.get(capability, frozenset())
+    missing: list[str] = []
+    for name in CAPABILITY_METHODS.get(capability, ()):
+        value = getattr(service, name, None)
+        if value is None or (name not in data_members and not callable(value)):
+            missing.append(name)
+            continue
+        protocol = CAPABILITY_PROTOCOLS.get(capability)
+        contract = getattr(protocol, name, None) if protocol is not None else None
+        if contract is not None and not _signature_compatible(value, contract):
+            missing.append(f"{name} signature")
+    return sorted(missing)
+
+
+def _signature_compatible(implementation: Any, contract: Any) -> bool:
+    """Whether a bound service operation accepts the Protocol's public call shape."""
+
+    try:
+        actual = list(signature(implementation).parameters.values())
+        expected = list(signature(contract).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    if expected and expected[0].name == "self":
+        expected = expected[1:]
+    actual_by_name = {parameter.name: parameter for parameter in actual}
+    has_args = any(parameter.kind is Parameter.VAR_POSITIONAL for parameter in actual)
+    has_kwargs = any(parameter.kind is Parameter.VAR_KEYWORD for parameter in actual)
+
+    for parameter in expected:
+        if parameter.kind in {Parameter.VAR_POSITIONAL, Parameter.VAR_KEYWORD}:
+            continue
+        candidate = actual_by_name.get(parameter.name)
+        if candidate is None:
+            if parameter.kind is Parameter.POSITIONAL_ONLY and has_args:
+                continue
+            if parameter.kind is Parameter.KEYWORD_ONLY and has_kwargs:
+                continue
+            if parameter.kind is Parameter.POSITIONAL_OR_KEYWORD and has_args and has_kwargs:
+                continue
+            return False
+        allowed_kinds: set[Any]
+        if parameter.kind is Parameter.POSITIONAL_ONLY:
+            allowed_kinds = {Parameter.POSITIONAL_ONLY}
+        elif parameter.kind is Parameter.POSITIONAL_OR_KEYWORD:
+            allowed_kinds = {Parameter.POSITIONAL_OR_KEYWORD}
+        elif parameter.kind is Parameter.KEYWORD_ONLY:
+            allowed_kinds = {
+                Parameter.POSITIONAL_OR_KEYWORD,
+                Parameter.KEYWORD_ONLY,
+            }
+        else:  # pragma: no cover - variadic kinds were skipped above
+            return False
+        if candidate.kind not in allowed_kinds:
+            return False
+        if parameter.default is not Parameter.empty and candidate.default is Parameter.empty:
+            return False
+
+    expected_names = {parameter.name for parameter in expected}
+    for parameter in actual:
+        if parameter.kind in {Parameter.VAR_POSITIONAL, Parameter.VAR_KEYWORD}:
+            continue
+        if parameter.name not in expected_names and parameter.default is Parameter.empty:
+            return False
+    return True
+
+
+__all__ = [
+    "APP_DATABASE",
+    "CAPABILITY_METHODS",
+    "CAPABILITY_PROTOCOLS",
+    "DEVELOPER_SETTINGS",
+    "DEVICE_AGENT",
+    "FEATURE_FLAGS",
+    "MICROPHONE",
+    "NETWORK",
+    "NETWORK_PROFILES",
+    "PROXY",
+    "TARGET_SUPERVISION",
+    "VIRTUAL_DEVICES",
+    "VIRTUAL_TARGETS",
+    "WEBVIEW",
+    "TargetSupervisionService",
+    "VirtualTargetsService",
+]

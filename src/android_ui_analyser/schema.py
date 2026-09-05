@@ -39,6 +39,16 @@ class ScreenSource(str, Enum):
     mixed = "mixed"
 
 
+class TargetStatus(str, Enum):
+    """Platform-neutral reachability state for an automation target."""
+
+    online = "online"
+    offline = "offline"
+    booting = "booting"
+    unavailable = "unavailable"
+    unknown = "unknown"
+
+
 class PathKind(str, Enum):
     """Which high-level perception path produced the result."""
 
@@ -267,6 +277,58 @@ class Element(BaseModel):
         return out
 
 
+class AppContext(BaseModel):
+    """Foreground application identity independent of Android package/activity names.
+
+    Runtime implementations should return this model. ``package``/``activity`` and ``get`` are
+    compatibility projections for existing engine and plugin code while those public spellings
+    remain supported.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    app_id: str | None = None
+    surface_id: str | None = None
+
+    @property
+    def package(self) -> str | None:
+        return self.app_id
+
+    @property
+    def activity(self) -> str | None:
+        return self.surface_id
+
+    def get(self, key: str, default: Any = None) -> Any:
+        aliases = {
+            "app_id": self.app_id,
+            "package": self.app_id,
+            "surface_id": self.surface_id,
+            "activity": self.surface_id,
+        }
+        return aliases.get(key, default)
+
+    def compatibility_dict(self) -> dict[str, str]:
+        """Legacy Android-shaped mapping, omitting unavailable values."""
+
+        return {
+            key: value
+            for key, value in {"package": self.app_id, "activity": self.surface_id}.items()
+            if value is not None
+        }
+
+    @classmethod
+    def coerce(cls, value: AppContext | Mapping[str, Any] | None) -> AppContext:
+        """Read a neutral context or a legacy ``package``/``activity`` mapping."""
+
+        if isinstance(value, cls):
+            return value
+        raw = value or {}
+        return cls(
+            app_id=raw.get("app_id") or raw.get("package"),
+            surface_id=raw.get("surface_id") or raw.get("activity"),
+        )
+
+
 class Screen(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -275,6 +337,22 @@ class Screen(BaseModel):
     package: str | None = None
     activity: str | None = None
     source: ScreenSource
+
+    @property
+    def app_id(self) -> str | None:
+        """Platform-neutral alias for the public ``package`` compatibility field."""
+
+        return self.package
+
+    @property
+    def surface_id(self) -> str | None:
+        """Platform-neutral alias for the public ``activity`` compatibility field."""
+
+        return self.activity
+
+    @property
+    def app_context(self) -> AppContext:
+        return AppContext(app_id=self.app_id, surface_id=self.surface_id)
 
 
 class ObservationContract(BaseModel):
@@ -932,7 +1010,48 @@ class ResolveResult(BaseModel):
         return json.dumps(data, indent=indent, separators=sep, ensure_ascii=False)
 
 
+class TargetInfo(BaseModel):
+    """Neutral discovery result returned by independently packaged adapters.
+
+    The compatibility properties let the existing engine consume this model while Android keeps
+    returning its established :class:`DeviceInfo` wire shape.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    target_id: str
+    platform: str
+    status: TargetStatus = TargetStatus.online
+    model: str | None = None
+    os_name: str | None = None
+    os_version: str | None = None
+    locale: str | None = None
+    native_status: str | None = None
+
+    @property
+    def serial(self) -> str:
+        return self.target_id
+
+    @property
+    def state(self) -> str:
+        """Legacy transport state used by pre-platform target selection."""
+
+        if self.native_status:
+            return self.native_status
+        return "device" if self.status is TargetStatus.online else self.status.value
+
+    @property
+    def android_version(self) -> str | None:
+        return self.os_version if self.platform == "android" else None
+
+
 class DeviceInfo(BaseModel):
+    """Android discovery compatibility shape.
+
+    New platform plugins return :class:`TargetInfo`; keeping this model unchanged preserves the
+    exact JSON emitted by ``aua devices`` for Android callers.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     serial: str
@@ -940,3 +1059,38 @@ class DeviceInfo(BaseModel):
     android_version: str | None = None
     locale: str | None = None
     state: str = "device"
+
+    @property
+    def target_id(self) -> str:
+        return self.serial
+
+    @property
+    def platform(self) -> str:
+        return "android"
+
+    @property
+    def status(self) -> TargetStatus:
+        return {
+            "device": TargetStatus.online,
+            "offline": TargetStatus.offline,
+        }.get(self.state, TargetStatus.unavailable)
+
+    @property
+    def os_name(self) -> str:
+        return "android"
+
+    @property
+    def os_version(self) -> str | None:
+        return self.android_version
+
+    def as_target_info(self) -> TargetInfo:
+        return TargetInfo(
+            target_id=self.target_id,
+            platform=self.platform,
+            status=self.status,
+            model=self.model,
+            os_name=self.os_name,
+            os_version=self.os_version,
+            locale=self.locale,
+            native_status=self.state,
+        )

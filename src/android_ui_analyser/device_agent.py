@@ -20,6 +20,7 @@ from __future__ import annotations
 import contextlib
 import json
 import re
+import shlex
 import socket
 import subprocess
 import threading
@@ -102,10 +103,16 @@ def rootable(serial: str) -> bool:
     return "test-keys" in tags or debuggable == "1"
 
 
+def root_enabled(serial: str) -> bool:
+    """Whether this target's adb shell is already running as root (read-only)."""
+
+    return _shell(serial, "id -u") == "0"
+
+
 def root_available(serial: str) -> bool:
     """Can adbd run as root here? Google Play images and retail phones cannot."""
 
-    if _shell(serial, "id -u") == "0":
+    if root_enabled(serial):
         return True
     result = _adb(serial, "root", timeout=30)
     blob = ((result.stdout or "") + (result.stderr or "")).lower()
@@ -113,7 +120,31 @@ def root_available(serial: str) -> bool:
         return False
     _adb(serial, "wait-for-device", timeout=60)
     time.sleep(0.5)
-    return _shell(serial, "id -u") == "0"
+    return root_enabled(serial)
+
+
+def unroot(serial: str) -> dict[str, Any]:
+    """Return adbd to its ordinary non-root state and verify the restart completed."""
+
+    if not root_enabled(serial):
+        return {"root": False, "action": "already-unrooted"}
+    result = _adb(serial, "unroot", timeout=30)
+    blob = ((result.stdout or "") + (result.stderr or "")).strip()
+    if result.returncode != 0 or any(
+        marker in blob.casefold() for marker in ("cannot", "failure", "unauthorized")
+    ):
+        raise HelperUnavailableError(
+            f"could not restore non-root adbd on {serial}: {blob or result.returncode}",
+            code="helper_unroot_failed",
+        )
+    _adb(serial, "wait-for-device", timeout=60)
+    time.sleep(0.5)
+    if root_enabled(serial):
+        raise HelperUnavailableError(
+            f"adbd on {serial} stayed root after `adb unroot`",
+            code="helper_unroot_unverified",
+        )
+    return {"root": False, "action": "unrooted"}
 
 
 # --------------------------------------------------------------------------- lifecycle
@@ -159,6 +190,105 @@ def is_installed(serial: str) -> bool:
 
 def is_enabled(serial: str) -> bool:
     return SERVICE in _setting(serial, _SECURE_SERVICES)
+
+
+def _restricted_settings_mode(serial: str) -> str:
+    """Current helper app-op mode, normalized to a value accepted by ``appops set``."""
+
+    raw = _shell(serial, f"cmd appops get {PACKAGE} ACCESS_RESTRICTED_SETTINGS")
+    match = re.search(r"ACCESS_RESTRICTED_SETTINGS:\s*([a-z_]+)", raw, re.IGNORECASE)
+    mode = match.group(1).casefold() if match is not None else "default"
+    allowed = {"allow", "default", "deny", "errored", "foreground", "ignore"}
+    return mode if mode in allowed else "default"
+
+
+def snapshot_state(serial: str) -> dict[str, Any]:
+    """Persistent accessibility/app-op state touched while enabling the helper."""
+
+    return {
+        "enabled_services": [
+            item for item in _setting(serial, _SECURE_SERVICES).split(":") if item
+        ],
+        "accessibility_enabled": _setting(serial, _SECURE_ENABLED),
+        "restricted_settings_appop": _restricted_settings_mode(serial),
+        "adbd_root": root_enabled(serial),
+    }
+
+
+def _write_services(serial: str, services: list[str]) -> None:
+    if services:
+        value = shlex.quote(":".join(services))
+        _shell(serial, f"settings put {_SECURE_SERVICES} {value}")
+    else:
+        _shell(serial, f"settings delete {_SECURE_SERVICES}")
+
+
+def restore_state(serial: str, state: dict[str, Any]) -> dict[str, Any]:
+    """Undo helper enable without clobbering accessibility services added meanwhile."""
+
+    if not state:
+        return disable(serial)
+    before = state.get("enabled_services")
+    original = [str(item) for item in before] if isinstance(before, list) else []
+    listed = [item for item in _setting(serial, _SECURE_SERVICES).split(":") if item]
+    remaining = [item for item in listed if item != SERVICE]
+    _write_services(serial, remaining)
+    expected_master: str | None = None
+
+    # Restore the master switch only while the service list (apart from our addition) still
+    # matches the snapshot. A person may have enabled TalkBack during a long test; disabling
+    # that newly-added service in the name of cleanup would be much worse than retaining a 1.
+    if remaining == original:
+        original_master = str(state.get("accessibility_enabled") or "")
+        if original_master in {"0", "1"}:
+            _shell(serial, f"settings put {_SECURE_ENABLED} {original_master}")
+            expected_master = original_master
+        else:
+            _shell(serial, f"settings delete {_SECURE_ENABLED}")
+            expected_master = ""
+    elif not remaining:
+        _shell(serial, f"settings put {_SECURE_ENABLED} 0")
+        expected_master = "0"
+
+    original_appop = str(state.get("restricted_settings_appop") or "default").casefold()
+    if original_appop not in {
+        "allow",
+        "default",
+        "deny",
+        "errored",
+        "foreground",
+        "ignore",
+    }:
+        original_appop = "default"
+    _shell(
+        serial,
+        f"cmd appops set {PACKAGE} ACCESS_RESTRICTED_SETTINGS {original_appop}",
+    )
+    verified_services = [
+        item for item in _setting(serial, _SECURE_SERVICES).split(":") if item
+    ]
+    if SERVICE in verified_services:
+        raise HelperUnavailableError(
+            f"helper accessibility service remains enabled on {serial}",
+            code="helper_restore_unverified",
+        )
+    if (
+        expected_master is not None
+        and verified_services == remaining
+        and _setting(serial, _SECURE_ENABLED) != expected_master
+    ):
+        raise HelperUnavailableError(
+            f"accessibility master state was not restored on {serial}",
+            code="helper_restore_unverified",
+        )
+    if _restricted_settings_mode(serial) != original_appop:
+        raise HelperUnavailableError(
+            f"restricted-settings state was not restored on {serial}",
+            code="helper_restore_unverified",
+        )
+    if state.get("adbd_root") is False:
+        unroot(serial)
+    return {"enabled": SERVICE in original, "remaining": remaining}
 
 
 def is_bound(serial: str, *, settle_s: float = 3.0) -> bool:
@@ -333,14 +463,14 @@ def disable(serial: str) -> dict[str, Any]:
     listed = [s for s in _setting(serial, _SECURE_SERVICES).split(":") if s]
     if SERVICE not in listed:
         # Nothing of ours to remove. Writing anyway would rewrite a list we do not own.
+        _shell(serial, f"cmd appops set {PACKAGE} ACCESS_RESTRICTED_SETTINGS default")
         return {"enabled": False, "remaining": listed}
 
     remaining = [s for s in listed if s != SERVICE]
-    if remaining:
-        _shell(serial, f"settings put {_SECURE_SERVICES} {':'.join(remaining)}")
-    else:
-        _shell(serial, f"settings delete {_SECURE_SERVICES}")
+    _write_services(serial, remaining)
+    if not remaining:
         _shell(serial, f"settings put {_SECURE_ENABLED} 0")
+    _shell(serial, f"cmd appops set {PACKAGE} ACCESS_RESTRICTED_SETTINGS default")
     return {"enabled": False, "remaining": remaining}
 
 
@@ -918,3 +1048,33 @@ def stop_touch_capture(serial: str) -> list[Touch]:
         return parse_touch_log(text, axis_maxima=parse_device_axes(listing), screen=screen)
     except Exception:  # noqa: BLE001 - see docstring
         return []
+
+
+def discard_touch_capture(serial: str) -> dict[str, Any]:
+    """Strictly stop and remove detached touch-capture state for durable teardown.
+
+    ``stop_touch_capture`` stays best-effort because it is an optional evidence source and must
+    still return the accessibility journey when parsing fails. Ledger replay has the opposite
+    contract: silence is not proof that a detached ``getevent`` process or its log disappeared.
+    This method verifies both before the Engine forgets the write-ahead undo.
+    """
+
+    _shell(serial, "pkill -f 'getevent -lt'", timeout=15.0)
+    processes = _shell(serial, "ps -A -o ARGS", timeout=20.0)
+    if "getevent -lt" in processes:
+        raise HelperUnavailableError(
+            f"touch capture is still running on {serial}",
+            code="helper_touch_capture_cleanup_failed",
+        )
+    _shell(serial, f"rm -f {TOUCH_LOG}", timeout=15.0)
+    remains = _shell(
+        serial,
+        f"if [ -e {shlex.quote(TOUCH_LOG)} ]; then echo present; fi",
+        timeout=15.0,
+    )
+    if remains.strip():
+        raise HelperUnavailableError(
+            f"touch capture log remains on {serial}",
+            code="helper_touch_capture_cleanup_failed",
+        )
+    return {"capturing": False}

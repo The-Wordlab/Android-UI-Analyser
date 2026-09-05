@@ -14,9 +14,13 @@ from __future__ import annotations
 
 import ast
 import re
+from collections.abc import Sequence
 from pathlib import Path
 
 from android_ui_analyser import device_ledger
+from android_ui_analyser.engine import Engine
+from android_ui_analyser.errors import ConfigError, DeviceError
+from conftest import FakeDevice, make_config
 
 ROOT = Path(__file__).parents[1] / "src" / "android_ui_analyser"
 
@@ -34,6 +38,7 @@ BACKENDS = (
     "proxy_mock.py",
     "app_database.py",
     "platforms/android.py",
+    "platforms/android_device.py",
 )
 
 # Commands that change state the device keeps after the command returns.
@@ -52,10 +57,13 @@ MUTATING = re.compile(
 # commands, so the scanner sees them; they are the cure, not the disease.
 UNDO_OR_READ_SITES = frozenset(
     {
-        "device.py:adb_reverse_remove",
-        "device.py:remove_reverse_port",
+        "platforms/android_device.py:adb_reverse_remove",
+        "platforms/android_device.py:remove_reverse_port",
+        "platforms/android_device.py:restore_permissions",
+        "device_agent.py:_write_services",
         "device_agent.py:disable",
         "device_agent.py:remove",
+        "device_agent.py:restore_state",
         "devopts.py:anim_restore",
         "devopts.py:read_state",
         "network.py:restore_controls",
@@ -182,3 +190,137 @@ def test_every_registered_undo_declares_whether_it_needs_the_target() -> None:
     for name, op in device_ledger.UNDO_OPS.items():
         assert isinstance(op.needs_device, bool), name
         assert op.summary, f"{name} has no human-readable summary for `aua teardown status`"
+
+
+def test_every_deliberately_non_reversible_mutation_has_an_explicit_reason() -> None:
+    for name, mutation in device_ledger.MUTATION_CATALOGUE.items():
+        if mutation.undo_op is None:
+            assert mutation.note.strip(), f"{name} has undo_op=None without a reason"
+
+
+class _WriteAheadRuntime(FakeDevice):
+    """A neutral runtime that refuses each mutation until its durable undo is visible."""
+
+    platform_name = "android"
+
+    def _assert_pending(self, *, kind: str, op: str) -> None:
+        entries = device_ledger.read_ledger(self.serial, platform=self.platform_name)
+        assert any(entry.kind == kind and entry.op == op for entry in entries), (
+            f"{kind} reached the target before Engine.record_device_change wrote {op}"
+        )
+
+    def set_orientation(self, mode: str) -> None:
+        self._assert_pending(kind="orientation", op="set_orientation")
+        super().set_orientation(mode)
+
+    def grant_permissions(self, package: str) -> None:
+        self._assert_pending(kind="app_permissions", op="restore_app_permissions")
+        super().grant_permissions(package)
+
+    def restore_permissions(self, package: str, granted: Sequence[str]) -> None:
+        self._assert_pending(kind="app_permissions", op="restore_app_permissions")
+        super().restore_permissions(package, granted)
+
+    def add_media(self, local_path: str, *, remote_dir: str = "/sdcard/DCIM/Camera") -> str:
+        self._assert_pending(kind="added_media", op="remove_added_media")
+        return super().add_media(local_path, remote_dir=remote_dir)
+
+    def remove_added_media(
+        self, local_path: str, *, remote_dir: str = "/sdcard/DCIM/Camera"
+    ) -> None:
+        self._assert_pending(kind="added_media", op="remove_added_media")
+        super().remove_added_media(local_path, remote_dir=remote_dir)
+
+    def start_recording(self, remote_path: str = "/sdcard/aua_recording.mp4") -> str:
+        self._assert_pending(kind="screen_recording", op="discard_recording")
+        return super().start_recording(remote_path)
+
+    def discard_recording(self, remote_path: str) -> None:
+        self._assert_pending(kind="screen_recording", op="discard_recording")
+        super().discard_recording(remote_path)
+
+
+def test_runtime_mutations_write_ahead_and_replay_through_the_neutral_runtime(
+    tmp_path: Path,
+) -> None:
+    runtime = _WriteAheadRuntime(serial="mutation-runtime")
+    runtime._granted_permissions = {"org.example.permission.ALREADY_GRANTED"}
+    engine = Engine(make_config(cache={"dir": str(tmp_path / "cache")}), device=runtime)
+    source = tmp_path / "evidence.png"
+    source.write_bytes(b"fake image")
+
+    engine.orientation_set("landscape")
+    engine.app("grant", package="com.example.app")
+    engine.media_add(str(source))
+    engine.record_start("/sdcard/recording.mp4")
+
+    entries = device_ledger.read_ledger(runtime.serial, platform=engine.platform.name)
+    assert {entry.kind for entry in entries} >= {
+        "orientation",
+        "app_permissions",
+        "added_media",
+        "screen_recording",
+    }
+    fingerprints = {entry.platform_options_fingerprint for entry in entries}
+    assert len(fingerprints) == 1
+    assert len(next(iter(fingerprints))) == 64
+
+    report = device_ledger.replay(
+        runtime.serial,
+        context=device_ledger.UndoContext(
+            serial=runtime.serial,
+            device=runtime,
+            capability=engine.platform.capability,
+            runtime_capability=engine.platform.runtime_capability,
+            platform=engine.platform.name,
+        ),
+        platform=engine.platform.name,
+    )
+
+    assert report["failed"] == []
+    assert runtime._orientation == "n"
+    assert runtime._granted_permissions == {"org.example.permission.ALREADY_GRANTED"}
+    assert runtime._media == set()
+    assert runtime._recording is None
+    assert device_ledger.read_ledger(runtime.serial, platform=engine.platform.name) == []
+
+
+def test_adapter_option_conflict_refuses_before_the_runtime_is_mutated(tmp_path: Path) -> None:
+    import pytest
+
+    runtime = _WriteAheadRuntime(serial="option-conflict-runtime")
+    engine = Engine(make_config(cache={"dir": str(tmp_path / "cache")}), device=runtime)
+    device_ledger.record(
+        runtime.serial,
+        key="orientation",
+        kind="orientation",
+        op="set_orientation",
+        args={"mode": "n"},
+        platform=engine.platform.name,
+        platform_options_fingerprint="f" * 64,
+    )
+
+    with pytest.raises(ConfigError) as raised:
+        engine.orientation_set("landscape")
+
+    assert raised.value.code == "platform_options_recovery_mismatch"
+    assert runtime._orientation == "n"
+
+
+def test_an_auto_stopped_recording_cannot_overwrite_its_pending_cleanup(
+    tmp_path: Path,
+) -> None:
+    import pytest
+
+    runtime = _WriteAheadRuntime(serial="auto-stopped-recording")
+    engine = Engine(make_config(cache={"dir": str(tmp_path / "cache")}), device=runtime)
+    engine.record_start("/sdcard/first.mp4")
+    runtime._recording = None  # Android screenrecord reached its bounded time limit by itself.
+
+    with pytest.raises(DeviceError) as raised:
+        engine.record_start("/sdcard/second.mp4")
+
+    assert raised.value.code == "recording_cleanup_pending"
+    pending = device_ledger.read_ledger(runtime.serial, platform=engine.platform.name)
+    recording = next(entry for entry in pending if entry.key == "screen_recording")
+    assert recording.args == {"remote_path": "/sdcard/first.mp4"}

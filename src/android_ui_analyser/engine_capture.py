@@ -74,11 +74,8 @@ def _capture_screenshot(self: Engine) -> Any:
     if device is None:
         return None
     with self.device_use_context(device.serial):
-        if self.config.perf.capture_adb_screencap:
-            grab = getattr(device, "screencap_png", None)
-            if grab is not None:
-                return grab()
-        return device.screenshot()
+        platform = self.platform.adapter_capability("ui.screenshot")
+        return platform.capture_screenshot(device)
 
 
 def _capture_screenshot_fn(self: Engine) -> Any:
@@ -88,12 +85,39 @@ def _capture_screenshot_fn(self: Engine) -> Any:
 
 
 def record_start(self: Engine, path: str | None = None) -> ActionResult:
-    remote = self.device.start_recording(path or "/sdcard/aua_recording.mp4")
+    runtime = self.platform.runtime_capability("device.recording", self.device)
+    remote_path = runtime.recording_destination(path)
+    active = runtime.active_recording()
+    if active is not None:
+        raise DeviceError(
+            f"a screen recording is already in progress at {active}",
+            hint="Run `aua record stop <path>` before starting another.",
+        )
+    pending = self._pending_device_change("screen_recording", serial=runtime.target_id)
+    if pending is not None:
+        raise DeviceError(
+            "an earlier screen recording still has pending target-side cleanup",
+            code="recording_cleanup_pending",
+            hint=(
+                "Run `aua teardown run --serial <target> --force` with the original platform "
+                "options before starting another recording."
+            ),
+        )
+    self.record_device_change(
+        key="screen_recording",
+        kind="screen_recording",
+        op="discard_recording",
+        args={"remote_path": remote_path},
+        detail=f"screen recording started at {remote_path}",
+    )
+    remote = runtime.start_recording(remote_path)
     return ActionResult(ok=True, action="record-start", detail=remote)
 
 
 def record_stop(self: Engine, local_path: str) -> ActionResult:
-    saved = self.device.stop_recording(local_path)
+    runtime = self.platform.runtime_capability("device.recording", self.device)
+    saved = runtime.stop_recording(local_path)
+    self.forget_device_change("screen_recording")
     return ActionResult(ok=True, action="record-stop", detail=saved)
 
 
@@ -168,6 +192,7 @@ def capture_start(self: Engine, *, connect_if_needed: bool = True) -> dict[str, 
             serial=serial,
             cfg=view,
             screenshot=shot,
+            platform=self.platform.name,
         )
         buf.start()
         self._capture = buf
@@ -243,11 +268,19 @@ def _capture_serial(self: Engine) -> str | None:
             return str(self._device.serial)
     root = Path(self.config.cache.dir).expanduser() / "captures"
     with contextlib.suppress(OSError):
-        serial_dirs = [entry for entry in root.iterdir() if entry.is_dir()]
-        if len(serial_dirs) == 1:
-            # Directory names use the same sanitisation as the disk reader. This is the
-            # common unpinned/single-device fallback and stays host-only.
-            return serial_dirs[0].name
+        from .capture import target_for_capture_root
+
+        targets = [
+            ref
+            for entry in root.iterdir()
+            if entry.is_dir()
+            and (ref := target_for_capture_root(entry)) is not None
+            and ref.platform == self.platform.name
+        ]
+        if len(targets) == 1:
+            # Explicit metadata makes this host-only fallback safe even when another platform
+            # has the same target id or the filesystem key had to be escaped.
+            return targets[0].target_id
     return None
 
 
@@ -263,7 +296,7 @@ def _capture_from_disk(self: Engine) -> Any:
 
     root = Path(self.config.cache.dir).expanduser() / "captures"
     try:
-        return read_session_from_disk(root, serial)
+        return read_session_from_disk(root, serial, platform=self.platform.name)
     except Exception:  # noqa: BLE001 - a corrupt cache must not break the caller's command
         logger.debug("capture disk index unreadable", exc_info=True)
         return None
@@ -339,7 +372,11 @@ def _disk_session_for(self: Engine, since: str | None) -> tuple[Any, int | None]
     sessions: list[Any] = []
     if serial:
         with contextlib.suppress(Exception):
-            sessions = read_sessions_from_disk(root, serial)
+            sessions = read_sessions_from_disk(
+                root,
+                serial,
+                platform=self.platform.name,
+            )
     if not sessions:
         raise UsageError(
             "capture buffer is not running, and nothing was ever recorded for this device",
@@ -674,10 +711,21 @@ def capture_sidecar_start(self: Engine) -> dict[str, Any]:
         cache_dir=Path(self.config.cache.dir).expanduser(),
         cfg=self.config.capture,
         platform=self.platform.name,
+        platform_options=self.config.platform_options(self.platform.name),
     )
 
 
 def capture_sidecar_stop(self: Engine) -> dict[str, Any]:
     from . import capture_sidecar as cs
 
-    return cs.stop(Path(self.config.cache.dir).expanduser())
+    serial = self._capture_serial()
+    if not serial:
+        raise UsageError(
+            "capture sidecar stop needs a target id",
+            hint="Pass --serial, or stop it from the cache containing one platform capture.",
+        )
+    return cs.stop(
+        Path(self.config.cache.dir).expanduser(),
+        serial=serial,
+        platform=self.platform.name,
+    )

@@ -60,7 +60,7 @@ def test_hide_keyboard_and_double_tap() -> None:
 
 def test_cli_app_clear_and_hide_keyboard(monkeypatch) -> None:
     dev = FakeDevice(hierarchy_xml=_XML, package="com.x")
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: dev)
 
     r = runner.invoke(app, ["app", "clear", "com.x", "--yes"])
     assert r.exit_code == 0, r.stderr
@@ -84,7 +84,11 @@ def test_cli_internal_error_exits_one_with_structured_stderr(monkeypatch) -> Non
     def boom(serial: str | None = None):  # pragma: no cover - exercised via CLI
         raise RuntimeError("simulated daemon permission failure")
 
-    monkeypatch.setattr(engine_mod, "connect", boom)
+    monkeypatch.setattr(
+        engine_mod.Engine,
+        "_connect_target",
+        lambda _engine, serial=None: boom(serial),
+    )
     # `devices` builds an engine; force a path that connects.
     r = runner.invoke(app, ["app", "foreground"])
     assert r.exit_code == 1

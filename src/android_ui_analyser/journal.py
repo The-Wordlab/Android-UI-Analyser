@@ -19,6 +19,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from .platforms.identity import LEGACY_PLATFORM, TargetLike, target_ref
+
 logger = logging.getLogger(__name__)
 
 _lock = threading.Lock()
@@ -66,27 +68,56 @@ def journal_dir(cache_dir: str | Path) -> Path:
     return d
 
 
-def _serial_key(serial: str | None) -> str:
+def _serial_key(
+    serial: TargetLike | None, *, platform: str = LEGACY_PLATFORM
+) -> str:
     safe = "host"
     if serial:
-        safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in serial)
+        ref = target_ref(serial, platform=platform)
+        return ref.storage_key
+    if str(platform).strip().lower() != LEGACY_PLATFORM:
+        return target_ref("host", platform=platform).storage_key
     return safe
 
 
-def journal_path(cache_dir: str | Path, serial: str | None) -> Path:
-    return journal_dir(cache_dir) / f"{_serial_key(serial)}.jsonl"
+def journal_path(
+    cache_dir: str | Path,
+    serial: TargetLike | None,
+    *,
+    platform: str = LEGACY_PLATFORM,
+) -> Path:
+    return journal_dir(cache_dir) / f"{_serial_key(serial, platform=platform)}.jsonl"
 
 
-def journal_detail_path(cache_dir: str | Path, serial: str | None) -> Path:
-    return journal_dir(cache_dir) / f"{_serial_key(serial)}.details.jsonl"
+def journal_detail_path(
+    cache_dir: str | Path,
+    serial: TargetLike | None,
+    *,
+    platform: str = LEGACY_PLATFORM,
+) -> Path:
+    return journal_dir(cache_dir) / f"{_serial_key(serial, platform=platform)}.details.jsonl"
 
 
-def clear(cache_dir: str | Path, serial: str | None, *, include_host: bool = True) -> list[Path]:
+def clear(
+    cache_dir: str | Path,
+    serial: TargetLike | None,
+    *,
+    include_host: bool = True,
+    platform: str = LEGACY_PLATFORM,
+) -> list[Path]:
     """Remove compact and detailed journal files visible in one dashboard scope."""
 
-    roots = [journal_path(cache_dir, serial), journal_detail_path(cache_dir, serial)]
+    roots = [
+        journal_path(cache_dir, serial, platform=platform),
+        journal_detail_path(cache_dir, serial, platform=platform),
+    ]
     if include_host and serial is not None:
-        roots.extend((journal_path(cache_dir, None), journal_detail_path(cache_dir, None)))
+        roots.extend(
+            (
+                journal_path(cache_dir, None, platform=platform),
+                journal_detail_path(cache_dir, None, platform=platform),
+            )
+        )
     deleted: list[Path] = []
     for root in dict.fromkeys(roots):
         for path in (root, root.with_suffix(root.suffix + ".1")):
@@ -98,11 +129,16 @@ def clear(cache_dir: str | Path, serial: str | None, *, include_host: bool = Tru
     return deleted
 
 
-def detail_revision(cache_dir: str | Path, serial: str | None) -> str:
+def detail_revision(
+    cache_dir: str | Path,
+    serial: TargetLike | None,
+    *,
+    platform: str = LEGACY_PLATFORM,
+) -> str:
     """Return a cheap change token for detail rows visible to one dashboard scope."""
 
-    current_paths = [journal_detail_path(cache_dir, serial)]
-    host = journal_detail_path(cache_dir, None)
+    current_paths = [journal_detail_path(cache_dir, serial, platform=platform)]
+    host = journal_detail_path(cache_dir, None, platform=platform)
     if host not in current_paths:
         current_paths.append(host)
     parts: list[str] = []
@@ -342,6 +378,7 @@ def _detail_record(
     result: Any,
     error: dict[str, Any] | None,
     privacy_cmd: str | None = None,
+    platform: str = LEGACY_PLATFORM,
 ) -> dict[str, Any]:
     effective_cmd = _effective_privacy_cmd(cmd, privacy_cmd)
     derived_private = cmd not in _PRIVATE_RESPONSE_COMMANDS and (
@@ -370,10 +407,16 @@ def _detail_record(
             request=False,
             sensitive_literals=literals,
         )
+    identity: dict[str, Any] = {"platform": str(platform).strip().lower()}
+    if serial:
+        ref = target_ref(serial, platform=platform)
+        identity.update({"target_id": ref.target_id, "serial": ref.target_id})
+    else:
+        identity["serial"] = None
     return {
         "detail_id": detail_id,
         "ts_ms": ts_ms,
-        "serial": serial,
+        **identity,
         "source": source,
         "request": {
             "cmd": cmd,
@@ -528,6 +571,7 @@ def record(
     extra: dict[str, Any] | None = None,
     owner: str | None = None,
     privacy_cmd: str | None = None,
+    platform: str = LEGACY_PLATFORM,
 ) -> str | None:
     """Append one journal event (best-effort; never raises into the caller).
 
@@ -537,7 +581,8 @@ def record(
     through the warm daemon carries the daemon's pid.
     """
     try:
-        path = journal_path(cache_dir, serial)
+        platform = str(platform).strip().lower()
+        path = journal_path(cache_dir, serial, platform=platform)
         now = time.time()
         ts_ms = int(now * 1000)
         detail_id = uuid.uuid4().hex
@@ -556,6 +601,8 @@ def record(
             "args": compact_args,
             "ok": ok,
             "serial": serial,
+            "platform": platform,
+            "target_id": serial,
             "pid": os.getpid(),
         }
         if owner:
@@ -564,7 +611,9 @@ def record(
         with contextlib.suppress(Exception):
             from .session import active_session_metadata
 
-            for key, value in active_session_metadata(cache_dir, serial, owner).items():
+            for key, value in active_session_metadata(
+                cache_dir, serial, owner, platform=platform
+            ).items():
                 correlation.setdefault(key, value)
         if isinstance(result, dict):
             for key in ("session_id", "goal_hash"):
@@ -611,9 +660,10 @@ def record(
             result=result,
             error=error,
             privacy_cmd=privacy_cmd,
+            platform=platform,
         )
         with _lock:
-            detail_path = journal_detail_path(cache_dir, serial)
+            detail_path = journal_detail_path(cache_dir, serial, platform=platform)
             detail_written = False
             try:
                 _rotate(detail_path, _MAX_DETAIL_FILE_BYTES)
@@ -628,11 +678,13 @@ def record(
             with contextlib.suppress(OSError):
                 _rotate(path, _MAX_FILE_BYTES)
             _append_private(path, json.dumps(event, ensure_ascii=False, default=str) + "\n")
-        # Keep headless idle-watchdog from auto-stopping mid-session.
+        # Keep an owned virtual target's idle supervisor from stopping it mid-session. The
+        # heartbeat is platform-neutral coordination state; each platform decides how its own
+        # supervisor consumes it.
         with contextlib.suppress(Exception):
-            from .emulator import touch_activity
+            from .target_activity import touch
 
-            touch_activity(cache_dir, serial)
+            touch(cache_dir, serial, platform=platform)
         return detail_id if detail_written else None
     except Exception as exc:  # noqa: BLE001
         logger.debug("journal write failed: %s", exc)
@@ -646,11 +698,13 @@ def read_since(
     since_ms: int | None = None,
     limit: int = 200,
     include_dashboard: bool = False,
+    platform: str = LEGACY_PLATFORM,
 ) -> list[dict[str, Any]]:
-    path = journal_path(cache_dir, serial)
+    platform = str(platform).strip().lower()
+    path = journal_path(cache_dir, serial, platform=platform)
     # Also merge host journal if serial-specific is empty of recent events.
     paths = [path]
-    host = journal_path(cache_dir, None)
+    host = journal_path(cache_dir, None, platform=platform)
     if host != path:
         paths.append(host)
     events: list[dict[str, Any]] = []
@@ -673,6 +727,8 @@ def read_since(
                 # keep host events without a serial; drop other devices
                 if serial and row.get("serial") not in (None, serial, ""):
                     continue
+                if str(row.get("platform") or LEGACY_PLATFORM).lower() != platform:
+                    continue
                 events.append(row)
     events.sort(key=lambda e: int(e.get("ts_ms") or 0))
     return events[-limit:]
@@ -682,13 +738,16 @@ def read_detail(
     cache_dir: str | Path,
     serial: str | None,
     detail_id: str,
+    *,
+    platform: str = LEGACY_PLATFORM,
 ) -> dict[str, Any] | None:
     """Read one full redacted exchange without adding it to the dashboard polling feed."""
 
     if not detail_id:
         return None
-    current_paths = [journal_detail_path(cache_dir, serial)]
-    host = journal_detail_path(cache_dir, None)
+    platform = str(platform).strip().lower()
+    current_paths = [journal_detail_path(cache_dir, serial, platform=platform)]
+    host = journal_detail_path(cache_dir, None, platform=platform)
     if host not in current_paths:
         current_paths.append(host)
     paths: list[Path] = []
@@ -708,6 +767,8 @@ def read_detail(
                     continue
                 if serial and row.get("serial") not in (None, serial, ""):
                     continue
+                if str(row.get("platform") or LEGACY_PLATFORM).lower() != platform:
+                    continue
                 return row
     return None
 
@@ -722,6 +783,7 @@ def record_emitted_response(
     args: dict[str, Any] | None,
     result: Any,
     request_context: dict[str, Any] | None = None,
+    platform: str = LEGACY_PLATFORM,
 ) -> bool:
     """Append the final CLI-visible response to an existing exchange detail.
 
@@ -736,7 +798,13 @@ def record_emitted_response(
     try:
         if not detail_id:
             for event in reversed(
-                read_since(cache_dir, serial, limit=200, include_dashboard=True)
+                read_since(
+                    cache_dir,
+                    serial,
+                    limit=200,
+                    include_dashboard=True,
+                    platform=platform,
+                )
             ):
                 if event.get("invocation_id") != invocation_id or event.get("cmd") != cmd:
                     continue
@@ -761,6 +829,7 @@ def record_emitted_response(
             ok=ok,
             result=result_value,
             error=None,
+            platform=platform,
         )
         if request_context:
             stored_context = dict(request_context)
@@ -778,7 +847,7 @@ def record_emitted_response(
                 sensitive_literals=literals,
             )
         with _lock:
-            path = journal_detail_path(cache_dir, serial)
+            path = journal_detail_path(cache_dir, serial, platform=platform)
             _rotate(path, _MAX_DETAIL_FILE_BYTES)
             _append_private(
                 path,

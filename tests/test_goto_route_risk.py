@@ -270,7 +270,7 @@ def test_cli_goto_requires_the_explicit_unsafe_opt_in(monkeypatch) -> None:  # t
         steps=[RouteStep(kind="open-link", arg="fiction://catalog")],
     )
     device = LinkDevice([HOME, APPS], package=P, serial="risk-cli")
-    monkeypatch.setattr(engine_module, "connect", lambda serial=None: device)
+    monkeypatch.setattr(engine_module.Engine, "_connect_target", lambda _engine, serial=None: device)
 
     refused = runner.invoke(app, ["--format", "compact", "goto", "catalog"])
     assert refused.exit_code == 1

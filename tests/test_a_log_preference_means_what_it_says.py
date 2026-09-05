@@ -19,13 +19,13 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-import android_ui_analyser.engine as engine_mod
 from android_ui_analyser.cli import app as cli_app
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.errors import AuaError
 from android_ui_analyser.logcat import digest_app_logs
 from android_ui_analyser.mcp_server import _dispatch as mcp_dispatch
 from android_ui_analyser.memory import AppLogPrefs, AppMemoryStore
+from android_ui_analyser.platforms.android import AndroidPlatform
 from conftest import FakeDevice, make_config
 
 APP = "com.example.notes"
@@ -214,7 +214,11 @@ def test_a_typed_app_logs_flag_beats_a_stored_preference(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seen: list[set[str]] = []
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: FakeDevice(package=APP))
+    monkeypatch.setattr(
+        AndroidPlatform,
+        "connect",
+        lambda self, target_id=None: FakeDevice(package=APP),
+    )
     monkeypatch.setenv("AUA_DAEMON__ENABLED", "false")
     monkeypatch.setattr(
         Engine,
@@ -282,7 +286,7 @@ def test_a_preference_call_needs_no_device_at_all(monkeypatch: pytest.MonkeyPatc
     def no_device(serial: str | None = None) -> Any:
         raise AssertionError("a preference call must not connect to a device")
 
-    monkeypatch.setattr(engine_mod, "connect", no_device)
+    monkeypatch.setattr(AndroidPlatform, "connect", lambda self, target_id=None: no_device(target_id))
     monkeypatch.setenv("AUA_DAEMON__ENABLED", "false")
 
     result = runner.invoke(cli_app, ["logcat", "prefs", "show", "--app", APP])

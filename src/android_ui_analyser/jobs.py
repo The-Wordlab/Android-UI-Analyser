@@ -48,6 +48,7 @@ class JobState(BaseModel):
     operation: str
     args: dict[str, Any] = Field(default_factory=dict)
     serial: str
+    platform: str = "android"
     owner: str | None = None
     session_id: str | None = None
     status: JobStatus = "queued"
@@ -112,7 +113,9 @@ def _complete_correlated_goal_phase(cache_dir: str | Path, job: JobState) -> Non
         phase_progress,
     )
 
-    session = load_session_state(cache_dir, session_id=job.session_id)
+    session = load_session_state(
+        cache_dir, session_id=job.session_id, platform=job.platform
+    )
     if session is None:
         return
     updated = complete_current_ui_phase_from_job(cache_dir, session, job=job)
@@ -194,6 +197,11 @@ class JobManager:
             return str(serial)
         return str(self.engine.device.serial)
 
+    def _platform(self) -> str:
+        adapter = getattr(self.engine, "_platform", None)
+        configured = getattr(getattr(self.engine.config, "device", None), "platform", None)
+        return str(getattr(adapter, "name", None) or configured or "android").strip().lower()
+
     def _session_id(self) -> str | None:
         from .session import load_session_state
 
@@ -201,12 +209,13 @@ class JobManager:
             self.cache_dir,
             serial=self._serial(),
             owner=self._owner(),
+            platform=self._platform(),
         )
         return state.session_id if state is not None else None
 
     def _visible(self, state: JobState) -> bool:
         owner = self._owner()
-        return state.owner == owner
+        return state.owner == owner and state.platform == self._platform()
 
     def _load(self, job_id: str) -> JobState:
         state = _read(self.cache_dir, job_id)
@@ -265,6 +274,7 @@ class JobManager:
                 operation=operation,
                 args=dict(args),
                 serial=self._serial(),
+                platform=self._platform(),
                 owner=self._owner(),
                 session_id=self._session_id(),
                 created_ms=int(time.time() * 1000),

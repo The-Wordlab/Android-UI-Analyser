@@ -40,9 +40,9 @@ def calls(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     """Record what the CLI asks the engine to do, without touching a device."""
     recorded: list[dict[str, Any]] = []
     monkeypatch.setattr(
-        engine_mod,
-        "connect",
-        lambda serial=None: FakeDevice(hierarchy_xml=_XML, serial=serial or "fake-emulator-5554"),
+        engine_mod.Engine,
+        "_connect_target",
+        lambda _engine, serial=None: FakeDevice(hierarchy_xml=_XML, serial=serial or "fake-emulator-5554"),
     )
     monkeypatch.setenv("AUA_DAEMON__ENABLED", "false")
 

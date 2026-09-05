@@ -20,10 +20,26 @@ import sys
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from .atomic import atomic_write_text
 from .errors import DeviceError, UsageError
+from .platforms.virtual_targets import (
+    OwnedVirtualTargetStopRequest,
+    VirtualTargetCreateRequest,
+    VirtualTargetCreateResult,
+    VirtualTargetDefinition,
+    VirtualTargetDeleteRequest,
+    VirtualTargetDeleteResult,
+    VirtualTargetInstance,
+    VirtualTargetList,
+    VirtualTargetProvisionRequest,
+    VirtualTargetReclaimRequest,
+    VirtualTargetStartRequest,
+    VirtualTargetStatus,
+    VirtualTargetStopRequest,
+    VirtualTargetStopResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -2203,3 +2219,390 @@ def stop(
             "lease frees the moment the holder process exits."
         )
     return result
+
+
+# --------------------------------------------------------------------------- neutral service API
+
+
+def _virtual_definition(detail: dict[str, Any]) -> VirtualTargetDefinition:
+    """Translate one Android AVD record into the platform-neutral definition contract."""
+
+    name = str(detail.get("name") or "").strip()
+    return VirtualTargetDefinition(
+        definition_id=name,
+        capabilities={
+            "root": detail.get("rootable") is True,
+            "proxy": detail.get("rootable") is True,
+            "play": detail.get("play_store") is True,
+        },
+        details=detail,
+    )
+
+
+def _virtual_instance(
+    payload: dict[str, Any], *, require_owned_token: bool
+) -> VirtualTargetInstance:
+    target_id = str(payload.get("serial") or payload.get("target_id") or "").strip()
+    token = str(payload.get("instance") or payload.get("instance_token") or "").strip() or None
+    if require_owned_token and token is None:
+        raise DeviceError(
+            "Android virtual-target startup returned no owned instance token",
+            code="platform_capability_invalid",
+            hint="Update AUA; rollback cannot safely stop this boot by serial alone.",
+        )
+    known = {
+        "ok",
+        "action",
+        "serial",
+        "target_id",
+        "instance",
+        "instance_token",
+        "avd",
+        "definition_id",
+        "owner",
+        "pid",
+    }
+    return VirtualTargetInstance(
+        target_id=target_id,
+        instance_token=token,
+        definition_id=(
+            str(payload.get("avd") or payload.get("definition_id") or "").strip() or None
+        ),
+        owner=str(payload["owner"]) if payload.get("owner") is not None else None,
+        pid=payload.get("pid") if isinstance(payload.get("pid"), int) else None,
+        details={key: value for key, value in payload.items() if key not in known},
+        legacy_result=payload,
+    )
+
+
+def list_virtual_targets() -> VirtualTargetList:
+    """List reusable Android definitions through the neutral virtual-target contract."""
+
+    payload = list_avds()
+    definitions = tuple(
+        _virtual_definition(item)
+        for item in payload.get("details", [])
+        if isinstance(item, dict) and item.get("name")
+    )
+    details = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"ok", "action", "avds", "details", "count"}
+    }
+    return VirtualTargetList(
+        definitions=definitions,
+        details=details,
+        legacy_result=payload,
+    )
+
+
+def select_virtual_target(
+    definition_id: str | None = None,
+    *,
+    needs: list[str] | tuple[str, ...] | None = None,
+) -> VirtualTargetDefinition:
+    """Select an AVD by neutral definition id and capability requirements."""
+
+    selected = select_avd_for_session(definition_id, needs=list(needs or ()))
+    detail = inspect_avd(selected)
+    if not detail.get("name"):
+        detail = {**detail, "name": selected}
+    return _virtual_definition(detail)
+
+
+def start_virtual_target(request: VirtualTargetStartRequest) -> VirtualTargetInstance:
+    """Start one Android definition and return its exact owned-instance token."""
+
+    options = dict(request.options)
+    allowed = {"extra_args", "gpu", "idle_timeout_s", "port", "read_only"}
+    unknown = sorted(set(options) - allowed)
+    if unknown:
+        raise UsageError(
+            f"unsupported Android virtual-target start option(s): {', '.join(unknown)}",
+            hint=f"Supported options: {', '.join(sorted(allowed))}.",
+        )
+    extra_args = options.get("extra_args")
+    if extra_args is not None and not isinstance(extra_args, list):
+        raise UsageError("virtual-target option extra_args must be a list of strings")
+    payload = start(
+        request.definition_id,
+        headless=request.headless,
+        animations=request.animations,
+        audio=request.audio,
+        wait_s=request.wait_s,
+        cache_dir=request.cache_dir,
+        extra_args=[str(item) for item in extra_args] if extra_args is not None else None,
+        gpu=str(options["gpu"]) if options.get("gpu") is not None else None,
+        idle_timeout_s=(
+            float(options["idle_timeout_s"])
+            if options.get("idle_timeout_s") is not None
+            else None
+        ),
+        port=int(options["port"]) if options.get("port") is not None else None,
+        read_only=(
+            bool(options["read_only"]) if options.get("read_only") is not None else None
+        ),
+        parallel=request.parallel,
+        owner=str(request.owner) if request.owner is not None else None,
+        lease_registry_dir=request.lease_registry_dir,
+    )
+    return _virtual_instance(payload, require_owned_token=True)
+
+
+def provision_virtual_target(
+    request: VirtualTargetProvisionRequest,
+) -> VirtualTargetInstance:
+    """Select a compatible Android definition and start it as one semantic operation."""
+
+    # Visibility/audio describe the boot we are about to create, not immutable AVD-image facts.
+    # Android's image selector owns root/Play/proxy; the common start flags own the other two.
+    image_needs = [item for item in request.needs if item in {"root", "play", "proxy"}]
+    unknown = sorted(set(request.needs) - {"root", "play", "proxy", "headed", "audio"})
+    if unknown:
+        raise UsageError(
+            f"cannot provision Android for unknown requirement(s): {', '.join(unknown)}",
+            hint="Supported provisioning requirements are root, play, proxy, headed, and audio.",
+        )
+    selected = select_virtual_target(request.definition_id, needs=image_needs)
+    return start_virtual_target(
+        VirtualTargetStartRequest(
+            definition_id=selected.definition_id,
+            headless=request.headless,
+            audio=request.audio,
+            animations=request.animations,
+            wait_s=request.wait_s,
+            cache_dir=request.cache_dir,
+            lease_registry_dir=request.lease_registry_dir,
+            owner=request.owner,
+            parallel=request.parallel,
+            options=request.options,
+        )
+    )
+
+
+def virtual_target_status(
+    *, cache_dir: str | Path | None = None
+) -> VirtualTargetStatus:
+    """Return configured, running, and AUA-owned Android virtual targets."""
+
+    payload = status(cache_dir=cache_dir)
+    definitions = tuple(
+        _virtual_definition(item)
+        for item in payload.get("avd_details", [])
+        if isinstance(item, dict) and item.get("name")
+    )
+    records = {
+        str(item.get("serial")): item
+        for item in payload.get("started_by_aua", [])
+        if isinstance(item, dict) and item.get("serial")
+    }
+    running: list[VirtualTargetInstance] = []
+    for raw in payload.get("running", []):
+        if not isinstance(raw, dict) or not raw.get("serial"):
+            continue
+        serial = str(raw["serial"])
+        record = records.get(serial, {})
+        combined = {**raw, **record, "serial": serial}
+        running.append(_virtual_instance(combined, require_owned_token=False))
+    owned = tuple(
+        _virtual_instance(item, require_owned_token=False)
+        for item in records.values()
+        if item.get("serial")
+    )
+    details = {
+        key: value
+        for key, value in payload.items()
+        if key
+        not in {
+            "ok",
+            "action",
+            "avds",
+            "avd_details",
+            "running",
+            "started_by_aua",
+        }
+    }
+    return VirtualTargetStatus(
+        definitions=definitions,
+        running=tuple(running),
+        owned=owned,
+        details=details,
+        legacy_result=payload,
+    )
+
+
+def stop_virtual_targets(request: VirtualTargetStopRequest) -> VirtualTargetStopResult:
+    """Stop matching Android virtual targets through neutral selection vocabulary."""
+
+    payload = stop(
+        serial=request.target_id,
+        avd=request.definition_id,
+        all_devices=request.all_targets,
+        mine=request.mine,
+        owner=request.owner,
+        cache_dir=request.cache_dir,
+        requested_by=request.requested_by,
+        lease_registry_dir=request.lease_registry_dir,
+        # Preserve LeaseOwner's process identity; stringifying it would make this caller look
+        # foreign to its own live lease during the stop transaction.
+        lease_owner=cast(str | None, request.lease_owner),
+    )
+    stopped = tuple(str(item) for item in payload.get("stopped", []) if str(item))
+    preserved = tuple(
+        str(item.get("serial"))
+        for item in payload.get("skipped_leased", [])
+        if isinstance(item, dict) and item.get("serial")
+    )
+    details = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"ok", "action", "stopped", "skipped_leased"}
+    }
+    if payload.get("skipped_leased"):
+        details["skipped_leased"] = payload["skipped_leased"]
+    return VirtualTargetStopResult(
+        stopped_target_ids=stopped,
+        preserved_target_ids=preserved,
+        details=details,
+        legacy_result=payload,
+    )
+
+
+def stop_virtual_target_instance(
+    request: OwnedVirtualTargetStopRequest,
+) -> VirtualTargetStopResult:
+    """Roll back exactly one Android boot using its opaque owned-instance token."""
+
+    payload = stop_spawned_instance(
+        instance=request.instance_token,
+        pid=request.expected_pid,
+        cache_dir=request.cache_dir,
+        lease_registry_dir=request.lease_registry_dir,
+        # The opaque owner may be a LeaseOwner carrying pid/start metadata used by the lease gate.
+        owner=cast(str | None, request.owner),
+        requested_by=request.requested_by,
+    )
+    stopped = tuple(str(item) for item in payload.get("stopped", []) if str(item))
+    preserved = tuple(
+        str(item.get("serial"))
+        for item in payload.get("skipped_leased", [])
+        if isinstance(item, dict) and item.get("serial")
+    )
+    return VirtualTargetStopResult(
+        stopped_target_ids=stopped,
+        preserved_target_ids=preserved,
+        details={
+            key: value
+            for key, value in payload.items()
+            if key not in {"ok", "action", "stopped", "skipped_leased"}
+        },
+        legacy_result=payload,
+    )
+
+
+def reclaim_virtual_targets(
+    request: VirtualTargetReclaimRequest,
+) -> tuple[VirtualTargetInstance, ...]:
+    """Re-arm retirement supervision only for Android instances AUA owns."""
+
+    adopted = adopt_idle_watchdogs(
+        cache_dir=request.cache_dir,
+        idle_timeout_s=request.idle_timeout_s,
+        lease_registry_dir=request.lease_registry_dir,
+    )
+    return tuple(
+        _virtual_instance(item, require_owned_token=False)
+        for item in adopted
+        if item.get("serial")
+    )
+
+
+def create_virtual_target(request: VirtualTargetCreateRequest) -> VirtualTargetCreateResult:
+    """Create Android's supported rootable virtual-target definition.
+
+    Android's existing creation surface intentionally provisions the small non-Play profile used
+    for proxy/system-CA work.  The neutral contract does not freeze that policy: another adapter
+    owns and validates its own ``options``.
+    """
+
+    options = dict(request.options)
+    allowed = {"accept_licenses", "api", "profile"}
+    unknown = sorted(set(options) - allowed)
+    if unknown:
+        raise UsageError(
+            f"unsupported Android virtual-target create option(s): {', '.join(unknown)}",
+            hint=f"Supported options: {', '.join(sorted(allowed))}.",
+        )
+    profile = str(options.get("profile") or "proxy").strip().lower()
+    if profile not in {"proxy", "rootable"}:
+        raise UsageError(
+            f"unsupported Android virtual-target profile {profile!r}",
+            hint="Android currently creates the rootable/proxy profile; existing AVDs remain usable.",
+        )
+    payload = ensure_proxy_avd(
+        name=request.definition_id,
+        api=int(options.get("api", PROXY_API_DEFAULT)),
+        force=request.replace,
+        accept_licenses=bool(options.get("accept_licenses", True)),
+    )
+    detail = payload.get("detail")
+    if not isinstance(detail, dict):
+        detail = inspect_avd(request.definition_id)
+    if not detail.get("name"):
+        detail = {**detail, "name": request.definition_id}
+    return VirtualTargetCreateResult(
+        definition=_virtual_definition(detail),
+        created=bool(payload.get("created")),
+        details={
+            key: value
+            for key, value in payload.items()
+            if key not in {"ok", "action", "created", "detail"}
+        },
+        legacy_result=payload,
+    )
+
+
+def delete_virtual_target(request: VirtualTargetDeleteRequest) -> VirtualTargetDeleteResult:
+    """Delete one stopped Android AVD definition after explicit confirmation."""
+
+    if request.options:
+        unknown = ", ".join(sorted(str(key) for key in request.options))
+        raise UsageError(f"unsupported Android virtual-target delete option(s): {unknown}")
+    if not request.confirmed:
+        raise UsageError(
+            "deleting a virtual-target definition needs explicit confirmation",
+            hint="Re-run with --yes after confirming the target definition and its data may be removed.",
+        )
+    name = request.definition_id
+    detail = inspect_avd(name)
+    if not detail.get("config"):
+        return VirtualTargetDeleteResult(
+            definition_id=name,
+            deleted=False,
+            details={"reason": "not_found"},
+        )
+    running = [
+        str(item.get("serial"))
+        for item in running_emulators()
+        if item.get("serial") and avd_name_of_serial(str(item["serial"])) == name
+    ]
+    if running:
+        raise UsageError(
+            f"virtual-target definition {name!r} is running on {', '.join(running)}",
+            hint="Stop the exact target first; deleting a live definition is refused.",
+        )
+    proc = _run_sdk(
+        [avdmanager_bin(), "delete", "avd", "--name", name],
+        timeout=120,
+    )
+    if proc.returncode != 0 or inspect_avd(name).get("config"):
+        detail_text = ((proc.stderr or "") + (proc.stdout or ""))[-1200:]
+        raise DeviceError(
+            f"failed to delete virtual-target definition {name!r}",
+            hint=detail_text or "Check the Android SDK avdmanager installation.",
+        )
+    return VirtualTargetDeleteResult(
+        definition_id=name,
+        deleted=True,
+        details={"previous": detail},
+    )

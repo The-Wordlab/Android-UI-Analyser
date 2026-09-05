@@ -11,10 +11,15 @@ from pathlib import Path
 
 import pytest
 
+from android_ui_analyser import device_ledger
 from android_ui_analyser.config import Config
 from android_ui_analyser.device import Device
 from android_ui_analyser.engine import Engine, _install_versions_differ
-from android_ui_analyser.errors import DeviceError, UsageError
+from android_ui_analyser.errors import (
+    DeviceError,
+    UnsupportedPlatformCapabilityError,
+    UsageError,
+)
 from android_ui_analyser.platforms import AppBundle, InstalledApp
 from android_ui_analyser.platforms.base import NormalizedTree, PlatformAdapter
 from android_ui_analyser.schema import DeviceInfo
@@ -25,7 +30,7 @@ BUNDLE = AppBundle(app_id="com.example.app", version_name="2.1.0", version_code=
 
 class FakeInstallPlatform(PlatformAdapter):
     name = "fake-install"
-    capabilities = frozenset({"ui.tree", "app.install"})
+    capabilities = frozenset({"ui.tree", "app.install", "app.lifecycle"})
 
     def __init__(
         self,
@@ -255,10 +260,10 @@ def test_a_platform_without_the_capability_refuses_explicitly(tmp_path) -> None:
     engine, platform, _ = make_engine(tmp_path)
     platform.capabilities = frozenset({"ui.tree"})
 
-    with pytest.raises(DeviceError) as raised:
+    with pytest.raises(UnsupportedPlatformCapabilityError) as raised:
         engine.install_app(apk(tmp_path))
 
-    assert raised.value.code == "unsupported_capability"
+    assert raised.value.code == "platform_capability_unsupported"
     assert platform.calls == []
 
 
@@ -301,6 +306,25 @@ def test_grant_still_applies_when_the_push_was_skipped(tmp_path) -> None:
     engine.install_app(apk(tmp_path), grant_permissions=True)
 
     assert any(call[0] == "grant_permissions" for call in runtime.calls)
+
+
+def test_install_permission_grant_is_recorded_before_the_bundle_reaches_the_target(
+    tmp_path,
+) -> None:
+    engine, platform, runtime = make_engine(tmp_path)
+    install = platform.install_app_bundle
+
+    def guarded_install(*args, **kwargs) -> None:  # type: ignore[no-untyped-def]
+        pending = device_ledger.read_ledger(runtime.serial, platform=platform.name)
+        entry = next(item for item in pending if item.kind == "app_permissions")
+        assert entry.args == {"app_id": "com.example.app", "granted": []}
+        install(*args, **kwargs)
+
+    platform.install_app_bundle = guarded_install  # type: ignore[method-assign]
+
+    engine.install_app(apk(tmp_path), grant_permissions=True)
+
+    assert install_args(platform)["grant"] is True
 
 
 def test_a_new_build_invalidates_the_previous_build_s_cached_reads(tmp_path) -> None:

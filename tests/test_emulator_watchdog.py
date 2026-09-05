@@ -11,6 +11,7 @@ import pytest
 from android_ui_analyser import emulator as emu
 from android_ui_analyser import emulator_watchdog as wd
 from android_ui_analyser import journal as journal_mod
+from android_ui_analyser import target_activity
 
 
 def test_touch_activity_bumps_matching_serial(tmp_path: Path) -> None:
@@ -57,8 +58,15 @@ def test_journal_record_touches_activity(tmp_path: Path) -> None:
         cmd="analyze",
         ok=True,
     )
-    meta = json.loads(path.read_text(encoding="utf-8"))
-    assert meta["last_activity"] > 1.0
+    heartbeat = target_activity.read(tmp_path, "emulator-5554", platform="android")
+    assert heartbeat is not None
+    assert heartbeat["last_activity"] > 1.0
+
+
+def test_watchdog_reads_platform_neutral_target_heartbeat(tmp_path: Path) -> None:
+    target_activity.touch(tmp_path, "emulator-5554", platform="android", at=42.0)
+
+    assert wd._last_activity({"last_activity": 1.0}, tmp_path, "emulator-5554") == 42.0
 
 
 def test_watchdog_stops_when_idle(

@@ -174,6 +174,36 @@ class InvalidPlatformCapabilityError(ConfigError):
         )
 
 
+class PlatformPluginLoadError(ConfigError):
+    """The selected platform entry point exists but could not be imported."""
+
+    code = "platform_plugin_load_failed"
+
+    def __init__(self, platform: str, detail: str) -> None:
+        super().__init__(
+            f"platform plugin {platform!r} could not be loaded: {detail}",
+            hint=(
+                "Repair or reinstall the selected platform plugin. Other installed platform "
+                "plugins were not imported."
+            ),
+        )
+
+
+class IncompatiblePlatformPluginError(ConfigError):
+    """A selected plugin targets a different version of AUA's platform contract."""
+
+    code = "platform_api_incompatible"
+
+    def __init__(self, platform: str, *, expected: int, actual: object) -> None:
+        super().__init__(
+            f"platform plugin {platform!r} declares API version {actual!r}; expected {expected}",
+            hint=(
+                "Install a plugin release compatible with this AUA version, or update the "
+                "adapter's platform_api_version declaration."
+            ),
+        )
+
+
 class ProviderError(AuaError):
     """Raised when an entire provider fallback chain is exhausted (PRD §7)."""
 

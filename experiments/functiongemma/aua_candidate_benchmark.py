@@ -26,6 +26,12 @@ from typing import Any
 from android_ui_analyser.config import Config
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.memory import arrival_destination_terms
+from android_ui_analyser.platforms import (
+    DisplayGeometry,
+    NormalizedTree,
+    PlatformAdapter,
+    TargetRuntime,
+)
 from android_ui_analyser.schema import AnalyzeResult, Element, Meta, Screen, Source
 
 
@@ -105,8 +111,33 @@ _SUMMARIES = (
 )
 
 
-class _HostDevice:
-    serial = "functiongemma-candidate-benchmark"
+_HOST_TARGET_ID = "functiongemma-candidate-benchmark"
+
+
+class _HostDevice(TargetRuntime):
+    target_id = _HOST_TARGET_ID
+
+
+class _HostPlatform(PlatformAdapter):
+    """Capability-free platform for a benchmark that never reads or acts on a target."""
+
+    name = "functiongemma-host"
+
+    def connect(self, target_id: str | None = None) -> TargetRuntime:
+        raise AssertionError("the host-only benchmark must not connect to a target")
+
+    def list_targets(self) -> list[Any]:
+        return []
+
+    def normalize_tree(
+        self,
+        raw_tree: str,
+        screen_size: tuple[int, int],
+        *,
+        geometry: DisplayGeometry | None = None,
+        ignored_app_ids: Sequence[str] = (),
+    ) -> NormalizedTree:
+        raise AssertionError("the host-only benchmark must not normalize a target tree")
 
 
 def _rid_tail(label: str) -> str:
@@ -172,7 +203,7 @@ def _observation(
             duration_ms=1,
             tier_used="hierarchy",
             path="hierarchy",
-            device_serial=_HostDevice.serial,
+            device_serial=_HOST_TARGET_ID,
             fingerprint=f"compiler-{case_id}",
             stale_risk=stale_risk,
         ),
@@ -408,14 +439,14 @@ def _engine(cache_root: Path) -> Engine:
         memory={"enabled": False, "dir": str(cache_root / "memory")},
         policy={"enabled": True, "mode": "shadow", "max_candidates": 4},
     )
-    return Engine(config, device=_HostDevice())  # type: ignore[arg-type]
+    return Engine(config, device=_HostDevice(), platform=_HostPlatform(config))
 
 
 def evaluate_cases(cases: Sequence[BenchmarkCase]) -> dict[str, Any]:
     results: list[CaseResult] = []
     with tempfile.TemporaryDirectory(prefix="aua-candidate-benchmark-") as tmp:
         engine = _engine(Path(tmp))
-        state = SimpleNamespace(session_id="benchmark-session", serial=_HostDevice.serial)
+        state = SimpleNamespace(session_id="benchmark-session", serial=_HOST_TARGET_ID)
         for case in cases:
             phase = SimpleNamespace(
                 id=f"phase-{case.case_id}",

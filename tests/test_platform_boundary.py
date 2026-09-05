@@ -7,14 +7,21 @@ from pathlib import Path
 
 ROOT = Path(__file__).parents[1] / "src" / "android_ui_analyser"
 GENERIC_MODULES = (
+    "platforms/runtime.py",
     "engine.py",
     # The Engine's domain modules (engine_*.py) are the same reusable layer under other names.
     *sorted(p.name for p in ROOT.glob("engine_*.py")),
     "cli.py",
     "mcp_server.py",
     "dashboard.py",
+    "capture.py",
     "capture_sidecar.py",
     "daemon.py",
+    "jobs.py",
+    "journal.py",
+    "leases.py",
+    "memory.py",
+    "session.py",
     # The undo ledger and its reaper describe device changes as data and replay them through the
     # adapter. Keeping them here is what lets an iOS or web plugin inherit the whole cleanup
     # guarantee without an Android dependency — the undo would otherwise be the one place a
@@ -47,6 +54,7 @@ ANDROID_BACKENDS = {
     "network.py",
     "network_profiles.py",
     "platforms/android.py",
+    "platforms/android_device.py",
     "platforms/android_runtime.py",
     "platforms/android_transport.py",
     "proxy_mock.py",
@@ -87,11 +95,13 @@ def test_generic_layers_reach_android_services_only_through_platform_gate() -> N
                 if (leaf in ANDROID_SERVICE_MODULES and not pure_error_import) or leaf == "android":
                     violations.append(f"{filename}:{node.lineno} imports {node.module}")
                 if leaf == "device":
-                    direct = imported & {"connect", "list_devices", "Uiautomator2Device"}
-                    # Engine's two names are a marked downstream-test monkeypatch shim. Production
-                    # calls still route through PlatformAdapter; do not extend this allow-list.
-                    allowed = {"connect", "list_devices"} if filename == "engine.py" else set()
-                    if direct - allowed:
+                    direct = imported & {
+                        "Device",
+                        "Uiautomator2Device",
+                        "connect",
+                        "list_devices",
+                    }
+                    if direct:
                         violations.append(
                             f"{filename}:{node.lineno} imports device symbols {sorted(direct)}"
                         )

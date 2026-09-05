@@ -18,14 +18,27 @@ Both call :func:`reap`, which is idempotent and refuses to touch a device with a
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import os
+import shlex
+import signal
 import subprocess
 import sys
+import tempfile
+import time
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
 from . import device_ledger
+from .atomic import atomic_write_text
+from .platforms.identity import LEGACY_PLATFORM, TargetLike, TargetRef, target_ref
+from .platforms.options_transport import (
+    encode_platform_options,
+    platform_options_fingerprint,
+    scrub_platform_option_environment,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,14 +71,27 @@ def cleanup_complete(result: Any) -> bool:
 
 def _connect(platform: Any, serial: str) -> Any | None:
     try:
-        return platform.connect(serial)
+        return platform.validate_runtime(platform.connect(serial))
     except Exception as exc:
         logger.debug("teardown could not connect to %s: %s", serial, exc)
         return None
 
 
+def _active_options_fingerprint(platform: Any, platform_name: str) -> str | None:
+    """Keyed identity of the adapter config currently available for recovery."""
+
+    config = getattr(platform, "config", None)
+    getter = getattr(config, "platform_options", None)
+    if not callable(getter):
+        return None
+    options = getter(platform_name)
+    if not isinstance(options, Mapping):
+        return None
+    return platform_options_fingerprint(options, key_dir=device_ledger.ledger_dir())
+
+
 def reap(
-    serial: str,
+    serial: TargetLike,
     *,
     platform: Any,
     cache_dir: str | Path | None = None,
@@ -73,6 +99,8 @@ def reap(
     grace_s: float = device_ledger.DEFAULT_GRACE_S,
     force: bool = False,
     dry_run: bool = False,
+    platform_name: str = LEGACY_PLATFORM,
+    options_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     """Undo everything pending on *serial*, when it is safe to.
 
@@ -80,12 +108,46 @@ def reap(
     skips the reboot check, because replaying a stale undo against a fresh boot is how a
     restore lands on a device that never had the mutation.
     """
-    entries = device_ledger.read_ledger(serial)
+    ref = target_ref(serial, platform=platform_name)
+    adapter_name = getattr(platform, "name", None)
+    if isinstance(adapter_name, str) and adapter_name.strip().lower() != ref.platform:
+        return {
+            **ref.to_json(),
+            "skipped": (
+                f"adapter platform {adapter_name.strip().lower()!r} does not match "
+                f"recorded platform {ref.platform!r}"
+            ),
+            "undone": [],
+            "failed": [],
+            "remaining": len(device_ledger.read_ledger(ref)),
+        }
+    entries = device_ledger.read_ledger(ref)
     if not entries:
-        return {"serial": serial, "skipped": "nothing pending", "undone": [], "failed": []}
+        return {
+            **ref.to_json(),
+            "skipped": "nothing pending",
+            "undone": [],
+            "failed": [],
+        }
+
+    active_fingerprint = options_fingerprint or _active_options_fingerprint(
+        platform, ref.platform
+    )
+    if not device_ledger.options_match(entries, active_fingerprint):
+        return {
+            **ref.to_json(),
+            "code": "platform_options_recovery_mismatch",
+            "skipped": (
+                "selected platform options do not match the adapter configuration that "
+                "recorded these changes"
+            ),
+            "undone": [],
+            "failed": [],
+            "remaining": len(entries),
+        }
 
     why = device_ledger.reapable(
-        serial,
+        ref,
         entries=entries,
         cache_dir=cache_dir,
         lease_registry_dir=lease_registry_dir,
@@ -93,13 +155,13 @@ def reap(
     )
     if why is None and not force:
         return {
-            "serial": serial,
+            **ref.to_json(),
             "skipped": "a live holder still owns these changes",
             "undone": [],
             "failed": [],
         }
 
-    device = _connect(platform, serial)
+    device = _connect(platform, ref.target_id)
     token: str | None = None
     if device is not None:
         with contextlib.suppress(Exception):
@@ -118,24 +180,26 @@ def reap(
         ]
         if not entries:
             return {
-                "serial": serial,
+                **ref.to_json(),
                 "skipped": "target unreachable; device-side undos deferred",
                 "undone": [],
                 "failed": [],
             }
 
     context = device_ledger.UndoContext(
-        serial=serial,
+        serial=ref.target_id,
         device=device,
         capability=platform.capability,
+        runtime_capability=platform.runtime_capability,
         instance_token=token,
+        platform=ref.platform,
     )
-    report = device_ledger.replay(serial, entries=entries, context=context, dry_run=dry_run)
+    report = device_ledger.replay(ref, entries=entries, context=context, dry_run=dry_run)
     report["reason"] = why or "forced"
     if report["undone"]:
         logger.info(
             "teardown on %s (%s): %s",
-            serial,
+            ref.target_id,
             report["reason"],
             ", ".join(f"{d['kind']}: {d['result']}" for d in report["undone"]),
         )
@@ -148,8 +212,9 @@ def sweep(
     cache_dir: str | Path | None = None,
     lease_registry_dir: str | Path | None = None,
     grace_s: float = device_ledger.DEFAULT_GRACE_S,
-    skip: str | None = None,
+    skip: TargetLike | None = None,
     dry_run: bool = False,
+    platform_factory: Callable[[str], Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Reap every dirty device with no live holder.
 
@@ -157,12 +222,34 @@ def sweep(
     on every command would be pure cost.
     """
     out = []
-    for serial in device_ledger.pending_serials():
-        if skip and serial == skip:
+    current_name = str(getattr(platform, "name", LEGACY_PLATFORM) or LEGACY_PLATFORM).lower()
+    skip_ref = target_ref(skip, platform=current_name) if skip is not None else None
+    adapters: dict[str, Any] = {current_name: platform}
+    for ref in device_ledger.pending_targets():
+        if skip_ref == ref:
+            continue
+        selected = adapters.get(ref.platform)
+        if selected is None and platform_factory is not None:
+            try:
+                selected = platform_factory(ref.platform)
+            except Exception as exc:
+                logger.warning("cannot build %s adapter for teardown: %s", ref.platform, exc)
+            else:
+                adapters[ref.platform] = selected
+        if selected is None:
+            out.append(
+                {
+                    **ref.to_json(),
+                    "skipped": f"no adapter available for platform {ref.platform!r}",
+                    "undone": [],
+                    "failed": [],
+                    "remaining": len(device_ledger.read_ledger(ref)),
+                }
+            )
             continue
         report = reap(
-            serial,
-            platform=platform,
+            ref,
+            platform=selected,
             cache_dir=cache_dir,
             lease_registry_dir=lease_registry_dir,
             grace_s=grace_s,
@@ -176,37 +263,188 @@ def sweep(
 # --------------------------------------------------------------------------- the watchdog
 
 
-def watchdog_pid_path(serial: str) -> Path:
-    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in str(serial))
-    return device_ledger.ledger_dir() / f"{safe}.watchdog.pid"
+def watchdog_pid_path(
+    serial: TargetLike, *, platform: str = LEGACY_PLATFORM
+) -> Path:
+    ref = target_ref(serial, platform=platform)
+    return device_ledger.ledger_dir() / f"{ref.storage_key}.watchdog.pid"
 
 
-def watchdog_alive(serial: str) -> int | None:
-    """Pid of the live teardown watchdog for *serial*, or ``None``."""
-    path = watchdog_pid_path(serial)
+def _read_watchdog_registration(
+    serial: TargetLike, *, platform: str = LEGACY_PLATFORM
+) -> tuple[int, str] | None:
+    """Read current JSON metadata, accepting the legacy file containing only a pid."""
+
+    path = watchdog_pid_path(serial, platform=platform)
     try:
-        pid = int(path.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
+        raw = path.read_text(encoding="utf-8").strip()
+    except OSError:
         return None
-    if pid <= 1:
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        payload = raw
+    if isinstance(payload, dict):
+        pid = payload.get("pid")
+        fingerprint = str(payload.get("platform_options_fingerprint") or "").strip()
+    else:
+        try:
+            pid = int(payload)
+        except (TypeError, ValueError):
+            return None
+        fingerprint = ""
+    if not isinstance(pid, int) or pid <= 1:
         return None
+    return pid, fingerprint
+
+
+def _write_watchdog_registration(
+    serial: TargetLike,
+    *,
+    pid: int,
+    options_fingerprint: str,
+    platform: str = LEGACY_PLATFORM,
+) -> None:
+    ref = target_ref(serial, platform=platform)
+    atomic_write_text(
+        watchdog_pid_path(ref),
+        json.dumps(
+            {
+                **ref.to_json(),
+                "pid": int(pid),
+                "platform_options_fingerprint": str(options_fingerprint),
+            },
+            sort_keys=True,
+        )
+        + "\n",
+    )
+
+
+def _clear_watchdog_registration(
+    serial: TargetLike,
+    *,
+    pid: int,
+    options_fingerprint: str,
+    platform: str = LEGACY_PLATFORM,
+) -> None:
+    """Remove only this process's metadata, never a replacement watchdog's record."""
+
+    ref = target_ref(serial, platform=platform)
+    if _read_watchdog_registration(ref) != (int(pid), str(options_fingerprint)):
+        return
+    with contextlib.suppress(OSError):
+        watchdog_pid_path(ref).unlink()
+
+
+def _pid_exists(pid: int) -> bool:
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
-        with contextlib.suppress(OSError):
-            path.unlink()
-        return None
+        return False
     except (PermissionError, OSError):
-        return pid
+        return True
+    return True
+
+
+def _is_target_watchdog(pid: int, ref: TargetRef) -> bool | None:
+    """Positive process identity before any signal; ``None`` means it could not be read."""
+
+    try:
+        result = subprocess.run(  # noqa: S603
+            ["ps", "-ww", "-o", "command=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except Exception:
+        return None
+    command = (result.stdout or "").strip()
+    if not command:
+        return False if result.returncode == 0 else None
+    with contextlib.suppress(ValueError):
+        argv = shlex.split(command)
+        module_matches = any(
+            argv[index : index + 2] == ["-m", "android_ui_analyser.teardown_watchdog"]
+            for index in range(max(0, len(argv) - 1))
+        )
+
+        def _arg(name: str) -> str | None:
+            try:
+                return argv[argv.index(name) + 1]
+            except (ValueError, IndexError):
+                return None
+
+        return bool(
+            module_matches
+            and _arg("--serial") == ref.target_id
+            and _arg("--platform") == ref.platform
+        )
+    return None
+
+
+def watchdog_alive(
+    serial: TargetLike, *, platform: str = LEGACY_PLATFORM
+) -> int | None:
+    """Pid of the live teardown watchdog for *serial*, or ``None``."""
+    ref = target_ref(serial, platform=platform)
+    registration = _read_watchdog_registration(ref)
+    if registration is None:
+        return None
+    pid, _fingerprint = registration
+    if not _pid_exists(pid):
+        with contextlib.suppress(OSError):
+            watchdog_pid_path(ref).unlink()
+        return None
+    identity = _is_target_watchdog(pid, ref)
+    if identity is False:
+        # A recycled pid is not a watchdog and must never be signalled or reused.
+        with contextlib.suppress(OSError):
+            watchdog_pid_path(ref).unlink()
+        return None
     return pid
 
 
+def _retire_watchdog(ref: TargetRef, pid: int, fingerprint: str) -> bool:
+    """Stop a proven stale watchdog so another adapter config can replace it."""
+
+    identity = _is_target_watchdog(pid, ref)
+    if identity is False:
+        _clear_watchdog_registration(
+            ref, pid=pid, options_fingerprint=fingerprint
+        )
+        return True
+    if identity is None:
+        logger.warning(
+            "cannot verify stale teardown watchdog pid %s for %s; leaving it alone",
+            pid,
+            ref.target_id,
+        )
+        return False
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    except (PermissionError, OSError) as exc:
+        logger.warning("cannot stop stale teardown watchdog pid %s: %s", pid, exc)
+        return False
+    deadline = time.monotonic() + 2.0
+    while _pid_exists(pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if _pid_exists(pid):
+        logger.warning("stale teardown watchdog pid %s did not stop", pid)
+        return False
+    _clear_watchdog_registration(ref, pid=pid, options_fingerprint=fingerprint)
+    return True
+
+
 def ensure_watchdog(
-    serial: str,
+    serial: TargetLike,
     *,
     cache_dir: str | Path,
     lease_registry_dir: str | Path | None = None,
     platform_name: str,
+    platform_options: Mapping[str, Any] | None = None,
     grace_s: float = device_ledger.DEFAULT_GRACE_S,
     poll_s: float = 15.0,
 ) -> int | None:
@@ -216,41 +454,74 @@ def ensure_watchdog(
     was moved has no emulator process to hang a watchdog off, and it is the target where a
     left-behind change hurts most, because nobody can fix it by killing an emulator.
     """
-    existing = watchdog_alive(serial)
-    if existing is not None:
-        return existing
-    log = device_ledger.ledger_dir() / "watchdog.log"
-    cmd = [
-        sys.executable,
-        "-m",
-        "android_ui_analyser.teardown_watchdog",
-        "--serial",
-        str(serial),
-        "--cache",
-        str(cache_dir),
-        "--lease-registry",
-        str(lease_registry_dir or cache_dir),
-        "--platform",
-        str(platform_name),
-        "--grace-s",
-        str(float(grace_s)),
-        "--poll-s",
-        str(float(poll_s)),
-    ]
-    try:
-        with open(log, "a", encoding="utf-8") as fh:  # noqa: SIM115
-            proc = subprocess.Popen(  # noqa: S603
-                cmd,
-                stdout=fh,
-                stderr=fh,
-                start_new_session=True,
-                close_fds=True,
+    ref = target_ref(serial, platform=platform_name)
+    options_fingerprint = platform_options_fingerprint(
+        platform_options or {}, key_dir=device_ledger.ledger_dir()
+    )
+    registration = _read_watchdog_registration(ref)
+    if registration is not None:
+        existing, recorded_fingerprint = registration
+        if not _pid_exists(existing):
+            _clear_watchdog_registration(
+                ref,
+                pid=existing,
+                options_fingerprint=recorded_fingerprint,
             )
+        elif _is_target_watchdog(existing, ref) is False:
+            # Stale metadata naming an unrelated recycled pid: forget the file, never signal.
+            _clear_watchdog_registration(
+                ref,
+                pid=existing,
+                options_fingerprint=recorded_fingerprint,
+            )
+        elif recorded_fingerprint == options_fingerprint:
+            return existing
+        elif not _retire_watchdog(ref, existing, recorded_fingerprint):
+            return None
+    log = device_ledger.ledger_dir() / "watchdog.log"
+    try:
+        with tempfile.TemporaryFile(mode="w+b") as options_file:
+            options_file.write(encode_platform_options(platform_options or {}))
+            options_file.seek(0)
+            options_fd = options_file.fileno()
+            cmd = [
+                sys.executable,
+                "-m",
+                "android_ui_analyser.teardown_watchdog",
+                "--serial",
+                ref.target_id,
+                "--cache",
+                str(cache_dir),
+                "--lease-registry",
+                str(lease_registry_dir or cache_dir),
+                "--platform",
+                ref.platform,
+                "--platform-options-fd",
+                str(options_fd),
+                "--grace-s",
+                str(float(grace_s)),
+                "--poll-s",
+                str(float(poll_s)),
+            ]
+            with open(log, "a", encoding="utf-8") as fh:  # noqa: SIM115
+                proc = subprocess.Popen(  # noqa: S603
+                    cmd,
+                    stdout=fh,
+                    stderr=fh,
+                    start_new_session=True,
+                    close_fds=True,
+                    pass_fds=(options_fd,),
+                    env=scrub_platform_option_environment(),
+                )
     except OSError as exc:
-        logger.warning("could not spawn teardown watchdog for %s: %s", serial, exc)
+        logger.warning("could not spawn teardown watchdog for %s: %s", ref.target_id, exc)
         return None
     with contextlib.suppress(OSError):
-        watchdog_pid_path(serial).write_text(str(proc.pid), encoding="utf-8")
+        _write_watchdog_registration(
+            ref,
+            pid=int(proc.pid),
+            options_fingerprint=options_fingerprint,
+        )
     return int(proc.pid)
 
 

@@ -35,6 +35,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import wave
@@ -43,6 +44,14 @@ from typing import TYPE_CHECKING, Any
 
 from .errors import AuaError, DaemonOutcomeUnknownError, UsageError
 from .leases import _worker_scope
+from .platforms.identity import LEGACY_PLATFORM, TargetRef
+from .platforms.options_transport import (
+    PLATFORM_ENV_PREFIX,
+    platform_options_fingerprint,
+    read_platform_options_fd,
+    selected_platform_options,
+    selected_platform_options_payload,
+)
 from .schema import publish_ids
 
 if TYPE_CHECKING:
@@ -138,10 +147,16 @@ def _daemon_environment(config: Config) -> dict[str, str]:
     receives the effective policy slice through the existing nested-env config layer.  Stale
     values for that slice are removed first, and the allow-list prevents unrelated config,
     provider credentials, or model contents from being serialized into the child environment.
+
+    Platform-plugin options use a separate anonymous-file transport. Removing inherited
+    ``AUA_PLATFORMS__*`` values here makes the parent's effective selected-platform mapping
+    authoritative instead of accidentally deep-merging it with the daemon process's cwd/user
+    configuration. Secret environment variables referenced by an option remain inherited; only
+    the option mapping itself is kept out of the environment.
     """
     env = dict(os.environ)
     for key in tuple(env):
-        if key.startswith(_POLICY_ENV_PREFIXES):
+        if key.startswith(_POLICY_ENV_PREFIXES) or key.startswith(PLATFORM_ENV_PREFIX):
             del env[key]
     for key, path in _POLICY_ENV_FIELDS.items():
         value = _env_value(_config_value(config, path))
@@ -156,7 +171,28 @@ def _daemon_environment(config: Config) -> dict[str, str]:
     env["AUA_WORKER_SCOPE"] = _worker_scope()
     env["AUA_CACHE__DIR"] = str(config.cache.dir)
     env["AUA_LEASE__REGISTRY_DIR"] = str(config.lease.registry_dir)
+    env["AUA_DEVICE__PLATFORM"] = effective_platform(config)
     return env
+
+
+def _selected_platform_options(
+    config: Config, platform: str, *, mask_secrets: bool = False
+) -> dict[str, Any]:
+    """Compatibility wrapper around the shared detached-process option transport."""
+
+    return selected_platform_options(config, platform, mask_secrets=mask_secrets)
+
+
+def _platform_options_payload(config: Config, platform: str) -> bytes:
+    """Compatibility wrapper for existing daemon transport tests."""
+
+    return selected_platform_options_payload(config, platform)
+
+
+def _read_platform_options_fd(fd: int) -> dict[str, Any]:
+    """Compatibility wrapper for existing daemon transport tests."""
+
+    return read_platform_options_fd(fd, consumer="daemon")
 
 
 def policy_config_fingerprint(config: Config) -> str:
@@ -175,12 +211,25 @@ def policy_config_fingerprint(config: Config) -> str:
 
 
 def runtime_config_fingerprint(config: Config) -> str:
-    """Opaque identity for daemon state directories that must never cross callers."""
+    """Opaque identity for daemon runtime settings that must never cross callers.
+
+    Platform options affect adapter construction and therefore warm runtime behavior just as
+    directly as cache/lease locations do. Their complete mapping enters a local keyed digest:
+    changes to credentials retire stale warm runtimes, while neither the raw value nor an
+    offline-verifiable hash is exposed in process metadata.
+    """
+
+    platform = effective_platform(config)
 
     payload = json.dumps(
         {
             "cache_dir": str(Path(config.cache.dir).expanduser().resolve()),
             "lease_registry_dir": str(Path(config.lease.registry_dir).expanduser().resolve()),
+            "platform": platform,
+            "platform_options": platform_options_fingerprint(
+                _selected_platform_options(config, platform),
+                key_dir=config.cache.dir,
+            ),
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -281,7 +330,20 @@ def effective_serial(config: Config, serial: str | None = None) -> str | None:
     return serial or getattr(config.device, "serial", None) or os.environ.get("AUA_SERIAL")
 
 
-def socket_path(config: Config, serial: str | None = None) -> str:
+def effective_platform(config: Config, platform: str | None = None) -> str:
+    """Selected platform transported into and used to namespace a warm daemon."""
+
+    return str(
+        platform
+        or getattr(config.device, "platform", None)
+        or os.environ.get("AUA_DEVICE__PLATFORM")
+        or LEGACY_PLATFORM
+    ).strip().lower()
+
+
+def socket_path(
+    config: Config, serial: str | None = None, *, platform: str | None = None
+) -> str:
     """Return the expanded unix-socket path from *config*.
 
     When a device serial is known (explicit arg, ``config.device.serial``, or
@@ -293,10 +355,11 @@ def socket_path(config: Config, serial: str | None = None) -> str:
         return os.path.expanduser(env)
     base = os.path.expanduser(config.daemon.socket)
     ser = effective_serial(config, serial)
+    platform_name = effective_platform(config, platform)
     if not ser:
-        return base
-    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in ser)
-    return f"{base}.{safe}"
+        return base if platform_name == LEGACY_PLATFORM else f"{base}.{platform_name}"
+    ref = TargetRef(platform_name, ser)
+    return f"{base}.{ref.storage_key}"
 
 
 # --------------------------------------------------------------------------- dispatch
@@ -375,8 +438,18 @@ def _adopt_client_owner(
     engine._leased_serial_resolved = None
     engine._lease_generation_resolved = None
     engine._lease_owner_resolved = adopted_owner
+    # Owner adoption is also used by host-only daemon commands. Reading ``engine.platform``
+    # here would instantiate and validate an adapter even though no target operation is about
+    # to run; the detached daemon already transported the selected strategy in its config.
+    platform_name = effective_platform(config) if config is not None else LEGACY_PLATFORM
     if not claim_device:
-        held = leases.primary_held_by(engine.config.lease.registry_dir, adopted_owner)
+        if config is None:
+            return
+        held = leases.primary_held_by(
+            config.lease.registry_dir,
+            adopted_owner,
+            platform=platform_name,
+        )
         if len(held) == 1:
             engine._lease_serial = held[0]
         return
@@ -393,7 +466,9 @@ def _adopt_client_owner(
     held_before: set[str] = set()
     if registry is not None:
         with contextlib.suppress(Exception):
-            held_before = set(leases.held_by(registry, adopted_owner))
+            held_before = set(
+                leases.held_by(registry, adopted_owner, platform=platform_name)
+            )
     leased_serial = engine._lease_device()  # raises when this owner may not have it
     if bound_serial and leased_serial and leased_serial != bound_serial:
         # A warm Engine cannot be rebound by changing only its lease metadata: its Device
@@ -405,7 +480,12 @@ def _adopt_client_owner(
             # Hand back only a lease this very call created; one the caller already held
             # belongs to their other session and must survive the refusal.
             with contextlib.suppress(Exception):
-                leases.release(registry, leased_serial, owner=adopted_owner)
+                leases.release(
+                    registry,
+                    leased_serial,
+                    owner=adopted_owner,
+                    platform=platform_name,
+                )
         raise UsageError(
             f"this daemon is bound to {bound_serial}, but owner {owner!r} leased {leased_serial}",
             hint="Use the per-device daemon selected by the CLI, or pass --serial explicitly.",
@@ -478,7 +558,7 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
         ):
             return _result_err(
                 "daemon_runtime_mismatch",
-                "the warm daemon belongs to a different cache/lease runtime",
+                "the warm daemon uses a different target runtime configuration",
                 hint="AUA will replace it automatically; retry this command once.",
             )
         _adopt_client_owner(
@@ -830,6 +910,21 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
             result = engine.install_app(**args)
             return _result_ok(result.model_dump(mode="json"))
 
+        elif cmd == "helper_status":
+            return _result_ok(engine.helper_status())
+
+        elif cmd == "helper_install":
+            return _result_ok(engine.helper_install(**args))
+
+        elif cmd == "helper_enable":
+            return _result_ok(engine.helper_enable())
+
+        elif cmd == "helper_disable":
+            return _result_ok(engine.helper_disable())
+
+        elif cmd == "helper_remove":
+            return _result_ok(engine.helper_remove())
+
         elif cmd == "database_list":
             return _result_ok(engine.database_list(**args))
 
@@ -1038,7 +1133,11 @@ def serve(
         srv.settimeout(0.5)  # non-blocking so we can check _stop_event
 
         logger.info("daemon listening on %s", sock_path)
-        write_pidfile(sock_path + ".pid")  # so `daemon stop` / `daemon reap` can find us
+        write_pidfile(
+            sock_path + ".pid",
+            platform=effective_platform(engine.config),
+            target_id=effective_serial(engine.config),
+        )  # so `daemon stop` / `daemon reap` can find us
         if engine.config.capture.enabled:
             # A cold uiautomator2 attach can take longer than the client's startup probe.
             # Running it here used to leave a listening socket with nobody in accept(), so the
@@ -1178,6 +1277,7 @@ def _journal_dispatch(
     return journal_mod.record(
         cache_dir=engine.config.cache.dir,
         serial=serial,
+        platform=effective_platform(engine.config),
         source=source,
         cmd=cmd,
         args=request.get("args") if isinstance(request.get("args"), dict) else {},
@@ -1325,6 +1425,9 @@ _LONG_POLL_COMMANDS = frozenset(
         # outlasts the 5s default, and a socket that expires mid-install answers
         # `daemon_outcome_unknown` for an install that was in fact still running.
         "install_app",
+        "helper_install",
+        "helper_enable",
+        "helper_remove",
     }
 )
 
@@ -1536,7 +1639,7 @@ class DaemonClient:
             return False
 
     def pong_runtime_fingerprint(self) -> str | None | bool:
-        """Return the daemon's cache/lease runtime identity, or False when unavailable."""
+        """Return the daemon's target-runtime identity, or False when unavailable."""
 
         try:
             resp = self.call("ping")
@@ -1613,9 +1716,11 @@ def _socket_process_alive(sock: str) -> bool:
     return pid is not None and _pid_alive(pid)
 
 
-def process_running(config: Config, *, serial: str | None = None) -> bool:
+def process_running(
+    config: Config, *, serial: str | None = None, platform: str | None = None
+) -> bool:
     """Return whether the daemon process for this config still owns its socket/device."""
-    return _socket_process_alive(socket_path(config, serial=serial))
+    return _socket_process_alive(socket_path(config, serial=serial, platform=platform))
 
 
 def is_running(config: Config) -> bool:
@@ -1634,26 +1739,51 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def write_pidfile(path: str | Path) -> None:
+def write_pidfile(
+    path: str | Path,
+    *,
+    platform: str = LEGACY_PLATFORM,
+    target_id: str | None = None,
+) -> None:
     """Record pid + interpreter so :func:`reap` can recognise our own orphans later."""
     with contextlib.suppress(OSError):
-        Path(path).write_text(json.dumps({"pid": os.getpid(), "exe": sys.executable}))
+        Path(path).write_text(
+            json.dumps(
+                {
+                    "pid": os.getpid(),
+                    "exe": sys.executable,
+                    "platform": str(platform).strip().lower(),
+                    "target_id": target_id,
+                    "serial": target_id,
+                }
+            )
+        )
+
+
+def read_pidfile_metadata(path: str | Path) -> dict[str, Any]:
+    """Structured daemon identity; legacy pidfiles default to Android."""
+
+    try:
+        raw = json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return {}
+    if isinstance(raw, int):
+        return {"pid": raw, "platform": LEGACY_PLATFORM}
+    if not isinstance(raw, dict):
+        return {}
+    out = dict(raw)
+    out.setdefault("platform", LEGACY_PLATFORM)
+    target_id = out.get("target_id") or out.get("serial")
+    if isinstance(target_id, str) and target_id:
+        out["target_id"] = target_id
+        out["serial"] = target_id
+    return out
 
 
 def read_pidfile(path: str | Path) -> tuple[int | None, str | None]:
     """Return ``(pid, interpreter)``; interpreter is None for legacy bare-int pidfiles."""
-    try:
-        raw = Path(path).read_text().strip()
-    except OSError:
-        return None, None
-    try:
-        data = json.loads(raw)
-    except ValueError:
-        return None, None
-    # A legacy pidfile is a bare integer, which is itself valid JSON.
-    if isinstance(data, int):
-        return data, None
-    if not isinstance(data, dict):
+    data = read_pidfile_metadata(path)
+    if not data:
         return None, None
     pid = data.get("pid")
     exe = data.get("exe")
@@ -1742,7 +1872,7 @@ def running_policy_fingerprint(config: Config) -> str | None | bool:
 
 
 def running_runtime_fingerprint(config: Config) -> str | None | bool:
-    """The live daemon's cache/lease authority (None means a legacy daemon)."""
+    """The live daemon's target-runtime identity (None means a legacy daemon)."""
 
     try:
         client = DaemonClient(socket_path(config), timeout=2.0)
@@ -1751,7 +1881,9 @@ def running_runtime_fingerprint(config: Config) -> str | None | bool:
         return False
 
 
-def start(config: Config, *, serial: str | None = None) -> dict[str, Any]:
+def start(
+    config: Config, *, serial: str | None = None, platform: str | None = None
+) -> dict[str, Any]:
     """Start the daemon as a detached background process.
 
     Returns a dict with keys ``running``, ``pid``, and ``socket``.
@@ -1760,7 +1892,8 @@ def start(config: Config, *, serial: str | None = None) -> dict[str, Any]:
     # the bare parameter while the socket fell back to config/env is what produced a
     # serial-less daemon answering on a serial-named socket.
     serial = effective_serial(config, serial)
-    sock = socket_path(config, serial=serial)
+    platform_name = effective_platform(config, platform)
+    sock = socket_path(config, serial=serial, platform=platform_name)
 
     # Adopt on the socket we are about to bind, not on the config-derived one: with an
     # explicit --serial those differ, and checking the wrong one spawns a second daemon
@@ -1772,9 +1905,20 @@ def start(config: Config, *, serial: str | None = None) -> dict[str, Any]:
             "pid": pid,
             "socket": sock,
             "status": "already_running",
+            "platform": platform_name,
+            "target_id": serial,
+            "serial": serial,
         }
     if _socket_alive(sock):
-        return {"running": True, "pid": None, "socket": sock, "status": "already_running"}
+        return {
+            "running": True,
+            "pid": None,
+            "socket": sock,
+            "status": "already_running",
+            "platform": platform_name,
+            "target_id": serial,
+            "serial": serial,
+        }
 
     with contextlib.suppress(Exception):
         reap(config)
@@ -1785,19 +1929,30 @@ def start(config: Config, *, serial: str | None = None) -> dict[str, Any]:
     _roll_log(log_path)
 
     cmd = [sys.executable, "-m", "android_ui_analyser.daemon", "--socket", sock]
+    cmd += ["--platform", platform_name]
     if serial:
         cmd += ["--serial", serial]
 
     log_fh = open(log_path, "a")  # noqa: SIM115 — kept open for child stdout/stderr
     try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=log_fh,
-            stderr=log_fh,
-            env=_daemon_environment(config),
-            start_new_session=True,
-            close_fds=True,
-        )
+        # Do not put opaque plugin options in argv or the environment. Both are routinely
+        # inspected in diagnostics, and Config deliberately tolerates/masks an accidentally
+        # pasted literal secret. An anonymous inherited file has no pathname to retain, and the
+        # child receives the exact selected option tree before constructing its adapter.
+        with tempfile.TemporaryFile(mode="w+b") as platform_options:
+            platform_options.write(_platform_options_payload(config, platform_name))
+            platform_options.seek(0)
+            options_fd = platform_options.fileno()
+            cmd += ["--platform-options-fd", str(options_fd)]
+            proc = subprocess.Popen(
+                cmd,
+                stdout=log_fh,
+                stderr=log_fh,
+                env=_daemon_environment(config),
+                start_new_session=True,
+                close_fds=True,
+                pass_fds=(options_fd,),
+            )
     finally:
         log_fh.close()
 
@@ -1807,10 +1962,26 @@ def start(config: Config, *, serial: str | None = None) -> dict[str, Any]:
     deadline = time.monotonic() + _START_TIMEOUT
     while time.monotonic() < deadline:
         if _socket_alive(sock):
-            return {"running": True, "pid": proc.pid, "socket": sock, "status": "started"}
+            return {
+                "running": True,
+                "pid": proc.pid,
+                "socket": sock,
+                "status": "started",
+                "platform": platform_name,
+                "target_id": serial,
+                "serial": serial,
+            }
         time.sleep(_START_POLL_INTERVAL)
 
-    return {"running": False, "pid": proc.pid, "socket": sock, "status": "timeout"}
+    return {
+        "running": False,
+        "pid": proc.pid,
+        "socket": sock,
+        "status": "timeout",
+        "platform": platform_name,
+        "target_id": serial,
+        "serial": serial,
+    }
 
 
 def live_sockets(config: Config) -> list[str]:
@@ -1851,7 +2022,11 @@ def stop_all(config: Config) -> dict[str, Any]:
 
 
 def stop(
-    config: Config, *, serial: str | None = None, _socket_override: str | None = None
+    config: Config,
+    *,
+    serial: str | None = None,
+    platform: str | None = None,
+    _socket_override: str | None = None,
 ) -> dict[str, Any]:
     """Stop the daemon by signalling its process, so it runs cleanup on the way out.
 
@@ -1859,7 +2034,11 @@ def stop(
     ``serve``'s finally releases the device + on-device uiautomator2 server (freeing the
     UiAutomation slot for adb/Maestro). Falls back to unlinking the socket if no pidfile.
     """
-    sock = _socket_override or (socket_path(config, serial) if serial else socket_path(config))
+    sock = _socket_override or (
+        socket_path(config, serial, platform=platform)
+        if serial
+        else socket_path(config, platform=platform)
+    )
     pid_file = sock + ".pid"
     if not (_socket_process_alive(sock) or _socket_alive(sock)):
         for path in (sock, pid_file):
@@ -1959,9 +2138,19 @@ def serial_for_socket(sock: str) -> str | None:
 
 def describe_socket(sock: str) -> dict[str, Any]:
     """A live daemon, named together with the command that would stop *it* specifically."""
-    serial = serial_for_socket(sock)
+    metadata = read_pidfile_metadata(sock + ".pid")
+    platform = str(metadata.get("platform") or LEGACY_PLATFORM).strip().lower()
+    serial = metadata.get("target_id") or serial_for_socket(sock)
     if serial:
-        stop_command = f"aua --serial {serial} daemon stop"
+        if platform == LEGACY_PLATFORM:
+            stop_command = f"aua --serial {serial} daemon stop"
+        else:
+            import shlex
+
+            stop_command = (
+                f"aua --platform {shlex.quote(platform)} --serial "
+                f"{shlex.quote(str(serial))} daemon stop"
+            )
     elif "." in Path(sock).name:
         import shlex
 
@@ -1969,6 +2158,8 @@ def describe_socket(sock: str) -> dict[str, Any]:
     else:
         stop_command = "aua daemon stop"
     return {
+        "platform": platform,
+        "target_id": serial,
         "serial": serial,
         "socket": sock,
         "stop_command": stop_command,
@@ -2023,6 +2214,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="android-ui-analyser daemon")
     parser.add_argument("--socket", required=True, help="unix socket path")
     parser.add_argument("--serial", default=None, help="device serial")
+    parser.add_argument("--platform", default=LEGACY_PLATFORM, help="platform adapter name")
+    parser.add_argument(
+        "--platform-options-fd",
+        type=int,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
     ns = parser.parse_args()
 
     # The parent redirects our stdout/stderr into daemon.log, but nothing ever configured a
@@ -2033,10 +2231,22 @@ if __name__ == "__main__":
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    overrides: dict[str, Any] = {"daemon": {"socket": ns.socket}}
+    overrides: dict[str, Any] = {
+        "daemon": {"socket": ns.socket},
+        "device": {"platform": ns.platform},
+    }
     if ns.serial:
-        overrides["device"] = {"serial": ns.serial}
+        overrides["device"]["serial"] = ns.serial
     cfg = load_config(cli_overrides=overrides)
+    if ns.platform_options_fd is not None:
+        try:
+            transported_options = _read_platform_options_fd(ns.platform_options_fd)
+        except UsageError as exc:
+            parser.error(str(exc))
+        # ``load_config`` deep-merges mappings. Transport is a replacement boundary: keys from
+        # an auto-discovered child config must not survive when the explicit parent config did
+        # not select them.
+        cfg.platforms[ns.platform.strip().lower()] = transported_options
 
     from .engine import Engine
 

@@ -1175,6 +1175,8 @@ _SYSTEM_ID_PREFIXES = ("com.android.systemui:", "android:")
 
 def _system_chrome(el: Element, height: int | None) -> bool:
     """True for status-bar / framework chrome (never an app's own content)."""
+    if el.window in {"system", "ime"}:
+        return True
     rid = el.resource_id or ""
     if rid.startswith(_SYSTEM_ID_PREFIXES):
         return True
@@ -2103,16 +2105,38 @@ def upgrade_app_map(app: AppMap) -> AppMap:
 class AppMemoryStore:
     """Read/write the per-app maps and the per-device navigation session."""
 
-    def __init__(self, cfg: MemoryCfg) -> None:
+    def __init__(self, cfg: MemoryCfg, *, platform: str = "android") -> None:
         self.cfg = cfg
+        from .platforms.identity import TargetRef
+
+        # Validate once and keep the canonical spelling. Android deliberately retains every
+        # historical path; other platforms live below a platform-owned namespace.
+        self.platform = TargetRef(platform, "validation-only").platform
         self._sqlite = None
         if cfg.backend == "sqlite":
             from .memory_sqlite import SqliteMemoryBackend
 
             self._sqlite = SqliteMemoryBackend(
-                Path(cfg.sqlite_path).expanduser(),
+                self._sqlite_path(),
                 migrate_from=self.memory_root(),
             )
+
+    @classmethod
+    def from_config(
+        cls,
+        config: Any,
+        *,
+        force_json: bool = False,
+        platform: str | None = None,
+    ) -> AppMemoryStore:
+        """Build a store in the effective adapter namespace from the root AUA config.
+
+        ``platform`` lets an injected adapter remain authoritative in tests and embeddings.
+        Normal CLI construction omits it and uses the configured selection.
+        """
+
+        cfg = config.memory.model_copy(update={"backend": "json"}) if force_json else config.memory
+        return cls(cfg, platform=platform or config.device.platform)
 
     # -- paths (everything stays under memory.dir) ------------------------
 
@@ -2121,10 +2145,30 @@ class AppMemoryStore:
         return Path(self.cfg.dir).expanduser()
 
     def memory_root(self) -> Path:
-        return self.base / "memory"
+        root = self.base / "memory"
+        if self.platform == "android":
+            return root
+        from .platforms.identity import safe_component
+
+        return root / "platforms" / safe_component(self.platform)
+
+    def _sqlite_path(self) -> Path:
+        path = Path(self.cfg.sqlite_path).expanduser()
+        if self.platform == "android":
+            return path
+        from .platforms.identity import safe_component
+
+        platform = safe_component(self.platform)
+        suffix = path.suffix
+        stem = path.name[: -len(suffix)] if suffix else path.name
+        return path.with_name(f"{stem}.{platform}{suffix}")
 
     def app_dir(self, package: str) -> Path:
-        return self.memory_root() / _safe(package)
+        from .platforms.identity import AppRef, safe_component
+
+        ref = AppRef(self.platform, package)
+        component = _safe(ref.app_id) if self.platform == "android" else safe_component(ref.app_id)
+        return self.memory_root() / component
 
     def index_path(self, package: str) -> Path:
         return self.app_dir(package) / "index.json"
@@ -2133,7 +2177,18 @@ class AppMemoryStore:
         return self.app_dir(package) / "MAP.md"
 
     def session_path(self, serial: str) -> Path:
-        return self.base / "state" / f"session_{_safe(serial)}.json"
+        from .platforms.identity import TargetRef, safe_component
+
+        target = TargetRef(self.platform, serial)
+        if self.platform == "android":
+            return self.base / "state" / f"session_{_safe(target.target_id)}.json"
+        return (
+            self.base
+            / "state"
+            / "platforms"
+            / safe_component(self.platform)
+            / f"session_{safe_component(target.target_id)}.json"
+        )
 
     # -- app map I/O ------------------------------------------------------
 
@@ -2171,7 +2226,18 @@ class AppMemoryStore:
         root = self.memory_root()
         if not root.is_dir():
             return []
-        return sorted(p.name for p in root.iterdir() if (p / "index.json").is_file())
+        if self.platform == "android":
+            return sorted(p.name for p in root.iterdir() if (p / "index.json").is_file())
+        apps: list[str] = []
+        for path in root.iterdir():
+            index = path / "index.json"
+            if not index.is_file():
+                continue
+            try:
+                apps.append(AppMap.model_validate_json(index.read_text(encoding="utf-8")).package)
+            except Exception:
+                continue
+        return sorted(apps)
 
     # -- mined strings I/O --------------------------------------------------
     # Deliberately file-based in both backends: the mined-label table is a bulk artifact

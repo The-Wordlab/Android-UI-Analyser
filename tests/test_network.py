@@ -93,6 +93,22 @@ def test_network_offline_is_verified_and_restore_is_reversible(tmp_path: Path) -
     assert not saved.exists()
 
 
+def test_repeated_offline_uses_the_first_cross_cache_restore_point(tmp_path: Path) -> None:
+    dev = FakeDevice(serial="cross-cache-network")
+    first = Engine(
+        make_config(cache={"dir": str(tmp_path / "first-cache")}),
+        device=dev,
+    )
+    second = Engine(
+        make_config(cache={"dir": str(tmp_path / "second-cache")}),
+        device=dev,
+    )
+
+    assert first.network_offline(timeout_ms=0).saved_state.wifi_enabled is True
+    assert second.network_offline(timeout_ms=0).saved_state.wifi_enabled is True
+    assert second.network_restore(timeout_ms=0).state.wifi_enabled is True
+
+
 def test_restore_rejects_validated_cellular_while_saved_wifi_is_missing() -> None:
     saved = NetworkState(
         airplane_mode=False,
@@ -224,7 +240,7 @@ def test_restore_refuses_a_restore_point_from_an_older_boot(tmp_path: Path) -> N
 
 def test_cli_network_offline_and_restore(monkeypatch: pytest.MonkeyPatch) -> None:
     dev = FakeDevice(serial="fake-cli-network")
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: dev)
 
     status = runner.invoke(app, ["--serial", dev.serial, "network", "status", "--verify"])
     assert status.exit_code == 0, status.output
@@ -263,7 +279,7 @@ def test_daemon_network_offline_and_restore_roundtrip(tmp_path: Path) -> None:
 
 def test_cli_network_verification_failure_is_nonzero(monkeypatch: pytest.MonkeyPatch) -> None:
     dev = _StubbornNetworkDevice(serial="fake-cli-ethernet")
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: dev)
 
     result = runner.invoke(
         app,

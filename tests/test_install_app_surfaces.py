@@ -48,7 +48,9 @@ def test_every_surface_calls_the_same_engine_method(spy, tmp_path, monkeypatch) 
     bundle = tmp_path / "example-debug.apk"
     bundle.write_bytes(b"stub")
     monkeypatch.setattr(
-        engine_mod, "connect", lambda serial=None: FakeDevice(serial=serial or "emulator-5554")
+        engine_mod.Engine,
+        "_connect_target",
+        lambda _engine, serial=None: FakeDevice(serial=serial or "emulator-5554"),
     )
     monkeypatch.setenv("AUA_DAEMON__ENABLED", "false")
     monkeypatch.setenv("AUA_CACHE__DIR", str(tmp_path / "cli-cache"))
@@ -78,7 +80,9 @@ def test_the_cli_converts_its_seconds_flag_into_the_daemon_s_millisecond_budget(
     bundle = tmp_path / "example-debug.apk"
     bundle.write_bytes(b"stub")
     monkeypatch.setattr(
-        engine_mod, "connect", lambda serial=None: FakeDevice(serial=serial or "emulator-5554")
+        engine_mod.Engine,
+        "_connect_target",
+        lambda _engine, serial=None: FakeDevice(serial=serial or "emulator-5554"),
     )
     monkeypatch.setenv("AUA_DAEMON__ENABLED", "false")
     monkeypatch.setenv("AUA_CACHE__DIR", str(tmp_path / "cli-cache"))
@@ -97,7 +101,9 @@ def test_reinstall_and_fresh_are_mutually_exclusive(spy, tmp_path, monkeypatch) 
     bundle = tmp_path / "example-debug.apk"
     bundle.write_bytes(b"stub")
     monkeypatch.setattr(
-        engine_mod, "connect", lambda serial=None: FakeDevice(serial=serial or "emulator-5554")
+        engine_mod.Engine,
+        "_connect_target",
+        lambda _engine, serial=None: FakeDevice(serial=serial or "emulator-5554"),
     )
     monkeypatch.setenv("AUA_DAEMON__ENABLED", "false")
     monkeypatch.setenv("AUA_CACHE__DIR", str(tmp_path / "cli-cache"))

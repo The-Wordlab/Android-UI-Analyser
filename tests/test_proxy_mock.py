@@ -102,6 +102,49 @@ def test_proxy_start_uses_random_port(tmp_path: Path, monkeypatch: pytest.Monkey
     assert rec["port"] == out["port"]
 
 
+def test_system_ca_root_escalation_is_restored_before_return(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rooted = False
+    restores: list[str] = []
+
+    def is_root(serial: str) -> bool:
+        return rooted
+
+    def install(serial: str, *, pem: Path | None = None) -> dict[str, Any]:
+        nonlocal rooted
+        rooted = True
+        return {"ok": True, "hash": "abc"}
+
+    def restore(serial: str) -> None:
+        nonlocal rooted
+        restores.append(serial)
+        rooted = False
+
+    monkeypatch.setattr(pm, "_adbd_is_root", is_root)
+    monkeypatch.setattr(pm, "_install_system_ca_rooted", install)
+    monkeypatch.setattr(pm, "_restore_non_root_adbd", restore)
+
+    assert pm.install_system_ca("emulator-ca")["ok"] is True
+    assert rooted is False
+    assert restores == ["emulator-ca"]
+
+
+def test_system_ca_preserves_adbd_that_was_already_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pm, "_adbd_is_root", lambda serial: True)
+    monkeypatch.setattr(
+        pm,
+        "_install_system_ca_rooted",
+        lambda serial, *, pem=None: {"ok": True},
+    )
+    restore = pytest.fail
+    monkeypatch.setattr(pm, "_restore_non_root_adbd", restore)
+
+    assert pm.install_system_ca("rooted-emulator")["ok"] is True
+
+
 def test_tls_failures_in_log(tmp_path: Path) -> None:
     log = tmp_path / "mitmdump.log"
     log.write_text(

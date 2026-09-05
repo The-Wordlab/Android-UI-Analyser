@@ -266,11 +266,11 @@ def test_fresh_cli_resolves_active_owner_before_phase_annotation(
     )
     connections: list[str | None] = []
 
-    def unexpected_connect(device_serial: str | None = None) -> FakeDevice:
+    def unexpected_connect(_engine: Engine, device_serial: str | None = None) -> FakeDevice:
         connections.append(device_serial)
         raise AssertionError("phase annotation must not connect to a device")
 
-    monkeypatch.setattr(engine_mod, "connect", unexpected_connect)
+    monkeypatch.setattr(Engine, "_connect_target", unexpected_connect)
     monkeypatch.setattr(cli.GlobalOpts, "load", lambda _self: cfg)
 
     result = runner.invoke(
@@ -563,13 +563,17 @@ def _start(engine: Engine, monkeypatch: Any) -> dict[str, Any]:
 
 def test_cli_headed_accepts_an_already_attached_emulator(monkeypatch: Any) -> None:
     device = FakeDevice(serial="goal-headed-attached")
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: device)
-    # Attached means listed: the selection consults the module-global device listing, and
-    # a headed request verifies the candidate's actual window/audio facts via the probe.
     monkeypatch.setattr(
-        engine_mod,
-        "list_devices",
-        lambda: [DeviceInfo(serial=device.serial, model="fake", android_version="14")],
+        "android_ui_analyser.platforms.android.AndroidPlatform.connect",
+        lambda _platform, _target_id=None: device,
+    )
+    # Attached means listed: selection stays behind the adapter, and a headed request verifies
+    # the candidate's actual window/audio facts via the adapter probe.
+    monkeypatch.setattr(
+        "android_ui_analyser.platforms.android.AndroidPlatform.list_targets",
+        lambda _platform: [
+            DeviceInfo(serial=device.serial, model="fake", android_version="14")
+        ],
     )
     monkeypatch.setattr(
         "android_ui_analyser.platforms.android.probe_android_capabilities",
@@ -1281,11 +1285,9 @@ def test_explicit_session_emulator_start_is_handed_to_the_warm_pool(
         memory={"enabled": False, "dir": str(tmp_path / "memory")},
     )
     engine = Engine(cfg)
-    # Patch the module-global seam `_list_targets` actually consults. Patching the engine's
-    # `list_devices` *method* left the real adb listing live, so on a host with running
-    # emulators this test silently selected (and leased) a real device instead of booting.
+    # Keep live host targets out of this deterministic provisioning test.
     online: list[DeviceInfo] = []
-    monkeypatch.setattr(engine_mod, "list_devices", lambda: list(online))
+    monkeypatch.setattr(engine, "_list_targets", lambda: list(online))
     monkeypatch.setattr(
         engine.platform,
         "probe_target_capabilities",
@@ -1300,7 +1302,13 @@ def test_explicit_session_emulator_start_is_handed_to_the_warm_pool(
         online.append(
             DeviceInfo(serial="emulator-5590", model="fake", android_version="14")
         )
-        return {"ok": True, "serial": "emulator-5590", "instance": "fake.p5590", "pid": 4242}
+        return {
+            "ok": True,
+            "serial": "emulator-5590",
+            "avd": avd,
+            "instance": "fake.p5590",
+            "pid": 4242,
+        }
 
     monkeypatch.setattr(emulator, "start", fake_start)
     monkeypatch.setattr(
@@ -1345,10 +1353,9 @@ def test_restore_error_keeps_owned_emulator_cached_and_leased_for_retry(
         memory={"enabled": False, "dir": str(tmp_path / "memory")},
     )
     engine = Engine(cfg)
-    # The module-global seam is what `_list_targets` consults; a live host emulator must
-    # never satisfy this test's selection (that is how the boot path went unexercised).
+    # A live host target must never satisfy this deterministic provisioning test.
     online: list[DeviceInfo] = []
-    monkeypatch.setattr(engine_mod, "list_devices", lambda: list(online))
+    monkeypatch.setattr(engine, "_list_targets", lambda: list(online))
     monkeypatch.setattr(emulator, "select_avd_for_session", lambda avd, **_kwargs: avd or "fake")
 
     def fake_start(_avd: str, **_kwargs: Any) -> dict[str, Any]:
@@ -1358,6 +1365,7 @@ def test_restore_error_keeps_owned_emulator_cached_and_leased_for_retry(
         return {
             "ok": True,
             "serial": "emulator-5592",
+            "avd": "fake",
             "instance": "fake.p5592",
             "pid": 4242,
         }

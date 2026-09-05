@@ -16,7 +16,6 @@ from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .device import Device
 from .engine_support import _label, logger
 from .errors import UsageError
 from .memory import (
@@ -29,7 +28,8 @@ from .memory import (
     launch_payload,
     playbook_view,
 )
-from .schema import AnalyzeResult, Element, Tier, drop_default_flags
+from .platforms.runtime import TargetRuntime as Device
+from .schema import AnalyzeResult, AppContext, Element, Tier, drop_default_flags
 
 if TYPE_CHECKING:
     from .engine import Engine
@@ -434,7 +434,13 @@ def _slow_controls_safe(
         package = (
             package
             or self._cached_package()
-            or (self.device.current_app().get("package") if self._device is not None else None)
+            or (
+                AppContext.coerce(
+                    self.platform.runtime_capability("ui.tree", self.device).current_app()
+                ).app_id
+                if self._device is not None
+                else None
+            )
         )
         if package:
             return mem.slow_controls(package, screen=screen)
@@ -487,8 +493,8 @@ def memory_update(self: Engine, screen_name: str | None = None) -> dict[str, Any
         raise UsageError("memory is disabled", hint="Set `memory.enabled: true` in config.")
     device, w, h = self._context()
     elements, package, _xml_hash = self._capture_hierarchy(device, w, h)
-    app = device.current_app()
-    package = app.get("package") or package
+    app = AppContext.coerce(device.current_app())
+    package = app.app_id or package
     if not package:
         raise UsageError("could not determine the foreground package to record")
     # ``memory update --screen`` is the explicit correction path for a bad generated
@@ -503,7 +509,7 @@ def memory_update(self: Engine, screen_name: str | None = None) -> dict[str, Any
     outcome = mem.record_screen(
         package=package,
         elements=elements,
-        activity=app.get("activity") or None,
+        activity=app.surface_id,
         app_version=self._version_for(device, package),
         tier="hierarchy",
         name_hint=screen_name,

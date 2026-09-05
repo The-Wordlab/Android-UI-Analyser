@@ -284,9 +284,9 @@ def test_the_skew_warning_stays_out_of_machine_readable_stdout(
     monkeypatch.setenv("AUA_DAEMON__SOCKET", str(cache / "daemon.sock"))
     monkeypatch.setenv("AUA_PERF__AUTO_DAEMON", "false")
     monkeypatch.setattr(
-        engine_mod,
-        "connect",
-        lambda serial=None: FakeDevice(hierarchy_xml=HIERARCHY_XML),
+        engine_mod.Engine,
+        "_connect_target",
+        lambda _engine, serial=None: FakeDevice(hierarchy_xml=HIERARCHY_XML),
     )
     monkeypatch.setattr(daemon_mod, "is_running", lambda _cfg: True)
     monkeypatch.setattr(daemon_mod, "DaemonClient", _buffer_off())

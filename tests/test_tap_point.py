@@ -90,6 +90,15 @@ def test_tap_point_clicks_exactly_where_it_was_told():
 
         def __init__(self) -> None:
             self.device = _Recorder()
+            self.platform = type(
+                "_Platform",
+                (),
+                {
+                    "runtime_capability": staticmethod(
+                        lambda capability, runtime: runtime
+                    )
+                },
+            )()
             self.recorded: list[str | None] = []
 
         def _step(self, kind, element=None, *, arg=None, submit=False):

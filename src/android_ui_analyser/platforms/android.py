@@ -11,20 +11,28 @@ import re
 import shutil
 import subprocess
 import time
+import xml.etree.ElementTree as ET
 from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 from .. import hierarchy
 from ..config import Config
-from ..device import Device
+from ..errors import UsageError
 from ..memory import matches_any
 from ..providers.base import ScreenImage
-from ..schema import DeviceInfo, Element
-from ..scroll_geom import _iter_nodes, _node_box
+from ..schema import AppContext, Element
 from . import android_apk, android_transport
-from .base import AppBundle, InstalledApp, NormalizedTree, PlatformAdapter
+from .base import AppBundle, DiscoveredTarget, InstalledApp, NormalizedTree, PlatformAdapter
+from .diagnostics import AppExitEvidence, DiagnosticSourcePolicy, DiagnosticWindow
+from .geometry import DisplayGeometry
+from .identity import TargetRef
 from .registry import register_platform
+from .runtime import TargetRuntime
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .android_device import AndroidRuntimeBase
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +41,50 @@ _CAPS_TTL_S = 3600
 # Long enough that a burst of actions pays one `pidof`, short enough that a process replaced
 # behind AUA's back costs at most this many seconds of empty windows.
 _PID_CACHE_TTL_S = 30.0
+_ANDROID_KEY_NAMES = frozenset(
+    {
+        "home",
+        "back",
+        "left",
+        "right",
+        "up",
+        "down",
+        "center",
+        "menu",
+        "search",
+        "enter",
+        "delete",
+        "del",
+        "recent",
+        "recents",
+        "volume_up",
+        "volume_down",
+        "volume_mute",
+        "camera",
+        "power",
+    }
+)
+_XML_BOUNDS_RE = re.compile(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]")
+
+
+def _node_box(node: ET.Element) -> tuple[int, int, int, int] | None:
+    match = _XML_BOUNDS_RE.search(node.get("bounds") or "")
+    if not match:
+        return None
+    x1, y1, x2, y2 = (int(group) for group in match.groups())
+    return (x1, y1, x2, y2) if x2 > x1 and y2 > y1 else None
+
+
+def _iter_nodes(raw_tree: str) -> list[ET.Element]:
+    """Return Android UIAutomator nodes, or an empty list for a malformed dump."""
+
+    if not raw_tree or not raw_tree.strip():
+        return []
+    try:
+        return list(ET.fromstring(raw_tree).iter("node"))
+    except ET.ParseError as exc:  # pragma: no cover - malformed device response
+        logger.warning("could not parse Android hierarchy dump: %s", exc)
+        return []
 
 
 def _runtime_emulator_capabilities(target_id: str) -> dict[str, bool]:
@@ -142,12 +194,21 @@ class AndroidPlatform(PlatformAdapter):
             "app.files",
             "app.install",
             "app.lifecycle",
+            "app.links",
             "app.status",
+            "device.accessibility",
+            "device.airplane",
+            "device.clipboard",
+            "device.clock",
+            "device.keyboard",
+            "device.location",
             "device.logs",
-            "device.network",
+            "device.media",
+            "device.orientation",
             "device.proxy",
+            "device.recording",
             "device.shell",
-            "emulator",
+            "device.touch",
             "app_database",
             "device_agent",
             "developer_settings",
@@ -156,7 +217,8 @@ class AndroidPlatform(PlatformAdapter):
             "network",
             "network_profiles",
             "proxy",
-            "virtual_devices",
+            "target_supervision",
+            "virtual_targets",
             "webview",
             "ui.input",
             "ui.screenshot",
@@ -169,13 +231,33 @@ class AndroidPlatform(PlatformAdapter):
         # (serial, app_id) -> (pid or None, monotonic stamp). See `_app_pid`.
         self._pid_cache: dict[tuple[str, str], tuple[str | None, float]] = {}
 
+    def normalize_key(self, name: str) -> str:
+        """Keep Android's historical keycode aliases inside the Android strategy."""
+
+        candidate = super().normalize_key(name)
+        known = (
+            candidate.casefold() in _ANDROID_KEY_NAMES
+            or candidate.upper().startswith("KEYCODE_")
+            or candidate.isdigit()
+        )
+        if not known:
+            raise UsageError(
+                f"unknown key '{name}'",
+                hint=(
+                    "Valid: "
+                    + ", ".join(sorted(_ANDROID_KEY_NAMES))
+                    + ", KEYCODE_*, or a keycode number."
+                ),
+            )
+        return candidate
+
     def prepare_host(self) -> None:
         from ..emulator import ensure_adb_on_path
 
         ensure_adb_on_path()
         android_transport.ensure_adb_server_ready(self.config.lease.registry_dir)
 
-    def connect(self, target_id: str | None = None) -> Device:
+    def connect(self, target_id: str | None = None) -> TargetRuntime:
         from .. import device as device_mod
         from .android_runtime import AndroidDeviceRuntime
 
@@ -185,16 +267,17 @@ class AndroidPlatform(PlatformAdapter):
             lambda: AndroidDeviceRuntime(device_mod.resolve_serial(target_id)),
         )
 
-    def list_targets(self) -> list[DeviceInfo]:
+    def list_targets(self) -> list[DiscoveredTarget]:
         from .. import device as device_mod
 
         self.prepare_host()
-        return android_transport.run_adb_inventory_operation(
+        devices = android_transport.run_adb_inventory_operation(
             self.config.lease.registry_dir,
             device_mod.list_devices,
         )
+        return list(devices)
 
-    def target_preference(self, target: DeviceInfo) -> int:
+    def target_preference(self, target: DiscoveredTarget) -> int:
         # Prefer a disposable emulator over a physical USB phone when the user did not pin one.
         return 0 if target.serial.startswith("emulator-") else 1
 
@@ -239,7 +322,8 @@ class AndroidPlatform(PlatformAdapter):
         "network": "network",
         "network_profiles": "network_profiles",
         "proxy": "proxy_mock",
-        "virtual_devices": "emulator",
+        "target_supervision": "platforms.android_supervision",
+        "virtual_targets": "emulator",
         "webview": "webview",
     }
 
@@ -262,9 +346,13 @@ class AndroidPlatform(PlatformAdapter):
         except Exception as exc:  # pragma: no cover - defensive
             u2_check = {"ok": False, "detail": f"error: {exc}"}
 
-        emulator = self.capability("virtual_devices")
+        emulator = self.capability("virtual_targets")
         try:
-            status = emulator.status(cache_dir=self.config.cache.dir)
+            target_status = emulator.virtual_target_status(cache_dir=self.config.cache.dir)
+            # Android's doctor response predates the neutral virtual-target schema. The typed
+            # service result deliberately retains this adapter-owned payload so this Android-only
+            # renderer can preserve its public fields without bypassing the service contract.
+            status = dict(target_status.legacy_result or target_status.to_dict())
             emulator_check: dict[str, object] = {
                 "ok": bool(status.get("emulator_ok")),
                 "detail": {
@@ -298,23 +386,193 @@ class AndroidPlatform(PlatformAdapter):
 
     def diagnostic_logs(
         self,
-        runtime: Device,
+        runtime: TargetRuntime,
         *,
         lines: int = 400,
         since_ms: int | None = None,
         app_id: str | None = None,
     ) -> str:
+        """Compatibility text rendering over the normalized Android diagnostic window."""
+
+        return self.diagnostic_window(
+            runtime,
+            lines=lines,
+            # The compatibility API historically meant "the latest N" when no boundary was
+            # supplied; zero keeps that unbounded-before-tail behavior.
+            since=since_ms if since_ms is not None else 0,
+            app_id=app_id,
+        ).text
+
+    def diagnostic_window(
+        self,
+        runtime: TargetRuntime,
+        *,
+        lines: int = 400,
+        since: str | int | None = None,
+        app_id: str | None = None,
+    ) -> DiagnosticWindow:
+        """Parse Android logcat into platform-neutral diagnostic evidence."""
+
+        from .. import logcat as logcat_mod
+
+        target = TargetRef(platform=self.name, target_id=runtime.target_id)
+        clock = logcat_mod.resolve_clock(
+            runtime,
+            self.config.cache.dir,
+            target=target,
+        )
+        marks = logcat_mod.load_marks(logcat_mod.marks_path(self.config.cache.dir, target))
+        since_ms, since_label = logcat_mod.resolve_since_ms(marks, since, clock=clock)
         pid: str | None = None
         if app_id:
             pid = self._app_pid(runtime, app_id)
-            if pid is None:
-                # The process is gone. That is a fact about the app, not a reason to hand back
-                # the whole device buffer and let it read as the app's own output.
-                return ""
-        raw = runtime.logcat(since_ms=since_ms, dump=True, pid=pid)
-        return "\n".join(raw.splitlines()[-max(1, lines) :])
+        android_runtime = cast("AndroidRuntimeBase", runtime)
+        raw = android_runtime.logcat(since_ms=since_ms, dump=True, pid=pid)
+        bounded = "\n".join(raw.splitlines()[-max(1, int(lines)) :])
+        try:
+            timezone_offset = android_runtime.utc_offset_minutes() or 0
+        except Exception:  # noqa: BLE001 - timestamps remain useful without a known zone
+            timezone_offset = 0
+        return logcat_mod.parse_diagnostic_window(
+            bounded,
+            target=target,
+            since=since_label,
+            since_unix_ms=since_ms,
+            clock=clock.name,
+            skew_ms=clock.skew_ms,
+            app_id=app_id,
+            # With no live pid, an app-scoped compatibility dump must stay empty. The global
+            # scan is retained only as normalized crash evidence for the just-dead process.
+            include_events=app_id is None or pid is not None,
+            tz_offset_minutes=timezone_offset,
+        )
 
-    def _app_pid(self, runtime: Device, app_id: str) -> str | None:
+    def mark_diagnostics(
+        self,
+        runtime: TargetRuntime,
+        name: str = "default",
+        *,
+        clear: bool = False,
+        refresh_clock: bool = False,
+    ) -> dict[str, object]:
+        """Persist an Android device-clock cursor under its platform-scoped target identity."""
+
+        from .. import logcat as logcat_mod
+
+        if clear:
+            self.clear_diagnostics(runtime)
+        target = TargetRef(platform=self.name, target_id=runtime.target_id)
+        clock = logcat_mod.resolve_clock(
+            runtime,
+            self.config.cache.dir,
+            target=target,
+            force=refresh_clock,
+        )
+        return logcat_mod.set_mark(
+            self.config.cache.dir,
+            target,
+            name or "default",
+            clock=clock,
+        )
+
+    def clear_diagnostics(self, runtime: TargetRuntime) -> None:
+        android_runtime = cast("AndroidRuntimeBase", runtime)
+        android_runtime.logcat(dump=False)
+
+    def diagnostic_source_policy(
+        self, app_id: str | None = None
+    ) -> DiagnosticSourcePolicy:
+        from ..logcat import android_source_policy
+
+        return android_source_policy(app_id)
+
+    def app_exit_evidence(
+        self,
+        before: AppContext | str | None,
+        after: AppContext | str | None,
+        elements: Sequence[Element],
+    ) -> AppExitEvidence | None:
+        """Interpret Android launcher and app-error surfaces behind the adapter boundary."""
+
+        def app_id(value: AppContext | str | None) -> str | None:
+            if isinstance(value, AppContext):
+                return value.app_id
+            if not value or "/" not in value:
+                return None
+            return value.split("/", 1)[0] or None
+
+        before_app = app_id(before)
+        after_app = app_id(after)
+        if not before_app or not after_app or before_app == after_app:
+            return None
+        crash_dialog = any("aerr_" in str(element.resource_id or "") for element in elements)
+        to_launcher = any(hint in after_app.casefold() for hint in ("launcher", "home"))
+        if not crash_dialog and not to_launcher:
+            return None
+        return AppExitEvidence(
+            from_app_id=before_app,
+            to_app_id=after_app,
+            crash_dialog=crash_dialog,
+        )
+
+    def link_chooser_visible(self, runtime: TargetRuntime) -> bool:
+        """Normalize Android ResolverActivity/SystemUI evidence for the shared link flow."""
+
+        try:
+            context = AppContext.coerce(runtime.current_app())
+        except Exception:
+            return False
+        app_id = (context.app_id or "").casefold()
+        surface_id = (context.surface_id or "").casefold()
+        if (
+            "resolver" in surface_id
+            or "intentresolver" in app_id
+            or app_id in {"android", "com.android.intentresolver", "com.android.internal.app"}
+        ):
+            return True
+        with contextlib.suppress(Exception):
+            raw_tree = self.dump_tree(runtime)
+            if "Open with" in raw_tree or ("Just once" in raw_tree and "Always" in raw_tree):
+                return True
+        return False
+
+    def link_chooser_candidates(
+        self,
+        elements: Sequence[Element],
+        *,
+        preferred_app_id: str | None = None,
+    ) -> list[Element]:
+        chrome = {"Just once", "Always", "Open with", "Cancel", "Open"}
+        candidates = [
+            element
+            for element in elements
+            if element.clickable
+            and (element.text or element.content_desc or "").strip()
+            and (element.text or element.content_desc or "").strip() not in chrome
+        ]
+        preferred = (preferred_app_id or "").casefold()
+        tail = preferred.rsplit(".", 1)[-1] if preferred else ""
+        if not preferred:
+            return candidates
+        matching = [
+            element
+            for element in candidates
+            if preferred in f"{element.text or ''} {element.content_desc or ''}".casefold()
+            or tail in f"{element.text or ''} {element.content_desc or ''}".casefold()
+        ]
+        return [*matching, *(element for element in candidates if element not in matching)]
+
+    def link_chooser_confirmation(self, elements: Sequence[Element]) -> Element | None:
+        return next(
+            (
+                element
+                for element in elements
+                if element.clickable and (element.text or "").strip() == "Just once"
+            ),
+            None,
+        )
+
+    def _app_pid(self, runtime: TargetRuntime, app_id: str) -> str | None:
         """First pid of *app_id*, or None when it is not running.
 
         ``logcat --pid`` is exact and cheaper than downloading the global buffer: measured on an
@@ -336,7 +594,8 @@ class AndroidPlatform(PlatformAdapter):
         if cached is not None and now - cached[1] < _PID_CACHE_TTL_S:
             return cached[0]
         try:
-            out = runtime.shell(f"pidof {quote(app_id)}")
+            android_runtime = cast("AndroidRuntimeBase", runtime)
+            out = android_runtime.shell(f"pidof {quote(app_id)}")
         except Exception as exc:  # noqa: BLE001 — a missing process is normal, not an error
             logger.debug("pidof %s failed: %s", app_id, exc)
             return None
@@ -358,7 +617,9 @@ class AndroidPlatform(PlatformAdapter):
         for key in [k for k in self._pid_cache if k[1] == app_id]:
             self._pid_cache.pop(key, None)
 
-    def capture_screenshot(self, runtime: Device) -> ScreenImage:
+    def capture_screenshot(self, runtime: TargetRuntime) -> ScreenImage:
+        if self.config.perf.capture_adb_screencap:
+            return runtime.screencap_png()
         return runtime.screenshot()
 
     def inspect_app_bundle(self, bundle: Path) -> AppBundle:
@@ -369,7 +630,7 @@ class AndroidPlatform(PlatformAdapter):
             version_code=info.version_code,
         )
 
-    def installed_app(self, runtime: Device, app_id: str) -> InstalledApp:
+    def installed_app(self, runtime: TargetRuntime, app_id: str) -> InstalledApp:
         state = android_apk.installed_app(runtime.serial, app_id)
         return InstalledApp(
             app_id=state.package,
@@ -380,7 +641,7 @@ class AndroidPlatform(PlatformAdapter):
 
     def install_app_bundle(
         self,
-        runtime: Device,
+        runtime: TargetRuntime,
         bundle: Path,
         *,
         replace: bool = True,
@@ -396,11 +657,11 @@ class AndroidPlatform(PlatformAdapter):
             timeout_s=timeout_s,
         )
 
-    def uninstall_app(self, runtime: Device, app_id: str) -> None:
+    def uninstall_app(self, runtime: TargetRuntime, app_id: str) -> None:
         self.prepare_host()
         android_apk.uninstall(runtime.serial, app_id)
 
-    def install_persistence_warning(self, runtime: Device) -> str | None:
+    def install_persistence_warning(self, runtime: TargetRuntime) -> str | None:
         # A `-read-only` emulator (what `--parallel` implies) puts disk writes in an overlay it
         # throws away on stop. The install genuinely works for the life of this instance, so
         # refusing would break the ordinary parallel-agent run — but saying nothing is worse: a
@@ -448,6 +709,7 @@ class AndroidPlatform(PlatformAdapter):
         raw_tree: str,
         screen_size: tuple[int, int],
         *,
+        geometry: DisplayGeometry | None = None,
         ignored_app_ids: Sequence[str] = (),
     ) -> NormalizedTree:
         return NormalizedTree(

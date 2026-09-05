@@ -37,7 +37,7 @@ def test_every_surface_reaches_the_same_engine_method(
         return {"ok": True, "action": "app-log-prefs-set", "package": kwargs.get("app")}
 
     monkeypatch.setattr(Engine, "app_log_prefs_set", spy)
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: FakeDevice(package=APP))
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: FakeDevice(package=APP))
     monkeypatch.setenv("AUA_DAEMON__ENABLED", "false")
 
     cli = runner.invoke(
@@ -91,7 +91,7 @@ def test_reading_the_preference_is_reachable_from_every_surface(
         return {"ok": True, "action": "app-log-prefs", "package": kwargs.get("app")}
 
     monkeypatch.setattr(Engine, "app_log_prefs", spy)
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: FakeDevice(package=APP))
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: FakeDevice(package=APP))
     monkeypatch.setenv("AUA_DAEMON__ENABLED", "false")
 
     cli = runner.invoke(cli_app, ["--no-lease", "logcat", "prefs", "show", "--app", APP])

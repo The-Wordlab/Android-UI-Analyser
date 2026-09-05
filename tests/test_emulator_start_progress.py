@@ -41,7 +41,11 @@ def test_slow_cli_start_reports_progress_without_corrupting_json(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = _SlowVirtualDevices()
-    monkeypatch.setattr(cli, "_platform_capability", lambda _ctx, _name: service)
+    monkeypatch.setattr(
+        cli.Engine,
+        "emulator_start",
+        lambda _engine, avd=None, **kwargs: service.start(avd, **kwargs),
+    )
     monkeypatch.setattr(cli, "_EMULATOR_PROGRESS_INTERVAL_S", 0.01)
 
     result = CliRunner().invoke(

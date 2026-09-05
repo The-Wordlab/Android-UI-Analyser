@@ -7,6 +7,7 @@ from typing import Any
 
 from android_ui_analyser import device as device_mod
 from android_ui_analyser.device import Uiautomator2Device, _foreground_from_window_dump
+from android_ui_analyser.schema import AppContext
 
 
 def _device() -> Uiautomator2Device:
@@ -48,10 +49,10 @@ def test_current_app_uses_fast_window_query_without_calling_u2(monkeypatch: Any)
         AssertionError("u2 fallback must not run")
     )
 
-    assert dev.current_app() == {
-        "package": "com.example.notes",
-        "activity": "com.example.notes.MainActivity",
-    }
+    assert dev.current_app() == AppContext(
+        app_id="com.example.notes",
+        surface_id="com.example.notes.MainActivity",
+    )
 
 
 def test_current_app_falls_back_to_u2_when_window_has_no_component(monkeypatch: Any) -> None:
@@ -66,7 +67,7 @@ def test_current_app_falls_back_to_u2_when_window_has_no_component(monkeypatch: 
         "activity": ".FallbackActivity",
     }
 
-    assert dev.current_app() == {
-        "package": "com.example.fallback",
-        "activity": ".FallbackActivity",
-    }
+    assert dev.current_app() == AppContext(
+        app_id="com.example.fallback",
+        surface_id=".FallbackActivity",
+    )

@@ -453,7 +453,7 @@ def _tool_definitions() -> list[types.Tool]:
         types.Tool(
             name="session_start",
             description=(
-                "Start goal-aware Android work: observe once, surface relevant capabilities, "
+                "Start goal-aware target work: observe once, surface relevant capabilities, "
                 "and return the safest exact recommended call. Use this first."
             ),
             inputSchema={
@@ -486,28 +486,35 @@ def _tool_definitions() -> list[types.Tool]:
                     "start_emulator": {
                         "type": "boolean",
                         "default": True,
-                        "description": "Boot a compatible AVD when no matching device is free.",
+                        "description": "Android compatibility alias for provision_target.",
+                    },
+                    "provision_target": {
+                        "type": "boolean",
+                        "description": (
+                            "Start a compatible selected-platform virtual target when no "
+                            "matching target is free."
+                        ),
                     },
                     "needs": {
                         "type": "array",
-                        "items": {
-                            "type": "string",
-                            "enum": ["root", "play", "proxy", "animations"],
-                        },
-                        "description": "Required target capabilities used for selection/provisioning.",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Required capabilities interpreted by the selected platform; "
+                            "animations remains a shared session-environment request."
+                        ),
                     },
                     "headed": {
                         "type": "boolean",
                         "default": False,
                         "description": (
-                            "Require a visible emulator; if AUA starts one, show its window."
+                            "Require a visible virtual target; if AUA starts one, show its window."
                         ),
                     },
                     "audio": {
                         "type": "boolean",
                         "default": False,
                         "description": (
-                            "When start_emulator boots one, keep host audio enabled so "
+                            "When provisioning boots one, keep host audio enabled so "
                             "microphone injection is available."
                         ),
                     },
@@ -520,6 +527,12 @@ def _tool_definitions() -> list[types.Tool]:
                         ),
                     },
                     "avd": {"type": "string", "description": "AVD name when several exist."},
+                    "virtual_target": {
+                        "type": "string",
+                        "description": (
+                            "Selected-platform virtual-target definition; avd is the Android alias."
+                        ),
+                    },
                     "package": {
                         "type": "string",
                         "description": "Launch and observe this package before planning.",
@@ -1459,6 +1472,118 @@ def _tool_definitions() -> list[types.Tool]:
             inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
         ),
         types.Tool(
+            name="virtual_target_list",
+            description="List reusable virtual-target definitions for the selected platform.",
+            inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
+        ),
+        types.Tool(
+            name="virtual_target_status",
+            description="Show configured, running, and AUA-owned virtual targets.",
+            inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
+        ),
+        types.Tool(
+            name="virtual_target_start",
+            description="Start one selected-platform virtual target without opening a session.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "definition_id": {"type": "string"},
+                    "headless": {"type": "boolean", "default": True},
+                    "audio": {"type": "boolean", "default": False},
+                    "animations": {"type": "boolean", "default": False},
+                    "wait": {"type": "number", "minimum": 0, "default": 120},
+                    "owner": {"type": "string"},
+                    "parallel": {"type": "boolean", "default": False},
+                    "options": {
+                        "type": "object",
+                        "description": "Opaque options validated by the selected adapter.",
+                    },
+                },
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="virtual_target_provision",
+            description="Select and start a compatible virtual target as one Engine operation.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "definition_id": {"type": "string"},
+                    "needs": {"type": "array", "items": {"type": "string"}},
+                    "headless": {"type": "boolean", "default": True},
+                    "audio": {"type": "boolean", "default": False},
+                    "animations": {"type": "boolean", "default": False},
+                    "wait": {"type": "number", "minimum": 0, "default": 120},
+                    "owner": {"type": "string"},
+                    "parallel": {"type": "boolean", "default": True},
+                    "options": {
+                        "type": "object",
+                        "description": "Opaque options validated by the selected adapter.",
+                    },
+                },
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="virtual_target_create",
+            description="Create or idempotently reuse a selected-platform target definition.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "definition_id": {"type": "string", "minLength": 1},
+                    "replace": {"type": "boolean", "default": False},
+                    "confirmed": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Required when replace=true because saved data may be lost.",
+                    },
+                    "options": {"type": "object"},
+                },
+                "required": ["definition_id"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="virtual_target_delete",
+            description="Delete a stopped virtual-target definition after confirmation.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "definition_id": {"type": "string", "minLength": 1},
+                    "confirmed": {"type": "boolean", "default": False},
+                    "options": {"type": "object"},
+                },
+                "required": ["definition_id"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="virtual_target_stop",
+            description="Stop selected virtual targets while preserving foreign live leases.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "target_id": {"type": "string"},
+                    "definition_id": {"type": "string"},
+                    "owner": {"type": "string"},
+                    "mine": {"type": "boolean", "default": False},
+                    "all": {"type": "boolean", "default": False},
+                },
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="virtual_target_reclaim",
+            description="Re-arm retirement supervision for AUA-owned orphan instances.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "idle_stop": {"type": "number", "minimum": 0},
+                },
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
             name="emulator_list",
             description="List configured Android Virtual Devices (AVD names, Play Store vs rootable).",
             inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
@@ -1874,7 +1999,9 @@ def _tool_definitions() -> list[types.Tool]:
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Remote path on device (default /sdcard/aua_recording.mp4).",
+                        "description": (
+                            "Target path override; the selected platform chooses its default."
+                        ),
                     },
                 },
                 "additionalProperties": False,
@@ -2479,6 +2606,44 @@ def _tool_definitions() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="helper_status",
+            description=(
+                "Report whether the selected platform's optional on-device helper is "
+                "installed, enabled, bound, and ready."
+            ),
+            inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
+        ),
+        types.Tool(
+            name="helper_install",
+            description="Explicitly install the selected platform's optional device helper.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "reinstall": {"type": "boolean", "default": False},
+                    "force": {"type": "boolean", "default": False},
+                },
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="helper_enable",
+            description=(
+                "Enable the optional device helper through the shared Engine path, with "
+                "write-ahead restoration of device state."
+            ),
+            inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
+        ),
+        types.Tool(
+            name="helper_disable",
+            description="Disable the optional device helper and restore its saved setup state.",
+            inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
+        ),
+        types.Tool(
+            name="helper_remove",
+            description="Disable and explicitly uninstall the optional device helper.",
+            inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
+        ),
+        types.Tool(
             name="database_list",
             description="List a debuggable package's private SQLite databases and WAL/SHM sizes.",
             inputSchema={
@@ -2777,6 +2942,10 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
             "package": args.get("package"),
             "activity": args.get("activity"),
         }
+        if "provision_target" in args:
+            start_kwargs["provision_target"] = bool(args["provision_target"])
+        if "virtual_target" in args:
+            start_kwargs["virtual_target"] = args["virtual_target"]
         for key in ("contract_yaml", "artifacts_dir", "evidence", "junit", "wait_for_lease_s"):
             if key in args:
                 start_kwargs[key] = args[key]
@@ -2786,7 +2955,9 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 **start_kwargs,
             )
         )
-        if isinstance(started, dict) and started.get("emulator_started"):
+        if isinstance(started, dict) and (
+            started.get("virtual_target_started") or started.get("emulator_started")
+        ):
             serial = started.get("serial")
             if isinstance(serial, str) and serial:
                 _mcp_started_serials().add(serial)
@@ -3100,31 +3271,95 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         )
     if name == "list_devices":
         return [d.model_dump(mode="json") for d in engine.list_devices()]
+    if name == "virtual_target_list":
+        return engine.virtual_target_list()
+    if name == "virtual_target_status":
+        return engine.virtual_target_status()
+    if name in {"virtual_target_start", "virtual_target_provision"}:
+        common: dict[str, Any] = {
+            "headless": bool(args.get("headless", True)),
+            "audio": bool(args.get("audio", False)),
+            "animations": bool(args.get("animations", False)),
+            "wait_s": float(args.get("wait", 120)),
+            "owner": args.get("owner"),
+            "parallel": bool(
+                args.get("parallel", name == "virtual_target_provision")
+            ),
+            "options": dict(args.get("options") or {}),
+        }
+        if name == "virtual_target_provision":
+            out = engine.virtual_target_provision(
+                args.get("definition_id"),
+                needs=args.get("needs") or [],
+                **common,
+            )
+        else:
+            out = engine.virtual_target_start(args.get("definition_id"), **common)
+        target_id = out.get("target_id") if isinstance(out, dict) else None
+        if isinstance(target_id, str) and target_id:
+            _mcp_started_serials().add(target_id)
+            if out.get("owner"):
+                _mcp_started_owners().add(str(out["owner"]))
+        return out
+    if name == "virtual_target_create":
+        replace_existing = bool(args.get("replace", False))
+        if replace_existing and not bool(args.get("confirmed", False)):
+            raise UsageError(
+                "virtual_target_create replace=true needs confirmed=true",
+                hint="Replacement may discard the existing virtual target's saved data.",
+            )
+        return engine.virtual_target_create(
+            str(args["definition_id"]),
+            replace=replace_existing,
+            options=dict(args.get("options") or {}),
+        )
+    if name == "virtual_target_delete":
+        return engine.virtual_target_delete(
+            str(args["definition_id"]),
+            confirmed=bool(args.get("confirmed", False)),
+            options=dict(args.get("options") or {}),
+        )
+    if name == "virtual_target_stop":
+        from . import leases as leases_mod
+
+        out = engine.virtual_target_stop(
+            target_id=args.get("target_id"),
+            definition_id=args.get("definition_id"),
+            owner=args.get("owner"),
+            mine=bool(args.get("mine", False)),
+            all_targets=bool(args.get("all", False)),
+            lease_owner=leases_mod.resolve_owner(args.get("owner")),
+        )
+        stopped = out.get("stopped_target_ids") if isinstance(out, dict) else None
+        if isinstance(stopped, list):
+            for target_id in stopped:
+                _mcp_started_serials().discard(str(target_id))
+            attached = getattr(engine, "_device", None)
+            if attached is not None and attached.target_id in stopped:
+                engine.close()
+        return out
+    if name == "virtual_target_reclaim":
+        idle = args.get("idle_stop")
+        if idle is None:
+            idle = float(getattr(engine.config.teardown, "emulator_idle_stop_s", 1200.0))
+        return engine.virtual_target_reclaim(idle_timeout_s=float(idle))
     if name == "emulator_list":
-        emulator_mod = engine.platform.capability("virtual_devices")
-
-        return emulator_mod.list_avds()
+        return engine.emulator_list()
     if name == "emulator_status":
-        emulator_mod = engine.platform.capability("virtual_devices")
-
-        return emulator_mod.status(cache_dir=engine.config.cache.dir)
+        return engine.emulator_status()
     if name == "emulator_start":
-        emulator_mod = engine.platform.capability("virtual_devices")
-
         headless = bool(args.get("headless", True))
         idle = args.get("idle_stop")
         if idle is None:
             # Same default as the CLI, windowed included: MCP and CLI must share one policy or
             # an agent's emulator outlives it on whichever surface was forgotten.
             idle = float(getattr(engine.config.teardown, "emulator_idle_stop_s", 1200.0))
-        out = emulator_mod.start(
+        out = engine.emulator_start(
             args.get("avd"),
             headless=headless,
             audio=bool(args.get("audio", False)),
             animations=bool(args.get("animations", False)),
             wait_s=float(args.get("wait", 120)),
-            cache_dir=engine.config.cache.dir,
-            lease_registry_dir=engine.config.lease.registry_dir,
             gpu=args.get("gpu"),
             idle_timeout_s=float(idle),
             parallel=bool(args.get("parallel", False)),
@@ -3141,17 +3376,14 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 _mcp_started_owners().add(str(out["owner"]))
         return out
     if name == "emulator_stop":
-        emulator_mod = engine.platform.capability("virtual_devices")
         from . import leases as leases_mod
 
-        out = emulator_mod.stop(
+        out = engine.emulator_stop(
             serial=args.get("serial"),
             avd=args.get("avd"),
             owner=args.get("owner"),
             mine=bool(args.get("mine", False)),
             all_devices=bool(args.get("all", False)),
-            cache_dir=engine.config.cache.dir,
-            lease_registry_dir=engine.config.lease.registry_dir,
             lease_owner=leases_mod.resolve_owner(args.get("owner")),
         )
         stopped = out.get("stopped") if isinstance(out, dict) else None
@@ -3559,6 +3791,21 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 timeout_ms=int(args.get("timeout_ms", 300000)),
             )
         )
+    if name == "helper_status":
+        return _dump(engine.helper_status())
+    if name == "helper_install":
+        return _dump(
+            engine.helper_install(
+                reinstall=bool(args.get("reinstall", False)),
+                force=bool(args.get("force", False)),
+            )
+        )
+    if name == "helper_enable":
+        return _dump(engine.helper_enable())
+    if name == "helper_disable":
+        return _dump(engine.helper_disable())
+    if name == "helper_remove":
+        return _dump(engine.helper_remove())
     if name == "database_list":
         return engine.database_list(args["package"])
     if name == "database_schema":
@@ -3717,6 +3964,14 @@ _LEASE_FREE_TOOLS = frozenset(
         "session_start",
         "session_progress",
         "session_review",
+        "virtual_target_create",
+        "virtual_target_delete",
+        "virtual_target_list",
+        "virtual_target_provision",
+        "virtual_target_reclaim",
+        "virtual_target_start",
+        "virtual_target_status",
+        "virtual_target_stop",
     }
 )
 
@@ -3751,10 +4006,12 @@ def cleanup_mcp_emulators(
 
     cfg = load_config()
     selected = platform or PlatformFactory(cfg).create()
-    emulator_mod = selected.capability("virtual_devices")
+    virtual_targets = selected.capability("virtual_targets")
+    platform_name = selected.name
     cache = cache_dir or cfg.cache.dir
     lease_registry = lease_registry_dir or cache
     from . import leases
+    from .platforms.virtual_targets import VirtualTargetStopRequest, VirtualTargetStopResult
 
     stopped: list[str] = []
     preserved: list[str] = []
@@ -3762,7 +4019,7 @@ def cleanup_mcp_emulators(
     caller_process = (caller.get("pid"), caller.get("started"))
     serials = list(_MCP_STARTED_SERIALS)
     for ser in serials:
-        lease = leases.read_lease(lease_registry, ser)
+        lease = leases.read_lease(lease_registry, ser, platform=platform_name)
         lease_process = (
             lease.get("owner_pid") if lease else None,
             lease.get("owner_started") if lease else None,
@@ -3777,28 +4034,34 @@ def cleanup_mcp_emulators(
             _MCP_STARTED_SERIALS.discard(ser)
             continue
         with contextlib.suppress(Exception):
-            out = emulator_mod.stop(
-                serial=ser,
-                cache_dir=cache,
-                lease_registry_dir=lease_registry,
-                lease_owner=leases.resolve_owner(),
-            )
-            if isinstance(out, dict):
-                stopped.extend(str(s) for s in (out.get("stopped") or []))
-        _MCP_STARTED_SERIALS.discard(ser)
-    # Owner-scoped leftover (parallel) if serial kill missed a record.
-    for owner in list(_MCP_STARTED_OWNERS):
-        if not preserved:
-            with contextlib.suppress(Exception):
-                out = emulator_mod.stop(
-                    mine=True,
-                    owner=owner,
+            out = virtual_targets.stop_virtual_targets(
+                VirtualTargetStopRequest(
+                    target_id=ser,
                     cache_dir=cache,
                     lease_registry_dir=lease_registry,
                     lease_owner=leases.resolve_owner(),
+                    requested_by="mcp-exit-cleanup",
                 )
-                if isinstance(out, dict):
-                    stopped.extend(str(s) for s in (out.get("stopped") or []))
+            )
+            if isinstance(out, VirtualTargetStopResult):
+                stopped.extend(out.stopped_target_ids)
+        _MCP_STARTED_SERIALS.discard(ser)
+    # Owner-scoped leftover (parallel) if target-id stop missed a record.
+    for owner in list(_MCP_STARTED_OWNERS):
+        if not preserved:
+            with contextlib.suppress(Exception):
+                out = virtual_targets.stop_virtual_targets(
+                    VirtualTargetStopRequest(
+                        mine=True,
+                        owner=owner,
+                        cache_dir=cache,
+                        lease_registry_dir=lease_registry,
+                        lease_owner=leases.resolve_owner(),
+                        requested_by="mcp-exit-cleanup",
+                    )
+                )
+                if isinstance(out, VirtualTargetStopResult):
+                    stopped.extend(out.stopped_target_ids)
         _MCP_STARTED_OWNERS.discard(owner)
     return {
         "ok": True,
@@ -3861,6 +4124,7 @@ def build_server(engine: Engine) -> Server:
                 journal_mod.record(
                     cache_dir=engine.config.cache.dir,
                     serial=serial,
+                    platform=engine.platform.name,
                     source="mcp",
                     cmd=name,
                     args=journal_args,

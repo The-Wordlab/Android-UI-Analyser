@@ -41,6 +41,14 @@ from pathlib import Path
 from typing import Any
 
 from .atomic import atomic_create_text, atomic_write_text
+from .platforms.identity import (
+    LEGACY_PLATFORM,
+    TargetLike,
+    TargetRef,
+    safe_component,
+    target_from_metadata,
+    target_ref,
+)
 
 # Long enough that a single blocking call cannot outlive it: `--until` waits legitimately run
 # 90-120s on a slow backend, and a lease that expires mid-wait would let another agent seize a
@@ -459,12 +467,14 @@ def lease_dir(cache_dir: str | Path) -> Path:
     return Path(cache_dir).expanduser() / "leases"
 
 
-def _safe_serial(serial: str) -> str:
-    return "".join(c if c.isalnum() or c in "-_." else "_" for c in serial)
+def _safe_serial(serial: TargetLike, *, platform: str = LEGACY_PLATFORM) -> str:
+    return target_ref(serial, platform=platform).storage_key
 
 
-def _lease_path(cache_dir: str | Path, serial: str) -> Path:
-    return lease_dir(cache_dir) / f"{_safe_serial(serial)}.json"
+def _lease_path(
+    cache_dir: str | Path, serial: TargetLike, *, platform: str = LEGACY_PLATFORM
+) -> Path:
+    return lease_dir(cache_dir) / f"{_safe_serial(serial, platform=platform)}.json"
 
 
 def _thread_lock(key: str) -> Any:
@@ -549,7 +559,9 @@ def _release_file_lock(handle: Any, backend: str) -> None:
 
 
 @contextlib.contextmanager
-def _lease_guard(cache_dir: str | Path, serial: str) -> Iterator[None]:
+def _lease_guard(
+    cache_dir: str | Path, serial: TargetLike, *, platform: str = LEGACY_PLATFORM
+) -> Iterator[None]:
     """Serialize mutations of one lease file across threads and processes.
 
     Lease reads stay lock-free. Writers need the guard so a transfer cannot be overwritten by
@@ -557,7 +569,8 @@ def _lease_guard(cache_dir: str | Path, serial: str) -> Iterator[None]:
     uses a one-byte ``msvcrt`` range lock.
     """
 
-    key = f"lease|{Path(cache_dir).expanduser()}|{serial}"
+    ref = target_ref(serial, platform=platform)
+    key = f"lease|{Path(cache_dir).expanduser()}|{ref.platform}|{ref.target_id}"
     with _thread_lock(key):
         active = getattr(_LEASE_GUARD_STATE, "keys", None)
         if active is None:
@@ -566,7 +579,7 @@ def _lease_guard(cache_dir: str | Path, serial: str) -> Iterator[None]:
         if key in active:
             yield
             return
-        path = lease_dir(cache_dir) / ".locks" / f"{_safe_serial(serial)}.lock"
+        path = lease_dir(cache_dir) / ".locks" / f"{ref.storage_key}.lock"
         path.parent.mkdir(parents=True, exist_ok=True)
         handle = path.open("a+", encoding="utf-8")
         backend: str | None = None
@@ -584,7 +597,11 @@ def _lease_guard(cache_dir: str | Path, serial: str) -> Iterator[None]:
 
 @contextlib.contextmanager
 def _device_lock(
-    cache_dir: str | Path, serial: str, *, exclusive: bool
+    cache_dir: str | Path,
+    serial: TargetLike,
+    *,
+    exclusive: bool,
+    platform: str = LEGACY_PLATFORM,
 ) -> Iterator[None]:
     """Shared normal use or an exclusive ownership transition for one physical target.
 
@@ -592,7 +609,8 @@ def _device_lock(
     lock. Ownership transitions still exclude every reader and command across processes.
     """
 
-    key = f"device|{Path(cache_dir).expanduser()}|{serial}"
+    ref = target_ref(serial, platform=platform)
+    key = f"device|{Path(cache_dir).expanduser()}|{ref.platform}|{ref.target_id}"
     active = getattr(_DEVICE_GUARD_STATE, "entries", None)
     if active is None:
         active = {}
@@ -614,8 +632,8 @@ def _device_lock(
     release = rw_lock.release_write if thread_exclusive else rw_lock.release_read
     acquire()
     lock_dir = lease_dir(cache_dir) / ".locks"
-    path = lock_dir / f"device-{_safe_serial(serial)}.lock"
-    gate_path = lock_dir / f"device-gate-{_safe_serial(serial)}.lock"
+    path = lock_dir / f"device-{ref.storage_key}.lock"
+    gate_path = lock_dir / f"device-gate-{ref.storage_key}.lock"
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         gate_handle = gate_path.open("a+", encoding="utf-8")
@@ -653,24 +671,31 @@ def _device_lock(
 
 
 @contextlib.contextmanager
-def _device_guard(cache_dir: str | Path, serial: str) -> Iterator[None]:
-    with _device_lock(cache_dir, serial, exclusive=True):
+def _device_guard(
+    cache_dir: str | Path, serial: TargetLike, *, platform: str = LEGACY_PLATFORM
+) -> Iterator[None]:
+    with _device_lock(cache_dir, serial, exclusive=True, platform=platform):
         yield
 
 
 @contextlib.contextmanager
-def device_use(cache_dir: str | Path, serial: str) -> Iterator[None]:
+def device_use(
+    cache_dir: str | Path, serial: TargetLike, *, platform: str = LEGACY_PLATFORM
+) -> Iterator[None]:
     """Hold a shared command-lifetime fence while this process may touch the target."""
 
-    with _device_lock(cache_dir, serial, exclusive=False):
+    with _device_lock(cache_dir, serial, exclusive=False, platform=platform):
         yield
 
 
 @contextlib.contextmanager
-def _command_guard(cache_dir: str | Path, serial: str) -> Iterator[None]:
+def _command_guard(
+    cache_dir: str | Path, serial: TargetLike, *, platform: str = LEGACY_PLATFORM
+) -> Iterator[None]:
     """Serialize foreground commands while still allowing short background reads."""
 
-    key = f"command|{Path(cache_dir).expanduser()}|{serial}"
+    ref = target_ref(serial, platform=platform)
+    key = f"command|{Path(cache_dir).expanduser()}|{ref.platform}|{ref.target_id}"
     with _thread_lock(key):
         active = getattr(_COMMAND_GUARD_STATE, "keys", None)
         if active is None:
@@ -679,7 +704,7 @@ def _command_guard(cache_dir: str | Path, serial: str) -> Iterator[None]:
         if key in active:
             yield
             return
-        path = lease_dir(cache_dir) / ".locks" / f"command-{_safe_serial(serial)}.lock"
+        path = lease_dir(cache_dir) / ".locks" / f"command-{ref.storage_key}.lock"
         path.parent.mkdir(parents=True, exist_ok=True)
         handle = path.open("a+", encoding="utf-8")
         backend: str | None = None
@@ -696,18 +721,23 @@ def _command_guard(cache_dir: str | Path, serial: str) -> Iterator[None]:
 
 
 @contextlib.contextmanager
-def device_command(cache_dir: str | Path, serial: str) -> Iterator[None]:
+def device_command(
+    cache_dir: str | Path, serial: TargetLike, *, platform: str = LEGACY_PLATFORM
+) -> Iterator[None]:
     """One foreground command: exclusive against commands, shared with perception readers."""
 
-    with _command_guard(cache_dir, serial), device_use(cache_dir, serial):
+    ref = target_ref(serial, platform=platform)
+    with _command_guard(cache_dir, ref), device_use(cache_dir, ref):
         yield
 
 
 @contextlib.contextmanager
-def device_transaction(cache_dir: str | Path, serial: str) -> Iterator[None]:
+def device_transaction(
+    cache_dir: str | Path, serial: TargetLike, *, platform: str = LEGACY_PLATFORM
+) -> Iterator[None]:
     """Keep a full device command or ownership transition exclusive on one target."""
 
-    with _device_guard(cache_dir, serial):
+    with _device_guard(cache_dir, serial, platform=platform):
         yield
 
 
@@ -879,13 +909,19 @@ def _entry_matches_owner(entry: dict[str, Any], owner: str) -> bool:
     return incoming == (stored_pid, stored_started)
 
 
-def read_lease(cache_dir: str | Path, serial: str) -> dict[str, Any] | None:
+def read_lease(
+    cache_dir: str | Path,
+    serial: TargetLike,
+    *,
+    platform: str = LEGACY_PLATFORM,
+) -> dict[str, Any] | None:
     """The live lease on *serial*, or None when free/expired.
 
     Expiry is evaluated here rather than swept elsewhere — that is what makes a crashed
     agent's lease self-healing and a permanent block impossible.
     """
-    path = _lease_path(cache_dir, serial)
+    ref = target_ref(serial, platform=platform)
+    path = _lease_path(cache_dir, ref)
     try:
         entry = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -896,7 +932,7 @@ def read_lease(cache_dir: str | Path, serial: str) -> dict[str, Any] | None:
         # exists (the file may have been damaged after a valid claim). Fail closed until an
         # operator explicitly repairs/removes it instead of silently double-allocating.
         return {
-            "serial": serial,
+            **ref.to_json(),
             "owner": "<corrupt lease metadata>",
             "inaccessible": True,
             "corrupt": True,
@@ -907,19 +943,29 @@ def read_lease(cache_dir: str | Path, serial: str) -> dict[str, Any] | None:
         # actively driven. The synthetic entry matches no owner, so acquisition, selection
         # and use-validation all refuse until the metadata can actually be read.
         return {
-            "serial": serial,
+            **ref.to_json(),
             "owner": "<unreadable lease metadata>",
             "inaccessible": True,
         }
-    if not isinstance(entry, dict) or not entry.get("owner") or not entry.get("serial"):
+    stored = target_from_metadata(entry, fallback_id=ref.target_id) if isinstance(entry, dict) else None
+    if (
+        not isinstance(entry, dict)
+        or not entry.get("owner")
+        or stored is None
+        or stored != ref
+    ):
         return {
-            "serial": serial,
+            **ref.to_json(),
             "owner": "<corrupt lease metadata>",
             "inaccessible": True,
             "corrupt": True,
         }
     if _expired(entry):
         return None
+    # Publish neutral metadata for legacy Android records without rewriting a live lease.
+    entry.setdefault("platform", ref.platform)
+    entry.setdefault("target_id", ref.target_id)
+    entry.setdefault("serial", ref.target_id)
     return entry
 
 
@@ -939,7 +985,34 @@ def _lease_metadata_paths(cache_dir: str | Path) -> list[Path]:
     return sorted(paths)
 
 
-def live_leased_serials(cache_dir: str | Path) -> set[str]:
+def _path_may_belong_to_platform(path: Path, platform: str) -> bool:
+    name = str(platform).strip().lower()
+    if name == LEGACY_PLATFORM:
+        return "--" not in path.stem
+    return path.stem.startswith(f"{safe_component(name)}--")
+
+
+def _inaccessible_entry(path: Path, platform: str, owner: str, *, corrupt: bool) -> dict[str, Any]:
+    name = str(platform).strip().lower()
+    target_id = path.stem
+    prefix = f"{safe_component(name)}--"
+    if name != LEGACY_PLATFORM and target_id.startswith(prefix):
+        target_id = target_id[len(prefix) :]
+    out: dict[str, Any] = {
+        "platform": name,
+        "target_id": target_id,
+        "serial": target_id,
+        "owner": owner,
+        "inaccessible": True,
+    }
+    if corrupt:
+        out["corrupt"] = True
+    return out
+
+
+def live_leased_serials(
+    cache_dir: str | Path, *, platform: str = LEGACY_PLATFORM
+) -> set[str]:
     """Every serial with a live lease in this registry; dead/expired owners drop out.
 
     Provisioning must treat these targets as occupied even when a transport snapshot
@@ -953,25 +1026,45 @@ def live_leased_serials(cache_dir: str | Path) -> set[str]:
         except FileNotFoundError:
             continue
         except json.JSONDecodeError:
-            out.add(path.stem)
+            if _path_may_belong_to_platform(path, platform):
+                out.add(
+                    str(
+                        _inaccessible_entry(
+                            path,
+                            platform,
+                            "<corrupt lease metadata>",
+                            corrupt=True,
+                        )["target_id"]
+                    )
+                )
             continue
         except OSError:
             # Fail closed: an entry that cannot be read may be a live holder, and the stem
             # is its (sanitised) serial. Blocking one port beats double-allocating it.
-            out.add(path.stem)
+            if _path_may_belong_to_platform(path, platform):
+                out.add(
+                    str(
+                        _inaccessible_entry(
+                            path,
+                            platform,
+                            "<unreadable lease metadata>",
+                            corrupt=False,
+                        )["target_id"]
+                    )
+                )
             continue
-        if (
-            not isinstance(entry, dict)
-            or not entry.get("owner")
-            or not entry.get("serial")
-        ):
-            out.add(path.stem)
+        ref = target_from_metadata(entry) if isinstance(entry, dict) else None
+        if not isinstance(entry, dict) or not entry.get("owner") or ref is None:
+            # Only a direct lookup can attribute corrupt metadata safely. Keep the Android
+            # compatibility behaviour, but do not claim an unknown record belongs to a plugin.
+            if platform == LEGACY_PLATFORM and "--" not in path.stem:
+                out.add(path.stem)
+            continue
+        if ref.platform != str(platform).strip().lower():
             continue
         if _expired(entry):
             continue
-        serial = entry.get("serial")
-        if isinstance(serial, str) and serial:
-            out.add(serial)
+        out.add(ref.target_id)
     return out
 
 
@@ -981,34 +1074,36 @@ def _write(path: Path, entry: dict[str, Any]) -> None:
 
 def acquire(
     cache_dir: str | Path,
-    serial: str,
+    serial: TargetLike,
     *,
     owner: str,
     ttl_s: int = DEFAULT_TTL_S,
     needs: list[str] | None = None,
     app: str | None = None,
     allow_additional: bool = False,
+    platform: str = LEGACY_PLATFORM,
 ) -> bool:
     """Claim *serial* for *owner*. True when held afterwards (including a sticky re-claim)."""
 
+    ref = target_ref(serial, platform=platform)
     with (
         _owner_guard(cache_dir, owner),
-        _device_guard(cache_dir, serial),
-        _lease_guard(cache_dir, serial),
+        _device_guard(cache_dir, ref),
+        _lease_guard(cache_dir, ref),
     ):
-        held_entries = held_entries_by(cache_dir, owner)
+        held_entries = held_entries_by(cache_dir, owner, platform=ref.platform)
         existing = [str(entry["serial"]) for entry in held_entries]
-        others = [held for held in existing if held != serial]
+        others = [held for held in existing if held != ref.target_id]
         if not allow_additional and others:
             return False
-        if allow_additional and serial not in existing and any(
+        if allow_additional and ref.target_id not in existing and any(
             entry.get("role") == "replacement" for entry in held_entries
         ):
             return False
-        replacement = bool(allow_additional and others and serial not in existing)
+        replacement = bool(allow_additional and others and ref.target_id not in existing)
         acquired = _acquire_unlocked(
             cache_dir,
-            serial,
+            ref,
             owner=owner,
             ttl_s=ttl_s,
             needs=needs,
@@ -1021,7 +1116,7 @@ def acquire(
 
 def _acquire_unlocked(
     cache_dir: str | Path,
-    serial: str,
+    serial: TargetLike,
     *,
     owner: str,
     ttl_s: int = DEFAULT_TTL_S,
@@ -1029,11 +1124,13 @@ def _acquire_unlocked(
     app: str | None = None,
     role: str = "primary",
     replacement_from: list[str] | None = None,
+    platform: str = LEGACY_PLATFORM,
 ) -> bool:
-    path = _lease_path(cache_dir, serial)
+    ref = target_ref(serial, platform=platform)
+    path = _lease_path(cache_dir, ref)
     path.parent.mkdir(parents=True, exist_ok=True)
     entry = {
-        "serial": serial,
+        **ref.to_json(),
         "owner": str(owner),
         "generation": secrets.token_hex(16),
         "role": role,
@@ -1067,20 +1164,20 @@ def _acquire_unlocked(
     except OSError:
         return False  # access control cannot claim success without a durable lease record
     else:
-        confirmed = read_lease(cache_dir, serial)
+        confirmed = read_lease(cache_dir, ref)
         return bool(
             confirmed
             and _entry_matches_owner(confirmed, owner)
             and confirmed.get("generation") == entry["generation"]
         )
 
-    current = read_lease(cache_dir, serial)
+    current = read_lease(cache_dir, ref)
     if current is None:
         # Free or expired — take it over, then re-read to settle a race with another
         # taker. Optimistic on purpose: the loser simply moves to another device.
         entry["acquired"] = _now()
         _write(path, entry)
-        confirmed = read_lease(cache_dir, serial)
+        confirmed = read_lease(cache_dir, ref)
         return bool(confirmed and _entry_matches_owner(confirmed, owner))
     if _entry_matches_owner(current, owner):
         if pending_handoff(current):
@@ -1099,16 +1196,30 @@ def _acquire_unlocked(
     return False
 
 
-def renew(cache_dir: str | Path, serial: str, *, owner: str, app: str | None = None) -> bool:
+def renew(
+    cache_dir: str | Path,
+    serial: TargetLike,
+    *,
+    owner: str,
+    app: str | None = None,
+    platform: str = LEGACY_PLATFORM,
+) -> bool:
     """Heartbeat. Called on every command, and from inside long waits."""
-    with _lease_guard(cache_dir, serial):
-        return _renew_unlocked(cache_dir, serial, owner=owner, app=app)
+    ref = target_ref(serial, platform=platform)
+    with _lease_guard(cache_dir, ref):
+        return _renew_unlocked(cache_dir, ref, owner=owner, app=app)
 
 
 def _renew_unlocked(
-    cache_dir: str | Path, serial: str, *, owner: str, app: str | None = None
+    cache_dir: str | Path,
+    serial: TargetLike,
+    *,
+    owner: str,
+    app: str | None = None,
+    platform: str = LEGACY_PLATFORM,
 ) -> bool:
-    current = read_lease(cache_dir, serial)
+    ref = target_ref(serial, platform=platform)
+    current = read_lease(cache_dir, ref)
     if current is None or not _entry_matches_owner(current, owner):
         return False
     if pending_handoff(current):
@@ -1117,26 +1228,38 @@ def _renew_unlocked(
     current["last_activity"] = _now()
     if app:
         current["app"] = app
-    _write(_lease_path(cache_dir, serial), current)
+    _write(_lease_path(cache_dir, ref), current)
     return True
 
 
-def release(cache_dir: str | Path, serial: str, *, owner: str | None = None) -> bool:
+def release(
+    cache_dir: str | Path,
+    serial: TargetLike,
+    *,
+    owner: str | None = None,
+    platform: str = LEGACY_PLATFORM,
+) -> bool:
     """Drop the lease. A mismatched owner is refused so one agent cannot free another's."""
-    with _device_guard(cache_dir, serial), _lease_guard(cache_dir, serial):
-        return _release_unlocked(cache_dir, serial, owner=owner)
+    ref = target_ref(serial, platform=platform)
+    with _device_guard(cache_dir, ref), _lease_guard(cache_dir, ref):
+        return _release_unlocked(cache_dir, ref, owner=owner)
 
 
 def _release_unlocked(
-    cache_dir: str | Path, serial: str, *, owner: str | None = None
+    cache_dir: str | Path,
+    serial: TargetLike,
+    *,
+    owner: str | None = None,
+    platform: str = LEGACY_PLATFORM,
 ) -> bool:
-    current = read_lease(cache_dir, serial)
+    ref = target_ref(serial, platform=platform)
+    current = read_lease(cache_dir, ref)
     if current is not None and owner is not None and not _entry_matches_owner(current, owner):
         return False
     if current is not None and owner is not None and pending_handoff(current):
         return False
     try:
-        _lease_path(cache_dir, serial).unlink()
+        _lease_path(cache_dir, ref).unlink()
     except FileNotFoundError:
         return True
     except OSError:
@@ -1144,7 +1267,9 @@ def _release_unlocked(
     return True
 
 
-def list_leases(cache_dir: str | Path) -> list[dict[str, Any]]:
+def list_leases(
+    cache_dir: str | Path, *, platform: str = LEGACY_PLATFORM
+) -> list[dict[str, Any]]:
     """Live leases only — expired entries are reported as free, never as holders."""
     out: list[dict[str, Any]] = []
     for path in _lease_metadata_paths(cache_dir):
@@ -1153,75 +1278,101 @@ def list_leases(cache_dir: str | Path) -> list[dict[str, Any]]:
         except FileNotFoundError:
             continue
         except json.JSONDecodeError:
+            if not _path_may_belong_to_platform(path, platform):
+                continue
             out.append(
-                {
-                    "serial": path.stem,
-                    "owner": "<corrupt lease metadata>",
-                    "inaccessible": True,
-                    "corrupt": True,
-                }
+                _inaccessible_entry(
+                    path, platform, "<corrupt lease metadata>", corrupt=True
+                )
             )
             continue
         except OSError:
+            if not _path_may_belong_to_platform(path, platform):
+                continue
             out.append(
-                {
-                    "serial": path.stem,
-                    "owner": "<unreadable lease metadata>",
-                    "inaccessible": True,
-                }
+                _inaccessible_entry(
+                    path, platform, "<unreadable lease metadata>", corrupt=False
+                )
             )
             continue
-        if not isinstance(entry, dict) or not entry.get("owner") or not entry.get("serial"):
+        ref = target_from_metadata(entry) if isinstance(entry, dict) else None
+        if ref is not None and ref.platform != str(platform).strip().lower():
+            continue
+        if not isinstance(entry, dict) or not entry.get("owner") or ref is None:
+            if platform != LEGACY_PLATFORM or "--" in path.stem:
+                continue
             out.append(
-                {
-                    "serial": path.stem,
-                    "owner": "<corrupt lease metadata>",
-                    "inaccessible": True,
-                    "corrupt": True,
-                }
+                _inaccessible_entry(
+                    path, platform, "<corrupt lease metadata>", corrupt=True
+                )
             )
         elif not _expired(entry):
+            entry.setdefault("platform", ref.platform)
+            entry.setdefault("target_id", ref.target_id)
+            entry.setdefault("serial", ref.target_id)
             out.append(entry)
     return out
 
 
-def holder(cache_dir: str | Path, serial: str) -> str | None:
-    entry = read_lease(cache_dir, serial)
+def holder(
+    cache_dir: str | Path, serial: TargetLike, *, platform: str = LEGACY_PLATFORM
+) -> str | None:
+    entry = read_lease(cache_dir, serial, platform=platform)
     return str(entry.get("owner")) if entry else None
 
 
-def held_by(cache_dir: str | Path, owner: str) -> list[str]:
+def held_by(
+    cache_dir: str | Path, owner: str, *, platform: str = LEGACY_PLATFORM
+) -> list[str]:
     """Every target this owner holds, including a crash-recoverable replacement reservation."""
 
-    return [str(e["serial"]) for e in held_entries_by(cache_dir, owner)]
+    return [str(e["serial"]) for e in held_entries_by(cache_dir, owner, platform=platform)]
 
 
-def held_entries_by(cache_dir: str | Path, owner: str) -> list[dict[str, Any]]:
-    return [e for e in list_leases(cache_dir) if _entry_matches_owner(e, owner)]
+def held_entries_by(
+    cache_dir: str | Path, owner: str, *, platform: str = LEGACY_PLATFORM
+) -> list[dict[str, Any]]:
+    return [
+        entry
+        for entry in list_leases(cache_dir, platform=platform)
+        if _entry_matches_owner(entry, owner)
+    ]
 
 
-def primary_held_by(cache_dir: str | Path, owner: str) -> list[str]:
+def primary_held_by(
+    cache_dir: str | Path, owner: str, *, platform: str = LEGACY_PLATFORM
+) -> list[str]:
     """Targets eligible for ordinary bare routing (normally exactly zero or one)."""
 
     return [
         str(entry["serial"])
-        for entry in held_entries_by(cache_dir, owner)
+        for entry in held_entries_by(cache_dir, owner, platform=platform)
         if entry.get("role") != "replacement"
     ]
 
 
-def promote_replacement(cache_dir: str | Path, serial: str, *, owner: str) -> bool:
+def promote_replacement(
+    cache_dir: str | Path,
+    serial: TargetLike,
+    *,
+    owner: str,
+    platform: str = LEGACY_PLATFORM,
+) -> bool:
     """Make a reserved replacement the owner's ordinary sticky target."""
 
+    ref = target_ref(serial, platform=platform)
     with (
         _owner_guard(cache_dir, owner),
-        _device_guard(cache_dir, serial),
-        _lease_guard(cache_dir, serial),
+        _device_guard(cache_dir, ref),
+        _lease_guard(cache_dir, ref),
     ):
-        current = read_lease(cache_dir, serial)
+        current = read_lease(cache_dir, ref)
         if current is None or not _entry_matches_owner(current, owner):
             return False
-        if any(held != serial for held in primary_held_by(cache_dir, owner)):
+        if any(
+            held != ref.target_id
+            for held in primary_held_by(cache_dir, owner, platform=ref.platform)
+        ):
             return False
         if current.get("role") != "replacement":
             # Migration from versions that allowed several ordinary leases: after the CLI has
@@ -1231,14 +1382,16 @@ def promote_replacement(cache_dir: str | Path, serial: str, *, owner: str) -> bo
         current["role"] = "primary"
         current.pop("replacement_from", None)
         current["last_activity"] = _now()
-        _write(_lease_path(cache_dir, serial), current)
+        _write(_lease_path(cache_dir, ref), current)
         return True
 
 
-def _recover_completed_replacement(cache_dir: str | Path, owner: str) -> None:
+def _recover_completed_replacement(
+    cache_dir: str | Path, owner: str, *, platform: str = LEGACY_PLATFORM
+) -> None:
     """Promote a reserved target when its cleaned predecessor is already gone after a crash."""
 
-    entries = held_entries_by(cache_dir, owner)
+    entries = held_entries_by(cache_dir, owner, platform=platform)
     live = {str(entry.get("serial") or "") for entry in entries}
     for entry in entries:
         if entry.get("role") != "replacement":
@@ -1247,7 +1400,9 @@ def _recover_completed_replacement(cache_dir: str | Path, owner: str) -> None:
             str(serial) for serial in (entry.get("replacement_from") or []) if serial
         }
         if predecessors and predecessors.isdisjoint(live):
-            promote_replacement(cache_dir, str(entry["serial"]), owner=owner)
+            promote_replacement(
+                cache_dir, str(entry["serial"]), owner=owner, platform=platform
+            )
 
 
 def _replacement_call(serial: str | None, needs: list[str] | None = None) -> str:
@@ -1301,15 +1456,17 @@ def _raise_handoff_pending(serial: str, entry: dict[str, Any]) -> None:
 
 def create_handoff(
     cache_dir: str | Path,
-    serial: str,
+    serial: TargetLike,
     *,
     owner: str,
     ttl_s: int = HANDOFF_TTL_S,
+    platform: str = LEGACY_PLATFORM,
 ) -> dict[str, Any]:
+    ref = target_ref(serial, platform=platform)
     with _owner_guard(cache_dir, owner):
         return _create_handoff_unlocked(
             cache_dir,
-            serial,
+            ref,
             owner=owner,
             ttl_s=ttl_s,
         )
@@ -1317,29 +1474,33 @@ def create_handoff(
 
 def _create_handoff_unlocked(
     cache_dir: str | Path,
-    serial: str,
+    serial: TargetLike,
     *,
     owner: str,
     ttl_s: int = HANDOFF_TTL_S,
+    platform: str = LEGACY_PLATFORM,
 ) -> dict[str, Any]:
     """Create a one-time token and reserve *serial* until acceptance or expiry."""
 
     from .errors import DeviceLeasedError, UsageError
 
-    owned = held_by(cache_dir, owner)
-    other = [held for held in owned if held != serial]
+    ref = target_ref(serial, platform=platform)
+    owned = held_by(cache_dir, owner, platform=ref.platform)
+    other = [held for held in owned if held != ref.target_id]
     if other:
-        _raise_switch_required(owner=owner, held=other, requested=serial)
-    with _device_guard(cache_dir, serial), _lease_guard(cache_dir, serial):
-        current = read_lease(cache_dir, serial)
+        _raise_switch_required(owner=owner, held=other, requested=ref.target_id)
+    with _device_guard(cache_dir, ref), _lease_guard(cache_dir, ref):
+        current = read_lease(cache_dir, ref)
         if current is None or not _entry_matches_owner(current, owner):
             holder_name = str(current.get("owner")) if current else "nobody"
             raise DeviceLeasedError(
-                f"{serial} is not leased by {owner}; current holder: {holder_name}",
+                f"{ref.target_id} is not leased by {owner}; current holder: {holder_name}",
                 hint="Only the current holder can transfer a lease. Run `aua lease list`.",
             )
         if current.get("role") == "replacement":
-            _raise_switch_required(owner=owner, held=[serial], requested=serial)
+            _raise_switch_required(
+                owner=owner, held=[ref.target_id], requested=ref.target_id
+            )
         if not current.get("owner_pid") or not current.get("owner_started"):
             raise UsageError(
                 "lease transfer requires process-bound source ownership",
@@ -1361,9 +1522,9 @@ def _create_handoff_unlocked(
             "created": created,
             "expires": created + max(1, int(ttl_s)),
         }
-        _write(_lease_path(cache_dir, serial), current)
+        _write(_lease_path(cache_dir, ref), current)
         return {
-            "serial": serial,
+            **ref.to_json(),
             "token": token,
             "from_owner": str(owner),
             "expires_in_s": max(1, int(ttl_s)),
@@ -1375,9 +1536,10 @@ def accept_handoff(
     token: str,
     *,
     owner: str,
+    platform: str = LEGACY_PLATFORM,
 ) -> dict[str, Any]:
     with _owner_guard(cache_dir, owner):
-        return _accept_handoff_unlocked(cache_dir, token, owner=owner)
+        return _accept_handoff_unlocked(cache_dir, token, owner=owner, platform=platform)
 
 
 def _accept_handoff_unlocked(
@@ -1385,6 +1547,7 @@ def _accept_handoff_unlocked(
     token: str,
     *,
     owner: str,
+    platform: str = LEGACY_PLATFORM,
 ) -> dict[str, Any]:
     """Atomically rebind a reserved lease to the process presenting its one-time token."""
 
@@ -1402,6 +1565,9 @@ def _accept_handoff_unlocked(
             continue
         if not isinstance(candidate, dict):
             continue
+        candidate_ref = target_from_metadata(candidate)
+        if candidate_ref is None or candidate_ref.platform != str(platform).strip().lower():
+            continue
         handoff = pending_handoff(candidate)
         if handoff and secrets.compare_digest(str(handoff.get("token_hash") or ""), digest):
             matches.append(str(candidate.get("serial") or ""))
@@ -1418,7 +1584,10 @@ def _accept_handoff_unlocked(
             "lease transfer requires a process-bound receiving agent",
             hint="Run `lease accept` from the spawned agent process, not a TTL-only owner label.",
         )
-    previous = [held for held in held_by(cache_dir, owner) if held != serial]
+    ref = TargetRef(platform, serial)
+    previous = [
+        held for held in held_by(cache_dir, owner, platform=ref.platform) if held != serial
+    ]
     if previous:
         raise LeaseSwitchRequiredError(
             f"{owner} already leases {', '.join(previous)}; accepting needs a free owner",
@@ -1429,9 +1598,9 @@ def _accept_handoff_unlocked(
             ),
         )
 
-    with _device_guard(cache_dir, serial), _lease_guard(cache_dir, serial):
+    with _device_guard(cache_dir, ref), _lease_guard(cache_dir, ref):
         try:
-            raw = json.loads(_lease_path(cache_dir, serial).read_text(encoding="utf-8"))
+            raw = json.loads(_lease_path(cache_dir, ref).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             raw = {}
         handoff = pending_handoff(raw)
@@ -1464,29 +1633,36 @@ def _accept_handoff_unlocked(
         raw["last_activity"] = _now()
         raw["pid"] = os.getpid()
         raw["generation"] = secrets.token_hex(16)
-        _write(_lease_path(cache_dir, serial), raw)
-        confirmed = read_lease(cache_dir, serial)
+        _write(_lease_path(cache_dir, ref), raw)
+        confirmed = read_lease(cache_dir, ref)
         if confirmed is None or not _entry_matches_owner(confirmed, owner):
             raise UsageError("lease handoff could not be confirmed; retry with a fresh token")
 
     return {
-        "serial": serial,
+        **ref.to_json(),
         "from_owner": handoff.get("from_owner"),
         "owner": str(owner),
         "previous_serials": previous,
     }
 
 
-def cancel_handoff(cache_dir: str | Path, serial: str, *, owner: str) -> bool:
+def cancel_handoff(
+    cache_dir: str | Path,
+    serial: TargetLike,
+    *,
+    owner: str,
+    platform: str = LEGACY_PLATFORM,
+) -> bool:
     """Cancel an offered handoff without releasing or resetting the device."""
 
+    ref = target_ref(serial, platform=platform)
     with (
         _owner_guard(cache_dir, owner),
-        _device_guard(cache_dir, serial),
-        _lease_guard(cache_dir, serial),
+        _device_guard(cache_dir, ref),
+        _lease_guard(cache_dir, ref),
     ):
         try:
-            current = json.loads(_lease_path(cache_dir, serial).read_text(encoding="utf-8"))
+            current = json.loads(_lease_path(cache_dir, ref).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return False
         if not _entry_matches_owner(current, owner) or not isinstance(
@@ -1495,49 +1671,51 @@ def cancel_handoff(cache_dir: str | Path, serial: str, *, owner: str) -> bool:
             return False
         current.pop("handoff", None)
         current["last_activity"] = _now()
-        _write(_lease_path(cache_dir, serial), current)
+        _write(_lease_path(cache_dir, ref), current)
         return True
 
 
 def validate_use(
     cache_dir: str | Path,
-    serial: str,
+    serial: TargetLike,
     *,
     owner: str,
     expected_generation: str | None = None,
     renew: bool = True,
+    platform: str = LEGACY_PLATFORM,
 ) -> str | None:
     """Fence one device command against transfer/release and return its lease generation."""
 
     from .errors import DeviceLeasedError, LeaseSwitchRequiredError
 
-    with _lease_guard(cache_dir, serial):
-        current = read_lease(cache_dir, serial)
+    ref = target_ref(serial, platform=platform)
+    with _lease_guard(cache_dir, ref):
+        current = read_lease(cache_dir, ref)
         if current is None or not _entry_matches_owner(current, owner):
             holder_name = str(current.get("owner")) if current else "nobody"
             raise DeviceLeasedError(
-                f"{serial} is no longer leased by {owner}; current holder: {holder_name}",
+                f"{ref.target_id} is no longer leased by {owner}; current holder: {holder_name}",
                 hint="Stop this stale call and resolve ownership with `aua lease list`.",
             )
         if renew and not current.get("generation"):
             current["generation"] = secrets.token_hex(16)
-            _write(_lease_path(cache_dir, serial), current)
+            _write(_lease_path(cache_dir, ref), current)
         if expected_generation is not None and current.get("generation") != expected_generation:
             raise DeviceLeasedError(
-                f"{serial} lease generation changed before background work could run",
+                f"{ref.target_id} lease generation changed before background work could run",
                 hint="Discard this stale background result; the current owner must schedule it again.",
             )
         if pending_handoff(current):
-            _raise_handoff_pending(serial, current)
+            _raise_handoff_pending(ref.target_id, current)
         if current.get("role") == "replacement":
             raise LeaseSwitchRequiredError(
-                f"{serial} is only a replacement reservation, not the ordinary target",
-                hint=f"Resume with `aua lease acquire {serial} --replace`.",
+                f"{ref.target_id} is only a replacement reservation, not the ordinary target",
+                hint=f"Resume with `aua lease acquire {ref.target_id} --replace`.",
             )
         if renew:
-            if not _renew_unlocked(cache_dir, serial, owner=owner):
-                raise DeviceLeasedError(f"could not renew the lease on {serial}")
-            current = read_lease(cache_dir, serial)
+            if not _renew_unlocked(cache_dir, ref, owner=owner):
+                raise DeviceLeasedError(f"could not renew the lease on {ref.target_id}")
+            current = read_lease(cache_dir, ref)
         return str(current.get("generation")) if current else None
 
 
@@ -1597,6 +1775,7 @@ def choose_device(
     needs: list[str] | None = None,
     ttl_s: int = DEFAULT_TTL_S,
     allow_replacement: bool = False,
+    platform: str = LEGACY_PLATFORM,
 ) -> tuple[str, str]:
     with _owner_guard(cache_dir, owner):
         return _choose_device_unlocked(
@@ -1607,6 +1786,7 @@ def choose_device(
             needs=needs,
             ttl_s=ttl_s,
             allow_replacement=allow_replacement,
+            platform=platform,
         )
 
 
@@ -1619,6 +1799,7 @@ def _choose_device_unlocked(
     needs: list[str] | None = None,
     ttl_s: int = DEFAULT_TTL_S,
     allow_replacement: bool = False,
+    platform: str = LEGACY_PLATFORM,
 ) -> tuple[str, str]:
     """Pick and claim a device. Returns ``(serial, why)``; raises when nothing is available.
 
@@ -1630,9 +1811,10 @@ def _choose_device_unlocked(
     """
     from .errors import DeviceLeasedError
 
+    platform = str(platform).strip().lower()
     known = dict(candidates)
-    _recover_completed_replacement(cache_dir, owner)
-    entries = held_entries_by(cache_dir, owner)
+    _recover_completed_replacement(cache_dir, owner, platform=platform)
+    entries = held_entries_by(cache_dir, owner, platform=platform)
     all_owned = [str(entry["serial"]) for entry in entries]
     replacements = [
         str(entry["serial"]) for entry in entries if entry.get("role") == "replacement"
@@ -1664,7 +1846,7 @@ def _choose_device_unlocked(
             s
             for s, caps in candidates
             if (
-                (current := read_lease(cache_dir, s)) is None
+                (current := read_lease(cache_dir, s, platform=platform)) is None
                 or _entry_matches_owner(current, owner)
             )
             and not unmet_needs(caps, needs)
@@ -1672,7 +1854,7 @@ def _choose_device_unlocked(
         return ", ".join(free) if free else "none"
 
     if explicit:
-        current = read_lease(cache_dir, explicit)
+        current = read_lease(cache_dir, explicit, platform=platform)
         if current is not None and not _entry_matches_owner(current, owner):
             # This function's contract is that explicit intent is NEVER redirected — but the
             # hint used to open with "free now: <others> — omit --serial to auto-pick", which
@@ -1733,7 +1915,7 @@ def _choose_device_unlocked(
         # Releasing therefore unblocks that cleanup instead of discarding it.
         if explicit in known:
             for stale in [s for s in all_owned if s != explicit and s not in known]:
-                release(cache_dir, stale, owner=owner)
+                release(cache_dir, stale, owner=owner, platform=platform)
         previous = [
             serial for serial in all_owned if serial != explicit and serial in known
         ]
@@ -1751,6 +1933,7 @@ def _choose_device_unlocked(
             ttl_s=ttl_s,
             needs=needs,
             allow_additional=allow_replacement,
+            platform=platform,
         ):
             raise DeviceLeasedError(
                 f"{explicit} lease changed while it was being selected",
@@ -1772,6 +1955,7 @@ def _choose_device_unlocked(
             ttl_s=ttl_s,
             needs=needs,
             allow_additional=True,
+            platform=platform,
         ):
             raise DeviceLeasedError(f"reserved replacement {reserved} could not be renewed")
         return reserved, "replacement_reserved"
@@ -1790,10 +1974,10 @@ def _choose_device_unlocked(
         )
     for serial in owned:
         if serial in known and not unmet_needs(known[serial], needs):
-            current = read_lease(cache_dir, serial)
+            current = read_lease(cache_dir, serial, platform=platform)
             if current is not None and pending_handoff(current):
                 _raise_handoff_pending(serial, current)
-            renew(cache_dir, serial, owner=owner)
+            renew(cache_dir, serial, owner=owner, platform=platform)
             return serial, "sticky"
 
     missing_owned = [serial for serial in owned if serial not in known]
@@ -1816,7 +2000,7 @@ def _choose_device_unlocked(
     for serial, caps in candidates:
         if unmet_needs(caps, needs):
             continue
-        if read_lease(cache_dir, serial) is not None:
+        if read_lease(cache_dir, serial, platform=platform) is not None:
             continue
         if acquire(
             cache_dir,
@@ -1825,11 +2009,12 @@ def _choose_device_unlocked(
             ttl_s=ttl_s,
             needs=needs,
             allow_additional=allow_replacement,
+            platform=platform,
         ):
             return serial, "assigned"
 
     busy_entries = [
-        e for e in list_leases(cache_dir) if e.get("serial") in known
+        e for e in list_leases(cache_dir, platform=platform) if e.get("serial") in known
     ]
     busy = [
         f"{e['serial']} ({e['owner']}, active {idle_seconds(e):.0f}s ago)"
@@ -1877,6 +2062,7 @@ def wait_for_device(
     poll_s: float = 0.25,
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
+    platform: str = LEGACY_PLATFORM,
 ) -> tuple[str, str, int]:
     """Choose a device, optionally waiting without redirecting explicit intent.
 
@@ -1901,6 +2087,7 @@ def wait_for_device(
                 needs=needs,
                 ttl_s=ttl_s,
                 allow_replacement=allow_replacement,
+                platform=platform,
             )
             return serial, why, int(max(0.0, monotonic() - started) * 1000)
         except DeviceLeasedError as exc:

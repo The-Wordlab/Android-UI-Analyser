@@ -290,8 +290,11 @@ def test_resolve_dashboard_targets_grid_by_default(
     assert one_device["focus"] is None
 
 
-def test_owner_for_serial(tmp_path: Path) -> None:
-    from android_ui_analyser import dashboard as dash
+def test_android_supervision_reports_owner_for_serial(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from android_ui_analyser.config import Config
+    from android_ui_analyser.platforms.android import AndroidPlatform
 
     rec = tmp_path / "emulator"
     rec.mkdir()
@@ -306,13 +309,19 @@ def test_owner_for_serial(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
-    assert dash.owner_for_serial(tmp_path, "emulator-5554") == "agent-a"
-    assert dash.owner_for_serial(tmp_path, "emulator-5556") is None
+    platform = AndroidPlatform(Config())
+    monkeypatch.setattr(platform, "prepare_host", lambda: None)
+    service = platform.capability("target_supervision")
+    status = service.target_supervision_status("emulator-5554", cache_dir=tmp_path)
+    assert status is not None
+    assert status.owner == "agent-a"
+    assert service.target_supervision_status("emulator-5556", cache_dir=tmp_path) is None
 
 
 def test_device_runtime_status_reports_lease_and_idle_watchdog(tmp_path: Path) -> None:
     from android_ui_analyser import dashboard as dash
     from android_ui_analyser import leases
+    from android_ui_analyser.platforms import android_supervision
 
     serial = "emulator-5554"
     now = time.time()
@@ -337,7 +346,14 @@ def test_device_runtime_status_reports_lease_and_idle_watchdog(tmp_path: Path) -
     )
     assert leases.acquire(tmp_path, serial, owner="agent-a", ttl_s=900)
 
-    runtime = dash.device_runtime_status(tmp_path, serial, now=now)
+    runtime = dash.device_runtime_status(
+        tmp_path,
+        serial,
+        now=now,
+        supervision=android_supervision.target_supervision_status(
+            serial, cache_dir=tmp_path
+        ),
+    )
 
     assert runtime["lease"]["held"] is True
     assert runtime["lease"]["owner"] == "agent-a"
@@ -366,7 +382,14 @@ def test_device_runtime_status_reports_lease_and_idle_watchdog(tmp_path: Path) -
         ),
         encoding="utf-8",
     )
-    disabled = dash.device_runtime_status(tmp_path, serial, now=now)
+    disabled = dash.device_runtime_status(
+        tmp_path,
+        serial,
+        now=now,
+        supervision=android_supervision.target_supervision_status(
+            serial, cache_dir=tmp_path
+        ),
+    )
     assert disabled["watchdog"]["enabled"] is False
     assert disabled["watchdog"]["running"] is False
     assert disabled["watchdog"]["remaining_s"] is None
@@ -671,6 +694,10 @@ def test_dashboard_forwards_app_scoped_logcat_to_the_selected_platform(tmp_path:
     calls: list[tuple[str, int, str | None]] = []
 
     class FakePlatform:
+        def adapter_capability(self, capability: str) -> FakePlatform:
+            assert capability == "device.logs"
+            return self
+
         def recent_logs(
             self, target_id: str, *, limit: int = 80, app_id: str | None = None
         ) -> list[str]:
@@ -699,7 +726,7 @@ def test_map_payload_contains_expandable_route_steps_and_all_app_flows(
             return dict(self.payload)
 
     class FakeFlowStore:
-        def __init__(self, _config: Any) -> None:
+        def __init__(self, _config: Any, **_kwargs: Any) -> None:
             pass
 
         def list(self) -> list[dict[str, Any]]:
@@ -766,7 +793,7 @@ def test_map_payload_contains_expandable_route_steps_and_all_app_flows(
     )
 
     class FakeAppMemoryStore:
-        def __init__(self, _config: Any) -> None:
+        def __init__(self, _config: Any, **_kwargs: Any) -> None:
             pass
 
         def load(self, package: str) -> Any:
@@ -1995,7 +2022,11 @@ def test_a_tile_never_takes_the_uiautomation_slot_from_the_agent_using_the_devic
         raise AssertionError("the dashboard must not connect to a device another agent holds")
 
     monkeypatch.setattr(state.platform, "connect", refuse)
-    monkeypatch.setattr(leases, "read_lease", lambda _cache, _ser: {"owner": "some-other-agent"})
+    monkeypatch.setattr(
+        leases,
+        "read_lease",
+        lambda _cache, _ser, **_kwargs: {"owner": "some-other-agent"},
+    )
 
     frames = tmp_path / "captures" / "emulator-5554" / "s1" / "frames"
     frames.mkdir(parents=True)
@@ -2008,7 +2039,7 @@ def test_a_tile_never_takes_the_uiautomation_slot_from_the_agent_using_the_devic
     assert data == b"last-known"
 
     # Nobody holding it → the screencap fallback is allowed again.
-    monkeypatch.setattr(leases, "read_lease", lambda _cache, _ser: None)
+    monkeypatch.setattr(leases, "read_lease", lambda _cache, _ser, **_kwargs: None)
     live_png = b"\x89PNG\r\n\x1a\nfresh"
 
     class _Img:

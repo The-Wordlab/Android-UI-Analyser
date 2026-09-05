@@ -1140,6 +1140,8 @@ strategy. `device.platform`, `--platform`, or `AUA_PLATFORM` can select an insta
 third-party packages register adapters through the `aua.platforms` Python entry-point group.
 The choice is process/config scoped (not repeated on every command), and both target actions and
 optional services are gated: another platform never silently falls back to ADB.
+Optional simulator/emulator lifecycle uses the neutral `virtual_targets` capability and
+`aua virtual-target ...` commands; established `aua emulator ...` commands remain Android aliases.
 See [Platform adapters](docs/platform-plugins.md) for the contract and a minimal plugin skeleton.
 
 ## Adding a provider
@@ -1432,6 +1434,9 @@ Tools include (non-exhaustive): `analyze_screen`, `tap_and_analyze`,
 `scroll_to_and_analyze`, `key_and_analyze`, `wait_and_analyze`,
 `wait_stable_and_analyze`, `wait_changed_and_analyze`, `has`,
 `expect`, `screenshot`, `inspect`, `goto`, `flow_run`, `navigate`, `policy_status`, `list_devices`,
+`virtual_target_list` / `virtual_target_status` / `virtual_target_start` /
+`virtual_target_provision` / `virtual_target_create` / `virtual_target_delete` /
+`virtual_target_stop` / `virtual_target_reclaim`, plus the Android aliases
 `emulator_list` / `emulator_status` / `emulator_start` / `emulator_stop` (stop before exit —
 MCP also auto-stops emulators it started when the server process ends), `open_link_and_analyze`,
 `app`, `install_app`, `resolve`, clipboard/paste/copy/erase,
@@ -1758,6 +1763,7 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 | `aua shell COMMAND…` | Bounded read-only diagnostic on the leased target; argv is remote-shell-quoted, unknown/mutating verbs are refused, and each output stream is capped at 256 KiB |
 | `aua db list\|schema\|query` | Structured private SQLite inspection for debuggable apps |
 | `aua db execute\|backup\|backups\|restore` | Confirmed, backed-up data mutation and rollback |
+| `aua virtual-target list\|status\|start\|provision\|create\|delete\|stop\|reclaim` | Manage the selected platform's optional virtual targets through the shared Engine contract |
 | `aua emulator list\|status\|start\|stop` | Boot/stop AVDs (`--headless`, `--audio`, `--parallel`, `--gpu`, `--mine`/`--owner`); `start --apk <app.apk> --launch` boots, installs, and opens in one call |
 | `aua emulator recommend-proxy\|ensure-proxy` | Suggest/create a small rootable Google APIs AVD |
 | `aua flags set\|apply` | Feature-flag writes with verify/restart |

@@ -1697,6 +1697,45 @@ def _adb(serial: str, *args: str, check: bool = True, timeout: float = 60) -> su
 
 
 def install_system_ca(serial: str, *, pem: Path | None = None) -> dict[str, Any]:
+    """Install the runtime CA overlay without leaving adbd more privileged than it began."""
+
+    was_root = _adbd_is_root(serial)
+    try:
+        result = _install_system_ca_rooted(serial, pem=pem)
+    except Exception as install_error:
+        try:
+            if not was_root:
+                _restore_non_root_adbd(serial)
+        except Exception as cleanup_error:
+            raise DeviceError(
+                f"{install_error}; additionally could not restore non-root adbd: {cleanup_error}",
+                code="proxy_ca_root_restore_failed",
+            ) from install_error
+        raise
+    if not was_root:
+        _restore_non_root_adbd(serial)
+    return result
+
+
+def _adbd_is_root(serial: str) -> bool:
+    result = _adb(serial, "shell", "id", "-u", check=False, timeout=15)
+    return result.returncode == 0 and (result.stdout or "").strip() == "0"
+
+
+def _restore_non_root_adbd(serial: str) -> None:
+    if not _adbd_is_root(serial):
+        return
+    result = _adb(serial, "unroot", check=False, timeout=30)
+    blob = ((result.stdout or "") + (result.stderr or "")).strip()
+    if result.returncode != 0:
+        raise DeviceError(blob or f"adb unroot failed with exit status {result.returncode}")
+    _adb(serial, "wait-for-device", check=False, timeout=60)
+    time.sleep(0.5)
+    if _adbd_is_root(serial):
+        raise DeviceError(f"adbd on {serial} stayed root after `adb unroot`")
+
+
+def _install_system_ca_rooted(serial: str, *, pem: Path | None = None) -> dict[str, Any]:
     """Install the mitm CA into the *system* trust store (emulator / rooted device).
 
     Android 7+ apps ignore user CAs unless their NSC opts in. An NSC that lists only

@@ -1,30 +1,49 @@
 """Common platform boundary for target discovery, connection, and UI normalization.
 
-The engine still speaks the existing :class:`~android_ui_analyser.device.Device`
-runtime protocol.  A platform adapter is the replaceable strategy that creates that
-runtime and translates its native UI tree into AUA's canonical ``Element`` schema.
+A platform adapter creates a platform-neutral :class:`TargetRuntime` and translates its
+native UI tree into AUA's canonical ``Element`` schema.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, overload
 
-from ..device import Device
 from ..errors import (
+    ConfigError,
     DeviceError,
     InvalidPlatformCapabilityError,
     UnsupportedPlatformCapabilityError,
+    UsageError,
 )
-from ..schema import DeviceInfo, Element
-from .services import missing_members
+from ..schema import AppContext, DeviceInfo, Element, TargetInfo
+from .api import PLATFORM_API_VERSION
+from .contracts import (
+    ADAPTER_CAPABILITIES,
+    DIRECT_CAPABILITIES,
+    RUNTIME_CAPABILITIES,
+    missing_structural_members,
+    normalize_capability,
+)
+from .geometry import DisplayGeometry
+from .runtime import TargetRuntime
+from .services import (
+    CAPABILITY_METHODS,
+    TargetSupervisionService,
+    VirtualTargetsService,
+    missing_members,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..config import Config
     from ..providers.base import ScreenImage
+    from .diagnostics import AppExitEvidence, DiagnosticSourcePolicy, DiagnosticWindow
+
+
+DiscoveredTarget = TargetInfo | DeviceInfo
 
 
 @dataclass(frozen=True)
@@ -68,16 +87,35 @@ class PlatformAdapter(ABC):
     """
 
     name: ClassVar[str]
+    platform_api_version: ClassVar[int] = PLATFORM_API_VERSION
+    api_version: ClassVar[int] = PLATFORM_API_VERSION  # compatibility for early plugin drafts
     capabilities: ClassVar[frozenset[str]] = frozenset()
 
     def __init__(self, config: Config) -> None:
         self.config = config
+        self.options: Mapping[str, Any] = {}
         self._capability_cache: dict[str, Any] = {}
 
     def prepare_host(self) -> None:
         """Make host-side tooling discoverable before connecting, if necessary."""
 
         return None
+
+    def validate_options(self, options: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Validate adapter-owned configuration and return its normalized representation.
+
+        The default is deliberately closed: silently accepting unknown options makes a misspelled
+        plugin setting look configured while the adapter runs with another behavior. Platforms
+        with options override this method and may return a copied/normalized mapping.
+        """
+
+        if options:
+            unknown = ", ".join(sorted(str(key) for key in options))
+            raise ConfigError(
+                f"platform {self.name!r} does not accept configuration options: {unknown}",
+                hint="Remove these options or install an adapter version that declares them.",
+            )
+        return {}
 
     def forget_app_process(self, app_id: str | None = None) -> None:
         """Forget anything cached about an app's *process*, after a lifecycle event.
@@ -94,24 +132,37 @@ class PlatformAdapter(ABC):
         return None
 
     @abstractmethod
-    def connect(self, target_id: str | None = None) -> Device:
+    def connect(self, target_id: str | None = None) -> TargetRuntime:
         """Connect to a target, or choose the sole available target."""
 
     @abstractmethod
-    def list_targets(self) -> list[DeviceInfo]:
+    def list_targets(self) -> list[DiscoveredTarget]:
         """List targets using AUA's current cross-process target schema."""
 
-    def target_preference(self, target: DeviceInfo) -> int:
+    def target_preference(self, target: DiscoveredTarget) -> int:
         """Lower values win when an unpinned lease chooses among free targets."""
 
         return 0
+
+    def normalize_key(self, name: str) -> str:
+        """Validate one platform-neutral key name before it reaches target input.
+
+        The base contract accepts any non-empty semantic name so a plugin may define keys its
+        native framework supports. Built-in adapters may retain validation for historical native
+        aliases without leaking those aliases into Engine or portable flow parsing.
+        """
+
+        candidate = str(name).strip()
+        if not candidate:
+            raise UsageError("key name must not be empty")
+        return candidate
 
     def probe_target_capabilities(self, target_id: str) -> dict[str, Any]:
         """Return runtime capabilities used by lease requirements such as ``--needs``."""
 
         return {}
 
-    def dump_tree(self, runtime: Device, *, compact: bool = False) -> str:
+    def dump_tree(self, runtime: TargetRuntime, *, compact: bool = False) -> str:
         """Capture the platform-native UI tree from an already connected runtime."""
 
         return runtime.dump_hierarchy(compressed=compact)
@@ -121,12 +172,7 @@ class PlatformAdapter(ABC):
     ) -> list[str]:
         """Return recent target logs, optionally scoped to one app's current process."""
 
-        if app_id:
-            raise UnsupportedPlatformCapabilityError(self.name, "app_scoped_logs")
-
-        count = max(1, int(limit))
-        text = self.connect(target_id).logcat()
-        return [line for line in text.splitlines() if line.strip()][-count:]
+        raise UnsupportedPlatformCapabilityError(self.name, "device.logs")
 
     @abstractmethod
     def normalize_tree(
@@ -134,9 +180,16 @@ class PlatformAdapter(ABC):
         raw_tree: str,
         screen_size: tuple[int, int],
         *,
+        geometry: DisplayGeometry | None = None,
         ignored_app_ids: Sequence[str] = (),
     ) -> NormalizedTree:
-        """Translate a native UI tree into canonical elements and foreground app id."""
+        """Translate a native UI tree into canonical elements and foreground app id.
+
+        ``geometry`` maps the platform automation API's coordinate space into the physical
+        pixels of the captured frame. Adapters whose trees use logical points or rotated native
+        coordinates must transform every returned bound through it. It is optional only so
+        direct compatibility calls made without a connected runtime keep working.
+        """
 
     def element_state(self, raw_tree: str, element: Element) -> dict[str, object]:
         """Return assertion state for one normalized element.
@@ -157,11 +210,101 @@ class PlatformAdapter(ABC):
         }
 
     def supports(self, capability: str) -> bool:
-        return capability in self.capabilities
+        key = normalize_capability(capability)
+        return key in {normalize_capability(item) for item in self.capabilities}
+
+    def validate_declared_capabilities(self) -> None:
+        """Reject unknown and incomplete adapter-scoped capability promises.
+
+        Services stay lazy and runtime operations are validated once a target is connected.
+        Adapter operations can be verified immediately without importing any optional service.
+        """
+
+        declared = {normalize_capability(item) for item in self.capabilities}
+        known = set(DIRECT_CAPABILITIES) | set(CAPABILITY_METHODS)
+        unknown = sorted(declared - known)
+        if unknown:
+            raise InvalidPlatformCapabilityError(
+                self.name,
+                unknown[0],
+                ["registered capability specification"],
+            )
+        for name, spec in ADAPTER_CAPABILITIES.items():
+            if name not in declared:
+                continue
+            missing = missing_structural_members(
+                self,
+                spec.members,
+                default_owner=PlatformAdapter,
+                inherited_defaults=spec.inherited_defaults,
+            )
+            if missing:
+                raise InvalidPlatformCapabilityError(self.name, name, missing)
+
+    def validate_runtime(self, runtime: TargetRuntime) -> TargetRuntime:
+        """Validate every runtime capability claimed by this adapter after connection."""
+
+        target_id = getattr(runtime, "target_id", None)
+        if not isinstance(target_id, str) or not target_id.strip():
+            raise InvalidPlatformCapabilityError(
+                self.name,
+                "target_runtime",
+                ["non-empty string target_id"],
+            )
+        for name, spec in RUNTIME_CAPABILITIES.items():
+            if not self.supports(name):
+                continue
+            missing = missing_structural_members(
+                runtime,
+                spec.members,
+                default_owner=TargetRuntime,
+                inherited_defaults=spec.inherited_defaults,
+            )
+            if missing:
+                raise InvalidPlatformCapabilityError(self.name, name, missing)
+        return runtime
+
+    def runtime_capability(
+        self,
+        capability: str,
+        runtime: TargetRuntime,
+    ) -> TargetRuntime:
+        """Resolve one per-target capability and validate its complete runtime surface."""
+
+        key = normalize_capability(capability)
+        spec = RUNTIME_CAPABILITIES.get(key)
+        if spec is None or not self.supports(key):
+            raise UnsupportedPlatformCapabilityError(self.name, key)
+        missing = missing_structural_members(
+            runtime,
+            spec.members,
+            default_owner=TargetRuntime,
+            inherited_defaults=spec.inherited_defaults,
+        )
+        if missing:
+            raise InvalidPlatformCapabilityError(self.name, key, missing)
+        return runtime
+
+    def adapter_capability(self, capability: str) -> PlatformAdapter:
+        """Resolve one adapter-owned capability without loading a service module."""
+
+        key = normalize_capability(capability)
+        spec = ADAPTER_CAPABILITIES.get(key)
+        if spec is None or not self.supports(key):
+            raise UnsupportedPlatformCapabilityError(self.name, key)
+        missing = missing_structural_members(
+            self,
+            spec.members,
+            default_owner=PlatformAdapter,
+            inherited_defaults=spec.inherited_defaults,
+        )
+        if missing:
+            raise InvalidPlatformCapabilityError(self.name, key, missing)
+        return self
 
     def diagnostic_logs(
         self,
-        runtime: Device,
+        runtime: TargetRuntime,
         *,
         lines: int = 400,
         since_ms: int | None = None,
@@ -185,6 +328,84 @@ class PlatformAdapter(ABC):
             code="unsupported_capability",
         )
 
+    def diagnostic_window(
+        self,
+        runtime: TargetRuntime,
+        *,
+        lines: int = 400,
+        since: str | int | None = None,
+        app_id: str | None = None,
+    ) -> DiagnosticWindow:
+        """Return normalized diagnostics owned and interpreted by this adapter."""
+
+        raise UnsupportedPlatformCapabilityError(self.name, "device.logs")
+
+    def mark_diagnostics(
+        self,
+        runtime: TargetRuntime,
+        name: str = "default",
+        *,
+        clear: bool = False,
+        refresh_clock: bool = False,
+    ) -> dict[str, Any]:
+        """Persist an adapter-clock cursor for a later diagnostic window."""
+
+        raise UnsupportedPlatformCapabilityError(self.name, "device.logs")
+
+    def clear_diagnostics(self, runtime: TargetRuntime) -> None:
+        """Clear this target's platform diagnostic buffer when supported."""
+
+        raise UnsupportedPlatformCapabilityError(self.name, "device.logs")
+
+    def diagnostic_source_policy(self, app_id: str | None = None) -> DiagnosticSourcePolicy:
+        """Adapter-owned default source filtering, available without a connected target."""
+
+        from .diagnostics import DiagnosticSourcePolicy
+
+        return DiagnosticSourcePolicy()
+
+    def app_exit_evidence(
+        self,
+        before: AppContext | str | None,
+        after: AppContext | str | None,
+        elements: Sequence[Element],
+    ) -> AppExitEvidence | None:
+        """Interpret platform-owned evidence that the tested app exited unexpectedly.
+
+        App-to-app hand-offs are ordinary navigation, while a launcher fallback or native crash
+        surface may prove that the app died.  Those distinctions depend on platform-owned app
+        identities and system UI, so the shared engine must not infer them from Android package
+        names or resource ids.  Adapters return normalized evidence when they can prove an exit.
+        """
+
+        return None
+
+    def link_chooser_visible(self, runtime: TargetRuntime) -> bool:
+        """Whether a platform-owned app-selection surface intercepted an opened link.
+
+        The generic engine understands the consequence (the requested destination has not
+        landed), but package names, native resolver activities and localized system labels are
+        platform grammar. Adapters that expose such a surface normalize it here. Platforms that
+        dispatch links deterministically can keep the conservative default.
+        """
+
+        return False
+
+    def link_chooser_candidates(
+        self,
+        elements: Sequence[Element],
+        *,
+        preferred_app_id: str | None = None,
+    ) -> list[Element]:
+        """Return selectable app rows from a normalized link chooser, best candidate first."""
+
+        return []
+
+    def link_chooser_confirmation(self, elements: Sequence[Element]) -> Element | None:
+        """Return a follow-up confirmation control after choosing a link handler, if any."""
+
+        return None
+
     # -- app bundle delivery (capability ``app.install``) -----------------
     #
     # "Get the build under test onto the target" is the first step of every run, and it was the
@@ -202,7 +423,7 @@ class PlatformAdapter(ABC):
             code="unsupported_capability",
         )
 
-    def installed_app(self, runtime: Device, app_id: str) -> InstalledApp:
+    def installed_app(self, runtime: TargetRuntime, app_id: str) -> InstalledApp:
         """Report whether *app_id* is installed on the target, and at which version."""
 
         raise DeviceError(
@@ -212,7 +433,7 @@ class PlatformAdapter(ABC):
 
     def install_app_bundle(
         self,
-        runtime: Device,
+        runtime: TargetRuntime,
         bundle: Path,
         *,
         replace: bool = True,
@@ -226,7 +447,7 @@ class PlatformAdapter(ABC):
             code="unsupported_capability",
         )
 
-    def uninstall_app(self, runtime: Device, app_id: str) -> None:
+    def uninstall_app(self, runtime: TargetRuntime, app_id: str) -> None:
         """Remove *app_id* and its data. An app that is already absent is not an error."""
 
         raise DeviceError(
@@ -234,7 +455,7 @@ class PlatformAdapter(ABC):
             code="unsupported_capability",
         )
 
-    def install_persistence_warning(self, runtime: Device) -> str | None:
+    def install_persistence_warning(self, runtime: TargetRuntime) -> str | None:
         """Why an install on this target may not outlive the session, or ``None`` if it will.
 
         A disposable target can accept an install, confirm it, and lose it on restart. That is a
@@ -244,11 +465,11 @@ class PlatformAdapter(ABC):
 
         return None
 
-    def capture_screenshot(self, runtime: Device) -> ScreenImage:
+    def capture_screenshot(self, runtime: TargetRuntime) -> ScreenImage:
         """Capture the current UI frame through the selected platform runtime.
 
         Evidence writers use this capability instead of reaching through the generic engine to
-        an Android-backed ``Device``.  Adapters that do not advertise ``ui.screenshot`` fail
+        a native runtime. Adapters that do not advertise ``ui.screenshot`` fail
         explicitly so unsupported evidence never falls back to Android tooling.
         """
 
@@ -260,10 +481,10 @@ class PlatformAdapter(ABC):
     def load_capability(self, capability: str) -> Any | None:
         """Return the implementation of one optional semantic capability.
 
-        Target-level operations live on :class:`Device`; host/platform-wide operations use
-        this second gate.  Implementations are structural services: for example,
-        ``virtual_devices`` exposes ``list_avds/start/stop`` and ``app_database`` exposes
-        ``list_databases/query_database/execute_database``.  The stable capability names and
+        Target-level operations live on :class:`TargetRuntime`; host/platform-wide operations use
+        this second gate. Implementations are structural services: for example,
+        ``virtual_targets`` exposes neutral discover/start/stop operations and ``app_database``
+        exposes ``list_databases/query_database/execute_database``. The stable capability names and
         their public method surfaces are the plugin contract; core code must never import a
         concrete platform module as a fallback.
 
@@ -273,11 +494,30 @@ class PlatformAdapter(ABC):
 
         return None
 
+    @overload
+    def capability(
+        self,
+        capability: Literal["virtual_targets", "virtual_devices", "emulator"],
+    ) -> VirtualTargetsService: ...
+
+    @overload
+    def capability(
+        self,
+        capability: Literal["target_supervision"],
+    ) -> TargetSupervisionService: ...
+
+    @overload
+    def capability(self, capability: str) -> Any: ...
+
     def capability(self, capability: str) -> Any:
         """Resolve and memoize a semantic service, or raise a typed refusal."""
 
-        key = str(capability).strip().lower().replace("-", "_")
-        if key not in self.capabilities:
+        key = normalize_capability(capability)
+        if key in ADAPTER_CAPABILITIES:
+            return self.adapter_capability(key)
+        if key in RUNTIME_CAPABILITIES:
+            raise UnsupportedPlatformCapabilityError(self.name, key)
+        if not self.supports(key):
             raise UnsupportedPlatformCapabilityError(self.name, key)
         if key not in self._capability_cache:
             service = self.load_capability(key)

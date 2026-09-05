@@ -37,7 +37,7 @@ def patched_device(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeDevic
         hierarchy_xml=_HIERARCHY,
         resource_index={"com.example.fiction:id/continue_btn": (40, 200, 1040, 320)},
     )
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: device)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: device)
     monkeypatch.setenv("AUA_CACHE__DIR", str(tmp_path / "cache"))
     monkeypatch.setenv("AUA_LEASE__REGISTRY_DIR", str(tmp_path / "cache"))
     monkeypatch.setenv("AUA_DAEMON__ENABLED", "false")

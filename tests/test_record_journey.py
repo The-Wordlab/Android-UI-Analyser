@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from android_ui_analyser import device_ledger
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.errors import AuaError
 from conftest import make_config
@@ -31,6 +32,7 @@ class _Agent:
         self.bound_after_release = True
         # Whether the service is still armed when the journey is drained.
         self.still_recording = True
+        self.touch_capture_calls: list[str] = []
 
     def is_bound(self, serial: str) -> bool:  # noqa: F811 - overrides the simple stub below
         return self.enabled and self.bound_after_release
@@ -69,6 +71,18 @@ class _Agent:
 
         return _Channel()
 
+    def start_touch_capture(self, serial: str) -> dict[str, Any]:
+        self.touch_capture_calls.append(f"start:{serial}")
+        return {"capturing": True}
+
+    def stop_touch_capture(self, serial: str) -> list[Any]:
+        self.touch_capture_calls.append(f"stop:{serial}")
+        return []
+
+    def discard_touch_capture(self, serial: str) -> dict[str, Any]:
+        self.touch_capture_calls.append(f"discard:{serial}")
+        return {"capturing": False}
+
 
 def _engine(tmp_path: Path, agent: _Agent) -> Engine:
     cfg = make_config(
@@ -98,6 +112,61 @@ def test_arming_the_recorder_never_connects_the_device(tmp_path: Path) -> None:
     assert agent.calls == ["record.start"]
     assert agent.released == ["emulator-1234"], (
         "the UiAutomation slot was not handed back, so the helper's service stays torn down"
+    )
+
+
+def test_touch_capture_is_recorded_before_start_and_forgotten_after_stop(tmp_path: Path) -> None:
+    agent = _Agent()
+    engine = _engine(tmp_path, agent)
+    original_start = agent.start_touch_capture
+
+    def guarded_start(serial: str) -> dict[str, Any]:
+        pending = device_ledger.read_ledger(serial, platform=engine.platform.name)
+        assert any(
+            entry.key == "device_agent_touch_capture"
+            and entry.op == "stop_device_agent_touch_capture"
+            for entry in pending
+        ), "detached touch capture started before its durable stop record"
+        return original_start(serial)
+
+    agent.start_touch_capture = guarded_start  # type: ignore[method-assign]
+
+    assert engine.demo_record_start()["touch_capture"] is True
+    assert any(
+        entry.key == "device_agent_touch_capture"
+        for entry in device_ledger.read_ledger("emulator-1234", platform=engine.platform.name)
+    )
+
+    engine.demo_record_stop()
+
+    assert agent.touch_capture_calls == [
+        "start:emulator-1234",
+        "stop:emulator-1234",
+        "discard:emulator-1234",
+    ]
+    assert not any(
+        entry.key == "device_agent_touch_capture"
+        for entry in device_ledger.read_ledger("emulator-1234", platform=engine.platform.name)
+    )
+
+
+def test_touch_capture_cleanup_failure_keeps_the_durable_stop_pending(tmp_path: Path) -> None:
+    agent = _Agent()
+    engine = _engine(tmp_path, agent)
+    engine.demo_record_start()
+
+    def refuse_discard(serial: str) -> dict[str, Any]:
+        raise RuntimeError(f"capture still running on {serial}")
+
+    agent.discard_touch_capture = refuse_discard  # type: ignore[method-assign]
+
+    result = engine.demo_record_stop()
+
+    assert result["ok"] is True
+    assert result["recovered_from_touches"] == 0
+    assert any(
+        entry.key == "device_agent_touch_capture"
+        for entry in device_ledger.read_ledger("emulator-1234", platform=engine.platform.name)
     )
 
 

@@ -10,7 +10,6 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from android_ui_analyser import engine as engine_mod
 from android_ui_analyser.cli import app
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.logcat import (
@@ -22,6 +21,7 @@ from android_ui_analyser.logcat import (
     resolve_since_ms,
     set_mark,
 )
+from android_ui_analyser.platforms.android import AndroidPlatform
 from conftest import FakeDevice, make_config, make_engine
 
 runner = CliRunner()
@@ -481,7 +481,7 @@ def test_cli_logcat_mark_and_dump(monkeypatch) -> None:
     epoch_line = f"{ts // 1000}.{ts % 1000:03d}  1  1 I Ui: hello world"
     later = f"{ts // 1000 + 60}.000  1  1 I Ui: after mark"
     dev._logcat_lines = [epoch_line, later]
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
+    monkeypatch.setattr(AndroidPlatform, "connect", lambda self, target_id=None: dev)
 
     r = runner.invoke(app, ["logcat", "mark", "t0"])
     assert r.exit_code == 0, r.stderr

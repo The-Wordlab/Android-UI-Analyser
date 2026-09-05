@@ -1058,7 +1058,7 @@ def test_back_until_stops_after_one_no_progress_hardware_back(monkeypatch: Any) 
 
 def test_cli_back_until_returns_final_observation(monkeypatch: Any) -> None:
     device = FakeDevice(serial="back-cli")
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: device)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: device)
     monkeypatch.setattr(
         Engine,
         "back_until",
@@ -1086,7 +1086,7 @@ def test_cli_back_until_deprecated_max_back_alias_maps_to_max_steps(
     monkeypatch: Any,
 ) -> None:
     device = FakeDevice(serial="back-cli-max-back")
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: device)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: device)
     calls: list[dict[str, Any]] = []
     monkeypatch.setattr(
         Engine,
@@ -1123,7 +1123,7 @@ def test_cli_back_until_max_back_help_and_conflict_are_explicit(monkeypatch: Any
     assert normalized_help.count("--max-steps") >= 2
 
     device = FakeDevice(serial="back-cli-max-conflict")
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: device)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: device)
     conflict = runner.invoke(
         app,
         [
@@ -1146,7 +1146,7 @@ def test_cli_back_until_rejects_global_until_and_multiple_back_selectors(
     monkeypatch: Any,
 ) -> None:
     device = FakeDevice(serial="back-cli-invalid")
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: device)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: device)
     calls: list[dict[str, Any]] = []
     monkeypatch.setattr(
         Engine,

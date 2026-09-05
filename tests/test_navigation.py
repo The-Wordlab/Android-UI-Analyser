@@ -558,7 +558,11 @@ def test_cli_tap_observe(monkeypatch) -> None:
         dev.serial = serial or dev.serial
         return dev
 
-    monkeypatch.setattr(engine_mod, "connect", connect_selected)
+    monkeypatch.setattr(
+        engine_mod.Engine,
+        "_connect_target",
+        lambda _engine, serial=None: connect_selected(serial),
+    )
     a = runner.invoke(app, ["--format", "compact", "analyze", "--source", "hierarchy"])
     tid = next(e["id"] for e in json.loads(a.stdout)["elements"] if e.get("text") == "Apps")
     r = runner.invoke(app, ["--format", "compact", "tap-and-analyze", str(tid)])
@@ -639,7 +643,11 @@ def test_cli_goto_drives_and_unknown(tmp_path: Path, monkeypatch) -> None:
         dev.serial = serial or dev.serial
         return dev
 
-    monkeypatch.setattr(engine_mod, "connect", connect_selected)
+    monkeypatch.setattr(
+        engine_mod.Engine,
+        "_connect_target",
+        lambda _engine, serial=None: connect_selected(serial),
+    )
 
     ok = runner.invoke(app, ["--format", "compact", "goto", "reports"])
     assert ok.exit_code == 0, ok.stderr
@@ -824,7 +832,11 @@ def test_cli_goto_accepts_allow_destructive(tmp_path: Path, monkeypatch) -> None
         dev.serial = serial or dev.serial
         return dev
 
-    monkeypatch.setattr(engine_mod, "connect", connect_selected)
+    monkeypatch.setattr(
+        engine_mod.Engine,
+        "_connect_target",
+        lambda _engine, serial=None: connect_selected(serial),
+    )
 
     refused = runner.invoke(app, ["--format", "compact", "goto", "prefs"])
     assert refused.exit_code == 1

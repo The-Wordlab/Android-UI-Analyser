@@ -126,9 +126,11 @@ _NETWORK_PROFILES = frozenset({"wifi-only", "cellular-only", "slow", "lossy"})
 # replaces the file it names, so a traversal would replace a different one. Kept here as well as
 # in the device-side writer because a flow must be refused at load time, before it acts.
 _PREFS_FILE_RE = re.compile(r"^[A-Za-z0-9_.\-]+\.xml$")
-# Keep this vocabulary aligned with Engine.key.  Importing Engine here would create a cycle:
-# Engine deliberately imports the flow parser only at the flow execution boundary.
-_KEY_NAMES = frozenset(
+# Saved flows use a finite semantic vocabulary so misspellings fail while the flow is parsed.
+# The selected adapter still owns the native mapping and may explicitly reject a semantic key
+# during whole-graph preflight. KEYCODE_* and numeric values remain accepted only for backwards
+# compatibility with existing Android-authored flows.
+_PORTABLE_FLOW_KEY_NAMES = frozenset(
     {
         "home",
         "back",
@@ -151,6 +153,7 @@ _KEY_NAMES = frozenset(
         "power",
     }
 )
+_LEGACY_KEYCODE_RE = re.compile(r"^KEYCODE_[A-Z0-9_]+$", re.IGNORECASE)
 _BARE_KINDS = frozenset(
     {
         "wait-stable",
@@ -397,26 +400,35 @@ def _string(value: Any, *, field: str, index: int, optional: bool = True) -> str
 
 
 def _key_string(value: Any, *, field: str, index: int) -> str:
-    """Return a key name in the same accepted vocabulary as :meth:`Engine.key`.
+    """Return a key in the finite saved-flow vocabulary.
 
-    YAML decodes an unquoted numeric keycode as an integer.  Accept that one lossless scalar
-    conversion while retaining the parser's refusal to coerce booleans, floats, or containers.
+    YAML decodes an unquoted legacy Android numeric keycode as an integer. Accept that one
+    lossless scalar conversion for compatibility. The selected adapter gets the final say during
+    execution preflight, so it can map or explicitly reject any otherwise valid saved-flow key.
     """
     if isinstance(value, int) and not isinstance(value, bool):
+        if value < 0:
+            raise _step_error(index, f"{field} numeric value must not be negative")
         value = str(value)
     parsed = _string(value, field=field, index=index, optional=False)
     assert parsed is not None  # optional=False
     candidate = parsed.strip()
+    # Preserve the legacy numeric-keycode shorthand without turning a negative YAML integer into
+    # an apparently valid platform key after the scalar-to-string compatibility conversion.
+    if candidate.startswith("-") and candidate[1:].isdigit():
+        raise _step_error(index, f"{field} numeric value must not be negative")
     if not (
-        candidate.lower() in _KEY_NAMES
-        or candidate.upper().startswith("KEYCODE_")
+        candidate.casefold() in _PORTABLE_FLOW_KEY_NAMES
+        or _LEGACY_KEYCODE_RE.fullmatch(candidate)
         or candidate.isdigit()
     ):
         raise _step_error(
             index,
-            f"{field} is not a supported Android key: {value!r}",
+            f"{field} is not a supported saved-flow key: {value!r}",
             hint=(
-                "Use one of " + ", ".join(sorted(_KEY_NAMES)) + ", KEYCODE_*, or a numeric keycode."
+                "Use one of "
+                + ", ".join(sorted(_PORTABLE_FLOW_KEY_NAMES))
+                + ", or a legacy KEYCODE_* or numeric keycode."
             ),
         )
     return candidate
@@ -1950,11 +1962,16 @@ def split_flow_ref(ref: str) -> tuple[str | None, str]:
 
 
 class FlowStore:
-    """Read/write named flows under ``<memory.dir>/flows/``, one directory per app.
+    """Read/write named flows under a platform-scoped library, one directory per app.
 
-    A saved flow lands in ``flows/<package>/<name>.yaml``, the package taken from the flow's own
-    ``app:`` field; a flow that declares no app runs against anything, so it stays in ``flows/``
-    itself — which is also where every flow written before this layout existed still lives.
+    Android retains ``flows/<package>/<name>.yaml`` exactly. Other adapters use
+    ``flows/platforms/<platform>/<app>/<name>.yaml`` so identical app ids cannot make one
+    platform replay another's learned journey. A caller-authored file passed by explicit path
+    remains portable by that deliberate reference; the indexed library never guesses portability.
+
+    The app is taken from the flow's own ``app:`` field; a flow that declares no app runs against
+    anything, so it stays at its platform library root — which is also where every Android flow
+    written before this layout existed still lives.
     Both layers are read and only the new one is written: a flow directory may be a checked-in
     repository, and relocating a user's files behind their back would break their references
     and their history for no gain the reader asked for.
@@ -1964,11 +1981,19 @@ class FlowStore:
     step, which :func:`nested_flow_candidates` resolves.
     """
 
-    def __init__(self, cfg: MemoryCfg) -> None:
+    def __init__(self, cfg: MemoryCfg, *, platform: str = "android") -> None:
         self.cfg = cfg
+        from .platforms.identity import TargetRef
+
+        self.platform = TargetRef(platform, "validation-only").platform
 
     def flows_dir(self) -> Path:
-        return Path(self.cfg.dir).expanduser() / "flows"
+        root = Path(self.cfg.dir).expanduser() / "flows"
+        if self.platform == "android":
+            return root
+        from .platforms.identity import safe_component
+
+        return root / "platforms" / safe_component(self.platform)
 
     def app_dir(self, app: str | None) -> Path:
         """The directory owning *app*'s flows — the library root for an app-agnostic one."""

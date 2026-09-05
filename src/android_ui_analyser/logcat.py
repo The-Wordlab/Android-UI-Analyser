@@ -24,6 +24,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .platforms.diagnostics import (
+    CrashEvidence,
+    DiagnosticEvent,
+    DiagnosticLevel,
+    DiagnosticSourcePolicy,
+    DiagnosticWindow,
+    UnknownDiagnosticMark,
+)
+from .platforms.identity import LEGACY_PLATFORM, TargetLike, TargetRef, target_ref
+
 # threadtime: "01-15 10:30:45.123  1234  5678 I Tag: msg"
 _THREADTIME = re.compile(
     r"^(?P<mon>\d{2})-(?P<day>\d{2})\s+"
@@ -38,6 +48,11 @@ _TAG_RE = re.compile(
 )
 _DETAIL_RE = re.compile(
     r"^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3}\s+"
+    r"(?P<pid>\d+)\s+(?P<tid>\d+)\s+(?P<priority>[VDIWEF])\s+"
+    r"(?P<tag>[^:]+):\s?(?P<message>.*)$"
+)
+_EPOCH_DETAIL_RE = re.compile(
+    r"^(?:\d{13}|\d{10}(?:\.\d+)?)\s+"
     r"(?P<pid>\d+)\s+(?P<tid>\d+)\s+(?P<priority>[VDIWEF])\s+"
     r"(?P<tag>[^:]+):\s?(?P<message>.*)$"
 )
@@ -60,18 +75,28 @@ _STACK_MARKERS = (
 )
 
 
-def marks_path(cache_dir: str | Path, serial: str) -> Path:
-    safe = str(serial).replace(":", "_")
-    return Path(cache_dir).expanduser() / f"logcat_marks_{safe}.json"
+def _diagnostic_storage_key(target: TargetLike) -> tuple[TargetRef, str]:
+    ref = target_ref(target)
+    if ref.platform == LEGACY_PLATFORM:
+        # Exact compatibility with every pre-platform Android marks/clock file.
+        return ref, ref.target_id.replace(":", "_")
+    return ref, ref.storage_key
 
 
-def clock_path(cache_dir: str | Path, serial: str) -> Path:
+def marks_path(cache_dir: str | Path, serial: TargetLike) -> Path:
+    ref, key = _diagnostic_storage_key(serial)
+    prefix = "logcat" if ref.platform == LEGACY_PLATFORM else "diagnostics"
+    return Path(cache_dir).expanduser() / f"{prefix}_marks_{key}.json"
+
+
+def clock_path(cache_dir: str | Path, serial: TargetLike) -> Path:
     """Sidecar for the measured host↔device skew — deliberately NOT the marks file.
 
     A reserved key inside ``marks`` would be resolvable as ``--since <that key>``.
     """
-    safe = str(serial).replace(":", "_")
-    return Path(cache_dir).expanduser() / f"logcat_clock_{safe}.json"
+    ref, key = _diagnostic_storage_key(serial)
+    prefix = "logcat" if ref.platform == LEGACY_PLATFORM else "diagnostics"
+    return Path(cache_dir).expanduser() / f"{prefix}_clock_{key}.json"
 
 
 def load_marks(path: Path) -> dict[str, dict[str, Any]]:
@@ -157,6 +182,7 @@ def resolve_clock(
     device: Any,
     cache_dir: str | Path,
     *,
+    target: TargetLike | None = None,
     force: bool = False,
     ttl_ms: int = SKEW_TTL_MS,
 ) -> DeviceClock:
@@ -167,7 +193,12 @@ def resolve_clock(
     that sells itself on tens of milliseconds. Each ``aua`` run is a fresh process, so the
     cache has to live on disk to help the CLI at all.
     """
-    path = clock_path(cache_dir, getattr(device, "serial", "unknown"))
+    identity: TargetLike = (
+        target
+        if target is not None
+        else str(getattr(device, "target_id", getattr(device, "serial", "unknown")))
+    )
+    path = clock_path(cache_dir, identity)
     now = int(time.time() * 1000)
     if not force:
         cached = load_clock(path)
@@ -197,7 +228,7 @@ def make_mark(*, unix_ms: int | None = None, clock: DeviceClock | None = None) -
 
 def set_mark(
     cache_dir: str | Path,
-    serial: str,
+    serial: TargetLike,
     name: str = "default",
     *,
     clock: DeviceClock | None = None,
@@ -219,7 +250,7 @@ def mark_device_ms(entry: dict[str, Any], *, skew_ms: int = 0) -> int:
 
 def resolve_since_ms(
     marks: dict[str, dict[str, Any]],
-    since: str | None,
+    since: str | int | None,
     *,
     clock: DeviceClock | None = None,
     default_window_ms: int = 30_000,
@@ -232,6 +263,8 @@ def resolve_since_ms(
     """
     dc = clock or DeviceClock()
     now_ms = dc.now_ms()
+    if isinstance(since, int):
+        return since, str(since)
     if since is None or since == "":
         if "last-action" in marks:
             return mark_device_ms(marks["last-action"], skew_ms=dc.skew_ms), "last-action"
@@ -252,7 +285,7 @@ def resolve_since_ms(
         mult = {"ms": 1, "s": 1000, "m": 60_000}[unit]
         return now_ms - n * mult, since
 
-    raise KeyError(since)
+    raise UnknownDiagnosticMark(since, sorted(marks))
 
 
 def line_unix_ms(
@@ -523,6 +556,10 @@ _RUNTIME_TAG_MIN = 8
 # marked as clipped: a reader must never mistake a truncated message for a complete one.
 DEFAULT_MAX_LINE_CHARS = 300
 
+# Android shell surfaces whose logs are never the application a test is driving. Kept beside
+# the Android parser so shared Engine code does not learn package-name conventions.
+_NON_APP_SUBJECT_FRAGMENTS = ("launcher", "systemui", "com.android.systemui", ".home")
+
 
 def _is_runtime_tag(tag: str, app_id: str | None) -> bool:
     """Whether *tag* is ART/libcore logging under the app's own (truncated) process name.
@@ -671,3 +708,109 @@ def digest_app_logs(
         # deliberately narrowed window is indistinguishable from a quiet one.
         digest["only"] = [prefix for prefix in allow_tag_prefixes if prefix.strip()]
     return digest
+
+
+# ---------------------------------------------------------------- adapter-owned normalization
+
+
+def android_source_policy(app_id: str | None = None) -> DiagnosticSourcePolicy:
+    """Android logger defaults expressed through the neutral source-policy contract."""
+
+    return DiagnosticSourcePolicy(
+        hidden_prefixes=DEFAULT_DENY_TAG_PREFIXES,
+        app_is_subject=bool(
+            app_id
+            and not any(
+                fragment in app_id.casefold() for fragment in _NON_APP_SUBJECT_FRAGMENTS
+            )
+        ),
+        derived_hidden=(lambda source: _is_runtime_tag(source, app_id)),
+    )
+
+
+def _normalized_event(
+    line: str,
+    *,
+    app_id: str | None,
+    policy: DiagnosticSourcePolicy,
+    tz_offset_minutes: int,
+) -> DiagnosticEvent:
+    stripped = line.lstrip()
+    match = _DETAIL_RE.match(stripped) or _EPOCH_DETAIL_RE.match(stripped)
+    if match is None:
+        return DiagnosticEvent(
+            message=line,
+            timestamp_ms=line_unix_ms(line, tz_offset_minutes=tz_offset_minutes),
+            app_id=app_id,
+            display_text=line,
+        )
+    detail = match.groupdict()
+    source = (detail.get("tag") or "").strip() or None
+    return DiagnosticEvent(
+        message=detail.get("message") or "",
+        level=DiagnosticLevel.from_compatibility_code(detail.get("priority") or ""),
+        source=source,
+        timestamp_ms=line_unix_ms(line, tz_offset_minutes=tz_offset_minutes),
+        process_id=detail.get("pid"),
+        thread_id=detail.get("tid"),
+        app_id=app_id,
+        display_text=line,
+        hidden_by_default=bool(source and policy.hides(source)),
+    )
+
+
+def parse_diagnostic_window(
+    raw: str,
+    *,
+    target: TargetRef,
+    since: str,
+    since_unix_ms: int,
+    clock: str,
+    skew_ms: int,
+    app_id: str | None = None,
+    include_events: bool = True,
+    tz_offset_minutes: int = 0,
+    crash_limit: int = 60,
+) -> DiagnosticWindow:
+    """Parse Android logcat into the public neutral diagnostic contract.
+
+    This is intentionally called only by :class:`AndroidPlatform`. Shared Engine modules never
+    import this parser or inspect logcat priorities, tags, timestamps, or crash markers.
+    """
+
+    policy = android_source_policy(app_id)
+    source_lines = [line for line in raw.splitlines() if line.strip()]
+    events = tuple(
+        _normalized_event(
+            line,
+            app_id=app_id,
+            policy=policy,
+            tz_offset_minutes=tz_offset_minutes,
+        )
+        for line in source_lines
+    )
+    crash = extract_crash_evidence(raw, app_id=app_id, limit=crash_limit)
+    crash_events = tuple(
+        _normalized_event(
+            line,
+            app_id=app_id,
+            policy=policy,
+            tz_offset_minutes=tz_offset_minutes,
+        )
+        for line in crash["lines"]
+    )
+    return DiagnosticWindow(
+        events=events if include_events else (),
+        target=target,
+        since=since,
+        since_unix_ms=since_unix_ms,
+        clock=clock,
+        skew_ms=skew_ms,
+        crash_evidence=CrashEvidence(
+            kind=str(crash["kind"]),
+            events=crash_events,
+            total_count=int(crash["total_count"]),
+            truncated=bool(crash["truncated"]),
+            matched_app=bool(crash["matched_app"]),
+        ),
+    )

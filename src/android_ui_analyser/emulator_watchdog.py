@@ -39,11 +39,15 @@ def _last_activity(meta: dict, cache_dir: Path, serial: str | None) -> float:
     last = float(meta.get("last_activity") or meta.get("started_at") or 0.0)
     if serial:
         from . import journal as journal_mod
+        from . import target_activity
 
-        jpath = journal_mod.journal_path(cache_dir, serial)
+        jpath = journal_mod.journal_path(cache_dir, serial, platform="android")
         if jpath.is_file():
             with __import__("contextlib").suppress(OSError):
                 last = max(last, jpath.stat().st_mtime)
+        heartbeat = target_activity.read(cache_dir, serial, platform="android")
+        if heartbeat is not None:
+            last = max(last, float(heartbeat["last_activity"]))
     return last
 
 

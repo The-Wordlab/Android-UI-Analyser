@@ -228,12 +228,16 @@ class SessionState(BaseModel):
     goal: str
     goal_hash: str
     serial: str
+    platform: str = "android"
     owner: str | None = None
     started_ms: int
     recommended_kind: str
     recommended_cli: str
     network_backup_preexisting: bool = False
     network_profile_preexisting: bool = False
+    virtual_target_started: bool = False
+    virtual_target_definition_id: str | None = None
+    virtual_target_instance_token: str | None = None
     emulator_started: bool = False
     animations_enabled: bool = False
     animation_backup_path: str | None = None
@@ -1914,20 +1918,50 @@ def _session_dir(cache_dir: str | Path) -> Path:
     return Path(cache_dir).expanduser() / "sessions"
 
 
-def _session_path(cache_dir: str | Path, session_id: str) -> Path:
-    return _session_dir(cache_dir) / f"{_safe_token(session_id)}.json"
+def _session_path(
+    cache_dir: str | Path, session_id: str, *, platform: str = "android"
+) -> Path:
+    from .platforms.identity import target_ref
+
+    name = str(platform).strip().lower()
+    key = _safe_token(session_id) if name == "android" else target_ref(
+        session_id, platform=name
+    ).storage_key
+    return _session_dir(cache_dir) / f"{key}.json"
 
 
-def _active_path(cache_dir: str | Path, serial: str, owner: str | None) -> Path:
+def _active_path(
+    cache_dir: str | Path,
+    serial: str,
+    owner: str | None,
+    *,
+    platform: str = "android",
+) -> Path:
+    from .platforms.identity import target_ref
+
     identity = hashlib.sha256((owner or "anonymous").encode()).hexdigest()[:12]
-    return _session_dir(cache_dir) / f"active-{_safe_token(serial)}-{identity}.txt"
+    name = str(platform).strip().lower()
+    target_key = (
+        _safe_token(serial)
+        if name == "android"
+        else target_ref(serial, platform=name).storage_key
+    )
+    return _session_dir(cache_dir) / f"active-{target_key}-{identity}.txt"
 
 
 def _write_state(cache_dir: str | Path, state: SessionState) -> None:
-    path = _session_path(cache_dir, state.session_id)
+    path = _session_path(cache_dir, state.session_id, platform=state.platform)
     atomic_write_text(path, state.model_dump_json(indent=2))
     if state.finished_ms is None:
-        atomic_write_text(_active_path(cache_dir, state.serial, state.owner), state.session_id)
+        atomic_write_text(
+            _active_path(
+                cache_dir,
+                state.serial,
+                state.owner,
+                platform=state.platform,
+            ),
+            state.session_id,
+        )
 
 
 def update_session_state(
@@ -1937,7 +1971,7 @@ def update_session_state(
 ) -> SessionState:
     """Revalidate and persist additive lifecycle metadata without changing session identity."""
 
-    for field in ("session_id", "serial", "owner", "started_ms"):
+    for field in ("session_id", "serial", "platform", "owner", "started_ms"):
         if field in changes and changes[field] != getattr(state, field):
             raise ValueError(f"session identity field {field!r} cannot be changed")
     payload = state.model_dump(mode="python")
@@ -1957,6 +1991,9 @@ def create_session_state(
     recommended_cli: str,
     network_backup_preexisting: bool,
     network_profile_preexisting: bool,
+    virtual_target_started: bool = False,
+    virtual_target_definition_id: str | None = None,
+    virtual_target_instance_token: str | None = None,
     emulator_started: bool = False,
     animations_enabled: bool = False,
     animation_backup_path: str | None = None,
@@ -1969,6 +2006,7 @@ def create_session_state(
     capture_context_id: str | None = None,
     capture_segment: int | None = None,
     capture_start_order: int | None = None,
+    platform: str = "android",
 ) -> SessionState:
     if contract_yaml is not None:
         parsed_contract = parse_session_contract_yaml(contract_yaml)
@@ -1983,12 +2021,16 @@ def create_session_state(
         goal=goal,
         goal_hash=hashlib.sha256(goal.encode()).hexdigest()[:16],
         serial=serial,
+        platform=str(platform).strip().lower(),
         owner=owner,
         started_ms=int(time.time() * 1000),
         recommended_kind=recommended_kind,
         recommended_cli=recommended_cli,
         network_backup_preexisting=network_backup_preexisting,
         network_profile_preexisting=network_profile_preexisting,
+        virtual_target_started=virtual_target_started,
+        virtual_target_definition_id=virtual_target_definition_id,
+        virtual_target_instance_token=virtual_target_instance_token,
         emulator_started=emulator_started,
         animations_enabled=animations_enabled,
         animation_backup_path=animation_backup_path,
@@ -2013,29 +2055,42 @@ def load_session_state(
     session_id: str | None = None,
     serial: str | None = None,
     owner: str | None = None,
+    platform: str = "android",
 ) -> SessionState | None:
+    platform = str(platform).strip().lower()
     if session_id is None:
         if not serial:
             return None
-        pointer = _active_path(cache_dir, serial, owner)
+        pointer = _active_path(cache_dir, serial, owner, platform=platform)
         try:
             session_id = pointer.read_text(encoding="utf-8").strip()
         except OSError:
             return None
     try:
-        payload = json.loads(_session_path(cache_dir, session_id).read_text(encoding="utf-8"))
-        return SessionState.model_validate(payload)
+        payload = json.loads(
+            _session_path(cache_dir, session_id, platform=platform).read_text(encoding="utf-8")
+        )
+        state = SessionState.model_validate(payload)
+        if state.platform != platform:
+            return None
+        return state
     except (OSError, ValueError, TypeError):
         return None
 
 
 def active_session_metadata(
-    cache_dir: str | Path, serial: str | None, owner: str | None
+    cache_dir: str | Path,
+    serial: str | None,
+    owner: str | None,
+    *,
+    platform: str = "android",
 ) -> dict[str, str]:
     """Return journal-safe correlation fields without exposing the natural-language goal."""
     if not serial:
         return {}
-    state = load_session_state(cache_dir, serial=serial, owner=owner)
+    state = load_session_state(
+        cache_dir, serial=serial, owner=owner, platform=platform
+    )
     if state is None or state.finished_ms is not None:
         return {}
     return {"session_id": state.session_id, "goal_hash": state.goal_hash}
@@ -2065,7 +2120,9 @@ def finish_session_state(cache_dir: str | Path, state: SessionState) -> SessionS
             phase.recommended_call = None
     finished = state.model_copy(update={"finished_ms": now_ms, "phases": phases})
     _write_state(cache_dir, finished)
-    pointer = _active_path(cache_dir, state.serial, state.owner)
+    pointer = _active_path(
+        cache_dir, state.serial, state.owner, platform=state.platform
+    )
     try:
         if pointer.read_text(encoding="utf-8").strip() == state.session_id:
             pointer.unlink(missing_ok=True)

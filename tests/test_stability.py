@@ -94,7 +94,7 @@ def test_wait_stable_times_out_with_structured_error() -> None:
 
 def test_cli_wait_for_stable_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     dev = FakeDevice(screenshots=[FRAME_A] * 12)
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: dev)
     res = runner.invoke(
         app,
         ["wait-and-analyze", "--for-stable", "--interval", "1", "--settle", "2", "--timeout", "3000"],
@@ -105,7 +105,7 @@ def test_cli_wait_for_stable_ok(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_cli_wait_for_stable_timeout_exit_3(monkeypatch: pytest.MonkeyPatch) -> None:
     dev = FakeDevice(screenshots=[FRAME_A, FRAME_B] * 200)
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: dev)
     res = runner.invoke(
         app,
         # Settle deliberately outlasts the timeout, so an alternating screen cannot be called
@@ -166,7 +166,7 @@ def test_wait_stable_observe_returns_screen() -> None:
 
 def test_cli_wait_accepts_timeout_ms_alias(monkeypatch: pytest.MonkeyPatch) -> None:
     dev = FakeDevice(hierarchy_xml=_XML, text_index={"Continue": (0, 0, 100, 60)})
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: dev)
     # --timeout-ms is accepted as an alias for --timeout (both are ms).
     r = runner.invoke(app, ["wait-and-analyze", "--for", "Continue", "--timeout-ms", "1500"])
     assert r.exit_code == 0, r.stderr
@@ -403,7 +403,7 @@ def test_bare_launch_stays_unpinned_when_nothing_is_known() -> None:
 
 def test_cli_wait_absent_and_app_activity(monkeypatch: pytest.MonkeyPatch) -> None:
     dev = FakeDevice(hierarchy_xml=_XML, package="com.x")
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: dev)
     r = runner.invoke(app, ["wait-and-analyze", "--for", "Loading", "--absent", "--timeout", "200"])
     assert r.exit_code == 0, r.stderr  # already absent → ok
     r2 = runner.invoke(app, ["app", "launch", "com.x", "--activity", ".LaunchActivity"])
@@ -453,7 +453,7 @@ def test_cli_wait_for_bang_prefix_exits_zero_when_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     dev = FakeDevice(hierarchy_xml=_XML, package="com.x")
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: dev)
     r = runner.invoke(
         app, ["wait-and-analyze", "--for", "!text:Gone for good", "--timeout", "200"]
     )

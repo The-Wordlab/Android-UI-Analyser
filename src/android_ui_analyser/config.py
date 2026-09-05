@@ -17,8 +17,10 @@ Secrets are **never** stored in config: a provider references the env-var *name*
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import parse_qsl, urlsplit
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
@@ -28,7 +30,16 @@ from .schema import OutputFormat, Tier
 
 PROJECT_CONFIG_NAME = ".android-ui-analyser.yaml"
 USER_CONFIG_REL = "android-ui-analyser/config.yaml"
-_SECRET_KEYS = {"api_key", "key", "token", "secret", "password"}
+_SECRET_KEY_PARTS = {
+    "apikey",
+    "bearer",
+    "credential",
+    "credentials",
+    "key",
+    "password",
+    "secret",
+    "token",
+}
 
 
 # --------------------------------------------------------------------------- models
@@ -253,6 +264,14 @@ class TeardownCfg(BaseModel):
     # twenty minutes is long enough that a person at the keyboard never crosses it, while a
     # forgotten emulator crosses it at once. An explicit `--idle-stop 0` is always honoured.
     emulator_idle_stop_s: float = 1200.0
+    # Neutral override for platform plugins. ``None`` keeps the established Android setting as
+    # the fallback, so old configuration and output remain exact while another platform does not
+    # need to expose an option named after emulators.
+    virtual_target_idle_stop_s: float | None = None
+
+    def effective_virtual_target_idle_stop_s(self) -> float:
+        value = self.virtual_target_idle_stop_s
+        return float(self.emulator_idle_stop_s if value is None else value)
 
 
 class GateCfg(BaseModel):
@@ -717,6 +736,10 @@ class Config(BaseModel):
     policy: PolicyCfg = Field(default_factory=PolicyCfg)
     timeouts: TimeoutsCfg = Field(default_factory=TimeoutsCfg)
     models: dict[str, dict[str, Any]] = Field(default_factory=_default_models)
+    # Opaque, namespaced options owned and validated by platform plugins. Keeping every
+    # platform's options here (rather than adding iOS/Web/etc fields to DeviceCfg) also lets a
+    # teardown process reconstruct the adapter that originally changed a target.
+    platforms: dict[str, dict[str, Any]] = Field(default_factory=dict)
     daemon: DaemonCfg = Field(default_factory=DaemonCfg)
     cache: CacheCfg = Field(default_factory=CacheCfg)
     capture: CaptureCfg = Field(default_factory=CaptureCfg)
@@ -730,6 +753,21 @@ class Config(BaseModel):
     flags: FlagsCfg = Field(default_factory=FlagsCfg)
     profiles: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
+    @field_validator("platforms")
+    @classmethod
+    def _normalise_platform_options(
+        cls, value: dict[str, dict[str, Any]]
+    ) -> dict[str, dict[str, Any]]:
+        out: dict[str, dict[str, Any]] = {}
+        for raw_name, options in value.items():
+            name = str(raw_name).strip().lower()
+            if not name:
+                raise ValueError("platform option names must not be empty")
+            if name in out:
+                raise ValueError(f"duplicate platform options for {name!r}")
+            out[name] = dict(options)
+        return out
+
     # -- views -------------------------------------------------------------
 
     def masked_dict(self) -> dict[str, Any]:
@@ -742,11 +780,43 @@ class Config(BaseModel):
         _mask_in_place(data)
         return data
 
+    def platform_options(self, name: str | None = None) -> dict[str, Any]:
+        """A copy of the opaque options belonging to one selected platform.
+
+        The core deliberately does not interpret these keys. A platform adapter validates its
+        own schema and may resolve any ``*_env`` references at use time, just like providers do.
+        """
+
+        key = (name or self.device.platform).strip().lower()
+        return dict(self.platforms.get(key, {}))
+
+
+def _secretish_key(value: object) -> bool:
+    raw = str(value)
+    snake = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", raw).lower()
+    if snake.endswith("_env"):
+        return False
+    parts = {part for part in re.split(r"[^a-z0-9]+", snake) if part}
+    return bool(parts & _SECRET_KEY_PARTS) or "apikey" in parts
+
+
+def _secret_bearing_url(value: str) -> bool:
+    """Whether a printable option embeds credentials in otherwise innocent URL text."""
+
+    try:
+        parsed = urlsplit(value)
+        if parsed.scheme and parsed.netloc and (parsed.username is not None or parsed.password is not None):
+            return True
+        return any(_secretish_key(key) for key, _item in parse_qsl(parsed.query, keep_blank_values=True))
+    except ValueError:
+        # A malformed URL is not proof of a secret. Its owning key is still checked separately.
+        return False
+
 
 def _mask_in_place(obj: Any) -> None:
     if isinstance(obj, dict):
         for k, v in obj.items():
-            if isinstance(v, str) and k.lower() in _SECRET_KEYS and not k.lower().endswith("_env"):
+            if isinstance(v, str) and (_secretish_key(k) or _secret_bearing_url(v)):
                 obj[k] = "***"
             else:
                 _mask_in_place(v)
@@ -953,9 +1023,14 @@ def default_config_yaml() -> str:
 # Secrets are NEVER stored here — reference the env-var NAME (api_key_env) instead.
 
 device:
+  platform: android        # strategy registered through the aua.platforms entry-point group
   serial: null            # null = auto-detect the only/first device
   backend: uiautomator2   # uiautomator2 | accessibility (future)
   compressed_hierarchy: true  # drop non-visible nodes (smaller dumps)
+
+# Opaque options are owned and validated by the named platform plugin. Secret values stay in
+# environment variables; config stores only references such as token_env: MY_PLATFORM_TOKEN.
+platforms: {}
 
 helper:                       # optional on-device helper APK (AccessibilityService)
   enabled: false              # use it when installed + bound; polling stays the fallback

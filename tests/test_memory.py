@@ -24,6 +24,7 @@ from android_ui_analyser.memory import (
     render_map,
     signature,
 )
+from android_ui_analyser.platforms.android import package_from_tree
 from android_ui_analyser.providers.registry import ProviderFactory
 from conftest import FakeDevice, make_config
 
@@ -491,7 +492,7 @@ def test_engine_input_action_does_not_store_typed_value(tmp_path: Path) -> None:
 
 def test_cli_map_lists_screens_routes_and_find(tmp_path, monkeypatch) -> None:
     dev = FakeDevice(hierarchy_xml=HOME, package=P, serial="emu-cli")
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: dev)
 
     a1 = runner.invoke(app, ["--format", "compact", "analyze", "--source", "hierarchy"])
     assert a1.exit_code == 0, a1.stderr
@@ -547,7 +548,7 @@ def test_package_vote_ignores_ime() -> None:
         _node("android.view.View", pkg=ime, b="[0,1500][1080,1800]"),
         _node("android.view.View", pkg=ime, b="[0,1800][1080,2100]"),
     )
-    assert engine_mod._package_from_xml(xml, ["com.android.systemui", "*inputmethod*"]) == P
+    assert package_from_tree(xml, ["com.android.systemui", "*inputmethod*"]) == P
 
 
 def test_package_vote_all_ignored_falls_back_to_majority() -> None:
@@ -555,7 +556,7 @@ def test_package_vote_all_ignored_falls_back_to_majority() -> None:
         _node("android.view.View", pkg="com.android.systemui"),
         _node("android.view.View", pkg="com.android.systemui"),
     )
-    assert engine_mod._package_from_xml(xml, ["com.android.systemui"]) == "com.android.systemui"
+    assert package_from_tree(xml, ["com.android.systemui"]) == "com.android.systemui"
 
 
 def test_matches_any_globs() -> None:

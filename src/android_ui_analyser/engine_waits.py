@@ -20,7 +20,6 @@ from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
 from .assertions import Selector, apply_structural_filters, check_contains_all, normalize_selector
-from .device import Device
 from .engine_support import (
     _AWAIT_PREFIXES,
     _AwaitTerm,
@@ -38,8 +37,9 @@ from .errors import (
     UsageError,
 )
 from .memory import AppStrings, _id_tail
+from .platforms.runtime import TargetRuntime as Device
 from .providers.registry import run_chain
-from .schema import ActionResult, AnalyzeResult, Element, HasResult, MatchMode
+from .schema import ActionResult, AnalyzeResult, AppContext, Element, HasResult, MatchMode
 from .selectors import (
     _MAX_CANDIDATES,
     app_elements,
@@ -104,6 +104,19 @@ def _job_checkpoint(self: Engine) -> None:
     event = self._current_job_cancel_event()
     if event is not None and event.is_set():
         raise JobCancelledError("background wait cancelled")
+
+
+def _wait_input_runtime(self: Engine, device: Device) -> Device:
+    """Validated semantic input surface used by hierarchy-backed waits."""
+
+    return self.platform.runtime_capability("ui.input", device)
+
+
+def _wait_screenshot(self: Engine, device: Device) -> Any:
+    """Capture a wait sample through the selected adapter's canonical screenshot path."""
+
+    screenshots = self.platform.adapter_capability("ui.screenshot")
+    return screenshots.capture_screenshot(device)
 
 
 def _current_job_cancel_event(self: Engine) -> threading.Event | None:
@@ -195,7 +208,7 @@ def wait_stable(
         stable_since: float | None = None
         while True:
             self._job_checkpoint()
-            img = device.screenshot()
+            img = _wait_screenshot(self, device)
             samples += 1
             now = time.monotonic()
             grid_stable = gs.feed(img)
@@ -243,7 +256,7 @@ def wait_stable(
         stable_since_legacy: float | None = None
         while True:
             self._job_checkpoint()
-            current = imaging.dhash(device.screenshot())
+            current = imaging.dhash(_wait_screenshot(self, device))
             samples += 1
             now = time.monotonic()
             if last is not None and imaging.is_stable(current, last):
@@ -325,7 +338,9 @@ def has(
                 by=by,
             )
         else:
-            bounds = device.find_text(text, match=mode, ignore_case=ignore_case, by=by)
+            bounds = _wait_input_runtime(self, device).find_text(
+                text, match=mode, ignore_case=ignore_case, by=by
+            )
             matched = None
         if bounds is not None:
             rendered = matched[0] if matched is not None else text
@@ -411,7 +426,9 @@ def _find_translated(
     """Retry a missed text lookup with the app's known renderings of the same label
         (hierarchy only — the mined strings bridge the device's UI language, §6b)."""
     for cand, loc, key in self._locale_candidates(device, text, by):
-        bounds = device.find_text(cand, match=mode, ignore_case=ignore_case, by=by)
+        bounds = _wait_input_runtime(self, device).find_text(
+            cand, match=mode, ignore_case=ignore_case, by=by
+        )
         if bounds is not None:
             return HasResult(
                 found=True,
@@ -536,18 +553,22 @@ def _wait_for_any(
     """Poll for *text* or any known translated rendering; report which one matched."""
     if not candidates:
         return (
-            device.wait_for(
+            _wait_input_runtime(self, device).wait_for(
                 text, match=mode, ignore_case=ignore_case, timeout_ms=timeout_ms, by=by
             ),
             None,
         )
     deadline = time.monotonic() + timeout_ms / 1000.0
     while True:
-        bounds = device.find_text(text, match=mode, ignore_case=ignore_case, by=by)
+        bounds = _wait_input_runtime(self, device).find_text(
+            text, match=mode, ignore_case=ignore_case, by=by
+        )
         if bounds is not None:
             return bounds, None
         for cand in candidates:
-            bounds = device.find_text(cand[0], match=mode, ignore_case=ignore_case, by=by)
+            bounds = _wait_input_runtime(self, device).find_text(
+                cand[0], match=mode, ignore_case=ignore_case, by=by
+            )
             if bounds is not None:
                 return bounds, cand
         if time.monotonic() >= deadline:
@@ -569,7 +590,7 @@ def _ocr_contains(
     chain = self.factory.build_chain("ocr")
     if not chain.providers:
         return None
-    img = device.screenshot()
+    img = _wait_screenshot(self, device)
     provider_timeout_ms = int(self.config.timeouts.vision_ms)
     if timeout_ms is not None:
         provider_timeout_ms = min(provider_timeout_ms, max(1, timeout_ms))
@@ -1028,6 +1049,16 @@ def await_predicate(
 
     terms = _parse_await_terms(predicate, require_positive=adopt_action)
     device = self.device
+    # Diagnostic/network-only waits do not need an accessibility hierarchy. A platform may
+    # legitimately expose normalized logs for an attached target before it implements UI
+    # capture, so do not turn that independent capability into an implicit ``ui.tree`` claim.
+    # Foreground-change detection is an optional refinement in that case; UI observations still
+    # resolve their own declared capabilities at the point where they are used.
+    tree_device = (
+        self.platform.runtime_capability("ui.tree", device)
+        if self.platform.supports("ui.tree")
+        else None
+    )
     mode = MatchMode(match)
     action_baseline = deepcopy(self._action_observation_baseline) if adopt_action else None
     positive_terms = [term for term in terms if not term.negated]
@@ -1049,32 +1080,34 @@ def await_predicate(
     stable_destination_checks = 0
 
     def snapshot() -> tuple[str, str]:
+        if tree_device is None:
+            return ("", "")
         try:
-            info = device.current_app() or {}
+            info = AppContext.coerce(tree_device.current_app())
         except Exception:  # a device hiccup must not be read as a navigation
             return ("", "")
-        return (str(info.get("package") or ""), str(info.get("activity") or ""))
+        return (str(info.app_id or ""), str(info.surface_id or ""))
 
     # Baseline for the off-screen terms, taken before the first evaluation so a `net:` /
     # `log:` term only ever matches evidence produced *after* the wait began. Without it
     # the previous turn's response would satisfy this turn's wait instantly.
     wall_baseline = time.time()
+    log_diagnostics = (
+        self.platform.adapter_capability("device.logs")
+        if any(term.by == "log" for term in terms)
+        else None
+    )
 
     def _log_baseline_ms() -> int:
-        """Baseline as a **device**-clock epoch — `logcat(since_ms=…)` demands one.
+        """Baseline in the selected adapter's diagnostic clock.
 
-            The host clock is not interchangeable: an emulator can sit seconds off, and a
-            baseline in the wrong frame either drops the very lines we are waiting for or
-            admits the previous turn's. The measured skew is cached, so this costs no adb
-            round-trip on the poll path.
+            Host and target clocks are not interchangeable. The adapter owns both the clock and
+            the persisted cursor, so shared wait code never assumes Android logcat timestamps.
             """
-        try:
-            from . import logcat as logcat_mod
-
-            clock = logcat_mod.resolve_clock(device, self.config.cache.dir)
-            return int(clock.to_device(int(wall_baseline * 1000)))
-        except Exception:
+        if log_diagnostics is None:
             return int(wall_baseline * 1000)
+        mark = log_diagnostics.mark_diagnostics(device, "_await")
+        return int(mark["unix_ms"])
 
     log_baseline_ms = _log_baseline_ms() if any(t.by == "log" for t in terms) else 0
 
@@ -1090,20 +1123,16 @@ def await_predicate(
         return any(proxy_mock.flow_matches(f, spec) for f in flows)
 
     def _log_present(spec: str) -> bool:
+        if log_diagnostics is None:
+            return False
         try:
-            lines = device.logcat(dump=True, since_ms=log_baseline_ms) or ""
-        except TypeError:  # device implementations that take no since filter
-            try:
-                lines = device.logcat(dump=True) or ""
-            except Exception:
-                return False
+            window = log_diagnostics.diagnostic_window(
+                device,
+                since=log_baseline_ms,
+            )
         except Exception:
             return False
-        if not isinstance(lines, str):
-            lines = "\n".join(str(x) for x in lines)
-        haystack = lines.lower() if ignore_case else lines
-        needle = spec.lower() if ignore_case else spec
-        return needle in haystack
+        return window.contains(spec, ignore_case=ignore_case)
 
     def evaluate() -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
@@ -1114,7 +1143,7 @@ def await_predicate(
                 present = _log_present(term.value)
             else:
                 present = (
-                    device.find_text(
+                    _wait_input_runtime(self, device).find_text(
                         term.value, match=mode, ignore_case=ignore_case, by=term.by
                     )
                     is not None
@@ -1550,7 +1579,10 @@ def wait(
         gone = False
         while True:
             if all(
-                device.find_text(p, match=mode, ignore_case=ignore_case, by=by) is None
+                _wait_input_runtime(self, device).find_text(
+                    p, match=mode, ignore_case=ignore_case, by=by
+                )
+                is None
                 for p in probes
             ):
                 gone = True
@@ -1636,6 +1668,10 @@ def hierarchy_fingerprint(self: Engine, *, background: bool = False) -> str | No
         """
     device = self._device if background else self.device
     if device is None:
+        return None
+    try:
+        device = self.platform.runtime_capability("ui.tree", device)
+    except Exception:  # pragma: no cover - unsupported/background disconnect
         return None
     compressed = bool(self.config.device.compressed_hierarchy)
     try:
@@ -1925,12 +1961,14 @@ def _expect_once(
     contains_all: Sequence[Selector] = (),
 ) -> tuple[bool, str]:
     """One evaluation pass: ``(ok, detail)``. One hierarchy dump, no screenshots."""
-    xml = self.platform.dump_tree(self.device)
-    w, h = self.device.window_size()
+    device = self.platform.runtime_capability("ui.tree", self.device)
+    xml = self.platform.dump_tree(device)
+    w, h = device.window_size()
     elements = self.platform.normalize_tree(
         xml,
         (w, h),
         ignored_app_ids=self.config.memory.ignore_packages,
+        geometry=device.display_geometry(),
     ).elements
     label = selector_label(selector)
     matches = match_selector(elements, **selector)

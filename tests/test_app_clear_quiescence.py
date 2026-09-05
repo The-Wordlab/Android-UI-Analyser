@@ -10,6 +10,7 @@ from android_ui_analyser import device as device_mod
 from android_ui_analyser.cli import _daemon_error
 from android_ui_analyser.device import Uiautomator2Device, _activity_dump_mentions_package
 from android_ui_analyser.errors import DeviceError
+from android_ui_analyser.platforms import android_device
 
 PKG = "com.example.lesson"
 
@@ -212,7 +213,7 @@ def test_clear_quiescence_timeout_degrades_to_a_warning_not_an_abort(
     _install_activity_dumps(monkeypatch, raw, [active])
     times = iter((10.0, 10.0, 10.1))
     monkeypatch.setattr(device_mod.time, "monotonic", lambda: next(times))
-    monkeypatch.setattr(device_mod, "_APP_CLEAR_SETTLE_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(android_device, "_APP_CLEAR_SETTLE_TIMEOUT_S", 0.05)
     monkeypatch.setattr(device_mod.time, "sleep", lambda _seconds: None)
 
     warning = wrapper.clear_app(PKG)
@@ -259,7 +260,7 @@ def test_clear_bounds_a_hung_activity_dump_by_the_remaining_deadline(
         raise subprocess.TimeoutExpired(args, timeout)
 
     monkeypatch.setattr(device_mod.subprocess, "run", run)
-    monkeypatch.setattr(device_mod, "_APP_CLEAR_SETTLE_TIMEOUT_S", 0.25)
+    monkeypatch.setattr(android_device, "_APP_CLEAR_SETTLE_TIMEOUT_S", 0.25)
 
     with pytest.raises(DeviceError) as raised:
         wrapper.clear_app(PKG)

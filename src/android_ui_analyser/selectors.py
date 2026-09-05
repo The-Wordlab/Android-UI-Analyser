@@ -497,7 +497,11 @@ def app_elements(elements: Sequence[Element]) -> list[Element]:
     """
     from .projection import is_system_rid
 
-    return [el for el in elements if not is_system_rid(el.resource_id)]
+    return [
+        el
+        for el in elements
+        if el.window not in {"system", "ime"} and not is_system_rid(el.resource_id)
+    ]
 
 
 def nearest_elements(elements: Sequence[Element], needle: str, limit: int = 5) -> list[Element]:

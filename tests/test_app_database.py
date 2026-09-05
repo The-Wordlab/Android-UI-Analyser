@@ -294,7 +294,7 @@ def test_engine_daemon_cli_and_mcp_expose_the_same_database_surface(
     assert daemon_result["ok"] is True
     assert daemon_result["result"]["rows"] == [["before"]]
 
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: device)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: device)
     monkeypatch.setattr(
         "android_ui_analyser.cli.load_config",
         lambda *args, **kwargs: make_config(
@@ -362,7 +362,7 @@ def test_cli_execute_requires_yes_then_returns_the_restore_point(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     device = _device(tmp_path)
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: device)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: device)
     monkeypatch.setattr(
         "android_ui_analyser.cli.load_config",
         lambda *args, **kwargs: make_config(
@@ -543,7 +543,7 @@ def test_engine_cli_and_mcp_default_to_live_and_expose_coherent_opt_in(
     assert coherent_engine_result["coherent"] is True
     assert [call[0] for call in device.calls].count("stop_app") == 1
 
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: device)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: device)
     monkeypatch.setattr(
         "android_ui_analyser.cli.load_config",
         lambda *args, **kwargs: make_config(

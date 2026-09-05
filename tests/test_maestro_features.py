@@ -78,7 +78,7 @@ def test_app_launch_clear_and_kill() -> None:
 
 def test_cli_maestro_commands(monkeypatch: pytest.MonkeyPatch) -> None:
     dev = FakeDevice(hierarchy_xml=_XML, package="com.x")
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: dev)
 
     assert runner.invoke(app, ["clipboard", "set", "hi"]).exit_code == 0
     assert runner.invoke(app, ["clipboard", "get"]).exit_code == 0

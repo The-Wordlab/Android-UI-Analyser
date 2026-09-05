@@ -79,6 +79,76 @@ def test_literal_secret_value_is_masked() -> None:
     assert "***" in blob
 
 
+def test_platform_options_are_namespaced_normalised_and_masked() -> None:
+    cfg = Config.model_validate(
+        {
+            "device": {"platform": " Example-OS "},
+            "platforms": {
+                " Example-OS ": {
+                    "endpoint": "http://127.0.0.1:9000",
+                    "token_env": "EXAMPLE_OS_TOKEN",
+                    "password": "must-not-print",
+                    "access_token": "also-private",
+                    "clientSecret": "camel-private",
+                    "nested": {"refresh-token": "nested-private"},
+                }
+            },
+        }
+    )
+
+    assert cfg.device.platform == "example-os"
+    assert cfg.platform_options() == {
+        "endpoint": "http://127.0.0.1:9000",
+        "token_env": "EXAMPLE_OS_TOKEN",
+        "password": "must-not-print",
+        "access_token": "also-private",
+        "clientSecret": "camel-private",
+        "nested": {"refresh-token": "nested-private"},
+    }
+    assert cfg.platform_options("missing") == {}
+    masked = json.dumps(cfg.masked_dict())
+    assert "must-not-print" not in masked
+    assert "also-private" not in masked
+    assert "camel-private" not in masked
+    assert "nested-private" not in masked
+    assert "EXAMPLE_OS_TOKEN" in masked
+
+
+def test_platform_option_urls_with_embedded_credentials_are_masked() -> None:
+    cfg = Config.model_validate(
+        {
+            "device": {"platform": "example-os"},
+            "platforms": {
+                "example-os": {
+                    "endpoint": "https://worker:private@host.invalid/api",
+                    "stream_url": "https://host.invalid/events?access_token=private-too",
+                }
+            },
+        }
+    )
+
+    masked = json.dumps(cfg.masked_dict())
+    assert "private" not in masked
+    assert masked.count("***") >= 2
+
+
+def test_platform_options_support_nested_environment_overrides(tmp_path, monkeypatch) -> None:
+    _isolate(monkeypatch, tmp_path)
+    cfg = load_config(
+        cwd=tmp_path,
+        env={
+            "AUA_PLATFORM": "example-os",
+            "AUA_PLATFORMS__EXAMPLE-OS__ENDPOINT": "http://127.0.0.1:9000",
+            "AUA_PLATFORMS__EXAMPLE-OS__RETRIES": "3",
+        },
+    )
+
+    assert cfg.platform_options() == {
+        "endpoint": "http://127.0.0.1:9000",
+        "retries": 3,
+    }
+
+
 def test_profile_deep_merges_over_base(tmp_path, monkeypatch) -> None:
     _isolate(monkeypatch, tmp_path)
     _project(

@@ -1537,9 +1537,9 @@ def test_cli_daemon_and_mcp_expose_equivalent_mic_calls(
 
     monkeypatch.setattr(Engine, "mic_inject", fake_inject)
     monkeypatch.setattr(
-        engine_mod,
-        "connect",
-        lambda serial=None: FakeDevice(serial=serial or "emulator-5554"),
+        engine_mod.Engine,
+        "_connect_target",
+        lambda _engine, serial=None: FakeDevice(serial=serial or "emulator-5554"),
     )
     monkeypatch.setenv("AUA_DAEMON__ENABLED", "false")
     monkeypatch.setenv("AUA_CACHE__DIR", str(tmp_path / "cli-cache"))
@@ -1648,9 +1648,9 @@ def test_cli_resolves_relative_wav_before_routing_and_rejects_orphan_selector_mo
 
     monkeypatch.setattr(Engine, "mic_inject", fake_inject)
     monkeypatch.setattr(
-        engine_mod,
-        "connect",
-        lambda serial=None: FakeDevice(serial=serial or "emulator-5554"),
+        engine_mod.Engine,
+        "_connect_target",
+        lambda _engine, serial=None: FakeDevice(serial=serial or "emulator-5554"),
     )
     monkeypatch.setenv("AUA_DAEMON__ENABLED", "false")
     monkeypatch.setenv("AUA_CACHE__DIR", str(tmp_path / "cli-cache"))
@@ -1832,9 +1832,9 @@ def test_mic_speak_cli_daemon_mcp_and_capability_names_are_in_parity(
 
     monkeypatch.setattr(Engine, "mic_speak", fake_speak)
     monkeypatch.setattr(
-        engine_mod,
-        "connect",
-        lambda serial=None: FakeDevice(serial=serial or "emulator-5554"),
+        engine_mod.Engine,
+        "_connect_target",
+        lambda _engine, serial=None: FakeDevice(serial=serial or "emulator-5554"),
     )
     monkeypatch.setenv("AUA_DAEMON__ENABLED", "false")
     monkeypatch.setenv("AUA_CACHE__DIR", str(tmp_path / "cli-cache"))
@@ -1916,10 +1916,15 @@ def test_mcp_direct_emulator_start_forwards_audio(
 
     def fake_start(_avd: str | None, **kwargs: Any) -> dict[str, Any]:
         calls.append(kwargs)
-        return {"ok": True, "serial": "emulator-5554"}
+        return {
+            "ok": True,
+            "serial": "emulator-5554",
+            "avd": "test-avd",
+            "instance": "test-avd.p5554",
+    }
 
     monkeypatch.setattr(emulator_mod, "start", fake_start)
-    engine = Engine(make_config(memory={"enabled": False}), device=FakeDevice())
+    engine = Engine(make_config(memory={"enabled": False}))
 
     result = mcp_dispatch(engine, "emulator_start", {"audio": True, "headless": True})
 

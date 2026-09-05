@@ -23,7 +23,7 @@ def test_selector_only_a11y_action_parses_and_dispatches(
     tmp_path, monkeypatch, command: str
 ) -> None:  # type: ignore[no-untyped-def]
     device = FakeDevice(hierarchy_xml=XML)
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: device)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: device)
     monkeypatch.setenv("AUA_CACHE__DIR", str(tmp_path / "cache"))
     monkeypatch.setenv("AUA_MEMORY__DIR", str(tmp_path / "memory"))
     monkeypatch.setenv("AUA_DAEMON__ENABLED", "false")
@@ -41,7 +41,7 @@ def test_selector_only_a11y_action_parses_and_dispatches(
 
 def test_legacy_id_then_action_order_still_works(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     device = FakeDevice(hierarchy_xml=XML)
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: device)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: device)
     monkeypatch.setenv("AUA_CACHE__DIR", str(tmp_path / "cache"))
     monkeypatch.setenv("AUA_MEMORY__DIR", str(tmp_path / "memory"))
     monkeypatch.setenv("AUA_DAEMON__ENABLED", "false")

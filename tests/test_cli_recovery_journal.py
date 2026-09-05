@@ -27,8 +27,8 @@ def test_absence_only_action_until_has_exact_recovery_and_is_journaled(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        engine_mod,
-        "connect",
+        engine_mod.Engine,
+        "_connect_target",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("safe usage recovery must not connect to Android")
         ),
@@ -62,8 +62,8 @@ def test_misspelled_action_until_is_refused_before_android_and_is_journaled(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        engine_mod,
-        "connect",
+        engine_mod.Engine,
+        "_connect_target",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("safe usage recovery must not connect to Android")
         ),
@@ -125,3 +125,21 @@ def test_top_level_help_is_journaled_with_its_shape_and_its_answer() -> None:
     body = ((detail or {}).get("response") or {}).get("result") or {}
     assert "The loop" in body["response_text"]
     assert body["response_lines"] > 10
+
+
+def test_host_only_recovery_journal_uses_the_selected_platform(monkeypatch) -> None:
+    # Eager top-level help runs before Click binds CLI options, but configuration/environment
+    # selection is already authoritative and must still choose the journal namespace.
+    monkeypatch.setenv("AUA_PLATFORM", "strict-fake")
+    result = runner.invoke(app, ["--help"])
+
+    assert result.exit_code == 0
+    cfg = load_config()
+    events = journal.read_since(
+        cfg.cache.dir,
+        None,
+        limit=20,
+        platform="strict-fake",
+    )
+    assert events[-1]["cmd"] == "cli_help"
+    assert events[-1]["platform"] == "strict-fake"

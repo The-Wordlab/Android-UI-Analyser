@@ -250,7 +250,7 @@ def test_reading_memory_without_a_device_does_not_connect_one(
     def _refuse(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("offline memory access must not connect to a device")
 
-    monkeypatch.setattr(engine_mod, "connect", _refuse)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", _refuse)
     eng = Engine(make_config(memory={"dir": str(tmp_path / "mem")}))
 
     assert eng._memory is not None  # the store is usable; no device was touched
@@ -281,7 +281,7 @@ def test_a_device_connected_after_memory_open_still_claims_its_boot_session(
         ),
     )
     device = _StampedDevice(hierarchy_xml=_XML, serial=_SERIAL)
-    monkeypatch.setattr(engine_mod, "connect", lambda serial: device)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial: device)
     engine = Engine(cfg)
 
     assert engine._memory is not None

@@ -13,6 +13,12 @@ from android_ui_analyser import emulator, leases, network
 from android_ui_analyser.config import Config
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.platforms.base import InstalledApp
+from android_ui_analyser.platforms.virtual_targets import (
+    OwnedVirtualTargetStopRequest,
+    VirtualTargetInstance,
+    VirtualTargetProvisionRequest,
+    VirtualTargetStopResult,
+)
 from android_ui_analyser.schema import DeviceInfo
 from android_ui_analyser.session import create_session_state
 from conftest import make_config
@@ -139,32 +145,30 @@ def test_busy_app_pool_provisions_without_connecting_to_the_foreign_target(
 
     class VirtualDevices:
         @staticmethod
-        def select_avd_for_session(avd: str | None, *, needs: list[str]) -> str:
-            assert avd is None
-            assert needs == []
-            return "test-ready"
-
-        @staticmethod
-        def start(avd: str, **_kwargs: Any) -> dict[str, Any]:
-            assert avd == "test-ready"
+        def provision_virtual_target(
+            request: VirtualTargetProvisionRequest,
+        ) -> VirtualTargetInstance:
+            assert request.definition_id is None
+            assert request.needs == ()
             online.append(DeviceInfo(serial="emulator-5556", state="device"))
-            return {
-                "ok": True,
-                "serial": "emulator-5556",
-                "avd": avd,
-                "instance": "test-ready.p5556",
-                "pid": 6556,
-            }
+            return VirtualTargetInstance(
+                target_id="emulator-5556",
+                definition_id="test-ready",
+                instance_token="test-ready.p5556",
+                pid=6556,
+            )
 
         @staticmethod
-        def stop_spawned_instance(**kwargs: Any) -> dict[str, Any]:
-            raise AssertionError(f"successful provisioning rolled back: {kwargs}")
+        def stop_virtual_target_instance(
+            request: OwnedVirtualTargetStopRequest,
+        ) -> VirtualTargetStopResult:
+            raise AssertionError(f"successful provisioning rolled back: {request}")
 
     virtual = VirtualDevices()
     monkeypatch.setattr(
         engine.platform,
         "capability",
-        lambda name: virtual if name == "virtual_devices" else None,
+        lambda name: virtual if name == "virtual_targets" else None,
     )
 
     prepared = engine._prepare_session_target(
@@ -343,26 +347,30 @@ def test_session_provisions_matching_avd_and_claims_it_automatically(
     calls: list[tuple[str, Any]] = []
 
     class VirtualDevices:
-        def select_avd_for_session(self, avd: str | None, *, needs: list[str]) -> str:
-            calls.append(("select", {"avd": avd, "needs": needs}))
-            return "rootable-api34"
-
-        def start(self, avd: str, **kwargs: Any) -> dict[str, Any]:
-            calls.append(("start", {"avd": avd, **kwargs}))
+        def provision_virtual_target(
+            self, request: VirtualTargetProvisionRequest
+        ) -> VirtualTargetInstance:
+            calls.append(("provision", request))
             online.append(
                 DeviceInfo(serial="emulator-5558", model="new", android_version="14")
             )
-            return {"ok": True, "serial": "emulator-5558", "avd": avd}
+            return VirtualTargetInstance(
+                target_id="emulator-5558",
+                definition_id="rootable-api34",
+                instance_token="rootable-api34.p5558",
+            )
 
-        def stop(self, **kwargs: Any) -> dict[str, Any]:
-            calls.append(("stop", kwargs))
-            return {"ok": True, "stopped": [kwargs["serial"]]}
+        def stop_virtual_target_instance(
+            self, request: OwnedVirtualTargetStopRequest
+        ) -> VirtualTargetStopResult:
+            calls.append(("stop", request))
+            return VirtualTargetStopResult(stopped_target_ids=("emulator-5558",))
 
     virtual = VirtualDevices()
     monkeypatch.setattr(
         engine.platform,
         "capability",
-        lambda name: virtual if name == "virtual_devices" else None,
+        lambda name: virtual if name == "virtual_targets" else None,
     )
 
     prepared = engine._prepare_session_target(
@@ -375,16 +383,14 @@ def test_session_provisions_matching_avd_and_claims_it_automatically(
 
     assert prepared["emulator_started"] is True
     assert prepared["serial"] == "emulator-5558"
-    assert calls[0] == (
-        "select",
-        {"avd": None, "needs": ["root", "proxy"]},
-    )
-    start = calls[1][1]
-    assert start["avd"] == "rootable-api34"
-    assert start["headless"] is False
-    assert start["audio"] is True
-    assert start["animations"] is False
-    assert start["parallel"] is True
+    assert calls[0][0] == "provision"
+    start = calls[0][1]
+    assert start.definition_id is None
+    assert start.needs == ("root", "proxy", "headed", "audio")
+    assert start.headless is False
+    assert start.audio is True
+    assert start.animations is False
+    assert start.parallel is True
     assert leases.holder(cfg.lease.registry_dir, "emulator-5558") == "session-agent"
     assert all(name != "stop" for name, _detail in calls)
 
@@ -413,27 +419,30 @@ def test_headed_session_does_not_reuse_an_unverifiably_headless_emulator(
 
     class VirtualDevices:
         @staticmethod
-        def select_avd_for_session(avd: str | None, *, needs: list[str]) -> str:
-            assert avd is None
-            assert needs == []
-            return "visible-image"
-
-        @staticmethod
-        def start(avd: str, **_kwargs: Any) -> dict[str, Any]:
-            assert avd == "visible-image"
+        def provision_virtual_target(
+            request: VirtualTargetProvisionRequest,
+        ) -> VirtualTargetInstance:
+            assert request.definition_id is None
+            assert request.needs == ("headed",)
             online.append(
                 DeviceInfo(serial="emulator-5556", model="new", android_version="14")
             )
-            return {"ok": True, "serial": "emulator-5556", "avd": avd}
+            return VirtualTargetInstance(
+                target_id="emulator-5556",
+                definition_id="visible-image",
+                instance_token="visible-image.p5556",
+            )
 
         @staticmethod
-        def stop(**_kwargs: Any) -> dict[str, Any]:
-            return {"ok": True, "stopped": []}
+        def stop_virtual_target_instance(
+            _request: OwnedVirtualTargetStopRequest,
+        ) -> VirtualTargetStopResult:
+            return VirtualTargetStopResult()
 
     monkeypatch.setattr(
         engine.platform,
         "capability",
-        lambda name: VirtualDevices() if name == "virtual_devices" else None,
+        lambda name: VirtualDevices() if name == "virtual_targets" else None,
     )
 
     prepared = engine._prepare_session_target(
@@ -561,32 +570,29 @@ def test_claim_rollback_never_stops_a_foreign_leased_serial(
     calls: list[tuple[str, dict[str, Any]]] = []
 
     class VirtualDevices:
-        def select_avd_for_session(self, avd: str | None, *, needs: list[str]) -> str:
-            return avd or "explicit-avd"
-
-        def start(self, avd: str, **kwargs: Any) -> dict[str, Any]:
-            calls.append(("start", {"avd": avd, **kwargs}))
+        def provision_virtual_target(
+            self, request: VirtualTargetProvisionRequest
+        ) -> VirtualTargetInstance:
+            calls.append(("provision", {"request": request}))
             # The collision: the "new" boot answers on the foreign worker's serial.
-            return {
-                "ok": True,
-                "serial": "emulator-5554",
-                "instance": f"{avd}.p5554",
-                "pid": 64064,
-                "avd": avd,
-            }
+            return VirtualTargetInstance(
+                target_id="emulator-5554",
+                instance_token="explicit-avd.p5554",
+                pid=64064,
+                definition_id=request.definition_id,
+            )
 
-        def stop(self, **kwargs: Any) -> dict[str, Any]:
-            raise AssertionError(f"serial-scoped stop reached a foreign lease: {kwargs}")
-
-        def stop_spawned_instance(self, **kwargs: Any) -> dict[str, Any]:
-            calls.append(("stop_spawned_instance", kwargs))
-            return {"ok": True, "stopped": [], "skipped_leased": []}
+        def stop_virtual_target_instance(
+            self, request: OwnedVirtualTargetStopRequest
+        ) -> VirtualTargetStopResult:
+            calls.append(("stop_virtual_target_instance", {"request": request}))
+            return VirtualTargetStopResult()
 
     virtual = VirtualDevices()
     monkeypatch.setattr(
         engine.platform,
         "capability",
-        lambda name: virtual if name == "virtual_devices" else None,
+        lambda name: virtual if name == "virtual_targets" else None,
     )
 
     with pytest.raises(DeviceLeasedError):
@@ -598,11 +604,11 @@ def test_claim_rollback_never_stops_a_foreign_leased_serial(
             avd="explicit-avd",
         )
 
-    rollback = dict(calls)["stop_spawned_instance"]
-    assert rollback["instance"] == "explicit-avd.p5554"
-    assert rollback["pid"] == 64064
-    assert rollback["requested_by"] == "session-start-claim-rollback"
-    assert str(rollback["lease_registry_dir"]) == str(registry)
+    rollback = dict(calls)["stop_virtual_target_instance"]["request"]
+    assert rollback.instance_token == "explicit-avd.p5554"
+    assert rollback.expected_pid == 64064
+    assert rollback.requested_by == "session-start-claim-rollback"
+    assert str(rollback.lease_registry_dir) == str(registry)
     assert leases.holder(registry, "emulator-5554") == "foreign-worker"
 
 

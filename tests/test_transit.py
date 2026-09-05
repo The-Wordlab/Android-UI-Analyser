@@ -13,8 +13,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from android_ui_analyser.engine import _package_from_xml
 from android_ui_analyser.memory import RouteStep
+from android_ui_analyser.platforms.android import package_from_tree
 from test_memory import P, _elements, _engine, _hier, _node, _store
 from test_navigation import ScriptedDevice
 
@@ -89,7 +89,7 @@ class TransitScriptedDevice(ScriptedDevice):
     """ScriptedDevice whose foreground package tracks the current screen's XML."""
 
     def current_app(self) -> dict[str, str]:
-        return {"package": _package_from_xml(self._xml) or self._pkg, "activity": self._act}
+        return {"package": package_from_tree(self._xml) or self._pkg, "activity": self._act}
 
 
 def _walk_auth_leg(tmp_path: Path, serial: str):

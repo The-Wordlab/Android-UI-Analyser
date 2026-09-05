@@ -86,3 +86,13 @@ def test_no_serial_anywhere_spawns_an_unpinned_daemon(monkeypatch, tmp_path) -> 
 
     assert "--serial" not in argv
     assert daemon_mod.effective_serial(cfg, None) is None
+
+
+def test_selected_platform_reaches_child_and_namespaces_socket(monkeypatch, tmp_path) -> None:
+    cfg = _config(tmp_path, "shared-id")
+    cfg.device.platform = "ios"
+
+    argv = _spawn_argv(monkeypatch, tmp_path, cfg, serial=None)
+
+    assert argv[argv.index("--platform") + 1] == "ios"
+    assert argv[argv.index("--socket") + 1].endswith(".ios--shared-id")

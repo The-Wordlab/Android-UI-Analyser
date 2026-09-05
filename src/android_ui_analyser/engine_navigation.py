@@ -15,7 +15,6 @@ import re
 import time
 from typing import TYPE_CHECKING, Any
 
-from .device import Device
 from .engine_support import (
     _ASSIST_MAX_STEPS,
     _SYSTEM_BAR_BAND,
@@ -48,9 +47,10 @@ from .memory import (
     step_display,
     target_arrival_evidence,
 )
+from .platforms.runtime import TargetRuntime as Device
 from .providers.base import ScreenImage
 from .providers.registry import run_chain
-from .schema import ActionResult, AnalyzeResult, Element, ElementId, MatchMode
+from .schema import ActionResult, AnalyzeResult, AppContext, Element, ElementId, MatchMode
 from .selectors import _match_step, is_back_resource_id
 
 if TYPE_CHECKING:
@@ -318,6 +318,7 @@ def drive_on_host(self: Engine, goal: str, *, budget: int = 8) -> dict[str, Any]
                 "text": element.text,
                 "desc": element.content_desc,
                 "rid": element.resource_id,
+                "window": element.window,
                 "clickable": bool(element.clickable),
                 "scrollable": bool(element.scrollable),
                 # `project` copies `id` into its `keys`, so this is how the chosen node maps
@@ -465,7 +466,7 @@ def _planner_view(self: Engine, res: AnalyzeResult) -> tuple[list[dict[str, Any]
     img: ScreenImage | None = None
     if res.elements and (labeled < 3 or labeled / len(res.elements) < 0.3):
         with contextlib.suppress(Exception):  # image is a bonus; text-only still works
-            img = self.device.screenshot()
+            img = self._screenshot(max_reuse_ms=80.0)
     return elements, img
 
 
@@ -1456,7 +1457,7 @@ def navigate(
                 and record.context_id in {newest.context_id, LEGACY_CONTEXT_ID}
             ):
                 arrival_screen = res.meta.known_screen
-        flow_store = FlowStore(self.config.memory)
+        flow_store = FlowStore(self.config.memory, platform=self.platform.name)
         # Per app: another package owning a flow of this name is not this app's collision.
         if flow_store.path(save_flow, app=origin).exists():
             return save_refusal(
@@ -1677,7 +1678,8 @@ def back_until(
     total_budget_ms, clamped_from, ceiling_ms = self._bounded_wait_ms(requested_total_ms)
     operation_deadline = started_at + total_budget_ms / 1000.0
     self._job_context.back_wait_clamp = (clamped_from, ceiling_ms)
-    device = self.device
+    device = self.platform.runtime_capability("ui.input", self.device)
+    self.platform.runtime_capability("ui.tree", device)
 
     def wait_destination(timeout_ms: int) -> ActionResult:
         if known_screen_target:
@@ -1757,7 +1759,7 @@ def back_until(
         current.observation.screen.package if current.observation is not None else ""
     )
     if not origin_package:
-        origin_package = str((device.current_app() or {}).get("package") or "")
+        origin_package = str(AppContext.coerce(device.current_app()).app_id or "")
     if current.ok:
         current = refresh_weak_terminal(current, None)
         if not current.ok:
@@ -2269,7 +2271,7 @@ def _back_observation_identity(observation: AnalyzeResult | None) -> str | None:
 def _back_observed_package(current: ActionResult, device: Device) -> str:
     return str(
         (current.observation.screen.package if current.observation is not None else "")
-        or (device.current_app() or {}).get("package")
+        or AppContext.coerce(device.current_app()).app_id
         or ""
     )
 
@@ -2326,8 +2328,9 @@ def open_link(
     if pin_package and not target_pkg:
         target_pkg = self.current_package() or self._cached_package()
     step = self._step("open-link", arg=uri)
+    links = self.platform.runtime_capability("app.links", self.device)
     with self._acting():
-        self.device.open_link(uri, package=target_pkg if pin_package else None)
+        links.open_link(uri, package=target_pkg if pin_package else None)
     time.sleep(0.35)  # chooser / activity settle
     detail = uri if not target_pkg else f"{uri} → {target_pkg}"
     if self._is_chooser():
@@ -2416,78 +2419,39 @@ def _remember_pending_flag_context(self: Engine, uri: str, package: str | None) 
 
 
 def _is_chooser(self: Engine) -> bool:
-    """True when the system resolver / 'Open with…' UI is in the foreground."""
-    device = self.device
-    try:
-        app = device.current_app() or {}
-    except Exception:
-        return False
-    pkg = (app.get("package") or "").lower()
-    activity = (app.get("activity") or "").lower()
-    if (
-        "resolver" in activity
-        or "intentresolver" in pkg
-        or pkg in {"android", "com.android.intentresolver", "com.android.internal.app"}
-    ):
-        return True
-    with contextlib.suppress(Exception):
-        xml = self.platform.dump_tree(device)
-        if "Open with" in xml or ("Just once" in xml and "Always" in xml):
-            return True
-    return False
+    """True when the selected platform says link dispatch is awaiting app selection."""
+    links = self.platform.runtime_capability("app.links", self.device)
+    return self.platform.link_chooser_visible(links)
 
 
 def _chooser_app_labels(self: Engine) -> list[str]:
-    """Clickable app-row labels on a chooser screen (best-effort)."""
-    skip = {"Just once", "Always", "Open with", "Cancel", "Open"}
-    labels: list[str] = []
+    """Platform-normalized app-row labels on a chooser screen (best-effort)."""
     with contextlib.suppress(Exception):
         result = self.analyze(source="hierarchy", record=False)
-        for el in result.elements:
-            label = (el.text or el.content_desc or "").strip()
-            if label and label not in skip and el.clickable:
-                labels.append(label)
-    return labels
+        candidates = self.platform.link_chooser_candidates(result.elements)
+        return [
+            label
+            for element in candidates
+            if (label := (element.text or element.content_desc or "").strip())
+        ]
+    return []
 
 
 def _dismiss_chooser(self: Engine, *, prefer: str | None = None) -> bool:
     """If the system 'Open with…' resolver is foreground, pick an app and continue."""
     if not self._is_chooser():
         return False
-    device = self.device
-    # Prefer an explicit package label match, else tap "Just once" on first row.
+    device = self.platform.runtime_capability("ui.input", self.device)
+    # Platform normalization keeps native resolver labels and chrome out of shared code.
     try:
         result = self.analyze(source="hierarchy", record=False)
     except Exception:
         return False
-    prefer_tail = (prefer or "").rsplit(".", 1)[-1].lower() if prefer else ""
-    candidates = [
-        el
-        for el in result.elements
-        if el.clickable
-        and (
-            (prefer_tail and prefer_tail in (el.text or el.content_desc or "").lower())
-            or (el.text or "").strip() not in {"Just once", "Always", "Open with"}
-        )
-    ]
-    target = None
-    if prefer_tail:
-        for el in candidates:
-            hay = f"{el.text or ''} {el.content_desc or ''}".lower()
-            if prefer_tail in hay or (prefer or "").lower() in hay:
-                target = el
-                break
-    if target is None:
-        # First non-chrome row that looks like an app
-        for el in result.elements:
-            label = (el.text or el.content_desc or "").strip()
-            if (
-                label
-                and label not in {"Just once", "Always", "Open with", "Cancel"}
-                and el.clickable
-            ):
-                target = el
-                break
+    candidates = self.platform.link_chooser_candidates(
+        result.elements,
+        preferred_app_id=prefer,
+    )
+    target = candidates[0] if candidates else None
     if target is None:
         return False
     x, y = target.center
@@ -2496,10 +2460,9 @@ def _dismiss_chooser(self: Engine, *, prefer: str | None = None) -> bool:
     time.sleep(0.3)
     with contextlib.suppress(Exception):
         again = self.analyze(source="hierarchy", record=False)
-        for el in again.elements:
-            if (el.text or "").strip() == "Just once" and el.clickable:
-                device.click(*el.center)
-                break
+        confirmation = self.platform.link_chooser_confirmation(again.elements)
+        if confirmation is not None:
+            device.click(*confirmation.center)
     # Cache only — deliberately NOT `_acting()`. This runs mid-`open_link`, whose window
     # is already open; re-stamping here would move it past the deeplink's own output.
     self._invalidate_cache()

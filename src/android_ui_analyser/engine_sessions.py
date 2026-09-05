@@ -25,6 +25,7 @@ from .memory import (
     arrival_destination_terms,
     is_destructive_step,
 )
+from .platforms.identity import TargetRef
 from .schema import AnalyzeResult
 from .selectors import match_selector
 
@@ -60,7 +61,7 @@ def _goal_session_plan(self: Engine, goal: str, observation: AnalyzeResult) -> A
     resolved_flow_evidence: dict[str, dict[str, Any]] = {}
     # A malformed flow must not prevent a new agent from starting a session.  It stays
     # visible through `flow list`, whose error is the right repair surface.
-    store = FlowStore(self.config.memory)
+    store = FlowStore(self.config.memory, platform=self.platform.name)
     for item in store.list():
         # `ref` rather than the storage name: with flows filed per app, a shared name only
         # loads when it is qualified, and a plan may only recommend a call that runs.
@@ -123,10 +124,12 @@ def session_start(
     junit: bool = False,
     wait_for_lease_s: float = 0,
     start_emulator: bool = True,
+    provision_target: bool | None = None,
     headed: bool = False,
     audio: bool = False,
     animations: bool = False,
     avd: str | None = None,
+    virtual_target: str | None = None,
     needs: list[str] | None = None,
     package: str | None = None,
     activity: str | None = None,
@@ -141,7 +144,7 @@ def session_start(
         explicitly name *package*/*activity* to launch into the intended app first; the launch's
         folded observation is reused, so bootstrap still performs exactly one screen read.
 
-        *apk* makes this the single bootstrap call: boot an emulator if asked, put the build on it
+        *apk* makes this the single bootstrap call: provision a virtual target if asked, put the build on it
         (skipping the push when that version is already there), launch it, observe, and plan. The
         bundle also names the package, so *package* is optional when *apk* is given.
         """
@@ -168,6 +171,14 @@ def session_start(
         raise UsageError("--wait-for-lease must not be negative")
     if wait_for_lease_s and observation is not None:
         raise UsageError("wait_for_lease_s cannot be combined with an injected observation")
+    if avd and virtual_target and avd != virtual_target:
+        raise UsageError(
+            f"conflicting virtual-target definitions: --virtual-target {virtual_target} "
+            f"vs --avd {avd}",
+            hint="Pass one definition. --avd remains the Android compatibility alias.",
+        )
+    should_provision = start_emulator if provision_target is None else provision_target
+    requested_definition = virtual_target or avd
     normalized_needs = (
         [str(item).strip().lower() for item in needs if str(item).strip()]
         if needs is not None
@@ -182,18 +193,34 @@ def session_start(
     self._lease_needs = [item for item in normalized_needs if item != "animations"]
     self._lease_waited_ms = 0
     emulator_started = False
+    virtual_target_started = False
+    virtual_target_definition_id: str | None = None
+    virtual_target_instance_token: str | None = None
     if observation is None:
         prepared = self._prepare_session_target(
             wait_for_lease_s=wait_for_lease_s,
-            start_emulator=start_emulator,
+            provision_target=should_provision,
             headed=headed,
             audio=audio,
-            avd=avd,
+            virtual_target=requested_definition,
             animations=animations_requested,
             package=package,
             app_will_be_installed=bool(apk),
         )
         emulator_started = bool(prepared.get("emulator_started"))
+        virtual_target_started = bool(
+            prepared.get("virtual_target_started") or emulator_started
+        )
+        virtual_target_definition_id = (
+            str(prepared["definition_id"])
+            if prepared.get("definition_id") is not None
+            else None
+        )
+        virtual_target_instance_token = (
+            str(prepared["instance_token"])
+            if prepared.get("instance_token") is not None
+            else None
+        )
         self._lease_waited_ms = int(prepared.get("lease_waited_ms") or 0)
     installed_bundle: dict[str, Any] | None = None
     animation_backup_path: Path | None = None
@@ -202,11 +229,11 @@ def session_start(
     try:
         if observation is None and animations_requested:
             serial = str(prepared["serial"])
-            safe_serial = serial.replace(":", "_").replace("/", "_")
+            target_key = TargetRef(self.platform.name, serial).storage_key
             animation_backup_path = (
                 Path(self.config.cache.dir).expanduser()
                 / "session-devopts"
-                / f"{safe_serial}-{uuid.uuid4().hex}.json"
+                / f"{target_key}-{uuid.uuid4().hex}.json"
             )
             animation_change_key = f"session_animations:{animation_backup_path.name}"
             self.record_device_change(
@@ -218,7 +245,7 @@ def session_start(
                 serial=serial,
             )
             devopts = self.platform.capability("developer_settings")
-            animation_state = devopts.anim_on(self.device.shell, animation_backup_path)
+            animation_state = devopts.anim_on(self.device, animation_backup_path)
             scales = (animation_state or {}).get("anim") or {}
             animations_enabled = bool(scales) and all(
                 str(value) in {"1", "1.0"} for value in scales.values()
@@ -300,27 +327,27 @@ def session_start(
         if animation_backup_path is not None and animation_backup_path.is_file():
             try:
                 self.platform.capability("developer_settings").anim_restore(
-                    self.device.shell, animation_backup_path
+                    self.device, animation_backup_path
                 )
                 if animation_change_key is not None:
                     self.forget_device_change(animation_change_key)
             except Exception:
                 # Leave the ledger entry intact: the teardown watchdog can still restore it.
                 pass
-        if emulator_started:
-            emulator_mod = self.platform.capability("virtual_devices")
-
+        if virtual_target_started:
             # Tear down only the boot this session performed (`prepared` carries the
-            # instance/pid the platform recorded); a bare serial can name a foreign
-            # device after a provisioning collision. Drop this command's shared use
+            # opaque instance token the platform recorded); a bare target id can name a foreign
+            # target after a provisioning collision. Drop this command's shared use
             # fence before rollback takes the exclusive stop/ownership transaction.
             self.release_device_use()
             with contextlib.suppress(Exception):
-                emulator_mod.stop_spawned_instance(
-                    instance=str(prepared.get("instance") or ""),
-                    pid=prepared.get("pid"),
-                    cache_dir=self.config.cache.dir,
-                    lease_registry_dir=self._lease_registry_dir,
+                self.virtual_target_stop_instance(
+                    str(
+                        prepared.get("instance_token")
+                        or prepared.get("instance")
+                        or ""
+                    ),
+                    expected_pid=prepared.get("pid"),
                     owner=getattr(self, "_lease_owner_resolved", None),
                     requested_by="session-start-rollback",
                 )
@@ -365,6 +392,9 @@ def session_start(
         network_backup_preexisting=network_backup_preexisting,
         network_profile_preexisting=network_profile_preexisting,
         emulator_started=emulator_started,
+        virtual_target_started=virtual_target_started,
+        virtual_target_definition_id=virtual_target_definition_id,
+        virtual_target_instance_token=virtual_target_instance_token,
         animations_enabled=animations_enabled,
         animation_backup_path=(
             str(animation_backup_path) if animation_backup_path is not None else None
@@ -378,6 +408,7 @@ def session_start(
         capture_context_id=capture_context_id,
         capture_segment=capture_segment,
         capture_start_order=capture_start_order,
+        platform=self.platform.name,
     )
     if artifacts_dir:
         from .session import update_session_state
@@ -444,7 +475,7 @@ def session_start(
             *(["animation_restore"] if animation_backup_path is not None else []),
             "network_restore",
             "network_profile_restore",
-            *(["owned_emulator_handoff"] if emulator_started else []),
+            *(["owned_emulator_handoff"] if virtual_target_started else []),
         ],
         cleanup_call={
             "cli": "aua session finish",
@@ -455,11 +486,14 @@ def session_start(
             "reason": (
                 "Run this once when finished. It restores only session-owned reversible "
                 "state, releases the device lease, and returns the efficiency review. "
-                "An AUA-started emulator remains warm until its lease-gated idle timeout; "
+                "An AUA-started virtual target remains warm until its lease-gated idle timeout; "
                 "do not restore the network separately first."
             ),
         },
         emulator_started=emulator_started,
+        virtual_target_started=virtual_target_started,
+        virtual_target_definition_id=virtual_target_definition_id,
+        virtual_target_instance_token=virtual_target_instance_token,
         animations={
             "requested": animations_requested,
             "enabled": animations_enabled,
@@ -1136,7 +1170,16 @@ def _session_state(self: Engine, session_id: str | None = None) -> Any:
     from .session import load_session_state
 
     resolved = session_id or getattr(self, "_session_id", None)
-    state = load_session_state(self.config.cache.dir, session_id=resolved) if resolved else None
+    platform_name = self.platform.name
+    state = (
+        load_session_state(
+            self.config.cache.dir,
+            session_id=resolved,
+            platform=platform_name,
+        )
+        if resolved
+        else None
+    )
     if state is None:
         owner = getattr(self, "_lease_owner_resolved", None)
         cached_device = getattr(self, "_device", None)
@@ -1146,13 +1189,18 @@ def _session_state(self: Engine, session_id: str | None = None) -> Any:
             or getattr(cached_device, "serial", None)
         )
         if serial is None and owner:
-            held = leases.primary_held_by(self._lease_registry_dir, owner)
+            held = leases.primary_held_by(
+                self._lease_registry_dir,
+                owner,
+                platform=platform_name,
+            )
             serial = held[0] if len(held) == 1 else None
         if serial is not None:
             state = load_session_state(
                 self.config.cache.dir,
                 serial=serial,
                 owner=owner,
+                platform=platform_name,
             )
     if state is None:
         raise UsageError(
@@ -1174,6 +1222,7 @@ def session_review(self: Engine, session_id: str | None = None) -> dict[str, Any
         state.serial,
         since_ms=state.started_ms,
         limit=2_000,
+        platform=state.platform,
     )
     review = review_session_events(state, events)
     # The rest of this review counts calls and names avoidable ones; `call_log` is the
@@ -1302,7 +1351,9 @@ def session_candidate_flow(
     if save:
         from .flows import FlowStore
 
-        path = FlowStore(self.config.memory).save(candidate.flow, force=False)
+        path = FlowStore(self.config.memory, platform=self.platform.name).save(
+            candidate.flow, force=False
+        )
         out["saved"] = True
         out["path"] = str(path)
     return out
@@ -1564,7 +1615,7 @@ def session_finish(
 
             def restore_session_animations() -> dict[str, Any]:
                 restored = self.platform.capability("developer_settings").anim_restore(
-                    self.device.shell, animation_path
+                    self.device, animation_path
                 )
                 self.forget_device_change(
                     f"session_animations:{animation_path.name}", serial=state.serial
@@ -1594,7 +1645,7 @@ def session_finish(
     # A completed session is also the ownership boundary. Release after every device cleanup
     # action, and drop the command fence first so the lease transition can take its exclusive
     # lock. Failed cleanup deliberately keeps the lease, allowing the same process to retry.
-    # A healthy AUA-started emulator is handed to the warm pool rather than stopped here; its
+    # A healthy AUA-started virtual target is handed to the warm pool rather than stopped here; its
     # detached, lease-gated idle watchdog owns eventual retirement.
     lease_serial = getattr(self, "_lease_serial", None)
     if not errors and lease_serial == state.serial and lease_owner:
@@ -1605,6 +1656,7 @@ def session_finish(
             self._lease_registry_dir,
             state.serial,
             owner=lease_owner,
+            platform=state.platform,
         )
         cleanup.append(
             {
@@ -1618,13 +1670,17 @@ def session_finish(
             self._leased_serial_resolved = None
             self._lease_owner_resolved = None
             self._lease_generation_resolved = None
-            if state.emulator_started:
-                idle_stop_s = float(
-                    getattr(self.config.teardown, "emulator_idle_stop_s", 1200.0)
-                )
+            if state.virtual_target_started or state.emulator_started:
+                idle_stop_s = self.config.teardown.effective_virtual_target_idle_stop_s()
                 cleanup.append(
                     {
                         "action": "owned_emulator_handoff",
+                        "virtual_target_action": "owned_virtual_target_handoff",
+                        "virtual_target": {
+                            "target_id": state.serial,
+                            "definition_id": state.virtual_target_definition_id,
+                            "instance_token": state.virtual_target_instance_token,
+                        },
                         "ok": True,
                         "result": {
                             "ok": True,
@@ -1667,7 +1723,7 @@ def session_finish(
         "hint": (
             (
                 "session completed; session-owned state was restored, the lease was "
-                "released, and any AUA-started emulator was handed to the warm pool"
+                "released, and any AUA-started virtual target was handed to the warm pool"
                 if progress["done"]
                 else "session terminated, cleanup completed, and the lease was released; "
                 "unfinished goal phases remain incomplete"

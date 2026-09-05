@@ -139,6 +139,26 @@ def test_invalid_finite_parameter_is_rejected_after_resolution(step: str, value:
         resolve_params(flow, {"VALUE": value})
 
 
+def test_selected_platform_validates_portable_flow_keys_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from conftest import make_engine
+
+    yaml = "steps:\n  - key: back\n  - key: camera\n"
+    engine = make_engine(memory={"enabled": False})
+    device = engine._device
+
+    def normalize_key(name: str) -> str:
+        if name == "camera":
+            raise UsageError("selected platform does not support camera")
+        return name
+
+    monkeypatch.setattr(engine.platform, "normalize_key", normalize_key)
+    with pytest.raises(UsageError, match="does not support camera"):
+        engine.flow_run(yaml=yaml)
+    assert device is not None and device.calls == []
+
+
 def test_resolved_step_validation_is_pure_and_recursive() -> None:
     steps = [
         RouteStep(

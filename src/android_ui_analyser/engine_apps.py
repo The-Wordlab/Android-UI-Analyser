@@ -17,23 +17,17 @@ from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from .device import Device
 from .engine_support import _ResolvedFlagsResource, logger
 from .errors import DeviceError, UsageError
 from .memory import _LOG_PREF_MAX, AppMemoryStore, EffectiveAppLogs, RouteStep, _id_tail
 from .platforms import AppBundle, InstalledApp
-from .schema import ActionResult, AnalyzeResult, AppStatusResult
+from .platforms.diagnostics import DIAGNOSTIC_LEVEL_CODES
+from .platforms.runtime import TargetRuntime as Device
+from .schema import ActionResult, AnalyzeResult, AppContext, AppStatusResult
 from .selectors import app_elements
 
 if TYPE_CHECKING:
     from .engine import Engine
-
-
-# Package-name fragments that mark a surface AUA is never *testing* — the system launcher and
-# the system UI. Scoping an action's log window to one of these is not a smaller answer, it is a
-# wrong one: measured on a real device, a Back to home attached 20 lines of `LauncherStateManager`
-# animation state under a field that claims to be the app's own output.
-_NOT_THE_APP_UNDER_TEST = ("launcher", "systemui", "com.android.systemui", ".home")
 
 
 def _clean_tags(tags: Sequence[str] | None) -> list[str]:
@@ -201,7 +195,8 @@ def _await_foreground(device: Device, package: str, *, timeout_ms: int = 20_000)
     deadline = time.monotonic() + timeout_ms / 1000.0
     while True:
         with contextlib.suppress(Exception):
-            if (device.current_app() or {}).get("package") == package:
+            current = AppContext.coerce(device.current_app())
+            if current.get("package") == package:
                 return True
         if time.monotonic() >= deadline:
             return False
@@ -216,6 +211,7 @@ def _await_launch_hierarchy(self: Engine, package: str) -> AnalyzeResult:
         fresh hierarchy-only samples while the requested package remains foreground; if ownership
         changes or the bounded attachment window expires, refuse the mixed-package observation.
         """
+    runtime = self.platform.runtime_capability("ui.tree", self.device)
     deadline = time.monotonic() + _LAUNCH_HIERARCHY_SETTLE_S
     last_package = ""
     while True:
@@ -236,7 +232,7 @@ def _await_launch_hierarchy(self: Engine, package: str) -> AnalyzeResult:
         last_package = fresh.screen.package or ""
         if not last_package:
             try:
-                foreground = str((self.device.current_app() or {}).get("package") or "")
+                foreground = str(AppContext.coerce(runtime.current_app()).app_id or "")
             except Exception:  # noqa: BLE001 — absence of ownership proof must fail closed
                 foreground = ""
             if foreground != package:
@@ -263,7 +259,7 @@ def _await_launch_hierarchy(self: Engine, package: str) -> AnalyzeResult:
             return fresh
 
         try:
-            foreground = str((self.device.current_app() or {}).get("package") or "")
+            foreground = str(AppContext.coerce(runtime.current_app()).app_id or "")
         except Exception:  # noqa: BLE001 — absence of ownership proof must fail closed
             foreground = ""
         if foreground != package:
@@ -458,19 +454,21 @@ def flags_set(
 def _foreground_activity(self: Engine, package: str) -> str | None:
     """The activity of *package* if it is in the foreground — the one to relaunch."""
     with contextlib.suppress(Exception):
-        app = self.device.current_app() or {}
-        if (app.get("package") or "") == package:
-            return app.get("activity") or None
+        runtime = self.platform.runtime_capability("ui.tree", self.device)
+        app = AppContext.coerce(runtime.current_app())
+        if app.app_id == package:
+            return app.surface_id
     return None
 
 
 def _wait_foreground(self: Engine, package: str, timeout_s: float | None = None) -> bool:
+    runtime = self.platform.runtime_capability("ui.tree", self.device)
     deadline = time.monotonic() + (
         _FLAGS_FOREGROUND_TIMEOUT_S if timeout_s is None else timeout_s
     )
     while True:
         with contextlib.suppress(Exception):
-            if ((self.device.current_app() or {}).get("package") or "") == package:
+            if AppContext.coerce(runtime.current_app()).app_id == package:
                 return True
         if time.monotonic() >= deadline:
             return False
@@ -498,7 +496,8 @@ def _launch_entry(self: Engine, package: str, activity: str | None) -> tuple[str
     if pinned:
         return pinned, None
     try:
-        declared = self.device.launcher_activities(package)
+        runtime = self.platform.runtime_capability("app.lifecycle", self.device)
+        declared = runtime.launcher_activities(package)
     except Exception as exc:  # noqa: BLE001 — a launch must not fail over a memory nicety
         logger.debug("could not read the launcher activities of %s: %s", package, exc)
         return None, None
@@ -525,7 +524,10 @@ def _restart_app(self: Engine, package: str, activity: str | None) -> Restart:
         foreground has to be re-read rather than assumed, or this reports a restart that
         left the app dead.
         """
-    device = self.device
+    device = self.platform.runtime_capability("app.lifecycle", self.device)
+    # A restart is not complete until foreground ownership can be verified. Keep that
+    # observation contract explicit instead of assuming every lifecycle runtime has a tree.
+    self.platform.runtime_capability("ui.tree", device)
     if not activity:
         # `flags set` restarts with no mid-flow Activity to return to. Without the learned
         # pin this fell through to an unpinned resolve — the coin flip that can reopen a Dev
@@ -666,15 +668,14 @@ def prefs_write(
     prefs = self.platform.capability("feature_flags")
 
     device = self.device
+    pending_changes = self._pending_device_changes(serial=device.target_id)
     snapshot = prefs.snapshot_prefs(device, package, file)
     key = f"app_prefs:{snapshot.package}:{snapshot.file}"
     backup: Path | None = None
     # Repeated writes in one session must still undo to the state before the *first* write.
     # The ledger is idempotent on key; overwriting its deterministic backup before replacing
     # the entry made teardown restore only the immediately preceding intermediate value.
-    from . import device_ledger
-
-    for entry in device_ledger.read_ledger(device.serial):
+    for entry in pending_changes:
         candidate = Path(str(entry.args.get("backup_path") or ""))
         if entry.key == key and entry.op == "restore_app_prefs" and candidate.is_file():
             backup = candidate
@@ -695,6 +696,58 @@ def prefs_write(
     return prefs.write_prefs(device, snapshot, dict(values), relaunch=relaunch)
 
 
+def _permission_change_key(app_id: str) -> str:
+    return f"app_permissions:{app_id}"
+
+
+def _record_app_permission_change(
+    self: Engine,
+    lifecycle: Device,
+    app_id: str,
+    *,
+    known_absent: bool = False,
+) -> tuple[str, list[str]]:
+    """Snapshot runtime grants before a grant/install can change them.
+
+    Repeated grants in one lease must continue to restore the state before the first one, so an
+    existing ledger entry wins over a fresh read just like app-prefs and airplane snapshots do.
+    """
+
+    key = _permission_change_key(app_id)
+    existing = self._pending_device_change(
+        key, serial=lifecycle.target_id
+    )
+    if existing is not None and existing.op == "restore_app_permissions":
+        raw = existing.args.get("granted")
+        original = [str(item) for item in raw] if isinstance(raw, list) else []
+        return key, original
+    original = [] if known_absent else sorted(set(lifecycle.granted_permissions(app_id)))
+    self.record_device_change(
+        key=key,
+        kind="app_permissions",
+        op="restore_app_permissions",
+        args={"app_id": app_id, "granted": original},
+        detail=f"runtime permissions granted to {app_id}",
+    )
+    return key, original
+
+
+def _forget_unchanged_app_permissions(
+    self: Engine, lifecycle: Device, app_id: str, key: str, original: Sequence[str]
+) -> None:
+    """Drop a redundant undo only when a post-mutation read proves nothing changed."""
+
+    with contextlib.suppress(Exception):
+        if set(lifecycle.granted_permissions(app_id)) == set(original):
+            self.forget_device_change(key)
+
+
+def _grant_app_permissions(self: Engine, lifecycle: Device, app_id: str) -> None:
+    key, original = _record_app_permission_change(self, lifecycle, app_id)
+    lifecycle.grant_permissions(app_id)
+    _forget_unchanged_app_permissions(self, lifecycle, app_id, key, original)
+
+
 def app(
     self: Engine,
     action: str,
@@ -709,8 +762,13 @@ def app(
     device = self.device
     a = action.lower()
     if a in ("foreground", "current"):
-        info = device.current_app()
-        return ActionResult(ok=True, action=f"app-{a}", detail=json.dumps(info))
+        tree = self.platform.runtime_capability("ui.tree", device)
+        info = AppContext.coerce(tree.current_app())
+        return ActionResult(
+            ok=True,
+            action=f"app-{a}",
+            detail=json.dumps(info.compatibility_dict()),
+        )
     if a == "launch":
         if not package:
             raise UsageError("app launch needs a package name")
@@ -719,6 +777,8 @@ def app(
                 "launch --clear wipes app data (flags + session) — pass --yes",
                 hint="`aua app launch <pkg> --clear --yes`",
             )
+        lifecycle = self.platform.runtime_capability("app.lifecycle", device)
+        tree = self.platform.runtime_capability("ui.tree", device)
         mem = self._memory
         if mem is not None and not self._join_memory_writers(timeout_s=5.0):
             raise UsageError("memory provenance is still being finalized")
@@ -738,9 +798,9 @@ def app(
         clear_warning: str | None = None
         with self._acting():
             if clear_state:
-                clear_warning = device.clear_app(package)
+                clear_warning = lifecycle.clear_app(package)
             self._app_process_replaced(package)
-            device.launch_app(package, activity=entry)
+            lifecycle.launch_app(package, activity=entry)
         self._record_action_safe(step)
         if mem is not None:
             with self._mem_lock:
@@ -762,7 +822,7 @@ def app(
             detail = f"{detail} (cleared)"
             if clear_warning:
                 detail = f"{detail} — {clear_warning}"
-        if not self._await_foreground(device, package):
+        if not self._await_foreground(tree, package):
             # uiautomator2's app_start swallows `am start` failures, so a launch that never
             # happened used to answer ok=True. The caller then drives a screen that is not
             # there and every selector fails with an unrelated "no element matches".
@@ -816,7 +876,7 @@ def app(
             # foreground check immediately above is authoritative for that missing field,
             # so bind the otherwise useful landing observation to the verified package.
             try:
-                foreground = str((self.device.current_app() or {}).get("package") or "")
+                foreground = str(AppContext.coerce(tree.current_app()).app_id or "")
             except Exception:  # noqa: BLE001 — absence of ownership proof must fail closed
                 foreground = ""
             if foreground != package:
@@ -856,12 +916,13 @@ def app(
     if a in ("kill", "force-stop"):
         if not package:
             raise UsageError("app kill needs a package name")
+        lifecycle = self.platform.runtime_capability("app.lifecycle", device)
         mem = self._memory
         if mem is not None and not self._join_memory_writers(timeout_s=5.0):
             raise UsageError("memory provenance is still being finalized")
         with self._acting():
             self._app_process_replaced(package)
-            device.stop_app(package)
+            lifecycle.stop_app(package)
         if mem is not None:
             with self._mem_lock:
                 mem.mark_capture_boundary(
@@ -873,12 +934,13 @@ def app(
     if a == "stop":
         if not package:
             raise UsageError("app stop needs a package name")
+        lifecycle = self.platform.runtime_capability("app.lifecycle", device)
         mem = self._memory
         if mem is not None and not self._join_memory_writers(timeout_s=5.0):
             raise UsageError("memory provenance is still being finalized")
         with self._acting():
             self._app_process_replaced(package)
-            device.stop_app(package)
+            lifecycle.stop_app(package)
         if mem is not None:
             with self._mem_lock:
                 mem.mark_capture_boundary(
@@ -896,12 +958,13 @@ def app(
                 "— pass --yes / --yes-wipe-flags to confirm",
                 hint="Then re-apply flag overrides / re-login before asserting experiment UI.",
             )
+        lifecycle = self.platform.runtime_capability("app.lifecycle", device)
         mem = self._memory
         if mem is not None and not self._join_memory_writers(timeout_s=5.0):
             raise UsageError("memory provenance is still being finalized")
         with self._acting():
             self._app_process_replaced(package)
-            clear_warning = device.clear_app(package)
+            clear_warning = lifecycle.clear_app(package)
         if mem is not None:
             with self._mem_lock:
                 mem.clear_context(device.serial, package)
@@ -913,7 +976,8 @@ def app(
     if a in ("grant", "grant-permissions", "grant_permissions"):
         if not package:
             raise UsageError("app grant needs a package name")
-        device.grant_permissions(package)
+        lifecycle = self.platform.runtime_capability("app.lifecycle", device)
+        _grant_app_permissions(self, lifecycle, package)
         return ActionResult(ok=True, action="app-grant", detail=package)
     raise UsageError(
         f"unknown app action '{action}'",
@@ -927,12 +991,7 @@ def app_status(self: Engine, package: str) -> AppStatusResult:
     app_id = str(package or "").strip()
     if not app_id:
         raise UsageError("app status needs a package name")
-    platform = self.platform
-    if not platform.supports("app.status"):
-        raise DeviceError(
-            f"platform '{platform.name}' cannot query installed app status",
-            code="unsupported_capability",
-        )
+    platform = self.platform.adapter_capability("app.status")
     device = self.device
     status = platform.installed_app(device, app_id)
     return AppStatusResult(
@@ -980,12 +1039,7 @@ def install_app(
             f"unknown install mode '{mode}'",
             hint=f"one of: {'|'.join(self.INSTALL_MODES)}",
         )
-    platform = self.platform
-    if not platform.supports("app.install"):
-        raise DeviceError(
-            f"platform '{platform.name}' cannot install app bundles",
-            code="unsupported_capability",
-        )
+    platform = self.platform.adapter_capability("app.install")
     path = Path(bundle).expanduser()
     info = platform.inspect_app_bundle(path)
     app_id = package or info.app_id
@@ -1025,10 +1079,23 @@ def install_app(
             hint=f"Or keep the data: `aua install {path} --reinstall`.",
         )
     started = time.perf_counter()
+    permission_change: tuple[Device, str, list[str]] | None = None
     if pushed:
         mem = self._memory
         if mem is not None and not self._join_memory_writers(timeout_s=5.0):
             raise UsageError("memory provenance is still being finalized")
+        if grant_permissions:
+            lifecycle = self.platform.runtime_capability("app.lifecycle", device)
+            key, original = _record_app_permission_change(
+                self,
+                lifecycle,
+                app_id,
+                # A confirmed fresh install explicitly uninstalls first. Its permission
+                # baseline is therefore the empty post-uninstall package, not the grants
+                # attached to the old build that the caller chose to destroy.
+                known_absent=not before.installed or removed,
+            )
+            permission_change = (lifecycle, key, original)
         with self._acting():
             self._app_process_replaced(app_id)
             if removed:
@@ -1068,12 +1135,16 @@ def install_app(
                 code="install_unverified",
                 hint="Check the bundle's package id and the device's remaining storage.",
             )
+        if permission_change is not None:
+            lifecycle, key, original = permission_change
+            _forget_unchanged_app_permissions(self, lifecycle, app_id, key, original)
     else:
         after = before
     if grant_permissions and not pushed:
         # `-g` only applies to the install itself, so an idempotent skip would silently drop
         # the caller's permission request.
-        device.grant_permissions(app_id)
+        lifecycle = self.platform.runtime_capability("app.lifecycle", device)
+        _grant_app_permissions(self, lifecycle, app_id)
     detail_info: dict[str, Any] = {
         "package": app_id,
         "installed": True,
@@ -1259,14 +1330,13 @@ def logcat_mark(self: Engine, name: str = "default", *, clear: bool = False) -> 
         Measures the skew fresh: this is the user-invoked entry point, the one place where
         an adb round-trip is affordable and where reporting real drift is the whole point.
         """
-    from . import logcat as logcat_mod
-
     device = self.device
-    if clear:
-        device.logcat(dump=False)
-    clock = logcat_mod.resolve_clock(device, self.config.cache.dir, force=True)
-    entry = logcat_mod.set_mark(
-        self.config.cache.dir, device.serial, name or "default", clock=clock
+    diagnostics = self.platform.adapter_capability("device.logs")
+    entry = diagnostics.mark_diagnostics(
+        device,
+        name or "default",
+        clear=clear,
+        refresh_clock=True,
     )
     return {"ok": True, "action": "logcat-mark", **entry}
 
@@ -1280,29 +1350,24 @@ def logcat(
     lines: int | None = None,
 ) -> dict[str, Any]:
     """Dump recent logcat, filtered by mark / grep / tag / line count."""
-    from . import logcat as logcat_mod
-
     device = self.device
-    path = logcat_mod.marks_path(self.config.cache.dir, device.serial)
-    marks = logcat_mod.load_marks(path)
-    clock = logcat_mod.resolve_clock(device, self.config.cache.dir)
+    diagnostics = self.platform.adapter_capability("device.logs")
     try:
-        since_ms, since_label = logcat_mod.resolve_since_ms(marks, since, clock=clock)
+        window = diagnostics.diagnostic_window(device, since=since)
     except KeyError as exc:
-        known = ", ".join(sorted(marks)) or "(none)"
+        known = ", ".join(getattr(exc, "known", ())) or "(none)"
         raise UsageError(
             f"unknown logcat mark {since!r}",
             hint=f"Known marks: {known}. Set one with `aua logcat mark <name>`.",
         ) from exc
-    raw = device.logcat(since_ms=since_ms, dump=True)
-    filtered = logcat_mod.filter_logcat(raw, grep=grep, tag=tag, lines=lines)
+    filtered = window.select_lines(grep=grep, source=tag, lines=lines)
     return {
         "ok": True,
         "lines": filtered,
-        "since": since_label,
-        "since_unix_ms": since_ms,
-        "clock": clock.name,
-        "skew_ms": clock.skew_ms,
+        "since": window.since,
+        "since_unix_ms": window.since_unix_ms,
+        "clock": window.clock,
+        "skew_ms": window.skew_ms,
         "grep": grep,
         "tag": tag,
         "count": len(filtered),
@@ -1390,7 +1455,7 @@ def app_log_prefs_set(
             hint="Pick one direction per call.",
         )
     if levels is not None:
-        unknown = sorted({ch for ch in levels.upper() if ch not in "VDIWEF"})
+        unknown = sorted({ch for ch in levels.upper() if ch not in DIAGNOSTIC_LEVEL_CODES})
         if not levels.strip() or unknown:
             raise UsageError(
                 f"levels must be a set of V D I W E F, got {levels!r}",
@@ -1511,10 +1576,12 @@ def _app_log_store(self: Engine) -> AppMemoryStore:
         the sqlite backend — the preference is a file in both backends, so building the sqlite
         store would create a database, and run its one-shot legacy migration, as a side effect of
         one action's log digest.
-        """
+    """
     if self._log_prefs_store is None:
-        self._log_prefs_store = AppMemoryStore(
-            self.config.memory.model_copy(update={"backend": "json"})
+        self._log_prefs_store = AppMemoryStore.from_config(
+            self.config,
+            force_json=True,
+            platform=self.platform.name,
         )
     return self._log_prefs_store
 
@@ -1528,12 +1595,11 @@ def _log_tag_is_hidden_elsewhere(self: Engine, tag: str, app_id: str) -> bool:
         exemption, and answering "it was not being ignored" for a tag that stays invisible is the
         one wrong answer that looks exactly like the right one.
         """
-    from . import logcat as logcat_mod
-
-    denied = (*logcat_mod.DEFAULT_DENY_TAG_PREFIXES, *self.config.logs.deny_tags)
+    policy = self.platform.diagnostic_source_policy(app_id)
+    denied = (*policy.hidden_prefixes, *self.config.logs.deny_tags)
     if any(_same_tag_family(prefix, tag) for prefix in denied if prefix.strip()):
         return True
-    return logcat_mod._is_runtime_tag(tag, app_id)
+    return policy.hides(tag)
 
 
 def _app_log_prefs_view(
@@ -1545,25 +1611,30 @@ def _app_log_prefs_view(
         with no `builtin_ignore_tags` beside it reads as "nothing is being filtered", which is
         never true.
         """
-    from . import logcat as logcat_mod
     from .memory import resolve_app_log_prefs
 
     effective = resolve_app_log_prefs(self.config.logs, prefs)
+    policy = self.platform.diagnostic_source_policy(package)
     return {
         "package": package,
         "stored": prefs.stored_fields() if prefs is not None else {},
         "effective": effective.as_dict(),
-        "builtin_ignore_tags": list(logcat_mod.DEFAULT_DENY_TAG_PREFIXES),
+        "builtin_ignore_tags": list(policy.hidden_prefixes),
         "path": str(store.log_prefs_path(package)),
     }
 
 
-def _could_be_app_under_test(package: str | None) -> bool:
-    """Whether *package* is plausibly the app being tested, rather than the shell around it."""
+def _could_be_app_under_test(self: Engine, package: str | None) -> bool:
+    """Ask the selected adapter whether this app can be the diagnostic subject."""
+
     if not package:
         return False
-    folded = package.casefold()
-    return not any(hint in folded for hint in _NOT_THE_APP_UNDER_TEST)
+    # A few focused unit fixtures construct an Engine shell with ``__new__`` and exercise only
+    # restart bookkeeping. With no configured adapter there is no native policy to apply; a
+    # named app remains a conservative subject rather than making that bookkeeping connect.
+    if not hasattr(self, "_platform") and not hasattr(self, "_platform_factory"):
+        return True
+    return bool(self.platform.diagnostic_source_policy(package).app_is_subject)
 
 
 def _note_app_under_test(self: Engine, package: str | None) -> None:

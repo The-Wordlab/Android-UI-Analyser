@@ -11,14 +11,13 @@ from __future__ import annotations
 
 import atexit
 import contextlib
-import re
 import sys
 import threading
 import time
 import weakref
-from collections import Counter
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from . import (
@@ -33,10 +32,10 @@ from . import (
     engine_observation,
     engine_policy,
     engine_sessions,
+    engine_virtual_targets,
     engine_waits,
 )
 from .config import Config
-from .device import Device, connect, list_devices
 from .engine_apps import (
     _install_versions_differ,  # noqa: F401  (re-exported: imported from here by tests or sibling modules)
 )
@@ -63,6 +62,7 @@ from .engine_waits import (
 )
 from .errors import (
     AuaError,
+    ConfigError,
     DeviceError,
     DeviceLeasedError,
     UsageError,
@@ -71,9 +71,9 @@ from .memory import (
     AppMemoryStore,
     AppStrings,
     _id_tail,
-    matches_any,
 )
-from .platforms import PlatformAdapter, PlatformFactory
+from .platforms import DiscoveredTarget, PlatformAdapter, PlatformFactory, TargetRef
+from .platforms.runtime import TargetRuntime
 from .providers.base import (
     ScreenImage,
 )
@@ -81,7 +81,7 @@ from .providers.registry import ProviderFactory
 from .schema import (
     ActionResult,
     AnalyzeResult,
-    DeviceInfo,
+    AppContext,
     Element,
     ElementId,
     ShellResult,
@@ -89,12 +89,6 @@ from .schema import (
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .policy import PolicyMode
-
-# Keep the historical module-level monkeypatch seams working for downstream tests and
-# integrations while production construction moves behind PlatformAdapter.
-_DEFAULT_ANDROID_CONNECT = connect
-_DEFAULT_ANDROID_LIST_DEVICES = list_devices
-
 
 def _regex_literal_hint(predicate: str) -> str | None:
     """Explain regex-looking action predicates, which deliberately use literal matching."""
@@ -130,24 +124,6 @@ def _safe_adopted_change(
     uncertain = dict(adopted)
     uncertain["changed"] = None
     return uncertain
-
-
-def _package_from_xml(xml: str, ignore: Sequence[str] = ("com.android.systemui",)) -> str | None:
-    """Cheap foreground-package guess from a hierarchy dump (avoids an app_current RPC).
-
-    Picks the most common ``package=`` among nodes, excluding *ignore* globs — system
-    chrome and IMEs overlay every app, so an open keyboard must never win the vote.
-    Falls back to the overall majority when every node is ignorable.
-    """
-    packages = re.findall(r'package="([^"]+)"', xml)
-    if not packages:
-        return None
-    counts = Counter(
-        package for package in packages if package and not matches_any(package, ignore)
-    )
-    if not counts:
-        counts = Counter(packages)
-    return counts.most_common(1)[0][0]
 
 
 # Engines with possibly-unflushed async map writes. Weak so holding one here never keeps an
@@ -210,7 +186,7 @@ class Engine:
         self,
         config: Config,
         *,
-        device: Device | None = None,
+        device: TargetRuntime | None = None,
         factory: ProviderFactory | None = None,
         platform: PlatformAdapter | None = None,
     ) -> None:
@@ -218,6 +194,22 @@ class Engine:
         self._device = device
         self._platform = platform
         self._platform_factory = PlatformFactory(config)
+        if platform is not None:
+            # A directly injected adapter bypasses PlatformFactory's option/declaration gate.
+            # A factory-created adapter already carries an immutable normalized option map, so
+            # avoid invoking a plugin's validation hook twice when that object is injected.
+            if not isinstance(platform.options, MappingProxyType):
+                options = platform.validate_options(config.platform_options(platform.name))
+                if not isinstance(options, Mapping):
+                    raise ConfigError(
+                        f"platform {platform.name!r} returned invalid normalized options",
+                        hint="The adapter validate_options hook must return a mapping.",
+                        code="platform_options_invalid",
+                    )
+                platform.options = MappingProxyType(dict(options))
+            platform.validate_declared_capabilities()
+            if device is not None:
+                platform.validate_runtime(device)
         self.factory = factory or ProviderFactory(config)
         if hasattr(self.factory, "model_control"):
             self.model_control = self.factory.model_control
@@ -275,7 +267,7 @@ class Engine:
         # 60 lines while chasing a library must get 60, or the per-turn control silently does
         # nothing for exactly the apps that have a preference.
         self._session_log_fields: set[str] = set()
-        self._last_activity: str | None = None
+        self._last_app_context: AppContext | None = None
         # Lease context: which agent this engine speaks for, what it needs, and what it got.
         # Set by the CLI/MCP layer before the device is first touched.
         self._flows_cache: dict[str, list[str]] = {}
@@ -367,18 +359,14 @@ class Engine:
 
         if self._platform is None:
             self._platform = self._platform_factory.create()
+            if self._device is not None:
+                self._platform.validate_runtime(self._device)
         return self._platform
 
-    def _connect_target(self, target_id: str | None) -> Device:
-        # AUA historically exposed ``engine.connect`` as an informal injection seam. Preserve
-        # it during this migration so existing embedders do not have to move atomically.
-        if self.platform.name == "android" and connect is not _DEFAULT_ANDROID_CONNECT:
-            return connect(target_id)
-        return self.platform.connect(target_id)
+    def _connect_target(self, target_id: str | None) -> TargetRuntime:
+        return self.platform.validate_runtime(self.platform.connect(target_id))
 
-    def _list_targets(self) -> list[DeviceInfo]:
-        if self.platform.name == "android" and list_devices is not _DEFAULT_ANDROID_LIST_DEVICES:
-            return list_devices()
+    def _list_targets(self) -> list[DiscoveredTarget]:
         return self.platform.list_targets()
 
     def _lease_target_id(self, serial: str | None) -> str | None:
@@ -431,13 +419,19 @@ class Engine:
 
         from . import leases
 
-        guard = leases.device_command(self._lease_registry_dir, target)
+        platform_name = self.platform.name
+        guard = leases.device_command(
+            self._lease_registry_dir,
+            target,
+            platform=platform_name,
+        )
         guard.__enter__()
         try:
             generation = leases.validate_use(
                 self._lease_registry_dir,
                 target,
                 owner=owner,
+                platform=platform_name,
             )
             previous_generation = self._lease_generation_resolved
             if previous_generation is not None and generation != previous_generation:
@@ -472,13 +466,19 @@ class Engine:
             return
         from . import leases
 
-        with leases.device_use(self._lease_registry_dir, target):
+        platform_name = self.platform.name
+        with leases.device_use(
+            self._lease_registry_dir,
+            target,
+            platform=platform_name,
+        ):
             leases.validate_use(
                 self._lease_registry_dir,
                 target,
                 owner=resolved_owner,
                 expected_generation=generation,
                 renew=False,
+                platform=platform_name,
             )
             yield
 
@@ -494,7 +494,7 @@ class Engine:
         guard.__exit__(None, None, None)
 
     @property
-    def device(self) -> Device:
+    def device(self) -> TargetRuntime:
         """Lazily connect; doctor/devices/config work without ever touching this."""
         target = self._device.serial if self._device is not None else self._leased_serial()
         self.begin_device_use(target)
@@ -587,7 +587,14 @@ class Engine:
         # so session bootstrap never provisions or switches devices because ADB disappeared.
         initial = candidates()
         owner = leases.resolve_owner(self._lease_owner)
-        held_before = set(leases.held_by(self._lease_registry_dir, owner))
+        platform_name = self.platform.name
+        held_before = set(
+            leases.held_by(
+                self._lease_registry_dir,
+                owner,
+                platform=platform_name,
+            )
+        )
         if not initial and not self._lease_wait_s:
             if explicit is not None:
                 # Explicit/injected targets retain the historical lazy-connect seam. The
@@ -606,6 +613,7 @@ class Engine:
                 ttl_s=int(getattr(cfg.lease, "ttl_s", leases.DEFAULT_TTL_S)),
                 allow_replacement=self._lease_allow_replacement,
                 wait_s=self._lease_wait_s,
+                platform=platform_name,
             )
             self._lease_waited_ms = waited_ms
         else:
@@ -617,6 +625,7 @@ class Engine:
                 needs=needs,
                 ttl_s=int(getattr(cfg.lease, "ttl_s", leases.DEFAULT_TTL_S)),
                 allow_replacement=self._lease_allow_replacement,
+                platform=platform_name,
             )
             self._lease_waited_ms = 0
         self._lease_serial = serial
@@ -628,16 +637,12 @@ class Engine:
     def _selected_target_has_app(self, serial: str, package: str) -> bool:
         """Check app presence only after this caller has safely leased *serial*."""
 
-        if not self.platform.supports("app.status"):
-            raise DeviceError(
-                f"platform '{self.platform.name}' cannot select a target by installed app",
-                code="unsupported_capability",
-            )
-        runtime: Device | None = None
+        apps = self.platform.adapter_capability("app.status")
+        runtime: TargetRuntime | None = None
         with self.device_use_context(serial):
             try:
                 runtime = self._connect_target(serial)
-                return bool(self.platform.installed_app(runtime, package).installed)
+                return bool(apps.installed_app(runtime, package).installed)
             finally:
                 if runtime is not None:
                     with contextlib.suppress(Exception):
@@ -649,7 +654,12 @@ class Engine:
         from . import leases
 
         owner = self._lease_owner_resolved
-        if not owner or not leases.release(self._lease_registry_dir, serial, owner=owner):
+        if not owner or not leases.release(
+            self._lease_registry_dir,
+            serial,
+            owner=owner,
+            platform=self.platform.name,
+        ):
             raise DeviceError(
                 f"could not release unused bootstrap target {serial}",
                 hint="Run `aua lease list`; no app action was attempted on the target.",
@@ -665,15 +675,31 @@ class Engine:
         self,
         *,
         wait_for_lease_s: float,
-        start_emulator: bool,
+        provision_target: bool | None = None,
         headed: bool,
         audio: bool,
-        avd: str | None,
+        virtual_target: str | None = None,
         animations: bool = False,
         package: str | None = None,
         app_will_be_installed: bool = False,
+        # Android-shaped aliases retained for embedders and focused regression tests.
+        start_emulator: bool | None = None,
+        avd: str | None = None,
     ) -> dict[str, Any]:
         """Select/claim a compatible target, provisioning one only when the pool has none."""
+
+        if (
+            provision_target is not None
+            and start_emulator is not None
+            and provision_target != start_emulator
+        ):
+            raise UsageError("conflicting provision_target and start_emulator values")
+        should_provision = (
+            bool(start_emulator) if provision_target is None else bool(provision_target)
+        )
+        if virtual_target and avd and virtual_target != avd:
+            raise UsageError("conflicting virtual_target and avd definitions")
+        requested_definition = virtual_target or avd
 
         if self._device is not None:
             return {
@@ -755,35 +781,27 @@ class Engine:
                 if selection_error is not None:
                     raise selection_error
                 raise DeviceError(f"requested device {self.config.device.serial} is not online")
-            if not start_emulator:
+            if not should_provision:
                 if selection_error is not None:
                     raise selection_error
                 raise DeviceError(
                     "no compatible unleased device is online",
-                    hint="Allow automatic provisioning or attach a compatible Android target.",
+                    hint="Allow automatic provisioning or attach a compatible target.",
                 )
 
             from . import leases
 
-            emulator_mod = self.platform.capability("virtual_devices")
-            selected_avd = emulator_mod.select_avd_for_session(
-                avd,
-                needs=[
-                    need for need in (self._lease_needs or []) if need in {"root", "play", "proxy"}
-                ],
-            )
             boot_owner = leases.resolve_owner(getattr(self, "_lease_owner", None))
-            boot = emulator_mod.start(
-                selected_avd,
+            boot = self.virtual_target_provision(
+                requested_definition,
+                needs=list(self._lease_needs or []),
                 headless=not headed,
                 animations=animations,
                 audio=audio,
-                cache_dir=self.config.cache.dir,
-                lease_registry_dir=self._lease_registry_dir,
                 owner=boot_owner,
                 parallel=True,
             )
-            serial = str(boot["serial"])
+            serial = str(boot["target_id"])
             self.config.device.serial = serial
             self._lease_serial = None
             self._leased_serial_resolved = None
@@ -812,11 +830,9 @@ class Engine:
                 if claimed == serial:
                     self._release_failed_bootstrap_target(serial)
                 with contextlib.suppress(Exception):
-                    emulator_mod.stop_spawned_instance(
-                        instance=str(boot.get("instance") or ""),
-                        pid=boot.get("pid"),
-                        cache_dir=self.config.cache.dir,
-                        lease_registry_dir=self._lease_registry_dir,
+                    self.virtual_target_stop_instance(
+                        str(boot.get("instance_token") or ""),
+                        expected_pid=boot.get("pid"),
                         owner=boot_owner,
                         requested_by="session-start-claim-rollback",
                     )
@@ -824,7 +840,10 @@ class Engine:
             return {
                 **boot,
                 "serial": serial,
+                "instance": boot.get("instance_token"),
+                "avd": boot.get("definition_id"),
                 "emulator_started": True,
+                "virtual_target_started": True,
                 "lease_waited_ms": self._lease_waited_ms,
             }
         finally:
@@ -844,7 +863,7 @@ class Engine:
                 hint="Retry this call after the current device operation settles.",
                 code="owner_handoff_busy",
             )
-        self._last_activity = None
+        self._last_app_context = None
         self._pre_action_sig = None
         self._pre_action_tree_fp = None
         self._pre_action_state = None
@@ -872,6 +891,34 @@ class Engine:
         self._gate_cache = type(self._gate_cache)()
 
     # ------------------------------------------------------- device change ledger
+
+    def _device_change_options_fingerprint(self) -> str:
+        """Opaque selected-adapter identity shared by ledger records and watchdogs."""
+
+        from . import device_ledger
+        from .platforms.options_transport import platform_options_fingerprint
+
+        return platform_options_fingerprint(
+            self.config.platform_options(self.platform.name),
+            key_dir=device_ledger.ledger_dir(),
+        )
+
+    def _pending_device_changes(self, *, serial: str | None = None) -> list[Any]:
+        """Read pending undos only when this adapter configuration can safely own them."""
+
+        from . import device_ledger
+
+        target = serial or (self._device.serial if self._device else self.config.device.serial)
+        if not target:
+            return []
+        entries = device_ledger.read_ledger(target, platform=self.platform.name)
+        device_ledger.require_options_match(
+            target,
+            entries,
+            self._device_change_options_fingerprint(),
+            platform=self.platform.name,
+        )
+        return entries
 
     def _ledger_identity(self) -> dict[str, Any]:
         """Who is making a change, so a stranger can tell later whether they are still alive."""
@@ -914,6 +961,7 @@ class Engine:
         target = serial or (self._device.serial if self._device else self.config.device.serial)
         if not target:
             return
+        options_fingerprint = self._device_change_options_fingerprint()
         token: str | None = None
         if self._device is not None:
             with contextlib.suppress(Exception):
@@ -927,6 +975,8 @@ class Engine:
             args=args or {},
             detail=detail,
             instance_token=token,
+            platform=self.platform.name,
+            platform_options_fingerprint=options_fingerprint,
             **identity,
         )
         self._ensure_teardown_watchdog(target)
@@ -937,14 +987,37 @@ class Engine:
         Not inert: Android suppresses accessibility services only while uiautomator2 holds
         UiAutomation, so a left-enabled helper keeps binding on a device somebody else inherits.
         """
-        with contextlib.suppress(Exception):
-            self.record_device_change(
-                key="device_agent_service",
-                kind="device_agent_service",
-                op="disable_device_agent",
-                detail="on-device helper accessibility service enabled",
-                serial=serial,
-            )
+        if self._pending_device_change("device_agent_service", serial=serial) is not None:
+            return
+        agent = self.platform.capability("device_agent")
+        original = agent.snapshot_state(serial)
+        self.record_device_change(
+            key="device_agent_service",
+            kind="device_agent_service",
+            op="disable_device_agent",
+            args=original,
+            detail="on-device helper accessibility service enabled",
+            serial=serial,
+        )
+
+    def _record_device_agent_install(self, serial: str) -> None:
+        """Register removal before helper auto-setup can install its package."""
+
+        self.record_device_change(
+            key="automatic_device_agent_package",
+            kind="automatic_device_agent_package",
+            op="remove_device_agent",
+            detail="on-device helper package installed automatically",
+            serial=serial,
+        )
+
+    def _pending_device_change(self, key: str, *, serial: str | None = None) -> Any | None:
+        """Return one platform-scoped pending undo without connecting to the target."""
+
+        target = serial or (self._device.serial if self._device else self.config.device.serial)
+        if not target:
+            return None
+        return next((entry for entry in self._pending_device_changes(serial=target) if entry.key == key), None)
 
     def forget_device_change(self, *keys: str, serial: str | None = None) -> None:
         """Drop records for changes this process has just undone itself."""
@@ -953,7 +1026,7 @@ class Engine:
         target = serial or (self._device.serial if self._device else self.config.device.serial)
         if target:
             with contextlib.suppress(Exception):
-                device_ledger.forget(target, *keys)
+                device_ledger.forget(target, *keys, platform=self.platform.name)
 
     def _ensure_teardown_watchdog(self, serial: str) -> None:
         if not getattr(self.config.teardown, "watchdog", True):
@@ -966,6 +1039,7 @@ class Engine:
                 cache_dir=self.config.cache.dir,
                 lease_registry_dir=self._lease_registry_dir,
                 platform_name=self.platform.name,
+                platform_options=self.config.platform_options(self.platform.name),
                 grace_s=float(self.config.teardown.grace_s),
                 poll_s=float(self.config.teardown.watchdog_poll_s),
             )
@@ -983,18 +1057,19 @@ class Engine:
         if self._swept_abandoned:
             return
         self._swept_abandoned = True
-        self._adopt_orphan_emulators()
+        self._reclaim_owned_virtual_targets()
         from . import device_ledger, teardown
 
         try:
-            if not device_ledger.pending_serials():
+            if not device_ledger.pending_targets():
                 return
             reports = teardown.sweep(
                 platform=self.platform,
                 cache_dir=self.config.cache.dir,
                 lease_registry_dir=self._lease_registry_dir,
                 grace_s=float(cfg.grace_s),
-                skip=skip,
+                skip=(TargetRef(self.platform.name, skip) if skip is not None else None),
+                platform_factory=self._platform_factory.create,
             )
         except Exception as exc:
             logger.debug("teardown sweep skipped: %s", exc)
@@ -1007,41 +1082,32 @@ class Engine:
                 ", ".join(f"{d['kind']}" for d in report.get("undone", [])) or "none",
             )
 
-    def _adopt_orphan_emulators(self) -> None:
-        """Re-arm the idle watchdog on aua-started emulators that lost theirs.
+    def _reclaim_owned_virtual_targets(self) -> None:
+        """Re-arm retirement supervision for AUA-owned virtual targets that lost it.
 
-        The watchdog is a process spawned once at boot, and nothing re-spawns it: a host reboot,
-        a stray ``pkill``, or a crash leaves that emulator immortal, because the only thing that
-        would ever have stopped it is gone. Observed on a dev host — an instance recorded with
-        ``idle_timeout_s: 900`` and ``watchdog_pid: None``.
+        A platform may supervise an instance with a detached process that can disappear while the
+        target keeps running. Reclaiming delegates ownership and liveness interpretation to the
+        selected virtual-target service.
 
-        Never raises, and never touches an emulator AUA did not start.
+        Never raises, and never touches a target AUA did not start.
         """
         cfg = self.config.teardown
         if not getattr(cfg, "enabled", True):
             return
-        timeout = float(getattr(cfg, "emulator_idle_stop_s", 0.0))
+        timeout = cfg.effective_virtual_target_idle_stop_s()
         if timeout <= 0:
             return
         try:
-            virtual = self.platform.capability("virtual_devices")
-        except Exception:
-            return  # platform cannot boot targets, so it cannot have orphaned any
-        try:
-            adopted = virtual.adopt_idle_watchdogs(
-                cache_dir=self.config.cache.dir,
-                idle_timeout_s=timeout,
-                lease_registry_dir=self._lease_registry_dir,
-            )
+            reclaimed = self.virtual_target_reclaim(idle_timeout_s=timeout)
         except Exception as exc:
-            logger.debug("emulator watchdog adoption skipped: %s", exc)
+            logger.debug("virtual-target retirement adoption skipped: %s", exc)
             return
-        for item in adopted:
+        for item in reclaimed.get("reclaimed", []):
             logger.warning(
                 "%s (%s) was running with no idle watchdog — re-armed at %.0fs",
-                item.get("serial"),
-                item.get("instance"),
-                float(item.get("idle_timeout_s") or 0),
+                item.get("target_id"),
+                item.get("instance_token"),
+                float((item.get("details") or {}).get("idle_timeout_s") or 0),
             )
 
     def teardown_status(self) -> dict[str, Any]:
@@ -1081,21 +1147,29 @@ class Engine:
                     grace_s=grace,
                     force=force,
                     dry_run=dry_run,
+                    platform_name=self.platform.name,
                 )
             ]
         else:
-            reports = [
-                teardown.reap(
-                    target,
-                    platform=self.platform,
-                    cache_dir=self.config.cache.dir,
-                    lease_registry_dir=self._lease_registry_dir,
-                    grace_s=grace,
-                    force=force,
-                    dry_run=dry_run,
+            reports = []
+            adapters: dict[str, PlatformAdapter] = {self.platform.name: self.platform}
+            for target in device_ledger.pending_targets():
+                adapter = adapters.get(target.platform)
+                if adapter is None:
+                    adapter = self._platform_factory.create(target.platform)
+                    adapters[target.platform] = adapter
+                reports.append(
+                    teardown.reap(
+                        target,
+                        platform=adapter,
+                        cache_dir=self.config.cache.dir,
+                        lease_registry_dir=self._lease_registry_dir,
+                        grace_s=grace,
+                        force=force,
+                        dry_run=dry_run,
+                        platform_name=target.platform,
+                    )
                 )
-                for target in device_ledger.pending_serials()
-            ]
         undone = sum(len(r.get("undone") or ()) for r in reports)
         failed = sum(len(r.get("failed") or ()) for r in reports)
         return {
@@ -1119,9 +1193,14 @@ class Engine:
         from . import leases
 
         with contextlib.suppress(Exception):
-            leases.renew(self._lease_registry_dir, serial, owner=owner)
+            leases.renew(
+                self._lease_registry_dir,
+                serial,
+                owner=owner,
+                platform=self.platform.name,
+            )
 
-    def list_devices(self) -> list[DeviceInfo]:
+    def list_devices(self) -> list[DiscoveredTarget]:
         return self._list_targets()
 
     # ----------------------------------------------------------------- memory (§6b)
@@ -1131,7 +1210,10 @@ class Engine:
         if not self.config.memory.enabled:
             return None
         if self._mem is None:
-            self._mem = AppMemoryStore(self.config.memory)
+            self._mem = AppMemoryStore.from_config(
+                self.config,
+                platform=self.platform.name,
+            )
             # Claim the serial's cursor for *this* device instance before anything reads it.
             # Session state is keyed by serial and serials are recycled from a small pool,
             # so without this a worker inherits its predecessor's action journal and
@@ -1158,12 +1240,10 @@ class Engine:
     def _mark_logcat(self, name: str) -> None:
         """Best-effort device-clock logcat mark (never fails the action that triggered it)."""
         try:
-            if self._device is None:
+            if self._device is None or not self.platform.supports("device.logs"):
                 return
-            from . import logcat as logcat_mod
-
-            clock = logcat_mod.resolve_clock(self._device, self.config.cache.dir)
-            logcat_mod.set_mark(self.config.cache.dir, self._device.serial, name, clock=clock)
+            diagnostics = self.platform.adapter_capability("device.logs")
+            diagnostics.mark_diagnostics(self._device, name)
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug("logcat mark %r failed: %s", name, exc)
 
@@ -1175,7 +1255,8 @@ class Engine:
     def current_package(self) -> str | None:
         """Best-effort foreground package (for ``aua map`` without ``--app``)."""
         try:
-            pkg = self.device.current_app().get("package")
+            runtime = self.platform.runtime_capability("ui.tree", self.device)
+            pkg = AppContext.coerce(runtime.current_app()).app_id
         except Exception:  # pragma: no cover - device hiccup
             pkg = None
         if pkg:
@@ -1186,6 +1267,7 @@ class Engine:
             return self.platform.normalize_tree(
                 raw_tree,
                 (w, h),
+                geometry=device.display_geometry(),
                 ignored_app_ids=self.config.memory.ignore_packages,
             ).app_id
         except Exception:  # pragma: no cover
@@ -1431,6 +1513,7 @@ class Engine:
             journal.record(
                 cache_dir=self.config.cache.dir,
                 serial=serial,
+                platform=self.platform.name,
                 source="helper",
                 cmd=cmd or f"helper.{outcome}",
                 args=args,
@@ -1507,6 +1590,8 @@ class Engine:
                 self._journal_helper("skipped", serial, reason="not_rootable")
                 raise _HandoverRefused("not_rootable", serial)
             try:
+                if not agent.is_installed(serial):
+                    self._record_device_agent_install(serial)
                 self._record_device_agent_change(serial)
                 agent.enable(serial)
             except Exception as exc:  # noqa: BLE001 - setup is best-effort by design
@@ -1942,13 +2027,8 @@ class Engine:
             )
         if not 100 <= int(timeout_ms) <= 120_000:
             raise UsageError("shell timeout must be between 100 and 120000 ms")
-        platform = self.platform
-        if not platform.supports("device.shell"):
-            raise DeviceError(
-                f"platform '{platform.name}' cannot run read-only target commands",
-                code="unsupported_capability",
-            )
-        return self.device.run_read_only_shell(
+        runtime = self.platform.runtime_capability("device.shell", self.device)
+        return runtime.run_read_only_shell(
             [str(part) for part in argv], timeout_s=int(timeout_ms) / 1000.0
         )
 
@@ -1974,7 +2054,7 @@ class Engine:
         if serial is None:
             serial = self._device.serial if self._device else self.device.serial
         cache_dir = Path(self.config.cache.dir).expanduser()
-        safe = str(serial).replace(":", "_")
+        safe = TargetRef(self.platform.name, str(serial)).storage_key
         return cache_dir / f"analyze_{safe}.json"
 
     def _write_cache(self, result: AnalyzeResult) -> None:
@@ -2081,6 +2161,7 @@ class Engine:
             rid = _id_tail(e.resource_id)
             if rid:
                 rids.append(rid)
+        app_context = self._last_app_context or self._read_app_context()
         return {
             "count": len(cached.elements),
             "focused": focused,
@@ -2088,14 +2169,27 @@ class Engine:
             "rids": rids,
             "arrival_identity": self._await_observation_identity(cached),
             "package": cached.screen.package,
-            "activity": self._last_activity or self._read_activity(),
+            # Keep the value object for adapter-owned reasoning. ``activity`` is only the
+            # long-standing public compatibility projection used in change payloads.
+            "app_context": app_context,
+            "activity": self._activity_string(app_context),
             "known_screen": (
                 cached.meta.known_screen if cached.meta is not None else self._last_known_screen
             ),
         }
 
-    def _read_activity(self) -> str | None:
-        """``package/activity`` in front of the user, or None if it cannot be read.
+    @staticmethod
+    def _activity_string(context: AppContext | None) -> str | None:
+        """Project a neutral app context onto the legacy ``package/activity`` output."""
+
+        if context is None:
+            return None
+        app_id = str(context.app_id or "")
+        surface_id = str(context.surface_id or "")
+        return f"{app_id}/{surface_id}" if app_id or surface_id else None
+
+    def _read_app_context(self) -> AppContext | None:
+        """Neutral app context in front of the user, or None if it cannot be read.
 
         One device call, only on the observe path — which already spends a settle and a full
         hierarchy dump, so this is a small fraction of a cost the caller has already accepted.
@@ -2103,12 +2197,16 @@ class Engine:
         a sequence of actions gets its comparison for free.
         """
         with contextlib.suppress(Exception):
-            info = self.device.current_app() or {}
-            package = str(info.get("package") or "")
-            activity = str(info.get("activity") or "")
-            if package or activity:
-                return f"{package}/{activity}"
+            runtime = self.platform.runtime_capability("ui.tree", self.device)
+            context = AppContext.coerce(runtime.current_app())
+            if context.app_id or context.surface_id:
+                return context
         return None
+
+    def _read_activity(self) -> str | None:
+        """Compatibility projection retained for callers of the private legacy helper."""
+
+        return self._activity_string(self._read_app_context())
 
     def _tree_fingerprint(self) -> tuple[str, ...] | None:
         """Stable-ish fingerprint of the last cached screen (rids + labels)."""
@@ -2158,7 +2256,7 @@ class Engine:
     _repair_lossy_text = engine_analyze._repair_lossy_text
     ask_screen = engine_analyze.ask_screen
     _resolve_pins = engine_analyze._resolve_pins
-    _attach_visual_identity = staticmethod(engine_analyze._attach_visual_identity)
+    _attach_visual_identity = engine_analyze._attach_visual_identity
     analyze = engine_analyze.analyze
     _analyze_screen = engine_analyze._analyze_screen
     _gate_decide = engine_analyze._gate_decide
@@ -2222,6 +2320,7 @@ class Engine:
     _typed_text_landed = engine_actions._typed_text_landed
     clear = engine_actions.clear
     _dump = engine_actions._dump
+    _scroll_elements = engine_actions._scroll_elements
     _scroll_box = engine_actions._scroll_box
     _swipe_path = engine_actions._swipe_path
     _settle_after_swipe = engine_actions._settle_after_swipe
@@ -2260,7 +2359,7 @@ class Engine:
     _note_empty_observation = engine_observation._note_empty_observation
     _await_post_action_ready = engine_observation._await_post_action_ready
     _observation_is_loading = engine_observation._observation_is_loading
-    _app_left_foreground = staticmethod(engine_observation._app_left_foreground)
+    _app_left_foreground = engine_observation._app_left_foreground
     _crash_evidence = engine_observation._crash_evidence
     _app_logs = engine_observation._app_logs
     _change_summary = engine_observation._change_summary
@@ -2358,6 +2457,11 @@ class Engine:
     _offload_steps_to_device = engine_flows._offload_steps_to_device
     _offload_from = engine_flows._offload_from
     _recorder = engine_flows._recorder
+    helper_status = engine_flows.helper_status
+    helper_install = engine_flows.helper_install
+    helper_enable = engine_flows.helper_enable
+    helper_disable = engine_flows.helper_disable
+    helper_remove = engine_flows.helper_remove
     demo_record_start = engine_flows.demo_record_start
     demo_record_stop = engine_flows.demo_record_stop
     _run_steps = engine_flows._run_steps
@@ -2392,6 +2496,24 @@ class Engine:
     session_candidate_flow = engine_sessions.session_candidate_flow
     _session_finish_summary = staticmethod(engine_sessions._session_finish_summary)
     session_finish = engine_sessions.session_finish
+
+    # engine_virtual_targets: Platform-neutral virtual-target discovery, creation, provisioning,
+    # exact-instance rollback, retirement/reclaim, and Android emulator compatibility aliases.
+    virtual_target_list = engine_virtual_targets.virtual_target_list
+    virtual_target_status = engine_virtual_targets.virtual_target_status
+    virtual_target_start = engine_virtual_targets.virtual_target_start
+    virtual_target_provision = engine_virtual_targets.virtual_target_provision
+    virtual_target_create = engine_virtual_targets.virtual_target_create
+    virtual_target_delete = engine_virtual_targets.virtual_target_delete
+    virtual_target_stop = engine_virtual_targets.virtual_target_stop
+    virtual_target_stop_instance = engine_virtual_targets.virtual_target_stop_instance
+    virtual_target_reclaim = engine_virtual_targets.virtual_target_reclaim
+    emulator_list = engine_virtual_targets.emulator_list
+    emulator_status = engine_virtual_targets.emulator_status
+    emulator_start = engine_virtual_targets.emulator_start
+    emulator_stop = engine_virtual_targets.emulator_stop
+    emulator_recommend_proxy = engine_virtual_targets.emulator_recommend_proxy
+    emulator_ensure_proxy = engine_virtual_targets.emulator_ensure_proxy
 
     # engine_policy: The optional local policy model: model_control status/action/chat/agent-test, policy tap-candidate and selection helpers, the session policy side channel, and session_autopilot which lets the policy drive a bounded stretch.
     _configured_policy_mode = engine_policy._configured_policy_mode
@@ -2452,7 +2574,7 @@ class Engine:
     _app_log_store = engine_apps._app_log_store
     _log_tag_is_hidden_elsewhere = engine_apps._log_tag_is_hidden_elsewhere
     _app_log_prefs_view = engine_apps._app_log_prefs_view
-    _could_be_app_under_test = staticmethod(engine_apps._could_be_app_under_test)
+    _could_be_app_under_test = engine_apps._could_be_app_under_test
     _note_app_under_test = engine_apps._note_app_under_test
     _app_process_replaced = engine_apps._app_process_replaced
     _effective_app_logs = engine_apps._effective_app_logs
@@ -2476,6 +2598,7 @@ class Engine:
     clock_set = engine_environment.clock_set
     _clock_backup_path = engine_environment._clock_backup_path
     _dev_backup_path = engine_environment._dev_backup_path
+    _developer_restore_point = engine_environment._developer_restore_point
     _proxy_port = engine_environment._proxy_port
     dev_show = engine_environment.dev_show
     dev_anim = engine_environment.dev_anim

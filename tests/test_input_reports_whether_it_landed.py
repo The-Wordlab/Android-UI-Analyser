@@ -177,7 +177,7 @@ def test_cli_explicit_send_reaches_the_shared_engine_path(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     dev = _SubmitDevice(ime_clears=False)
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: dev)
     monkeypatch.setenv("AUA_CACHE__DIR", str(tmp_path / "cache"))
     monkeypatch.setenv("AUA_LEASE__REGISTRY_DIR", str(tmp_path / "cache"))
     monkeypatch.setenv("AUA_MEMORY__DIR", str(tmp_path / "memory"))
@@ -199,7 +199,7 @@ def test_cli_refuses_two_different_submission_mechanisms(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     dev = _SubmitDevice(ime_clears=False)
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: dev)
     monkeypatch.setenv("AUA_CACHE__DIR", str(tmp_path / "cache"))
     monkeypatch.setenv("AUA_LEASE__REGISTRY_DIR", str(tmp_path / "cache"))
     monkeypatch.setenv("AUA_DAEMON__ENABLED", "false")

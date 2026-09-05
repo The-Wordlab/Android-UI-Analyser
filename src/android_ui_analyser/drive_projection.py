@@ -202,9 +202,12 @@ def project(
     for ``nodes[i]``, kept by the caller and never shown to the model.
     """
 
-    # 1. foreign windows
+    # 1. foreign windows. ``window`` is the adapter-normalized boundary; package names remain
+    # only a compatibility fallback for older Android-shaped observations.
     kept: list[Mapping[str, Any]] = []
     for node in elements:
+        if str(node.get("window") or "").casefold() in {"system", "ime"}:
+            continue
         node_package = node.get("package")
         if node_package and node_package in FOREIGN_PACKAGES:
             continue

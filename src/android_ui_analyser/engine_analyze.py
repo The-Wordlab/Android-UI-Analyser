@@ -18,15 +18,17 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from . import routing
-from .device import Device
 from .engine_support import logger
 from .errors import ElementNotFoundError, ProviderError, UsageError
 from .memory import NavHints, _id_tail, screen_skips_ocr
+from .platforms.identity import TargetRef
+from .platforms.runtime import TargetRuntime as Device
 from .providers.base import DetBox, OcrProvider, Point, ScreenAnalysisResult, ScreenImage, TextBox
 from .providers.registry import registered_names, run_chain
 from .schema import (
     ActionResult,
     AnalyzeResult,
+    AppContext,
     Element,
     ElementId,
     Meta,
@@ -106,7 +108,7 @@ def _effective_with_image(self: Engine, with_image: bool | str | None) -> bool |
 
 def _context(self: Engine) -> tuple[Device, int, int]:
     # window_size is memoized on the device; no app_current RPC on the hot path.
-    device = self.device
+    device = self.platform.runtime_capability("ui.tree", self.device)
     w, h = device.window_size()
     return device, w, h
 
@@ -127,6 +129,7 @@ def _capture_hierarchy(
     normalized = self.platform.normalize_tree(
         raw_tree,
         (w, h),
+        geometry=device.display_geometry(),
         ignored_app_ids=self.config.memory.ignore_packages,
     )
     return normalized.elements, normalized.app_id, tree_hash
@@ -140,6 +143,9 @@ def _kick_hierarchy_prefetch(self: Engine) -> None:
         return
     device = self._device
     platform = self.platform
+    if not platform.supports("ui.tree"):
+        return
+    device = platform.runtime_capability("ui.tree", device)
     compressed = bool(self.config.device.compressed_hierarchy)
     owner = self._lease_owner_resolved
     generation = getattr(self._device_use_context, "generation", None)
@@ -160,6 +166,7 @@ def _kick_hierarchy_prefetch(self: Engine) -> None:
         normalized = platform.normalize_tree(
             raw_tree,
             (w, h),
+            geometry=device.display_geometry(),
             ignored_app_ids=self.config.memory.ignore_packages,
         )
         return normalized.elements, normalized.app_id
@@ -176,7 +183,8 @@ def _screenshot(self: Engine, *, max_reuse_ms: float = 50.0) -> ScreenImage:
             img = self._capture.latest_frame()
             if img is not None and age is not None and age <= max_reuse_ms:
                 return img
-    return self.device.screenshot()
+    platform = self.platform.adapter_capability("ui.screenshot")
+    return platform.capture_screenshot(self.device)
 
 
 def _start_hierarchy_ocr(self: Engine, *, with_ocr: bool | None) -> _PendingOcr | None:
@@ -475,9 +483,9 @@ def ask_screen(self: Engine, question: str) -> dict[str, Any]:
     observation = self._capture_hierarchy_with_ocr(device, width, height, with_ocr=None)
     elements = observation.elements + observation.ocr_elements
     package = observation.package
-    app = device.current_app()
-    package = app.get("package") or package
-    activity = app.get("activity") or None
+    app = AppContext.coerce(device.current_app())
+    package = app.app_id or package
+    activity = app.surface_id
     image = observation.image or self._screenshot(max_reuse_ms=80.0)
     graph: list[dict[str, Any]] = []
     for element in elements:
@@ -548,6 +556,7 @@ def _resolve_pins(self: Engine, source: str | None, strategy: str | None) -> tup
 
 
 def _attach_visual_identity(
+    self: Engine,
     device: Device,
     elements: list[Element],
     image: ScreenImage | None,
@@ -567,7 +576,7 @@ def _attach_visual_identity(
         return elements, image, False
     if image is None:
         try:
-            image = device.screenshot()
+            image = self._screenshot(max_reuse_ms=80.0)
         except Exception as exc:
             logger.info("visual element identity could not capture a screenshot: %s", exc)
             return elements, None, True
@@ -810,15 +819,10 @@ def _analyze_screen(
                     compact=bool(self.config.device.compressed_hierarchy),
                 )
                 if webview_mod.should_try_webview(hierarchy_elements, xml_dump):
-                    shell = None
-                    if wv_cfg.cdp:
-                        shell = lambda cmd: str(  # noqa: E731
-                            device.shell(cmd) if hasattr(device, "shell") else ""
-                        )
                     enriched = webview_mod.enrich(
                         xml_dump,
+                        runtime=device,
                         screen_size=(w, h),
-                        shell=shell,
                         cdp=wv_cfg.cdp,
                     )
                     if len(enriched) >= wv_cfg.min_elements:
@@ -854,9 +858,9 @@ def _analyze_screen(
 
     if use_vision:
         # slow fallback path: fetch full app context (incl. activity)
-        app = device.current_app()
-        package = app.get("package") or package
-        activity = app.get("activity") or None
+        app = AppContext.coerce(device.current_app())
+        package = app.app_id or package
+        activity = app.surface_id
         precomputed_ocr = None
         if hierarchy_observation is not None and hierarchy_observation.ocr_provider:
             precomputed_ocr = (
@@ -1106,9 +1110,9 @@ def _analyze_query(
         want_vision = decision.use_vision or kind is routing.QueryKind.visual or pin_grounding
 
     if want_vision and routing.allows(Tier.vision, ceiling):
-        app = device.current_app()
-        package = app.get("package") or package
-        activity = app.get("activity") or None
+        app = AppContext.coerce(device.current_app())
+        package = app.app_id or package
+        activity = app.surface_id
         precomputed_ocr = None
         if hierarchy_observation is not None and hierarchy_observation.ocr_provider:
             precomputed_ocr = (
@@ -1172,7 +1176,7 @@ def _analyze_query(
         chain = self.factory.build_chain("grounding")
         if chain.providers:
             if img is None:
-                img = device.screenshot()
+                img = self._screenshot(max_reuse_ms=80.0)
             try:
                 loc, name = run_chain(
                     chain,
@@ -1372,7 +1376,8 @@ def inspect(self: Engine, element_id: ElementId) -> Element:
 
 def screenshot(self: Engine, path: str | None = None, *, annotate: bool = False) -> ActionResult:
     device = self.device
-    img = self.platform.capture_screenshot(device)
+    screenshots = self.platform.adapter_capability("ui.screenshot")
+    img = screenshots.capture_screenshot(device)
     if annotate:
         cached = self._read_cache()
         elements = cached.elements if cached else []
@@ -1452,7 +1457,7 @@ def _prune_run_frames(self: Engine, serial: str, *, suffix: str) -> None:
         """
     try:
         run_dir = Path(self.config.cache.dir).expanduser() / "runs"
-        safe = serial.replace(":", "_")
+        safe = TargetRef(self.platform.name, serial).storage_key
         frames = sorted(
             run_dir.glob(f"{safe}_{suffix}_*.png"),
             key=lambda f: f.name,
@@ -1487,7 +1492,7 @@ def _default_annotate_path(
 ) -> str:
     run_dir = Path(self.config.cache.dir).expanduser() / "runs"
     run_dir.mkdir(parents=True, exist_ok=True)
-    safe = serial.replace(":", "_")
+    safe = TargetRef(self.platform.name, serial).storage_key
     if timestamped:
         # Sequential captures (before/after an action) must never clobber each other.
         stamp = time.strftime("%Y%m%d-%H%M%S") + f"-{time.time_ns() % 1_000_000_000:09d}"

@@ -226,7 +226,7 @@ caveats.
 
 ---
 
-## 10. Engine layout: one class, thirteen files
+## 10. Engine layout: one class, fourteen files
 
 `Engine` is still a single class — the CLI, MCP server, daemon and dashboard all call
 `engine.<method>(...)` and every test that patches `Engine.<method>` or `engine.<method>` keeps
@@ -263,6 +263,7 @@ history of a method continues in its new file.
 | `engine_navigation.py` | goto over the learned map, navigate and reach, the drive lanes, back_until, open_link, map_find |
 | `engine_flows.py` | saved flows: flow_run/save/list/delete, the step executor and its on-device offload, nested-flow preflight, demo recording, suite_run |
 | `engine_sessions.py` | session_start → session_finish: goal planning, phase progress, recommended-call ranking, candidate flows, session review |
+| `engine_virtual_targets.py` | platform-neutral virtual-target list/create/delete/start/provision/status/stop/reclaim orchestration and Android emulator compatibility aliases |
 | `engine_policy.py` | the optional local policy: model_control, policy tap-candidate and selection helpers, the session policy side channel, session_autopilot |
 | `engine_memory.py` | learning into per-app memory and reading it back: recorded screens, actions and timings, the runtime flag context, learned control costs, `memory update`, orient, explore mine/plan |
 | `engine_apps.py` | the app under test: launch/stop/clear/install and the launch observation, feature flags, private databases, logcat and per-app log preferences, process bookkeeping |
@@ -283,5 +284,6 @@ Rules that keep this shape honest:
   together.
 - A method reads module constants from *its own* module's globals. A test that wants to shorten a
   timeout patches the module that holds the method — `sys.modules[Engine.flags_set.__module__]` —
-  not `android_ui_analyser.engine`. The two patch seams that tests do rely on in `engine.py`,
-  `connect` and `list_devices`, stay there because their only readers do.
+  not `android_ui_analyser.engine`.
+- Target discovery and connection always go through the selected `PlatformAdapter`; the former
+  Android-only `connect`/`list_devices` monkeypatch seam has been removed.

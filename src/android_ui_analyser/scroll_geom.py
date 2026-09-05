@@ -1,58 +1,44 @@
-"""Scroll-container geometry helpers over a hierarchy dump.
+"""Scroll-container geometry helpers over normalized UI elements.
 
 Pure functions used by the engine's swipe/scroll paths — kept separate so the
-engine module stays about orchestration.
+engine module stays about orchestration. Native hierarchy grammars belong to the
+selected platform adapter; this module consumes only AUA's canonical schema.
 """
 
 from __future__ import annotations
 
 import logging
-import re
 from collections import Counter
 from collections.abc import Sequence
-from typing import Any
+
+from .schema import Element
 
 logger = logging.getLogger("android_ui_analyser.scroll_geom")
 
-_XML_BOUNDS_RE = re.compile(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]")
 Box = tuple[int, int, int, int]
 Sample = tuple[tuple[str, int, int], ...]
 _SCROLL_JITTER_PX = 8
 
 
-def _node_box(node: Any) -> Box | None:
-    m = _XML_BOUNDS_RE.search(node.get("bounds") or "")
-    if not m:
-        return None
-    x1, y1, x2, y2 = (int(g) for g in m.groups())
+def _element_box(element: Element) -> Box | None:
+    x1, y1, x2, y2 = element.bounds
     return (x1, y1, x2, y2) if x2 > x1 and y2 > y1 else None
 
 
-def _iter_nodes(xml: str) -> Any:
-    """Every ``<node>`` of a hierarchy dump, in document order (empty on unparseable XML)."""
-    import xml.etree.ElementTree as ET
-
-    if not xml or not xml.strip():
-        return []
-    try:
-        return list(ET.fromstring(xml).iter("node"))
-    except ET.ParseError as exc:  # pragma: no cover - malformed dump
-        logger.warning("could not parse hierarchy dump: %s", exc)
-        return []
-
-
-def scrollable_boxes(xml: str, screen: tuple[int, int] | None = None) -> list[Box]:
-    """Bounds of every ``scrollable="true"`` container, largest area first.
+def scrollable_boxes(
+    elements: Sequence[Element], screen: tuple[int, int] | None = None
+) -> list[Box]:
+    """Bounds of every canonical scrollable container, largest area first.
 
     A view reports ``scrollable`` only while its content overflows its viewport, so an
     empty list means *this screen has nothing to scroll anywhere* — the signal that tells
     "already at the end" apart from "the swipe missed the list".
     """
     boxes: list[Box] = []
-    for node in _iter_nodes(xml):
-        if node.get("scrollable") != "true":
+    for element in elements:
+        if element.scrollable is not True or element.window in {"system", "ime"}:
             continue
-        box = _node_box(node)
+        box = _element_box(element)
         if box is None:
             continue
         if screen is not None:
@@ -72,7 +58,10 @@ def _contains(box: Box, point: tuple[int, int]) -> bool:
 
 
 def region_probe(
-    xml: str, box: Box, *, ignore_packages: Sequence[str] = ("com.android.systemui",)
+    elements: Sequence[Element],
+    box: Box,
+    *,
+    excluded_windows: Sequence[str] = ("system", "ime"),
 ) -> Sample:
     """One scroll-position sample: ordered ``(label, left, top)`` inside *box*.
 
@@ -80,24 +69,25 @@ def region_probe(
 
     * **only inside the container** — a whole-screen sample flips when the status-bar clock
       ticks, reporting a scroll that never happened;
-    * **no system chrome** — same reason, for screens whose container spans the display;
+    * **no system/IME chrome** — same reason, for screens whose container spans the display;
     * **labelled nodes only** (text / content-desc, falling back to class names when the
       container carries no labels at all, e.g. an image grid) — layout containers keep their
       position while their contents scroll, so including them dilutes the signal.
     """
     labelled: list[tuple[str, int, int]] = []
     fallback: list[tuple[str, int, int]] = []
-    for node in _iter_nodes(xml):
-        if node.get("package") in ignore_packages:
+    excluded = set(excluded_windows)
+    for element in elements:
+        if element.window in excluded:
             continue
-        nbox = _node_box(node)
+        nbox = _element_box(element)
         if nbox is None or not _contains(box, ((nbox[0] + nbox[2]) // 2, (nbox[1] + nbox[3]) // 2)):
             continue
-        label = (node.get("text") or node.get("content-desc") or "").strip()
+        label = (element.text or element.content_desc or "").strip()
         if label:
             labelled.append((label, nbox[0], nbox[1]))
         else:
-            fallback.append(((node.get("class") or "?"), nbox[0], nbox[1]))
+            fallback.append((element.type or "?", nbox[0], nbox[1]))
     return tuple(labelled or fallback)
 
 

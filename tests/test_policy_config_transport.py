@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -176,6 +177,79 @@ def test_daemon_environment_roundtrips_selective_hybrid_reviewer(tmp_path: Path)
     assert env["AUA_MODELS__GEMMA4__MAX_MODE"] == "advisory"
     assert child.policy == config.policy
     assert child.models["gemma4"] == config.models["gemma4"]
+
+
+def test_daemon_environment_does_not_serialize_platform_options(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = _policy_config(tmp_path)
+    config.device.platform = "example-os"
+    config.platforms["example-os"] = {
+        "endpoint": "https://device-grid.invalid",
+        "token_env": "EXAMPLE_OS_TOKEN",
+        "password": "literal-that-must-not-enter-env",
+    }
+    monkeypatch.setenv("AUA_PLATFORMS__EXAMPLE-OS__ENDPOINT", "stale-inherited-value")
+    monkeypatch.setenv("EXAMPLE_OS_TOKEN", "runtime-secret-stays-inherited")
+
+    env = daemon_mod._daemon_environment(config)
+
+    assert not any(key.startswith("AUA_PLATFORMS__") for key in env)
+    assert "literal-that-must-not-enter-env" not in env.values()
+    # Secret references resolve in the child exactly as they do in the parent; AUA does not
+    # copy the referenced value into a second, tool-owned environment key.
+    assert env["EXAMPLE_OS_TOKEN"] == "runtime-secret-stays-inherited"
+
+
+def test_platform_option_private_payload_roundtrips_exact_json_shape(tmp_path: Path) -> None:
+    config = _policy_config(tmp_path)
+    config.device.platform = "example-os"
+    expected = {
+        "endpoint": "https://device-grid.invalid/naive-\N{LATIN SMALL LETTER I WITH DIAERESIS}",
+        "features": {"stream": True, "retry_delays": [0.25, 1, 3]},
+        "token_env": "EXAMPLE_OS_TOKEN",
+        "password": "accidental-literal-is-private",
+    }
+    config.platforms["example-os"] = expected
+
+    read_fd, write_fd = os.pipe()
+    try:
+        os.write(write_fd, daemon_mod._platform_options_payload(config, "example-os"))
+    finally:
+        os.close(write_fd)
+
+    assert daemon_mod._read_platform_options_fd(read_fd) == expected
+
+
+def test_runtime_fingerprint_tracks_the_full_selected_platform_identity_without_exposing_it(
+    tmp_path: Path,
+) -> None:
+    config = _policy_config(tmp_path)
+    config.device.platform = "example-os"
+    config.platforms = {
+        "example-os": {
+            "endpoint": "https://one.invalid",
+            "token_env": "EXAMPLE_OS_TOKEN",
+            "password": "first-accidental-literal",
+        },
+        "another-os": {"endpoint": "https://unselected.invalid"},
+    }
+
+    first = daemon_mod.runtime_config_fingerprint(config)
+    config.platforms["another-os"]["endpoint"] = "https://changed-but-unselected.invalid"
+    assert daemon_mod.runtime_config_fingerprint(config) == first
+
+    config.platforms["example-os"]["endpoint"] = "https://two.invalid"
+    endpoint_changed = daemon_mod.runtime_config_fingerprint(config)
+    assert endpoint_changed != first
+
+    config.platforms["example-os"]["endpoint"] = "https://one.invalid"
+    config.platforms["example-os"]["token_env"] = "ROTATED_EXAMPLE_OS_TOKEN"
+    assert daemon_mod.runtime_config_fingerprint(config) != first
+
+    config.platforms["example-os"]["token_env"] = "EXAMPLE_OS_TOKEN"
+    config.platforms["example-os"]["password"] = "second-accidental-literal"
+    assert daemon_mod.runtime_config_fingerprint(config) != first
 
 
 def test_policy_fingerprint_is_opaque_stable_and_config_sensitive(tmp_path: Path) -> None:
@@ -873,8 +947,8 @@ def test_cli_and_mcp_policy_status_are_host_only_and_have_identical_readiness(
     )
     monkeypatch.setattr(functiongemma_mod.importlib.util, "find_spec", lambda _name: None)
     monkeypatch.setattr(
-        engine_mod,
-        "connect",
+        engine_mod.Engine,
+        "_connect_target",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("policy status must not touch a device")
         ),
@@ -932,3 +1006,48 @@ def test_daemon_start_passes_the_sanitized_effective_environment(
     assert child_env["AUA_MODELS__FUNCTIONGEMMA__ADAPTER_SHA256"] == "b" * 64
     assert child_env["AUA_MODELS__FUNCTIONGEMMA__MANIFEST_SHA256"] == "c" * 64
     assert "--socket" in captured["command"]
+
+
+def test_daemon_start_passes_selected_platform_options_only_through_private_fd(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = _policy_config(tmp_path)
+    config.device.platform = "example-os"
+    config.platforms = {
+        "example-os": {
+            "endpoint": "https://device-grid.invalid",
+            "token_env": "EXAMPLE_OS_TOKEN",
+            "password": "literal-private-value",
+            "nested": {"retries": [1, 2, 5]},
+        },
+        "unselected-os": {"endpoint": "https://must-not-cross.invalid"},
+    }
+    captured: dict[str, Any] = {}
+
+    class FakeProcess:
+        pid = 4242
+
+    def fake_popen(command: list[str], **kwargs: Any) -> FakeProcess:
+        captured["command"] = list(command)
+        captured["env"] = kwargs["env"]
+        options_fd = int(command[command.index("--platform-options-fd") + 1])
+        captured["options"] = json.loads(os.pread(options_fd, 1_048_576, 0))
+        captured["pass_fds"] = kwargs["pass_fds"]
+        return FakeProcess()
+
+    monkeypatch.setattr(daemon_mod.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(daemon_mod, "reap", lambda _config: None)
+    alive = iter([False, True])
+    monkeypatch.setattr(daemon_mod, "_socket_alive", lambda _socket: next(alive, True))
+
+    result = daemon_mod.start(config)
+
+    assert result["status"] == "started"
+    assert captured["options"] == config.platform_options()
+    assert len(captured["pass_fds"]) == 1
+    visible_transport = json.dumps(
+        {"command": captured["command"], "env": captured["env"]}, sort_keys=True
+    )
+    assert "literal-private-value" not in visible_transport
+    assert "https://device-grid.invalid" not in visible_transport
+    assert "https://must-not-cross.invalid" not in json.dumps(captured["options"])

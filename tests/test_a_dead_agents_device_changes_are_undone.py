@@ -13,9 +13,17 @@ down where a stranger can find it, and replayed by someone else.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from android_ui_analyser import device_ledger, teardown
+from android_ui_analyser import teardown_watchdog as teardown_watchdog_mod
+from android_ui_analyser.errors import ConfigError
+from android_ui_analyser.platforms.options_transport import platform_options_fingerprint
+
+_REAL_ENSURE_WATCHDOG = teardown.ensure_watchdog
 
 
 class _Device:
@@ -37,7 +45,9 @@ class _Device:
 class _Platform:
     """A platform with no Android in it, proving the reaper needs none."""
 
-    name = "fake"
+    # The implementation is deliberately fake; the records under test are legacy Android
+    # records, so the strategy identity still has to agree with their platform scope.
+    name = "android"
 
     def __init__(self, device: _Device | None) -> None:
         self.device = device
@@ -46,6 +56,12 @@ class _Platform:
         if self.device is None:
             raise RuntimeError("target unreachable")
         return self.device
+
+    def validate_runtime(self, runtime: _Device) -> _Device:
+        return runtime
+
+    def runtime_capability(self, name: str, runtime: _Device) -> _Device:
+        return runtime
 
     def capability(self, name: str) -> Any:
         raise RuntimeError(f"no {name} capability in this test")
@@ -315,3 +331,198 @@ def test_with_leasing_off_a_dead_owner_is_reaped_at_once(tmp_path: Path) -> None
 
     assert "is gone" in report["reason"], report
     assert ("set_http_proxy", None) in device.calls
+
+
+def _options_fingerprint(options: dict[str, str]) -> str:
+    return platform_options_fingerprint(options, key_dir=device_ledger.ledger_dir())
+
+
+def test_pending_changes_refuse_a_different_nonempty_adapter_identity(tmp_path: Path) -> None:
+    first = _options_fingerprint({"endpoint": "https://first.invalid", "token": "private-one"})
+    second = _options_fingerprint(
+        {"endpoint": "https://second.invalid", "token": "private-two"}
+    )
+    device_ledger.record(
+        "configured-target",
+        key="http_proxy",
+        kind="http_proxy",
+        op="set_http_proxy",
+        args={"host_port": None},
+        cache_dir=tmp_path,
+        platform_options_fingerprint=first,
+    )
+
+    with pytest.raises(ConfigError) as raised:
+        device_ledger.record(
+            "configured-target",
+            key="reverse_port:1234",
+            kind="reverse_port",
+            op="remove_reverse_port",
+            args={"port": 1234},
+            cache_dir=tmp_path,
+            platform_options_fingerprint=second,
+        )
+
+    assert raised.value.code == "platform_options_recovery_mismatch"
+    assert [entry.key for entry in device_ledger.read_ledger("configured-target")] == [
+        "http_proxy"
+    ]
+    persisted = device_ledger.ledger_path("configured-target").read_text(encoding="utf-8")
+    assert first in persisted
+    assert "first.invalid" not in persisted
+    assert "private-one" not in persisted
+
+
+def test_pending_configured_changes_refuse_a_missing_adapter_identity(tmp_path: Path) -> None:
+    recorded = _options_fingerprint({"endpoint": "https://original.invalid"})
+    device_ledger.record(
+        "configured-target",
+        key="http_proxy",
+        kind="http_proxy",
+        op="set_http_proxy",
+        args={"host_port": None},
+        cache_dir=tmp_path,
+        platform_options_fingerprint=recorded,
+    )
+
+    with pytest.raises(ConfigError, match="another adapter configuration"):
+        device_ledger.record(
+            "configured-target",
+            key="reverse_port:1234",
+            kind="reverse_port",
+            op="remove_reverse_port",
+            args={"port": 1234},
+            cache_dir=tmp_path,
+        )
+
+    assert not device_ledger.options_match(
+        device_ledger.read_ledger("configured-target"),
+        None,
+    )
+
+
+def test_teardown_refuses_active_adapter_options_that_cannot_replay_the_change(
+    tmp_path: Path,
+) -> None:
+    recorded = _options_fingerprint({"endpoint": "https://original.invalid"})
+    active = _options_fingerprint({"endpoint": "https://other.invalid"})
+    device_ledger.record(
+        "configured-target",
+        key="http_proxy",
+        kind="http_proxy",
+        op="set_http_proxy",
+        args={"host_port": None},
+        owner_pid=_dead_pid(),
+        cache_dir=tmp_path,
+        platform_options_fingerprint=recorded,
+    )
+    device = _Device(serial="configured-target")
+
+    report = teardown.reap(
+        "configured-target",
+        platform=_Platform(device),
+        cache_dir=tmp_path,
+        force=True,
+        options_fingerprint=active,
+    )
+
+    assert report["code"] == "platform_options_recovery_mismatch"
+    assert report["remaining"] == 1
+    assert device.calls == []
+    assert device_ledger.read_ledger("configured-target")
+
+
+def test_watchdog_refuses_mismatched_transported_options_and_leaves_the_undo(
+    tmp_path: Path,
+) -> None:
+    original_options = {"endpoint": "https://original.invalid"}
+    device_ledger.record(
+        "configured-target",
+        key="http_proxy",
+        kind="http_proxy",
+        op="set_http_proxy",
+        args={"host_port": None},
+        cache_dir=tmp_path,
+        platform="example-os",
+        platform_options_fingerprint=_options_fingerprint(original_options),
+    )
+
+    code = teardown_watchdog_mod.run_watchdog(
+        serial="configured-target",
+        cache_dir=str(tmp_path),
+        platform_name="example-os",
+        platform_options={"endpoint": "https://other.invalid"},
+        max_lifetime_s=0,
+    )
+
+    assert code == 1
+    assert device_ledger.read_ledger("configured-target", platform="example-os")
+
+
+def test_ensure_watchdog_replaces_legacy_and_mismatched_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = teardown.watchdog_pid_path("configured-target")
+    path.write_text("111\n", encoding="utf-8")
+    retired: list[tuple[int, str]] = []
+    spawned: list[list[str]] = []
+    next_pid = iter((222, 333))
+
+    monkeypatch.setattr(teardown, "_pid_exists", lambda _pid: True)
+    monkeypatch.setattr(teardown, "_is_target_watchdog", lambda _pid, _ref: True)
+    monkeypatch.setattr(
+        teardown,
+        "_retire_watchdog",
+        lambda _ref, pid, fingerprint: retired.append((pid, fingerprint)) or True,
+    )
+
+    def popen(command: list[str], **_kwargs: Any) -> SimpleNamespace:
+        spawned.append(command)
+        return SimpleNamespace(pid=next(next_pid))
+
+    monkeypatch.setattr(teardown.subprocess, "Popen", popen)
+    first_options = {"endpoint": "https://first.invalid", "token": "secret-one"}
+    second_options = {"endpoint": "https://second.invalid", "token": "secret-two"}
+
+    assert _REAL_ENSURE_WATCHDOG(
+        "configured-target",
+        cache_dir=tmp_path,
+        platform_name="android",
+        platform_options=first_options,
+    ) == 222
+    assert retired == [(111, "")]
+    assert _REAL_ENSURE_WATCHDOG(
+        "configured-target",
+        cache_dir=tmp_path,
+        platform_name="android",
+        platform_options=first_options,
+    ) == 222
+    assert len(spawned) == 1
+
+    assert _REAL_ENSURE_WATCHDOG(
+        "configured-target",
+        cache_dir=tmp_path,
+        platform_name="android",
+        platform_options=second_options,
+    ) == 333
+    assert retired[-1][0] == 222
+    metadata = path.read_text(encoding="utf-8")
+    assert _options_fingerprint(second_options) in metadata
+    assert "second.invalid" not in metadata
+    assert "secret-two" not in metadata
+
+
+def test_stale_watchdog_metadata_never_signals_an_unrelated_recycled_pid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ref = teardown.target_ref("configured-target")
+    teardown._write_watchdog_registration(
+        ref, pid=444, options_fingerprint="legacy-fingerprint"
+    )
+    signalled: list[tuple[int, int]] = []
+    monkeypatch.setattr(teardown, "_is_target_watchdog", lambda _pid, _ref: False)
+    monkeypatch.setattr(teardown.os, "kill", lambda pid, sig: signalled.append((pid, sig)))
+
+    assert teardown._retire_watchdog(ref, 444, "legacy-fingerprint") is True
+    assert signalled == []
+    assert not teardown.watchdog_pid_path(ref).exists()

@@ -18,6 +18,24 @@ notes, so you can check for a newer version — and read what changed — withou
   jitter and cross-axis motion excluded, so a real thumbnail-strip or icon-grid swipe no longer
   reports `already-at-end` solely because every visible item has the same fallback label.
 
+### Added
+
+- Platform adapter API v1 now exposes a stable `android_ui_analyser.platforms` facade, lazy
+  `aua.platforms` entry-point discovery, neutral target/app/geometry/diagnostic contracts, typed
+  capability failures, and an executable attached-target conformance profile. The repository gate
+  also installs a strict fixture wheel in a fresh process with Android imports blocked.
+- Platform plugins can now implement the typed `virtual_targets` service for reusable target
+  definitions, provisioning, exact-instance rollback, status, stop, reclaim, create, and delete.
+  The new `aua virtual-target ...` and `virtual_target_*` MCP transports share one Engine path;
+  existing Android `emulator` commands and payloads remain compatibility aliases.
+- Leases, sessions, memory, flows, journals, captures, daemons, dashboards, and teardown records
+  are platform/target scoped. Detached workers receive selected plugin options through anonymous
+  file descriptors and verify a keyed, non-secret configuration identity before reuse or recovery.
+- Persistent target changes now have write-ahead neutral undo registration (or a documented reason
+  no truthful undo exists), including orientation, runtime permissions, media, recordings,
+  developer settings, helper state, touch capture, automatic helper installation, and temporary
+  Android root escalation.
+
 ## [0.14.2] - 2026-09-04
 
 ### Fixed

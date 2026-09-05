@@ -44,15 +44,15 @@ def test_fresh_engine_flow_list_discovers_attached_foreground_context(
         SessionState(package=PACKAGE, active_context_id=CONTEXT),
     )
     monkeypatch.setattr(
-        engine_mod,
-        "list_devices",
-        lambda: [DeviceInfo(serial=serial, state="device")],
+        engine_mod.Engine,
+        "_list_targets",
+        lambda _engine: [DeviceInfo(serial=serial, state="device")],
     )
     connected: list[str | None] = []
     monkeypatch.setattr(
-        engine_mod,
-        "connect",
-        lambda requested=None: connected.append(requested) or device,
+        engine_mod.Engine,
+        "_connect_target",
+        lambda _engine, requested=None: connected.append(requested) or device,
     )
     engine = Engine(cfg)
     assert engine._device is None
@@ -80,11 +80,11 @@ def test_fresh_engine_flow_list_stays_offline_and_compatibility_unknown(
     devices: list[DeviceInfo],
 ) -> None:
     cfg = _config_with_contextual_flow(tmp_path)
-    monkeypatch.setattr(engine_mod, "list_devices", lambda: devices)
+    monkeypatch.setattr(engine_mod.Engine, "_list_targets", lambda _engine: devices)
     monkeypatch.setattr(
-        engine_mod,
-        "connect",
-        lambda _serial=None: pytest.fail("offline flow listing must not connect"),
+        engine_mod.Engine,
+        "_connect_target",
+        lambda _engine, _serial=None: pytest.fail("offline flow listing must not connect"),
     )
     engine = Engine(cfg)
 

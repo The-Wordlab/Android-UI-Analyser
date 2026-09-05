@@ -265,9 +265,16 @@ def _record_session_artifact(
     store = SessionArtifactStore(artifact_dir)
 
     def screenshot(path: Path) -> str:
-        image = engine.platform.capture_screenshot(engine.device)
+        screenshots = engine.platform.adapter_capability("ui.screenshot")
+        image = screenshots.capture_screenshot(engine.device)
         image.save(str(path))
         return str(path)
+
+    def diagnostics() -> str | None:
+        if not engine.platform.supports("device.logs"):
+            return None
+        logs = engine.platform.adapter_capability("device.logs")
+        return logs.diagnostic_logs(engine.device, lines=400)
 
     stored = store.record(
         command=cmd,
@@ -276,13 +283,7 @@ def _record_session_artifact(
         duration_ms=duration_ms,
         args=args,
         screenshot=screenshot,
-        diagnostics=(
-            lambda: (
-                engine.platform.diagnostic_logs(engine.device, lines=400)
-                if engine.platform.supports("device.logs")
-                else None
-            )
-        ),
+        diagnostics=diagnostics,
     )
     if stored is not None:
         _attach_observation_contract(result, stored)
@@ -391,7 +392,12 @@ def decorate_result(
         # Two windows from one read. The per-command rules below were tuned on the last 12
         # calls and stay on 12; churn needs a longer view — a run can relaunch seven times
         # across twelve minutes and never show three in any twelve-call slice.
-        events = journal.read_since(engine.config.cache.dir, serial, limit=36)
+        events = journal.read_since(
+            engine.config.cache.dir,
+            serial,
+            limit=36,
+            platform=engine.platform.name,
+        )
     except Exception:  # pragma: no cover - coaching is always best effort
         events = []
     owner = getattr(engine, "_lease_owner_resolved", None)

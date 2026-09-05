@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 from .engine_support import _label, logger
 from .errors import AuaError
 from .memory import _id_tail
-from .schema import ActionResult, AnalyzeResult
+from .schema import ActionResult, AnalyzeResult, AppContext
 from .selectors import app_elements
 
 if TYPE_CHECKING:
@@ -34,9 +34,6 @@ _CHANGE_TEXT_CAP = 12  # text deltas echoed back per direction; a list screen wo
 
 
 _CRASH_LOG_SCAN_LINES = 600  # bounded read from one already-short last-action window
-
-
-_CRASH_EVIDENCE_LINES = 60  # enough for exception + causes without dumping the full device log
 
 
 def _compact_action_diff(element_diff: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -849,9 +846,9 @@ def _observe(
                 with contextlib.suppress(Exception):
                     # Order matters. The app that was in front when the action was dispatched
                     # is the one that logged the response to it, so it wins over the screen we
-                    # landed on. Both are ignored when they are the launcher or system UI, and
-                    # the remembered app under test then carries a cold launch — the window
-                    # that has no previous package at all and the most to say.
+                    # landed on. Adapter-owned policy excludes platform shell surfaces, and the
+                    # remembered app under test then carries a cold launch — the window that has
+                    # no previous app at all and the most to say.
                     for candidate in (
                         (before_state or {}).get("package"),
                         obs.screen.package,
@@ -1081,6 +1078,24 @@ def _await_post_action_ready(
     pre_tree = self._pre_action_tree_fp
     self._pre_action_sig = None
     self._pre_action_tree_fp = None
+    tree_device = (
+        self.platform.runtime_capability("ui.tree", device)
+        if pre_tree is not None
+        else device
+    )
+    try:
+        screenshots = self.platform.adapter_capability("ui.screenshot")
+    except AuaError:
+        # Pixel settling is an internal optimization. A hierarchy-only adapter may still
+        # perform and observe the action; unsupported screenshots must not trigger an Android
+        # fallback or turn that otherwise valid action into a false device failure.
+        return {
+            "changed": pre is None,
+            "masked": 0,
+            "ms": 0,
+            "timeout": False,
+            "via": "screenshot-unsupported",
+        }
     t0 = time.monotonic()
     deadline = t0 + total_timeout_ms / 1000.0
     change_deadline = t0 + change_timeout_ms / 1000.0
@@ -1097,7 +1112,7 @@ def _await_post_action_ready(
         try:
             # Fresh frames only — reusing a capture-buffer JPEG (~2 fps) falsely
             # reports idle / change and stretches same-screen taps.
-            img = device.screenshot()
+            img = screenshots.capture_screenshot(device)
         except Exception:
             break
         now = time.monotonic()
@@ -1142,12 +1157,16 @@ def _await_post_action_ready(
             with contextlib.suppress(Exception):
                 dump_started = time.monotonic()
                 xml = self.platform.dump_tree(
-                    device,
+                    tree_device,
                     compact=bool(self.config.device.compressed_hierarchy),
                 )
                 dump_ms = (time.monotonic() - dump_started) * 1000.0
-                w, h = device.window_size()
-                els = self.platform.normalize_tree(xml, (w, h)).elements
+                w, h = tree_device.window_size()
+                els = self.platform.normalize_tree(
+                    xml,
+                    (w, h),
+                    geometry=tree_device.display_geometry(),
+                ).elements
                 parts: list[str] = []
                 for e in els:
                     if getattr(e, "window", None) == "system":
@@ -1259,40 +1278,23 @@ def _observation_is_loading(self: Engine, observation: AnalyzeResult | None) -> 
 
 
 def _app_left_foreground(
-    activity_before: str | None, activity_after: str | None, obs: AnalyzeResult
+    self: Engine,
+    context_before: AppContext | str | None,
+    context_after: AppContext | str | None,
+    obs: AnalyzeResult,
 ) -> dict[str, Any] | None:
-    """Report the app under test vanishing from the foreground — nearly always a crash.
+    """Serialize adapter-owned evidence that the tested app left the foreground."""
 
-        A tap that kills the app answered ``ok: true`` with a cheerful observation of the
-        launcher, leaving the caller to infer the crash from ``activity_after`` by hand.
-        A weaker caller does not make that leap: it concludes the button "navigated home"
-        and then spends its whole budget trying to navigate back inside a dead app.
-
-        Both signals Android gives us are checked — the system's ``aerr_*`` crash dialog, and
-        the foreground falling back to a launcher. An ordinary app-to-app hand-off (a share
-        sheet, a browser) is deliberately NOT reported: the package changing is normal there.
-        """
-
-    def package_of(activity: str | None) -> str | None:
-        if not activity or "/" not in activity:
-            return None
-        return activity.split("/", 1)[0] or None
-
-    before_pkg = package_of(activity_before)
-    after_pkg = package_of(activity_after)
-    if not before_pkg or not after_pkg or before_pkg == after_pkg:
-        return None
-    crash_dialog = any("aerr_" in str(e.resource_id or "") for e in obs.elements)
-    to_launcher = any(hint in after_pkg.lower() for hint in ("launcher", "home"))
-    if not crash_dialog and not to_launcher:
-        return None
-    return {"from": before_pkg, "to": after_pkg, "crash_dialog": crash_dialog}
+    evidence = self.platform.app_exit_evidence(
+        context_before,
+        context_after,
+        obs.elements,
+    )
+    return evidence.as_dict() if evidence is not None else None
 
 
 def _crash_evidence(self: Engine, app_id: str) -> dict[str, Any]:
     """Read and reduce the diagnostic window already opened before the failed action."""
-    from . import logcat as logcat_mod
-
     source = "device.logs"
     if not self.platform.supports(source):
         return {
@@ -1305,24 +1307,18 @@ def _crash_evidence(self: Engine, app_id: str) -> dict[str, Any]:
             ),
         }
 
-    device = self.device
-    path = logcat_mod.marks_path(self.config.cache.dir, device.serial)
-    marks = logcat_mod.load_marks(path)
-    clock = logcat_mod.resolve_clock(device, self.config.cache.dir)
-    since_ms, since_label = logcat_mod.resolve_since_ms(marks, None, clock=clock)
     base: dict[str, Any] = {
         "available": True,
         "source": source,
         "app_id": app_id,
-        "since": since_label,
-        "since_unix_ms": since_ms,
-        "clock": clock.name,
     }
     try:
-        raw = self.platform.diagnostic_logs(
-            device,
+        diagnostics = self.platform.adapter_capability(source)
+        window = diagnostics.diagnostic_window(
+            self.device,
             lines=_CRASH_LOG_SCAN_LINES,
-            since_ms=since_ms,
+            since=None,
+            app_id=app_id,
         )
     except AuaError as exc:
         return {
@@ -1338,13 +1334,13 @@ def _crash_evidence(self: Engine, app_id: str) -> dict[str, Any]:
             "code": "diagnostic_logs_failed",
             "detail": str(exc),
         }
+    evidence = window.crash_evidence.as_dict()
     return {
         **base,
-        **logcat_mod.extract_crash_evidence(
-            raw,
-            app_id=app_id,
-            limit=_CRASH_EVIDENCE_LINES,
-        ),
+        "since": window.since,
+        "since_unix_ms": window.since_unix_ms,
+        "clock": window.clock,
+        **evidence,
     }
 
 
@@ -1369,49 +1365,43 @@ def _app_logs(self: Engine, app_id: str) -> dict[str, Any] | None:
         # Silent, deliberately. An unsupported optional extra is not the caller's problem
         # on every single action; `aua logcat` reports it properly when asked directly.
         return None
-    from . import logcat as logcat_mod
-
     device = self.device
-    marks = logcat_mod.load_marks(logcat_mod.marks_path(self.config.cache.dir, device.serial))
-    if "last-action" not in marks:
+    try:
+        diagnostics = self.platform.adapter_capability("device.logs")
+        window = diagnostics.diagnostic_window(
+            device,
+            lines=cfg.scan_lines,
+            since="last-action",
+            app_id=app_id,
+        )
+    except KeyError:
         # No window means no action bracketed this observation — a bare `analyze` must not
         # re-report the previous action's lines as if they were new.
         return None
-    clock = logcat_mod.resolve_clock(device, self.config.cache.dir)
-    since_ms, since_label = logcat_mod.resolve_since_ms(marks, "last-action", clock=clock)
+    except AuaError as exc:
+        logger.debug("app log window unavailable: %s", exc.message)
+        return None
+    since_ms = window.since_unix_ms
     if since_ms is not None and since_ms == self._app_logs_reported_ms:
         # A wait does not stamp a new mark, so its observation would otherwise re-report the
         # previous action's lines — reading as though the app had just said all of it again.
         return None
     self._app_logs_reported_ms = since_ms
-    try:
-        raw = self.platform.diagnostic_logs(
-            device,
-            lines=cfg.scan_lines,
-            since_ms=since_ms,
-            app_id=app_id,
-        )
-    except AuaError as exc:
-        logger.debug("app log window unavailable: %s", exc.message)
-        return None
-    digest = logcat_mod.digest_app_logs(
-        raw,
-        app_id=app_id,
+    digest = window.digest(
         levels=cfg.levels,
-        deny_tag_prefixes=logcat_mod.DEFAULT_DENY_TAG_PREFIXES,
         # Held apart from the built-in list on purpose: what a caller said about THIS app
         # outranks an allow-list, while the generic guess about apps in general does not.
-        drop_tag_prefixes=cfg.ignore_tags,
-        keep_tag_prefixes=cfg.keep_tags,
-        allow_tag_prefixes=cfg.only_tags,
+        drop_source_prefixes=cfg.ignore_tags,
+        keep_source_prefixes=cfg.keep_tags,
+        only_source_prefixes=cfg.only_tags,
         limit=cfg.limit,
-        per_tag=cfg.per_tag,
+        per_source=cfg.per_tag,
     )
     if not digest["count"]:
         return None
     return {
         "app_id": app_id,
-        "since": since_label,
+        "since": window.since,
         "since_unix_ms": since_ms,
         **digest,
     }
@@ -1436,10 +1426,21 @@ def _change_summary(self: Engine, before: dict[str, Any] | None, obs: AnalyzeRes
         if (e.text or e.content_desc or "").strip()
     ]
     after_focus = next((e.id for e in obs.elements if e.focused), None)
-    activity_before = (before or {}).get("activity") or self._last_activity
-    activity_after = self._read_activity()
-    if activity_after is not None:
-        self._last_activity = activity_after
+    # Preserve neutral values throughout orchestration; the Android-shaped strings below exist
+    # only because ``change.activity_*`` predates the platform boundary. A hand-built legacy
+    # baseline can still carry just ``activity`` and is passed through only for compatibility.
+    context_before: AppContext | str | None = (before or {}).get("app_context")
+    if context_before is None:
+        context_before = self._last_app_context or (before or {}).get("activity")
+    context_after = self._read_app_context()
+    if context_after is not None:
+        self._last_app_context = context_after
+    activity_before = (
+        context_before
+        if isinstance(context_before, str)
+        else self._activity_string(context_before)
+    )
+    activity_after = self._activity_string(context_after)
 
     out: dict[str, Any] = {
         "activity_before": activity_before,
@@ -1451,7 +1452,7 @@ def _change_summary(self: Engine, before: dict[str, Any] | None, obs: AnalyzeRes
         ),
         "node_count_after": len(obs.elements),
     }
-    left = self._app_left_foreground(activity_before, activity_after, obs)
+    left = self._app_left_foreground(context_before, context_after, obs)
     if left is not None:
         out["app_left_foreground"] = left
     if before is None:

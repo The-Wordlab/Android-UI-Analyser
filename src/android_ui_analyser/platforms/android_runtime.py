@@ -10,7 +10,7 @@ import contextlib
 import subprocess
 from collections.abc import Iterator
 
-from ..device import Uiautomator2Device
+from .android_device import Uiautomator2Device
 
 _STALE_UIAUTOMATION_MARKERS = (
     "not connected",
@@ -66,4 +66,3 @@ class AndroidDeviceRuntime(Uiautomator2Device):
                 with contextlib.suppress(Exception):
                     client.stop_uiautomator()
         self._connect()
-

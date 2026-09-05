@@ -23,6 +23,9 @@ from math import ceil
 from pathlib import Path
 from typing import Any
 
+from .atomic import atomic_write_text
+from .platforms.identity import LEGACY_PLATFORM, TargetLike, TargetRef, target_ref
+
 logger = logging.getLogger(__name__)
 
 ScreenshotFn = Callable[[], Any]  # returns ScreenImage-like with .png_bytes / .pil()
@@ -73,6 +76,7 @@ class CaptureBuffer:
     serial: str
     cfg: CaptureCfgView
     screenshot: ScreenshotFn
+    platform: str = LEGACY_PLATFORM
     session_id: str = field(
         default_factory=lambda: time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
     )
@@ -96,22 +100,29 @@ class CaptureBuffer:
 
     @property
     def dir(self) -> Path:
-        safe = str(self.serial).replace(":", "_").replace("/", "_")
-        return self.root / safe / self.session_id
+        return self.root / _serial_dir_name(self.serial, platform=self.platform) / self.session_id
 
     @property
     def serial_root(self) -> Path:
         """All sessions for this device, live and dead."""
-        safe = str(self.serial).replace(":", "_").replace("/", "_")
-        return self.root / safe
+        return self.root / _serial_dir_name(self.serial, platform=self.platform)
 
     @property
     def index_path(self) -> Path:
         return self.dir / "index.jsonl"
 
+    @property
+    def target_metadata_path(self) -> Path:
+        return self.serial_root / "target.json"
+
     def start(self) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
         (self.dir / "frames").mkdir(parents=True, exist_ok=True)
+        ref = TargetRef(self.platform, self.serial)
+        atomic_write_text(
+            self.target_metadata_path,
+            json.dumps(ref.to_json(), sort_keys=True, separators=(",", ":")) + "\n",
+        )
         # Sessions from earlier runs have no owner to prune them, so the aggregate only
         # stays bounded if each new session clears up after the dead ones.
         with contextlib.suppress(Exception):
@@ -842,9 +853,41 @@ class DiskSession:
         return max(0, int(time.time() * 1000) - self.newest_frame_ms)
 
 
-def _serial_dir_name(serial: str) -> str:
+def _serial_dir_name(
+    serial: TargetLike, *, platform: str = LEGACY_PLATFORM
+) -> str:
     """Match :attr:`CaptureBuffer.dir`'s sanitisation, so the reader looks in the right place."""
-    return str(serial).replace(":", "_").replace("/", "_")
+
+    ref = target_ref(serial, platform=platform)
+    if ref.platform == LEGACY_PLATFORM:
+        # Preserve the capture directory spelling shipped before platform scoping.
+        return ref.target_id.replace(":", "_").replace("/", "_")
+    return TargetRef(ref.platform, ref.target_id).storage_key
+
+
+def target_for_capture_root(path: Path | str) -> TargetRef | None:
+    """Recover a target identity from a capture root written by :class:`CaptureBuffer`.
+
+    New platform-scoped roots carry explicit metadata because escaped storage keys are not
+    intentionally reversible. A legacy root predates platforms and its directory name is the
+    best Android serial compatibility evidence available.
+    """
+
+    root = Path(path)
+    try:
+        raw = json.loads((root / "target.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        raw = None
+    if isinstance(raw, dict):
+        platform = raw.get("platform")
+        target_id = raw.get("target_id") or raw.get("serial")
+        if isinstance(platform, str) and isinstance(target_id, str):
+            with contextlib.suppress(ValueError):
+                return TargetRef(platform, target_id)
+    if "--" not in root.name and root.name:
+        with contextlib.suppress(ValueError):
+            return TargetRef(LEGACY_PLATFORM, root.name)
+    return None
 
 
 def _read_index(session: Path) -> DiskSession | None:
@@ -902,14 +945,19 @@ def _read_index(session: Path) -> DiskSession | None:
     )
 
 
-def read_sessions_from_disk(root: Path | str, serial: str) -> list[DiskSession]:
+def read_sessions_from_disk(
+    root: Path | str,
+    serial: TargetLike,
+    *,
+    platform: str = LEGACY_PLATFORM,
+) -> list[DiskSession]:
     """Every readable session for *serial*, newest index first.
 
     Ordered by index mtime rather than directory name because two writers — the daemon's
     always-on buffer and the capture sidecar — can both own sessions for one device, and a
     tie broken by name would silently pick the wrong one.
     """
-    serial_root = Path(root) / _serial_dir_name(serial)
+    serial_root = Path(root) / _serial_dir_name(serial, platform=platform)
     if not serial_root.is_dir():
         return []
     dated: list[tuple[float, DiskSession]] = []
@@ -931,9 +979,14 @@ def read_sessions_from_disk(root: Path | str, serial: str) -> list[DiskSession]:
     return [found for _, found in dated]
 
 
-def read_session_from_disk(root: Path | str, serial: str) -> DiskSession | None:
+def read_session_from_disk(
+    root: Path | str,
+    serial: TargetLike,
+    *,
+    platform: str = LEGACY_PLATFORM,
+) -> DiskSession | None:
     """The newest readable session for *serial*, or ``None`` if nothing was ever recorded."""
-    sessions = read_sessions_from_disk(root, serial)
+    sessions = read_sessions_from_disk(root, serial, platform=platform)
     return sessions[0] if sessions else None
 
 
@@ -955,4 +1008,5 @@ __all__ = [
     "local_narration",
     "read_session_from_disk",
     "read_sessions_from_disk",
+    "target_for_capture_root",
 ]

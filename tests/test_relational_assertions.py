@@ -16,7 +16,12 @@ from android_ui_analyser.device import Device
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.flows import parse_flow_yaml, render_flow_yaml
 from android_ui_analyser.mcp_server import build_server
-from android_ui_analyser.platforms import NormalizedTree, PlatformAdapter
+from android_ui_analyser.platforms import (
+    DisplayGeometry,
+    NormalizedTree,
+    PlatformAdapter,
+    ScreenImage,
+)
 from android_ui_analyser.projection import Projection
 from android_ui_analyser.schema import DeviceInfo, Element, Source
 from android_ui_analyser.suite import parse_suite, run_suite
@@ -57,7 +62,7 @@ def _elements() -> list[Element]:
 
 class _TreePlatform(PlatformAdapter):
     name = "tree-test"
-    capabilities = frozenset({"ui.tree"})
+    capabilities = frozenset({"ui.screenshot", "ui.tree"})
 
     def __init__(self, config: Config, elements: Sequence[Element]) -> None:
         super().__init__(config)
@@ -79,11 +84,16 @@ class _TreePlatform(PlatformAdapter):
         raw_tree: str,
         screen_size: tuple[int, int],
         *,
+        geometry: DisplayGeometry | None = None,
         ignored_app_ids: Sequence[str] = (),
     ) -> NormalizedTree:
         assert raw_tree == "opaque-native-tree"
+        assert geometry is not None
         self.calls.append("normalize_tree")
         return NormalizedTree(list(self.elements), app_id="dev.aua.fixture")
+
+    def capture_screenshot(self, runtime: Device) -> ScreenImage:
+        return runtime.screenshot()
 
 
 def _engine(elements: Sequence[Element] | None = None) -> tuple[Engine, _TreePlatform, FakeDevice]:
@@ -208,7 +218,7 @@ _NESTED_XML = """<hierarchy>
 
 def test_cli_relational_options_reach_shared_engine(monkeypatch) -> None:
     runtime = FakeDevice(hierarchy_xml=_NESTED_XML, package="dev.aua.fixture")
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: runtime)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: runtime)
 
     result = CliRunner().invoke(
         app,

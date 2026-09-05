@@ -1211,7 +1211,7 @@ def test_cli_flow_run_dry_run(tmp_path: Path, monkeypatch) -> None:
     store = FlowStore(make_config().memory)
     store.save(Flow(name="dry", app=P, steps=[RouteStep(kind="tap", label="Apps")]))
     dev = ScriptedDevice([HOME], package=P, serial="emu-cli-dry")
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: dev)
     out = runner.invoke(app, ["--format", "compact", "flow", "run", "dry", "--dry-run"])
     assert out.exit_code == 0, out.stderr
     data = json.loads(out.stdout)
@@ -1223,9 +1223,9 @@ def test_cli_flow_run_inline_yaml_and_artifact_options(tmp_path: Path, monkeypat
     import android_ui_analyser.engine as engine_mod
 
     monkeypatch.setattr(
-        engine_mod,
-        "connect",
-        lambda serial=None: ScriptedDevice([HOME], package=P, serial="emu-inline-dry"),
+        engine_mod.Engine,
+        "_connect_target",
+        lambda _engine, serial=None: ScriptedDevice([HOME], package=P, serial="emu-inline-dry"),
     )
     artifacts = tmp_path / "cli-artifacts"
     out = runner.invoke(
@@ -1501,7 +1501,7 @@ def test_cli_remember_and_about(tmp_path, monkeypatch) -> None:
     from conftest import FakeDevice
 
     dev = FakeDevice(hierarchy_xml=HOME, package=P)
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: dev)
 
     r = runner.invoke(
         app,
@@ -1524,7 +1524,7 @@ def test_cli_remember_recipe_requires_note(tmp_path, monkeypatch) -> None:
     import android_ui_analyser.engine as engine_mod
     from conftest import FakeDevice
 
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: FakeDevice(package=P))
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: FakeDevice(package=P))
     r = runner.invoke(app, ["remember", "--app", P, "--recipe", "x"])
     assert r.exit_code != 0
 
@@ -1687,7 +1687,7 @@ def test_cli_has_by_id(tmp_path, monkeypatch) -> None:
         package=P,
         resource_index={"x:id/dashboardContainer": (0, 0, 9, 9)},
     )
-    monkeypatch.setattr(engine_mod, "connect", lambda serial=None: dev)
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: dev)
     ok = runner.invoke(app, ["has", "dashboardContainer", "--by", "id"])
     assert ok.exit_code == 0, ok.stderr
     miss = runner.invoke(app, ["has", "dashboardContainer"])  # by text → absent
