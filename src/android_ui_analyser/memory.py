@@ -2455,7 +2455,7 @@ class AppMemoryStore:
                     reason = (
                         f"re-reading the device's own on-disk flags for {package} found "
                         f"{context_id}, not the {sess.active_context_id} this session recorded — "
-                        "detected by that periodic read-back, not by a flags/restart call in "
+                        "detected by that on-device read-back, not by a flags/restart call in "
                         "this session; the app itself, an earlier unverified flags call this "
                         "session made, or a previous run may have set them"
                     )

@@ -87,7 +87,7 @@ def test_auto_detected_flag_context_change_names_its_detection_source(tmp_path: 
     discovers flags already set on the device by re-reading its on-disk state, not by an
     explicit `flags apply`/restart in this session — the shape a recycled warm device/app
     install produces. The capture-boundary reason it leaves behind is what `flow save` echoes
-    verbatim in its error hint, so it must name that periodic read-back as the detection
+    verbatim in its error hint, so it must name that on-device read-back as the detection
     mechanism, rather than the generic "memory context changed" wording an explicit
     `flags apply` leaves (see the sibling
     `test_flag_context_change_separates_recorded_actions_before_flow_save`).
@@ -115,7 +115,7 @@ def test_auto_detected_flag_context_change_names_its_detection_source(tmp_path: 
     session = store.load_session(serial)
     assert session.capture_segment == 1
     reason = session.capture_boundary_reason or ""
-    assert "detected by that periodic read-back, not by a flags/restart call" in reason
+    assert "detected by that on-device read-back, not by a flags/restart call" in reason
     assert "memory context changed from" not in reason
 
 
