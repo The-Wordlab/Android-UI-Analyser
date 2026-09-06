@@ -91,6 +91,7 @@ def _sync_runtime_flag_context(
         verified=True,
         replace=True,
         evidence=[f"shared_prefs:{name}" for name in result.files],
+        auto_detected=True,
     )
     current = mem.load_session(device.serial)
     changed = previous_identity != (

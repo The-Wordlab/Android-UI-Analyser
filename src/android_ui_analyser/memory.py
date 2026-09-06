@@ -2424,8 +2424,19 @@ class AppMemoryStore:
         verified: bool,
         replace: bool = False,
         evidence: list[str] | None = None,
+        auto_detected: bool = False,
     ) -> str:
-        """Promote a flag set to the active observation context after flags-set/restart."""
+        """Promote a flag set to the active observation context after flags-set/restart.
+
+        *auto_detected* marks a call that discovered this context by reading the device's own
+        state (:func:`engine_memory._sync_runtime_flag_context`), as opposed to one driven by an
+        explicit ``flags apply``/restart the caller just performed. The two need different
+        capture-boundary wording: an explicit call is a change the caller made and will
+        recognise; an auto-detected one can fire with no action in between (typically because a
+        recycled device/app install already carried this flag state in), and a caller told only
+        "memory context changed" reasonably suspects a concurrent session touched their capture
+        history when nothing of the sort happened.
+        """
         sess = self.load_session(serial)
         merged = (
             {} if replace else dict(sess.active_flags) if sess.package in (None, package) else {}
@@ -2438,6 +2449,13 @@ class AppMemoryStore:
             if sess.package is not None:
                 if package_changed:
                     reason = f"origin app changed from {sess.package} to {package}"
+                elif auto_detected:
+                    reason = (
+                        f"the device's own on-disk flags for {package} were read back as "
+                        f"{context_id}, not the {sess.active_context_id} this session recorded — "
+                        "no flags/restart call happened in this session; the app install or "
+                        "device most likely already carried this state in from a previous test"
+                    )
                 else:
                     reason = f"memory context changed from {sess.active_context_id} to {context_id}"
                 self._advance_capture_segment(sess, reason)
