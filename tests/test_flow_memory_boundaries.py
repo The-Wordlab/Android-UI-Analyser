@@ -80,17 +80,16 @@ def test_flag_context_change_separates_recorded_actions_before_flow_save(tmp_pat
     assert [step.resource_id for step in newest_suffix] == ["newVariant"]
 
 
-def test_auto_detected_flag_context_change_names_no_session_action_as_the_cause(
-    tmp_path: Path,
-) -> None:
+def test_auto_detected_flag_context_change_names_its_detection_source(tmp_path: Path) -> None:
     """An auto-detected on-device flag change must not read like a concurrent lane's doing.
 
     `_sync_runtime_flag_context` calls `activate_flag_context(auto_detected=True)` when it
-    discovers flags already set on the device, with no `flags apply`/restart in this session
-    to explain it — the shape a recycled warm device/app install produces. The capture-boundary
-    reason it leaves behind is what `flow save` echoes verbatim in its error hint, so it must
-    say plainly that nothing in this session caused it, rather than the generic "memory context
-    changed" wording an explicit `flags apply` leaves (see the sibling
+    discovers flags already set on the device by re-reading its on-disk state, not by an
+    explicit `flags apply`/restart in this session — the shape a recycled warm device/app
+    install produces. The capture-boundary reason it leaves behind is what `flow save` echoes
+    verbatim in its error hint, so it must name that periodic read-back as the detection
+    mechanism, rather than the generic "memory context changed" wording an explicit
+    `flags apply` leaves (see the sibling
     `test_flag_context_change_separates_recorded_actions_before_flow_save`).
     """
     store = _store(tmp_path)
@@ -116,7 +115,7 @@ def test_auto_detected_flag_context_change_names_no_session_action_as_the_cause(
     session = store.load_session(serial)
     assert session.capture_segment == 1
     reason = session.capture_boundary_reason or ""
-    assert "no flags/restart call happened in this session" in reason
+    assert "detected by that periodic read-back, not by a flags/restart call" in reason
     assert "memory context changed from" not in reason
 
 

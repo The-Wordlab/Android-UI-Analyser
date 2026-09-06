@@ -2428,14 +2428,16 @@ class AppMemoryStore:
     ) -> str:
         """Promote a flag set to the active observation context after flags-set/restart.
 
-        *auto_detected* marks a call that discovered this context by reading the device's own
-        state (:func:`engine_memory._sync_runtime_flag_context`), as opposed to one driven by an
-        explicit ``flags apply``/restart the caller just performed. The two need different
+        *auto_detected* marks a call that discovered this context by re-reading the device's own
+        state (:func:`engine_memory._sync_runtime_flag_context`) rather than one driven directly
+        by an explicit ``flags apply``/restart the caller just performed. The two need different
         capture-boundary wording: an explicit call is a change the caller made and will
-        recognise; an auto-detected one can fire with no action in between (typically because a
-        recycled device/app install already carried this flag state in), and a caller told only
-        "memory context changed" reasonably suspects a concurrent session touched their capture
-        history when nothing of the sort happened.
+        recognise; an auto-detected one can surface with no *visible* action in between (a
+        recycled device/app install that already carried the flag state in, the app rewriting
+        its own prefs, or an earlier unverified ``flags apply`` this same session made landing
+        only on the next read-back). A caller told only "memory context changed" cannot tell
+        any of that from a concurrent session touching their capture history, so name the
+        detection mechanism instead of guessing at a cause the code cannot actually see.
         """
         sess = self.load_session(serial)
         merged = (
@@ -2451,10 +2453,11 @@ class AppMemoryStore:
                     reason = f"origin app changed from {sess.package} to {package}"
                 elif auto_detected:
                     reason = (
-                        f"the device's own on-disk flags for {package} were read back as "
+                        f"re-reading the device's own on-disk flags for {package} found "
                         f"{context_id}, not the {sess.active_context_id} this session recorded — "
-                        "no flags/restart call happened in this session; the app install or "
-                        "device most likely already carried this state in from a previous test"
+                        "detected by that periodic read-back, not by a flags/restart call in "
+                        "this session; the app itself, an earlier unverified flags call this "
+                        "session made, or a previous run may have set them"
                     )
                 else:
                     reason = f"memory context changed from {sess.active_context_id} to {context_id}"
