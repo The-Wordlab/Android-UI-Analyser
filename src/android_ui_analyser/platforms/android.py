@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, cast
 
 from .. import hierarchy
 from ..config import Config
-from ..errors import UsageError
+from ..errors import DeviceError, UsageError
 from ..memory import matches_any
 from ..providers.base import ScreenImage
 from ..schema import AppContext, Element
@@ -221,6 +221,7 @@ class AndroidPlatform(PlatformAdapter):
             "virtual_targets",
             "webview",
             "ui.input",
+            "ui.peek",
             "ui.screenshot",
             "ui.tree",
         }
@@ -309,6 +310,57 @@ class AndroidPlatform(PlatformAdapter):
             check=False,
         )
         return [line for line in (result.stdout or "").splitlines() if line.strip()][-count:]
+
+    # -- ui.peek: a watcher's read-only view, plain adb, no uiautomator2 ---------------------
+    #
+    # The dashboard asks these for every tile every second, including devices another agent
+    # is driving. Both stay on adb alone: ``dumpsys window`` names the focused app in ~30 ms
+    # and ``screencap`` pictures the screen without touching the UiAutomation slot, so a watcher
+    # never installs, starts, or attaches the on-device automation server.
+
+    def peek_foreground_app(self, target_id: str) -> AppContext | None:
+        from .android_device import _foreground_from_window_dump
+
+        self.prepare_host()
+        try:
+            proc = subprocess.run(  # noqa: S603
+                ["adb", "-s", target_id, "shell", "dumpsys", "window"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if proc.returncode != 0:
+            return None
+        focused = _foreground_from_window_dump(proc.stdout or "")
+        return AppContext.coerce(focused) if focused is not None else None
+
+    def peek_screenshot(self, target_id: str) -> ScreenImage:
+        self.prepare_host()
+        try:
+            proc = subprocess.run(  # noqa: S603
+                ["adb", "-s", target_id, "exec-out", "screencap", "-p"],
+                capture_output=True,
+                timeout=8,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise DeviceError(
+                f"could not picture {target_id!r}: {exc}",
+                code="screencap_failed",
+                hint="Check `aua devices`; the target may be booting or detached.",
+            ) from exc
+        raw = proc.stdout or b""
+        if proc.returncode != 0 or not raw.startswith(b"\x89PNG\r\n\x1a\n"):
+            detail = (proc.stderr or raw[:80] or b"").decode("utf-8", "replace").strip()
+            raise DeviceError(
+                f"could not picture {target_id!r}: {detail or 'screencap returned no PNG'}",
+                code="screencap_failed",
+                hint="Check `aua devices`; the target may be booting or detached.",
+            )
+        return ScreenImage(raw)
 
     def probe_target_capabilities(self, target_id: str) -> dict[str, object]:
         return probe_android_capabilities(self.config.cache.dir, target_id)

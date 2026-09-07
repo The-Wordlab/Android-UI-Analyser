@@ -161,6 +161,11 @@ ADAPTER_CAPABILITIES: dict[str, CapabilitySpec] = {
     "ui.screenshot": _spec(
         "ui.screenshot", CapabilityScope.ADAPTER, "capture_screenshot"
     ),
+    # A watcher's view of a target it does not drive: no runtime is connected, nothing is
+    # installed or started on the target, and an agent's automation session is left alone.
+    "ui.peek": _spec(
+        "ui.peek", CapabilityScope.ADAPTER, "peek_foreground_app", "peek_screenshot"
+    ),
     "app.status": _spec("app.status", CapabilityScope.ADAPTER, "installed_app"),
     "app.install": _spec(
         "app.install",

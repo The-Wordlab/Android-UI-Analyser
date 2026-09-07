@@ -58,7 +58,7 @@ class _SupervisionService:
 class _NeutralDashboardPlatform(PlatformAdapter):
     name = "apple-test"
     capabilities = frozenset(
-        {"ui.tree", "ui.screenshot", "device.logs", "target_supervision"}
+        {"ui.tree", "ui.screenshot", "ui.peek", "device.logs", "target_supervision"}
     )
 
     def __init__(self, config: Config) -> None:
@@ -96,6 +96,14 @@ class _NeutralDashboardPlatform(PlatformAdapter):
     def capture_screenshot(self, runtime: Any) -> ScreenImage:
         assert runtime is self.runtime
         self.calls.append(("screenshot", runtime))
+        return ScreenImage(b"\x89PNG\r\n\x1a\nneutral")
+
+    def peek_foreground_app(self, target_id: str) -> AppContext | None:
+        self.calls.append(("peek_app", target_id))
+        return AppContext(app_id="example.notes", surface_id="main")
+
+    def peek_screenshot(self, target_id: str) -> ScreenImage:
+        self.calls.append(("peek_screen", target_id))
         return ScreenImage(b"\x89PNG\r\n\x1a\nneutral")
 
     def recent_logs(
@@ -175,11 +183,13 @@ def test_non_android_dashboard_reads_use_declared_capabilities(tmp_path: Path) -
         "neutral diagnostic"
     ]
 
-    assert ("screenshot", platform.runtime) in platform.calls
+    assert ("peek_app", "simulator-1") in platform.calls
+    assert ("peek_screen", "simulator-1") in platform.calls
     assert ("logs", ("simulator-1", 12, "example.notes")) in platform.calls
-    assert ("runtime_gate", "ui.tree") in platform.calls
-    assert ("adapter_gate", "ui.screenshot") in platform.calls
+    assert ("adapter_gate", "ui.peek") in platform.calls
     assert ("adapter_gate", "device.logs") in platform.calls
+    # A watcher never opens an automation session: no connect, no runtime capability.
+    assert not [call for call in platform.calls if call[0] in {"connect", "runtime_gate"}]
 
 
 def test_non_android_dashboard_gets_owner_and_retirement_from_supervision_service(

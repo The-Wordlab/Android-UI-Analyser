@@ -478,6 +478,27 @@ class PlatformAdapter(ABC):
             code="unsupported_capability",
         )
 
+    def peek_foreground_app(self, target_id: str) -> AppContext | None:
+        """Read which app is in front on *target_id* without connecting a runtime.
+
+        ``ui.peek`` is the watcher's contract: the dashboard polls it for every visible target
+        every second or so, including targets another agent is driving. It must therefore be
+        cheap and must never install, start, or attach an automation session - connecting a
+        runtime takes the automation slot from the agent that holds the target. ``None`` means
+        the target answered but nothing is in focus.
+        """
+
+        raise UnsupportedPlatformCapabilityError(self.name, "ui.peek")
+
+    def peek_screenshot(self, target_id: str) -> ScreenImage:
+        """Picture the current screen of *target_id* without connecting a runtime.
+
+        Same rules as :meth:`peek_foreground_app`: read-only and safe on a target another
+        agent holds. Raise :class:`DeviceError` when the target cannot be pictured right now.
+        """
+
+        raise UnsupportedPlatformCapabilityError(self.name, "ui.peek")
+
     def load_capability(self, capability: str) -> Any | None:
         """Return the implementation of one optional semantic capability.
 

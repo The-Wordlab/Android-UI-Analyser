@@ -13,6 +13,15 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- `aua dashboard` no longer opens a uiautomator2 session to draw a tile. The grid used to
+  connect to every device for its foreground app every 5 s and for its picture almost every poll,
+  each time a fresh session inside the host-wide adb lock - a cold server launch on a freshly
+  booted emulator, so the new tile appeared late and everything else waited behind it. It also
+  refused to picture a device another agent held, which with no capture frame on disk was a 1x1
+  black tile for the whole run - the "one agent works, the rest are black" grid. Tiles now read
+  through the new read-only `ui.peek` platform capability (plain `dumpsys window` and
+  `screencap` on Android), so a held device shows its real screen and the agent driving it is
+  never disturbed. The page also polls one request at a time, and a held tile names its holder.
 - Scroll verification now recognizes coherent movement in rows and grids whose unlabelled items all
   fall back to the same Android class name. Repeated items are paired along the requested axis, with
   jitter and cross-axis motion excluded, so a real thumbnail-strip or icon-grid swipe no longer
@@ -26,6 +35,9 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Added
 
+- Platform adapters can declare the read-only `ui.peek` capability (`peek_foreground_app`,
+  `peek_screenshot`): a watcher's view of a target that connects no runtime and never disturbs
+  an agent's automation session. Android implements it with `dumpsys window` and `screencap`.
 - Platform adapter API v1 now exposes a stable `android_ui_analyser.platforms` facade, lazy
   `aua.platforms` entry-point discovery, neutral target/app/geometry/diagnostic contracts, typed
   capability failures, and an executable attached-target conformance profile. The repository gate

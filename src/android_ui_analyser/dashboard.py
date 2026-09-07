@@ -3406,7 +3406,7 @@ function ensureTile(d) {
   a.querySelector('.pkg').textContent = d.package || 'No foreground package';
   const lease = d.lease || {};
   const leaseEl = a.querySelector('.lease');
-  leaseEl.textContent = lease.held ? 'Held' : 'Available';
+  leaseEl.textContent = lease.held ? ('Held · ' + (lease.owner || 'another agent')) : 'Available';
   leaseEl.className = 'tile-stat-value lease' + (lease.held ? ' held' : '');
   const watchdog = d.watchdog || {};
   const watchdogEl = a.querySelector('.watchdog');
@@ -3432,7 +3432,12 @@ function ensureTile(d) {
   return a;
 }
 
+// One poll at a time: setInterval does not wait for the previous answer, and a poll stuck
+// behind a booting emulator must not become a queue of stale ones answering out of order.
+let gridPollInFlight = false;
 async function tickGrid() {
+  if (gridPollInFlight) return;
+  gridPollInFlight = true;
   try {
     const r = await fetch('/api/devices', {cache: 'no-store'});
     const d = await r.json();
@@ -3472,6 +3477,8 @@ async function tickGrid() {
       'The dashboard could not refresh its device list.';
     document.getElementById('grid-empty-command').classList.add('hidden');
     document.getElementById('grid-empty-foot').textContent = 'AuA will retry automatically.';
+  } finally {
+    gridPollInFlight = false;
   }
 }
 
@@ -3735,7 +3742,10 @@ async function tickProxy() {
   }
 }
 
+let statusPollInFlight = false;
 async function tickStatus() {
+  if (statusPollInFlight) return;
+  statusPollInFlight = true;
   try {
     const r = await fetch('/api/status' + qSerial(), {cache: 'no-store'});
     const s = await r.json();
@@ -3846,6 +3856,8 @@ async function tickStatus() {
   } catch (e) {
     document.getElementById('capture').textContent = 'error';
     document.getElementById('capture').className = 'pill bad';
+  } finally {
+    statusPollInFlight = false;
   }
 }
 
@@ -5321,23 +5333,6 @@ class _DashboardState:
         via = ens.get("via")
         return str(via) if via else None
 
-    def _leased_elsewhere(self, serial: str) -> bool:
-        """Is another agent holding this device right now?"""
-        from . import leases
-
-        try:
-            lease = leases.read_lease(
-                self.cache_dir, serial, platform=self.platform_name
-            )
-        except Exception:  # noqa: BLE001 — a watcher never fails on a bookkeeping read
-            return False
-        if not lease:
-            return False
-        try:
-            return str(lease.get("owner") or "") != str(leases.resolve_owner(None))
-        except Exception:  # noqa: BLE001
-            return True
-
     def note_capture_live(self, serial: str, live: bool | None) -> None:
         """Record whether something is writing capture frames for *serial* right now.
 
@@ -5905,13 +5900,14 @@ class _DashboardState:
             return cached[0]
         pkg: str | None = None
         try:
-            from .schema import AppContext
-
-            runtime = self.platform.connect(ser)
-            tree = self.platform.runtime_capability("ui.tree", runtime)
-            pkg = AppContext.coerce(tree.current_app()).app_id
+            # A watcher peeks; it never connects a runtime. Connecting attached uiautomator2 to
+            # every tile's device every 5 s - a cold server launch on a fresh emulator, inside
+            # the host-wide adb lock, and on devices other agents were driving.
+            peek = self.platform.adapter_capability("ui.peek")
+            context = peek.peek_foreground_app(ser)
+            pkg = context.app_id if context is not None else None
         except Exception as exc:  # noqa: BLE001
-            logger.debug("current_app failed: %s", exc)
+            logger.debug("foreground peek failed: %s", exc)
         self._pkg_cache[ser] = (pkg or None, now)
         return pkg or None
 
@@ -6731,32 +6727,17 @@ class _DashboardState:
             hit = self._fallback.get(ser)
             if hit and (time.time() - hit[1]) < 0.8:
                 return hit[0], hit[2]
-        if self._leased_elsewhere(ser):
-            # Screenshotting here attaches uiautomator2 and takes the UiAutomation slot
-            # from the agent that holds this device — for a preview thumbnail. Whatever
-            # capture already wrote is the honest picture; a watcher never interrupts.
-            stale = latest_frame(self.cache_dir, ser, platform=self.platform_name)
-            if stale is not None and stale.is_file():
-                with contextlib.suppress(OSError):
-                    return stale.read_bytes(), "image/jpeg"
-            return _PLACEHOLDER_PNG, "image/png"
         try:
-            screenshots = self.platform.adapter_capability("ui.screenshot")
-            runtime = self.platform.connect(ser)
-            img = screenshots.capture_screenshot(runtime)
-            raw = getattr(img, "png_bytes", None)
-            if raw is None and hasattr(img, "pil"):
-                import io
-
-                buf = io.BytesIO()
-                img.pil().convert("RGB").save(buf, format="JPEG", quality=70)
-                raw = buf.getvalue()
-            if raw:
-                data = bytes(raw)
-                mime = "image/png" if data[:8] == b"\x89PNG\r\n\x1a\n" else "image/jpeg"
+            # ``ui.peek`` pictures the screen without an automation session, so it is safe on
+            # a device another agent holds. The old path connected uiautomator2 per request
+            # and therefore refused held devices - which, with no capture frame on disk, was
+            # a 1x1 black tile for the whole run.
+            peek = self.platform.adapter_capability("ui.peek")
+            data = bytes(peek.peek_screenshot(ser).png_bytes)
+            if data:
                 with self._fallback_lock:
-                    self._fallback[ser] = (data, time.time(), mime)
-                return data, mime
+                    self._fallback[ser] = (data, time.time(), "image/png")
+                return data, "image/png"
         except Exception as exc:  # noqa: BLE001
             logger.debug("fallback screencap failed: %s", exc)
         # Screencap is gone too - a stale frame still says more than a blank tile.

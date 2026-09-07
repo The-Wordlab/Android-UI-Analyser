@@ -656,3 +656,36 @@ def test_the_journal_viewport_holds_still_in_a_real_browser(tmp_path: pathlib.Pa
     assert len(lines) == 17, lines
     failures = [line for line in lines if not line.startswith("PASS")]
     assert not failures, "\n".join(lines)
+
+
+def test_the_grid_and_detail_pollers_run_one_request_at_a_time() -> None:
+    """A slow answer must not stack a queue of stale polls behind it.
+
+    Both tickers fire from setInterval, which does not care whether the previous fetch
+    returned. Without a guard, one poll blocked on a booting emulator turned into a dozen
+    server threads all queued on the same adb lock, answering in whatever order they woke.
+    """
+    from android_ui_analyser import dashboard as dash
+
+    html = dash._DASHBOARD_HTML
+    grid = html[html.index("async function tickGrid()") :]
+    grid = grid[: grid.index("\n}\n")]
+    assert "if (gridPollInFlight) return;" in grid
+    assert "gridPollInFlight = true;" in grid
+    assert "finally {" in grid and "gridPollInFlight = false;" in grid
+
+    status = html[html.index("async function tickStatus()") :]
+    status = status[: status.index("\n}\n")]
+    assert "if (statusPollInFlight) return;" in status
+    assert "statusPollInFlight = true;" in status
+    assert "finally {" in status and "statusPollInFlight = false;" in status
+
+
+def test_a_held_tile_names_the_agent_holding_it() -> None:
+    """'Held' alone reads like a fault; the owner label says who is driving."""
+    from android_ui_analyser import dashboard as dash
+
+    html = dash._DASHBOARD_HTML
+    tile = html[html.index("function ensureTile(d)") :]
+    tile = tile[: tile.index("\n}\n")]
+    assert "'Held · ' + (lease.owner || 'another agent')" in tile

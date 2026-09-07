@@ -192,7 +192,7 @@ Complete structural specifications live in `platforms/contracts.py` and
 | Scope | Capability names |
 | --- | --- |
 | Runtime | `ui.tree`, `ui.input`, `app.lifecycle`, `app.files`, `app.links`, `device.keyboard`, `device.clipboard`, `device.location`, `device.orientation`, `device.airplane`, `device.media`, `device.recording`, `device.clock`, `device.accessibility`, `device.touch`, `device.proxy`, `device.shell` |
-| Adapter | `ui.screenshot`, `app.status`, `app.install`, `device.logs` |
+| Adapter | `ui.screenshot`, `ui.peek`, `app.status`, `app.install`, `device.logs` |
 | Service | `app_database`, `developer_settings`, `device_agent`, `feature_flags`, `microphone`, `network`, `network_profiles`, `proxy`, `target_supervision`, `virtual_targets`, `webview` |
 
 Declare only complete capabilities. Runtime calls are resolved with
@@ -207,6 +207,11 @@ def load_capability(self, name: str):
         return IOSSimulatorService(self.options)
     return None
 ```
+
+`ui.peek` is the watcher's contract: `peek_foreground_app(target_id)` and
+`peek_screenshot(target_id)` answer without connecting a runtime, so the dashboard can poll
+every visible target - including one another agent is driving - without installing, starting, or
+attaching an automation session. Implement it with the platform's cheapest read-only tooling.
 
 Native framework imports belong inside the selected adapter/runtime/service modules. Do not put
 them in the Engine, CLI, MCP server, daemon, dashboard, or generic state modules.

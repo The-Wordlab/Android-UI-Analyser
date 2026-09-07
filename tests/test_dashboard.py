@@ -1552,15 +1552,17 @@ def test_frame_bytes_screencaps_past_a_dead_capture(
     os.utime(shot, (long_ago, long_ago))
 
     live_png = b"\x89PNG\r\n\x1a\nlive-bytes"
+    from android_ui_analyser.providers.base import ScreenImage
 
-    class _Img:
-        png_bytes = live_png
+    class _Peek:
+        def adapter_capability(self, name: str) -> Any:
+            assert name == "ui.peek"
+            return self
 
-    class _Dev:
-        def screenshot(self) -> _Img:
-            return _Img()
+        def peek_screenshot(self, _target: str) -> ScreenImage:
+            return ScreenImage(live_png)
 
-    monkeypatch.setattr(state.platform, "connect", lambda _ser: _Dev())
+    state.platform = _Peek()
 
     state.note_capture_live("emulator-5554", False)
     data, mime = state.frame_bytes("emulator-5554")
@@ -2009,52 +2011,51 @@ def test_proxy_flow_detail_disambiguates_a_reused_sequence_number(tmp_path: Path
 def test_a_tile_never_takes_the_uiautomation_slot_from_the_agent_using_the_device(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The frame fallback goes through platform.connect(), which attaches uiautomator2.
+    """A watcher looks through plain adb; it never opens an automation session.
 
-    Tiles now request a frame every poll, so without this the dashboard would grab the
-    UiAutomation slot roughly once a second out from under whichever agent is driving.
+    The old frame fallback went through platform.connect(), which attaches uiautomator2 and
+    takes the UiAutomation slot out from under whichever agent is driving. It therefore
+    refused devices another agent held - and a held device with no capture frames became a
+    1x1 black tile for the whole run. ``ui.peek`` costs the agent nothing, so the tile can
+    show the real screen whether or not somebody holds the lease.
     """
     from android_ui_analyser import leases
+    from android_ui_analyser.providers.base import ScreenImage
+    from android_ui_analyser.schema import AppContext
 
     state = _dashboard_state(tmp_path)
+    live_png = b"\x89PNG\r\n\x1a\nfresh"
+    peeks: list[tuple[str, str]] = []
 
-    def refuse(_ser: str) -> Any:
-        raise AssertionError("the dashboard must not connect to a device another agent holds")
+    class _PeekOnlyPlatform:
+        def connect(self, *_a: Any, **_k: Any) -> Any:
+            raise AssertionError("the dashboard must not open an automation session")
 
-    monkeypatch.setattr(state.platform, "connect", refuse)
+        def adapter_capability(self, name: str) -> Any:
+            assert name == "ui.peek"
+            return self
+
+        def peek_foreground_app(self, target_id: str) -> AppContext:
+            peeks.append(("app", target_id))
+            return AppContext(app_id="com.example.notes")
+
+        def peek_screenshot(self, target_id: str) -> ScreenImage:
+            peeks.append(("screen", target_id))
+            return ScreenImage(live_png)
+
+    state.platform = _PeekOnlyPlatform()
     monkeypatch.setattr(
         leases,
         "read_lease",
         lambda _cache, _ser, **_kwargs: {"owner": "some-other-agent"},
     )
-
-    frames = tmp_path / "captures" / "emulator-5554" / "s1" / "frames"
-    frames.mkdir(parents=True)
-    (frames / "1.jpg").write_bytes(b"last-known")
-    long_ago = time.time() - 300
-    os.utime(frames / "1.jpg", (long_ago, long_ago))
     state.note_capture_live("emulator-5554", False)
 
-    data, _mime = state.frame_bytes("emulator-5554")
-    assert data == b"last-known"
-
-    # Nobody holding it → the screencap fallback is allowed again.
-    monkeypatch.setattr(leases, "read_lease", lambda _cache, _ser, **_kwargs: None)
-    live_png = b"\x89PNG\r\n\x1a\nfresh"
-
-    class _Img:
-        png_bytes = live_png
-
-    class _Dev:
-        def screenshot(self) -> _Img:
-            return _Img()
-
-    monkeypatch.setattr(state.platform, "connect", lambda _ser: _Dev())
+    # Held by another agent, no capture frame anywhere: still a real picture, not black.
     data, mime = state.frame_bytes("emulator-5554")
-    assert data == live_png
-    # The cached bytes must keep their own mime; a PNG served as JPEG is a broken tile.
-    assert state.frame_bytes("emulator-5554") == (live_png, "image/png")
-    assert mime == "image/png"
+    assert (data, mime) == (live_png, "image/png")
+    assert state.foreground_package("emulator-5554") == "com.example.notes"
+    assert peeks == [("screen", "emulator-5554"), ("app", "emulator-5554")]
 
 
 def test_the_flow_detail_view_never_hands_out_a_credential(tmp_path: Path) -> None:
