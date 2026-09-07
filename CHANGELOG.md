@@ -11,6 +11,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-09-07
+
 ### Fixed
 
 - `aua dashboard` no longer opens a uiautomator2 session to draw a tile. The grid used to
@@ -385,5 +387,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.14.1]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.14.1
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.14.2...HEAD
 [0.14.2]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.14.2
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.15.0
