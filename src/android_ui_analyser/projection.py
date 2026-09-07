@@ -27,6 +27,7 @@ from types import MappingProxyType
 from typing import Any
 
 from .errors import UsageError
+from .observation_contract import refresh_observation_contract
 from .schema import Meta, OutputFormat, drop_default_flags
 
 # Short agent-facing names → the canonical element key they read. Two spellings are
@@ -582,7 +583,7 @@ class Projection:
             out["meta"] = {
                 k: v for k, v in out["meta"].items() if not _is_empty(v, strict=strict)
             }
-        return out
+        return refresh_observation_contract(out)
 
     def _meta(self, meta: dict[str, Any]) -> dict[str, Any]:
         """The requested `meta` keys, in the order they were requested.
@@ -602,7 +603,9 @@ class Projection:
         """Tab-separated rows with a ``#``-prefixed summary, so the payload stays greppable."""
         elements = payload.get("elements") or []
         kept = self.select(payload)
-        lines = self._comment_lines(payload, total=len(elements), shown=len(kept))
+        visible = {**payload, "elements": kept, "meta": dict(payload.get("meta") or {})}
+        refresh_observation_contract(visible)
+        lines = self._comment_lines(visible, total=len(elements), shown=len(kept))
         cols = self.columns() or TSV_DEFAULT_FIELDS
         lines.append("\t".join(cols))
         lines += ["\t".join(_cell(self.value_of(e, c)) for c in cols) for e in kept]
@@ -699,11 +702,13 @@ def render_action_tsv(data: dict[str, Any], view: Projection | None = None) -> s
     The envelope is kept because it carries the verdict — ``change.text_added`` is usually the
     whole reason the action was run.
     """
-    lines = _envelope_comments(data)
     payload = data.get("observation")
     if not isinstance(payload, dict) or not isinstance(payload.get("elements"), list):
-        return "\n".join(lines)
+        return "\n".join(_envelope_comments(data))
     projection = view or Projection.parse(fmt=OutputFormat.tsv)
+    visible = {**data, "observation": {**payload, "elements": projection.select(payload)}}
+    refresh_observation_contract(visible)
+    lines = _envelope_comments(visible)
     return "\n".join([*lines, projection.render_tsv(payload)])
 
 
@@ -902,4 +907,4 @@ def trim_observation_payload(
         rows = data.get(key)
         if isinstance(rows, list):
             data[key] = [r for r in rows if not isinstance(r, dict) or r.get("id") in kept]
-    return data
+    return refresh_observation_contract(data)

@@ -36,6 +36,7 @@ from .memory import (
     step_display,
     target_arrival_evidence,
 )
+from .observation_contract import preserves_previous_observation, result_has_reusable_observation
 from .schema import AnalyzeResult
 from .selectors import is_back_resource_id
 from .session_contracts import (
@@ -2162,20 +2163,84 @@ def _base_command(value: Any) -> str:
 
 
 def _result_has_reusable_observation(value: Any) -> bool:
-    """Whether a prior observation is safe to reuse instead of waiting for readiness."""
-    result = _mapping(value)
-    observation = result.get("observation")
-    if not isinstance(observation, dict):
-        return False
-    meta = _mapping(observation.get("meta"))
-    contract = _mapping(result.get("observation_contract"))
-    return not (
-        result.get("stale_risk")
-        or meta.get("stale_risk")
-        or result.get("observation_empty")
-        or result.get("settled_unmet")
-        or contract.get("reusable") is False
+    """Compatibility wrapper around the same evaluator used by CLI/MCP producers."""
+    return result_has_reusable_observation(value)
+
+
+def _diagnostic_read(event: dict[str, Any]) -> bool:
+    args = _mapping(event.get("args"))
+    client = _mapping(event.get("client"))
+    return bool(
+        args.get("source") not in (None, "auto")
+        or args.get("query")
+        or args.get("with_ocr") is not None
+        or args.get("fields")
+        or args.get("with_image")
+        or client.get("projection")
+        or client.get("observe_fields")
     )
+
+
+def _expected_probe(event: dict[str, Any]) -> bool:
+    return isinstance(_mapping(event.get("extra")).get("expected_error_code"), str)
+
+
+def _review_fingerprint(event: dict[str, Any]) -> str | None:
+    result = _mapping(event.get("result"))
+    observation = _mapping(result.get("observation")) or result
+    meta = _mapping(observation.get("meta"))
+    contract = _mapping(result.get("observation_contract")) or _mapping(
+        meta.get("observation_contract")
+    )
+    value = meta.get("fingerprint") or contract.get("fingerprint")
+    return str(value) if value else None
+
+
+def _composite_part(event: dict[str, Any]) -> tuple[str, str, int, int] | None:
+    extra = _mapping(event.get("extra"))
+    parent, component = extra.get("parent_command"), extra.get("component")
+    index, count = extra.get("component_index"), extra.get("component_count")
+    if (
+        isinstance(parent, str)
+        and isinstance(component, str)
+        and isinstance(index, int)
+        and isinstance(count, int)
+        and 0 <= index < count
+        and count > 1
+    ):
+        return parent, component, index, count
+    return None
+
+
+def _fold_composite_parts(
+    previous_parts: list[dict[str, Any]], event: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Fold explicitly named, ordered components; duplicate attempts remain ambiguous."""
+    first = previous_parts[0]
+    initial, incoming = _composite_part(first), _composite_part(event)
+    if initial is None or incoming is None:
+        return None
+    parent, _component, index, count = incoming
+    if (
+        initial[2] != 0
+        or parent != initial[0]
+        or count != initial[3]
+        or index != len(previous_parts)
+        or any((_composite_part(part) or ("", "", 0, 0))[1] == incoming[1] for part in previous_parts)
+        or first.get("owner") != event.get("owner")
+        or first.get("serial") != event.get("serial")
+    ):
+        return None
+    parts = [*previous_parts, event]
+    failed = next((part for part in parts if part.get("ok") is False), None)
+    return {
+        **event,
+        "cmd": parent,
+        "ok": failed is None,
+        "error": failed.get("error") if failed else None,
+        "result": event.get("result", {}) if failed is None and len(parts) == count else {},
+        "component_events": len(parts),
+    }
 
 
 def review_session_events(state: SessionState, events: Sequence[dict[str, Any]]) -> dict[str, Any]:
@@ -2209,6 +2274,7 @@ def review_session_events(state: SessionState, events: Sequence[dict[str, Any]])
     previous: dict[str, Any] | None = None
     top_level: list[dict[str, Any]] = []
     invocation_indexes: dict[str, int] = {}
+    invocation_parts: dict[str, list[dict[str, Any]]] = {}
     ambiguous_invocations: dict[str, dict[str, Any]] = {}
     for event in scoped:
         args_value = event.get("args")
@@ -2230,6 +2296,12 @@ def review_session_events(state: SessionState, events: Sequence[dict[str, Any]])
         )
         if isinstance(invocation_id, str):
             if invocation_id in invocation_indexes:
+                index = invocation_indexes[invocation_id]
+                folded = _fold_composite_parts(invocation_parts[invocation_id], event)
+                invocation_parts[invocation_id].append(event)
+                if folded is not None and invocation_id not in ambiguous_invocations:
+                    top_level[index] = folded
+                    continue
                 # Historical daemons could time out after executing a mutation, after which
                 # `_route` replayed it in-process under the same invocation id. Journal order
                 # cannot reveal which response the caller saw: the daemon's delayed success may
@@ -2258,25 +2330,51 @@ def review_session_events(state: SessionState, events: Sequence[dict[str, Any]])
                 }
                 continue
             invocation_indexes[invocation_id] = len(top_level)
+            invocation_parts[invocation_id] = [event]
         top_level.append(event)
 
     avoidable["ambiguous_invocation"] = list(ambiguous_invocations.values())
 
+    previous_view: dict[str, Any] | None = None
     for event in top_level:
         cmd = str(event.get("cmd") or "?")
         base = _base_command(cmd)
         counts[cmd] = counts.get(cmd, 0) + 1
-        prior_result = (previous or {}).get("result")
+        prior_result = (previous_view or {}).get("result")
         prior_observed = _result_has_reusable_observation(prior_result)
-        if base == "analyze" and prior_observed:
+        intentional = _expected_probe(event)
+        previous_fp = _review_fingerprint(previous_view or {})
+        current_fp = _review_fingerprint(event)
+        same_frame = bool(previous_fp and current_fp and previous_fp == current_fp)
+        visibly_changed = bool(previous_fp and current_fp and previous_fp != current_fp)
+        gap = float(event.get("ts_ms") or 0) - float((previous_view or {}).get("ts_ms") or 0)
+        if (
+            base == "analyze"
+            and prior_observed
+            and not intentional
+            and not _expected_probe(previous_view or {})
+            and not _diagnostic_read(event)
+            and not visibly_changed
+            and 0 <= gap <= 120_000
+        ):
             avoidable["redundant_analyze"].append(
-                {"ts_ms": event.get("ts_ms"), "after": (previous or {}).get("cmd")}
+                {
+                    "ts_ms": event.get("ts_ms"),
+                    "after": (previous_view or {}).get("cmd"),
+                    "confirmed": same_frame,
+                }
             )
-        if base in _WAIT_COMMANDS and prior_observed:
+        if base in _WAIT_COMMANDS and prior_observed and not intentional:
             avoidable["wait_after_observed_action"].append(
                 {"ts_ms": event.get("ts_ms"), "after": (previous or {}).get("cmd")}
             )
-        if base == "has" and previous is not None and _base_command(previous.get("cmd")) == "has":
+        if (
+            base == "has"
+            and not intentional
+            and previous is not None
+            and not _expected_probe(previous)
+            and _base_command(previous.get("cmd")) == "has"
+        ):
             avoidable["consecutive_has"].append({"ts_ms": event.get("ts_ms")})
         if base in {"open_link", "open"} and state.recommended_kind in {"goto", "flow"}:
             avoidable["deeplink_over_verified_navigation"].append({"ts_ms": event.get("ts_ms")})
@@ -2302,6 +2400,7 @@ def review_session_events(state: SessionState, events: Sequence[dict[str, Any]])
         previous_numeric_id = previous_args.get("element_id")
         if (
             base == "tap"
+            and not intentional
             and previous is not None
             and _base_command(previous.get("cmd")) == "tap"
             and isinstance(numeric_id, int)
@@ -2326,7 +2425,7 @@ def review_session_events(state: SessionState, events: Sequence[dict[str, Any]])
         is_back = (base == "key" and str(event_args.get("name")).casefold() == "back") or (
             base == "tap" and semantic_selector
         )
-        if is_back:
+        if is_back and not intentional:
             back_streak.append(event)
         elif base in _ACTION_COMMANDS:
             if len(back_streak) >= 2:
@@ -2334,7 +2433,7 @@ def review_session_events(state: SessionState, events: Sequence[dict[str, Any]])
                     {"calls": len(back_streak), "from_ms": back_streak[0].get("ts_ms")}
                 )
             back_streak = []
-        if base in _ACTION_COMMANDS:
+        if base in _ACTION_COMMANDS and not intentional:
             manual_streak.append(event)
         else:
             if len(manual_streak) >= 4:
@@ -2343,6 +2442,8 @@ def review_session_events(state: SessionState, events: Sequence[dict[str, Any]])
                 )
             manual_streak = []
         previous = event
+        if not preserves_previous_observation(base):
+            previous_view = event
     if len(manual_streak) >= 4:
         avoidable["manual_path"].append(
             {"calls": len(manual_streak), "from_ms": manual_streak[0].get("ts_ms")}
@@ -2354,14 +2455,18 @@ def review_session_events(state: SessionState, events: Sequence[dict[str, Any]])
 
     patterns = {name: rows for name, rows in avoidable.items() if rows}
     avoidable_calls = sum(
-        len(patterns.get(name, []))
-        for name in ("redundant_analyze", "wait_after_observed_action", "consecutive_has")
+        row.get("confirmed") is True for row in patterns.get("redundant_analyze", [])
     )
     manual_savings = sum(max(1, int(row["calls"]) - 1) for row in patterns.get("manual_path", []))
     back_savings = sum(max(1, int(row["calls"]) - 1) for row in patterns.get("repeated_back", []))
     # A repeated Back streak is normally contained in the same manual journey. Do not claim
     # both a flow saving and a back-until saving for the same top-level calls.
-    avoidable_calls += manual_savings or back_savings
+    potential_savings = (
+        sum(row.get("confirmed") is not True for row in patterns.get("redundant_analyze", []))
+        + len(patterns.get("wait_after_observed_action", []))
+        + len(patterns.get("consecutive_has", []))
+        + (manual_savings or back_savings)
+    )
     advice: list[dict[str, str]] = []
     if patterns.get("redundant_analyze"):
         advice.append(
@@ -2372,7 +2477,13 @@ def review_session_events(state: SessionState, events: Sequence[dict[str, Any]])
         )
     if patterns.get("wait_after_observed_action"):
         advice.append(
-            {"id": "fold_until", "recommended_call": "Put --until on the analyzed action."}
+            {
+                "id": "fold_until",
+                "recommended_call": (
+                    "For arrival checks, put --until on the action; retain separate waits "
+                    "that verify a later behavior."
+                ),
+            }
         )
     if patterns.get("consecutive_has"):
         advice.append(
@@ -2382,7 +2493,12 @@ def review_session_events(state: SessionState, events: Sequence[dict[str, Any]])
             }
         )
     if patterns.get("manual_path"):
-        advice.append({"id": "save_flow", "recommended_call": "aua flow save <name>"})
+        advice.append(
+            {
+                "id": "save_flow",
+                "recommended_call": "If this journey recurs, save it with aua flow save <name>.",
+            }
+        )
     if patterns.get("deeplink_over_verified_navigation"):
         advice.append(
             {"id": "prefer_verified_navigation", "recommended_call": state.recommended_cli}
@@ -2494,6 +2610,15 @@ def review_session_events(state: SessionState, events: Sequence[dict[str, Any]])
         ),
         "avoidable_calls": avoidable_calls,
         "estimated_calls_saved_next_run": avoidable_calls,
+        "potential_calls_saved_next_run": potential_savings,
+        "efficiency_accounting": {
+            "confirmed_redundant_reads": avoidable_calls,
+            "possible_savings": potential_savings,
+            "note": (
+                "Possible savings require checking test intent and an equivalent reusable flow; "
+                "they are not included in avoidable_calls."
+            ),
+        },
         "patterns": patterns,
         "advice": advice,
     }

@@ -690,6 +690,57 @@ def _load_grpc() -> Any:
     return grpc
 
 
+def preflight(
+    target_id: str,
+    *,
+    running_dirs: Sequence[Path] | None = None,
+    grpc_module: Any | None = None,
+) -> dict[str, Any]:
+    """Read-only endpoint/dependency/authentication check before an audio session begins.
+
+    ``getStatus(google.protobuf.Empty)`` is an EmulatorController read; it never opens a
+    microphone stream or consumes an injection attempt on affected emulator builds.
+    """
+    endpoint = discover_emulator_endpoint(target_id, running_dirs=running_dirs)
+    grpc = grpc_module if grpc_module is not None else _load_grpc()
+    channel = grpc.insecure_channel(
+        f"127.0.0.1:{endpoint.port}", options=(("grpc.enable_http_proxy", 0),)
+    )
+    try:
+        status = channel.unary_unary(
+            "/android.emulation.control.EmulatorController/getStatus",
+            request_serializer=lambda request: request,
+            response_deserializer=lambda response: response,
+        )
+        status(
+            b"", metadata=(("authorization", f"Bearer {endpoint.token}"),), timeout=5.0
+        )
+    except Exception as exc:
+        code = (
+            "mic_endpoint_auth_failed"
+            if _status_name(exc) in {"UNAUTHENTICATED", "PERMISSION_DENIED"}
+            else "mic_endpoint_unavailable"
+        )
+        raise DeviceError(
+            "microphone endpoint preflight failed before app setup",
+            code=code,
+            hint=(
+                "No microphone input was sent. Start an AUA audio-enabled virtual target "
+                "with `aua virtual-target start --audio`; retain an existing lease until "
+                "its work and cleanup are complete."
+            ),
+        ) from exc
+    finally:
+        channel.close()
+    return {
+        "ok": True,
+        "target_id": target_id,
+        "endpoint_verified": True,
+        "authenticated": True,
+        "input_sent": False,
+    }
+
+
 def prepare_injection(
     serial: str,
     path: str | Path,

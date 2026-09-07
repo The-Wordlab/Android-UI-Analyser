@@ -16,6 +16,7 @@ import re
 import secrets
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -935,15 +936,18 @@ def status(*, cache_dir: str | Path | None = None) -> dict[str, Any]:
     return info
 
 
-def _serial_shell(serial: str) -> Callable[[str], str]:
+def _serial_shell(serial: str, *, deadline: float | None = None) -> Callable[[str], str]:
     """A ``devopts.ShellFn`` bound to one serial, for use before an Engine exists."""
 
     def shell(cmd: str) -> str:
+        timeout_s = 30.0 if deadline is None else min(30.0, deadline - time.monotonic())
+        if timeout_s <= 0:
+            raise DeviceError("emulator boot deadline expired", code="emulator_boot_timeout")
         proc = subprocess.run(  # noqa: S603
             [adb_bin(), "-s", serial, "shell", cmd],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=timeout_s,
             check=False,
         )
         return proc.stdout or ""
@@ -960,14 +964,19 @@ def _wait_for_boot(shell: Callable[[str], str], *, timeout_s: float = 90.0) -> b
     name a package too costs one extra shell round trip and removes that whole class of
     start-up flake.
     """
-    deadline = time.monotonic() + max(5.0, timeout_s)
+    deadline = time.monotonic() + max(0.0, timeout_s)
     booted = False
     while time.monotonic() < deadline:
-        if not booted and (shell("getprop sys.boot_completed") or "").strip() == "1":
-            booted = True
-        if booted and "package:" in (shell("pm path android") or ""):
-            return True
-        time.sleep(_POLL_S)
+        try:
+            if not booted and (shell("getprop sys.boot_completed") or "").strip() == "1":
+                booted = True
+            if time.monotonic() >= deadline:
+                return False
+            if booted and "package:" in (shell("pm path android") or ""):
+                return time.monotonic() < deadline
+        except subprocess.TimeoutExpired:
+            return False
+        time.sleep(min(_POLL_S, max(0.0, deadline - time.monotonic())))
     return False
 
 
@@ -1159,6 +1168,27 @@ def default_gpu_mode(*, headless: bool) -> str:
     return "swiftshader"
 
 
+def _audio_endpoint_args(extra_args: list[str] | None) -> list[str]:
+    """Enable the authenticated loopback control endpoint used for microphone injection."""
+    args = list(extra_args or [])
+    if "-no-audio" in args or "-grpc-use-jwt" in args:
+        raise UsageError(
+            "--audio conflicts with -no-audio or -grpc-use-jwt",
+            hint="AUA microphone injection uses the emulator's authenticated token endpoint.",
+        )
+    if "-grpc" not in args:
+        # Choose an available host port. A concurrent bind is still possible after closing
+        # this reservation; the authenticated preflight below detects it and rolls back only
+        # the instance we just created instead of advertising a broken audio target.
+        with socket.socket() as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            port = reservation.getsockname()[1]
+        args.extend(["-grpc", str(port)])
+    if "-grpc-use-token" not in args:
+        args.append("-grpc-use-token")
+    return args
+
+
 def start(
     avd: str | None = None,
     *,
@@ -1194,6 +1224,8 @@ def start(
     explicit, warned ``lease acquire <serial> --replace`` path. Stop with ``stop --serial`` /
     ``--owner`` / ``--mine`` (scoped by ``$AUA_OWNER``).
     """
+    if audio:
+        extra_args = _audio_endpoint_args(extra_args)
     listed = list_avds()
     names: list[str] = list(listed["avds"])
     if not names:
@@ -1384,6 +1416,7 @@ def start(
         lambda: meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
     )
 
+    startup_deadline = time.monotonic() + max(0.0, wait_s)
     if expected_serial is not None:
         serial = startup_step(
             lambda: _wait_for_serial(expected_serial, timeout_s=wait_s, expect_avd=avd)
@@ -1438,14 +1471,30 @@ def start(
     startup_step(
         lambda: meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
     )
-    shell = startup_step(lambda: _serial_shell(serial))
+    shell = startup_step(lambda: _serial_shell(serial, deadline=startup_deadline))
     # `adb state=device` precedes Android restoring persisted global settings. The live failure
     # behind this recovery read unproxied here, then became blackholed seconds later. Always wait
     # for the settled boot and check again; this is the result exposed to callers.
-    startup_step(lambda: _wait_for_boot(shell, timeout_s=min(90.0, wait_s)))
+    if not startup_step(
+        lambda: _wait_for_boot(
+            shell, timeout_s=min(90.0, max(0.0, startup_deadline - time.monotonic()))
+        )
+    ):
+        rollback_failed_start()
+        raise DeviceError(
+            "emulator transport appeared, but Android and its package manager did not become ready",
+            code="emulator_boot_timeout",
+            hint=f"Inspect the emulator log: {log_path}. Only this newly started instance was stopped.",
+        )
     proxy_cleanup = startup_step(
         lambda: _clear_inherited_blackholed_proxy(serial, cache_dir=cache_dir)
     )
+    shell = startup_step(lambda: _serial_shell(serial))
+    audio_preflight = None
+    if audio:
+        from . import mic
+
+        audio_preflight = startup_step(lambda: mic.preflight(serial))
 
     # Animations off by default. Measured on a windowed AVD: a tap settles in 272ms instead
     # of 357ms, and the spread narrows from 225ms to 69ms — the predictability matters more
@@ -1490,6 +1539,7 @@ def start(
         "headless": headless,
         "gpu": gpu_mode,
         "animations_disabled": animations_disabled,
+        "audio_preflight": audio_preflight,
         "proxy_cleanup": proxy_cleanup,
         "idle_timeout_s": idle_timeout_s,
         "watchdog_pid": watchdog_pid,
@@ -1542,31 +1592,27 @@ def _wait_for_serial(serial: str, *, timeout_s: float, expect_avd: str | None = 
         # An emulator that will not answer its console yet is not a mismatch; keep waiting.
         return actual is None or actual == expect_avd
 
-    deadline = time.monotonic() + max(5.0, timeout_s)
+    deadline = time.monotonic() + max(0.0, timeout_s)
     while time.monotonic() < deadline:
         for d in running_emulators():
+            if time.monotonic() >= deadline:
+                return None
             if _match(d):
                 return serial
-        time.sleep(_POLL_S)
-    for d in running_emulators():
-        if _match(d):
-            return serial
+        time.sleep(min(_POLL_S, max(0.0, deadline - time.monotonic())))
     return None
 
 
 def _wait_for_new_emulator(before: set[str], *, timeout_s: float) -> str | None:
-    deadline = time.monotonic() + max(5.0, timeout_s)
+    deadline = time.monotonic() + max(0.0, timeout_s)
     while time.monotonic() < deadline:
         for d in running_emulators():
+            if time.monotonic() >= deadline:
+                return None
             if d.get("state") == "device" and d["serial"] not in before:
                 return str(d["serial"])
-        if not before:
-            ready = [d for d in running_emulators() if d.get("state") == "device"]
-            if ready:
-                return str(ready[0]["serial"])
-        time.sleep(_POLL_S)
-    ready = [d for d in running_emulators() if d.get("state") == "device"]
-    return str(ready[0]["serial"]) if ready else None
+        time.sleep(min(_POLL_S, max(0.0, deadline - time.monotonic())))
+    return None
 
 
 def _aua_started_records(cache_dir: str | Path) -> list[dict[str, Any]]:

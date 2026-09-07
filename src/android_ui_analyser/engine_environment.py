@@ -653,22 +653,40 @@ def clock_set(self: Engine, *, timestamp_ms: int | None = None, restore: bool = 
         (or ``clock set --restore``) when the test is done — never leave the device in
         a time-traveled state.
         """
+    from .clock import restore_clock_verified, set_clock_verified
+
+    if not restore and timestamp_ms is None:
+        raise UsageError("clock set needs --ms <unix-ms> (or --restore)")
+    # An unpinned CLI resolves its sticky target here. The restore path must be keyed to that
+    # target, never to the pre-connection default placeholder.
+    runtime = _runtime_capability(self, "device.clock")
     path = self._clock_backup_path()
     if restore:
-        if not path.is_file():
+        pending = self._pending_device_change("wall_clock", serial=runtime.target_id)
+        recorded = pending.args.get("timestamp_ms") if pending is not None else None
+        if not isinstance(recorded, int) and not path.is_file():
             raise UsageError(
                 "no saved clock to restore",
                 hint="Run `aua clock set --ms …` first; it saves the prior wall clock.",
             )
-        previous = int(path.read_text(encoding="utf-8").strip())
-        _runtime_capability(self, "device.clock").set_clock(previous)
+        previous = (
+            recorded
+            if isinstance(recorded, int)
+            else int(path.read_text(encoding="utf-8").strip())
+        )
+        fallback_saved_at = path.stat().st_mtime if path.is_file() else time.time()
+        saved_at = (
+            float(pending.args.get("saved_at") or fallback_saved_at)
+            if pending is not None
+            else fallback_saved_at
+        )
+        previous += max(0, int((time.time() - saved_at) * 1000))
+        restore_clock_verified(runtime, previous)
         path.unlink(missing_ok=True)
         self.forget_device_change("wall_clock")
         return ActionResult(ok=True, action="clock-restore", detail=str(previous))
-    if timestamp_ms is None:
-        raise UsageError("clock set needs --ms <unix-ms> (or --restore)")
+    assert timestamp_ms is not None
     # Save current clock once so restore is possible.
-    runtime = _runtime_capability(self, "device.clock")
     current = runtime.get_clock_ms()
     if current is None:
         raise DeviceError(
@@ -677,9 +695,11 @@ def clock_set(self: Engine, *, timestamp_ms: int | None = None, restore: bool = 
             hint="No change was made; repair target clock access and retry.",
         )
     path.parent.mkdir(parents=True, exist_ok=True)
-    if not path.is_file():
+    pending = self._pending_device_change("wall_clock", serial=runtime.target_id)
+    if pending is None:
+        # Automated teardown can clear a ledger in another process while an older cache file
+        # remains. A new change must save its current baseline, not inherit that stale file.
         path.write_text(str(current), encoding="utf-8")
-    if self._pending_device_change("wall_clock", serial=runtime.target_id) is None:
         # The undo carries the value *and* when it was taken: a device restored an hour later
         # must land on now, not on the instant the backup was written, or every token is
         # stale again for a different reason. Repeated time travel preserves this first value.
@@ -690,7 +710,7 @@ def clock_set(self: Engine, *, timestamp_ms: int | None = None, restore: bool = 
             args={"timestamp_ms": int(current), "saved_at": time.time()},
             detail=f"wall clock moved to {timestamp_ms} (was {current})",
         )
-    runtime.set_clock(timestamp_ms)
+    set_clock_verified(runtime, timestamp_ms)
     return ActionResult(
         ok=True,
         action="clock-set",

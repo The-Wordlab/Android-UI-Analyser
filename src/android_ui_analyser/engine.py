@@ -874,6 +874,9 @@ class Engine:
                 hint="Retry this call after the current device operation settles.",
                 code="owner_handoff_busy",
             )
+        if self._capture is not None:
+            with contextlib.suppress(Exception):
+                self._capture.close_evidence()
         self._last_app_context = None
         self._pre_action_sig = None
         self._pre_action_tree_fp = None
@@ -2131,7 +2134,7 @@ class Engine:
         buf = self._capture
         if buf is not None:
             with contextlib.suppress(Exception):
-                buf.mark(label or "action")
+                self._capture_mark(label or "action")
         # Any speculative hierarchy dump is stale the moment we touch the device.
         self._prefetch.invalidate()
         self._action_observation_baseline = None
@@ -2655,6 +2658,9 @@ class Engine:
     record_start = engine_capture.record_start
     record_stop = engine_capture.record_stop
     _capture_hint = engine_capture._capture_hint
+    _capture_evidence = engine_capture._capture_evidence
+    _capture_mark = engine_capture._capture_mark
+    _capture_evidence_last = engine_capture._capture_evidence_last
     capture_start = engine_capture.capture_start
     capture_stop = engine_capture.capture_stop
     capture_on = engine_capture.capture_on

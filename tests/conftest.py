@@ -811,6 +811,32 @@ def _aua_never_kill_a_real_emulator(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(emulator_mod, "_adb_emu_kill", _refuse)
 
 
+@pytest.fixture
+def fake_cli_device(monkeypatch: pytest.MonkeyPatch):
+    """Bind discovery and connection to one fake across repeated CLI lease acquisitions.
+
+    Patching connect alone still lets the next command validate its sticky lease against the
+    developer's real device inventory. This opt-in fixture keeps that contract realistic while
+    leaving tests of actual discovery/readiness free to define their own platform boundary.
+    """
+    from android_ui_analyser.schema import DeviceInfo
+
+    def bind(device: FakeDevice) -> FakeDevice:
+        monkeypatch.setenv("AUA_DEVICE__SERIAL", device.serial)
+        monkeypatch.setattr(
+            Engine, "_list_targets", lambda _engine: [DeviceInfo(serial=device.serial, state="device")]
+        )
+
+        def connect(_engine: Engine, serial: str | None = None) -> FakeDevice:
+            assert serial in (None, device.serial), "the CLI must only connect the supplied fake"
+            return device
+
+        monkeypatch.setattr(Engine, "_connect_target", connect)
+        return device
+
+    return bind
+
+
 def make_engine(
     *,
     config: Config | None = None,

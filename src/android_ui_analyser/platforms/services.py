@@ -180,6 +180,7 @@ CAPABILITY_METHODS: dict[str, frozenset[str]] = {
             "claim_injection_attempt",
             "inject_prepared",
             "inspect_pcm_wav",
+            "preflight",
             "prepare_injection",
             "synthesize_speech",
             "validate_control_mode",

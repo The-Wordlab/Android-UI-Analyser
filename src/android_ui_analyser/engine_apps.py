@@ -65,7 +65,7 @@ _FLAGS_FOREGROUND_TIMEOUT_S = 6.0  # how long the relaunched app gets to reach t
 
 # Foreground ownership can lead accessibility-window attachment briefly on a cold launch. Retry
 # only while the requested package demonstrably remains foreground, and never beyond this budget.
-_LAUNCH_HIERARCHY_SETTLE_S = 2.0
+_LAUNCH_HIERARCHY_SETTLE_S = 5.0
 
 
 _LAUNCH_CONTENT_SETTLE_S = 5.0
@@ -301,6 +301,38 @@ def _invalidate_launch_observation(self: Engine) -> None:
     self._last_analyze_elements = None
     self._last_hierarchy_hash = None
     self._last_analyze_result = None
+
+
+def _recover_unpinned_launch(self: Engine, package: str) -> tuple[AnalyzeResult, str] | None:
+    """Try one other declared entry after an implicit launcher never attached its window.
+
+    No guessing among multiple alternatives, no stop/install, and no override of an explicit
+    or remembered entry. Ownership must still be the requested app before another launch.
+    """
+    lifecycle = self.platform.runtime_capability("app.lifecycle", self.device)
+    tree = self.platform.runtime_capability("ui.tree", self.device)
+    foreground = AppContext.coerce(tree.current_app())
+    if foreground.app_id != package or not foreground.surface_id:
+        return None
+
+    def identity(activity: str) -> str:
+        return f"{package}{activity}" if activity.startswith(".") else activity
+
+    current = identity(foreground.surface_id)
+    declared = list(dict.fromkeys(lifecycle.launcher_activities(package)))
+    if current not in {identity(item) for item in declared}:
+        return None
+    alternatives = [item for item in declared if identity(item) != current]
+    if len(alternatives) != 1:
+        return None
+    candidate = alternatives[0]
+    with self._acting():
+        self._app_process_replaced(package)
+        lifecycle.launch_app(package, activity=candidate)
+    if not self._await_foreground(tree, package):
+        return None
+    fresh = self._await_launch_hierarchy(package)
+    return fresh, candidate
 
 
 def _adopt_recovered_launch_observation(
@@ -786,6 +818,7 @@ def app(
         # activities (e.g. a Dev Tools menu) and default resolution picks whichever the
         # manifest lists first, which is not necessarily the product's own entry.
         entry, launch_note = self._launch_entry(package, activity)
+        recovered_entry: str | None = None
         # Journal the launch. Without this it was invisible to `session review`, which then
         # reported 10 calls for an 18-call run — and the invisible ones were the crash
         # recovery, i.e. exactly the work its efficiency advice was reasoning about.
@@ -905,9 +938,29 @@ def app(
             # app we left or to a short-lived SystemUI attachment frame. Fresh hierarchy-only
             # reads may heal that race, but only while foreground ownership remains proven and
             # only inside a small bound; a persistent mismatch stays a typed failure.
-            fresh = self._await_launch_hierarchy(package)
+            try:
+                fresh = self._await_launch_hierarchy(package)
+            except DeviceError as exc:
+                recovered = (
+                    _recover_unpinned_launch(self, package)
+                    if exc.code == "launch_observation_mismatch" and entry is None
+                    else None
+                )
+                if recovered is None:
+                    raise
+                fresh, recovered_entry = recovered
+                launched.detail = f"{package}/{recovered_entry}"
+                launch_note = (
+                    "The default launch window did not attach; AUA recovered through the "
+                    f"only other declared entry ({recovered_entry}) within this call."
+                )
             self._adopt_recovered_launch_observation(launched, fresh)
         self._finish_launch_content_observation(launched)
+        if recovered_entry and mem is not None and not launched.stale_risk:
+            # Repeating the known-bad default on every bootstrap recreates the same recovery
+            # overhead. Learn only after the replacement produced a usable app observation.
+            with self._mem_lock:
+                mem.remember_launch_entry(package, recovered_entry, source="resolved")
         if launch_note:
             # `_observe` owns `note` when it attaches a screen, so the ambiguity warning is
             # prepended afterwards rather than passed in — it must not be silently dropped.

@@ -60,6 +60,10 @@ class FrameEntry:
     action: str | None = None
 
 
+class CaptureFrameUnavailable(OSError):
+    """An exact capture export lost a required source image before it could be loaded."""
+
+
 def _set_event() -> threading.Event:
     """A ``threading.Event`` that starts set — "nothing in flight" is the resting state."""
 
@@ -97,6 +101,47 @@ class CaptureBuffer:
     _seq: int = 0
     _latest_img: Any = None
     _latest_at: float = 0.0
+    _evidence_refs: list[str] = field(default_factory=list)
+    _action_evidence_ref: str | None = None
+
+    @property
+    def evidence_store(self) -> Any:
+        from .capture_evidence import EvidenceStore
+
+        return EvidenceStore(self.root, self.platform, self.serial)
+
+    def begin_evidence(
+        self, action: str, *, session_id: str | None = None, owner: str | None = None
+    ) -> dict[str, Any]:
+        """Start an independent job window without changing the last-action marker."""
+        with self._lock:
+            value = self.evidence_store.begin(
+                action, self.session_id, session_id=session_id, owner=owner
+            )
+            self._evidence_refs.append(value["ref"])
+            self.evidence_store.prune(max(1, int(self.cfg.max_mb)) * 1024 * 1024)
+            return self.evidence_store.describe(value["ref"])
+
+    def finish_evidence(self, ref: str) -> dict[str, Any]:
+        with self._lock:
+            value = self.evidence_store.seal(ref)
+            self._evidence_refs = [item for item in self._evidence_refs if item != ref]
+            return value
+
+    def action_evidence(self) -> dict[str, Any] | None:
+        with self._lock:
+            if self._action_evidence_ref is None:
+                return None
+            return self.evidence_store.describe(self._action_evidence_ref)
+
+    def close_evidence(self) -> None:
+        """End all windows at shutdown/handover so another owner cannot extend them."""
+        for ref in list(self._evidence_refs):
+            with contextlib.suppress(Exception):
+                self.finish_evidence(ref)
+        with self._lock:
+            self._evidence_refs = []
+            self._action_evidence_ref = None
 
     @property
     def dir(self) -> Path:
@@ -142,6 +187,7 @@ class CaptureBuffer:
         if t is not None and t.is_alive():
             t.join(timeout=2.0)
         self._thread = None
+        self.close_evidence()
         # A session that captured nothing (or deduped everything) must not leave a directory
         # behind for the next sweep to find.
         with contextlib.suppress(OSError):
@@ -194,10 +240,24 @@ class CaptureBuffer:
     def paused(self) -> bool:
         return self._paused
 
-    def mark(self, action: str) -> None:
+    def mark(self, action: str, *, session_id: str | None = None, owner: str | None = None) -> None:
         """Durably stamp *action* now, then label the next changed frame too."""
         now = time.time()
         with self._lock:
+            if self._action_evidence_ref:
+                with contextlib.suppress(Exception):
+                    self.evidence_store.seal(self._action_evidence_ref)
+                self._evidence_refs = [
+                    ref for ref in self._evidence_refs if ref != self._action_evidence_ref
+                ]
+            # If retaining this action fails, never attach the preceding action's evidence.
+            self._action_evidence_ref = None
+            evidence = self.evidence_store.begin(
+                action, self.session_id, session_id=session_id, owner=owner
+            )
+            self._action_evidence_ref = evidence["ref"]
+            self._evidence_refs.append(evidence["ref"])
+            self.evidence_store.prune(max(1, int(self.cfg.max_mb)) * 1024 * 1024)
             self._pending_action = action
             self._burst_until = now + max(0, self.cfg.burst_ms) / 1000.0
             self._last_action_ms = int(now * 1000)
@@ -207,9 +267,7 @@ class CaptureBuffer:
             # into the last label. The marker is its own append-only record for exactly that
             # reason; frame rows remain backwards compatible.
             self.dir.mkdir(parents=True, exist_ok=True)
-            self._append_record(
-                {"kind": "action", "t_ms": self._last_action_ms, "action": action}
-            )
+            self._append_record({"kind": "action", "t_ms": self._last_action_ms, "action": action})
 
     def hint_ready(self) -> bool:
         """True when a post-action burst kept at least one non-deduped frame."""
@@ -245,6 +303,7 @@ class CaptureBuffer:
             "age_span_ms": age_span,
             "disk_bytes": disk,
             "total_disk_bytes": self.total_disk_bytes(),
+            "evidence_disk_bytes": self.evidence_store.disk_bytes(),
             "last_action_ms": last_action,
             "kept_since_action": kept_since,
             "idle_fps": self.cfg.idle_fps,
@@ -369,6 +428,9 @@ class CaptureBuffer:
             self._stop.wait(delay)
 
     def _tick(self) -> None:
+        # A frame already being sampled when an action starts must not be labelled as its
+        # response merely because encoding completed after the action marker was written.
+        now_ms = int(time.time() * 1000)
         img = self.screenshot()
         png = getattr(img, "png_bytes", None)
         if not png:
@@ -379,12 +441,14 @@ class CaptureBuffer:
             self._latest_at = now_mono
         gray, w, h = _downscale_gray(img)
         digest = frame_hash(gray)
-        now_ms = int(time.time() * 1000)
         with self._lock:
             if digest == self._last_hash:
                 return
             action = self._pending_action
-            self._pending_action = None
+            if self._last_action_ms is not None and now_ms < self._last_action_ms:
+                action = None
+            else:
+                self._pending_action = None
             self._seq += 1
             name = f"{self._seq:06d}.jpg"
             path = self.dir / "frames" / name
@@ -407,11 +471,15 @@ class CaptureBuffer:
             ):
                 self._kept_since_action += 1
             # Animation-aware: while frames keep changing during a burst, keep it open.
-            if self.cfg.extend_burst_on_change and (
-                action or time.time() < self._burst_until
-            ):
+            if self.cfg.extend_burst_on_change and (action or time.time() < self._burst_until):
                 self._burst_until = time.time() + max(0, self.cfg.burst_ms) / 1000.0
             self._append_index(entry)
+            active: list[str] = []
+            for ref in self._evidence_refs:
+                with contextlib.suppress(Exception):
+                    if self.evidence_store.append(ref, entry.__dict__):
+                        active.append(ref)
+            self._evidence_refs = active
         self._prune()
 
     def _append_index(self, entry: FrameEntry) -> None:
@@ -444,9 +512,12 @@ class CaptureBuffer:
         ``_disk_bytes`` covers the live session only, which under-reports badly once dead
         sessions accumulate: it read 114 kB while 11 MB sat on disk.
         """
+        evidence_bytes = self.evidence_store.disk_bytes()
         if not self.serial_root.is_dir():
-            return 0
-        return sum(self._dir_bytes(d) for d in self.serial_root.iterdir() if d.is_dir())
+            return evidence_bytes
+        return evidence_bytes + sum(
+            self._dir_bytes(d) for d in self.serial_root.iterdir() if d.is_dir()
+        )
 
     def sweep_sessions(self) -> dict[str, int]:
         """Prune DEAD sessions left by earlier runs. Returns what it removed.
@@ -463,6 +534,7 @@ class CaptureBuffer:
         """
         removed_sessions = 0
         removed_bytes = 0
+        self.evidence_store.prune(max(1, int(self.cfg.max_mb)) * 1024 * 1024)
         if not self.serial_root.is_dir():
             return {"sessions": 0, "bytes": 0}
 
@@ -490,7 +562,11 @@ class CaptureBuffer:
                 dead.append((newest, session, size))
 
         max_bytes = max(1, int(self.cfg.max_mb)) * 1024 * 1024
-        total = self._dir_bytes(self.dir) + sum(size for _, _, size in dead)
+        total = (
+            self._dir_bytes(self.dir)
+            + sum(size for _, _, size in dead)
+            + self.evidence_store.disk_bytes()
+        )
         dead.sort()  # oldest first
         for _, session, size in dead:
             if total <= max_bytes:
@@ -509,6 +585,8 @@ class CaptureBuffer:
         """Drop frames older than TTL or over max_mb. Returns count removed."""
         cutoff = int(time.time() * 1000) - int(self.cfg.ttl_s) * 1000
         max_bytes = max(1, int(self.cfg.max_mb)) * 1024 * 1024
+        self.evidence_store.prune(max_bytes)
+        max_bytes = max(0, max_bytes - self.evidence_store.disk_bytes())
         with self._lock:
             entries = list(self._entries)
         removed = 0
@@ -527,6 +605,8 @@ class CaptureBuffer:
             removed += 1
         with self._lock:
             self._entries = keep
+        if self.total_disk_bytes() > max(1, int(self.cfg.max_mb)) * 1024 * 1024:
+            self.sweep_sessions()
         return removed
 
 
@@ -661,6 +741,7 @@ def export_animation(
     *,
     fmt: str = "gif",
     fps: float = 8.0,
+    strict: bool = False,
 ) -> str:
     """Write a GIF (Pillow) from frame paths. ``fmt=mp4`` requires imageio+ffmpeg."""
     from PIL import Image
@@ -671,8 +752,11 @@ def export_animation(
     images = []
     for e in entries:
         try:
-            images.append(Image.open(e.path).convert("RGB"))
-        except OSError:
+            with Image.open(e.path) as source:
+                images.append(source.convert("RGB"))
+        except OSError as exc:
+            if strict:
+                raise CaptureFrameUnavailable("a required capture frame is unavailable") from exc
             continue
     if not images:
         raise ValueError("could not open any frame images")
@@ -730,6 +814,7 @@ def export_contact_sheet(
     columns: int = 3,
     timestamps: bool = True,
     thumbnail_width: int = 320,
+    strict: bool = False,
 ) -> tuple[str, list[FrameEntry]]:
     """Write an evenly sampled PNG contact sheet with relative-time/action labels."""
 
@@ -749,12 +834,12 @@ def export_contact_sheet(
                 opened.append(
                     (
                         entry,
-                        image.resize(
-                            (thumbnail_width, height), Image.Resampling.LANCZOS
-                        ),
+                        image.resize((thumbnail_width, height), Image.Resampling.LANCZOS),
                     )
                 )
-        except OSError:
+        except OSError as exc:
+            if strict:
+                raise CaptureFrameUnavailable("a required capture frame is unavailable") from exc
             continue
     if not opened:
         raise ValueError("could not open any frame images")
@@ -763,9 +848,7 @@ def export_contact_sheet(
     rows = ceil(len(opened) / columns)
     label_height = 28 if timestamps else 0
     cell_height = max(image.height for _entry, image in opened) + label_height
-    sheet = Image.new(
-        "RGB", (columns * thumbnail_width, rows * cell_height), (24, 24, 24)
-    )
+    sheet = Image.new("RGB", (columns * thumbnail_width, rows * cell_height), (24, 24, 24))
     draw = ImageDraw.Draw(sheet)
     font = ImageFont.load_default()
     t0 = opened[0][0].t_ms
@@ -793,8 +876,16 @@ def _changed_cells(path_a: str, path_b: str, *, grid: int, threshold: float) -> 
     from PIL import Image
 
     try:
-        a = Image.open(path_a).convert("L").resize((grid * 16, grid * 16), Image.Resampling.BILINEAR)
-        b = Image.open(path_b).convert("L").resize((grid * 16, grid * 16), Image.Resampling.BILINEAR)
+        a = (
+            Image.open(path_a)
+            .convert("L")
+            .resize((grid * 16, grid * 16), Image.Resampling.BILINEAR)
+        )
+        b = (
+            Image.open(path_b)
+            .convert("L")
+            .resize((grid * 16, grid * 16), Image.Resampling.BILINEAR)
+        )
     except OSError:
         return []
     aa = np.asarray(a, dtype=np.float32)
@@ -853,9 +944,7 @@ class DiskSession:
         return max(0, int(time.time() * 1000) - self.newest_frame_ms)
 
 
-def _serial_dir_name(
-    serial: TargetLike, *, platform: str = LEGACY_PLATFORM
-) -> str:
+def _serial_dir_name(serial: TargetLike, *, platform: str = LEGACY_PLATFORM) -> str:
     """Match :attr:`CaptureBuffer.dir`'s sanitisation, so the reader looks in the right place."""
 
     ref = target_ref(serial, platform=platform)

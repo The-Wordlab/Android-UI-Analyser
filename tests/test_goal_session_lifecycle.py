@@ -794,9 +794,20 @@ def test_journal_automatically_correlates_active_session_and_review_finds_waste(
     journal.record(
         **common,
         cmd="tap",
-        result={"ok": True, "action": "tap", "observation": {"elements": []}},
+        result={
+            "ok": True,
+            "action": "tap",
+            "observation": {
+                "elements": [{"id": "el:ready", "text": "Ready"}],
+                "meta": {"fingerprint": "ready-frame"},
+            },
+        },
     )
-    journal.record(**common, cmd="analyze", result={"ok": True, "elements": []})
+    journal.record(
+        **common,
+        cmd="analyze",
+        result={"ok": True, "elements": [], "meta": {"fingerprint": "ready-frame"}},
+    )
     journal.record(**common, cmd="has", args={"text": "Ready"}, result={"found": True})
     journal.record(**common, cmd="has", args={"text": "Loading"}, result={"found": False})
 
@@ -805,7 +816,8 @@ def test_journal_automatically_correlates_active_session_and_review_finds_waste(
     review = engine.session_review(started["session_id"])
     assert review["patterns"]["redundant_analyze"]
     assert review["patterns"]["consecutive_has"]
-    assert review["avoidable_calls"] == 2
+    assert review["avoidable_calls"] == 1
+    assert review["potential_calls_saved_next_run"] == 1
     assert {item["id"] for item in review["advice"]} >= {
         "reuse_observation",
         "combine_assertions",
@@ -1048,7 +1060,13 @@ def test_analyze_after_session_start_receives_immediate_reuse_advice(
         **common,
         cmd="session_start",
         ok=True,
-        result={**started, "observation": {"elements": [], "meta": {"known_screen": "home"}}},
+        result={
+            **started,
+            "observation": {
+                "elements": [{"id": "el:catalog", "text": "Example catalog"}],
+                "meta": {"known_screen": "home", "fingerprint": "catalog-frame"},
+            },
+        },
     )
     journal.record(
         **common,
@@ -1058,7 +1076,9 @@ def test_analyze_after_session_start_receives_immediate_reuse_advice(
         result={"ok": True, "elements": []},
     )
 
-    decorated = decorate_result(engine, "analyze", {"ok": True, "elements": []})
+    decorated = decorate_result(
+        engine, "analyze", {"ok": True, "elements": [], "meta": {"fingerprint": "catalog-frame"}}
+    )
 
     assert decorated["advice"][0]["id"] == "reuse_observation"
 
@@ -1278,7 +1298,9 @@ def test_daemon_exposes_the_same_goal_session_lifecycle() -> None:
 def test_explicit_session_emulator_start_is_handed_to_the_warm_pool(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
-    from android_ui_analyser import emulator
+    from android_ui_analyser import emulator, mic
+
+    monkeypatch.setattr(mic, "preflight", lambda target_id: {"ok": True, "target_id": target_id})
 
     cfg = make_config(
         cache={"dir": str(tmp_path / "cache")},

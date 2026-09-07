@@ -12,6 +12,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from android_ui_analyser import mic
+from android_ui_analyser.errors import DeviceError
 from android_ui_analyser.platforms import android
 
 
@@ -23,8 +25,10 @@ def test_physical_target_never_satisfies_emulator_window_requirements() -> None:
     }
 
 
+@pytest.mark.parametrize("audio_ready", [False, True])
 def test_headed_emulator_explicitly_satisfies_emulator_requirement(
     monkeypatch: pytest.MonkeyPatch,
+    audio_ready: bool,
 ) -> None:
     monkeypatch.setattr(
         android.subprocess,
@@ -34,10 +38,18 @@ def test_headed_emulator_explicitly_satisfies_emulator_requirement(
         ),
     )
 
+    def endpoint(target_id: str) -> object:
+        assert target_id == "emulator-5558"
+        if not audio_ready:
+            raise DeviceError("no endpoint", code="mic_endpoint_missing")
+        return object()
+
+    monkeypatch.setattr(mic, "discover_emulator_endpoint", endpoint)
+
     assert android._runtime_emulator_capabilities("emulator-5558") == {  # noqa: SLF001
         "emulator": True,
         "headed": True,
-        "audio": True,
+        "audio": audio_ready,
     }
 
 

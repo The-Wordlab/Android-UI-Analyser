@@ -13,6 +13,18 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- CLI, MCP and session review share one observation contract, separating action execution,
+  fresh evidence, returned controls and destination readiness. Empty/transitional reads no
+  longer claim settled arrival; local capture exports preserve the prior observation's validity.
+  Existing observation screenshots are reused for artifacts and visual inspection.
+- Analyzed actions and waits accept consistent `--with-image [PATH]` options and exact command
+  corrections reduce CLI discovery retries. Final phase facts can be attached directly to
+  `session finish`; generated agent guidance consumes returned evidence before recovery.
+- App launch verifies readiness before reporting success, audio setup checks an authenticated
+  microphone endpoint before app installation, and device-clock writes require matching readback.
+- Invocation accounting includes CLI discovery and parser failures, folds restart sub-operations
+  beneath their parent call, and separates confirmed redundant reads from possible navigation
+  optimizations. Expected typed-error probes can be declared without poisoning the run verdict.
 - Session bootstrap now returns persisted element handles before trimming its observation, matching
   analysis and action responses. Labelled list rows retain handles when an English relative-age
   suffix changes; same-title rows with different ages remain ambiguous and refuse actions.
@@ -24,6 +36,15 @@ notes, so you can check for a newer version — and read what changed — withou
   boot and adapter-configuration scoped, shared across CLI/MCP/dashboard processes, and bounded.
   Without boot evidence handles remain local to the connected runtime. Legacy selectors and
   numeric scripts remain supported; selector keys with ordinal suffixes still describe positions.
+
+### Added
+
+- Actions and background wait jobs expose durable `capture_evidence.ref` windows. All capture
+  readers accept `--evidence REF` / MCP `evidence_ref`; delayed contact-sheet and GIF exports use
+  exactly the same recorded frames without another device read or guessed relative time window.
+  Evidence survives rolling-frame pruning and process turnover for up to one hour, within the
+  existing per-target byte budget and a 128-window limit. Missing/expired references refuse
+  explicitly instead of substituting another action, session or target.
 
 ## [0.15.0] - 2026-09-07
 

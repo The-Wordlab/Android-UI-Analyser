@@ -15,8 +15,9 @@ import re
 import shlex
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from copy import deepcopy
+from functools import wraps
 from typing import TYPE_CHECKING, Any
 
 from .assertions import Selector, apply_structural_filters, check_contains_all, normalize_selector
@@ -52,6 +53,28 @@ from .selectors import (
 
 if TYPE_CHECKING:
     from .engine import Engine
+
+
+def _image_output(method: Callable[..., ActionResult]) -> Callable[..., ActionResult]:
+    """Scope an explicit wait image option to this operation, including nested waits.
+
+    The normal observation saves its captured frame; this does not take a second screenshot.
+    Restoring the default also prevents an MCP request from changing later callers' output.
+    """
+
+    @wraps(method)
+    def wrapped(
+        self: Engine, *args: Any, with_image: bool | str | None = None, **kwargs: Any
+    ) -> ActionResult:
+        previous = self._default_with_image
+        if with_image is not None:
+            self._default_with_image = with_image
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            self._default_with_image = previous
+
+    return wrapped
 
 
 _LOCALE_CANDIDATE_CAP = 3  # translated-label retries per text miss (generic labels fan out)
@@ -169,6 +192,7 @@ def job_list(self: Engine, **_kwargs: Any) -> None:
     self._job_requires_warm_transport()
 
 
+@_image_output
 def wait_stable(
     self: Engine,
     *,
@@ -180,21 +204,21 @@ def wait_stable(
 ) -> ActionResult:
     """Return once the screen stops changing for ``settle_ms`` (PRD §5, AC14).
 
-        Cheap perceptual-hash over screenshots only — NO OCR, NO hierarchy parse. Works on
-        opaque/Compose/video screens; ideal for waiting on image generation / loading.
-        ``observe`` folds in a post-settle ``analyze`` — because the screen is settled, the
-        returned ids are reliable (fixes the "premature observation" trap on transitions).
+    Cheap perceptual-hash over screenshots only — NO OCR, NO hierarchy parse. Works on
+    opaque/Compose/video screens; ideal for waiting on image generation / loading.
+    ``observe`` folds in a post-settle ``analyze`` — because the screen is settled, the
+    returned ids are reliable (fixes the "premature observation" trap on transitions).
 
-        When ``ignore_animation`` is True (default), per-cell grid hashing is used so that
-        regions with continuous looping animation (spinners, videos, Lottie) are auto-masked
-        and don't prevent settling. The screen is "settled" when all non-animated cells stop
-        changing.
+    When ``ignore_animation`` is True (default), per-cell grid hashing is used so that
+    regions with continuous looping animation (spinners, videos, Lottie) are auto-masked
+    and don't prevent settling. The screen is "settled" when all non-animated cells stop
+    changing.
 
-        ``timeout_ms`` is a request, not a guarantee: it is sized by :meth:`_bounded_wait_ms`
-        like every other observation wait. A clamped wait that settles says so on its result;
-        a clamped wait that expires still raises :class:`StabilityTimeout`, because "the screen
-        never went quiet" is the same answer whether it was watched for 5 seconds or 60.
-        """
+    ``timeout_ms`` is a request, not a guarantee: it is sized by :meth:`_bounded_wait_ms`
+    like every other observation wait. A clamped wait that settles says so on its result;
+    a clamped wait that expires still raises :class:`StabilityTimeout`, because "the screen
+    never went quiet" is the same answer whether it was watched for 5 seconds or 60.
+    """
     from . import imaging
 
     self._start_call()
@@ -308,10 +332,10 @@ def has(
 ) -> HasResult:
     """Quick presence check — NOT the full pipeline (PRD §5, §6a T0).
 
-        ``by="id"`` matches a resource-id (a bare tail like ``containerDetail`` too) —
-        this can confirm containers the parsed element list prunes (Maestro-style
-        ``assertVisible: id:``). OCR fallback only applies to text lookups.
-        """
+    ``by="id"`` matches a resource-id (a bare tail like ``containerDetail`` too) —
+    this can confirm containers the parsed element list prunes (Maestro-style
+    ``assertVisible: id:``). OCR fallback only applies to text lookups.
+    """
     query_field = "rid" if _is_resource_id_lookup(by) else "desc" if by == "desc" else "text"
     text = normalize_selector_prefix(query_field, text) or text
     mode = MatchMode(match)
@@ -424,7 +448,7 @@ def _find_translated(
     self: Engine, device: Device, text: str, mode: MatchMode, ignore_case: bool, by: str
 ) -> HasResult | None:
     """Retry a missed text lookup with the app's known renderings of the same label
-        (hierarchy only — the mined strings bridge the device's UI language, §6b)."""
+    (hierarchy only — the mined strings bridge the device's UI language, §6b)."""
     for cand, loc, key in self._locale_candidates(device, text, by):
         bounds = _wait_input_runtime(self, device).find_text(
             cand, match=mode, ignore_case=ignore_case, by=by
@@ -453,11 +477,11 @@ def _locale_candidates(
 ) -> list[tuple[str, str, str]]:
     """(label, locale, key) alternates for *text* from the app's mined strings.
 
-        The query is matched against every locale's value of a key, so the bridge works
-        in both directions (a query in the source language on a localized device and
-        vice versa); the device-locale rendering ranks first, the default (source)
-        value last.
-        """
+    The query is matched against every locale's value of a key, so the bridge works
+    in both directions (a query in the source language on a localized device and
+    vice versa); the device-locale rendering ranks first, the default (source)
+    value last.
+    """
     from .explore import DEFAULT_LOCALE
 
     if _is_resource_id_lookup(by):
@@ -477,9 +501,7 @@ def _locale_candidates(
         if not any(v.strip().casefold() == wanted for v in per.values()):
             continue
         exact = [
-            (loc, v)
-            for loc, v in per.items()
-            if locale and loc.casefold() == locale.casefold()
+            (loc, v) for loc, v in per.items() if locale and loc.casefold() == locale.casefold()
         ]
         same_language = [
             (loc, v)
@@ -527,9 +549,9 @@ def _text_miss_hint(
 def _locale_hint(by: str, locale: str | None) -> str | None:
     """Why a text lookup may have missed: labels render in the device locale.
 
-        Deliberately language-neutral — the query's language is unknowable, so the hint
-        fires for any known locale. Resource-id lookups are locale-proof, never hinted.
-        """
+    Deliberately language-neutral — the query's language is unknowable, so the hint
+    fires for any known locale. Resource-id lookups are locale-proof, never hinted.
+    """
     if _is_resource_id_lookup(by) or not locale:
         return None
     return (
@@ -632,12 +654,12 @@ def _hand_back_what_is_on_screen(
 ) -> ActionResult:
     """A bounded wait that expired is a normal outcome, not a failure.
 
-        Under a short ceiling, expiry stops meaning "this screen is broken" and starts meaning
-        "not yet". Raising there would turn the common case into an error the caller has to
-        catch, and would throw away the screen we just paid to read — so return it, say plainly
-        that it may be mid-flight, and let the caller decide whether to ask again. One more
-        function call is cheap; a blocked session is not.
-        """
+    Under a short ceiling, expiry stops meaning "this screen is broken" and starts meaning
+    "not yet". Raising there would turn the common case into an error the caller has to
+    catch, and would throw away the screen we just paid to read — so return it, say plainly
+    that it may be mid-flight, and let the caller decide whether to ask again. One more
+    function call is cheap; a blocked session is not.
+    """
     result = ActionResult(
         ok=True,
         action=action,
@@ -660,11 +682,11 @@ def _hand_back_what_is_on_screen(
 def _screen_already_answers(self: Engine, *, quiet_ms: int = 120) -> bool:
     """True when the screen is holding still and has something on it.
 
-        The question a caller means by "wait for a change" is "let me see the result". When the
-        result is already up, waiting for a *further* change answers a different question and,
-        on a screen with any periodic redraw, can block until the deadline. Two cheap
-        hierarchy samples a short interval apart settle it without a screenshot.
-        """
+    The question a caller means by "wait for a change" is "let me see the result". When the
+    result is already up, waiting for a *further* change answers a different question and,
+    on a screen with any periodic redraw, can block until the deadline. Two cheap
+    hierarchy samples a short interval apart settle it without a screenshot.
+    """
     # Only meaningful when the caller already holds an observation. "The change may have
     # happened while you were composing" presupposes a before-picture; with no prior
     # analyze there is nothing that could have been missed, and probing anyway would both
@@ -687,42 +709,40 @@ def _screen_already_answers(self: Engine, *, quiet_ms: int = 120) -> bool:
 def _wait_ceiling(self: Engine) -> tuple[int, str]:
     """The effective ceiling and its mode. The cap is read here and nowhere else.
 
-        `perf.max_wait_ms` is the hard maximum and this is its single reader; `wait_ceiling_ms`
-        is handed that number and can only return something at or below it. Keeping the read in
-        one place is what `test_the_wait_ceiling_has_no_holes` pins, and the reason is the same
-        as it was then: a wait that reads the ceiling itself is a wait that can size its own
-        budget.
-        """
+    `perf.max_wait_ms` is the hard maximum and this is its single reader; `wait_ceiling_ms`
+    is handed that number and can only return something at or below it. Keeping the read in
+    one place is what `test_the_wait_ceiling_has_no_holes` pins, and the reason is the same
+    as it was then: a wait that reads the ceiling itself is a wait that can size its own
+    budget.
+    """
     from .perf import wait_ceiling_ms
 
-    return wait_ceiling_ms(
-        int(self.config.perf.max_wait_ms), self.config, self._caller_profile()
-    )
+    return wait_ceiling_ms(int(self.config.perf.max_wait_ms), self.config, self._caller_profile())
 
 
 def _bounded_wait_ms(self: Engine, requested_ms: int | None) -> tuple[int, int | None, int]:
     """Bound one observation wait to the ceiling, which is at most ``perf.max_wait_ms``.
 
-        The ceiling adapts *downwards* within that maximum, from what this caller has been
-        measured to cost between calls (see :meth:`_wait_ceiling` and ``caller_latency``): a
-        shell script whose re-call costs ~3.9s of tool time and no thinking has no use for a 5s
-        wait, while an LLM caller that thinks for 6-39s is already at the maximum and stays
-        there. Nothing in that path can raise the number — the maximum is a standing decision,
-        and an agent that needs longer is expected to make another call, not hold one long wait.
+    The ceiling adapts *downwards* within that maximum, from what this caller has been
+    measured to cost between calls (see :meth:`_wait_ceiling` and ``caller_latency``): a
+    shell script whose re-call costs ~3.9s of tool time and no thinking has no use for a 5s
+    wait, while an LLM caller that thinks for 6-39s is already at the maximum and stays
+    there. Nothing in that path can raise the number — the maximum is a standing decision,
+    and an agent that needs longer is expected to make another call, not hold one long wait.
 
-        Returns ``(effective_ms, clamped_from_or_None, ceiling_ms)``. This is the ONE gate:
-        every agent-facing wait sizes its deadline here rather than from the caller's
-        ``timeout_ms``, so the ceiling is a property of the session and not something a
-        ``--timeout`` flag can lift. Provisioning budgets do not come through here at all —
-        installing an APK or booting an emulator is not an observation and legitimately takes
-        minutes.
+    Returns ``(effective_ms, clamped_from_or_None, ceiling_ms)``. This is the ONE gate:
+    every agent-facing wait sizes its deadline here rather than from the caller's
+    ``timeout_ms``, so the ceiling is a property of the session and not something a
+    ``--timeout`` flag can lift. Provisioning budgets do not come through here at all —
+    installing an APK or booting an emulator is not an observation and legitimately takes
+    minutes.
 
-        One exemption, and it is about who is blocked rather than about how long. While this
-        Engine is executing a background job the caller already holds a job id and polls
-        ``job status``, so no session is stalled; clamping there would cut short the very
-        long wait the `job` vocabulary exists to hold, and its own defaults (30s wait-stable,
-        60s await) would all collapse to the ceiling.
-        """
+    One exemption, and it is about who is blocked rather than about how long. While this
+    Engine is executing a background job the caller already holds a job id and polls
+    ``job status``, so no session is stalled; clamping there would cut short the very
+    long wait the `job` vocabulary exists to hold, and its own defaults (30s wait-stable,
+    60s await) would all collapse to the ceiling.
+    """
     from .perf import clamp_wait_ms, is_provisioning_wait
 
     # One ceiling, sized by one policy: `perf.max_wait_ms` is the maximum, and the caller's
@@ -745,11 +765,11 @@ def _bounded_wait_ms(self: Engine, requested_ms: int | None) -> tuple[int, int |
 def _sleep_between_polls(self: Engine, interval_ms: float, deadline: float) -> None:
     """Sleep until the next poll, but never past *deadline*.
 
-        A bounded deadline buys nothing while one poll interval can outlast the whole budget:
-        the loop checks the clock, sleeps out the interval, and only then notices it is late —
-        so ``--interval 30000`` spends 30 seconds inside a 5-second ceiling. This is not a
-        second ceiling, it is the existing one being enforced between two polls.
-        """
+    A bounded deadline buys nothing while one poll interval can outlast the whole budget:
+    the loop checks the clock, sleeps out the interval, and only then notices it is late —
+    so ``--interval 30000`` spends 30 seconds inside a 5-second ceiling. This is not a
+    second ceiling, it is the existing one being enforced between two polls.
+    """
     self._job_sleep(min(max(0.0, interval_ms) / 1000.0, max(0.0, deadline - time.monotonic())))
 
 
@@ -758,11 +778,11 @@ def _say_the_wait_was_shortened(
 ) -> ActionResult:
     """Record a clamp on the response, so 'not yet' cannot be read as 'not there'.
 
-        Also names which policy produced the ceiling. Without it a caller cannot tell a number
-        it could reproduce (`fixed`/`pinned`) from one that will move under it as its own
-        latency is measured (`cold`/`adaptive`) — and a benchmark that cannot tell those apart
-        is comparing two different budgets and calling it one.
-        """
+    Also names which policy produced the ceiling. Without it a caller cannot tell a number
+    it could reproduce (`fixed`/`pinned`) from one that will move under it as its own
+    latency is measured (`cold`/`adaptive`) — and a benchmark that cannot tell those apart
+    is comparing two different budgets and calling it one.
+    """
     if clamped_from is None:
         return result
     result.wait_clamped_from_ms = clamped_from
@@ -786,9 +806,9 @@ def _wait_ceiling_explanation(clamped_from: int, ceiling: int) -> str:
 def _hint_for_a_shortened_wait(hint: str, clamped_from: int | None, ceiling: int) -> str:
     """The same explanation on a raising path, where there is no result to carry it.
 
-        It goes *first* because it corrects the advice behind it: every one of these hints
-        says "increase --timeout", which a clamped wait ignores.
-        """
+    It goes *first* because it corrects the advice behind it: every one of these hints
+    says "increase --timeout", which a clamped wait ignores.
+    """
     if clamped_from is None:
         return hint
     return f"{_wait_ceiling_explanation(clamped_from, ceiling)} {hint}"
@@ -804,15 +824,15 @@ def _await_terms_on_observation(
 ) -> list[dict[str, Any]]:
     """Evaluate UI terms against one exact hierarchy frame.
 
-        The ordinary poll uses ``Device.find_text`` because it is the cheapest possible check.
-        Arrival-mismatch detection also needs to prove that the *stable frame* it inspected still
-        misses the predicate.  Reusing results from an earlier selector RPC would combine two
-        moments and could call a destination wrong while it was still rendering.
+    The ordinary poll uses ``Device.find_text`` because it is the cheapest possible check.
+    Arrival-mismatch detection also needs to prove that the *stable frame* it inspected still
+    misses the predicate.  Reusing results from an earlier selector RPC would combine two
+    moments and could call a destination wrong while it was still rendering.
 
-        Off-screen ``net:``/``log:`` terms retain their already evaluated value.  In practice the
-        early mismatch path is intentionally disabled when a positive off-screen term is present,
-        but retaining those rows keeps this helper total and the output order unchanged.
-        """
+    Off-screen ``net:``/``log:`` terms retain their already evaluated value.  In practice the
+    early mismatch path is intentionally disabled when a positive off-screen term is present,
+    but retaining those rows keeps this helper total and the output order unchanged.
+    """
 
     def matches(candidate: str, wanted: str) -> bool:
         hay = candidate.casefold() if ignore_case else candidate
@@ -865,14 +885,12 @@ def _await_observation_identity(observation: AnalyzeResult) -> str | None:
     )
     if not anchors:
         return None
-    return hashlib.sha256(
-        repr((observation.screen.package or "", anchors)).encode()
-    ).hexdigest()[:16]
+    return hashlib.sha256(repr((observation.screen.package or "", anchors)).encode()).hexdigest()[
+        :16
+    ]
 
 
-def _await_destination_changed(
-    observation: AnalyzeResult, baseline: dict[str, Any] | None
-) -> bool:
+def _await_destination_changed(observation: AnalyzeResult, baseline: dict[str, Any] | None) -> bool:
     """Whether a hierarchy frame is semantically different from the pre-action screen."""
     if baseline is None:
         return False
@@ -916,11 +934,11 @@ def _arrival_predicate_suggestions(
 ) -> list[str]:
     """Stable positive predicates visible only after (or at least on) the destination.
 
-        Resource ids are preferred because they survive copy changes and do not echo user content.
-        Text/description is a fallback for apps that expose no ids.  Numeric frame ids are never
-        suggested: they are observation-local and are exactly what this recovery is meant to make
-        unnecessary.
-        """
+    Resource ids are preferred because they survive copy changes and do not echo user content.
+    Text/description is a fallback for apps that expose no ids.  Numeric frame ids are never
+    suggested: they are observation-local and are exactly what this recovery is meant to make
+    unnecessary.
+    """
 
     def escaped(value: str) -> str:
         return value.replace("\\", "\\\\").replace(",", "\\,")
@@ -990,6 +1008,7 @@ def _sample_action_destination(self: Engine) -> AnalyzeResult | None:
         return None
 
 
+@_image_output
 def await_predicate(
     self: Engine,
     predicate: str,
@@ -1005,36 +1024,36 @@ def await_predicate(
 ) -> ActionResult:
     """Wait until *predicate* holds, and say exactly what ended the wait.
 
-        A long-running synthetic export demonstrates the ambiguity: without a condition to wait
-        *on*, a caller can only poll, wait fixed intervals, or conclude "stuck" from a stale frame.
-        The output must distinguish a hang from a slow backend, so the outcome is a named field
-        rather than something inferred from `ok`:
+    A long-running synthetic export demonstrates the ambiguity: without a condition to wait
+    *on*, a caller can only poll, wait fixed intervals, or conclude "stuck" from a stale frame.
+    The output must distinguish a hang from a slow backend, so the outcome is a named field
+    rather than something inferred from `ok`:
 
-        * ``satisfied`` — every term held.
-        * ``screen-changed`` — the foreground activity or package moved while waiting and the
-          predicate is still unmet. Returns immediately instead of burning the budget: the
-          surface being waited on is gone, so more waiting cannot help. This is the outcome that
-          separates "we got kicked out / an error dialog took over" from "still working".
-        * ``settled-unmet`` — action-bound waits only: the action reached a stable, non-loading,
-          semantically different destination in the same activity, but the caller's positive UI
-          arrival term is not on it. This returns a structured ``arrival_mismatch`` rather than
-          spending a long budget on a predicate that describes the screen left behind.
-        * ``timeout`` — budget spent, predicate unmet, still on the same screen.
+    * ``satisfied`` — every term held.
+    * ``screen-changed`` — the foreground activity or package moved while waiting and the
+      predicate is still unmet. Returns immediately instead of burning the budget: the
+      surface being waited on is gone, so more waiting cannot help. This is the outcome that
+      separates "we got kicked out / an error dialog took over" from "still working".
+    * ``settled-unmet`` — action-bound waits only: the action reached a stable, non-loading,
+      semantically different destination in the same activity, but the caller's positive UI
+      arrival term is not on it. This returns a structured ``arrival_mismatch`` rather than
+      spending a long budget on a predicate that describes the screen left behind.
+    * ``timeout`` — budget spent, predicate unmet, still on the same screen.
 
-        **Not** network idle. A sample app may prefetch, post telemetry, or stream status updates
-        continuously, so idleness is a flaky proxy for "this is ready". A predicate says what is
-        actually wanted.
+    **Not** network idle. A sample app may prefetch, post telemetry, or stream status updates
+    continuously, so idleness is a flaky proxy for "this is ready". A predicate says what is
+    actually wanted.
 
-        Standalone ``screen-changed`` remains keyed on the resumed activity/package and
-        deliberately not on the element tree: a streaming surface rewrites its tree constantly,
-        so a tree-change trigger would abort every legitimate wait on exactly the screens this
-        exists for. The stable-tree check is reachable only when ``adopt_action`` says one action
-        has already run, and requires two equal fresh destination frames.
+    Standalone ``screen-changed`` remains keyed on the resumed activity/package and
+    deliberately not on the element tree: a streaming surface rewrites its tree constantly,
+    so a tree-change trigger would abort every legitimate wait on exactly the screens this
+    exists for. The stable-tree check is reachable only when ``adopt_action`` says one action
+    has already run, and requires two equal fresh destination frames.
 
-        Per-term results are always returned, satisfied or not, because *which* term is missing is
-        how a reader tells a failed load from a slow one: spinner gone but results absent is a
-        failure, spinner still present is progress.
-        """
+    Per-term results are always returned, satisfied or not, because *which* term is missing is
+    how a reader tells a failed load from a slow one: spinner gone but results absent is a
+    failure, spinner still present is progress.
+    """
     # One ceiling for every observation wait, this one included. It was missed here at
     # first and a single `await-and-analyze` then ran 62s in a live pass — the default was
     # 60s and nothing capped it. `await` is the wait an agent should reach for most, so an
@@ -1101,9 +1120,9 @@ def await_predicate(
     def _log_baseline_ms() -> int:
         """Baseline in the selected adapter's diagnostic clock.
 
-            Host and target clocks are not interchangeable. The adapter owns both the clock and
-            the persisted cursor, so shared wait code never assumes Android logcat timestamps.
-            """
+        Host and target clocks are not interchangeable. The adapter owns both the clock and
+        the persisted cursor, so shared wait code never assumes Android logcat timestamps.
+        """
         if log_diagnostics is None:
             return int(wall_baseline * 1000)
         mark = log_diagnostics.mark_diagnostics(device, "_await")
@@ -1162,11 +1181,11 @@ def await_predicate(
     def evaluate_rich() -> list[dict[str, Any]] | None:
         """Verify UI text against hierarchy plus OCR before making a final claim.
 
-            The device selector only sees accessibility text. That is cheap enough to poll, but
-            it made ``!text:Loading`` succeed immediately on a visible canvas label and made a
-            positive result time out even though OCR could read it. Rich verification is bounded:
-            once before accepting a negated UI term and once at the deadline for a positive miss.
-            """
+        The device selector only sees accessibility text. That is cheap enough to poll, but
+        it made ``!text:Loading`` succeed immediately on a visible canvas label and made a
+        positive result time out even though OCR could read it. Rich verification is bounded:
+        once before accepting a negated UI term and once at the deadline for a positive miss.
+        """
         if not rich_ui or not ui_terms:
             return None
         try:
@@ -1405,11 +1424,11 @@ def await_predicate(
 def _unknown_map_selectors(self: Engine, unmet: list[str], package: str) -> list[dict[str, Any]]:
     """Unmet ``rid:`` terms this app's map has never recorded on any screen.
 
-        Deliberately map-based rather than screen-based: "not on this screen" is what an unmet
-        term already says. What an agent cannot see, and what sends it inventing a second id, is
-        that the id exists nowhere in the app. Not cached — it runs only when a positive term
-        went unmet, and a map that just learned a screen must not be answered from a stale copy.
-        """
+    Deliberately map-based rather than screen-based: "not on this screen" is what an unmet
+    term already says. What an agent cannot see, and what sends it inventing a second id, is
+    that the id exists nowhere in the app. Not cached — it runs only when a positive term
+    went unmet, and a map that just learned a screen must not be answered from a stale copy.
+    """
     if not unmet or not package or self._memory is None:
         return []
     app = self._memory.load(package)
@@ -1533,6 +1552,7 @@ def _await_result(
     return observed
 
 
+@_image_output
 def wait(
     self: Engine,
     *,
@@ -1547,11 +1567,11 @@ def wait(
 ) -> ActionResult:
     """Wait for text to appear or disappear, or for the UI to go idle.
 
-        ``timeout_ms`` is sized by :meth:`_bounded_wait_ms` before anything blocks on it. This
-        was the last agent-facing wait handing the caller's budget straight to the device, so
-        `wait-and-analyze --for X --timeout-ms 120000` blocked for two minutes and made the
-        ceiling on its sibling waits meaningless.
-        """
+    ``timeout_ms`` is sized by :meth:`_bounded_wait_ms` before anything blocks on it. This
+    was the last agent-facing wait handing the caller's budget straight to the device, so
+    `wait-and-analyze --for X --timeout-ms 120000` blocked for two minutes and made the
+    ceiling on its sibling waits meaningless.
+    """
     self._start_call()
     device = self.device
     timeout_ms, clamped_from, ceiling_ms = self._bounded_wait_ms(timeout_ms)
@@ -1635,9 +1655,7 @@ def wait(
         action="wait",
         detail=for_,
         target=list(found),
-        hint=self._translated_hint(matched[0], matched[1], matched[2], for_)
-        if matched
-        else None,
+        hint=self._translated_hint(matched[0], matched[1], matched[2], for_) if matched else None,
     )
     # `--observe` returns the screen with fresh ids so the agent acts without a separate
     # `analyze` — attached even on a MISS, so a failed wait is diagnosable in one call.
@@ -1650,10 +1668,10 @@ def wait(
 def _journal_wait_gave_up(self: Engine, kind: str, detail: str) -> None:
     """Log a wait that ended by raising, before the exception leaves.
 
-        The successful path is journalled on the way out of `_observe`; a timeout never gets
-        there. Leaving it unrecorded would hide exactly the wrong number — the one wait that
-        spent its entire budget.
-        """
+    The successful path is journalled on the way out of `_observe`; a timeout never gets
+    there. Leaving it unrecorded would hide exactly the wrong number — the one wait that
+    spent its entire budget.
+    """
     self._journal_call_answer(
         ActionResult(ok=False, action=kind, detail=detail, elapsed_ms=self._wall_ms()),
         outcome="timeout",
@@ -1663,9 +1681,9 @@ def _journal_wait_gave_up(self: Engine, kind: str, detail: str) -> None:
 def hierarchy_fingerprint(self: Engine, *, background: bool = False) -> str | None:
     """Cheap SHA1 of the current hierarchy dump (no parse). Used by watch/push.
 
-        The push watcher is a long-lived background thread. It may observe through the shared
-        activity fence, but it must neither connect nor retain the foreground command mutex.
-        """
+    The push watcher is a long-lived background thread. It may observe through the shared
+    activity fence, but it must neither connect nor retain the foreground command mutex.
+    """
     device = self._device if background else self.device
     if device is None:
         return None
@@ -1685,6 +1703,7 @@ def hierarchy_fingerprint(self: Engine, *, background: bool = False) -> str | No
     return hashlib.sha1(xml.encode()).hexdigest()
 
 
+@_image_output
 def wait_changed(
     self: Engine,
     *,
@@ -1694,17 +1713,15 @@ def wait_changed(
 ) -> ActionResult:
     """Block until the hierarchy fingerprint changes (or timeout).
 
-        Host-polled stand-in for AccessibilityEvent push (phase 2). Prefer this over
-        busy ``analyze`` loops when waiting for *any* UI change.
+    Host-polled stand-in for AccessibilityEvent push (phase 2). Prefer this over
+    busy ``analyze`` loops when waiting for *any* UI change.
 
-        ``timeout_ms`` is sized by :meth:`_bounded_wait_ms`: "any change" is the weakest thing
-        to wait on, so it is the wait most worth cutting short — a caller with 60s to spend
-        should be waiting on evidence with ``--until`` instead.
-        """
+    ``timeout_ms`` is sized by :meth:`_bounded_wait_ms`: "any change" is the weakest thing
+    to wait on, so it is the wait most worth cutting short — a caller with 60s to spend
+    should be waiting on evidence with ``--until`` instead.
+    """
     self._start_call()
-    interval = (
-        interval_ms if interval_ms is not None else int(self.config.daemon.watch_interval_ms)
-    )
+    interval = interval_ms if interval_ms is not None else int(self.config.daemon.watch_interval_ms)
     baseline = self.hierarchy_fingerprint()
     timeout_ms, clamped_from, ceiling_ms = self._bounded_wait_ms(timeout_ms)
     deadline = time.monotonic() + timeout_ms / 1000.0
@@ -1745,6 +1762,7 @@ def wait_changed(
     )
 
 
+@_image_output
 def wait_after_change(
     self: Engine,
     *,
@@ -1756,17 +1774,17 @@ def wait_after_change(
 ) -> ActionResult:
     """Wait for a change, visual settle, and a bounded late-change confirmation.
 
-        A loading shell can become visually quiet while its request is still running. Plainly
-        composing :meth:`wait_changed` with :meth:`wait_stable` therefore accepts the first quiet
-        spinner frame as the result. This contract adds a second, bounded phase: after visual
-        settle, the hierarchy must stay unchanged for ``confirmation_ms``. If later content lands
-        during that window, stability is measured again from the new frame.
+    A loading shell can become visually quiet while its request is still running. Plainly
+    composing :meth:`wait_changed` with :meth:`wait_stable` therefore accepts the first quiet
+    spinner frame as the result. This contract adds a second, bounded phase: after visual
+    settle, the hierarchy must stay unchanged for ``confirmation_ms``. If later content lands
+    during that window, stability is measured again from the new frame.
 
-        The confirmation uses the hierarchy rather than full-frame pixels so a looping spinner or
-        video remains maskable by :meth:`wait_stable`. Opaque/canvas results should still use an
-        explicit predicate, which is the only generic proof that particular content arrived.
-        ``timeout_ms`` bounds the complete change + settle + confirmation sequence.
-        """
+    The confirmation uses the hierarchy rather than full-frame pixels so a looping spinner or
+    video remains maskable by :meth:`wait_stable`. Opaque/canvas results should still use an
+    explicit predicate, which is the only generic proof that particular content arrived.
+    ``timeout_ms`` bounds the complete change + settle + confirmation sequence.
+    """
     timeout_ms, clamped_from, ceiling = self._bounded_wait_ms(timeout_ms)
     started = self._start_call()
     deadline = started + max(0.0, timeout_ms / 1000.0)
@@ -1995,9 +2013,7 @@ def _expect_once(
             )
         return False, detail
     if count == 0:
-        return True, detail_tokens(
-            "pass", sought=label, predicate="count", expected=0, actual=0
-        )
+        return True, detail_tokens("pass", sought=label, predicate="count", expected=0, actual=0)
     if predicates.get("absent"):
         if not matches:
             return True, detail_tokens("pass", sought=label, predicate="absent")
@@ -2039,14 +2055,10 @@ def _expect_once(
     if contains_all:
         contains_ok, contains_detail = check_contains_all(elements, el, contains_all)
         if not contains_ok:
-            return False, detail_tokens(
-                "fail", sought=label, id=el.id
-            ) + " | " + contains_detail
+            return False, detail_tokens("fail", sought=label, id=el.id) + " | " + contains_detail
     failures = self._check_predicates(el, self._node_state(xml, el), predicates)
     if failures:
-        return False, detail_tokens("fail", sought=label, id=el.id) + " | " + "; ".join(
-            failures
-        )
+        return False, detail_tokens("fail", sought=label, id=el.id) + " | " + "; ".join(failures)
     checks = ",".join(predicates) or "exists"
     if count is not None:
         checks += f",count={count}"
@@ -2079,11 +2091,11 @@ def expect(
 ) -> ActionResult:
     """Assert something about the screen; ``ok=False`` means the assertion failed.
 
-        This is the primitive that turns an acceptance-criteria list into a script: one
-        criterion per call, exit code per criterion. ``timeout_ms`` polls until the
-        assertion holds, which is what replaces a ``sleep`` guess — the flakiness the
-        project's own testing guidance warns about.
-        """
+    This is the primitive that turns an acceptance-criteria list into a script: one
+    criterion per call, exit code per criterion. ``timeout_ms`` polls until the
+    assertion holds, which is what replaces a ``sleep`` guess — the flakiness the
+    project's own testing guidance warns about.
+    """
     selector = {
         "rid": normalize_selector_prefix("rid", rid),
         "text": normalize_selector_prefix("text", text),
@@ -2117,9 +2129,7 @@ def expect(
         )
     ):
         raise UsageError("--count 0 cannot be combined with element state/structure predicates")
-    normalized_within = (
-        normalize_selector(within, field="within") if within is not None else None
-    )
+    normalized_within = normalize_selector(within, field="within") if within is not None else None
     normalized_same_parent = (
         normalize_selector(same_parent_as, field="same_parent_as")
         if same_parent_as is not None
@@ -2164,9 +2174,7 @@ def expect(
         )
         if ok or time.monotonic() >= deadline:
             return self._say_the_wait_was_shortened(
-                self._observe(
-                    ActionResult(ok=ok, action="expect", detail=detail), observe, None
-                ),
+                self._observe(ActionResult(ok=ok, action="expect", detail=detail), observe, None),
                 clamped_from,
                 ceiling_ms,
             )

@@ -43,7 +43,10 @@ def _journal(monkeypatch: pytest.MonkeyPatch, events: list[dict]) -> list[str | 
         seen.append(serial)
         return events
 
-    fake_journal = types.SimpleNamespace(read_since=read_since)
+    fake_journal = types.SimpleNamespace(
+        read_since=read_since,
+        review_events=lambda _cache, _serial, rows, **_kwargs: rows,
+    )
     monkeypatch.setattr(android_ui_analyser, "journal", fake_journal, raising=False)
     monkeypatch.setitem(sys.modules, "android_ui_analyser.journal", fake_journal)
     return seen
@@ -80,4 +83,52 @@ def test_unpinned_soft_lint_stays_host_only(monkeypatch: pytest.MonkeyPatch) -> 
     cli_mod._warn_if_redundant_analyze(engine)
 
     assert seen == [None]
+    assert engine.device_reads == 0
+
+
+@pytest.mark.parametrize("changed", ["same", "different", "unmet", "projected_empty", "diagnostic"])
+def test_redundant_read_warning_requires_matching_usable_emitted_frames(
+    monkeypatch: pytest.MonkeyPatch, changed: str
+) -> None:
+    import time
+
+    first = {
+        "cmd": "tap",
+        "ok": True,
+        "owner": "agent-a:1",
+        "ts_ms": int(time.time() * 1000),
+        "result": {
+            "action": "tap",
+            "observation": {
+                "elements": [{"id": "el:ready", "text": "Ready"}],
+                "meta": {"fingerprint": "ready-frame"},
+            },
+        },
+    }
+    latest = {
+        "cmd": "analyze",
+        "ok": True,
+        "args": {"source": "auto"},
+        "result": {"meta": {"fingerprint": "ready-frame"}},
+    }
+    if changed == "different":
+        latest["result"]["meta"]["fingerprint"] = "changed-frame"
+    elif changed == "unmet":
+        first["result"]["settled_unmet"] = True
+    elif changed == "projected_empty":
+        first["result"]["observation"]["elements"] = []
+    elif changed == "diagnostic":
+        latest["args"]["fields"] = "id,text"
+    _journal(monkeypatch, [first, latest])
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        cli_mod,
+        "logger",
+        types.SimpleNamespace(warning=lambda message, *args: warnings.append(message % args)),
+    )
+    engine = _NoConnectEngine(leased="example-target", configured=None)
+
+    cli_mod._warn_if_redundant_analyze(engine)
+
+    assert bool(warnings) is (changed == "same")
     assert engine.device_reads == 0

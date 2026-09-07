@@ -226,7 +226,20 @@ def session_start(
     animation_backup_path: Path | None = None
     animation_change_key: str | None = None
     animations_enabled = False
+    audio_preflight: dict[str, Any] | None = None
     try:
+        if observation is None and (audio or "audio" in normalized_needs):
+            # Process flags prove neither the optional dependency nor a usable input endpoint.
+            # Validate through the selected platform before installation or app interaction.
+            audio_preflight = self.platform.capability("microphone").preflight(
+                str(prepared["serial"])
+            )
+            if not isinstance(audio_preflight, dict) or not audio_preflight.get("ok"):
+                raise DeviceError(
+                    "microphone preflight did not confirm a usable audio endpoint",
+                    code="mic_preflight_failed",
+                    hint="No app setup was attempted; inspect the selected platform's audio setup.",
+                )
         if observation is None and animations_requested:
             serial = str(prepared["serial"])
             target_key = TargetRef(self.platform.name, serial).storage_key
@@ -297,6 +310,9 @@ def session_start(
                 and "has not produced a stable readback yet" in launched.note
             ):
                 observation = self._await_launch_hierarchy(package)
+                self._adopt_recovered_launch_observation(launched, observation)
+                self._finish_launch_content_observation(launched)
+                observation = launched.observation
         observed = observation or self.analyze(source="hierarchy", with_ocr=False)
         if package and observed.screen.package != package:
             # A launch readback must never combine the requested package with a hierarchy
@@ -528,6 +544,8 @@ def session_start(
     # opt-in as every action response: filtering `observation.elements` on `clickable` is the
     # same answer, from the observation already in this payload.
     self._price_elements(observed)
+    if audio_preflight is not None:
+        out["audio_preflight"] = audio_preflight
     # This routing response is a plain dict, so it does not pass through an action's
     # renderer. Publish before CLI/MCP projection discards handle/selector evidence.
     out["observation"] = observed.as_dict()
@@ -1226,6 +1244,9 @@ def session_review(self: Engine, session_id: str | None = None) -> dict[str, Any
         since_ms=state.started_ms,
         limit=2_000,
         platform=state.platform,
+    )
+    events = journal_mod.review_events(
+        self.config.cache.dir, state.serial, events, platform=state.platform
     )
     review = review_session_events(state, events)
     # The rest of this review counts calls and names avoidable ones; `call_log` is the

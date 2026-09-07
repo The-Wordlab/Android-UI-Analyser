@@ -6,6 +6,7 @@ import contextlib
 import uuid
 from typing import Any
 
+from .observation_contract import build_observation_contract, result_has_reusable_observation
 from .selectors import is_back_resource_id
 
 _MANUAL_ACTIONS = frozenset(
@@ -204,6 +205,28 @@ def attach_caller_turn(engine: Any, result: Any) -> Any:
     return result
 
 
+def finalize_session_artifact(
+    engine: Any, result: Any, *, invocation_id: str, evidence_result: Any = None
+) -> None:
+    """Replace a folded CLI call's early evidence with its emitted view, without acquisition."""
+    data = _payload(result) or {}
+    if not data.get("await_outcome"):
+        return
+    state = engine._session_state()  # noqa: SLF001 - host-only persisted session lookup
+    artifact_dir = getattr(state, "artifact_dir", None)
+    if artifact_dir:
+        from .session_artifacts import SessionArtifactStore
+
+        SessionArtifactStore(artifact_dir).record(
+            command=str(data.get("action") or "await_predicate"),
+            result=result,
+            invocation_id=invocation_id,
+            duration_ms=None,
+            finalize_existing=True,
+            evidence_result=evidence_result,
+        )
+
+
 def _record_session_artifact(
     engine: Any,
     cmd: str,
@@ -223,37 +246,21 @@ def _record_session_artifact(
     with contextlib.suppress(Exception):
         state = engine._session_state()  # noqa: SLF001 - shared lifecycle boundary
 
-    contract: dict[str, Any] | None = None
     if observation is not None:
         from .session_artifacts import observation_evidence_id
 
-        raw_meta = observation.get("meta")
-        meta: dict[str, Any] = raw_meta if isinstance(raw_meta, dict) else {}
-        stale = data.get("stale_risk") or meta.get("stale_risk")
-        fingerprint = meta.get("fingerprint")
-        contract = {
-            "fingerprint": str(fingerprint) if fingerprint else None,
-            "evidence_id": (
+        contract = build_observation_contract(
+            data,
+            command=cmd,
+            evidence_id=(
                 observation_evidence_id(state.session_id, observation)
                 if state is not None
                 else None
             ),
-            "produced_by": cmd,
-            "reusable": stale is None,
-            "analyze_needed": stale is not None,
-            "reason": str(stale or "fresh settled observation"),
-        }
+        )
         _attach_observation_contract(result, contract)
     elif "action" in data:
-        contract = {
-            "fingerprint": None,
-            "evidence_id": None,
-            "produced_by": cmd,
-            "reusable": False,
-            "analyze_needed": True,
-            "reason": "this result did not contain an observation",
-        }
-        _attach_observation_contract(result, contract)
+        _attach_observation_contract(result, build_observation_contract(data, command=cmd))
 
     artifact_dir = getattr(state, "artifact_dir", None) if state is not None else None
     if not artifact_dir:
@@ -513,26 +520,35 @@ def decorate_result(
 
     if normalized == "analyze" and prior:
         previous = prior[-1]
+        with contextlib.suppress(Exception):
+            previous = journal.review_events(
+                engine.config.cache.dir, serial, [previous], platform=engine.platform.name
+            )[0]
         previous_result = previous.get("result")
         intentionally_different = False
         current_args = events[-1].get("args") if events else {}
         if isinstance(current_args, dict):
             intentionally_different = bool(
-                current_args.get("source") == "vision"
+                current_args.get("source") not in (None, "auto")
                 or current_args.get("query")
                 or current_args.get("with_ocr") is not None
                 or current_args.get("fields")
+                or current_args.get("with_image")
             )
+        fingerprint = emitted_fingerprint(previous_result)
         if (
-            isinstance(previous_result, dict)
-            and previous_result.get("observation")
+            result_has_reusable_observation(previous_result)
             and not intentionally_different
+            and fingerprint
+            and fingerprint == emitted_fingerprint(result)
+            and not _mapping(previous.get("extra")).get("expected_error_code")
+            and not _mapping(events[-1].get("extra") if events else None).get("expected_error_code")
         ):
             return _append(
                 result,
                 {
                     "id": "reuse_observation",
-                    "message": f"{previous.get('cmd')} already returned the current screen",
+                    "message": f"{previous.get('cmd')} already returned this semantic frame",
                     "recommended_call": "Reuse its observation and take the next action.",
                 },
             )

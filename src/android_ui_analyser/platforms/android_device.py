@@ -1994,15 +1994,27 @@ class Uiautomator2Device(AndroidRuntimeBase):
                 state_file.unlink(missing_ok=True)
 
     def set_clock(self, timestamp_ms: int) -> None:
+        from ..clock import verify_clock_readback
+
         dt = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=UTC)
         stamp = dt.strftime("%m%d%H%M%Y.%S")
+        started = time.monotonic()
         try:
-            self._d.shell(f"date {stamp}")
+            # The stamp is UTC; interpreting it in the device's local zone shifts it by hours.
+            result = self._d.shell(f"date -u {stamp}")
         except Exception as exc:
             raise DeviceError(
                 "could not set device clock",
+                code="clock_write_failed",
                 hint="Usually works on emulators/rooted devices only (Maestro travel).",
             ) from exc
+        if getattr(result, "exit_code", 0) != 0:
+            raise DeviceError(
+                "device refused the clock write",
+                code="clock_write_failed",
+                hint="Clock travel requires permission to set system time; the restore point is retained.",
+            )
+        verify_clock_readback(self, timestamp_ms, started)
 
     def get_clock_ms(self) -> int | None:
         try:
@@ -2522,6 +2534,10 @@ def _require_attached(serial: str) -> None:
     )
 
 
+_INVENTORY_IO_TIMEOUT_S = 1.0
+_INVENTORY_ENRICHMENT_BUDGET_S = 5.0
+
+
 def list_devices() -> list[DeviceInfo]:
     """List attached devices via adbutils (a uiautomator2 dependency)."""
     try:
@@ -2533,22 +2549,39 @@ def list_devices() -> list[DeviceInfo]:
         ) from exc
     out: list[DeviceInfo] = []
     try:
+        # The global adbutils client has no inventory timeout, and its property helpers use
+        # a ten-minute shell timeout. A single booting target then holds the host inventory
+        # transaction far beyond an emulator's outer startup deadline. Keep discovery cheap
+        # and bound enrichment independently of how many targets share this ADB server.
+        client = adbutils.AdbClient(socket_timeout=_INVENTORY_IO_TIMEOUT_S)
+        enrichment_deadline = time.monotonic() + _INVENTORY_ENRICHMENT_BUDGET_S
         # ``device_list()`` discards every transport whose state is not exactly ``device``.
         # Preserve offline/unauthorized/booting targets so leasing can distinguish a successful
         # inventory from a target that temporarily vanished; only enrich online targets.
-        for transport in adbutils.adb.list():
+        for transport in client.list(extended=True):
             state = str(transport.state or "unknown")
             tags = transport.tags if isinstance(transport.tags, dict) else {}
             model: str | None = str(tags.get("model") or "") or None
             version: str | None = None
             locale: str | None = None
-            if state == "device":
-                dev = adbutils.adb.device(serial=transport.serial)
+            remaining = enrichment_deadline - time.monotonic()
+            if state == "device" and remaining > 0:
+                dev = client.device(serial=transport.serial)
                 try:
-                    model = dev.prop.model or model
-                    version = dev.getprop("ro.build.version.release") or None
+                    # Passing shell(timeout=...) is insufficient: adbutils.open_shell first
+                    # opens a transport with its independent 600s default. Bound that handshake
+                    # too, then batch the property snapshot on the same bounded connection.
+                    with dev.open_transport(
+                        timeout=min(_INVENTORY_IO_TIMEOUT_S, remaining)
+                    ) as connection:
+                        connection.send_command("shell:getprop")
+                        connection.check_okay()
+                        raw = connection.read_until_close()
+                    properties = dict(re.findall(r"^\[([^\]]+)\]: \[(.*)\]$", str(raw), re.M))
+                    model = properties.get("ro.product.model") or model
+                    version = properties.get("ro.build.version.release") or None
                     locale = parse_locale(
-                        dev.getprop("persist.sys.locale") or dev.getprop("ro.product.locale")
+                        properties.get("persist.sys.locale") or properties.get("ro.product.locale")
                     )
                 except Exception:  # pragma: no cover - target changed during enrichment
                     state = "offline"

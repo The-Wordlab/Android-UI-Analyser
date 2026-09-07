@@ -104,7 +104,9 @@ def test_an_unknown_command_journals_what_was_typed_and_what_came_back(
     if not rows:  # cache dir not honoured in this environment; the unit tests still bind
         return
     row = rows[-1]
-    assert row["request"]["args"]["argv"] == ["definitely-not-a-command"]
+    # An unrecognized token can be a misplaced secret. Keep its shape and the answer,
+    # while known command synonyms remain safe to identify by name.
+    assert row["request"]["args"]["argv"] == ["<redacted>"]
     body = (row["response"].get("result") or {}).get("response_text") or ""
     assert "is not a command" in body, "the row must carry the answer the caller received"
 

@@ -34,6 +34,69 @@ SHELL_ONLY = (
 )
 
 
+def test_unpinned_launch_recovers_the_only_other_declared_entry_in_the_same_call(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    dev = FakeDevice(hierarchy_xml=APPS, package=P, serial="emu-launch-alternate")
+    dev._act = ".ToolsActivity"
+    dev._launcher_activities = [".ToolsActivity", ".MainActivity"]
+    eng = _engine(tmp_path, dev)
+    fresh = eng.analyze(source="hierarchy", with_ocr=False)
+    stale = fresh.model_copy(deep=True)
+    stale.screen.package = "com.android.systemui"
+    monkeypatch.setattr(
+        eng,
+        "_observe",
+        lambda *_args, **_kwargs: ActionResult(
+            ok=True, action="app-launch", observation=stale, observation_present=True
+        ),
+    )
+    attempts: list[str] = []
+
+    def attachment(package: str) -> Any:
+        attempts.append(package)
+        if len(attempts) == 1:
+            raise DeviceError("window did not attach", code="launch_observation_mismatch")
+        return fresh
+
+    monkeypatch.setattr(eng, "_await_launch_hierarchy", attachment)
+    result = eng.app("launch", package=P)
+    assert result.observation is fresh
+    assert result.detail == f"{P}/.MainActivity"
+    assert result.note and "only other declared entry" in result.note
+    assert [call for call in dev.calls if call[0] == "launch_app"] == [
+        ("launch_app", (P,)), ("launch_app", (P, ".MainActivity"))
+    ]
+    assert not any(call[0] in {"stop_app", "install_app"} for call in dev.calls)
+    assert eng._memory is not None
+    assert eng._memory.launch_activity(P) == f"{P}.MainActivity"
+
+
+def test_explicit_entry_mismatch_never_switches_to_another_launcher(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    dev = FakeDevice(hierarchy_xml=APPS, package=P, serial="emu-launch-explicit")
+    dev._launcher_activities = [".ToolsActivity", ".MainActivity"]
+    eng = _engine(tmp_path, dev)
+    stale = eng.analyze(source="hierarchy", with_ocr=False)
+    stale.screen.package = "com.android.systemui"
+    monkeypatch.setattr(
+        eng,
+        "_observe",
+        lambda *_args, **_kwargs: ActionResult(ok=True, action="app-launch", observation=stale),
+    )
+
+    def fail(package: str) -> Any:
+        raise DeviceError("window did not attach", code="launch_observation_mismatch")
+
+    monkeypatch.setattr(eng, "_await_launch_hierarchy", fail)
+    with pytest.raises(DeviceError, match="window did not attach"):
+        eng.app("launch", package=P, activity=".ToolsActivity")
+    assert [call for call in dev.calls if call[0] == "launch_app"] == [
+        ("launch_app", (P, ".ToolsActivity"))
+    ]
+
+
 def test_launch_folds_in_the_screen_it_landed_on(tmp_path: Path) -> None:
     dev = FakeDevice(hierarchy_xml=APPS, package=P, serial="emu-launch")
     eng = _engine(tmp_path, dev)

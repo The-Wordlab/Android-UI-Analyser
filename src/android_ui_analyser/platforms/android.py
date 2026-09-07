@@ -120,10 +120,20 @@ def _runtime_emulator_capabilities(target_id: str) -> dict[str, bool]:
         # A default-port emulator may not disclose ``-port``. Unknown is not proof that it can
         # satisfy a requested visible/audio session, so AUA will provision a known-good instance.
         return {"emulator": True, "headed": False, "audio": False}
+    audio = False
+    if "-no-audio" not in command:
+        from .. import mic
+
+        # An output-enabled process without an authenticated input endpoint cannot satisfy
+        # session --audio. Probe discovery here so an unpinned session selects/provisions a
+        # usable target; the session itself verifies connectivity and auth before app setup.
+        with contextlib.suppress(DeviceError, UsageError):
+            mic.discover_emulator_endpoint(target_id)
+            audio = True
     return {
         "emulator": True,
         "headed": "-no-window" not in command,
-        "audio": "-no-audio" not in command,
+        "audio": audio,
     }
 
 

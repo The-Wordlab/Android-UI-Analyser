@@ -143,9 +143,7 @@ def _optional_mic_target(
 def _dump(result: Any) -> Any:
     # Publish at the boundary: `model_dump` is the internal form and still carries frame
     # ordinals, and this is the last place before the payload reaches an agent.
-    return publish_ids(
-        result.model_dump(mode="json") if hasattr(result, "model_dump") else result
-    )
+    return publish_ids(result.model_dump(mode="json") if hasattr(result, "model_dump") else result)
 
 
 def _engine_method(engine: Engine, name: str) -> Any:
@@ -154,8 +152,8 @@ def _engine_method(engine: Engine, name: str) -> Any:
 
 
 _WITH_IMAGE_PROP: dict[str, Any] = {
-    "type": "boolean",
-    "description": "Also attach a post-action screenshot (overrides configure default).",
+    "type": ["boolean", "string"],
+    "description": "Keep the returned frame (true or destination path); false disables output. Overrides configure default without another capture.",
 }
 _OBSERVE_FIELDS_PROP: dict[str, Any] = {
     "type": "string",
@@ -798,6 +796,7 @@ def _tool_definitions() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "with_image": _WITH_IMAGE_PROP,
                     "predicate": {
                         "type": "string",
                         "description": "For example 'rid:result,!text:Loading'.",
@@ -1220,6 +1219,7 @@ def _tool_definitions() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "with_image": _WITH_IMAGE_PROP,
                     "for_": {"type": "string"},
                     "idle": {"type": "boolean", "default": False},
                     "timeout": {"type": "integer", "default": 5000},
@@ -1235,6 +1235,7 @@ def _tool_definitions() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "with_image": _WITH_IMAGE_PROP,
                     "timeout_ms": {"type": "integer", "default": 15000},
                     "interval_ms": {"type": "integer", "default": 150},
                     "observe": _OBSERVE_PROP,
@@ -1371,6 +1372,7 @@ def _tool_definitions() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "with_image": _WITH_IMAGE_PROP,
                     "interval": {"type": "integer", "default": 200},
                     "settle": {"type": "integer", "default": 600},
                     "timeout": {"type": "integer", "default": 30000},
@@ -1485,24 +1487,34 @@ def _tool_definitions() -> list[types.Tool]:
             name="teardown_run",
             description="Replay safe pending undos; force bypasses leases, never boot/configuration proof.",
             inputSchema={
-                "type": "object", "properties": {
+                "type": "object",
+                "properties": {
                     "target_id": {"type": "string"},
                     "force": {"type": "boolean", "default": False},
                     "dry_run": {"type": "boolean", "default": False},
-                }, "additionalProperties": False,
+                },
+                "additionalProperties": False,
             },
         ),
         types.Tool(
             name="teardown_discard",
-            description=("Explicitly abandon named stale undos on an unleased target. Archives evidence "
-                         "but does not connect to or restore the device. Requires human authorization."),
+            description=(
+                "Explicitly abandon named stale undos on an unleased target. Archives evidence "
+                "but does not connect to or restore the device. Requires human authorization."
+            ),
             inputSchema={
-                "type": "object", "properties": {
+                "type": "object",
+                "properties": {
                     "target_id": {"type": "string", "minLength": 1},
-                    "keys": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
+                    "keys": {
+                        "type": "array",
+                        "items": {"type": "string", "minLength": 1},
+                        "minItems": 1,
+                    },
                     "reason": {"type": "string", "minLength": 1},
                     "confirmed": {"type": "boolean", "default": False},
-                }, "required": ["target_id", "keys", "reason", "confirmed"],
+                },
+                "required": ["target_id", "keys", "reason", "confirmed"],
                 "additionalProperties": False,
             },
         ),
@@ -2100,6 +2112,10 @@ def _tool_definitions() -> list[types.Tool]:
                         "type": "string",
                         "description": "Infer region from a resource-id's last-known center.",
                     },
+                    "evidence_ref": {
+                        "type": "string",
+                        "description": "Exact capture_evidence.ref from an action/job; excludes seconds/since.",
+                    },
                 },
                 "additionalProperties": False,
             },
@@ -2115,6 +2131,10 @@ def _tool_definitions() -> list[types.Tool]:
                     "since": {"type": "string"},
                     "format": {"type": "string", "description": "gif|mp4"},
                     "fps": {"type": "number"},
+                    "evidence_ref": {
+                        "type": "string",
+                        "description": "Reuse exact action/job frame window, including a previous sheet's window.",
+                    },
                 },
                 "required": ["path"],
                 "additionalProperties": False,
@@ -2148,6 +2168,10 @@ def _tool_definitions() -> list[types.Tool]:
                         "default": 3,
                     },
                     "timestamps": {"type": "boolean", "default": True},
+                    "evidence_ref": {
+                        "type": "string",
+                        "description": "Exact capture_evidence.ref; the first read/export fixes the frame list.",
+                    },
                 },
                 "required": ["path"],
                 "additionalProperties": False,
@@ -2162,6 +2186,10 @@ def _tool_definitions() -> list[types.Tool]:
                     "seconds": {"type": "number"},
                     "since": {"type": "string"},
                     "llm": {"type": "boolean"},
+                    "evidence_ref": {
+                        "type": "string",
+                        "description": "Exact capture_evidence.ref from an action/job; excludes seconds/since.",
+                    },
                 },
                 "additionalProperties": False,
             },
@@ -3048,6 +3076,7 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 match=args.get("match", "contains"),
                 ignore_case=bool(args.get("ignore_case", False)),
                 observe=True,
+                with_image=img,
             )
         )
     if name == "flow_list":
@@ -3181,6 +3210,7 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 idle=args.get("idle", False),
                 timeout_ms=args.get("timeout", 5000),
                 observe=args.get("observe", True),
+                with_image=img,
             )
         )
     if name == "back_until_and_analyze":
@@ -3200,6 +3230,7 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 timeout_ms=int(args.get("timeout_ms", 15000)),
                 interval_ms=args.get("interval_ms"),
                 observe=args.get("observe", True),
+                with_image=img,
             )
         )
     if name == "screenshot":
@@ -3264,6 +3295,7 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 settle_ms=int(args.get("settle", 600)),
                 timeout_ms=int(args.get("timeout", 30000)),
                 observe=args.get("observe", True),
+                with_image=img,
             )
         )
     if name == "goto":
@@ -3305,12 +3337,15 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         return engine.teardown_status()
     if name == "teardown_run":
         return engine.teardown_run(
-            serial=args.get("target_id"), force=bool(args.get("force", False)),
+            serial=args.get("target_id"),
+            force=bool(args.get("force", False)),
             dry_run=bool(args.get("dry_run", False)),
         )
     if name == "teardown_discard":
         return engine.teardown_discard(
-            serial=str(args["target_id"]), keys=list(args["keys"]), reason=str(args["reason"]),
+            serial=str(args["target_id"]),
+            keys=list(args["keys"]),
+            reason=str(args["reason"]),
             confirmed=bool(args.get("confirmed", False)),
         )
     if name == "virtual_target_list":
@@ -3324,9 +3359,7 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
             "animations": bool(args.get("animations", False)),
             "wait_s": float(args.get("wait", 120)),
             "owner": args.get("owner"),
-            "parallel": bool(
-                args.get("parallel", name == "virtual_target_provision")
-            ),
+            "parallel": bool(args.get("parallel", name == "virtual_target_provision")),
             "options": dict(args.get("options") or {}),
         }
         if name == "virtual_target_provision":
@@ -3577,6 +3610,7 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 since=args.get("since"),
                 region=args.get("region"),
                 where_rid=args.get("where_rid"),
+                evidence_ref=args.get("evidence_ref"),
             )
         )
     if name == "capture_export":
@@ -3587,6 +3621,7 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 since=args.get("since"),
                 fmt=args.get("format", "gif"),
                 fps=float(args.get("fps") or 8.0),
+                evidence_ref=args.get("evidence_ref"),
             )
         )
     if name == "capture_sheet":
@@ -3598,6 +3633,7 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 max_frames=int(args.get("max_frames", 6)),
                 columns=int(args.get("columns", 3)),
                 timestamps=bool(args.get("timestamps", True)),
+                evidence_ref=args.get("evidence_ref"),
             )
         )
     if name == "capture_explain":
@@ -3606,6 +3642,7 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 seconds=args.get("seconds"),
                 since=args.get("since"),
                 llm=bool(args.get("llm", False)),
+                evidence_ref=args.get("evidence_ref"),
             )
         )
     if name == "dev_profile":
@@ -4218,9 +4255,7 @@ def build_server(engine: Engine) -> Server:
                 meta_spec = args_in.get("observe_meta")
                 if meta_spec is None:
                     meta_spec = getattr(engine.config.output, "observation_meta", None)
-                view = Projection.for_observation(
-                    spec, meta=meta_spec, fmt=OutputFormat.json
-                )
+                view = Projection.for_observation(spec, meta=meta_spec, fmt=OutputFormat.json)
                 payload = trim_observation_payload(payload, view, fmt=OutputFormat.json)
             if annotation_warnings and isinstance(payload, dict):
                 payload["annotation_warnings"] = annotation_warnings

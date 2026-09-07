@@ -798,12 +798,14 @@ def _undo_discard_recording(ctx: UndoContext, args: dict[str, Any]) -> str:
 
 
 def _undo_set_clock(ctx: UndoContext, args: dict[str, Any]) -> str:
+    from .clock import restore_clock_verified
+
     previous = args.get("timestamp_ms")
     if not isinstance(previous, int):
         raise RuntimeError("saved clock is missing; undo remains pending")
     # A clock set N seconds ago must land back on *now*, not on the instant it was saved.
     drift_ms = int((time.time() - float(args.get("saved_at") or time.time())) * 1000)
-    ctx.require_device("device.clock").set_clock(previous + max(0, drift_ms))
+    restore_clock_verified(ctx.require_device("device.clock"), previous + max(0, drift_ms))
     return "wall clock restored"
 
 

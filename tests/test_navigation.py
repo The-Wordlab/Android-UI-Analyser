@@ -16,7 +16,6 @@ from unittest.mock import MagicMock
 
 from typer.testing import CliRunner
 
-import android_ui_analyser.engine as engine_mod
 from android_ui_analyser.cli import app
 from android_ui_analyser.daemon import DaemonClient, dispatch, stop
 from android_ui_analyser.device import Uiautomator2Device
@@ -551,18 +550,9 @@ def test_observe_snapshot_does_not_pollute_memory(tmp_path: Path) -> None:
     assert set(store.load(P).screens) == before  # no new screen written by the snapshot
 
 
-def test_cli_tap_observe(monkeypatch) -> None:
+def test_cli_tap_observe(fake_cli_device) -> None:
     dev = FakeDevice(hierarchy_xml=HOME, package=P, serial="emu-cli-obs")
-
-    def connect_selected(serial=None):
-        dev.serial = serial or dev.serial
-        return dev
-
-    monkeypatch.setattr(
-        engine_mod.Engine,
-        "_connect_target",
-        lambda _engine, serial=None: connect_selected(serial),
-    )
+    fake_cli_device(dev)
     a = runner.invoke(app, ["--format", "compact", "analyze", "--source", "hierarchy"])
     tid = next(e["id"] for e in json.loads(a.stdout)["elements"] if e.get("text") == "Apps")
     r = runner.invoke(app, ["--format", "compact", "tap-and-analyze", str(tid)])
@@ -628,7 +618,7 @@ def test_memory_cfg_suggestion_knobs() -> None:
 # --------------------------------------------------------------- CLI: aua goto
 
 
-def test_cli_goto_drives_and_unknown(tmp_path: Path, monkeypatch) -> None:
+def test_cli_goto_drives_and_unknown(tmp_path: Path, fake_cli_device) -> None:
     # The CLI reads memory from AUA_MEMORY__DIR (the autouse isolation dir), so build there.
     store = AppMemoryStore(make_config().memory)
     store.record_screen(package=P, elements=_elements(HOME), activity=".H", name_hint="home")
@@ -639,15 +629,7 @@ def test_cli_goto_drives_and_unknown(tmp_path: Path, monkeypatch) -> None:
 
     dev = ScriptedDevice([HOME, APPS, REPORTS], package=P, serial="emu-cli-goto")
 
-    def connect_selected(serial=None):
-        dev.serial = serial or dev.serial
-        return dev
-
-    monkeypatch.setattr(
-        engine_mod.Engine,
-        "_connect_target",
-        lambda _engine, serial=None: connect_selected(serial),
-    )
+    fake_cli_device(dev)
 
     ok = runner.invoke(app, ["--format", "compact", "goto", "reports"])
     assert ok.exit_code == 0, ok.stderr
@@ -819,7 +801,7 @@ def test_shortest_path_prefers_steps_edge_over_legacy(tmp_path: Path) -> None:
     assert path[0].steps, "the replayable edge must win the tie-break"
 
 
-def test_cli_goto_accepts_allow_destructive(tmp_path: Path, monkeypatch) -> None:
+def test_cli_goto_accepts_allow_destructive(tmp_path: Path, fake_cli_device) -> None:
     from android_ui_analyser.memory import RouteStep
 
     store = AppMemoryStore(make_config().memory)
@@ -828,15 +810,7 @@ def test_cli_goto_accepts_allow_destructive(tmp_path: Path, monkeypatch) -> None
     store.record_route(P, "c", "prefs", steps=[RouteStep(kind="tap", label="Delete my account")])
     dev = ScriptedDevice([DANGER_HOME, PREFS], package=P, serial="emu-cli-guard")
 
-    def connect_selected(serial=None):
-        dev.serial = serial or dev.serial
-        return dev
-
-    monkeypatch.setattr(
-        engine_mod.Engine,
-        "_connect_target",
-        lambda _engine, serial=None: connect_selected(serial),
-    )
+    fake_cli_device(dev)
 
     refused = runner.invoke(app, ["--format", "compact", "goto", "prefs"])
     assert refused.exit_code == 1

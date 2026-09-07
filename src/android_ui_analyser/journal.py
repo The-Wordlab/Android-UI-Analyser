@@ -16,6 +16,7 @@ import os
 import threading
 import time
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -483,6 +484,9 @@ def summarize_result(result: Any) -> Any:
             "goal_progress",
             "advice",
             "stale_risk",
+            "observation_contract",
+            "observation_empty",
+            "settled_unmet",
             "arrival",
             "verified",
             "finished",
@@ -509,6 +513,9 @@ def summarize_result(result: Any) -> Any:
                     "package",
                     "capture_hint",
                     "path",
+                    "stale_risk",
+                    "observation_contract",
+                    "arrival_state",
                 )
                 if k in meta
             }
@@ -527,6 +534,11 @@ def summarize_result(result: Any) -> Any:
                 if isinstance(obs.get("meta"), dict)
                 else None,
             }
+            obs_meta = obs.get("meta")
+            if isinstance(obs_meta, dict):
+                for key in ("stale_risk", "observation_contract"):
+                    if key in obs_meta:
+                        slim.setdefault(key, _truncate(obs_meta[key], 200))
         raw = json.dumps(slim, ensure_ascii=False, default=str)
         if len(raw) > _MAX_RESULT:
             return _truncate(slim, 120)
@@ -678,6 +690,10 @@ def record(
             with contextlib.suppress(OSError):
                 _rotate(path, _MAX_FILE_BYTES)
             _append_private(path, json.dumps(event, ensure_ascii=False, default=str) + "\n")
+        with contextlib.suppress(Exception):
+            from .cli_invocations import note_record
+
+            note_record(event.get("invocation_id"))
         # Keep an owned virtual target's idle supervisor from stopping it mid-session. The
         # heartbeat is platform-neutral coordination state; each platform decides how its own
         # supervisor consumes it.
@@ -771,6 +787,91 @@ def read_detail(
                     continue
                 return row
     return None
+
+
+def _reverse_lines(path: Path) -> Iterator[str]:
+    """Read recent journal revisions without scanning old frames on every CLI lint."""
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        cursor = handle.tell()
+        pending = b""
+        while cursor:
+            length = min(64 * 1024, cursor)
+            cursor -= length
+            handle.seek(cursor)
+            rows = (handle.read(length) + pending).split(b"\n")
+            pending = rows.pop(0)
+            for row in reversed(rows):
+                if row:
+                    yield row.decode("utf-8", errors="replace")
+        if pending:
+            yield pending.decode("utf-8", errors="replace")
+
+
+def review_events(
+    cache_dir: str | Path,
+    serial: str | None,
+    events: list[dict[str, Any]],
+    *,
+    platform: str = LEGACY_PLATFORM,
+) -> list[dict[str, Any]]:
+    """Use final emitted views for review, reading each bounded detail file only once.
+
+    The compact index precedes CLI predicate adoption and projection. Its result can therefore
+    differ from the screen the caller actually received. Keep original timing/outcome and
+    invocation correlation, but use the latest retained, redacted response and request context.
+    Missing/rotated details leave the compact event usable as a conservative fallback.
+    """
+    wanted = {event.get("detail_id") for event in events if event.get("detail_id")}
+    if not wanted:
+        return events
+    normalized_platform = str(platform).strip().lower()
+    paths = [journal_detail_path(cache_dir, serial, platform=normalized_platform)]
+    host = journal_detail_path(cache_dir, None, platform=normalized_platform)
+    if host not in paths:
+        paths.append(host)
+    details: dict[str, dict[str, Any]] = {}
+    for current in paths:
+        for path in (current, current.with_suffix(current.suffix + ".1")):
+            try:
+                for line in _reverse_lines(path):
+                    with contextlib.suppress(json.JSONDecodeError, TypeError):
+                        row = json.loads(line)
+                        if not isinstance(row, dict) or row.get("detail_id") not in wanted:
+                            continue
+                        if serial and row.get("serial") not in (None, serial, ""):
+                            continue
+                        if str(row.get("platform") or LEGACY_PLATFORM).lower() != normalized_platform:
+                            continue
+                        details.setdefault(str(row["detail_id"]), row)
+                        if wanted <= details.keys():
+                            break
+            except OSError:
+                continue
+            if wanted <= details.keys():
+                break
+        if wanted <= details.keys():
+            break
+    hydrated: list[dict[str, Any]] = []
+    for event in events:
+        detail = details.get(str(event.get("detail_id")))
+        if not detail:
+            hydrated.append(event)
+            continue
+        request = detail.get("request")
+        response = detail.get("response")
+        if not isinstance(request, dict) or request.get("cmd") != event.get("cmd"):
+            hydrated.append(event)
+            continue
+        row = dict(event)
+        if isinstance(response, dict) and isinstance(response.get("result"), dict):
+            row["result"] = response["result"]
+        if isinstance(request.get("args"), dict):
+            row["args"] = request["args"]
+        if isinstance(request.get("client"), dict):
+            row["client"] = request["client"]
+        hydrated.append(row)
+    return hydrated
 
 
 def record_emitted_response(

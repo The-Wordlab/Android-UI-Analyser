@@ -29,6 +29,7 @@ from typer.core import TyperCommand, TyperGroup
 
 from . import __version__
 from .assertions import parse_selector_expression
+from .cli_invocations import CommandAccounting
 from .config import (
     Config,
     default_config_yaml,
@@ -37,7 +38,6 @@ from .config import (
     user_config_path,
 )
 from .engine import (
-    _AWAIT_PREDICATE_HELD,
     Engine,
     _parse_await_terms,
     _parse_point,
@@ -97,7 +97,15 @@ _LOG_LEVELS = {
 }
 
 
-class AnnotateCommand(TyperCommand):
+class JournalCommand(CommandAccounting, TyperCommand):
+    """Account for plain CLI help and parsing without accessing a device."""
+
+
+class JournalGroup(CommandAccounting, TyperGroup):
+    """Account for nested CLI groups as part of their root invocation."""
+
+
+class AnnotateCommand(JournalCommand):
     """A Typer command whose ``--annotate`` / ``--emit-skill`` option takes an *optional* value.
 
     Typer (0.26) drops Click's ``flag_value``, so a bare ``--annotate`` would error
@@ -349,12 +357,25 @@ def _journal_cli_recovery(
     with contextlib.suppress(Exception):
         from . import journal as journal_mod
         from . import leases
+        from .cli_invocations import Invocation, _safe_argv, current, scrub_request_values
 
+        invocation = current()
+        privacy_context = invocation or Invocation(argv=list(argv or []), context=ctx)
+
+        def safe_recovery(value: Any) -> Any:
+            # Unknown syntax is untyped and can itself be a misplaced secret. Known
+            # semantic preflights (e.g. an absence-only UI wait) retain their exact recovery
+            # predicate, as normal AUA observations also retain UI labels.
+            return (
+                scrub_request_values(privacy_context, value)
+                if error is not None and error.code == "unknown_command"
+                else value
+            )
         opts = ctx.obj if isinstance(ctx.obj, GlobalOpts) else None
         cfg = opts.load() if opts is not None else load_config()
         owner = leases.resolve_owner(opts.owner if opts is not None else None)
         command_path = str(getattr(ctx, "command_path", None) or "aua")
-        error_value = error.to_dict().get("error") if error is not None else None
+        error_value = safe_recovery(error.to_dict().get("error") if error is not None else None)
         result: dict[str, Any] = {
             "ok": ok,
             "action": "cli-recovery",
@@ -362,9 +383,9 @@ def _journal_cli_recovery(
         }
         exact_call = recommended_call or getattr(error, "recommended_call", None)
         if exact_call:
-            result["recommended_call"] = exact_call
+            result["recommended_call"] = safe_recovery(exact_call)
         if response_text:
-            text = str(response_text)
+            text = str(safe_recovery(response_text))
             result["response_text"] = text[:_JOURNAL_RESPONSE_CAP]
             result["response_lines"] = text.count("\n") + 1
             if len(text) > _JOURNAL_RESPONSE_CAP:
@@ -375,12 +396,12 @@ def _journal_cli_recovery(
             platform=cfg.device.platform,
             source="cli",
             cmd=f"cli_{event}",
-            args={"command": command_path, "argv": redacted_argv(argv or [])},
+            args={"command": command_path, "argv": _safe_argv(privacy_context)},
             ok=ok,
             result=result,
             error=error_value if isinstance(error_value, dict) else None,
             extra={
-                "invocation_id": globals().get("_INVOCATION_ID") or uuid.uuid4().hex,
+                "invocation_id": (invocation.invocation_id if invocation else uuid.uuid4().hex),
                 "cli_event": event,
             },
             owner=owner,
@@ -398,7 +419,10 @@ def _run(ctx: typer.Context, fn: Callable[[Engine, OutputFormat], T]) -> T:
     opts = _opts(ctx)
     try:
         global _INVOCATION_ID, _CLI_OUTPUT_FORMAT, _CLI_OBSERVE_FIELDS_SPEC
-        _INVOCATION_ID = uuid.uuid4().hex
+        from .cli_invocations import current
+
+        invocation = current()
+        _INVOCATION_ID = invocation.invocation_id if invocation else uuid.uuid4().hex
         _CLI_JOURNAL_CONTEXTS.clear()
         cfg_fmt = opts.fmt()
         _CLI_OUTPUT_FORMAT = cfg_fmt
@@ -521,6 +545,13 @@ def _run(ctx: typer.Context, fn: Callable[[Engine, OutputFormat], T]) -> T:
             finally:
                 engine.release_device_use()
     except AuaError as err:
+        from .cli_invocations import current
+
+        invocation = current()
+        if invocation is not None:
+            error_payload = err.to_dict().get("error")
+            if isinstance(error_payload, dict):
+                invocation.error = error_payload
         emit_error(err)
         raise typer.Exit(int(err.exit_code)) from err
     except typer.Exit:
@@ -997,9 +1028,20 @@ def _record_cli_emitted(
     result: Any,
     *,
     client: dict[str, Any] | None = None,
+    artifact_result: Any = None,
 ) -> None:
+    from .cli_invocations import emitted
+
+    emitted(result)
     if context is None:
         return
+    if _ENGINE is not None and (context.client.get("until") or _UNTIL is not None):
+        with contextlib.suppress(Exception):
+            from .coaching import finalize_session_artifact
+
+            finalize_session_artifact(
+                _ENGINE, result, invocation_id=context.invocation_id, evidence_result=artifact_result
+            )
     with contextlib.suppress(Exception):
         from . import journal as journal_mod
 
@@ -1111,7 +1153,12 @@ def _await_timeout_note(predicate: str, timeout_ms: int, result: Any) -> str:
     )
 
 
-def _await_until(result: Any, *, journal_privacy_cmd: str | None = None) -> Any:
+def _await_until(
+    result: Any,
+    *,
+    journal_privacy_cmd: str | None = None,
+    with_image: bool | str | None = None,
+) -> Any:
     """Honour a global ``--until``: wait for the predicate, then adopt *that* screen.
 
     The post-action settle can only ever wait ~1.1s (``_await_post_action_ready``), stretched
@@ -1143,6 +1190,7 @@ def _await_until(result: Any, *, journal_privacy_cmd: str | None = None) -> Any:
             poll_ms=poll_ms,
             observe=True,
             adopt_action=True,
+            **({"with_image": with_image} if with_image is not None else {}),
             _journal_privacy_cmd=journal_privacy_cmd,
         )
         # This wait is folded into the action response below; it is journaled as its own
@@ -1154,6 +1202,7 @@ def _await_until(result: Any, *, journal_privacy_cmd: str | None = None) -> Any:
         return result
     if isinstance(awaited, dict):
         awaited = _rehydrate(awaited)
+    previous_contract = getattr(result, "observation_contract", None)
     previous_change = getattr(result, "change", None)
     for attr in (
         "await_outcome",
@@ -1162,6 +1211,10 @@ def _await_until(result: Any, *, journal_privacy_cmd: str | None = None) -> Any:
         "elapsed_ms",
         "observation",
         "observation_present",
+        "observation_empty",
+        "settled_unmet",
+        "arrival",
+        "stale_risk",
         "known_screen",
         "action_diff_summary",
         "change",
@@ -1179,18 +1232,31 @@ def _await_until(result: Any, *, journal_privacy_cmd: str | None = None) -> Any:
     if getattr(result, "await_outcome", None) == "timeout":
         with contextlib.suppress(Exception):
             result.note = _await_timeout_note(predicate, timeout_ms, result)
-    # The action's own settle-derived caveat described a screen we have since re-read. An
-    # absence-only predicate re-read it just as thoroughly; what it cannot prove is arrival,
-    # which `await_outcome` reports and `stale_risk` was never about. (Action-bound `--until`
-    # still requires a positive term, so this only matters if that ever changes.)
-    if getattr(result, "await_outcome", None) in _AWAIT_PREDICATE_HELD:
-        with contextlib.suppress(Exception):
-            result.stale_risk = None
+    # All frame caveats now come from the wait. A satisfied predicate must not erase a stale
+    # provenance caveat on that final read, or retain a transition verdict from the early one.
+    if not getattr(result, "stale_risk", None):
         detail = getattr(result, "detail", None)
         if isinstance(detail, str) and "stale_risk" in detail:
             cleaned = detail.replace("stale_risk", "").strip()
             with contextlib.suppress(Exception):
                 result.detail = cleaned or None
+    from .coaching import _attach_observation_contract
+    from .observation_contract import build_observation_contract
+
+    data = _action_dict(result)
+    if data is not None:
+        awaited_contract = getattr(awaited, "observation_contract", None)
+        _attach_observation_contract(
+            result,
+            build_observation_contract(
+                data,
+                command=str(
+                    getattr(previous_contract, "produced_by", None)
+                    or getattr(result, "action", "await_predicate")
+                ),
+                evidence_id=getattr(awaited_contract, "evidence_id", None),
+            ),
+        )
     return result
 
 
@@ -1201,13 +1267,28 @@ def _emit(
     _journal_context: _CliJournalContext | None = None,
 ) -> None:
     """Render a pydantic result (``.render``) or a plain dict (daemon path) to stdout."""
+    from .cli_invocations import emitted as note_emitted
+
+    note_emitted(result)
     journal_context = _journal_context or _take_cli_journal(result)
     if isinstance(result, dict):
         result = _rehydrate(result)
     result = _await_until(
         result,
         journal_privacy_cmd=journal_context.cmd if journal_context is not None else None,
+        with_image=(
+            journal_context.args.get("with_image")
+            if journal_context is not None
+            and isinstance(journal_context.args.get("with_image"), (bool, str))
+            else None
+        ),
     )
+    from .observation_contract import refresh_observation_contract
+
+    payload = _action_dict(result)
+    if payload is not None:
+        refresh_observation_contract(payload)
+        result = _rehydrate(payload)
     result = _caller_turn(result)
     projected = _project_observation(result, fmt)
     if _ANNOTATION_WARNINGS:
@@ -1233,11 +1314,11 @@ def _emit(
                     _OBSERVATION_VIEW,
                     fmt=OutputFormat.json,
                 )
-            _record_cli_emitted(journal_context, journal_payload)
+            _record_cli_emitted(journal_context, journal_payload, artifact_result=result)
             typer.echo(render_action_tsv(payload, _OBSERVATION_VIEW))
             return
     if projected is not None:
-        _record_cli_emitted(journal_context, projected)
+        _record_cli_emitted(journal_context, projected, artifact_result=result)
         _echo_json(projected, fmt)
         return
     if hasattr(result, "render"):
@@ -1247,10 +1328,10 @@ def _emit(
             import json
 
             emitted = json.loads(rendered)
-        _record_cli_emitted(journal_context, emitted)
+        _record_cli_emitted(journal_context, emitted, artifact_result=result)
         typer.echo(rendered)
         return
-    _record_cli_emitted(journal_context, result)
+    _record_cli_emitted(journal_context, result, artifact_result=result)
     _echo_json(result, fmt)
 
 
@@ -1327,29 +1408,10 @@ def _journal_serial_without_device(engine: Engine) -> str | None:
 
 
 def _previous_response_invited_a_reread(prev: dict[str, Any]) -> bool:
-    """Did the previous action itself admit its observation may not be usable?
+    """Use the same readiness/reuse decision as the response producer and review."""
+    from .observation_contract import result_has_reusable_observation
 
-    Two admissions license the follow-up ``analyze`` this lint would otherwise scold
-    (journalled 2026-08-22: a tap returned a transitional frame as the settled screen, the
-    recovery ``analyze`` was warned off as redundant — the tool punishing a caller for
-    recovering from the tool's own admitted uncertainty):
-
-    * ``stale_risk`` — the engine said the observation may predate the action, be
-      mid-transition, or be an unrendered/loading destination. It survives the journal's
-      slim record (``summarize_result`` keeps it top-level).
-    * an empty observation — its note literally says "Re-read with `analyze`". The slim
-      record carries ``elements_count``; the in-process shape carries ``elements``. An
-      observation stating neither makes no emptiness claim and keeps the lint.
-    """
-    if prev.get("stale_risk"):
-        return True
-    obs = prev.get("observation")
-    if isinstance(obs, dict):
-        if "elements_count" in obs:
-            return not obs.get("elements_count")
-        if "elements" in obs:
-            return not obs.get("elements")
-    return False
+    return not result_has_reusable_observation(prev)
 
 
 def _warn_if_redundant_analyze(engine: Engine, args: dict[str, Any] | None = None) -> None:
@@ -1366,6 +1428,9 @@ def _warn_if_redundant_analyze(engine: Engine, args: dict[str, Any] | None = Non
             serial,
             limit=4,
             platform=_selected_platform_name(engine),
+        )
+        events = journal_mod.review_events(
+            cfg.cache.dir, serial, events, platform=_selected_platform_name(engine)
         )
     except Exception:  # pragma: no cover - best effort
         return
@@ -1390,20 +1455,16 @@ def _warn_if_redundant_analyze(engine: Engine, args: dict[str, Any] | None = Non
         action = "session start" if previous.get("cmd") == "session_start" else None
     if action is None:
         return
-    # If the user already asked for an intentionally different view (query/source), do not warn.
-    latest_args = latest.get("args") or {}
-    if latest_args.get("source") == "vision" or latest_args.get("query"):
+    from .session import _diagnostic_read, _expected_probe, _review_fingerprint
+
+    if _diagnostic_read(latest) or _expected_probe(latest) or _expected_probe(previous):
         return
-    if latest_args.get("with_ocr") is not None or latest_args.get("fields"):
+    fingerprint = _review_fingerprint(previous)
+    if not fingerprint or fingerprint != _review_fingerprint(latest):
         return
     logger.warning(
-        "redundant analyze right after %s: that action already returned `observation` (id "
-        "space is already in the action response). Prefer using the previous `observation` and "
-        "running analyze only when you need a different view. If you are re-reading because the "
-        "screen had not settled yet, do not sleep-then-analyze: re-run the action with "
-        "`--until 'text:<label>,!text:Loading'`, which waits and returns the "
-        "settled screen in the same call; for network-driven content use "
-        "`aua wait-and-analyze --after-change`.",
+        "analyze returned the same semantic frame already supplied by %s. Reuse its "
+        "observation for the next control; request another view when the verification needs it.",
         action,
     )
 
@@ -1414,17 +1475,10 @@ _WAIT_COMMANDS = frozenset({"await_predicate", "wait_stable", "wait_changed", "w
 
 
 def _warn_if_wait_could_have_been_until(engine: Engine, waited_for: str | None) -> None:
-    """Soft lint: a settle-wait straight after an action is a `--until` the caller did not know.
+    """Mention already-proven positive evidence without judging a future wait as waste.
 
-    Measured on a fresh agent (2026-08-10): it typed, then ran `wait-and-analyze --after-change`
-    to let the results land — 1851ms + 3762ms across two calls, where folding the same wait into
-    `input-and-analyze --until 'text:No apps found'` took 2015ms in one. `--after-change` cannot
-    do better: with no predicate it has to observe the screen go quiet, while `--until` returns
-    the moment the thing arrives.
-
-    It reached for `--after-change` because nothing had told it `--until` exists — the
-    redundant-analyze lint only fires on `analyze`, and `wait-and-analyze --help` documents
-    `--for`/`--for-stable`/`--changed` but not the global flag that replaces them here.
+    This runs before the new wait. A prior wait may have proved appearance while this one
+    verifies later dismissal, so its command name alone cannot establish redundancy.
     """
     cfg = engine.config
     serial = _journal_serial_without_device(engine)
@@ -1437,49 +1491,33 @@ def _warn_if_wait_could_have_been_until(engine: Engine, waited_for: str | None) 
             limit=4,
             platform=_selected_platform_name(engine),
         )
+        events = journal_mod.review_events(
+            cfg.cache.dir, serial, events, platform=_selected_platform_name(engine)
+        )
     except Exception:  # pragma: no cover - best effort
         return
-    # Unlike the redundant-analyze lint, this runs BEFORE its own command is journaled, so the
-    # call being followed is the newest entry, not the one behind it.
-    if not events:
+    if not events or not waited_for:
         return
     previous = events[-1]
     if not previous.get("ok"):
         return
     if not _same_caller(engine, previous):
         return
-    # A global `--until` is journaled as its own `await_predicate` entry, so the newest entry
-    # after `tap-and-analyze --until X` is the await, not the tap. `await_outcome` never reaches
-    # the journal at all — it is attached to the emitted result — so the *entry kind* is the only
-    # usable signal that the caller already waited.
-    if previous.get("cmd") in _WAIT_COMMANDS:
-        logger.warning(
-            "the call before this already waited%s — you were handed the settled screen. Act on "
-            "that observation instead of re-reading it. When you do need to wait, name the "
-            "element you are about to act on (`--until 'rid:<target>'`), which returns as soon as "
-            "that element exists; a screen-wide predicate like `!text:Loading` waits for "
-            "EVERYTHING on the page — measured 25.3s on a streaming feed against 2.3s for the "
-            "element that was already there.",
-            " with `--until`" if previous.get("cmd") == "await_predicate" else "",
-        )
-        return
     prev = previous.get("result")
-    if not isinstance(prev, dict) or not prev.get("observation"):
+    if not isinstance(prev, dict) or _previous_response_invited_a_reread(prev):
         return
-    action = prev.get("action")
-    if not isinstance(action, str):
+    from .session import _expected_probe
+
+    if _expected_probe(previous) or prev.get("await_outcome") != "satisfied":
         return
-    predicate = f"text:{waited_for}" if waited_for else "rid:<the element you will act on next>"
-    logger.warning(
-        "this wait follows `%s`, which already observed the screen. If you know what you are "
-        "waiting for, pass it to the action instead: `%s ... --until '%s'` waits and returns the "
-        "settled screen in ONE call, and reports `await_outcome` so you can tell arrived from "
-        "timed-out. Name the element you are about to act on rather than the whole screen: a "
-        "predicate-less settle wait, or a screen-wide one like `!text:Loading`, waits for every "
-        "last thing on the page.",
-        action,
-        f"{action}-and-analyze" if not action.endswith("-and-analyze") else action,
-        predicate,
+    prior_args = previous.get("args") or {}
+    client = previous.get("client") or {}
+    if (prior_args.get("predicate") or client.get("until")) != f"text:{waited_for}":
+        return
+    logger.info(
+        "the previous observation already satisfied text:%s; reuse it if that is all this "
+        "check needs. A separate wait can still verify a later behavior.",
+        waited_for,
     )
 
 
@@ -1819,6 +1857,7 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
     matching :class:`AuaError` (it is the answer, so it must not be swallowed).
     """
     cfg = engine.config
+    journal_component = kwargs.pop("_journal_component", {})
     journal_privacy_cmd_raw = kwargs.pop("_journal_privacy_cmd", None)
     journal_privacy_cmd = str(journal_privacy_cmd_raw) if journal_privacy_cmd_raw else None
     # Resolve the process-bound lease *before* choosing a daemon socket.  A daemon is bound
@@ -1945,6 +1984,8 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
                     "owner": _leases.resolve_owner(getattr(engine, "_lease_owner", None)),
                     "invocation_id": _INVOCATION_ID,
                 }
+                if journal_component:
+                    client_options["journal_component"] = journal_component
                 if _EXPECTED_ERROR_CODE:
                     client_options["expected_error_code"] = _EXPECTED_ERROR_CODE
                 if journal_privacy_cmd:
@@ -1961,6 +2002,10 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
                 )
                 cmd = _DAEMON_CMD.get(method, method)
                 resp = client.call(cmd, **kwargs)
+                if resp.get("journal_detail_id"):
+                    from .cli_invocations import note_record
+
+                    note_record(_INVOCATION_ID)
                 if resp.get("ok"):
                     if resp.get("response_decorated") is True:
                         result = resp.get("result")
@@ -2044,6 +2089,7 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
                 result=result,
                 owner=getattr(engine, "_lease_owner_resolved", None),
                 extra={
+                    **journal_component,
                     **({"invocation_id": _INVOCATION_ID} if _INVOCATION_ID else {}),
                     **(
                         {
@@ -2079,6 +2125,7 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
                 error=error_value if isinstance(error_value, dict) else None,
                 owner=getattr(engine, "_lease_owner_resolved", None),
                 extra={
+                    **journal_component,
                     **({"invocation_id": _INVOCATION_ID} if _INVOCATION_ID else {}),
                     **(
                         {
@@ -2168,7 +2215,7 @@ class UnknownCommand(AuaError):
         elif self.available:
             message += f" Available: {', '.join(self.available)}."
         self.recommended_call = f"aua {self.meant} --help" if self.meant else "aua guide --brief"
-        super().__init__(message, hint=_GUIDE_POINTER)
+        super().__init__(message, hint=self.recommended_call)
 
     def to_dict(self) -> dict[str, object]:
         from .guide import ORIENTATION
@@ -2178,14 +2225,14 @@ class UnknownCommand(AuaError):
         if isinstance(err, dict):
             if self.meant:
                 err["did_you_mean"] = self.meant
-            if self.available:
+            if self.available and not self.meant:
                 err["available_commands"] = self.available
+                err["how_to_drive"] = [f"{cmd}  # {why}" for cmd, why in ORIENTATION]
             err["recommended_call"] = self.recommended_call
-            err["how_to_drive"] = [f"{cmd}  # {why}" for cmd, why in ORIENTATION]
         return out
 
 
-class GuidingGroup(TyperGroup):
+class GuidingGroup(JournalGroup):
     """Answer an unknown command with what was meant and how to drive, not a spelling guess.
 
     Click's fallback is string distance over command names, which is worse than nothing here: it
@@ -2987,6 +3034,13 @@ def await_cmd(
         "--no-meta",
         help="Omit meta from the returned observation (same meaning as analyze).",
     ),
+    with_image: str | None = typer.Option(
+        None,
+        "--with-image",
+        metavar="[PATH]",
+        help="Save the returned frame; a bare flag uses a timestamped path. No extra capture.",
+        show_default=False,
+    ),
 ) -> None:
     """Wait for a condition, distinguishing success, navigation, and timeout.
 
@@ -3013,6 +3067,7 @@ def await_cmd(
             match=match,
             ignore_case=ignore_case,
             observe=observe,
+            with_image=_annotate_arg(with_image),
         )
         _emit(result, fmt)
         # A wait that did not get what it was told to wait for must not exit 0.
@@ -3966,6 +4021,13 @@ def wait(
         "--no-meta",
         help="Omit meta from the returned observation (same meaning as analyze).",
     ),
+    with_image: str | None = typer.Option(
+        None,
+        "--with-image",
+        metavar="[PATH]",
+        help="Save the returned frame; a bare flag uses a timestamped path. No extra capture.",
+        show_default=False,
+    ),
 ) -> None:
     """Wait for text to appear (or with ``--absent`` disappear), for idle, or for settle.
 
@@ -4009,6 +4071,7 @@ def wait(
                     timeout_ms=timeout_ms,
                     poll_ms=poll_ms,
                     observe=observe,
+                    with_image=_annotate_arg(with_image),
                 ),
                 fmt,
             )
@@ -4026,6 +4089,7 @@ def wait(
                     settle_ms=settle if settle != 200 else 1200,
                     timeout_ms=timeout if timeout is not None else 60000,
                     observe=observe,
+                    with_image=_annotate_arg(with_image),
                 ),
                 fmt,
             )
@@ -4040,6 +4104,7 @@ def wait(
                     settle_ms=settle,
                     timeout_ms=eff,
                     observe=observe,
+                    with_image=_annotate_arg(with_image),
                 ),
                 fmt,
             )
@@ -4052,6 +4117,7 @@ def wait(
                 timeout_ms=eff,
                 interval_ms=interval,
                 observe=observe,
+                with_image=_annotate_arg(with_image),
             )
             _emit(result, fmt)
             return
@@ -4065,6 +4131,7 @@ def wait(
             match=match,
             ignore_case=ignore_case,
             observe=observe,
+            with_image=_annotate_arg(with_image),
             by=by,
             absent=absent,
         )
@@ -4906,7 +4973,7 @@ def _virtual_target_options(values: list[str]) -> dict[str, Any]:
         if not separator or not key:
             raise UsageError(
                 f"virtual-target option must be KEY=VALUE, got {raw!r}",
-                hint='Repeat --option for more values; JSON scalars/arrays/objects are accepted.',
+                hint="Repeat --option for more values; JSON scalars/arrays/objects are accepted.",
             )
         if key in options:
             raise UsageError(f"duplicate virtual-target option {key!r}")
@@ -4969,15 +5036,19 @@ def virtual_target_start_cmd(
             wait_s=wait,
             action="virtual-target-start",
         ):
-            payload = _opts(ctx).engine().virtual_target_start(
-                definition_id,
-                headless=headless,
-                audio=audio,
-                animations=animations,
-                wait_s=wait,
-                owner=owner,
-                parallel=parallel,
-                options=_virtual_target_options(option or []),
+            payload = (
+                _opts(ctx)
+                .engine()
+                .virtual_target_start(
+                    definition_id,
+                    headless=headless,
+                    audio=audio,
+                    animations=animations,
+                    wait_s=wait,
+                    owner=owner,
+                    parallel=parallel,
+                    options=_virtual_target_options(option or []),
+                )
             )
         _emulator_emit(payload, ctx)
     except AuaError as err:
@@ -5016,16 +5087,20 @@ def virtual_target_provision_cmd(
             wait_s=wait,
             action="virtual-target-provision",
         ):
-            payload = _opts(ctx).engine().virtual_target_provision(
-                definition_id,
-                needs=_split_needs(needs) if needs is not None else [],
-                headless=headless,
-                audio=audio,
-                animations=animations,
-                wait_s=wait,
-                owner=owner,
-                parallel=parallel,
-                options=_virtual_target_options(option or []),
+            payload = (
+                _opts(ctx)
+                .engine()
+                .virtual_target_provision(
+                    definition_id,
+                    needs=_split_needs(needs) if needs is not None else [],
+                    headless=headless,
+                    audio=audio,
+                    animations=animations,
+                    wait_s=wait,
+                    owner=owner,
+                    parallel=parallel,
+                    options=_virtual_target_options(option or []),
+                )
             )
         _emulator_emit(payload, ctx)
     except AuaError as err:
@@ -5055,7 +5130,9 @@ def virtual_target_create_cmd(
                 hint="Replacement may discard the existing virtual target's saved data.",
             )
         _emulator_emit(
-            _opts(ctx).engine().virtual_target_create(
+            _opts(ctx)
+            .engine()
+            .virtual_target_create(
                 definition_id,
                 replace=replace_existing,
                 options=_virtual_target_options(option or []),
@@ -5083,7 +5160,9 @@ def virtual_target_delete_cmd(
 
     try:
         _emulator_emit(
-            _opts(ctx).engine().virtual_target_delete(
+            _opts(ctx)
+            .engine()
+            .virtual_target_delete(
                 definition_id,
                 confirmed=yes,
                 options=_virtual_target_options(option or []),
@@ -5110,7 +5189,9 @@ def virtual_target_stop_cmd(
 
     try:
         _emulator_emit(
-            _opts(ctx).engine().virtual_target_stop(
+            _opts(ctx)
+            .engine()
+            .virtual_target_stop(
                 target_id=target_id,
                 definition_id=definition_id,
                 owner=owner,
@@ -5177,9 +5258,7 @@ def emulator_recommend_proxy_cmd(
     the package + commands; does not download or create anything.
     """
     try:
-        _emulator_emit(
-            _opts(ctx).engine().emulator_recommend_proxy(api=api, name=name), ctx
-        )
+        _emulator_emit(_opts(ctx).engine().emulator_recommend_proxy(api=api, name=name), ctx)
     except AuaError as err:
         emit_error(err)
         raise typer.Exit(int(err.exit_code)) from err
@@ -5664,6 +5743,12 @@ def app_cmd(
             _route(
                 engine,
                 "app",
+                _journal_component={
+                    "parent_command": "app_restart",
+                    "component": "stop",
+                    "component_index": 0,
+                    "component_count": 2,
+                },
                 action="stop",
                 package=package,
                 confirmed=yes,
@@ -5673,6 +5758,12 @@ def app_cmd(
                 _route(
                     engine,
                     "app",
+                    _journal_component={
+                        "parent_command": "app_restart",
+                        "component": "launch",
+                        "component_index": 1,
+                        "component_count": 2,
+                    },
                     action="launch",
                     package=package,
                     activity=activity,
@@ -7270,10 +7361,7 @@ def lease_cmd(
             raise UsageError("--force is only valid with `lease release`")
 
         if verb == "list":
-            live = {
-                e["serial"]: e
-                for e in lease_mod.list_leases(cache, platform=platform_name)
-            }
+            live = {e["serial"]: e for e in lease_mod.list_leases(cache, platform=platform_name)}
             rows = []
             for d in engine.list_devices():
                 held = live.get(d.serial)
@@ -7585,10 +7673,14 @@ def teardown_cmd(
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Say what would be undone without touching any device."
     ),
-    keys: list[str] | None = typer.Option(None, "--key", help="Exact undo key to discard (repeatable)."),
+    keys: list[str] | None = typer.Option(
+        None, "--key", help="Exact undo key to discard (repeatable)."
+    ),
     reason: str = typer.Option("", "--reason", help="Why automatic recovery is being abandoned."),
     confirmed: bool = typer.Option(
-        False, "--confirmed", help="Confirm discard: archive undo evidence without restoring the device."
+        False,
+        "--confirmed",
+        help="Confirm discard: archive undo evidence without restoring the device.",
     ),
 ) -> None:
     """Show or undo persistent device changes AUA is still holding on your behalf.
@@ -7618,12 +7710,22 @@ def teardown_cmd(
             return
         if verb == "discard":
             if not serial_arg or force or dry_run:
-                raise UsageError("discard needs --serial-target and does not accept --force or --dry-run")
-            _emit(engine.teardown_discard(
-                serial=serial_arg, keys=list(keys or []), reason=reason, confirmed=confirmed,
-            ), fmt)
+                raise UsageError(
+                    "discard needs --serial-target and does not accept --force or --dry-run"
+                )
+            _emit(
+                engine.teardown_discard(
+                    serial=serial_arg,
+                    keys=list(keys or []),
+                    reason=reason,
+                    confirmed=confirmed,
+                ),
+                fmt,
+            )
             return
-        raise UsageError(f"unknown teardown action {verb!r}", hint="Use `status`, `run`, or `discard`.")
+        raise UsageError(
+            f"unknown teardown action {verb!r}", hint="Use `status`, `run`, or `discard`."
+        )
 
     _run(ctx, go)
 
@@ -9032,6 +9134,11 @@ def capture_last_cmd(
         "--where-rid",
         help="Infer --region from a resource-id's last-known center cell.",
     ),
+    evidence_ref: str | None = typer.Option(
+        None,
+        "--evidence",
+        help="Exact capture_evidence.ref from an action/job; excludes --since/--seconds.",
+    ),
 ) -> None:
     """Emit timeline JSON + frame paths + cheap local diff summary."""
 
@@ -9044,6 +9151,7 @@ def capture_last_cmd(
                 since=since,
                 region=region,
                 where_rid=where_rid,
+                evidence_ref=evidence_ref,
             ),
             fmt,
         )
@@ -9059,6 +9167,11 @@ def capture_export_cmd(
     since: str | None = typer.Option(None, "--since", help="last-action"),
     fmt: str = typer.Option("gif", "--format", help="gif|mp4"),
     fps: float = typer.Option(8.0, "--fps"),
+    evidence_ref: str | None = typer.Option(
+        None,
+        "--evidence",
+        help="Reuse an action/job capture_evidence.ref, including a previous sheet's window.",
+    ),
 ) -> None:
     """Assemble recent kept frames into a GIF (or MP4)."""
 
@@ -9072,6 +9185,7 @@ def capture_export_cmd(
                 since=since,
                 fmt=fmt,
                 fps=fps,
+                evidence_ref=evidence_ref,
             ),
             fmt_out,
         )
@@ -9090,6 +9204,9 @@ def capture_sheet_cmd(
     timestamps: bool = typer.Option(
         True, "--timestamps/--no-timestamps", help="Label frames with relative time/action."
     ),
+    evidence_ref: str | None = typer.Option(
+        None, "--evidence", help="Exact capture_evidence.ref; first export fixes this frame window."
+    ),
 ) -> None:
     """Export a bounded PNG contact sheet for fast transition inspection."""
 
@@ -9104,6 +9221,7 @@ def capture_sheet_cmd(
                 max_frames=max_frames,
                 columns=columns,
                 timestamps=timestamps,
+                evidence_ref=evidence_ref,
             ),
             fmt,
         )
@@ -9117,12 +9235,24 @@ def capture_explain_cmd(
     seconds: float | None = typer.Option(None, "--seconds"),
     since: str | None = typer.Option(None, "--since", help="last-action"),
     llm: bool = typer.Option(False, "--llm", help="Also ask the opt-in planner LLM to narrate."),
+    evidence_ref: str | None = typer.Option(
+        None,
+        "--evidence",
+        help="Exact capture_evidence.ref from an action/job; excludes --since/--seconds.",
+    ),
 ) -> None:
     """Narrate the recent capture window (local diff summary; optional --llm)."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
         _emit(
-            _route(engine, "capture_explain", seconds=seconds, since=since, llm=llm),
+            _route(
+                engine,
+                "capture_explain",
+                seconds=seconds,
+                since=since,
+                llm=llm,
+                evidence_ref=evidence_ref,
+            ),
             fmt,
         )
 
@@ -10291,6 +10421,29 @@ def _register_removed_alias(
 
 for _removed_alias in _REMOVED_ACTION_ALIASES:
     _register_removed_alias(_removed_alias)
+
+
+def _install_command_accounting(target: typer.Typer) -> None:
+    """Use the same safe parser/help accounting for every registered command."""
+    from typer.models import DefaultPlaceholder
+
+    def unset(value: Any) -> bool:
+        if isinstance(value, DefaultPlaceholder):
+            value = value.value
+        return value is None or value in (TyperCommand, TyperGroup)
+
+    for command in target.registered_commands:
+        if unset(command.cls):
+            command.cls = JournalCommand
+    for group in target.registered_groups:
+        child = group.typer_instance
+        if child is not None:
+            if unset(group.cls) and unset(child.info.cls):
+                child.info.cls = JournalGroup
+            _install_command_accounting(child)
+
+
+_install_command_accounting(app)
 
 
 def run() -> None:

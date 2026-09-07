@@ -47,7 +47,9 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "so an online preparation remains before a later offline transition. Every result carries "
         "`goal_progress`; when its evidence completes the active checkpoint, add the returned "
         '`--phase-done phase_N="evidence"` to your next AUA call (MCP: `phase_done`). This '
-        "advances the goal without another round trip. Deterministic offline evidence advances "
+        "advances the goal without another round trip. If the goal is complete, attach those "
+        "facts directly to `aua session finish --phase-done ...` (MCP `session_finish` with "
+        "`phase_done`); do not analyze just to mark progress. Deterministic offline evidence advances "
         "automatically. The returned compact observation is the current screen: reuse it "
         "and do not follow session start with analyze. The command is recommendation-first: "
         "when the foreground is unrelated, add `--app <package>` (alias `--package`, optional "
@@ -56,8 +58,11 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "For deterministic acceptance proof, add `--contract <yaml>` and optionally "
         "`--artifacts-dir <dir> --evidence all --junit`. Authored checkpoints reuse flow "
         "assertions, require one fresh fingerprinted frame, and reject `--phase-done`. Every "
-        "analyzed response carries `observation_contract` with `reusable` and "
-        "`analyze_needed`. A contracted `session finish` stays active and returns "
+        "analyzed response carries `observation_contract`: `action_succeeded` reports execution, "
+        "`evidence_fresh` describes the frame, `elements_available` describes returned controls, "
+        "and `readiness` is `ready`, `not_checked`, `unconfirmed`, or `unmet`. Freshness alone "
+        "does not prove the requested destination. Use `reusable` before acting on returned "
+        "controls; inspect `image_path` for visual evidence. A contracted `session finish` stays active and returns "
         "`contract_incomplete` until all checkpoints, including UI cleanup, pass; only explicit "
         "`--allow-incomplete` abandons that proof and terminates the session. Normal incomplete "
         "closure exits nonzero but preserves the lease/session and returns the missing "
@@ -93,7 +98,9 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "selects a configured AVD from `--needs root,play,proxy`, and boots a unique read-only "
         "instance headless automatically. Use "
         "`--no-start-emulator` only when provisioning is forbidden. "
-        "For microphone/voice-input tests add `--audio`; the normal unattended default uses "
+        "For microphone/voice-input tests add `--audio`; AUA checks for a usable authenticated "
+        "microphone injection endpoint before installing or launching the app, and refuses "
+        "audio setup when that endpoint is unavailable. The normal unattended default uses "
         "`-no-audio` to avoid unnecessary host audio initialization. "
         "For animation/motion tests add `--animations` or `--needs animations` (goal text also "
         "infers it); AUA enables the scales and restores their exact prior values at finish. "
@@ -295,8 +302,8 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "rootable target; `aua drive` needs nothing and works on retail phones and Play-image "
         "emulators. Two things it deliberately cannot do: judge that it has ARRIVED (it keeps "
         "going until the budget ends, so state arrival yourself with `--until` on the next call or "
-        "`aua has`), and bridge words that do not meet - a goal saying \"wifi\" will not reach a "
-        "row labelled \"Internet\". For a mapped or repeatable journey prefer `goto`/`reach` or a "
+        '`aua has`), and bridge words that do not meet - a goal saying "wifi" will not reach a '
+        'row labelled "Internet". For a mapped or repeatable journey prefer `goto`/`reach` or a '
         "flow; this is for the unmapped stretch.",
     ),
     (
@@ -304,12 +311,12 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "When a task's wording and the app's labels disagree, write it down instead of re-deriving "
         "it: `aua remember --calls feed=Ideas`. Both `aua drive` and `aua helper drive` then fold "
         "the app's own words into any goal naming that concept, so a goal saying \"open the feed "
-        "tab\" reaches a control labelled \"Ideas\" - which it cannot otherwise, because word "
+        'tab" reaches a control labelled "Ideas" - which it cannot otherwise, because word '
         "overlap scores zero when the words do not meet. It ADDS rather than replaces, so a goal "
         "already using the app's words stays correct, and the goal reported back to you is the one "
         "you asked for, not the expansion. Matching is per-phrase and case-insensitive: "
-        "`--calls \"lock screen=Security\"` fires on \"lock screen\" and not on the bare word "
-        "\"screen\". A term made only of stopwords is refused, because it would append its label to "
+        '`--calls "lock screen=Security"` fires on "lock screen" and not on the bare word '
+        '"screen". A term made only of stopwords is refused, because it would append its label to '
         "nearly every goal and make every screen look like it held the target. Teach one the moment "
         "a goal fails on vocabulary rather than on structure - the next task starts informed, and on "
         "a suite sharing one app that is the difference between paying the tax once and paying it "
@@ -473,7 +480,11 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "Pass `--no-observe` to skip it on action-only sequences. Action `observation` waits "
         "for a pixel change + idle (animation-aware) before dumping the tree, and a screen "
         "whose content is still streaming in has to hold still for one confirming sample — so "
-        "you get the *next* screen, not a mid-transition snapshot with the list body missing. "
+        "the response includes the best available arrival evidence. Inspect `readiness` and "
+        "`stale_risk` before choosing another action; an empty or moving view does not prove "
+        "arrival. Read an existing `observation_contract.image_path` or `meta.raw_image` when "
+        "visual verification matters, instead of capturing the screen again. Capture artifact "
+        "exports preserve the prior observation's validity and do not demand another analyze. "
         "When returning through nested screens, use `back-until-and-analyze '<known_screen>'` "
         "when the destination is mapped, or pass positive `rid:`/`text:`/`desc:` evidence. "
         "It re-resolves a labeled Back on every frame and stops rather than navigating again "
@@ -501,8 +512,8 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "(MCP: `observe_meta`, `observe_fields`). They are independent — asking for every "
         "column does not ask for every hint. "
         "**That settle can only wait ~1.1s (max 1.6s).** A slower screen makes the action "
-        "report `nothing changed` for a tap that did land, and `stale_risk` appears in "
-        '`detail`. That is *not* evidence the tap missed: it cannot tell "no effect" from '
+        "report `nothing changed` for a tap that did land, and `stale_risk` explains the "
+        'uncertainty. That is *not* evidence the tap missed: it cannot tell "no effect" from '
         '"not yet", so **never re-tap on it** — a second tap means a second submit. When you '
         "know what should come next, say so and the wait becomes evidence-based with your "
         'budget instead of the settle timer: `--until "rid:resultsPanel"` or `--until '
@@ -660,7 +671,7 @@ BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
         "every result; if the foreground is unrelated, add `--app <package>` / `--package` so "
         "the launch and its observation are folded into bootstrap. Carry its `--phase-done` / "
         "MCP `phase_done` checkpoint on your next call "
-        'after evidence is visible, rather than spending a call on progress. Use `aua capabilities --goal "…"` only '
+        'after evidence is visible; on completion attach it to `session finish` itself. Use `aua capabilities --goal "…"` only '
         "when you need another goal-specific capability, and finish reversible work with "
         "`aua session finish`. It returns a compact verdict by default; incomplete closure exits "
         "nonzero and stays active with an exact next call. Use `--allow-incomplete` only to abandon "
@@ -708,7 +719,11 @@ BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
     ),
     (
         "Act and consume the returned screen",
-        "Use analyzed actions; their `observation` has fresh ids, so do not re-analyze. "
+        "Use analyzed actions. `observation_contract` separates `action_succeeded`, "
+        "`evidence_fresh`, `elements_available` and `readiness`: `ready` confirms arrival; "
+        "`not_checked` makes no destination claim. Inspect `unconfirmed`/`unmet`; check "
+        "`reusable` before acting. View `image_path`/`meta.raw_image`; don't recapture. "
+        "Actions/waits share `--with-image [PATH]`. "
         "`--submit` is IME-only: check `submitted`. On false, do not retype; follow the "
         "semantic-send `recommended_call`, or use `--send rid:<control>` to type and tap once. "
         "Verify the exact depth named and choose only returned clickable controls. Add positive "
@@ -718,7 +733,9 @@ BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
         "`'rid:<destination>'`. For an unattached update use "
         "`wait-and-analyze --after-change --observe`. On `daemon_outcome_unknown`, never repeat: "
         "inspect once; a live busy daemon prevents a competing controller. For a long read-only "
-        "wait, use `job start await`, then `job status` or cancel.",
+        "wait, use `job start await`, then `job status` or cancel. After transitions, use "
+        "`capture_evidence.ref`: `capture sheet PATH.png --evidence REF`, then GIF export "
+        "with that REF. First inspection fixes the window; exports preserve observation validity.",
     ),
     (
         "Let automatic perception escalate",
@@ -831,7 +848,7 @@ ORIENTATION: tuple[tuple[str, str], ...] = (
     (
         "aua logcat prefs set --app <package> --ignore-tag <Tag>",
         "PERSISTED, per app — stop one chatty library spending the `app_logs` budget on every "
-        "future action, or `--lines 40` when the app\'s own breadcrumbs are being truncated. "
+        "future action, or `--lines 40` when the app's own breadcrumbs are being truncated. "
         "Local to this host, inherited by every later session",
     ),
     (
@@ -869,7 +886,10 @@ COMMAND_SYNONYMS: dict[str, str] = {
     "exists": "has",
     "check": "has",
     "back": "key-and-analyze",
+    "back-and-analyze": "key-and-analyze",
     "home": "key-and-analyze",
+    "logs": "logcat",
+    "launch": "app launch-and-analyze",
     "sideload": "install",
     "apk": "install",
     "adb-install": "install",
@@ -894,6 +914,12 @@ KEY_FLAGS: list[tuple[str, str]] = [
         '`--source auto|hierarchy|vision`, `--query "<nl>"`, `--deep`, `--cheap`, '
         "`--strategy <tier>`, `--annotate [path]`, `--with-image [path]` (also save the raw "
         "screenshot; path lands in `meta.raw_image`), `--with-ocr/--no-ocr`",
+    ),
+    (
+        "actions and waits",
+        "`--with-image [PATH]` has the same meaning on analyzed actions, `await-and-analyze`, "
+        "and `wait-and-analyze`: return the final observation's existing raw image, optionally "
+        "saving to PATH. Read that file for visual checks; no separate `screenshot` is needed.",
     ),
     (
         "analyze — views (use these instead of post-processing JSON)",
@@ -1064,8 +1090,8 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "`crash_evidence` block instead, from the same window. Per-app and PERSISTED: "
         "`aua logcat prefs set --app <package> [--ignore-tag T] [--unignore-tag T] "
         "[--only-tag T] [--lines N] [--per-tag N] [--levels DIWEF]` (MCP: "
-        "`app_log_prefs_set`) remembers it beside that app\'s map on this host, so every later "
-        "session inherits it — that is where you name the app\'s own chatty logger, raise the "
+        "`app_log_prefs_set`) remembers it beside that app's map on this host, so every later "
+        "session inherits it — that is where you name the app's own chatty logger, raise the "
         "20-line budget when its breadcrumbs are being truncated, or report a tag the built-in "
         "noisy list hides. `--only-tag` narrows to the logger you are chasing and says so, as "
         "`only` in the digest. Read it back with `aua logcat prefs show`, drop it with "
@@ -1088,6 +1114,16 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "carrying `capture_hint` is telling you the frames can explain it — it appears only "
         "where something is wrong (a miss, `stale_risk`, an empty screen), never on a settled "
         "action; suite failures attach `capture last --since last-action`. "
+        "All four readers accept `--evidence REF` (MCP: `evidence_ref`) using the exact "
+        "`capture_evidence.ref` returned by an action/job. After the required transition/wait "
+        "completes, use `aua capture sheet /tmp/transition.png --evidence REF`; a later "
+        "`aua capture export /tmp/transition.gif --evidence REF` uses the identical recorded "
+        "frame window. The first read/export freezes the frame list; a later action, job "
+        "completion or owner handoff also closes its window. Do not guess seconds from when "
+        "you inspect it or replay an action to recover evidence. References survive daemon "
+        "turnover and rolling-frame pruning for up to one hour, subject to the per-target "
+        "capture byte budget and 128-window limit. Expired/missing evidence is a typed refusal, "
+        "never another action's frames. Do not combine `--evidence` with `--since`/`--seconds`. "
         "Sneak-peek a headless agent live with "
         "`aua dashboard start` (detached fixed-port device **grid**)",
     ),
@@ -1097,7 +1133,7 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "detached exact-port grid, **by default published as `aua.local` on port 80, bound to "
         "every interface, with no access token**, so the URL is typeable; every start prints a "
         "warning naming what that exposes. Narrow it with `--auth` (require the token), "
-        "`--local` (loopback only), `--name \"\"` (publish nothing) or `--port N`; the "
+        '`--local` (loopback only), `--name ""` (publish nothing) or `--port N`; the '
         "`dashboard.*` config block changes the default. Android browsers cannot resolve "
         "`.local`, so `dashboard qr` remains the phone path. Opens with or without "
         "a device, discovers later emulators and shows lease/idle-watchdog "
@@ -1290,7 +1326,7 @@ AGENT_BEST_PRACTICES_PERCEPTION: list[tuple[str, str, str]] = [
         "of those gaps. `caller.wait_ceiling_ms` is the cap on any single wait "
         "(`wait_ceiling_mode` says whether it was measured or pinned); it is deliberately short "
         "because an open-ended wait can outlive the change it waits for, so a wait that "
-        "returns `timeout` means \"not yet\", never \"not there\". Actions are different: "
+        'returns `timeout` means "not yet", never "not there". Actions are different: '
         "when the folded observation is provably unready, the action itself holds on "
         "briefly (`perf.arrival_extension_ms`) and returns the rendered screen, or an "
         "`arrival` verdict saying it could not.",
@@ -1850,11 +1886,12 @@ def render_markdown(*, brief: bool = False) -> str:
         "(`--no-observe` or unsupported action), so run `analyze` explicitly."
     )
     p.append(
-        "Need the actual pixels too? `--with-image [path]` on `analyze` AND on every "
-        "action (tap/input/swipe/scroll-to/key/open) saves the raw screenshot to a "
+        "Need the actual pixels too? `--with-image [path]` on `analyze`, analyzed actions "
+        "and waits saves the final observation's raw screenshot to a "
         "timestamped file and returns its path in `meta.raw_image` (on actions: inside "
         "`observation.meta`) — Read that file when you must SEE the screen (visual "
-        "fidelity, images, charts) instead of just addressing it. Over MCP the image "
+        "fidelity, images, charts) instead of capturing again. `observation_contract.image_path` "
+        "also names this existing image when available. Over MCP the image "
         "comes back inline as an image content block. **Default off.** Do not pass "
         "`--with-image` on every step — hierarchy/TSV is faster and cheaper; images erase "
         "the token advantage of acting by id."
@@ -1946,63 +1983,64 @@ def render_skill_markdown() -> str:
     """Compact triggered instructions; deeper guidance stays in the CLI manual."""
     return """# Android UI Analyser
 
-Use AUA MCP tools when present; otherwise use the equivalent `aua` CLI. Act on returned IDs or
-stable selectors, never pixels or raw `adb`. The plugin does not put `aua` on `PATH`.
+Use AUA MCP tools or the `aua` CLI; the plugin does not put `aua` on `PATH`. Act by ID, never raw `adb`.
 
 ## Operating loop
 
 1. Start with MCP `session_start(goal="<what must be verified>")`, or
-   `aua session start --goal "<what must be verified>"`. It leases a free compatible
-   target; when all app-compatible targets are leased, it leaves them alone and provisions a
-   unique read-only instance. `--app` requires the package; `--apk` installs it. Reuse its
-   observation and `recommended_call`. `--contract` requires fresh proof and strict finish;
-   `--artifacts-dir` records it. `--wait-for-lease` waits safely.
-2. Navigate in this order: verified `goto`, saved `flow`, proven deeplink, manual action.
-   Screen-family arrival requires equal mapped `logical_name`, state, and surface. Preview risky routes; goal text never authorizes destructive,
-   external, settings, data, payment, send, or sign-out effects.
-3. Use analyzed actions and their `observation`. Send its `el:` IDs back directly; they follow
-   identified items. Uncertain matches are refused. Use `--rid` for resource IDs. Pick the next
-   control by filtering `observation.elements` on `clickable` (`checked`/`scrollable` for
-   toggles/scrollers). `--submit` is IME-only: check `submitted`; if false, do not retype—use
-   its semantic-send `recommended_call`, or `--send rid:<control>` to type+tap in one call.
-4. Fold arrival into the action with a positive predicate:
-   `--until 'rid:resultCard,!text:Loading'`. On `settled-unmet`, use its fresh destination and
-   corrected predicate; never repeat. Use `await-and-analyze` for absence-only checks and
-   `back-until-and-analyze` for nested returns.
-5. Keep perception hierarchy-first. Filter in AUA (`--where-rid`, `--where-text`, `--clickable`,
-   `--region`); vision for opaque screens and `--deep` for grounding.
-6. Carry `goal_progress.checkpoint` on the next call with `--phase-done` (MCP: `phase_done`),
-   not a separate progress call. Use `aua job start await ...` only for a
-   read-only wait that may outlive one agent call. If `daemon_outcome_unknown` appears, never
-   repeat the action: wait, then inspect a fresh screen.
-7. End with MCP `session_finish`, or CLI `aua session finish` (compact by default). Incomplete finish stays active and gives
-   the exact next call; `--allow-incomplete` abandons it, while `--full` gives all evidence. Use `review.accounting`, not estimates:
-   `top_level_calls` counts caller-visible invocations = `lifecycle_calls` + `task_calls`;
-   `journal_events` adds `folded_internal_events` such as an action-bound wait. The snapshot excludes
-   this review/finish (`reporting_call_included` is false); `top_level_calls_including_reporting_call` adds it.
-8. After a contract passes, `session candidate-flow NAME --save` requires explicit
-   `--reset-flow` and passing reset/replay.
+   `aua session start --goal "<goal>"`. It leaves leased targets alone and
+   provisions a free instance. `--app` selects a package; `--apk` installs it. Reuse the observation
+   and `recommended_call`; `--contract` requires proof, `--artifacts-dir` records it.
+2. Prefer verified `goto`, saved `flow`, proven deeplink, then manual action. Arrival requires
+   equal mapped `logical_name`, state and surface. Preview risky routes; goal text never
+   authorizes destructive, external, settings, data, payment, send or sign-out effects.
+3. Use analyzed actions' observation. Send its `el:` IDs back directly. Use `--rid` for resource IDs.
+   Filter `observation.elements` by `clickable`, `checked` or `scrollable`. `--submit` is IME-only:
+   check `submitted`; if false, use its `recommended_call` or `--send rid:<control>`, never retype.
+   `observation_contract` separates `action_succeeded`, `evidence_fresh`, `elements_available`
+   and `readiness`. Only `ready` confirms arrival; `not_checked` makes no destination claim.
+   Inspect `unconfirmed`/`unmet`; check `reusable` before using controls.
+   Read `image_path`/`meta.raw_image` for visual checks; don't recapture. Actions/waits share `--with-image [PATH]`.
+4. Fold arrival into actions: `--until 'rid:resultCard,!text:Loading'`. On `settled-unmet`,
+   inspect the returned evidence and correct the predicate; never repeat the action.
+   Use `await-and-analyze` for absence-only checks, `back-until-and-analyze` for nested returns.
+5. Keep hierarchy-first; filter with `--where-rid`/`--where-text`/`--region`. Use vision for opaque screens.
+6. Carry `goal_progress.checkpoint` on the next call with `--phase-done` (MCP: `phase_done`).
+   `aua job start await ...` detaches read-only waits; reconnect by job id.
+   On `daemon_outcome_unknown`, wait and inspect; never repeat the action.
+7. End with MCP `session_finish` or CLI `aua session finish` (compact), attaching final
+   `phase_done` / `--phase-done` facts; never analyze for bookkeeping.
+   Incomplete finish stays active; `--allow-incomplete` abandons; `--full` gives evidence.
+   Use `review.accounting`, not estimates: `top_level_calls` counts caller-visible invocations =
+   `lifecycle_calls` + `task_calls`; `journal_events` adds `folded_internal_events` (action-bound wait).
+   `reporting_call_included` is false; `top_level_calls_including_reporting_call` adds this review/finish.
+8. `session candidate-flow NAME --save` requires a passed contract, explicit `--reset-flow`
+   and passing reset/replay.
 
 Flow previews expose `selector_resilience`; only a same-frame privacy-safe positive `--until`
-can yield an unmapped `satisfied_action_until` arrival.
+yields an unmapped `satisfied_action_until` arrival.
 
 ## Device and safety rules
 
-- First call `session start`; never list/start devices, set `AUA_OWNER`, or acquire a lease.
-  It frees dead owners and provisions instead of touching a live owner's target. One device stays
-  implicit: omit `--serial`; switching or transfer is explicit.
-- `--no-start-emulator` forbids provisioning; `--headed` enables visibility. For voice add
-  `--audio`, then `mic inject`/`mic speak`; never repeat uncertain delivery.
-- Animation goals enable scales until finish. Use `capture sheet`; obey the raw-`adb` plugin guard.
+- Start with `session start`; never list/start devices, set `AUA_OWNER`, or acquire a lease.
+  It frees dead owners; omit `--serial`; switching or transfer is explicit.
+- `--no-start-emulator` forbids provisioning; `--headed` shows the target. `--audio` verifies an
+  authenticated microphone endpoint before app installation.
+  Use `mic inject`/`mic speak`; never repeat uncertain delivery.
+- Animation scales restore at finish. After the transition/wait, use the action/job's
+  `capture_evidence.ref`: `capture sheet PATH.png --evidence REF`, then `capture export PATH.gif`
+  with that REF. First inspection fixes the window; no guessed seconds or replay. Exports
+  preserve prior observation validity. Obey the raw-`adb` plugin guard.
 - Use `aua network offline --verify`; session cleanup restores it. Guarded `aua db` for
   debuggable SQLite.
 - Deeplink delivery or spinner disappearance is not arrival—check `verified` and the final affordance.
 - Assert observed text or `--rid` — labels render in `meta.device_locale`.
-- Never execute `policy_suggestion`; `session autopilot` is off by default and **taps only** —
-  never start it on a login or text entry. Short goal in the screen's own words (`Open Catalog`):
-  a candidate sharing no goal word is refused. `policy_handoff` hands back.
+- Never execute `policy_suggestion`; `session autopilot` is off by default and **taps only**.
+  No login/text entry. Use screen words (`Open Catalog`); no goal word match yields `policy_handoff`.
 
 ## Load more when needed
+
+CLI: `logcat`; `app launch-and-analyze`; `key-and-analyze back`.
 
 - Call MCP `capabilities(goal="<goal>")`, or CLI `aua capabilities --goal "<goal>"`, for discovery.
 - Run `aua guide` for the full reference or `aua guide --brief` for the field guide.

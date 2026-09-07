@@ -50,15 +50,15 @@ class DeviceStoodDownError(DeviceError):
 def _capture_screenshot(self: Engine) -> Any:
     """Grab a frame for the rolling capture buffer, or refuse if the device is on loan.
 
-        The buffer must not hold a device. It used to be handed ``device.screenshot``, a
-        method bound to the uiautomator2 client, and that binding outlived every teardown the
-        engine performed: closing the client and dropping the engine's reference left the
-        sampling thread still holding a live handle, so its next tick reconnected the server
-        AUA had just stepped away from.
+    The buffer must not hold a device. It used to be handed ``device.screenshot``, a
+    method bound to the uiautomator2 client, and that binding outlived every teardown the
+    engine performed: closing the client and dropping the engine's reference left the
+    sampling thread still holding a live handle, so its next tick reconnected the server
+    AUA had just stepped away from.
 
-        Going through the engine makes ``self._device = None`` mean what it says, and makes a
-        handover a hard edge rather than a request the sampler is free to ignore.
-        """
+    Going through the engine makes ``self._device = None`` mean what it says, and makes a
+    handover a hard edge rather than a request the sampler is free to ignore.
+    """
 
     if self._stood_down:
         raise DeviceStoodDownError(
@@ -132,15 +132,81 @@ def _capture_hint(self: Engine) -> str | None:
     return "recent pixel change after last action — `aua capture last --since last-action`"
 
 
+def _capture_evidence(self: Engine) -> dict[str, Any] | None:
+    """Return existing action evidence metadata, without sampling or sealing its window."""
+    if self._capture is not None:
+        with contextlib.suppress(Exception):
+            return self._capture.action_evidence()
+    return None
+
+
+def _capture_mark(self: Engine, label: str) -> None:
+    """Correlate a daemon action with the active persisted goal, not its local cache."""
+    buf = self._capture
+    if buf is None:
+        return
+    from .session import load_session_state
+
+    owner = self._lease_owner_resolved or self._lease_owner
+    state = load_session_state(
+        self.config.cache.dir, serial=buf.serial, owner=owner, platform=self.platform.name
+    )
+    if state is not None and (
+        state.finished_ms is not None or state.serial != buf.serial or state.owner != owner
+    ):
+        state = None
+    buf.mark(label, session_id=state.session_id if state is not None else None, owner=owner)
+
+
+def _capture_evidence_last(
+    self: Engine,
+    evidence_ref: str,
+    *,
+    seconds: float | None,
+    since: str | None,
+    region: str | None,
+    where_rid: str | None,
+) -> dict[str, Any]:
+    if seconds is not None or since is not None:
+        raise UsageError("evidence_ref cannot be combined with seconds or since")
+    serial = self._capture_serial()
+    if serial is None:
+        raise UsageError(
+            "capture evidence needs its original target", hint="Select its --serial target."
+        )
+    from .capture import FrameEntry, change_duration_ms, diff_summary
+    from .capture_evidence import EvidenceStore
+
+    store = EvidenceStore(
+        Path(self.config.cache.dir).expanduser() / "captures", self.platform.name, serial
+    )
+    metadata, raw_entries = store.read(evidence_ref)
+    entries = [FrameEntry(**entry) for entry in raw_entries]
+    return {
+        "ok": True,
+        "action": "capture-last",
+        "source": "capture-evidence",
+        "live": False,
+        "session_id": metadata["capture_session_id"],
+        "capture_evidence": metadata,
+        "frames": raw_entries,
+        "count": len(entries),
+        "summary": diff_summary(entries, region=region),
+        "change_duration_ms": change_duration_ms(entries),
+        "region": region,
+        "where_rid": where_rid,
+    }
+
+
 def capture_start(self: Engine, *, connect_if_needed: bool = True) -> dict[str, Any]:
     """Start the rolling capture buffer (daemon-warm sessions).
 
-        ``connect_if_needed=False`` is the daemon auto-start seam. A per-device daemon already
-        knows its target from config, so initializing the host-side buffer must not eagerly
-        attach uiautomator2 before the accept loop can answer its first request. The sampler
-        already waits for ``self._device`` instead of connecting by itself; this keeps buffer
-        creation subject to the same rule.
-        """
+    ``connect_if_needed=False`` is the daemon auto-start seam. A per-device daemon already
+    knows its target from config, so initializing the host-side buffer must not eagerly
+    attach uiautomator2 before the accept loop can answer its first request. The sampler
+    already waits for ``self._device`` instead of connecting by itself; this keeps buffer
+    creation subject to the same rule.
+    """
     from .capture import CaptureBuffer, CaptureCfgView
 
     with self._capture_lock:
@@ -258,10 +324,10 @@ def capture_idle_resume(self: Engine) -> bool:
 def _capture_serial(self: Engine) -> str | None:
     """Which device's frames to look for, without connecting to one.
 
-        A disk read must stay host-only: it is the answer of last resort precisely when the
-        process holding the device is gone or unusable, so paying a device attach to find the
-        directory name would defeat it.
-        """
+    A disk read must stay host-only: it is the answer of last resort precisely when the
+    process holding the device is gone or unusable, so paying a device attach to find the
+    directory name would defeat it.
+    """
     serial = getattr(self.config.device, "serial", None)
     if serial:
         return str(serial)
@@ -289,8 +355,8 @@ def _capture_serial(self: Engine) -> str | None:
 def _capture_from_disk(self: Engine) -> Any:
     """The newest capture session for this device, recovered from ``index.jsonl``.
 
-        Returns ``None`` when nothing was ever recorded for this serial.
-        """
+    Returns ``None`` when nothing was ever recorded for this serial.
+    """
     serial = self._capture_serial()
     if not serial:
         return None
@@ -328,11 +394,11 @@ def _capture_last_from_disk(
 ) -> dict[str, Any]:
     """``capture_last`` answered from ``index.jsonl``, for both callers that need it.
 
-        Reached either when this process holds no buffer at all, or when it holds a live one
-        that cannot answer a ``--since last-action`` because a restart just superseded the
-        session the mark is in. The provenance keys are the same in both cases: whatever is
-        returned here is not the live buffer and must never read as though it were.
-        """
+    Reached either when this process holds no buffer at all, or when it holds a live one
+    that cannot answer a ``--since last-action`` because a restart just superseded the
+    session the mark is in. The provenance keys are the same in both cases: whatever is
+    returned here is not the live buffer and must never read as though it were.
+    """
     found, disk_since = self._disk_session_for(since)
     entries = list(found.entries)
     if disk_since is not None:
@@ -363,10 +429,10 @@ def _capture_last_from_disk(
 def _disk_session_for(self: Engine, since: str | None) -> tuple[Any, int | None]:
     """Pick the session that can answer, and the window within it.
 
-        Only the newest session may answer. Walking backward to an older mark turned a frame
-        from a previous daemon (and sometimes a previous action) into current post-action proof.
-        Missing or pruned evidence is an error; an old screenshot is not a degraded success.
-        """
+    Only the newest session may answer. Walking backward to an older mark turned a frame
+    from a previous daemon (and sometimes a previous action) into current post-action proof.
+    Missing or pruned evidence is an error; an old screenshot is not a degraded success.
+    """
     from .capture import read_sessions_from_disk
 
     root = Path(self.config.cache.dir).expanduser() / "captures"
@@ -454,7 +520,12 @@ def capture_last(
     since: str | None = None,
     region: str | None = None,
     where_rid: str | None = None,
+    evidence_ref: str | None = None,
 ) -> dict[str, Any]:
+    if evidence_ref is not None:
+        return self._capture_evidence_last(
+            evidence_ref, seconds=seconds, since=since, region=region, where_rid=where_rid
+        )
     if self._capture is None:
         # The frames are durable, so "no buffer here" is not "no frames anywhere". This
         # used to raise, which is how a caller under daemon skew ended up with nothing at
@@ -521,7 +592,32 @@ def capture_export(
     since: str | None = None,
     fmt: str = "gif",
     fps: float = 8.0,
+    evidence_ref: str | None = None,
 ) -> dict[str, Any]:
+    if evidence_ref is not None:
+        payload = self.capture_last(seconds=seconds, since=since, evidence_ref=evidence_ref)
+        from .capture import CaptureFrameUnavailable, FrameEntry, export_animation
+
+        entries = [FrameEntry(**entry) for entry in payload["frames"]]
+        out = Path(path).expanduser()
+        out.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            written = export_animation(entries, out, fmt=fmt, fps=fps, strict=True)
+        except CaptureFrameUnavailable as exc:
+            raise UsageError(str(exc), code="capture_evidence_incomplete") from exc
+        except (ValueError, ImportError, OSError) as exc:
+            raise UsageError(str(exc)) from exc
+        return {
+            "ok": True,
+            "action": "capture-export",
+            "source": "capture-evidence",
+            "live": False,
+            "session_id": payload["session_id"],
+            "capture_evidence": payload["capture_evidence"],
+            "path": written,
+            "frames": len(entries),
+            "format": fmt,
+        }
     if self._capture is None:
         # Same durability argument as ``capture_last``: the JPEGs an export assembles are
         # already files on disk, so a process without a buffer can still stitch them.
@@ -576,11 +672,12 @@ def capture_sheet(
     max_frames: int = 6,
     columns: int = 3,
     timestamps: bool = True,
+    evidence_ref: str | None = None,
 ) -> dict[str, Any]:
     """Export a bounded visual timeline without requiring ffmpeg."""
 
-    payload = self.capture_last(seconds=seconds, since=since)
-    from .capture import FrameEntry, export_contact_sheet
+    payload = self.capture_last(seconds=seconds, since=since, evidence_ref=evidence_ref)
+    from .capture import CaptureFrameUnavailable, FrameEntry, export_contact_sheet
 
     entries = [FrameEntry(**item) for item in payload.get("frames") or []]
     try:
@@ -590,7 +687,10 @@ def capture_sheet(
             max_frames=max_frames,
             columns=columns,
             timestamps=timestamps,
+            strict=evidence_ref is not None,
         )
+    except CaptureFrameUnavailable as exc:
+        raise UsageError(str(exc), code="capture_evidence_incomplete") from exc
     except ValueError as exc:
         raise UsageError(str(exc)) from exc
     provenance: dict[str, Any] = {
@@ -604,6 +704,7 @@ def capture_sheet(
             "available",
             "newest_frame_age_ms",
             "note",
+            "capture_evidence",
         )
         if key in payload
     }
@@ -626,13 +727,14 @@ def capture_explain(
     seconds: float | None = None,
     since: str | None = None,
     llm: bool = False,
+    evidence_ref: str | None = None,
 ) -> dict[str, Any]:
     """Narrate the recent capture window (local summary; optional LLM)."""
-    if self._capture is None:
+    if self._capture is None or evidence_ref is not None:
         # ``local_narration`` reads the payload, not the buffer, so the disk answer
         # narrates exactly as well as the live one — minus any pruned frames, which the
         # provenance keys carried through from ``capture_last`` already declare.
-        payload = self.capture_last(seconds=seconds, since=since)
+        payload = self.capture_last(seconds=seconds, since=since, evidence_ref=evidence_ref)
         out = {**payload, "action": "capture-explain"}
         from .capture import local_narration
 
@@ -663,7 +765,9 @@ def _capture_explain_llm(self: Engine, payload: dict[str, Any]) -> str | None:
     """Best-effort narration via the planner chain (opt-in)."""
     try:
         if not self.factory.is_enabled("planner"):
-            return "(llm skipped: planner disabled — enable planner in config or use local narration)"
+            return (
+                "(llm skipped: planner disabled — enable planner in config or use local narration)"
+            )
         names = self.factory.chain_names("planner")
         objective = (
             "Summarize this Android UI transition for a QA agent in 2-4 sentences.\n"

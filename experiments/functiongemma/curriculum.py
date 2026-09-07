@@ -263,6 +263,7 @@ PUBLIC_AUA_ARGUMENTS: dict[str, frozenset[str]] = {
         {
             "timeout_ms",
             "interval_ms",
+            "with_image",
             "observe_fields",
             "observe_meta",
             "until",
@@ -279,6 +280,7 @@ PUBLIC_AUA_ARGUMENTS: dict[str, frozenset[str]] = {
             "poll_ms",
             "match",
             "ignore_case",
+            "with_image",
             "observe_fields",
             "observe_meta",
             "phase_done",

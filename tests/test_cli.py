@@ -717,7 +717,9 @@ def test_lease_list_mine_requires_the_same_process_not_only_the_same_label(
     row = json.loads(listed.stdout)["devices"][0]
     assert row["owner"] == "shared-label"
     assert row["mine"] is False
-    assert listed_platforms == ["android"]
+    # Host-only accounting may inspect the same registry for session attribution; every
+    # lookup must remain scoped to the selected platform and preserve ownership semantics.
+    assert listed_platforms and set(listed_platforms) == {"android"}
 
 
 def test_lease_release_keeps_ownership_when_cleanup_fails(

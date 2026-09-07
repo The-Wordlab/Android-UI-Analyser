@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from android_ui_analyser import engine as engine_mod
 from android_ui_analyser.cli import app
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.flows import parse_flow_yaml
@@ -76,9 +75,9 @@ def test_app_launch_clear_and_kill() -> None:
     assert ("stop_app", ("com.x",)) in dev.calls
 
 
-def test_cli_maestro_commands(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cli_maestro_commands(fake_cli_device) -> None:
     dev = FakeDevice(hierarchy_xml=_XML, package="com.x")
-    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: dev)
+    fake_cli_device(dev)
 
     assert runner.invoke(app, ["clipboard", "set", "hi"]).exit_code == 0
     assert runner.invoke(app, ["clipboard", "get"]).exit_code == 0

@@ -902,6 +902,7 @@ def _observe(
         hint = self._capture_hint()
         if hint:
             result.capture_hint = hint
+    result.capture_evidence = self._capture_evidence()
     if finalize:
         result = self._finalize_observed_action(result)
     return result

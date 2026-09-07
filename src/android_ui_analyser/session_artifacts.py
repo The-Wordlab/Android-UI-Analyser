@@ -12,6 +12,7 @@ import contextlib
 import json
 import os
 import re
+import shutil
 import uuid
 import xml.etree.ElementTree as ET
 from collections.abc import Callable, Iterator
@@ -20,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from .atomic import atomic_write_text
+from .observation_contract import build_observation_contract
 
 _EVIDENCE_MODES = frozenset({"none", "failures", "all"})
 
@@ -190,42 +192,73 @@ class SessionArtifactStore:
         args: dict[str, Any] | None = None,
         screenshot: Callable[[Path], str] | None = None,
         diagnostics: Callable[[], str | None] | None = None,
+        finalize_existing: bool = False,
+        evidence_result: Any = None,
     ) -> dict[str, Any] | None:
-        """Record one caller-visible result and return its observation contract."""
+        """Record a result, or finalize an existing folded invocation without counting it twice.
+
+        Finalization preserves the original request and duration. It only copies images already
+        present in the result; it never calls acquisition callbacks.
+        """
 
         data = _payload(result)
-        observation = _observation(data)
+        # Projection can hide image paths and fingerprints. Retain the unprojected final
+        # frame as evidence while the call and its reuse contract describe the emitted view.
+        observation = _observation(evidence_result) or _observation(data)
         with _locked(self.root):
             manifest = self._read_manifest()
-            if invocation_id in manifest.get("invocations", []):
+            duplicate = invocation_id in manifest.get("invocations", [])
+            calls: list[dict[str, Any]] | None = None
+            prior_call: dict[str, Any] | None = None
+            prior_entry: dict[str, Any] | None = None
+            if finalize_existing:
+                if not duplicate:
+                    return None
+                calls = [
+                    json.loads(line)
+                    for line in (self.root / "calls.jsonl").read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
+                prior_call = next(
+                    (call for call in calls if call.get("invocation_id") == invocation_id), None
+                )
+                prior_entry = next(
+                    (entry for entry in manifest["entries"]
+                     if entry.get("invocation_id") == invocation_id), None
+                )
+                if prior_call is None or prior_entry is None:
+                    return None
+                command = str(prior_call["command"])
+                args = prior_call.get("args") or {}
+                duration_ms = prior_call.get("duration_ms")
+                screenshot = None
+                diagnostics = None
+            elif duplicate:
                 existing = data.get("observation_contract")
                 return dict(existing) if isinstance(existing, dict) else None
-            sequence = len(manifest.get("entries", [])) + 1
+            sequence = (
+                prior_entry["sequence"] if prior_entry else len(manifest.get("entries", [])) + 1
+            )
             entry: dict[str, Any] = {
                 "sequence": sequence,
                 "invocation_id": invocation_id,
                 "command": command,
                 "ok": bool(data.get("ok", True)),
                 "duration_ms": round(float(duration_ms or 0), 1),
-                "timestamp": datetime.now(UTC).isoformat(),
+                "timestamp": (
+                    prior_entry["timestamp"] if prior_entry else datetime.now(UTC).isoformat()
+                ),
             }
             contract: dict[str, Any] | None = None
             if observation is not None:
                 evidence_id = observation_evidence_id(str(manifest["session_id"]), observation)
                 fingerprint = evidence_id.rsplit(":", 1)[-1]
-                stale_reason = data.get("stale_risk")
-                if stale_reason is None and isinstance(observation.get("meta"), dict):
-                    stale_reason = observation["meta"].get("stale_risk")
-                contract = {
-                    "fingerprint": str(
-                        (observation.get("meta") or {}).get("fingerprint") or fingerprint
-                    ),
-                    "evidence_id": evidence_id,
-                    "produced_by": command,
-                    "reusable": stale_reason is None,
-                    "analyze_needed": stale_reason is not None,
-                    "reason": str(stale_reason or "fresh settled observation"),
-                }
+                contract = build_observation_contract(
+                    data,
+                    command=command,
+                    evidence_id=evidence_id,
+                    fingerprint=str((observation.get("meta") or {}).get("fingerprint") or fingerprint),
+                )
                 data["observation_contract"] = contract
                 entry["evidence_id"] = evidence_id
                 entry["observation_contract"] = contract
@@ -234,11 +267,18 @@ class SessionArtifactStore:
                 if mode == "all" or (mode == "failures" and failed):
                     relative = f"evidence/{sequence:03d}-{fingerprint}-observation.json"
                     entry["observation"] = self._write_json(relative, observation)
-                    if screenshot is not None:
+                    raw_image = (observation.get("meta") or {}).get("raw_image")
+                    image_source = Path(raw_image) if isinstance(raw_image, str) else None
+                    if screenshot is not None or (image_source and image_source.is_file()):
                         screenshot_path = self.root / f"evidence/{sequence:03d}-{fingerprint}.png"
                         screenshot_path.parent.mkdir(parents=True, exist_ok=True)
                         try:
-                            entry["screenshot"] = screenshot(screenshot_path)
+                            if image_source is not None and image_source.is_file():
+                                if image_source.resolve() != screenshot_path.resolve():
+                                    shutil.copyfile(image_source, screenshot_path)
+                                entry["screenshot"] = str(screenshot_path)
+                            elif screenshot is not None:
+                                entry["screenshot"] = screenshot(screenshot_path)
                         except Exception as exc:  # noqa: BLE001 - evidence never changes truth
                             manifest.setdefault("capture_errors", []).append(
                                 f"{screenshot_path.name}: {type(exc).__name__}: {exc}"
@@ -255,14 +295,7 @@ class SessionArtifactStore:
                             f"failure-diagnostics.txt: {type(exc).__name__}: {exc}"
                         )
             else:
-                data["observation_contract"] = {
-                    "fingerprint": None,
-                    "evidence_id": None,
-                    "produced_by": command,
-                    "reusable": False,
-                    "analyze_needed": True,
-                    "reason": "this result did not contain an observation",
-                }
+                data["observation_contract"] = build_observation_contract(data, command=command)
             call = {
                 "sequence": sequence,
                 "invocation_id": invocation_id,
@@ -278,12 +311,21 @@ class SessionArtifactStore:
                 "duration_ms": round(float(duration_ms or 0), 1),
                 "result": data,
             }
-            with (self.root / "calls.jsonl").open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(_redact(call), ensure_ascii=False, default=str) + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            manifest.setdefault("entries", []).append(entry)
-            manifest.setdefault("invocations", []).append(invocation_id)
+            if calls is not None and prior_call is not None and prior_entry is not None:
+                calls[calls.index(prior_call)] = call
+                atomic_write_text(
+                    self.root / "calls.jsonl",
+                    "".join(json.dumps(_redact(item), ensure_ascii=False, default=str) + "\n"
+                            for item in calls),
+                )
+                manifest["entries"][manifest["entries"].index(prior_entry)] = entry
+            else:
+                with (self.root / "calls.jsonl").open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(_redact(call), ensure_ascii=False, default=str) + "\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                manifest.setdefault("entries", []).append(entry)
+                manifest.setdefault("invocations", []).append(invocation_id)
             self._write_json("manifest.json", manifest)
             return contract
 

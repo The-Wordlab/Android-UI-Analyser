@@ -11,7 +11,7 @@ import json
 from collections.abc import Mapping
 from enum import Enum
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_serializer
 
@@ -382,6 +382,17 @@ class ObservationContract(BaseModel):
     reusable: bool
     analyze_needed: bool
     reason: str
+    # Dispatch success does not establish that a requested destination is ready. Fresh
+    # visual evidence can also exist without semantic elements on an opaque screen.
+    action_succeeded: bool | None = None
+    # False means the semantic read carries stale-provenance caveats, even when a new PNG
+    # is available. This is not a measurement of pixel age or destination readiness.
+    evidence_fresh: bool | None = None
+    elements_available: bool | None = None
+    readiness: Literal["ready", "unmet", "unconfirmed", "not_checked"] | None = None
+    image_path: str | None = None
+    # Local artifact exports contain no new observation and cannot invalidate an earlier one.
+    previous_observation_validity: Literal["unchanged"] | None = None
 
 
 class CallerTurn(BaseModel):
@@ -797,6 +808,8 @@ class ActionResult(BaseModel):
 
     ok: bool
     action: str
+    # Exact retained animation window; local exports reuse it without another device read.
+    capture_evidence: dict[str, Any] | None = None
     # Inline hint when an action already returns usable screen state. Declared this high on
     # purpose: it is the sentence that stops a caller spending a second round trip on an
     # `analyze` it does not need, and it has to be read *before* the observation it describes,

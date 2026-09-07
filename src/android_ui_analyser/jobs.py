@@ -51,6 +51,7 @@ class JobState(BaseModel):
     platform: str = "android"
     owner: str | None = None
     session_id: str | None = None
+    capture_evidence: dict[str, Any] | None = None
     status: JobStatus = "queued"
     created_ms: int
     started_ms: int | None = None
@@ -113,9 +114,7 @@ def _complete_correlated_goal_phase(cache_dir: str | Path, job: JobState) -> Non
         phase_progress,
     )
 
-    session = load_session_state(
-        cache_dir, session_id=job.session_id, platform=job.platform
-    )
+    session = load_session_state(cache_dir, session_id=job.session_id, platform=job.platform)
     if session is None:
         return
     updated = complete_current_ui_phase_from_job(cache_dir, session, job=job)
@@ -280,6 +279,12 @@ class JobManager:
                 created_ms=int(time.time() * 1000),
                 worker_pid=os.getpid(),
             )
+            capture = getattr(self.engine, "_capture", None)
+            if capture is not None:
+                with contextlib.suppress(Exception):
+                    state.capture_evidence = capture.begin_evidence(
+                        f"job:{state.job_id}", session_id=state.session_id, owner=state.owner
+                    )
             _event(state, "queued", "durable wait queued")
             self._cancel = threading.Event()
             self._active_id = state.job_id
@@ -365,6 +370,14 @@ class JobManager:
                 _event(state, "failed", "worker raised an internal error")
         finally:
             with self._lock:
+                capture = getattr(self.engine, "_capture", None)
+                if capture is not None and state.capture_evidence is not None:
+                    with contextlib.suppress(Exception):
+                        state.capture_evidence = capture.finish_evidence(
+                            state.capture_evidence["ref"]
+                        )
+                        if isinstance(state.result, dict):
+                            state.result["capture_evidence"] = state.capture_evidence
                 state.finished_ms = int(time.time() * 1000)
                 _write(self.cache_dir, state)
                 if self._active_id == job_id:

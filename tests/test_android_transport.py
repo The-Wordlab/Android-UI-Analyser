@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -257,9 +258,7 @@ def test_read_only_inventory_retries_one_transient_locked_failure(
             raise DeviceError("could not list devices: Unknown data: b''")
         return ["emulator-5554"]
 
-    assert android_transport.run_adb_inventory_operation(tmp_path, inventory) == [
-        "emulator-5554"
-    ]
+    assert android_transport.run_adb_inventory_operation(tmp_path, inventory) == ["emulator-5554"]
     assert calls == 2
 
 
@@ -280,9 +279,7 @@ def test_non_inventory_adb_operation_is_never_retried(tmp_path: Path, monkeypatc
     assert calls == 1
 
 
-def test_persistently_failed_inventory_stops_after_one_retry(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_persistently_failed_inventory_stops_after_one_retry(tmp_path: Path, monkeypatch) -> None:
     calls = 0
     monkeypatch.setattr(android_transport, "ensure_adb_on_path", lambda: "/fake/adb")
     monkeypatch.setattr(android_transport, "adb_server_endpoint", lambda: ("127.0.0.1", 5037))
@@ -308,20 +305,28 @@ def test_device_inventory_preserves_offline_and_unauthorized_states(monkeypatch)
     ]
     online = SimpleNamespace(
         serial="emulator-5554",
-        prop=SimpleNamespace(model="Pixel Test"),
-        getprop=lambda key: {
-            "ro.build.version.release": "14",
-            "persist.sys.locale": "en-US",
-            "ro.product.locale": "",
-        }[key],
+        open_transport=lambda **kwargs: nullcontext(
+            SimpleNamespace(
+                send_command=lambda command: None,
+                check_okay=lambda: None,
+                read_until_close=lambda: (
+                    "[ro.product.model]: [Pixel Test]\n"
+                    "[ro.build.version.release]: [14]\n[persist.sys.locale]: [en-US]\n"
+                ),
+            )
+        ),
     )
     fake_adb = SimpleNamespace(
-        list=lambda: transports,
-        device=lambda *, serial: online
-        if serial == "emulator-5554"
-        else (_ for _ in ()).throw(AssertionError(f"enriched {serial}")),
+        list=lambda **kwargs: transports,
+        device=lambda *, serial: (
+            online
+            if serial == "emulator-5554"
+            else (_ for _ in ()).throw(AssertionError(f"enriched {serial}"))
+        ),
     )
-    monkeypatch.setitem(sys.modules, "adbutils", SimpleNamespace(adb=fake_adb))
+    monkeypatch.setitem(
+        sys.modules, "adbutils", SimpleNamespace(AdbClient=lambda **kwargs: fake_adb)
+    )
 
     inventory = device.list_devices()
 

@@ -333,17 +333,19 @@ def effective_serial(config: Config, serial: str | None = None) -> str | None:
 def effective_platform(config: Config, platform: str | None = None) -> str:
     """Selected platform transported into and used to namespace a warm daemon."""
 
-    return str(
-        platform
-        or getattr(config.device, "platform", None)
-        or os.environ.get("AUA_DEVICE__PLATFORM")
-        or LEGACY_PLATFORM
-    ).strip().lower()
+    return (
+        str(
+            platform
+            or getattr(config.device, "platform", None)
+            or os.environ.get("AUA_DEVICE__PLATFORM")
+            or LEGACY_PLATFORM
+        )
+        .strip()
+        .lower()
+    )
 
 
-def socket_path(
-    config: Config, serial: str | None = None, *, platform: str | None = None
-) -> str:
+def socket_path(config: Config, serial: str | None = None, *, platform: str | None = None) -> str:
     """Return the expanded unix-socket path from *config*.
 
     When a device serial is known (explicit arg, ``config.device.serial``, or
@@ -466,9 +468,7 @@ def _adopt_client_owner(
     held_before: set[str] = set()
     if registry is not None:
         with contextlib.suppress(Exception):
-            held_before = set(
-                leases.held_by(registry, adopted_owner, platform=platform_name)
-            )
+            held_before = set(leases.held_by(registry, adopted_owner, platform=platform_name))
     leased_serial = engine._lease_device()  # raises when this owner may not have it
     if bound_serial and leased_serial and leased_serial != bound_serial:
         # A warm Engine cannot be rebound by changing only its lease metadata: its Device
@@ -1264,6 +1264,15 @@ def _journal_dispatch(
     nested = response.get("result")
     ok = bool(response.get("ok")) and not (isinstance(nested, dict) and nested.get("ok") is False)
     extra = {"invocation_id": request["invocation_id"]} if request.get("invocation_id") else {}
+    component = request.get("journal_component")
+    if isinstance(component, dict):
+        extra.update(
+            {
+                key: component[key]
+                for key in ("parent_command", "component", "component_index", "component_count")
+                if key in component
+            }
+        )
     expected_error_code = request.get("expected_error_code")
     if isinstance(expected_error_code, str) and expected_error_code:
         error_value = response.get("error")
@@ -1477,6 +1486,7 @@ class DaemonClient:
         runtime_fingerprint: str | None = None,
         decorate_response: bool = False,
         journal_privacy_cmd: str | None = None,
+        journal_component: dict[str, Any] | None = None,
     ) -> None:
         self._sock_path = sock_path
         self._timeout = 5.0 if timeout is None else timeout
@@ -1496,6 +1506,7 @@ class DaemonClient:
         self._runtime_fingerprint = runtime_fingerprint
         self._decorate_response = decorate_response
         self._journal_privacy_cmd = journal_privacy_cmd
+        self._journal_component = journal_component
 
     def __enter__(self) -> DaemonClient:
         return self
@@ -1528,6 +1539,8 @@ class DaemonClient:
             request["runtime_fingerprint"] = self._runtime_fingerprint
         if self._decorate_response:
             request["decorate_response"] = True
+        if self._journal_component:
+            request["journal_component"] = self._journal_component
         if self._journal_privacy_cmd:
             request["journal_privacy_cmd"] = self._journal_privacy_cmd
         payload = json.dumps(request, ensure_ascii=False).encode() + b"\n"

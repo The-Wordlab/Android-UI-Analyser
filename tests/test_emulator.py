@@ -67,8 +67,12 @@ def test_start_requires_avd_when_multiple(monkeypatch: pytest.MonkeyPatch, tmp_p
         emu.start(cache_dir=tmp_path)
 
 
-def test_start_headless_waits_for_serial(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("audio", [False, True])
+def test_start_headless_waits_for_serial(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, audio: bool
+) -> None:
     from android_ui_analyser import emulator as emu
+    from android_ui_analyser import mic
 
     monkeypatch.setattr(emu, "emulator_bin", lambda: "/fake/emulator")
     monkeypatch.setattr(
@@ -94,6 +98,11 @@ def test_start_headless_waits_for_serial(monkeypatch: pytest.MonkeyPatch, tmp_pa
     monkeypatch.setattr(emu.subprocess, "Popen", lambda *a, **k: FakeProc())
     monkeypatch.setattr(emu.time, "sleep", lambda *_: None)
     monkeypatch.setattr(emu, "_wait_for_boot", lambda *_a, **_k: True)
+    monkeypatch.setattr(emu, "_serial_shell", lambda _serial, **_kwargs: lambda _command: "1")
+    audio_checks: list[str] = []
+    monkeypatch.setattr(
+        mic, "preflight", lambda serial: audio_checks.append(serial) or {"ok": True}
+    )
     monkeypatch.setattr(emu, "_spawn_idle_watchdog", lambda **k: 7777)
     cleanup_calls: list[tuple[str, Path]] = []
     cleanup_results = iter(
@@ -117,7 +126,7 @@ def test_start_headless_waits_for_serial(monkeypatch: pytest.MonkeyPatch, tmp_pa
         ),
     )
 
-    out = emu.start(headless=True, wait_s=5, cache_dir=tmp_path)
+    out = emu.start(headless=True, audio=audio, wait_s=5, cache_dir=tmp_path)
     assert out["serial"] == "emulator-5554"
     assert out["headless"] is True
     assert out["avd"] == "only"
@@ -143,6 +152,10 @@ def test_start_headless_waits_for_serial(monkeypatch: pytest.MonkeyPatch, tmp_pa
         ("emulator-5554", tmp_path),
     ]
     assert out["proxy_cleanup"]["cleared"] is True
+    assert audio_checks == (["emulator-5554"] if audio else [])
+    assert ("-grpc-use-token" in meta["cmd"]) is audio
+    assert ("-no-audio" in meta["cmd"]) is not audio
+    assert out["audio_preflight"] == ({"ok": True} if audio else None)
 
 
 def test_emulator_start_help_explains_provisioning_vs_lease_selection() -> None:

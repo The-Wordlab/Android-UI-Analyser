@@ -55,8 +55,23 @@ def test_every_synonym_points_at_a_command_that_exists() -> None:
 
     from android_ui_analyser.guide import COMMAND_SYNONYMS
 
-    real = set(get_command(app).commands)
-    unknown = {m for m in COMMAND_SYNONYMS.values() if m not in real}
+    def exists(path: str) -> bool:
+        command = get_command(app)
+        parts = path.split()
+        for index, part in enumerate(parts):
+            commands = getattr(command, "commands", None)
+            if commands is None:
+                # Some public families (for example app ACTION) use one leaf command with
+                # a documented positional vocabulary instead of a nested Click group.
+                action = next((param for param in command.params if param.name == "action"), None)
+                vocabulary = str(getattr(action, "help", "")).rstrip(".").split("|")
+                return index == len(parts) - 1 and part in vocabulary
+            command = commands.get(part)
+            if command is None:
+                return False
+        return True
+
+    unknown = {meant for meant in COMMAND_SYNONYMS.values() if not exists(meant)}
     assert not unknown, f"synonyms point at non-existent commands: {unknown}"
 
 

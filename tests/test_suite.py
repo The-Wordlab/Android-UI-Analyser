@@ -7,7 +7,6 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from android_ui_analyser import engine as engine_mod
 from android_ui_analyser.cli import app
 from android_ui_analyser.errors import ExitCode
 from android_ui_analyser.suite import parse_suite, run_suite
@@ -133,7 +132,7 @@ checks:
     assert ("launch_app", ("co.example.app",)) in dev.calls
 
 
-def test_cli_suite_run_pass_and_fail(tmp_path: Path, monkeypatch) -> None:
+def test_cli_suite_run_pass_and_fail(tmp_path: Path, fake_cli_device) -> None:
     path = tmp_path / "ac.yaml"
     path.write_text(_SUITE, encoding="utf-8")
     dev = FakeDevice(
@@ -141,7 +140,7 @@ def test_cli_suite_run_pass_and_fail(tmp_path: Path, monkeypatch) -> None:
         text_index={"Notifications": (40, 100, 1040, 180), "Done": (40, 300, 1040, 380)},
         resource_index={"com.test.app:id/notificationsButton": (40, 100, 1040, 180)},
     )
-    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: dev)
+    fake_cli_device(dev)
 
     r = runner.invoke(app, ["suite", "run", str(path)])
     assert r.exit_code == 0, r.stderr
@@ -169,12 +168,12 @@ def test_cli_suite_run_pass_and_fail(tmp_path: Path, monkeypatch) -> None:
     assert body4["stopped_early"] is False
 
 
-def test_cli_suite_stdin(monkeypatch) -> None:
+def test_cli_suite_stdin(fake_cli_device) -> None:
     dev = FakeDevice(
         hierarchy_xml=_XML,
         text_index={"Notifications": (40, 100, 1040, 180)},
     )
-    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: dev)
+    fake_cli_device(dev)
     yaml_text = 'name: stdin_ac\nchecks:\n  - has: "Notifications"\n'
     r = runner.invoke(app, ["suite", "run", "-", "--json"], input=yaml_text)
     assert r.exit_code == 0, r.stderr

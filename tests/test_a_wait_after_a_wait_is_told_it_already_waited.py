@@ -1,27 +1,4 @@
-"""Waiting twice is the expensive mistake, and the advice has to differ from waiting once.
-
-Run 6 of the fresh-agent series (2026-08-10) did this:
-
-    tap-and-analyze --rid <navTab> --until 'text:Search'     # 2042ms, satisfied
-    wait-and-analyze --after-change --until '!text:Loading'  # 25256ms
-
-The second call cost 25.3s — more than a third of the whole run — and bought nothing: the search
-field it went on to use was already on the screen the first call returned. For comparison, the
-entire flow through to the search verdict takes 5.7s when each wait names the element it is about
-to act on.
-
-Two distinct mistakes, so two messages:
-
-* Waiting after a plain action → "pass --until to the action".
-* Waiting after a call that ALREADY waited → that advice is what they just followed, so saying it
-  again is noise. They need to hear that they are re-reading a settled screen, and that a
-  screen-wide predicate (`!text:Loading`) waits for the whole page while `rid:<target>` returns as
-  soon as the one element they want exists.
-
-The signal is the journal entry kind. `await_outcome` is attached to the emitted result and never
-reaches the journal, and a global `--until` is recorded as its own `await_predicate` entry — so
-after `tap --until X` the newest entry is the await, not the tap.
-"""
+"""Prior arrival evidence cannot establish that a later behavior check is redundant."""
 
 from __future__ import annotations
 
@@ -34,86 +11,83 @@ import android_ui_analyser.cli as cli_mod
 
 class _Recorder:
     def __init__(self) -> None:
-        self.messages: list[str] = []
+        self.warnings: list[str] = []
+        self.information: list[str] = []
 
     def warning(self, msg: str, *args: Any) -> None:
-        self.messages.append(msg % args if args else msg)
+        self.warnings.append(msg % args if args else msg)
+
+    def info(self, msg: str, *args: Any) -> None:
+        self.information.append(msg % args if args else msg)
 
 
 @pytest.fixture
-def warned(monkeypatch: pytest.MonkeyPatch) -> _Recorder:
-    recorder = _Recorder()
-    monkeypatch.setattr(cli_mod, "logger", recorder)
-    return recorder
+def recorder(monkeypatch: pytest.MonkeyPatch) -> _Recorder:
+    value = _Recorder()
+    monkeypatch.setattr(cli_mod, "logger", value)
+    return value
 
 
-def _fire(monkeypatch: pytest.MonkeyPatch, events: list[dict]) -> None:
+def _fire(monkeypatch: pytest.MonkeyPatch, result: dict, *, waited_for: str | None = None) -> None:
     """Drive the lint against a scripted journal, with no device anywhere."""
     import sys
     import types
 
     import android_ui_analyser
 
-    fake_journal = types.SimpleNamespace(read_since=lambda *a, **k: events)
-    # `from . import journal` reads the attribute off the package once it has been imported, so
-    # patching sys.modules alone passes in isolation and fails in a full run.
+    events = [{"cmd": "await_predicate", "ok": True, "args": {"predicate": "text:Ready"}, "result": result}]
+    fake_journal = types.SimpleNamespace(
+        read_since=lambda *a, **k: events,
+        review_events=lambda _cache, _serial, rows, **kwargs: rows,
+    )
     monkeypatch.setattr(android_ui_analyser, "journal", fake_journal, raising=False)
     monkeypatch.setitem(sys.modules, "android_ui_analyser.journal", fake_journal)
-
     engine = types.SimpleNamespace(
-        config=types.SimpleNamespace(cache=types.SimpleNamespace(dir="/tmp/none")),
-        device=types.SimpleNamespace(serial="emulator-0"),
+        config=types.SimpleNamespace(cache=types.SimpleNamespace(dir="/example/none"))
     )
-    cli_mod._warn_if_wait_could_have_been_until(engine, None)
+    cli_mod._warn_if_wait_could_have_been_until(engine, waited_for)
 
 
-_ACTION = {"cmd": "tap", "ok": True, "result": {"action": "tap", "observation": {"elements": []}}}
-_AWAIT = {"cmd": "await_predicate", "ok": True, "result": {"action": "await"}}
+def _ready() -> dict:
+    return {
+        "action": "await",
+        "await_outcome": "satisfied",
+        "observation": {"elements": [{"id": "el:ready", "text": "Ready"}]},
+    }
 
 
-def test_waiting_after_an_until_says_you_already_waited(
-    monkeypatch: pytest.MonkeyPatch, warned: _Recorder
-) -> None:
-    _fire(monkeypatch, [_ACTION, _AWAIT])
+def test_a_wait_command_without_evidence_is_not_called_settled(monkeypatch, recorder) -> None:
+    _fire(monkeypatch, {"action": "await"})
 
-    assert warned.messages, "the expensive case must not be the silent one"
-    message = warned.messages[0]
-    assert "already waited with `--until`" in message, message
-    assert "pass it to the action instead" not in message, "that is what they just did"
+    assert recorder.warnings == []
+    assert recorder.information == []
 
 
-def test_it_names_the_cheaper_predicate(
-    monkeypatch: pytest.MonkeyPatch, warned: _Recorder
-) -> None:
-    _fire(monkeypatch, [_ACTION, _AWAIT])
+def test_a_later_behavior_wait_is_not_accused_of_repeating_arrival(monkeypatch, recorder) -> None:
+    _fire(monkeypatch, _ready())
 
-    message = warned.messages[0]
-    assert "rid:<target>" in message, message
-    assert "!text:Loading" in message, "the screen-wide predicate is the thing being corrected"
+    assert recorder.warnings == []
+    assert recorder.information == []
 
 
-def test_waiting_after_a_plain_action_still_says_to_fold_it_in(
-    monkeypatch: pytest.MonkeyPatch, warned: _Recorder
-) -> None:
-    _fire(monkeypatch, [_ACTION])
+def test_an_exact_satisfied_predicate_gets_conditional_information(monkeypatch, recorder) -> None:
+    _fire(monkeypatch, _ready(), waited_for="Ready")
 
-    message = warned.messages[0]
-    assert "this wait follows `tap`" in message, message
-    assert "pass it to the action instead" in message, message
-
-
-def test_the_action_is_named_not_the_await_that_followed_it(
-    monkeypatch: pytest.MonkeyPatch, warned: _Recorder
-) -> None:
-    """`--until` journals an `await` entry, which would otherwise be reported as the action."""
-    _fire(monkeypatch, [_ACTION, _AWAIT])
-
-    assert "`await`" not in warned.messages[0]
+    assert recorder.warnings == []
+    assert len(recorder.information) == 1
+    assert "if that is all this check needs" in recorder.information[0]
+    assert "later behavior" in recorder.information[0]
 
 
-def test_an_empty_journal_says_nothing(
-    monkeypatch: pytest.MonkeyPatch, warned: _Recorder
-) -> None:
-    _fire(monkeypatch, [])
+def test_a_different_positive_predicate_is_not_a_repeated_check(monkeypatch, recorder) -> None:
+    _fire(monkeypatch, _ready(), waited_for="Dismissed")
 
-    assert warned.messages == []
+    assert recorder.warnings == []
+    assert recorder.information == []
+
+
+def test_an_unmet_wait_never_claims_its_requested_state_is_available(monkeypatch, recorder) -> None:
+    _fire(monkeypatch, {**_ready(), "settled_unmet": True}, waited_for="Ready")
+
+    assert recorder.warnings == []
+    assert recorder.information == []

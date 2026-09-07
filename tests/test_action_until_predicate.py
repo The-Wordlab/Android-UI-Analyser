@@ -263,12 +263,13 @@ def test_regex_looking_until_timeout_explains_literal_matching(monkeypatch) -> N
     assert "--match regex" in (out.note or "")
 
 
-def test_timeout_keeps_the_caveat_and_reports_which_term_failed(monkeypatch) -> None:
-    """A timeout is not a failed tap — the outcome must stay distinguishable."""
+def test_timeout_reports_the_unmet_term_without_reusing_the_early_stale_caveat(monkeypatch) -> None:
+    """A wait timeout is distinct from both a failed tap and an old frame's stale caveat."""
     out, _ = _run(monkeypatch, _tapped(), ("rid:resultsPanel", 5000, 500), _awaited("timeout"))
     assert out.await_outcome == "timeout"
     assert out.await_terms and out.await_terms[0]["present"] is False
-    assert "stale_risk" in (out.detail or "")
+    assert "stale_risk" not in (out.detail or "")
+    assert out.ok is True
 
 
 def test_no_until_leaves_the_result_untouched(monkeypatch) -> None:
