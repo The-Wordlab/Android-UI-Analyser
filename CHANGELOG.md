@@ -13,6 +13,9 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- Session bootstrap now returns persisted element handles before trimming its observation, matching
+  analysis and action responses. Labelled list rows retain handles when an English relative-age
+  suffix changes; same-title rows with different ages remain ambiguous and refuse actions.
 - Published element IDs are now persisted `el:` handles, separate from reusable selector keys.
   Identified rows and their child controls keep their handles when reordered or scrolled;
   recycled items cannot inherit a previous item's handle. Matching uses full resource names,

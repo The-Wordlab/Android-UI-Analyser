@@ -528,6 +528,9 @@ def session_start(
     # opt-in as every action response: filtering `observation.elements` on `clickable` is the
     # same answer, from the observation already in this payload.
     self._price_elements(observed)
+    # This routing response is a plain dict, so it does not pass through an action's
+    # renderer. Publish before CLI/MCP projection discards handle/selector evidence.
+    out["observation"] = observed.as_dict()
     if self.config.output.next_actions:
         next_actions = self._next_actions(observed)
         if next_actions:

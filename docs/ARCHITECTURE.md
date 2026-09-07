@@ -112,6 +112,12 @@ descriptors are not matched by position; their old handles become unavailable. M
 limits reuse to the connected runtime. Corrupt or evicted records expire handles rather than reusing
 them. This mechanism uses existing adapter tree/input contracts and the neutral `instance_token`.
 
+Session bootstrap publishes its observation before projection can discard identity evidence.
+An independently titled, clickable child of a scrollable container can carry an English numeric
+relative-age suffix (`3 days ago`). Its descriptor replaces that suffix with an age marker while
+preserving the title, ancestry and original output text. Title collisions remain ambiguous; bare
+ages, labels outside lists and unrecognized formats retain exact matching.
+
 `stable_key` remains a selector fingerprint used by maps and saved flows. Its ordinal suffixes
 provide frame uniqueness, not item identity. All transports publish and act through the same Engine
 handles. Action commands take an ID (`tap-and-analyze <id>`, `input-and-analyze <id> "text"`). Benefits:

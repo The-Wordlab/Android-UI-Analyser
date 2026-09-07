@@ -1497,6 +1497,12 @@ controls are distinguished by their owning row's content and ancestry. Input val
 enabled, focused, and selected state do not determine identity. AUA refuses absent, changed,
 ambiguous, or expired handles with a fresh observation, without sending the action.
 
+Session bootstrap publishes the same handles as analysis and actions. On clickable list rows with
+a title, a trailing English relative age such as `3 days ago` is treated as state; changing it to
+`4 days ago` keeps the handle and the original text remains visible. Rows with the same title and
+different ages are ambiguous. Bare ages, other text changes and unrecognized date formats still
+expire handles conservatively.
+
 Handles persist across CLI/daemon restarts on the same attested target boot and adapter configuration.
 Without boot identity they remain local to the connected runtime. Records are bounded, so old handles
 can expire. Identical items without distinguishing semantics cannot be tracked reliably; visual-only

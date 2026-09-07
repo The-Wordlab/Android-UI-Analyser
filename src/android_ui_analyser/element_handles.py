@@ -31,6 +31,11 @@ if TYPE_CHECKING:
 PREFIX = "el:"
 MAX_RECORDS = 4096
 _LOCAL_LIFETIMES: WeakKeyDictionary[Any, str] = WeakKeyDictionary()
+# Only a trailing, explicit age on an independently labelled list item is state.
+# Keep bare ages and arbitrary numbers verbatim: they may be the item's only identity.
+_RELATIVE_AGE = re.compile(
+    r"(?P<title>.*\S)\s+\d+\s+(?:seconds?|minutes?|hours?|days?|weeks?|months?|years?)\s+ago$"
+)
 
 
 def is_handle(value: Any) -> bool:
@@ -69,6 +74,20 @@ def descriptors(elements: list[Element]) -> list[str]:
         children.setdefault(el.parent, []).append(el)
     sibling_roles = Counter((el.parent, el.resource_id, el.type) for el in elements)
 
+    def identity_label(el: Element, value: str | None) -> str:
+        label = _label(value)
+        parent = by_id.get(el.parent) if el.parent is not None else None
+        if (
+            parent is not None and parent.scrollable
+            and (el.clickable or el.long_clickable) and not _editable(el)
+        ):
+            age = _RELATIVE_AGE.fullmatch(label)
+            if age is not None:
+                # Keep an age marker, so a title-only row cannot inherit this identity.
+                # This is descriptor-only; the original text is still published unchanged.
+                return age["title"] + "\0relative-age"
+        return label
+
     @cache
     def context_labels(parent: ElementId | None, window: str | None) -> str:
         # A dialog/page heading identifies what its identically named buttons operate on.
@@ -96,7 +115,9 @@ def descriptors(elements: list[Element]) -> list[str]:
     def subtree_labels(el: Element, visited: frozenset[ElementId] = frozenset()) -> list[str]:
         if el.id in visited:
             return []
-        labels = [] if _editable(el) else [_label(el.content_desc), _label(el.text)]
+        labels = [] if _editable(el) else [
+            identity_label(el, el.content_desc), identity_label(el, el.text)
+        ]
         for child in children.get(el.id, []):
             labels.extend(subtree_labels(child, visited | {el.id}))
         return sorted(set(filter(None, labels)))
@@ -104,7 +125,9 @@ def descriptors(elements: list[Element]) -> list[str]:
     own: dict[ElementId, str] = {}
     for el in elements:
         # Full resource names retain package namespaces; a resource-id tail is a selector.
-        label = _label(el.content_desc) or ("" if _editable(el) else _label(el.text))
+        label = identity_label(el, el.content_desc) or (
+            "" if _editable(el) else identity_label(el, el.text)
+        )
         anchor: Any = label
         if children.get(el.id) and not el.scrollable:
             anchor = subtree_labels(el)
