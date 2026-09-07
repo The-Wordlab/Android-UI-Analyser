@@ -181,10 +181,10 @@ def test_tap_aims_at_the_control_and_says_so(tmp_path: Path) -> None:
     assert out.acting is not None
     assert out.acting["relation"] == "sibling-subtree"
     # `acting` reports published ids, like every other id in the response.
-    from android_ui_analyser.identity import stable_key
-
-    assert out.acting["named_id"] == stable_key(caption)
-    assert out.acting["id"] == stable_key(control)
+    observed = eng._last_analyze_result
+    assert observed is not None
+    assert out.acting["named_id"] == observed.element_by_id(caption.id).published_id
+    assert out.acting["id"] == observed.element_by_id(control.id).published_id
 
 
 def test_numeric_id_never_retargets_to_a_sibling_control(tmp_path: Path) -> None:

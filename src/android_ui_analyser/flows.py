@@ -328,6 +328,7 @@ _PUBLISHED_ID_PREFIXES: dict[str, str | None] = {
     "cd": "desc",
     "geo": None,
     "px": None,
+    "el": None,  # Runtime handles are not reusable selectors for saved flows.
 }
 
 

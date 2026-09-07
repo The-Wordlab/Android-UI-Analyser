@@ -172,9 +172,7 @@ class ActingNode(NamedTuple):
 
 def _published(el: Element) -> ElementId:
     """The id this element is published under — its stable identity, never the frame ordinal."""
-    from .identity import stable_key
-
-    return el.stable_key or stable_key(el)
+    return el.published_id
 
 
 def can_act(el: Element) -> bool:

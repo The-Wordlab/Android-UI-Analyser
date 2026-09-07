@@ -86,8 +86,6 @@ def test_state_flags_ride_only_on_the_rows_that_mean_something_by_them(tmp_path:
     at its default is dropped and a *checkable* node's `checked: false` — which is the reading
     of an off switch, not a default — is kept.
     """
-    from android_ui_analyser.identity import stable_key
-
     dev = FakeDevice(hierarchy_xml=APPS, package=P, serial="emu-next-selected")
     eng = _engine(tmp_path, dev, output=_OPT_IN)
     observation = eng.analyze(source="hierarchy")
@@ -101,10 +99,10 @@ def test_state_flags_ride_only_on_the_rows_that_mean_something_by_them(tmp_path:
     # `next_actions` names elements the way the payload does — by stable id.
     by_id = {row["id"]: row for row in eng._next_actions(observation) or []}
 
-    assert by_id[stable_key(controls[0])]["selected"] is True
-    assert "selected" not in by_id[stable_key(controls[1])], "a false default says nothing"
-    assert by_id[stable_key(controls[2])]["checked"] is False, "an off switch IS the reading"
-    assert by_id[stable_key(controls[2])]["checkable"] is True
+    assert by_id[controls[0].published_id]["selected"] is True
+    assert "selected" not in by_id[controls[1].published_id], "a false default says nothing"
+    assert by_id[controls[2].published_id]["checked"] is False, "an off switch IS the reading"
+    assert by_id[controls[2].published_id]["checkable"] is True
 
 
 def test_the_learned_cost_is_not_duplicated_onto_the_row(tmp_path: Path) -> None:

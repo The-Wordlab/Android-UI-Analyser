@@ -29,6 +29,7 @@
     "stable_key": "rid:surface",
     "window": "app",
     "parent": null,
-    "cost": null
+    "cost": null,
+    "handle": null
   }
 ]

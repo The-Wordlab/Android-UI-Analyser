@@ -26,8 +26,8 @@ stable selectors, never pixels or raw `adb`. The plugin does not put `aua` on `P
 2. Navigate in this order: verified `goto`, saved `flow`, proven deeplink, manual action.
    Screen-family arrival requires equal mapped `logical_name`, state, and surface. Preview risky routes; goal text never authorizes destructive,
    external, settings, data, payment, send, or sign-out effects.
-3. Use analyzed actions and consume their `observation`. Each `id` is stable
-   (`rid:continue_btn`): send it back directly or paste it into `--rid`. Pick the next
+3. Use analyzed actions and their `observation`. Send its `el:` IDs back directly; they follow
+   identified items. Uncertain matches are refused. Use `--rid` for resource IDs. Pick the next
    control by filtering `observation.elements` on `clickable` (`checked`/`scrollable` for
    toggles/scrollers). `--submit` is IME-only: check `submitted`; if false, do not retype—use
    its semantic-send `recommended_call`, or `--send rid:<control>` to type+tap in one call.

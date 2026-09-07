@@ -164,7 +164,7 @@ def drop_default_flags(element: Mapping[str, Any]) -> dict[str, Any]:
 
 
 class Element(BaseModel):
-    """One actionable thing on screen, identified by a stable integer ``id``.
+    """One screen element, with an internal ordinal and a published identity handle.
 
     The interaction-state flags (``checkable``/``checked``/``selected``/``scrollable``/
     ``long_clickable``/``password``) are **tri-state**: ``True``/``False`` when the
@@ -178,7 +178,7 @@ class Element(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     # A frame-local ordinal in memory, a stable id once published. Both are accepted so a
-    # payload round-trips: `as_dict` rewrites every id to the element's stable key (see
+    # payload round-trips: `as_dict` rewrites every id to the element's published handle (see
     # `AnalyzeResult._publish_identity`), and re-validating that payload must not be an error —
     # the alternative is a shape the tool emits but cannot read back, which every consumer
     # eventually trips over. Python paths index by whatever they were given.
@@ -202,6 +202,9 @@ class Element(BaseModel):
     confidence: float | None = None
     # Cross-frame fingerprint — survives re-analyze ID churn (see ``identity.stable_key``).
     stable_key: str | None = None
+    # Assigned by the engine's persistent identity registry. Kept apart from stable_key,
+    # which remains a reusable selector fingerprint for maps, timings, and saved flows.
+    handle: str | None = None
     # Window layer: app | ime | system | overlay (hierarchy package heuristics).
     window: str | None = None
     # ``id`` of the nearest *collected* ancestor, or None for a root / vision element. Kept
@@ -221,6 +224,17 @@ class Element(BaseModel):
     # do so. Priced onto the row it belongs to, "tap this next, and it takes ~4.8s" is one
     # read rather than a cross-reference.
     cost: dict[str, Any] | None = None
+
+    @property
+    def published_id(self) -> str:
+        """The same handle after an output payload has been read back into a model."""
+        from .identity import stable_key
+
+        if self.handle:
+            return self.handle
+        if isinstance(self.id, str) and self.id.startswith("el:"):
+            return self.id
+        return self.stable_key or stable_key(self)
 
     def compact(self) -> dict[str, Any]:
         """Token-minimal dict: drop nulls and default-valued verbose fields."""
@@ -249,6 +263,8 @@ class Element(BaseModel):
             out["confidence"] = round(self.confidence, 4)
         if self.stable_key is not None:
             out["stable_key"] = self.stable_key
+        if self.handle is not None:
+            out["handle"] = self.handle
         if self.window is not None:
             out["window"] = self.window
         if self.parent is not None:
@@ -509,7 +525,7 @@ class AnalyzeResult(BaseModel):
 
     @staticmethod
     def _publish_identity(data: dict[str, Any]) -> dict[str, Any]:
-        """Rewrite every published ``id`` to the element's stable key.
+        """Publish tracked handles, with selector-key compatibility for untracked fixtures.
 
         The integer ``id`` is a frame-local ordinal: reading order, renumbered on every
         analyze, and validated through one cache file per device that all callers of that
@@ -518,8 +534,8 @@ class AnalyzeResult(BaseModel):
         holding an observation produced by another process (the dashboard, a second agent, a
         saved report) is validated against whoever wrote that file last.
 
-        So the ordinal stays internal — every Python path still indexes by it — and what goes
-        out is the one name that outlives the frame. `parent` is remapped through the same
+        The ordinal stays internal and the tracked handle goes out as `id`; `stable_key`
+        remains a reusable selector fingerprint. `parent` is remapped through the same
         table, because a parent pointer that still held an ordinal would name a different
         element than the id it points at. `meta.element_diff` too: an added/removed list of
         ordinals is unreadable next to string ids, and worse, silently comparable to the wrong
@@ -545,14 +561,21 @@ class AnalyzeResult(BaseModel):
         for element in elements:
             if not isinstance(element, dict):
                 continue
-            key = element.get("stable_key") or _stable_key(element)
+            ident = element.get("id")
+            handle = element.get("handle") or (
+                ident if isinstance(ident, str) and ident.startswith("el:") else None
+            )
+            key = handle or element.get("stable_key") or _stable_key(element)
             if key:
                 rows.append((element.get("id"), str(key), element.get("bounds")))
         if not rows:
             return data
         by_ordinal: dict[Any, Any] = _uniquify_keys(rows)
         for element in elements:
-            if isinstance(element, dict) and element.get("id") in by_ordinal:
+            if (
+                isinstance(element, dict) and element.get("id") in by_ordinal
+                and not str(by_ordinal[element["id"]]).startswith("el:")
+            ):
                 element["stable_key"] = by_ordinal[element["id"]]
         for element in elements:
             if not isinstance(element, dict):
@@ -561,6 +584,7 @@ class AnalyzeResult(BaseModel):
                 element["id"] = by_ordinal[element["id"]]
             if element.get("parent") in by_ordinal:
                 element["parent"] = by_ordinal[element["parent"]]
+            element.pop("handle", None)
         meta = data.get("meta")
         diff = meta.get("element_diff") if isinstance(meta, dict) else None
         if isinstance(diff, dict):
@@ -658,7 +682,7 @@ class AnalyzeResult(BaseModel):
 
     def element_by_id(self, element_id: ElementId) -> Element | None:
         for e in self.elements:
-            if e.id == element_id:
+            if e.id == element_id or e.handle == element_id:
                 return e
         return None
 

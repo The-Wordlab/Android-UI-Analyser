@@ -103,8 +103,18 @@ handshake (~300–500 ms overhead/call). Two mitigations:
 
 ## 5. Set-of-Marks: the agent acts on IDs, not pixels
 
-`analyze` assigns every element a stable integer **ID** and returns compact JSON.
-Action commands take an ID (`tap 4`, `input 2 "text"`, `swipe up`). Benefits:
+`analyze` publishes tracked `el:` handles and returns compact JSON. Integer ordinals stay internal
+for legacy callers. `element_handles.py` persists descriptor-to-handle records under the shared
+coordination directory, scoped to platform, target boot and adapter configuration. Matching uses
+full resource names, semantic labels and ancestry, including the content of repeated row containers.
+Editable values, interaction state and positions do not rename semantic elements. Duplicate
+descriptors are not matched by position; their old handles become unavailable. Missing boot evidence
+limits reuse to the connected runtime. Corrupt or evicted records expire handles rather than reusing
+them. This mechanism uses existing adapter tree/input contracts and the neutral `instance_token`.
+
+`stable_key` remains a selector fingerprint used by maps and saved flows. Its ordinal suffixes
+provide frame uniqueness, not item identity. All transports publish and act through the same Engine
+handles. Action commands take an ID (`tap-and-analyze <id>`, `input-and-analyze <id> "text"`). Benefits:
 - No coordinate hallucination — the ID maps to a known box; the tool computes the
   center.
 - Much smaller token footprint than passing images every step.

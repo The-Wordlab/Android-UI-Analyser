@@ -87,7 +87,10 @@ def _selector_from_args(args: dict[str, Any]) -> dict[str, Any] | None:
     caller pasting one back sends it in the field it came out of. A numeric ``id`` stays an
     ordinal and is handled by the caller of this function.
     """
-    key = args.get("stable_key")
+    from .element_handles import is_handle
+
+    raw_id = args.get("id")
+    key = raw_id if is_handle(raw_id) else args.get("stable_key")
     if not (isinstance(key, str) and key.strip()):
         raw = args.get("id")
         if isinstance(raw, str) and raw.strip() and not raw.strip().lstrip("-").isdigit():
@@ -229,9 +232,9 @@ _SELECTOR_PROPS: dict[str, Any] = {
     "stable_key": {
         "type": "string",
         "description": (
-            "Match by an element's stable_key from any observation (e.g. rid:continueBtn). "
-            "It is what `id` already carries, and it outlives the frame it was read in, so it is the safe "
-            "way to act on an observation this process did not produce."
+            "Accept a published element handle (el:...) or a reusable selector key "
+            "(e.g. rid:continueBtn). Prefer the observation's id: handles follow the same "
+            "identified item across reordering and refuse an unavailable or uncertain match."
         ),
     },
     "bounds": {

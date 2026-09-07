@@ -11,6 +11,17 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Fixed
+
+- Published element IDs are now persisted `el:` handles, separate from reusable selector keys.
+  Identified rows and their child controls keep their handles when reordered or scrolled;
+  recycled items cannot inherit a previous item's handle. Matching uses full resource names,
+  labels and semantic ancestry, excluding input values and interaction flags. Ambiguous or
+  unavailable identities are refused with a fresh observation. Records are platform, target,
+  boot and adapter-configuration scoped, shared across CLI/MCP/dashboard processes, and bounded.
+  Without boot evidence handles remain local to the connected runtime. Legacy selectors and
+  numeric scripts remain supported; selector keys with ordinal suffixes still describe positions.
+
 ## [0.15.0] - 2026-09-07
 
 ### Fixed

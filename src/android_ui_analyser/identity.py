@@ -95,7 +95,7 @@ def stable_key(el: Element | dict) -> str:
 #: (pixel signature, geometry, label hash) and can only be resolved as a key. A caller pasting
 #: one back under ``--by id`` means "the id you published", not "a resource-id that happens to
 #: start with px:" — a resource-id cannot contain a colon-separated prefix of these shapes.
-PUBLISHED_KEY_PREFIXES = ("px:", "geo:", "cd:", "tx:")
+PUBLISHED_KEY_PREFIXES = ("el:", "px:", "geo:", "cd:", "tx:")
 
 
 def is_published_key(value: str | None) -> bool:
@@ -295,6 +295,8 @@ def _pixel_parts(key: str | None) -> tuple[str, int] | None:
 
 def _identity_distance(previous: Element, current: Element) -> int | None:
     """Zero for exact/legacy identity, positive for a close visual fingerprint."""
+    if previous.published_id.startswith("el:") and current.published_id.startswith("el:"):
+        return 0 if previous.published_id == current.published_id else None
     previous_key = previous.stable_key or stable_key(previous)
     current_key = current.stable_key or stable_key(current)
     if previous_key == current_key:
@@ -361,6 +363,9 @@ def remap_ids(
 def find_by_stable_key(elements: Sequence[Element], key: str) -> list[Element]:
     """Elements matching *key*, including close ``px:`` and legacy ``geo:`` identities."""
     needle = key.strip()
+    if needle.startswith("el:"):
+        # A missing handle must never fall through to a semantic/positional selector.
+        return [el for el in elements if el.handle == needle or el.id == needle]
     exact: list[Element] = []
     for el in elements:
         sk = el.stable_key or stable_key(el)

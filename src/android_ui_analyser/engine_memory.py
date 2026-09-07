@@ -335,8 +335,6 @@ def _next_actions(
         The learned per-control cost — the one thing `elements` could not express — moved onto
         the element itself; see :meth:`_price_elements`.
         """
-    from .identity import stable_key as _stable_key
-
     rows: list[dict[str, Any]] = []
     for e in obs.elements:
         if not (e.clickable or e.checkable or e.long_clickable or e.scrollable):
@@ -347,7 +345,7 @@ def _next_actions(
         # the caller a number that does not appear anywhere in the payload it came with —
         # and the shared trim, which filters this list to the ids that survived the view,
         # would match nothing and quietly return no next actions at all.
-        row: dict[str, Any] = {"id": e.stable_key or _stable_key(e)}
+        row: dict[str, Any] = {"id": e.published_id}
         if label:
             row["label"] = _label(label)
         if rid:

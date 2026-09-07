@@ -94,9 +94,7 @@ def _published_id(el: Element | None) -> ElementId | None:
     """
     if el is None:
         return None
-    from .identity import stable_key as _sk
-
-    return el.stable_key or _sk(el)
+    return el.published_id
 
 
 def _action_site(self: Engine, element: Element | None) -> _ActionSite | None:
@@ -481,8 +479,12 @@ def _resolve_action_key(
     shown = self._read_cache()
     # A resolution read is AUA's own evidence, never a published observation: recording
     # it would replace the caller's id space with a hierarchy-only view of it.
+    from .element_handles import for_engine, is_handle
+
+    origin = for_engine(self, with_app=False).source(key) if is_handle(key) else None
     current = self.analyze(
-        source="hierarchy", with_ocr=False, record=False, record_ids=False
+        source="vision" if origin in {"detection", "grounding"} else "hierarchy",
+        with_ocr=origin == "ocr", record=False, record_ids=False,
     )
     hits = find_by_stable_key(current.elements, key)
     if not hits and self._key_may_be_visual(key):
@@ -492,6 +494,16 @@ def _resolve_action_key(
         hits = find_by_stable_key(current.elements, key)
     moved = self._note_screen_moved(shown, current)
     if not hits:
+        if is_handle(key):
+            raise ElementNotFoundError(
+                f"could not establish a unique current element for handle {key!r}",
+                hint=(
+                    "No action was sent. The element may be absent, indistinguishable from "
+                    "another item, changed, or from an expired target lifetime. Inspect the "
+                    "attached observation and use a uniquely identified control."
+                ),
+                observation=self._miss_observation(current),
+            )
         # The screen that proves the miss rides along: this read is how we know the key is
         # absent, so telling the caller to go and analyze would spend a round trip on a
         # payload already in hand — and when the screen moved underneath them (an
@@ -539,6 +551,9 @@ def _resolve_action_id(self: Engine, element_id: ElementId, *, verb: str) -> Ele
         the overlapping node would silently perform the requested action on the wrong content.
         """
     from .identity import remap_ids, stable_key
+
+    if isinstance(element_id, str) and not element_id.isdigit():
+        return self._resolve_action_key(element_id, verb=verb)
 
     cached = self._read_cache()
     if cached is None:

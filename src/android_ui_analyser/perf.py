@@ -358,6 +358,8 @@ def element_diff(prev: list[Element], curr: list[Element]) -> dict[str, Any]:
     """
 
     def _key(e: Element) -> str:
+        if e.published_id.startswith("el:"):
+            return e.published_id
         sk = getattr(e, "stable_key", None)
         if sk:
             return str(sk)

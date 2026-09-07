@@ -5548,14 +5548,14 @@ class _DashboardState:
     ) -> dict[str, Any]:
         """Address the clicked element by the identity its own frame published.
 
-        ``stable_key`` is the only name that outlives the frame it came from, so it is the
-        only one this process may send: a frame-local integer resolves through the shared
-        per-device id cache, whose last writer is not necessarily the reader who clicked.
-        The bounds ride along because a key deliberately carries no exact position - a
-        reusable row layout hands every row the same key, and where the human saw it is then
-        the only evidence for which row was meant.
+        Prefer the frame's tracked handle so a reordered row cannot inherit the click.
+        Older observations retain selector-key compatibility, including bounds for ambiguous
+        legacy selectors. A handle is always resolved by identity, never by those bounds.
         """
-        key = element.get("stable_key")
+        from .element_handles import is_handle
+
+        published = element.get("id")
+        key = published if is_handle(published) else element.get("stable_key")
         if not isinstance(key, str) or not key.strip():
             raise UsageError(
                 f"element id {element_id} in that frame has no stable identity to act on",

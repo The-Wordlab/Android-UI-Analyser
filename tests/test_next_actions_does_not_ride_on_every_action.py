@@ -218,7 +218,7 @@ def test_the_opt_in_list_names_every_control_it_can_act_on(tmp_path: Path) -> No
     assert observation is not None
     listed = {row["id"] for row in result.next_actions or []}
     actionable = {
-        stable_key(element)
+        element.published_id
         for element in observation.elements
         if element.clickable or element.checkable or element.long_clickable or element.scrollable
     }

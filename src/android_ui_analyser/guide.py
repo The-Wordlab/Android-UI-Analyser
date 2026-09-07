@@ -381,13 +381,14 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
     (
         "Drive by element ID",
         "`aua --format compact analyze` → a list of elements each with a stable `id` + bounds. "
-        "That `id` is the element's identity (`rid:continue_btn`, `tx:9f0c1a2b3c#2`), not a "
-        "position, so it survives a re-analyze and you can send it straight back — no "
-        "`aua resolve` step, no guessing that the same number still means the same control. "
-        "A published selector such as `rid:continue_btn` may be pasted either as this stable "
-        "id or into `--rid`; AUA strips the redundant matching prefix. The same applies to "
+        "That `id` is a tracked handle (`el:...`). It follows a uniquely identified item "
+        "through movement and reordering; send it straight back. An absent, changed, "
+        "ambiguous, or expired identity is refused with a fresh observation. "
+        "The separate `stable_key` is a reusable selector, not a persistent item handle. "
+        "A selector such as `rid:continue_btn` can also be passed into `--rid`; AUA strips "
+        "the redundant matching prefix. The same applies to "
         "`text:` with `--text` and `desc:` with `--desc`. "
-        "Repeats on one screen are numbered `#1`, `#2` down the screen. Within the current frame: "
+        "Prefer handles over positional `#1`/`#2` selector keys in changing lists. "
         '`aua tap-and-analyze <id>`, `aua input-and-analyze <id> "text"`, '
         "`aua swipe-and-analyze up`, `aua key-and-analyze back`. "
         'Use `aua has "<text>"` (exit 0/1) to branch cheaply without parsing JSON.',
@@ -685,11 +686,11 @@ BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
         "Observe once and use stable selectors",
         "Reuse the compact observation returned by session start. Without a goal session, use "
         "`aua --format tsv analyze --fields id,text,rid,clickable`. Each `id` is a stable "
-        "identity you can act on directly; `--rid <resource-id>` still works, and a copied "
-        "`rid:<resource-id>` is accepted there too. An unlabeled actionable "
-        "control may expose a `px:` perceptual crop fingerprint with rendering tolerance and a "
-        "legacy geometry fallback. After state changes, consume the returned observation or use "
-        "`aua resolve <stable_key>`; never replay an old numeric id. Numeric taps and long-presses "
+        "handle (`el:...`) you can act on directly; `--rid <resource-id>` still works. "
+        "Handles survive CLI/daemon restarts when the adapter can attest the same target boot. "
+        "Without boot evidence their lifetime is the connected runtime; identical unlabelled "
+        "items may be unresolvable. After state changes, consume the returned observation or use "
+        "`aua resolve <id>`; never replay an old numeric id. Numeric taps and long-presses "
         "refuse to redirect "
         "a caption into a sibling control subtree; name the actual acting control instead. "
         "Inline `--answers` / `--phase-done` are bookkeeping: an invalid annotation is returned "
@@ -1959,8 +1960,8 @@ stable selectors, never pixels or raw `adb`. The plugin does not put `aua` on `P
 2. Navigate in this order: verified `goto`, saved `flow`, proven deeplink, manual action.
    Screen-family arrival requires equal mapped `logical_name`, state, and surface. Preview risky routes; goal text never authorizes destructive,
    external, settings, data, payment, send, or sign-out effects.
-3. Use analyzed actions and consume their `observation`. Each `id` is stable
-   (`rid:continue_btn`): send it back directly or paste it into `--rid`. Pick the next
+3. Use analyzed actions and their `observation`. Send its `el:` IDs back directly; they follow
+   identified items. Uncertain matches are refused. Use `--rid` for resource IDs. Pick the next
    control by filtering `observation.elements` on `clickable` (`checked`/`scrollable` for
    toggles/scrollers). `--submit` is IME-only: check `submitted`; if false, do not retype—use
    its semantic-send `recommended_call`, or `--send rid:<control>` to type+tap in one call.

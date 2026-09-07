@@ -672,6 +672,9 @@ def _analyze_screen(
 ) -> AnalyzeResult:
     t0 = time.perf_counter()
     device, w, h = self._context()
+    from .element_handles import for_engine
+
+    identities = for_engine(self)
     if self.config.memory.enabled:
         # Re-check a long-lived daemon's boot identity before it reads or writes any
         # serial-scoped cursor. This is a cheap no-op for the same token and retries a
@@ -769,23 +772,22 @@ def _analyze_screen(
                     ask=hints.ask,
                     map_hint=hints.map_hint,
                 )
+            tracked = identities.assign(prev.elements, app=package, surface=activity)
+            same_ids = [el.published_id for el in tracked] == [el.published_id for el in prev.elements]
+            from .perf import element_diff as _identity_diff
+
             reused = prev.model_copy(
                 update={
+                    "elements": tracked,
                     "meta": prev.meta.model_copy(
                         update={
                             "duration_ms": int((time.perf_counter() - t0) * 1000),
-                            "unchanged": True,
+                            "unchanged": same_ids,
                             "fingerprint": xml_hash,
                             "known_screen": known,
                             **learned,
                             "via": "hierarchy-unchanged",
-                            "element_diff": {
-                                "added": [],
-                                "removed": [],
-                                "changed": [],
-                                "prev_count": len(prev.elements),
-                                "curr_count": len(prev.elements),
-                            }
+                            "element_diff": _identity_diff(prev.elements, tracked)
                             if self.config.perf.differential
                             else prev.meta.element_diff,
                         }
@@ -796,8 +798,10 @@ def _analyze_screen(
             # action invalidates the id cache, so an unchanged screen returned straight
             # from memory left NOTHING on disk and the next `tap <id>` died with "no
             # cached analyze result". The ids are only usable because analyze persists them.
-            if not no_cache:
+            if record_ids:
                 self._write_cache(reused)
+            self._last_analyze_result = reused
+            self._last_analyze_elements = list(tracked)
             self._last_analyze_image = img
             return reused
     else:
@@ -927,12 +931,6 @@ def _analyze_screen(
         known_screen, hints = None, None
     annotated = self._maybe_annotate(annotate, device, elements, img)
     ediff = None
-    if self.config.perf.differential and self._last_analyze_elements is not None:
-        from .perf import element_diff as _element_diff
-
-        with contextlib.suppress(Exception):
-            ediff = _element_diff(self._last_analyze_elements, elements)
-    self._last_analyze_elements = list(elements)
 
     from .perf import elements_fingerprint
 
@@ -964,6 +962,15 @@ def _analyze_screen(
             "The hierarchy contains unrepresentable text; raw Apple Vision OCR elements "
             "are included alongside it with source=ocr. Compare both observations."
         )
+    # Keep the tree's owner separate from the foreground metadata a vision fallback may
+    # replace. Switching perception tiers must not change an unchanged element's scope.
+    identity_app = hierarchy_observation.package if hierarchy_observation is not None else package
+    elements = identities.assign(elements, app=identity_app, surface=activity)
+    if self.config.perf.differential and self._last_analyze_elements is not None:
+        from .perf import element_diff as _identity_diff
+
+        ediff = _identity_diff(self._last_analyze_elements, elements)
+    self._last_analyze_elements = list(elements)
     result = AnalyzeResult(
         screen=Screen(
             width=w, height=h, package=package, activity=activity, source=screen_source
@@ -1048,6 +1055,9 @@ def _analyze_query(
 ) -> AnalyzeResult:
     t0 = time.perf_counter()
     device, w, h = self._context()
+    from .element_handles import for_engine
+
+    identities = for_engine(self)
     package: str | None = None
     activity: str | None = None
     providers_used: list[str] = []
@@ -1079,6 +1089,7 @@ def _analyze_query(
         known_screen, hints = self._record_screen_safe(
             device, package, activity, pool, Tier.hierarchy, h
         )
+        pool = identities.assign(pool, app=package, surface=activity)
         cand, score = self._match_query(query, pool)
         if cand is not None and score > best_score:
             best, best_score = cand, score
@@ -1141,7 +1152,10 @@ def _analyze_query(
             known_screen, hints = self._record_screen_safe(
                 device, package, activity, pool, Tier.vision, h
             )
-        cand, score = self._match_query(query, vis_elements)
+        identity_app = hierarchy_observation.package if hierarchy_observation is not None else package
+        pool = identities.assign(pool, app=identity_app, surface=activity)
+        vis_ids = {el.id for el in vis_elements}
+        cand, score = self._match_query(query, [el for el in pool if el.id in vis_ids])
         if cand is not None and score > best_score:
             best, best_score = cand, score
         if best_score >= QUERY_CONFIDENT and not pin_grounding:

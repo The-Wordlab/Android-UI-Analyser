@@ -170,14 +170,13 @@ def _actionable_keys(elements: Sequence[Element]) -> frozenset[str]:
     what makes it the right basis for "did the screen you are holding move": a label whose text
     ticked over has not taken anything away from you, and an arriving dialog has.
     """
-    from .identity import stable_key as _sk
     from .selectors import app_elements
 
     return frozenset(
         key
         for el in app_elements(elements)
         if (el.clickable or el.checkable or el.long_clickable or el.scrollable)
-        and (key := el.stable_key or _sk(el))
+        and (key := el.published_id)
     )
 
 
@@ -332,6 +331,11 @@ class Engine:
         self._last_analyze_elements: list[Element] | None = None
         self._last_hierarchy_hash: str | None = None
         self._last_analyze_result: AnalyzeResult | None = None
+        # Fallback scope for adapters unable to attest a target boot. Never shared with a
+        # replacement Engine/runtime; attested boots use the persistent registry instead.
+        from uuid import uuid4
+
+        self._element_identity_lifetime = uuid4().hex
         # Screenshot whose pixels produced the current analyze's px: element identities.
         # The outer --with-image wrapper saves this exact frame instead of taking a second,
         # potentially different screenshot after identity assignment.
@@ -1678,6 +1682,9 @@ class Engine:
                 dev.close()
             self._device = None
             self._claimed_instance_token = None
+            from uuid import uuid4
+
+            self._element_identity_lifetime = uuid4().hex
         with contextlib.suppress(Exception):
             self.release_device_use()
 

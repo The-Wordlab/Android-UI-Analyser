@@ -93,6 +93,11 @@ def _rows(output: str) -> list[list[str]]:
     return [ln.split("\t") for ln in body]
 
 
+def _ids_by_rid() -> dict[str, str]:
+    payload = json.loads(_run("analyze", "--all", "--fields", "id,rid"))
+    return {el["rid"]: el["id"] for el in payload["elements"] if el.get("rid")}
+
+
 # ------------------------------------------------------------------ backward compatibility
 
 
@@ -112,10 +117,11 @@ def test_filters_alone_still_validate_as_an_analyze_result(device: FakeDevice) -
 
 
 def test_fields_projects_and_shortens_rid(device: FakeDevice) -> None:
+    ids = _ids_by_rid()
     payload = json.loads(_run("analyze", "--fields", "id,text,rid", "--where-rid", "homeTab"))
     # A projection is an output path, so its ids are the published stable ids.
     assert payload["elements"] == [
-        {"id": "rid:homeTabBROWSE", "text": "Browse", "rid": "homeTabBROWSE"}
+        {"id": ids["homeTabBROWSE"], "text": "Browse", "rid": "homeTabBROWSE"}
     ]
 
 
@@ -166,11 +172,12 @@ def test_tsv_is_comment_header_then_columns_then_rows(device: FakeDevice) -> Non
 
 
 def test_tsv_default_view_hides_system_chrome_and_unlabelled_rows(device: FakeDevice) -> None:
+    named = _ids_by_rid()
     # `rid` is no longer a default column, so the identity is read from `id` — which is the
     # point of the change: one name per row rather than the same name twice.
     ids = [row[0] for row in _rows(_run("--format", "tsv", "analyze"))[1:]]
-    assert "rid:clock" not in ids  # com.android.systemui id
-    assert "rid:notificationsButton" in ids and "rid:homeTabBROWSE" in ids
+    assert named["clock"] not in ids  # com.android.systemui id
+    assert named["notificationsButton"] in ids and named["homeTabBROWSE"] in ids
     assert "" not in ids  # the unlabelled View is gone
 
 
@@ -204,13 +211,15 @@ def test_invalid_global_format_still_exits_2() -> None:
 
 
 def test_region_and_clickable_compose_to_the_header_only(device: FakeDevice) -> None:
+    ids = _ids_by_rid()
     rows = _rows(_run("--format", "tsv", "analyze", "--region", "0,0,1080,300", "--clickable"))
-    assert [r[0] for r in rows[1:]] == ["rid:notificationsButton"]
+    assert [r[0] for r in rows[1:]] == [ids["notificationsButton"]]
 
 
 def test_where_text_is_case_insensitive(device: FakeDevice) -> None:
+    ids = _ids_by_rid()
     rows = _rows(_run("--format", "tsv", "analyze", "--where-text", "brow"))
-    assert [r[0] for r in rows[1:]] == ["rid:homeTabBROWSE"]
+    assert [r[0] for r in rows[1:]] == [ids["homeTabBROWSE"]]
 
 
 def test_limit_caps_the_rows(device: FakeDevice) -> None:

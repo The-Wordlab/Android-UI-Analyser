@@ -1,6 +1,6 @@
 # android-ui-analyser (`aua`)
 
-`aua` is a fast, configurable CLI that gives an AI agent structured "what's on screen and where" for Android UI testing. It reads the accessibility/view hierarchy first — returning every element with a stable integer ID, type, text, and bounding box in tens of milliseconds — and falls back to image-based detection and OCR (and optionally a grounding VLM) only on screens the hierarchy cannot see (Compose without semantics, Flutter, WebViews, canvas, games). The agent acts on **integer IDs, not pixels**: `aua tap-and-analyze 4` and `aua input-and-analyze 2 "hello"` compute coordinates internally, eliminating coordinate hallucination and shrinking the token footprint to a compact JSON list.
+`aua` is a configurable CLI that gives an AI agent structured "what's on screen and where" for Android UI testing. It reads the accessibility/view hierarchy first, returning elements with tracked IDs, types, text, and bounding boxes. Image-based detection, OCR, and optional grounding cover screens with incomplete accessibility data. The agent sends a published ID to `aua tap-and-analyze <id>` or `aua input-and-analyze <id> "hello"`; AUA resolves the element on the current screen and computes the coordinates.
 
 > **New here?** Start with [Installation help](#installation-help). Claude Code and Codex users
 > can install one plugin that supplies the AUA skill and starts the matching released MCP server;
@@ -1488,9 +1488,22 @@ aua --format compact analyze   # get element IDs (smaller token footprint)
 aua analyze                    # full JSON with all fields
 ```
 
-Elements are returned with stable integer IDs. By default, action commands already return the next
+Elements are returned with tracked `el:` handles. By default, action commands already return the next
 screen in `observation` with fresh IDs, so you usually do not need a separate `analyze` immediately
 after state-changing actions.
+
+A handle follows a uniquely identified element through scrolling and reordering. Repeated child
+controls are distinguished by their owning row's content and ancestry. Input values and checked,
+enabled, focused, and selected state do not determine identity. AUA refuses absent, changed,
+ambiguous, or expired handles with a fresh observation, without sending the action.
+
+Handles persist across CLI/daemon restarts on the same attested target boot and adapter configuration.
+Without boot identity they remain local to the connected runtime. Records are bounded, so old handles
+can expire. Identical items without distinguishing semantics cannot be tracked reliably; visual-only
+identities may also expire when rendering changes. The separate `stable_key` remains a reusable
+selector fingerprint: `rid:row#1` means the first matching row on the current screen. Prefer `id`
+for acting on a previously observed item, and semantic selectors for saved flows. Integer ordinals
+remain supported for older scripts but belong to their cached observation.
 
 ### Asking for fewer rows and columns (don't post-process the JSON)
 

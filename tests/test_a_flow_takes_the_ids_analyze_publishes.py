@@ -71,7 +71,7 @@ def test_a_resource_id_that_merely_contains_a_colon_is_left_alone() -> None:
     assert step.resource_id == "com.example.app:id/navBarPrimary"
 
 
-@pytest.mark.parametrize("prefix", ["tx", "cd", "geo", "px"])
+@pytest.mark.parametrize("prefix", ["tx", "cd", "geo", "px", "el"])
 def test_the_content_hashed_ids_are_refused_with_the_field_to_use_instead(prefix: str) -> None:
     """`tx:9db2c18ecb` is a hash of the visible text, not a selector anything can resolve later.
 

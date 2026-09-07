@@ -100,7 +100,7 @@ def test_brief_prefers_stable_selectors_and_current_playbook_facts() -> None:
     brief = guide.render_brief()
     for claim in [
         "stable_key",
-        "`px:` perceptual crop fingerprint",
+        "handle (`el:...`)",
         # Was "prefer `--rid`" — advice that only made sense while `id` was a frame-local
         # ordinal. The id is now itself a stable identity, so the brief has to say the
         # named selector still works rather than that it is preferable.
@@ -251,8 +251,9 @@ def test_guidance_teaches_the_agent_closure_recovery_contracts() -> None:
         assert "leased" in text and "leaves" in text and "provision" in text
 
     assert "redundant matching prefix" in full
-    assert "copied `rid:<resource-id>`" in brief
-    assert "paste it into `--rid`" in skill
+    assert "`--rid <resource-id>` still works" in brief
+    assert "Use `--rid` for resource IDs" in skill
+    assert "Send its `el:` IDs back directly" in skill
 
 
 def test_guide_defines_authoritative_call_accounting_without_inflating_calls() -> None:
