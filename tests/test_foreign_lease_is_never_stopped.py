@@ -143,7 +143,7 @@ def test_start_fails_before_spawning_when_the_expected_serial_already_answers(
     _stub_avds(monkeypatch)
     # The port snapshot sees nothing (adb blink) but the `before` snapshot sees the foreign
     # device: the boot must fail before Popen, having touched nothing.
-    snapshots = iter([[], [{"serial": "emulator-5554", "state": "device"}]])
+    snapshots = iter([[], [], [{"serial": "emulator-5554", "state": "device"}]])
     monkeypatch.setattr(
         em, "running_emulators", lambda: next(snapshots, [{"serial": "emulator-5554"}])
     )

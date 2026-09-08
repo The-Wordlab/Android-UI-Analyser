@@ -688,6 +688,25 @@ def allocate_console_port(
         | _reserved_console_ports()
         | _leased_console_ports(lease_registry_dir)
     )
+
+    def claim_unused(port: int) -> bool:
+        if not _claim_console_port(port):
+            used.add(port)
+            return False
+        try:
+            # A competing boot may become visible and release its reservation after our
+            # first snapshot. Winning the now-free reservation does not mean its live port
+            # is free: recheck while holding the claim, before handing it to the caller.
+            used.update(_used_console_ports(cache_dir=cache_dir))
+            used.update(_leased_console_ports(lease_registry_dir))
+        except BaseException:
+            release_console_port(port)
+            raise
+        if port in used:
+            release_console_port(port)
+            return False
+        return True
+
     if preferred is not None:
         port = int(preferred)
         if port % 2 != 0:
@@ -700,20 +719,19 @@ def allocate_console_port(
                 f"emulator port {port} out of range "
                 f"{_EMULATOR_PORT_MIN}–{_EMULATOR_PORT_MAX}",
             )
-        if port in used:
+        if port in used or not claim_unused(port):
             raise DeviceError(
                 f"emulator port {port} already in use",
                 hint="Omit --port to auto-allocate, or pick a free even port "
                 f"(used: {', '.join(str(p) for p in sorted(used)) or 'none'}).",
             )
-        _claim_console_port(port)
         return port
     for port in range(_EMULATOR_PORT_MIN, _EMULATOR_PORT_MAX + 1, 2):
         if port in used:
             continue
         # Claim before returning: the check above is a snapshot, and a concurrent caller
         # may be between its own check and its emulator binding the port.
-        if _claim_console_port(port):
+        if claim_unused(port):
             return port
     raise DeviceError(
         "no free emulator console ports left",

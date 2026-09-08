@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypeAlias, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from . import __version__
 from .atomic import atomic_write_text
 from .errors import UsageError
 from .flows import Flow
@@ -230,6 +231,8 @@ class SessionState(BaseModel):
     goal_hash: str
     serial: str
     platform: str = "android"
+    # Absent in legacy records: never infer their runtime from the reviewing process.
+    aua_version: str | None = None
     owner: str | None = None
     started_ms: int
     recommended_kind: str
@@ -1972,7 +1975,7 @@ def update_session_state(
 ) -> SessionState:
     """Revalidate and persist additive lifecycle metadata without changing session identity."""
 
-    for field in ("session_id", "serial", "platform", "owner", "started_ms"):
+    for field in ("session_id", "serial", "platform", "owner", "started_ms", "aua_version"):
         if field in changes and changes[field] != getattr(state, field):
             raise ValueError(f"session identity field {field!r} cannot be changed")
     payload = state.model_dump(mode="python")
@@ -2023,6 +2026,7 @@ def create_session_state(
         goal_hash=hashlib.sha256(goal.encode()).hexdigest()[:16],
         serial=serial,
         platform=str(platform).strip().lower(),
+        aua_version=__version__,
         owner=owner,
         started_ms=int(time.time() * 1000),
         recommended_kind=recommended_kind,
@@ -2595,6 +2599,9 @@ def review_session_events(state: SessionState, events: Sequence[dict[str, Any]])
         "ok": True,
         "run_ok": None if ambiguous_invocations and failures == 0 else failures == 0,
         "session_id": state.session_id,
+        "aua_version": state.aua_version,
+        "runtime_versions": sorted({str(e["aua_version"]) for e in scoped if e.get("aua_version")}),
+        "unversioned_events": sum(not e.get("aua_version") for e in scoped),
         "goal_hash": state.goal_hash,
         "serial": state.serial,
         "started_ms": state.started_ms,

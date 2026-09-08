@@ -20,6 +20,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+from . import __version__
 from .platforms.identity import LEGACY_PLATFORM, TargetLike, target_ref
 
 logger = logging.getLogger(__name__)
@@ -610,6 +611,7 @@ def record(
             "ts_ms": ts_ms,
             "source": source,
             "cmd": cmd,
+            "aua_version": __version__,
             "args": compact_args,
             "ok": ok,
             "serial": serial,

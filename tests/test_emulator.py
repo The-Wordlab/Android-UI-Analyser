@@ -369,10 +369,9 @@ def test_parallel_second_instance_gets_next_port(
     monkeypatch.setattr(
         emu, "list_avds", lambda: {"ok": True, "avds": ["only"], "count": 1, "emulator": "x"}
     )
-    calls = {"n": 0}
+    spawned = False
 
     def running() -> list[dict[str, Any]]:
-        calls["n"] += 1
         base = [
             {
                 "serial": "emulator-5554",
@@ -381,7 +380,7 @@ def test_parallel_second_instance_gets_next_port(
                 "android_version": "14",
             }
         ]
-        if calls["n"] < 3:
+        if not spawned:
             return base
         return base + [
             {
@@ -401,7 +400,12 @@ def test_parallel_second_instance_gets_next_port(
         def poll() -> None:
             return None  # the fake boot is a live process; exit would mean collision
 
-    monkeypatch.setattr(emu.subprocess, "Popen", lambda *a, **k: FakeProc())
+    def spawn(*_args: Any, **_kwargs: Any) -> FakeProc:
+        nonlocal spawned
+        spawned = True
+        return FakeProc()
+
+    monkeypatch.setattr(emu.subprocess, "Popen", spawn)
     monkeypatch.setattr(emu.time, "sleep", lambda *_: None)
     monkeypatch.setattr(emu, "_wait_for_boot", lambda *_a, **_k: True)
     monkeypatch.setattr(emu, "_spawn_idle_watchdog", lambda **k: None)

@@ -139,6 +139,7 @@ class SessionArtifactStore:
         evidence: str,
         junit: bool,
         contract_yaml: str | None,
+        aua_version: str | None = None,
     ) -> SessionArtifactStore:
         mode = validate_session_evidence_mode(evidence)
         requested = Path(requested_dir).expanduser()
@@ -152,6 +153,7 @@ class SessionArtifactStore:
             "schema_version": 1,
             "run_id": run_id,
             "session_id": session_id,
+            "aua_version": aua_version,
             "goal": goal,
             "evidence": mode,
             "junit": bool(junit),

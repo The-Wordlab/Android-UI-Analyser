@@ -433,6 +433,7 @@ def session_start(
         artifact_store = SessionArtifactStore.create(
             artifacts_dir,
             session_id=state.session_id,
+            aua_version=state.aua_version,
             goal=goal,
             evidence=evidence,
             junit=junit,
@@ -484,6 +485,7 @@ def session_start(
     phase_call = progress.get("next_call")
     out.update(
         session_id=state.session_id,
+        aua_version=state.aua_version,
         goal_hash=state.goal_hash,
         owner=state.owner,
         serial=state.serial,

@@ -11,8 +11,22 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-09-08
+
+### Breaking
+
+- Published element IDs now use persisted `el:` handles instead of frame-local integers or
+  selector keys. Treat returned IDs as opaque and pass them back unchanged; do not parse them,
+  infer list positions, or keep them across a target reboot. Refresh saved observations when
+  upgrading, and finish active sessions before returning to an older runtime. Reusable selectors
+  remain available through resource IDs, text and descriptions;
+  legacy selector and numeric input compatibility does not make those values durable identities.
+
 ### Fixed
 
+- Concurrent emulator provisioning rechecks port occupancy after claiming a reservation, so a
+  boot that becomes live during allocation cannot have its port assigned again. Explicit port
+  requests also refuse when another process wins the reservation.
 - CLI, MCP and session review share one observation contract, separating action execution,
   fresh evidence, returned controls and destination readiness. Empty/transitional reads no
   longer claim settled arrival; local capture exports preserve the prior observation's validity.
@@ -39,6 +53,9 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Added
 
+- Session records and artifact manifests include the starting AUA version. Journal events record
+  the producing runtime version, and session reviews identify mixed-version or unversioned events
+  so usage comparisons do not attribute older processes to a newly installed release.
 - Actions and background wait jobs expose durable `capture_evidence.ref` windows. All capture
   readers accept `--evidence REF` / MCP `evidence_ref`; delayed contact-sheet and GIF exports use
   exactly the same recorded frames without another device read or guessed relative time window.
@@ -424,5 +441,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.14.2]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.14.2
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.15.0...HEAD
 [0.15.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.15.0
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.16.0

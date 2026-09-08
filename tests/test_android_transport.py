@@ -90,6 +90,11 @@ def _parallel_provision_worker(
     starts = Path(starts_path)
     failure = Path(failure_path)
     online = Path(online_dir)
+    # Spawned interpreters do not inherit pytest's reservation-directory monkeypatch.
+    # Share this test's directory across workers without touching the user's port claims.
+    reservations = Path(lock_dir) / "portlocks"
+    reservations.mkdir(parents=True, exist_ok=True)
+    emulator._reservation_dir = lambda: reservations  # type: ignore[assignment]
     android_transport.adb_server_endpoint = lambda: ("127.0.0.1", 5037)  # type: ignore[method-assign]
     android_transport._adb_coordination_dir = lambda: Path(lock_dir)  # type: ignore[assignment]
     android_transport.adb_bin = lambda: "/fake/adb"  # type: ignore[assignment]

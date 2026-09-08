@@ -15,6 +15,7 @@ import concurrent.futures as cf
 import pytest
 
 from android_ui_analyser import emulator as em
+from android_ui_analyser.errors import DeviceError
 
 
 @pytest.fixture(autouse=True)
@@ -70,6 +71,49 @@ def test_explicit_port_is_also_reserved(_clean_reservations):
     em.allocate_console_port(5566)
     assert (_clean_reservations / "5566.port").exists()
     assert em.allocate_console_port(None) != 5566
+
+
+@pytest.mark.parametrize("preferred", [None, 5554])
+def test_a_boot_that_releases_its_reservation_after_the_snapshot_is_not_reallocated(
+    monkeypatch, _clean_reservations, preferred,
+):
+    """A live boot can replace its reservation while another caller holds an old snapshot."""
+    running = []
+    monkeypatch.setattr(em, "running_emulators", lambda: list(running))
+    claim = em._claim_console_port
+
+    def finish_competing_boot_then_claim(port):
+        if port == 5554:
+            assert claim(port)
+            running.append({"serial": "emulator-5554"})
+            em.release_console_port(port)
+        return claim(port)
+
+    monkeypatch.setattr(em, "_claim_console_port", finish_competing_boot_then_claim)
+
+    if preferred is None:
+        assert em.allocate_console_port() == 5556
+        assert (_clean_reservations / "5556.port").is_file()
+    else:
+        with pytest.raises(DeviceError, match="already in use"):
+            em.allocate_console_port(preferred)
+    assert not (_clean_reservations / "5554.port").exists()
+
+
+def test_an_explicit_port_losing_its_claim_preserves_the_winners_reservation(
+    monkeypatch, _clean_reservations,
+):
+    claim = em._claim_console_port
+
+    def competing_claim(port):
+        assert claim(port)
+        return claim(port)
+
+    monkeypatch.setattr(em, "_claim_console_port", competing_claim)
+
+    with pytest.raises(DeviceError, match="already in use"):
+        em.allocate_console_port(5554)
+    assert (_clean_reservations / "5554.port").is_file()
 
 
 def test_odd_and_out_of_range_ports_rejected():
