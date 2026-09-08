@@ -9,7 +9,6 @@ import anyio
 from mcp.shared.memory import create_connected_server_and_client_session
 from typer.testing import CliRunner
 
-import android_ui_analyser.engine as engine_module
 from android_ui_analyser.cli import app
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.mcp_server import build_server
@@ -259,7 +258,7 @@ def test_map_find_returns_executable_goto_for_safe_structured_route(tmp_path: Pa
     assert result["risks"] == []
 
 
-def test_cli_goto_requires_the_explicit_unsafe_opt_in(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_cli_goto_requires_the_explicit_unsafe_opt_in(fake_cli_device) -> None:  # type: ignore[no-untyped-def]
     store = AppMemoryStore(make_config().memory)
     store.record_screen(package=P, elements=_elements(HOME), name_hint="home")
     store.record_screen(package=P, elements=_elements(APPS), name_hint="catalog")
@@ -270,7 +269,7 @@ def test_cli_goto_requires_the_explicit_unsafe_opt_in(monkeypatch) -> None:  # t
         steps=[RouteStep(kind="open-link", arg="fiction://catalog")],
     )
     device = LinkDevice([HOME, APPS], package=P, serial="risk-cli")
-    monkeypatch.setattr(engine_module.Engine, "_connect_target", lambda _engine, serial=None: device)
+    fake_cli_device(device)
 
     refused = runner.invoke(app, ["--format", "compact", "goto", "catalog"])
     assert refused.exit_code == 1

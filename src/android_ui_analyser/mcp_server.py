@@ -123,21 +123,48 @@ def _optional_mic_target(
 ) -> tuple[int | None, dict[str, Any] | None]:
     """Return one optional mic control target while refusing ambiguous addressing."""
 
-    target_keys = [key for key in ("id", "rid", "text", "desc") if args.get(key) is not None]
+    target_keys = [
+        key for key in ("id", "stable_key", "rid", "text", "desc") if args.get(key) is not None
+    ]
     if len(target_keys) > 1:
         raise UsageError(
-            "microphone control accepts only one id/rid/text/desc target",
-            hint="Pass one fresh id or one stable selector; omit all four for audio-only input.",
+            "microphone control accepts only one id/stable_key/rid/text/desc target",
+            hint="Pass one fresh id or one stable selector; omit the target for audio-only input.",
         )
     if not target_keys:
-        if args.get("index") is not None or args.get("first"):
-            raise UsageError("--index/first needs a microphone control selector")
+        if args.get("index") is not None or args.get("first") or args.get("bounds") is not None:
+            raise UsageError("index/first/bounds needs a microphone control selector")
         return None, None
-    if target_keys[0] == "id":
-        if args.get("index") is not None or args.get("first"):
-            raise UsageError("index/first cannot modify a numeric microphone control id")
-        return _ordinal(args.get("id")), _selector_from_args(args)
-    return None, _selector_from_args(args)
+    target_key = target_keys[0]
+    value = args[target_key]
+    if target_key == "id":
+        if isinstance(value, bool) or not isinstance(value, (int, str)):
+            raise UsageError("microphone control id must be a nonnegative integer or element key")
+        ordinal = _ordinal(value)
+        if ordinal is not None and ordinal < 0:
+            raise UsageError("microphone control id must be nonnegative")
+    if isinstance(value, str) and not value.strip():
+        raise UsageError("microphone control target must not be empty")
+    identity = target_key == "stable_key" or (target_key == "id" and _ordinal(value) is None)
+    if target_key in {"id", "stable_key"} and (
+        args.get("index") is not None or args.get("first")
+    ):
+        raise UsageError("index/first cannot modify a microphone control id or stable_key")
+    bounds = args.get("bounds")
+    if bounds is not None:
+        if not identity:
+            raise UsageError("bounds requires a microphone control element key")
+        if (
+            not isinstance(bounds, (list, tuple))
+            or len(bounds) != 4
+            or any(type(coordinate) is not int for coordinate in bounds)
+        ):
+            raise UsageError("microphone control bounds must contain four integer coordinates")
+    selector = _selector_from_args(args)
+    element_id = _ordinal(value) if target_key == "id" else None
+    if element_id is None and selector is None:
+        raise UsageError("microphone control target did not identify an element")
+    return element_id, selector
 
 
 def _dump(result: Any) -> Any:
@@ -1290,7 +1317,7 @@ def _tool_definitions() -> list[types.Tool]:
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Host path to a PCM WAV."},
-                    "id": {"type": "integer", "minimum": 0},
+                    "id": {"type": ["integer", "string"], "minimum": 0, "minLength": 1},
                     **_SELECTOR_PROPS,
                     "control_mode": {
                         "type": "string",
@@ -1320,7 +1347,7 @@ def _tool_definitions() -> list[types.Tool]:
                 "type": "object",
                 "properties": {
                     "speech": {"type": "string", "minLength": 1},
-                    "id": {"type": "integer", "minimum": 0},
+                    "id": {"type": ["integer", "string"], "minimum": 0, "minLength": 1},
                     **_SELECTOR_PROPS,
                     "control_mode": {
                         "type": "string",

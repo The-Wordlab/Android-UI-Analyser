@@ -58,6 +58,8 @@ class EvaluatorTest(unittest.TestCase):
                 ]
             },
         )
+        self.write_json(f"{name}/evidence/sort.json", {"fixture": "sorted"})
+        self.write_json(f"{name}/evidence/cleanup.json", {"fixture": "restored"})
         (bundle / "calls.jsonl").write_text(
             "\n".join(
                 [
@@ -236,6 +238,8 @@ class EvaluatorTest(unittest.TestCase):
                 ],
             },
         )
+        self.write_json("bundle/evidence/sort.json", {"fixture": "sorted"})
+        self.write_json("bundle/evidence/cleanup.json", {"fixture": "restored"})
         (bundle / "calls.jsonl").write_text(
             "\n".join(
                 [
@@ -283,9 +287,9 @@ class EvaluatorTest(unittest.TestCase):
         self.assertTrue(metrics["cleanup_verified"])
         self.assertEqual(metrics["duration_ms"], 4500.0)
         self.assertEqual(metrics["evidence_completeness"], 1.0)
-        self.assertEqual(metrics["redundant_analyze_calls"], 1)
+        self.assertEqual(metrics["redundant_analyze_calls"], 0)
 
-    def test_requires_existing_bundle_artifacts(self) -> None:
+    def test_missing_bundle_stays_in_attempt_denominator_with_unknown_calls(self) -> None:
         campaign = self.write_json(
             "campaign.json",
             {
@@ -310,8 +314,167 @@ class EvaluatorTest(unittest.TestCase):
             },
         )
 
-        with self.assertRaisesRegex(CampaignError, "result.json"):
-            evaluate_campaign(campaign)
+        evaluation = evaluate_campaign(campaign)
+        self.assertFalse(evaluation["runs"][0]["completed"])
+        self.assertIsNone(evaluation["runs"][0]["calls"])
+        self.assertEqual(evaluation["runs"][0]["accounting_status"], "unavailable")
+        self.assertEqual(evaluation["lanes"][0]["runs"], 1)
+
+    def native_campaign(self, *, finished: bool = True, nonterminal_probe: bool = False) -> Path:
+        from android_ui_analyser.session import SessionState, review_session_events
+
+        self.write_bundle("native", calls=2, duration_ms=1000)
+        state = SessionState(session_id="fixture-session", goal="Verify the fictional grid",
+                             goal_hash="fixture-goal", serial="fixture-target", started_ms=1,
+                             finished_ms=50, recommended_kind="manual", recommended_cli="aua analyze")
+        events = [
+            {"cmd": "session_start", "invocation_id": "start", "ok": True, "ts_ms": 2},
+            {"cmd": "tap_and_analyze", "invocation_id": "tap", "ok": True, "ts_ms": 3},
+            {"cmd": "await", "invocation_id": "wait", "ok": True, "ts_ms": 4,
+             "args": {"adopt_action": True}},
+            {"cmd": "tap_and_analyze", "invocation_id": "failed", "ok": False, "ts_ms": 5,
+             "error": {"code": "element_not_found"}},
+        ]
+        if nonterminal_probe:
+            events.append({"cmd": "session_finish", "invocation_id": "early-finish", "ok": False,
+                           "ts_ms": 6, "result": {"finished": False, "terminated": False}})
+        for event in events:
+            event["session_id"] = state.session_id
+            event["_detail_hydrated"] = True
+        result = {"session_id": state.session_id, "finished": finished, "terminated": True,
+                  "verdict": "passed" if finished else "incomplete", "duration_ms": 1000,
+                  "review": review_session_events(state, events),
+                  "checkpoints": [{"id": "sorted", "status": "passed" if finished else "pending",
+                                   "evidence_id": "proof-sort"}],
+                  "cleanup": [{"action": "lease_release", "ok": True, "result": {"released": True}}]}
+        events += [
+            {"cmd": "session_finish", "invocation_id": "finish", "ok": True, "ts_ms": 51, "result": result},
+            {"cmd": "list_devices", "invocation_id": "devices", "ok": True, "ts_ms": 52, "result": []},
+            {"cmd": "emulator_status", "invocation_id": "status", "ok": True, "ts_ms": 53, "result": {"ok": True}},
+        ]
+        for event in events:
+            event["session_id"] = state.session_id
+            event["_detail_hydrated"] = True
+        self.write_json("native/session.json", state.model_dump(mode="json"))
+        self.write_json("native/result.json", result)
+        manifest = json.loads((self.root / "native/manifest.json").read_text())
+        manifest.update(session_id=state.session_id, invocations=["start", "tap", "finish", "status"])
+        self.write_json("native/manifest.json", manifest)
+        (self.root / "native/journal.jsonl").write_text("".join(json.dumps(event) + "\n" for event in events))
+        return self.write_json("native-campaign.json", {
+            "schema_version": 1, "campaign_id": "native-fixture",
+            "scenarios": [{"id": "fixture", "title": "Fixture", "goal": "Verify the grid",
+                           "time_limit_s": 10, "required_checkpoints": ["sorted"]}],
+            "runs": [{"run_id": "native", "scenario_id": "fixture", "lane": "candidate", "bundle": "native"}],
+        })
+
+    def test_native_journal_counts_errors_and_postfinish_but_folds_internal_wait(self) -> None:
+        evaluation = evaluate_campaign(self.native_campaign())
+        run = evaluation["runs"][0]
+        self.assertEqual(run["accounting_status"], "verified_through_finish")
+        self.assertEqual(run["calls"], 6)  # Four through finish, two after; artifacts are sparse.
+        self.assertEqual(run["post_finish_calls"], 2)
+        self.assertEqual(run["unexpected_failures"], 1)
+        self.assertTrue(run["cleanup_verified"])
+        self.assertTrue(run["completed"])
+        self.assertEqual(evaluation["lanes"][0]["all_attempt_calls_per_completed_task"], 6)
+
+    def test_dropped_internal_event_keeps_cost_but_marks_accounting_incomplete(self) -> None:
+        campaign = self.native_campaign()
+        path = self.root / "native/journal.jsonl"
+        events = [json.loads(line) for line in path.read_text().splitlines()]
+        path.write_text("".join(json.dumps(event) + "\n" for event in events if event["cmd"] != "await"))
+        evaluation = evaluate_campaign(campaign)
+        run = evaluation["runs"][0]
+        self.assertEqual(run["calls"], 6)
+        self.assertEqual(run["accounting_status"], "incomplete")
+        self.assertEqual(evaluation["lanes"][0]["runs"], 1)
+        self.assertIsNone(evaluation["lanes"][0]["all_attempt_calls_per_completed_task"])
+
+    def test_terminal_incomplete_is_a_failed_attempt_not_missing_data(self) -> None:
+        evaluation = evaluate_campaign(self.native_campaign(finished=False))
+        run = evaluation["runs"][0]
+        self.assertEqual(run["accounting_status"], "verified_through_finish")
+        self.assertFalse(run["completed"])
+        self.assertEqual(run["calls"], 6)
+        self.assertEqual(evaluation["lanes"][0]["completion_rate"], 0)
+
+    def test_failed_nonterminal_finish_is_counted_without_selecting_it(self) -> None:
+        run = evaluate_campaign(self.native_campaign(nonterminal_probe=True))["runs"][0]
+        self.assertEqual(run["accounting_status"], "verified_through_finish")
+        self.assertEqual(run["calls"], 7)
+        self.assertEqual(run["unexpected_failures"], 2)
+
+    def test_native_saved_review_without_journal_cannot_claim_zero_or_sparse_total(self) -> None:
+        campaign = self.native_campaign()
+        (self.root / "native/journal.jsonl").unlink()
+        run = evaluate_campaign(campaign)["runs"][0]
+        self.assertIsNone(run["calls"])
+        self.assertEqual(run["accounting_status"], "unavailable")
+        self.assertIsNone(run["redundant_analyze_calls"])
+
+    def test_missing_evidence_file_prevents_completion(self) -> None:
+        campaign = self.native_campaign()
+        (self.root / "native/evidence/sort.json").unlink()
+        run = evaluate_campaign(campaign)["runs"][0]
+        self.assertTrue(run["reported_pass"])
+        self.assertFalse(run["completed"])
+        self.assertEqual(run["evidence_completeness"], 0.5)
+
+    def test_pending_independent_review_is_unknown_and_cannot_complete(self) -> None:
+        campaign = self.native_campaign()
+        self.write_json("verifier.json", {"status": "pending_review", "passed": None, "cleanup_verified": None})
+        value = json.loads(campaign.read_text())
+        value["runs"][0]["verifier"] = "verifier.json"
+        campaign.write_text(json.dumps(value))
+        run = evaluate_campaign(campaign)["runs"][0]
+        self.assertIsNone(run["verifier_pass"])
+        self.assertIsNone(run["false_pass"])
+        self.assertFalse(run["completed"])
+
+    def test_missing_configured_verifier_is_unknown_and_preserves_attempt(self) -> None:
+        campaign = self.native_campaign()
+        value = json.loads(campaign.read_text())
+        value["runs"][0]["verifier"] = "not-yet-written.json"
+        campaign.write_text(json.dumps(value))
+        evaluation = evaluate_campaign(campaign)
+        self.assertIsNone(evaluation["runs"][0]["verifier_pass"])
+        self.assertIsNone(evaluation["runs"][0]["false_pass"])
+        self.assertFalse(evaluation["runs"][0]["completed"])
+        self.assertEqual(evaluation["lanes"][0]["runs"], 1)
+
+    def test_missing_hydration_proof_does_not_assert_zero_redundant_reads(self) -> None:
+        campaign = self.native_campaign()
+        self.assertEqual(evaluate_campaign(campaign)["runs"][0]["redundant_analyze_calls"], 0)
+        path = self.root / "native/journal.jsonl"
+        events = [json.loads(line) for line in path.read_text().splitlines()]
+        for event in events:
+            event.pop("_detail_hydrated", None)
+        path.write_text("".join(json.dumps(event) + "\n" for event in events))
+        run = evaluate_campaign(campaign)["runs"][0]
+        self.assertEqual(run["accounting_status"], "verified_through_finish")
+        self.assertIsNone(run["redundant_analyze_calls"])
+
+    def test_native_comparison_requires_matching_execution_provenance(self) -> None:
+        import shutil
+
+        campaign = self.native_campaign()
+        shutil.copytree(self.root / "native", self.root / "baseline")
+        value = json.loads(campaign.read_text())
+        value["runs"].append({"run_id": "baseline", "scenario_id": "fixture", "lane": "baseline", "bundle": "baseline"})
+        campaign.write_text(json.dumps(value))
+        comparison = evaluate_campaign(campaign)["comparisons"][0]
+        self.assertEqual(comparison["comparison_status"], "incompatible_or_missing")
+        self.assertIsNone(comparison["call_improvement_rate"])
+        for bundle in ("native", "baseline"):
+            self.write_json(f"{bundle}/execution.json", {"comparison_fingerprint": "a" * 64})
+        comparison = evaluate_campaign(campaign)["comparisons"][0]
+        self.assertEqual(comparison["comparison_status"], "matched")
+        self.assertEqual(comparison["call_improvement_rate"], 0)
+        self.write_json("native/execution.json", {"comparison_fingerprint": "b" * 64})
+        comparison = evaluate_campaign(campaign)["comparisons"][0]
+        self.assertIsNone(comparison["call_improvement_rate"])
+        self.assertIsNone(comparison["duration_regression_rate"])
 
     def test_rejects_unknown_scenario_reference(self) -> None:
         campaign = self.write_json(

@@ -974,8 +974,10 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "Needs the `[audio]` extra and an emulator started with `--audio`; physical devices "
         "do not expose this API. `mic_delivery_uncertain` means samples may already have been "
         "delivered: inspect `error.result.observation` and never retry the voice action. If "
-        "`mic_emulator_unavailable` occurs, inspect `aua devices` first. Emulator 36.4.10 "
-        "permits one AUA injection attempt per boot; `mic_repeat_unsafe` requires a restart. "
+        "`mic_emulator_unavailable` occurs, inspect `aua devices` first. AUA waits up to three "
+        "seconds for an active recording input before streaming; `mic_recording_not_ready` "
+        "means no audio was sent. Emulator 36.4.10 permits one AUA injection "
+        "attempt per boot; `mic_repeat_unsafe` requires restarting only that emulator. "
         "`mic_delivered_release_failed` means audio arrived but control cleanup failed. "
         "`mic_toggle_start_uncertain` / `mic_toggle_stop_uncertain` mean recording may be "
         "active: protect privacy, inspect the forced observation, and never tap/retry blindly.",
@@ -1713,7 +1715,11 @@ def render_markdown(*, brief: bool = False) -> str:
         "```\n"
         "WAV input is uncompressed unsigned 8-bit or little-endian signed 16-bit PCM, mono or "
         "stereo, at 48 kHz or less, up to five minutes. `mic speak` is macOS-only; elsewhere synthesize a compatible "
-        "WAV and use `mic inject`. The stream uses emulator backpressure and waits for its close. "
+        "WAV and use `mic inject`. After control start/pre-roll, AUA waits up to three seconds "
+        "for a current, active recording input before streaming. Endpoint authentication alone "
+        "does not prove recording readiness. `mic_recording_not_ready` sends no audio; inspect "
+        "the returned observation for permissions or an inactive recording control. The "
+        "stream uses emulator backpressure and waits for its close. "
         "A target defaults to push-to-talk `hold` (DOWN/pre/audio/post/UP). `--control-mode "
         "toggle` uses exactly one non-retrying tap to START and one to STOP at the same point; "
         "it requires an enabled, clickable, initially-off control. When the app does not expose "
@@ -1733,8 +1739,9 @@ def render_markdown(*, brief: bool = False) -> str:
         "observation, and never tap/retry blindly. If "
         "`mic_emulator_unavailable` reports that the emulator exited or went offline, inspect "
         "`aua devices` and restart only that emulator with `--audio` when necessary. Android "
-        "Emulator 36.4.10 is limited to one injection attempt per boot across all AUA workers; "
-        "`mic_repeat_unsafe` means restart only that emulator before one new attempt."
+        "Emulator 36.4.10 is limited to one injection attempt per boot across all "
+        "AUA workers; `mic_repeat_unsafe` means restart only that emulator before one new "
+        "attempt. This conservative limit does not guarantee that a first attempt will succeed."
     )
 
     p.append("")

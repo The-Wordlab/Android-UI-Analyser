@@ -33,9 +33,14 @@ class RunMetrics:
     cleanup_verified: bool
     verifier_pass: bool | None
     false_pass: bool | None
-    calls: int
+    calls: int | None
+    accounting_status: str
+    accounting_issues: list[str]
+    post_finish_calls: int | None
+    unexpected_failures: int | None
+    comparison_fingerprint: str | None
     analyze_calls: int
-    redundant_analyze_calls: int
+    redundant_analyze_calls: int | None
     recovery_calls: int
     duration_ms: float | None
     within_time_limit: bool | None
@@ -115,6 +120,16 @@ def _checkpoint_passes(result: Mapping[str, Any]) -> dict[str, bool]:
 
 
 def _cleanup_pass(result: Mapping[str, Any]) -> bool:
+    cleanup = result.get("cleanup")
+    if isinstance(cleanup, list):
+        return bool(cleanup) and all(
+            isinstance(entry, Mapping) and entry.get("ok") is True for entry in cleanup
+        ) and any(
+            entry.get("action") == "lease_release"
+            and isinstance(entry.get("result"), Mapping)
+            and entry["result"].get("released") is True
+            for entry in cleanup
+        )
     value = _first(
         result,
         (
@@ -169,6 +184,7 @@ def _operation(record: Mapping[str, Any]) -> str:
     value = _first(
         record,
         (
+            ("cmd",),
             ("operation",),
             ("command",),
             ("tool",),
@@ -196,33 +212,13 @@ def _call_metrics(records: Sequence[Mapping[str, Any]], result: Mapping[str, Any
     calls = [record for record in records if _is_call(record)]
     analyze = [record for record in calls if "analyze" in _operation(record).replace(".", " ").split()]
     redundant = 0
-    for position, record in enumerate(calls):
+    for record in calls:
         if "analyze" not in _operation(record).replace(".", " ").split():
             continue
         redundant_value = _first(record, (("redundant",), ("metrics", "redundant")))
-        analyze_needed = _first(
-            record,
-            (("observation_contract", "analyze_needed"),),
-        )
-        reason = str(_first(record, (("reason",), ("metrics", "reason"))) or "").lower()
-        previous_analyze_needed = None
-        if position > 0:
-            previous_analyze_needed = _first(
-                calls[position - 1],
-                (
-                    ("observation_contract", "analyze_needed"),
-                    ("result", "observation_contract", "analyze_needed"),
-                    ("result", "meta", "observation_contract", "analyze_needed"),
-                    ("result", "observation", "meta", "observation_contract", "analyze_needed"),
-                ),
-            )
-        if (
-            redundant_value is True
-            or analyze_needed is False
-            or previous_analyze_needed is False
-            or "redundant" in reason
-            or "fresh observation" in reason
-        ):
+        # Legacy records need an explicit classification. Freshness alone cannot prove
+        # a repeated read was wasted (the caller may request a different view).
+        if redundant_value is True:
             redundant += 1
     recovery = sum(
         1
@@ -233,11 +229,87 @@ def _call_metrics(records: Sequence[Mapping[str, Any]], result: Mapping[str, Any
     )
 
     # Early bundle implementations may store only aggregate counts in result.json.
-    total = int(_first(result, (("metrics", "calls"), ("call_count",))) or len(calls))
-    analyze_total = int(_first(result, (("metrics", "analyze_calls"),)) or len(analyze))
-    redundant_total = int(_first(result, (("metrics", "redundant_analyze_calls"),)) or redundant)
-    recovery_total = int(_first(result, (("metrics", "recovery_calls"), ("recovery_calls",))) or recovery)
+    def count(paths: Iterable[Sequence[str]], fallback: int) -> int:
+        value = _first(result, paths)
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else fallback
+
+    total = count((("metrics", "calls"), ("call_count",)), len(calls))
+    analyze_total = count((("metrics", "analyze_calls"),), len(analyze))
+    redundant_total = count((("metrics", "redundant_analyze_calls"),), redundant)
+    recovery_total = count((("metrics", "recovery_calls"), ("recovery_calls",)), recovery)
     return total, analyze_total, redundant_total, recovery_total
+
+
+def _native_accounting(
+    bundle: Path, result: Mapping[str, Any], manifest: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Review complete journal evidence, never the sparse artifact call list."""
+    saved_review = result.get("review")
+    if not isinstance(saved_review, Mapping) and not (bundle / "journal.jsonl").exists():
+        return None
+    missing = [name for name in ("session.json", "journal.jsonl") if not (bundle / name).is_file()]
+    if missing:
+        return {"status": "unavailable", "issues": [f"missing native evidence: {', '.join(missing)}"],
+                "calls": None, "post_finish_calls": None, "failures": None,
+                "analyze": 0, "redundant": None}
+    from android_ui_analyser.session import SessionState, review_session_events
+
+    try:
+        state = SessionState.model_validate(_load_json(bundle / "session.json"))
+    except ValueError as exc:
+        raise CampaignError(f"invalid native session state in {bundle}") from exc
+    events = [dict(event) for event in _iter_jsonl(bundle / "journal.jsonl")
+              if (event.get("session_id") or (event.get("extra") or {}).get("session_id")) == state.session_id]
+    events.sort(key=lambda event: event.get("ts_ms", 0))
+    review = review_session_events(state, events)
+    saved_review = saved_review if isinstance(saved_review, Mapping) else {}
+    saved = saved_review.get("accounting") or {}
+    issues = []
+
+    def terminal(payload: Any) -> bool:
+        if not isinstance(payload, Mapping):
+            return False
+        checkpoint = payload.get("review") or {}
+        return (payload.get("session_id") == state.session_id
+                and isinstance(payload.get("finished"), bool) and payload.get("terminated") is True
+                and isinstance(checkpoint, Mapping) and bool(state.finished_ms)
+                and checkpoint.get("session_id") == state.session_id
+                and checkpoint.get("started_ms") == state.started_ms
+                and checkpoint.get("finished_ms") == state.finished_ms
+                and checkpoint.get("accounting") == saved)
+
+    finishes = [i for i, event in enumerate(events)
+                if event.get("cmd") == "session_finish" and terminal(event.get("result"))]
+    if not terminal(result) or len(finishes) != 1:
+        issues.append("no unique terminal finish matches saved state/accounting")
+        prefix, post = events, []
+    else:
+        prefix, post = events[:finishes[0] + 1], events[finishes[0] + 1:]
+    before = review_session_events(state, prefix)["accounting"]
+    after = review_session_events(state, post)["accounting"]
+    expected_calls = saved.get("top_level_calls") if saved.get("reporting_call_included") is True else saved.get("top_level_calls_including_reporting_call")
+    expected_events = saved.get("journal_events")
+    if isinstance(expected_events, int) and saved.get("reporting_call_included") is False:
+        expected_events += 1
+    if (expected_calls != before["top_level_calls"] or expected_events != len(prefix)
+            or not any(event.get("cmd") == "session_start" for event in prefix)):
+        issues.append("retained through-finish call/event counts do not match saved accounting")
+    if saved.get("journal_events", 0) >= 2000:
+        issues.append("saved review reached its 2000-event retention limit")
+    ids = {event.get("invocation_id") or (event.get("extra") or {}).get("invocation_id") for event in events} - {None}
+    # Artifacts omit some failed/non-dict results and can append after finish.
+    if manifest.get("session_id") != state.session_id or not set(manifest.get("invocations") or []).issubset(ids):
+        issues.append("sparse manifest IDs are not corroborated by retained journal")
+    if review["accounting"]["top_level_calls"] != before["top_level_calls"] + after["top_level_calls"]:
+        issues.append("caller folding crosses terminal finish boundary")
+    if review["patterns"].get("ambiguous_invocation"):
+        issues.append("retained invocations contain ambiguous caller outcomes")
+    return {"status": "incomplete" if issues else "verified_through_finish", "issues": issues,
+            "calls": review["accounting"]["top_level_calls"], "post_finish_calls": after["top_level_calls"],
+            "failures": None if review["run_ok"] is None else review["accounting"]["unexpected_failures"],
+            "analyze": review["commands"].get("analyze", 0),
+            "redundant": None if any(event.get("_detail_hydrated") is not True for event in events) else
+            sum(item.get("confirmed") is True for item in review["patterns"].get("redundant_analyze", []))}
 
 
 def _collect_evidence_ids(value: Any) -> set[str]:
@@ -254,16 +326,25 @@ def _collect_evidence_ids(value: Any) -> set[str]:
     return found
 
 
-def _manifest_evidence_ids(manifest: Mapping[str, Any]) -> set[str]:
+def _manifest_evidence_ids(manifest: Mapping[str, Any], bundle: Path) -> set[str]:
     found: set[str] = set()
+    def exists(value: Any) -> bool:
+        if not isinstance(value, str):
+            return False
+        path = (bundle / value).resolve()
+        return path.is_relative_to(bundle.resolve()) and path.is_file()
+
     evidence = manifest.get("evidence")
     if isinstance(evidence, Mapping):
-        found.update(str(key) for key in evidence)
+        for key, value in evidence.items():
+            path = value.get("path") if isinstance(value, Mapping) else value
+            if exists(path):
+                found.add(str(key))
     elif isinstance(evidence, list):
         for entry in evidence:
             if isinstance(entry, Mapping):
                 identifier = entry.get("id") or entry.get("evidence_id")
-                if identifier is not None:
+                if identifier is not None and exists(entry.get("path")):
                     found.add(str(identifier))
     entries = manifest.get("entries")
     if isinstance(entries, list):
@@ -272,7 +353,7 @@ def _manifest_evidence_ids(manifest: Mapping[str, Any]) -> set[str]:
                 continue
             identifier = entry.get("evidence_id")
             captured = entry.get("observation") or entry.get("screenshot")
-            if identifier is not None and captured:
+            if identifier is not None and exists(captured):
                 found.add(str(identifier))
     return found
 
@@ -292,6 +373,8 @@ def _checkpoint_evidence(
     if cleanup_required:
         cleanup = _first(result, (("cleanup",), ("contract", "cleanup")))
         evidence_ids = _collect_evidence_ids(cleanup)
+        if isinstance(cleanup, list) and _cleanup_pass(result):
+            evidence_ids.add("result.json#cleanup")
         if not evidence_ids:
             evidence_ids = {
                 evidence_id
@@ -389,11 +472,14 @@ def evaluate_campaign(campaign_path: Path) -> dict[str, Any]:
     for run in campaign["runs"]:
         scenario = scenarios[str(run["scenario_id"])]
         bundle = (root / str(run["bundle"])).resolve()
-        result = _load_json(bundle / "result.json")
-        manifest = _load_json(bundle / "manifest.json")
+        result = _load_json(bundle / "result.json", required=False)
+        manifest = _load_json(bundle / "manifest.json", required=False)
         if not isinstance(result, Mapping) or not isinstance(manifest, Mapping):
             raise CampaignError(f"bundle result and manifest must be JSON objects: {bundle}")
         calls = _iter_jsonl(bundle / "calls.jsonl")
+        execution = _load_json(bundle / "execution.json", required=False)
+        fingerprint = execution.get("comparison_fingerprint") if isinstance(execution, Mapping) else None
+        fingerprint = fingerprint if isinstance(fingerprint, str) and fingerprint else None
 
         status = _first(
             result,
@@ -412,21 +498,39 @@ def evaluate_campaign(campaign_path: Path) -> dict[str, Any]:
 
         verifier: Mapping[str, Any] | None = None
         if run.get("verifier"):
-            loaded_verifier = _load_json((root / str(run["verifier"])).resolve())
+            loaded_verifier = _load_json((root / str(run["verifier"])).resolve(), required=False)
             if not isinstance(loaded_verifier, Mapping):
                 raise CampaignError(f"verifier must be a JSON object for run {run['run_id']}")
             verifier = loaded_verifier
         verifier_pass = None
         false_pass = None
         if verifier is not None:
-            verifier_pass = _status_pass(
-                _first(verifier, (("passed",), ("verdict",), ("status",)))
-            ) and (not cleanup_required or _status_pass(
-                _first(verifier, (("cleanup_verified",), ("cleanup", "verified"), ("cleanup", "status")))
-            ))
-            false_pass = reported_pass and not verifier_pass
+            decision = _first(verifier, (("passed",), ("verdict",), ("status",)))
+            cleanup_decision = _first(verifier, (("cleanup_verified",), ("cleanup", "verified"), ("cleanup", "status")))
+            known = isinstance(decision, bool) or str(decision).lower() in PASS_STATUSES | {"fail", "failed"}
+            cleanup_known = isinstance(cleanup_decision, bool) or str(cleanup_decision).lower() in PASS_STATUSES | {"fail", "failed"}
+            if (known and not _status_pass(decision)) or (cleanup_required and cleanup_known and not _status_pass(cleanup_decision)):
+                verifier_pass = False
+            elif known and (not cleanup_required or cleanup_known):
+                verifier_pass = _status_pass(decision) and (not cleanup_required or _status_pass(cleanup_decision))
+            if verifier_pass is not None:
+                false_pass = reported_pass and not verifier_pass
 
+        total_calls: int | None
+        redundant_calls: int | None
         total_calls, analyze_calls, redundant_calls, recovery_calls = _call_metrics(calls, result)
+        native = _native_accounting(bundle, result, manifest)
+        accounting_status, accounting_issues = "legacy", []
+        post_finish_calls = unexpected_failures = None
+        if native is not None:
+            total_calls, analyze_calls, redundant_calls = native["calls"], native["analyze"], native["redundant"]
+            post_finish_calls, unexpected_failures = native["post_finish_calls"], native["failures"]
+            accounting_status, accounting_issues = native["status"], native["issues"]
+        elif not result or not manifest:
+            accounting_status = "unavailable"
+            accounting_issues = ["missing result.json or manifest.json; attempted run remains in denominator"]
+            total_calls = len([call for call in calls if _is_call(call)]) if calls else None
+            redundant_calls = None
         duration_ms = _float_or_none(
             _first(result, (("duration_ms",), ("metrics", "duration_ms")))
         ) or _float_or_none(_first(manifest, (("duration_ms",), ("metrics", "duration_ms"))))
@@ -441,10 +545,18 @@ def evaluate_campaign(campaign_path: Path) -> dict[str, Any]:
         )
 
         evidence_proof = _checkpoint_evidence(result, required_checkpoints, cleanup_required)
-        available_evidence = _manifest_evidence_ids(manifest)
+        available_evidence = _manifest_evidence_ids(manifest, bundle)
+        if isinstance(result.get("cleanup"), list) and _cleanup_pass(result) and (bundle / "result.json").is_file():
+            available_evidence.add("result.json#cleanup")
         resolved = sum(1 for evidence_id in evidence_proof.values() if evidence_id in available_evidence)
         expected = len(evidence_proof)
         completeness = None if expected == 0 else resolved / expected
+        # An affirmative checkpoint without its saved proof is not a verified completion.
+        completed = completed and (not expected or resolved == expected) and (verifier is None or verifier_pass is True)
+        if "terminated" in result:
+            completed = completed and result["terminated"] is True
+        if native is not None:
+            completed = completed and result.get("finished") is True
         candidate_flow_reuse_expected = bool(scenario.get("candidate_reuse_expected", False))
         candidate_flow_reused = _candidate_reused(result, calls)
 
@@ -459,6 +571,11 @@ def evaluate_campaign(campaign_path: Path) -> dict[str, Any]:
             verifier_pass=verifier_pass,
             false_pass=false_pass,
             calls=total_calls,
+            accounting_status=accounting_status,
+            accounting_issues=accounting_issues,
+            post_finish_calls=post_finish_calls,
+            unexpected_failures=unexpected_failures,
+            comparison_fingerprint=fingerprint,
             analyze_calls=analyze_calls,
             redundant_analyze_calls=redundant_calls,
             recovery_calls=recovery_calls,
@@ -518,6 +635,14 @@ def _aggregate_lanes(metrics: Sequence[RunMetrics]) -> list[dict[str, Any]]:
             "cleanup_rate": _rate([value.cleanup_verified for value in values]),
             "false_passes": sum(value is True for value in known_false_passes),
             "verified_runs": len(known_false_passes),
+            "accounting_verified_runs": sum(value.accounting_status == "verified_through_finish" for value in values),
+            "accounting_incomplete_runs": sum(value.accounting_status in {"incomplete", "unavailable"} for value in values),
+            "observed_caller_invocations": sum(value.calls or 0 for value in values),
+            "all_attempt_calls_per_completed_task": (
+                sum(value.calls or 0 for value in values) / sum(value.completed for value in values)
+                if all(value.accounting_status == "verified_through_finish" for value in values)
+                and any(value.completed for value in values) else None
+            ),
             "median_calls": _median(value.calls for value in values),
             "median_redundant_analyze_calls": _median(value.redundant_analyze_calls for value in values),
             "median_recovery_calls": _median(value.recovery_calls for value in values),
@@ -547,30 +672,39 @@ def _compare_scenarios(
             continue
         baseline_calls = _median(value.calls for value in baseline)
         candidate_calls = _median(value.calls for value in candidate)
+        all_runs = [*baseline, *candidate]
+        fingerprints = {value.comparison_fingerprint for value in all_runs}
+        legacy = fingerprints == {None} and all(value.accounting_status == "legacy" for value in all_runs)
+        compatible = legacy or (len(fingerprints) == 1 and None not in fingerprints)
+        call_accounting_available = all(
+            value.calls is not None and value.accounting_status not in {"incomplete", "unavailable"}
+            for value in [*baseline, *candidate]
+        )
         baseline_duration = _median(value.duration_ms for value in baseline)
         candidate_duration = _median(value.duration_ms for value in candidate)
         comparisons.append({
             "scenario_id": scenario_id,
             "baseline_runs": len(baseline),
             "candidate_runs": len(candidate),
+            "comparison_status": "legacy_unverified" if legacy else "matched" if compatible else "incompatible_or_missing",
             "baseline_completion_rate": _rate([value.completed for value in baseline]),
             "candidate_completion_rate": _rate([value.completed for value in candidate]),
             "median_call_delta": (
-                None if baseline_calls is None or candidate_calls is None else candidate_calls - baseline_calls
+                None if not compatible or not call_accounting_available or baseline_calls is None or candidate_calls is None else candidate_calls - baseline_calls
             ),
             "call_improvement_rate": (
                 None
-                if not baseline_calls or candidate_calls is None
+                if not compatible or not call_accounting_available or not baseline_calls or candidate_calls is None
                 else (baseline_calls - candidate_calls) / baseline_calls
             ),
             "median_duration_delta_ms": (
                 None
-                if baseline_duration is None or candidate_duration is None
+                if not compatible or baseline_duration is None or candidate_duration is None
                 else candidate_duration - baseline_duration
             ),
             "duration_regression_rate": (
                 None
-                if not baseline_duration or candidate_duration is None
+                if not compatible or not baseline_duration or candidate_duration is None
                 else (candidate_duration - baseline_duration) / baseline_duration
             ),
         })
@@ -613,14 +747,15 @@ def render_markdown(evaluation: Mapping[str, Any]) -> str:
         "",
         "## Baseline vs candidate",
         "",
-        "| Scenario | Completion baseline → candidate | Call improvement | Duration regression |",
-        "|---|---:|---:|---:|",
+        "| Scenario | Comparison | Completion baseline → candidate | Call improvement | Duration regression |",
+        "|---|---|---:|---:|---:|",
     ])
     if evaluation["comparisons"]:
         for comparison in evaluation["comparisons"]:
             lines.append(
-                "| {scenario_id} | {baseline} → {candidate} | {calls} | {duration} |".format(
+                "| {scenario_id} | {status} | {baseline} → {candidate} | {calls} | {duration} |".format(
                     scenario_id=comparison["scenario_id"],
+                    status=comparison["comparison_status"],
                     baseline=_percent(comparison["baseline_completion_rate"]),
                     candidate=_percent(comparison["candidate_completion_rate"]),
                     calls=_percent(comparison["call_improvement_rate"]),
@@ -628,26 +763,28 @@ def render_markdown(evaluation: Mapping[str, Any]) -> str:
                 )
             )
     else:
-        lines.append("| _No paired lanes_ | n/a | n/a | n/a |")
+        lines.append("| _No paired lanes_ | n/a | n/a | n/a | n/a |")
     lines.extend([
         "",
         "## Runs",
         "",
-        "| Run | Scenario | Lane | Closed loop | Verifier | Calls | Redundant analyze | Recovery | Evidence |",
-        "|---|---|---|---:|---:|---:|---:|---:|---:|",
+        "| Run | Scenario | Lane | Closed loop | Verifier | Calls | Accounting | After finish | Redundant analyze | Recovery | Evidence |",
+        "|---|---|---|---:|---:|---:|---|---:|---:|---:|---:|",
     ])
     for run in evaluation["runs"]:
         verifier = "n/a" if run["verifier_pass"] is None else ("pass" if run["verifier_pass"] else "fail")
         lines.append(
             "| {run_id} | {scenario_id} | {lane} | {completed} | {verifier} | {calls} | "
-            "{redundant} | {recovery} | {evidence} |".format(
+            "{accounting} | {post} | {redundant} | {recovery} | {evidence} |".format(
                 run_id=run["run_id"],
                 scenario_id=run["scenario_id"],
                 lane=run["lane"],
                 completed="yes" if run["completed"] else "no",
                 verifier=verifier,
-                calls=run["calls"],
-                redundant=run["redundant_analyze_calls"],
+                calls="n/a" if run["calls"] is None else run["calls"],
+                accounting=run["accounting_status"],
+                post="n/a" if run["post_finish_calls"] is None else run["post_finish_calls"],
+                redundant="n/a" if run["redundant_analyze_calls"] is None else run["redundant_analyze_calls"],
                 recovery=run["recovery_calls"],
                 evidence=_percent(run["evidence_completeness"]),
             )

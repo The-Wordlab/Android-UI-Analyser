@@ -86,6 +86,7 @@ def test_generic_layers_reach_android_services_only_through_platform_gate() -> N
                 error_types = {
                     "MicDeliveredReleaseError",
                     "MicDeliveryUncertainError",
+                    "MicRecordingNotReadyError",
                     "MicToggleStartUncertainError",
                     "MicToggleStopUncertainError",
                 }

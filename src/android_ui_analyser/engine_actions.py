@@ -973,6 +973,7 @@ def mic_inject(
     terminal_mic_error: Any | None = None
     injection_attempted = False
     injection_completed = False
+    recording_readiness: dict[str, Any] | None = None
 
     def toggle_owner_failure(stage: str) -> DeviceError | None:
         try:
@@ -1023,6 +1024,15 @@ def mic_inject(
                     if control_started and pre_roll_ms:
                         time.sleep(pre_roll_ms / 1000.0)
 
+                if terminal_mic_error is None and action_error is None:
+                    try:
+                        recording_readiness = mic_mod.wait_for_recording(self.device)
+                    except mic_mod.MicRecordingNotReadyError as exc:
+                        recording_readiness = exc.readiness
+                        terminal_mic_error = exc
+
+                # Readiness can wait for guest recording to start. Reconfirm ownership after
+                # that wait so a foreground transition cannot admit audio or a blind STOP.
                 if control_mode == "toggle" and control_started and terminal_mic_error is None:
                     owner_error = toggle_owner_failure("before audio injection")
                     if owner_error is not None:
@@ -1161,6 +1171,7 @@ def mic_inject(
         target=target,
         detail=detail,
         acting=acting,
+        recording_readiness=recording_readiness,
     )
     if terminal_mic_error is not None:
         try:

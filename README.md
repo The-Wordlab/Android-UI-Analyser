@@ -382,7 +382,7 @@ aua mic speak "Testing one two" --voice Samantha --rate 175 --rid hold_to_talk
 Input must be an uncompressed RIFF/WAVE file: unsigned 8-bit or little-endian signed 16-bit
 PCM, mono or stereo, at 48 kHz or less, and no longer than five minutes. The default delivery
 mode is server-backpressured. With a target, `--control-mode hold` remains the default:
-DOWN → pre-roll → audio → post-roll → UP. `--control-mode toggle` instead sends one
+DOWN → pre-roll → recording readiness → audio → post-roll → UP. `--control-mode toggle` instead sends one
 non-retrying tap to start, waits/injects, then sends one non-retrying tap to the exact same
 point to stop. Toggle mode requires a target that is enabled, clickable, and initially off;
 when its active state is not exposed as `checked`/`selected`, the caller must establish that
@@ -390,6 +390,12 @@ precondition. Toggle mode is best-effort unless the app exposes an active-state/
 use short media and require the control to remain actively recording through post-roll. If the
 app auto-stops early (timeout, max duration, or recognition completion), the same final tap could
 start a new recording instead. Each command then returns the post-action observation with fresh ids.
+
+Before streaming, AUA waits up to three seconds for a current, active recording input. Historical
+recording logs, idle inputs, and endpoint authentication do not satisfy this check.
+`mic_recording_not_ready` means no audio was sent; inspect the attached observation for a
+permission prompt or inactive recording control. A held control is released on failure.
+Readiness is a prerequisite for injection, not a guarantee against emulator faults.
 
 AUA discovers the endpoint by matching the selected `emulator-<port>` serial to the emulator's
 `pid_*.ini` runtime record and sends its bearer token only as gRPC metadata; the token is never
@@ -408,9 +414,10 @@ and never tap or repeat audio blindly. AUA rechecks that the same foreground pac
 screen before audio and STOP; if ownership changes it refuses to inject or tap stale coordinates.
 If injection reports
 `mic_emulator_unavailable`, run `aua devices`, then restart only that emulator with `--audio`
-if it is offline or absent; never blindly retry either outcome. Android Emulator 36.4.10 has a
-known repeat-stream crash, so AUA atomically permits only one injection attempt per emulator
-boot on that build—even across workers with separate AUA cache directories. A second attempt
+if it is offline or absent; never blindly retry either outcome. AUA conservatively permits
+only one injection attempt per boot on Android Emulator 36.4.10 because of its observed
+repeat-stream crash. This applies even across workers with separate AUA cache directories.
+A second attempt
 returns `mic_repeat_unsafe`; restart only that emulator and make the next attempt the sole
 injection for the new boot.
 
@@ -1824,7 +1831,8 @@ All action commands (`tap`, `long-press`, `input`, `clear`, `swipe`, `scroll-to`
 | `uiautomator2 is not installed` | Reinstall the package — `uiautomator2` is a base dependency, not an extra. |
 | `mic_grpc_unavailable` | Install the optional transport: `pip install 'android-ui-analyser[audio]'`. |
 | `mic_audio_disabled` | Restart only the selected emulator with `aua emulator start --audio`; AUA refuses AVDs launched with `-no-audio`. |
-| `mic_repeat_unsafe` | Emulator 36.4.10 already had its one safe stream attempt this boot. Do not retry; restart only that emulator with audio enabled. |
+| `mic_repeat_unsafe` | Emulator 36.4.10 already had its permitted attempt this boot. Restart only that emulator with audio enabled. |
+| `mic_recording_not_ready` | No current recording input was established before the deadline. No audio was injected; inspect the attached observation. |
 | `mic_delivery_uncertain` | Samples may already have arrived despite the emulator's `INTERNAL` close. Inspect `error.result.observation`; do not repeat the voice action. |
 | `mic_delivered_release_failed` | Audio arrived, but target-control cleanup failed. Do not repeat it; inspect the attached observation and control state. |
 | `mic_toggle_start_uncertain` | START may have landed; no audio or blind STOP was sent. Recording may be active—protect privacy and inspect the forced observation. |

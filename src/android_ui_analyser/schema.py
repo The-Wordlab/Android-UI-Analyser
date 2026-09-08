@@ -808,6 +808,7 @@ class ActionResult(BaseModel):
 
     ok: bool
     action: str
+    recording_readiness: dict[str, Any] | None = None
     # Exact retained animation window; local exports reuse it without another device read.
     capture_evidence: dict[str, Any] | None = None
     # Inline hint when an action already returns usable screen state. Declared this high on

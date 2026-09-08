@@ -13,6 +13,7 @@ import contextlib
 import hashlib
 import os
 import platform
+import re
 import shlex
 import subprocess
 import time
@@ -20,9 +21,12 @@ import wave
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Self
+from typing import TYPE_CHECKING, Any, Self
 
 from .errors import AuaError, DeviceError, UsageError
+
+if TYPE_CHECKING:
+    from .platforms.android_device import AndroidRuntimeBase
 
 _INJECT_AUDIO_METHOD = "/android.emulation.control.EmulatorController/injectAudio"
 _MAX_SAMPLE_RATE = 48_000
@@ -31,6 +35,85 @@ _AFFECTED_SINGLE_INJECTION_VERSION = (36, 4, 10)
 MAX_WAV_DURATION_S = 300.0
 SPEECH_SYNTHESIS_TIMEOUT_S = 120.0
 CONTROL_MODES = ("hold", "toggle")
+
+
+def _active_recording_inputs(dump: str) -> int:
+    """Count current, consuming input threads; historical log entries are not evidence."""
+    current = dump.split("Historical Thread Log", 1)[0]
+    blocks = re.finditer(
+        r"(?ms)^Input thread[^\n]*:\n(.*?)(?=^(?:Input|Output|Record|Mmap|Offload|Duplicating) thread|\Z)",
+        current,
+    )
+    active = 0
+    for match in blocks:
+        block = match.group(1).split("  Local log:", 1)[0]
+        frames = re.search(r"(?m)^\s+Frames read:\s*(\d+)\s*$", block)
+        device = re.search(r"(?m)^\s+Input device:\s*(0x[0-9a-fA-F]+|\d+)\b", block)
+        tracks = re.search(r"(?m)^\s+\d+ Tracks of which ([1-9]\d*) are active\s*$", block)
+        if (
+            re.search(r"(?m)^\s+Standby:\s*no\s*$", block)
+            and not re.search(r"(?m)^\s+Hw silenced:\s*yes\s*$", block)
+            and frames is not None
+            and int(frames.group(1)) > 0
+            and device is not None
+            and int(device.group(1), 0) != 0
+            and tracks is not None
+        ):
+            active += 1
+    return active
+
+
+def wait_for_recording(
+    device: AndroidRuntimeBase, *, timeout_ms: int = 3000, poll_ms: int = 100
+) -> dict[str, Any]:
+    """Bounded Android readiness read before entering the emulator's native audio forwarder.
+
+    A live authenticated endpoint can still have no input voice. Current guest recording is
+    necessary evidence, not proof that an arbitrary emulator implementation cannot fail.
+    """
+    started = time.monotonic()
+    deadline = started + max(0, timeout_ms) / 1000.0
+    checks = 0
+    active = 0
+    status = "inactive"
+    while time.monotonic() < deadline:
+        checks += 1
+        try:
+            result = device.run_read_only_shell(
+                ["dumpsys", "media.audio_flinger"],
+                timeout_s=min(1.0, max(0.001, deadline - time.monotonic())),
+            )
+            if time.monotonic() >= deadline:
+                status = "deadline_exceeded"
+                break
+            if result.exit_code != 0 or result.stdout_truncated:
+                status = "unavailable"
+                break
+            active = _active_recording_inputs(result.stdout)
+        except Exception:
+            # No raw diagnostic output, device address, or private app identity in errors.
+            status = "unavailable"
+            break
+        if active:
+            status = "active"
+            break
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(max(1, poll_ms) / 1000.0, remaining))
+    readiness = {
+        "ready": bool(active),
+        "source": "android.audio_flinger",
+        "phase": "before_injection",
+        "status": status,
+        "active_inputs": active,
+        "checks": checks,
+        "elapsed_ms": round((time.monotonic() - started) * 1000),
+        "timeout_ms": max(0, timeout_ms),
+        "input_sent": False,
+    }
+    if not active:
+        raise MicRecordingNotReadyError(readiness=readiness)
+    return readiness
 
 
 def validate_control_mode(control_mode: str, *, has_target: bool) -> str:
@@ -68,7 +151,7 @@ class MicDeliveryUncertainError(DeviceError):
         super().__init__(
             message
             or (
-                "the emulator ended the audio stream with INTERNAL after accepting packets; "
+                "the audio stream ended with INTERNAL; "
                 "the samples may already have been delivered"
             ),
             code=self.code,
@@ -110,6 +193,41 @@ class MicDeliveryUncertainError(DeviceError):
             error["result"] = self.result
         if self.followup_errors and isinstance(error, dict):
             error["followup_errors"] = list(self.followup_errors)
+        return payload
+
+
+class MicRecordingNotReadyError(MicDeliveryUncertainError):
+    """Reuse result-bearing recovery while explicitly reporting that no audio was injected."""
+
+    code = "mic_recording_not_ready"
+
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        readiness: dict[str, Any] | None = None,
+        hint: str | None = None,
+        result: dict[str, Any] | None = None,
+        followup_errors: Sequence[dict[str, str]] | None = None,
+    ) -> None:
+        super().__init__(
+            message or "microphone injection requires a currently active recording input",
+            hint=hint or (
+                "No audio was injected. Inspect error.result.observation for a microphone "
+                "permission prompt or inactive recording control. Endpoint authentication "
+                "does not establish recording readiness. On builds limited to one attempt, "
+                "restart only this emulator before a new attempt."
+            ),
+            result=result,
+            followup_errors=followup_errors,
+        )
+        self.readiness = dict(readiness or {})
+
+    def to_dict(self) -> dict[str, object]:
+        payload = super().to_dict()
+        error = payload.get("error")
+        if isinstance(error, dict):
+            error["recording_readiness"] = dict(self.readiness)
         return payload
 
 
@@ -629,7 +747,11 @@ def _attempt_guard_path(endpoint: EmulatorEndpoint) -> Path | None:
 
 
 def claim_injection_attempt(prepared: PreparedInjection) -> PreparedInjection:
-    """Atomically reserve the one safe stream attempt on affected emulator builds."""
+    """Atomically limit affected emulator builds to one stream attempt per boot.
+
+    Retain the existing 36.4.10 repeat-attempt restriction. This conservative limit does
+    not make the first attempt inherently safe; recording readiness is checked separately.
+    """
 
     guard = prepared.attempt_guard
     if guard is None or prepared.attempt_claimed:
@@ -640,8 +762,8 @@ def claim_injection_attempt(prepared: PreparedInjection) -> PreparedInjection:
     except FileExistsError as exc:
         version = prepared.endpoint.emulator_version or "unknown"
         raise DeviceError(
-            f"Android Emulator {version} cannot safely accept a second microphone injection "
-            f"during the same emulator boot",
+            f"AUA limits Android Emulator {version} to one microphone injection "
+            f"attempt during the same emulator boot",
             code="mic_repeat_unsafe",
             hint=(
                 "Do not retry. Restart only this emulator with `--audio`, reopen the target "
@@ -790,7 +912,9 @@ def inject_prepared(prepared: PreparedInjection) -> WavInfo:
         inject = channel.stream_unary(
             _INJECT_AUDIO_METHOD,
             request_serializer=lambda packet: packet,
-            response_deserializer=lambda _response: None,
+            # The wire response is google.protobuf.Empty (b""). Returning None here
+            # makes gRPC Python turn a successful response into a local INTERNAL error.
+            response_deserializer=lambda response: response,
         )
         inject(
             iter_audio_packets(prepared.wav),
@@ -839,9 +963,8 @@ def inject_prepared(prepared: PreparedInjection) -> WavInfo:
                 ),
             ) from exc
         if status == "INTERNAL":
-            # Emulator 36.4.10 has returned INTERNAL only after the app received non-silent
-            # samples and completed its voice flow. Retrying would duplicate user input and can
-            # also trigger an upstream emulator audio crash, so this is its own uncertain state.
+            # A transport/server error does not establish whether samples arrived.
+            # Preserve the uncertain outcome and never replay the stream automatically.
             raise MicDeliveryUncertainError() from exc
         raise DeviceError(
             f"emulator audio injection failed ({status})",

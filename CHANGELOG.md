@@ -11,6 +11,19 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Fixed
+
+- Microphone injection accepts the emulator's empty successful gRPC response instead of turning
+  it into a false uncertain-delivery error. Genuine uncertain delivery still never triggers a replay.
+- Microphone injection waits for an active recording input before opening the emulator audio
+  stream. Missing readiness returns a typed refusal with an observation and releases an acquired
+  hold. Late readiness and foreground changes during the wait cannot authorize injection.
+- Microphone MCP calls accept published element handles through `id` or `stable_key` and reject
+  conflicting targets or orphan selector modifiers before preparing audio.
+- The offline release evaluator counts failed calls and post-finish cleanup from complete session
+  journals, checks saved evidence files, and keeps incomplete attempts in the denominator.
+  Missing accounting or independent verification remains explicit instead of appearing as a pass.
+
 ## [0.16.2] - 2026-09-08
 
 ### Fixed

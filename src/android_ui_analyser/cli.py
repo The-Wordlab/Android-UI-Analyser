@@ -1639,6 +1639,7 @@ def _daemon_error(err: dict[str, Any]) -> AuaError:
     }
     if code in {
         "mic_delivery_uncertain",
+        "mic_recording_not_ready",
         "mic_delivered_release_failed",
         "mic_toggle_start_uncertain",
         "mic_toggle_stop_uncertain",
@@ -1646,6 +1647,7 @@ def _daemon_error(err: dict[str, Any]) -> AuaError:
         from .mic import (
             MicDeliveredReleaseError,
             MicDeliveryUncertainError,
+            MicRecordingNotReadyError,
             MicToggleStartUncertainError,
             MicToggleStopUncertainError,
         )
@@ -1657,6 +1659,15 @@ def _daemon_error(err: dict[str, Any]) -> AuaError:
             if isinstance(raw_followups, list)
             else None
         )
+        if code == "mic_recording_not_ready":
+            readiness = err.get("recording_readiness")
+            return MicRecordingNotReadyError(
+                message,
+                hint=hint,
+                readiness=readiness if isinstance(readiness, dict) else None,
+                result=result if isinstance(result, dict) else None,
+                followup_errors=followups,
+            )
         error_type = {
             "mic_delivery_uncertain": MicDeliveryUncertainError,
             "mic_delivered_release_failed": MicDeliveredReleaseError,

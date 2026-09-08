@@ -175,6 +175,7 @@ CAPABILITY_METHODS: dict[str, frozenset[str]] = {
         {
             "MicDeliveredReleaseError",
             "MicDeliveryUncertainError",
+            "MicRecordingNotReadyError",
             "MicToggleStartUncertainError",
             "MicToggleStopUncertainError",
             "claim_injection_attempt",
@@ -184,6 +185,7 @@ CAPABILITY_METHODS: dict[str, frozenset[str]] = {
             "prepare_injection",
             "synthesize_speech",
             "validate_control_mode",
+            "wait_for_recording",
         }
     ),
     NETWORK: frozenset(

@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import wave
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,18 @@ from android_ui_analyser.schema import ActionResult
 from conftest import FakeDevice, make_config
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def recording_ready_for_transport_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    # These tests isolate gesture/transport contracts. Real diagnostic parsing and polling
+    # are covered separately, including refusal before the stream can be opened.
+    monkeypatch.setattr(
+        mic,
+        "wait_for_recording",
+        lambda _device: {"ready": True, "source": "test.recording", "input_sent": False},
+    )
+
 
 HOLD_XML = """<?xml version="1.0" encoding="UTF-8"?>
 <hierarchy rotation="0">
@@ -445,6 +458,56 @@ def test_authenticated_grpc_success_waits_for_response_and_closes_channel(tmp_pa
     assert grpc.channel_options == (("grpc.enable_http_proxy", 0),)
     assert grpc.channel.closed is True
     assert "one-use-secret" not in repr(prepared)
+
+
+@pytest.mark.parametrize("server_status", ["OK", "INTERNAL"])
+def test_real_grpc_empty_response_preserves_server_status_and_does_not_replay(
+    tmp_path: Path, server_status: str
+) -> None:
+    grpc = pytest.importorskip("grpc")
+    received: list[list[bytes]] = []
+
+    def inject(requests: Any, context: Any) -> bytes:
+        received.append(list(requests))
+        if server_status == "INTERNAL":
+            context.abort(grpc.StatusCode.INTERNAL, "test stream failure")
+        return b""  # Serialized google.protobuf.Empty, with the server's default OK status.
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        server = grpc.server(executor)
+        handler = grpc.stream_unary_rpc_method_handler(
+            inject, request_deserializer=lambda data: data, response_serializer=lambda data: data
+        )
+        server.add_generic_rpc_handlers(
+            (
+                grpc.method_handlers_generic_handler(
+                    "android.emulation.control.EmulatorController", {"injectAudio": handler}
+                ),
+            )
+        )
+        port = server.add_insecure_port("127.0.0.1:0")
+        assert port > 0
+        server.start()
+        try:
+            path = _write_wav(tmp_path / "voice.wav")
+            running = tmp_path / "avd/running"
+            _endpoint_record(
+                running, grpc_port=port, pid=os.getpid(), emulator_version="36.5.11.0"
+            )
+            for _ in range(2 if server_status == "OK" else 1):
+                prepared = mic.prepare_injection(
+                    "emulator-5554", path, running_dirs=[running], grpc_module=grpc
+                )
+                assert prepared.attempt_guard is None
+                if server_status == "INTERNAL":
+                    with pytest.raises(mic.MicDeliveryUncertainError):
+                        mic.inject_prepared(prepared)
+                else:
+                    assert mic.inject_prepared(prepared).path == path
+        finally:
+            server.stop(0).wait()
+    assert len(received) == (2 if server_status == "OK" else 1)
+    assert all(packets == list(mic.iter_audio_packets(prepared.wav)) for packets in received)
 
 
 def test_affected_emulator_allows_only_one_persisted_stream_attempt_per_pid(
@@ -1906,7 +1969,7 @@ def test_mcp_rejects_selector_modifiers_on_numeric_mic_hold_id(
 ) -> None:
     engine = Engine(make_config(memory={"enabled": False}), device=FakeDevice())
 
-    with pytest.raises(UsageError, match="cannot modify a numeric microphone control id"):
+    with pytest.raises(UsageError, match="cannot modify a microphone control id"):
         mcp_dispatch(
             engine,
             "mic_inject_and_analyze",
