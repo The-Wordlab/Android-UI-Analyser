@@ -2090,7 +2090,7 @@ def _tool_definitions() -> list[types.Tool]:
         ),
         types.Tool(
             name="capture_status",
-            description="Status of the rolling screencap buffer (daemon-warm).",
+            description="Status of this persistent server's rolling capture buffer.",
             inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
         ),
         types.Tool(
@@ -3018,6 +3018,7 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 **start_kwargs,
             )
         )
+        engine.capture_service_start(restart=True)
         if isinstance(started, dict) and (
             started.get("virtual_target_started") or started.get("emulator_started")
         ):
@@ -3371,6 +3372,7 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         else:
             out = engine.virtual_target_start(args.get("definition_id"), **common)
         _track_mcp_target(engine, out)
+        engine.capture_service_start(restart=True)
         return out
     if name == "virtual_target_create":
         replace_existing = bool(args.get("replace", False))
@@ -3438,6 +3440,7 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
             owner=args.get("owner"),
         )
         _track_mcp_target(engine, out)
+        engine.capture_service_start(restart=True)
         return out
     if name == "emulator_stop":
         from . import leases as leases_mod
@@ -4145,6 +4148,7 @@ def cleanup_mcp_emulators(
 
 def build_server(engine: Engine) -> Server:
     """Build a low-level MCP :class:`Server` bound to ``engine`` (for stdio + tests)."""
+    engine.capture_service_start()
     server: Server = Server(
         SERVER_NAME,
         version=__version__,
@@ -4180,10 +4184,16 @@ def build_server(engine: Engine) -> Server:
                 engine.config.device, "serial", None
             )
             session_id = (
-                (payload.get("session_id") if isinstance(payload, dict) else None)
+                (
+                    payload.get("session_id")
+                    if name.startswith("session_") and isinstance(payload, dict)
+                    else None
+                )
                 or args_in.get("session_id")
                 or getattr(engine, "_session_id", None)
             )
+            # Capture readers also return a session_id, but it names their rolling buffer.
+            # Preserve that response metadata without mistaking it for the active goal.
             extra: dict[str, Any] = {"invocation_id": invocation_id}
             if session_id:
                 extra["session_id"] = str(session_id)
@@ -4211,6 +4221,36 @@ def build_server(engine: Engine) -> Server:
                     ),
                 )
 
+        def prepare_response(result: Any) -> Any:
+            from .coaching import decorate_result
+
+            result = publish_ids(result)
+            result = decorate_result(
+                engine,
+                name,
+                result,
+                args=args_in,
+                current_recorded=False,
+                invocation_id=invocation_id,
+                duration_ms=(time.monotonic() - started_at) * 1000.0,
+            )
+            # Trim the folded observation the same way the CLI does. Applied here, at the one
+            # boundary every tool returns through, rather than at ~40 `_dump` sites — and via the
+            # shared helper, because these two surfaces had already drifted once: MCP was
+            # returning every field of every element on every action while the CLI trimmed.
+            if isinstance(result, dict) and name in _OBSERVATION_TOOL_NAMES:
+                spec = args_in.get("observe_fields")
+                if spec is None:
+                    spec = getattr(engine.config.output, "observation_fields", None)
+                meta_spec = args_in.get("observe_meta")
+                if meta_spec is None:
+                    meta_spec = getattr(engine.config.output, "observation_meta", None)
+                view = Projection.for_observation(spec, meta=meta_spec, fmt=OutputFormat.json)
+                result = trim_observation_payload(result, view, fmt=OutputFormat.json)
+            if annotation_warnings and isinstance(result, dict):
+                result["annotation_warnings"] = annotation_warnings
+            return result
+
         try:
             if isinstance(phase_done, dict):
                 try:
@@ -4233,39 +4273,34 @@ def build_server(engine: Engine) -> Server:
             _validate_until(name, args_in)
             payload = _dispatch(engine, name, args_in)
             payload = _fold_action_until(engine, name, args_in, payload)
-            from .coaching import decorate_result
-
-            payload = decorate_result(
-                engine,
-                name,
-                payload,
-                args=args_in,
-                current_recorded=False,
-                invocation_id=invocation_id,
-                duration_ms=(time.monotonic() - started_at) * 1000.0,
-            )
-            # Trim the folded observation the same way the CLI does. Applied here, at the one
-            # boundary every tool returns through, rather than at ~40 `_dump` sites — and via the
-            # shared helper, because these two surfaces had already drifted once: MCP was
-            # returning every field of every element on every action while the CLI trimmed.
-            if isinstance(payload, dict) and name in _OBSERVATION_TOOL_NAMES:
-                spec = args_in.get("observe_fields")
-                if spec is None:
-                    spec = getattr(engine.config.output, "observation_fields", None)
-                meta_spec = args_in.get("observe_meta")
-                if meta_spec is None:
-                    meta_spec = getattr(engine.config.output, "observation_meta", None)
-                view = Projection.for_observation(spec, meta=meta_spec, fmt=OutputFormat.json)
-                payload = trim_observation_payload(payload, view, fmt=OutputFormat.json)
-            if annotation_warnings and isinstance(payload, dict):
-                payload["annotation_warnings"] = annotation_warnings
+            payload = prepare_response(payload)
             text = json.dumps(payload, ensure_ascii=False)
         except AuaError as err:
-            error = err.to_dict().get("error")
+            envelope = err.to_dict()
+            error = envelope.get("error")
+            # An uncertain mutation may already have taken effect. Its forced observation
+            # is caller evidence too: publish/project it without replaying the action or
+            # running a success-bound predicate. Decoration remains best effort so a
+            # bookkeeping problem cannot replace the primary no-retry error.
+            attached = error.get("result") if isinstance(error, dict) else None
+            emitted_error_result: Any = None
+            if isinstance(error, dict) and isinstance(attached, dict):
+                payload = publish_ids(attached)
+                with contextlib.suppress(Exception):
+                    payload = prepare_response(payload)
+                error["result"] = payload
+                emitted_error_result = payload
             journal_call(ok=False, error=error if isinstance(error, dict) else None)
-            text = json.dumps(err.to_dict(), ensure_ascii=False)
-            engine.close_caller_turn()
-            return [types.TextContent(type="text", text=text)]
+            from .coaching import emitted_fingerprint
+
+            engine.close_caller_turn(emitted_fingerprint(emitted_error_result))
+            error_blocks: list[types.ContentBlock] = [
+                types.TextContent(type="text", text=json.dumps(envelope, ensure_ascii=False))
+            ]
+            image = _image_block(name, emitted_error_result)
+            if image is not None:
+                error_blocks.append(image)
+            return error_blocks
         except Exception as err:
             journal_call(ok=False, error={"code": "error", "message": str(err)})
             engine.close_caller_turn()

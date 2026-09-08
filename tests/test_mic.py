@@ -1294,6 +1294,11 @@ def test_internal_stream_error_releases_hold_and_carries_post_action_observation
     assert error["result"]["ok"] is False
     assert error["result"]["observation_present"] is True
     assert error["result"]["observation"]["meta"]["device_serial"] == "emulator-5554"
+    observed = error["result"]["observation"]["elements"][0]
+    assert observed["id"].startswith("el:")
+    assert "handle" not in observed
+    # The forced failure observation registered the same identity as an ordinary result.
+    assert engine.tap(observed["id"], observe=False).ok is True
 
     daemon = dispatch(
         engine,

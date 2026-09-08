@@ -234,12 +234,15 @@ class Engine:
             config.output.with_image if config.output.with_image else None
         )
         self._capture: Any = None  # CaptureBuffer | None — set by capture_start
-        # Capture auto-start happens on the daemon's background initializer. Lifecycle
+        # Capture auto-start happens on the persistent server's background initializer. Lifecycle
         # commands can arrive on the socket while that initializer is still creating its
         # directories, so start/stop/on/off must be one atomic state transition. This lock is
         # deliberately capture-only: the background initializer is forbidden from connecting
         # to the device and therefore must not serialize the daemon's first real request.
         self._capture_lock = threading.RLock()
+        self._capture_service_lock = threading.Lock()
+        self._capture_initializer: threading.Thread | None = None
+        self._capture_shutdown = threading.Event()
         # True only while the UiAutomation slot is on loan to the on-device helper.
         # Read by :meth:`_capture_screenshot`, which is the one device call that can
         # arrive from another thread during a handover.
@@ -1674,6 +1677,7 @@ class Engine:
 
     def close(self) -> None:
         """Release the device (and its on-device uiautomator2 server). Idempotent."""
+        self.capture_service_stop()
         with contextlib.suppress(Exception):
             self.capture_stop()
         # An async observation may still be reading this Device and finalising the session
@@ -2661,6 +2665,8 @@ class Engine:
     _capture_evidence = engine_capture._capture_evidence
     _capture_mark = engine_capture._capture_mark
     _capture_evidence_last = engine_capture._capture_evidence_last
+    capture_service_start = engine_capture.capture_service_start
+    capture_service_stop = engine_capture.capture_service_stop
     capture_start = engine_capture.capture_start
     capture_stop = engine_capture.capture_stop
     capture_on = engine_capture.capture_on

@@ -11,6 +11,23 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-09-08
+
+### Fixed
+
+- MCP now starts the same optional rolling capture service as the CLI daemon. Actions expose
+  durable capture evidence windows without a separate daemon or screen read. Initialization
+  waits for foreground target selection, honors capture configuration and adapter support,
+  preserves existing buffers, and completes before the engine closes its device.
+- MCP capture status and exports now correlate to the active goal session in the journal;
+  their separate capture-buffer session IDs remain intact in results. Session review counts
+  these calls instead of silently filtering them out of the goal's totals.
+
+- Microphone errors that carry an observation now publish the same opaque element IDs as
+  successful actions. MCP applies the requested observation projection and preserves the
+  returned fingerprint and existing image while retaining the uncertain-delivery error;
+  it does not repeat the action or run its success-bound wait.
+
 ## [0.16.0] - 2026-09-08
 
 ### Breaking
@@ -443,5 +460,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.15.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.15.0
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.16.0...HEAD
 [0.16.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.16.0
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.16.1...HEAD
+[0.16.1]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.16.1

@@ -43,6 +43,7 @@ from .schema import (
     MatchMode,
     ResolveResult,
     center_of,
+    publish_ids,
 )
 from .scroll_geom import Box, Sample, _contains, region_probe, scroll_movement, scrollable_boxes
 from .selectors import (
@@ -1167,7 +1168,7 @@ def mic_inject(
             # mandatory: without it, `--no-observe` would leave callers with no safe way
             # to decide whether the already-sent samples took effect.
             result = self._observe(action_result, True, with_image)
-            result_payload = result.model_dump(mode="json")
+            result_payload = publish_ids(result.model_dump(mode="json"))
         except BaseException as exc:
             raise terminal_mic_error.note_followup_failure("observation", exc) from exc
         raise terminal_mic_error.with_result(result_payload)

@@ -10,6 +10,7 @@ it in ``Engine``.
 from __future__ import annotations
 
 import contextlib
+import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -198,8 +199,63 @@ def _capture_evidence_last(
     }
 
 
+def capture_service_start(self: Engine, *, restart: bool = False) -> None:
+    """Enable one optional capture initializer for a persistent CLI-daemon or MCP Engine.
+
+    Target selection and attachment remain foreground operations. The initializer waits for
+    their result and creates only the host-side buffer, so a cold server can immediately
+    answer discovery and bootstrap calls without racing another device owner.
+    """
+    if not self.config.capture.enabled or not self.platform.supports("ui.screenshot"):
+        return
+    with self._capture_service_lock:
+        if self._capture_shutdown.is_set():
+            # MCP can close a stopped target and reuse its Engine for a later explicit
+            # bootstrap. Only that new foreground lifecycle may re-enable initialization.
+            if not restart or (
+                self._capture_initializer is not None and self._capture_initializer.is_alive()
+            ):
+                return
+            self._capture_shutdown.clear()
+            self._capture_initializer = None
+        if self._capture_initializer is not None:
+            return
+
+        def initialize() -> None:
+            while (
+                getattr(self.config.device, "serial", None) is None
+                and self._device is None
+            ):
+                if self._capture_shutdown.wait(0.05):
+                    return
+            try:
+                with self._capture_lock:
+                    if self._capture_shutdown.is_set() or not self.config.capture.enabled:
+                        return
+                    # Preserve an explicitly started/paused buffer and never spawn a second
+                    # sampler when capture_on raced automatic initialization.
+                    if self._capture is None:
+                        self.capture_start(connect_if_needed=False)
+            except Exception:  # noqa: BLE001 - optional capture cannot prevent server startup
+                logger.exception("capture buffer auto-start failed")
+
+        self._capture_initializer = threading.Thread(
+            target=initialize, name="aua-capture-init", daemon=True
+        )
+        self._capture_initializer.start()
+
+
+def capture_service_stop(self: Engine) -> None:
+    """Fence initialization before closing the buffer/device, including unbound servers."""
+    with self._capture_service_lock:
+        self._capture_shutdown.set()
+        initializer = self._capture_initializer
+    if initializer is not None and initializer is not threading.current_thread():
+        initializer.join()
+
+
 def capture_start(self: Engine, *, connect_if_needed: bool = True) -> dict[str, Any]:
-    """Start the rolling capture buffer (daemon-warm sessions).
+    """Start the rolling capture buffer (persistent daemon/MCP sessions).
 
     ``connect_if_needed=False`` is the daemon auto-start seam. A per-device daemon already
     knows its target from config, so initializing the host-side buffer must not eagerly
