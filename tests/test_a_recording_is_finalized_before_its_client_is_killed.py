@@ -93,8 +93,15 @@ class _FakeU2:
         self._interrupted = True
 
     def shell(self, command: str) -> str:
+        if command.startswith("# AUA_RECORDING_CMDLINES"):
+            requested = command.split("for pid in ", 1)[1].split(";", 1)[0].split()
+            table = dict(line.split(None, 1) for line in self.shell("ps -A -w -o PID,ARGS").splitlines()[1:])
+            return "\n".join(f"{pid} {table.get(pid, 'AUA_GONE')}" for pid in requested) + "\nAUA_CMDLINES_COMPLETE"
         if command.startswith("ps "):
-            return _PS_RECORDING if self._recording() else _PS_IDLE
+            output = _PS_RECORDING if self._recording() else _PS_IDLE
+            if command == "ps -A -w -o PID,ARGS":
+                return "PID ARGS\n" + "\n".join(f"{i} {line}" for i, line in enumerate(output.splitlines()[1:], 1))
+            return output
         if command.startswith("ls -l"):
             return command.split()[2]
         return ""

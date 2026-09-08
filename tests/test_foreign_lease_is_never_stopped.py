@@ -54,6 +54,14 @@ def _no_real_devices(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setattr(em, "_adb_emu_kill", killed.append)
     signalled: list[int] = []
     monkeypatch.setattr(em.os, "killpg", lambda pid, _sig: signalled.append(pid))
+    original_probe = em.os.kill
+
+    def probe(pid: int, sig: int) -> None:
+        if pid == 4242 and sig == 0:
+            raise ProcessLookupError  # the synthetic emulator exits after its fake signal
+        original_probe(pid, sig)
+
+    monkeypatch.setattr(em.os, "kill", probe)
     return {"killed": killed, "signalled": signalled}
 
 
@@ -284,13 +292,16 @@ def test_stop_check_and_kill_are_atomic_against_a_concurrent_acquire(
     assert outcomes["acquired"] is True
 
 
+@pytest.mark.parametrize("own_lease", [False, True])
 def test_spawned_rollback_is_atomic_against_a_concurrent_acquire(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, own_lease: bool,
 ) -> None:
     registry = tmp_path / "registry"
     cache = tmp_path / "cache"
     serial = SER_GUARD
     _boot_record(cache, serial=serial, pid=4242, started_at=time.time())
+    if own_lease:
+        assert leases.acquire(registry, serial, owner="stopper")
     kill_entered = threading.Event()
     allow_kill = threading.Event()
     acquire_finished = threading.Event()
@@ -298,6 +309,8 @@ def test_spawned_rollback_is_atomic_against_a_concurrent_acquire(
 
     def slow_kill(target: int, _signal: int) -> None:
         assert target == 4242
+        if own_lease:
+            assert leases.holder(registry, serial) == "stopper"
         kill_entered.set()
         assert allow_kill.wait(timeout=2)
 
@@ -330,6 +343,7 @@ def test_spawned_rollback_is_atomic_against_a_concurrent_acquire(
     assert not rollback.is_alive() and not acquirer.is_alive()
     assert outcomes["rollback"]["stopped"] == [serial]
     assert outcomes["acquired"] is True
+    assert leases.holder(registry, serial) == "new-owner"
 
 
 def test_a_dead_owners_lease_does_not_block_a_stop(
@@ -416,6 +430,54 @@ def _boot_record(cache: Path, *, serial: str, pid: int, started_at: float) -> Pa
         )
     )
     return path
+
+
+@pytest.mark.parametrize("outcome", ["gone", "denied", "still_alive"])
+def test_owned_rollback_releases_only_after_confirmed_process_exit(
+    tmp_path, monkeypatch, outcome,
+):
+    registry = tmp_path / "registry"
+    cache = tmp_path / "cache"
+    record = _boot_record(cache, serial=SER_GUARD, pid=4242, started_at=time.time())
+    assert leases.acquire(registry, SER_GUARD, owner="fictional-owner")
+    monkeypatch.setattr(em, "_kill_watchdog", lambda _meta: None)
+    signals = []
+
+    def signal_group(pid, sig):
+        if outcome == "denied":
+            raise PermissionError("synthetic denial")
+        signals.append(pid)
+
+    def probe(pid, sig):
+        assert pid == 4242 and sig == 0
+        if outcome == "gone":
+            raise ProcessLookupError()
+
+    monkeypatch.setattr(em.os, "killpg", signal_group)
+    monkeypatch.setattr(em.os, "kill", probe)
+    monkeypatch.setattr(em, "_OWNED_STOP_TIMEOUT_S", 0.01, raising=False)
+    out = em.stop_spawned_instance(
+        instance="fake.p5554", pid=4242, cache_dir=cache,
+        lease_registry_dir=registry, owner="fictional-owner",
+    )
+    assert out["stopped"] == ([SER_GUARD] if outcome == "gone" else [])
+    assert record.exists() is (outcome != "gone")
+    assert leases.holder(registry, SER_GUARD) == (
+        None if outcome == "gone" else "fictional-owner"
+    )
+
+
+def test_rollback_reaps_its_exited_child_before_testing_pid_liveness(monkeypatch):
+    reaped = []
+    def wait(pid, flags):
+        assert flags == os.WNOHANG
+        reaped.append(pid)
+        return pid, 0
+    monkeypatch.setattr(em.os, "waitpid", wait)
+    monkeypatch.setattr(em.os, "kill", lambda *_: None)  # a zombie still has a pid
+    monkeypatch.setattr(em, "_OWNED_STOP_TIMEOUT_S", 0.01)
+    assert em._wait_owned_process_exit(4242, None)
+    assert reaped == [4242]
 
 
 def test_rollback_of_an_unleased_boot_stops_it_gracefully(

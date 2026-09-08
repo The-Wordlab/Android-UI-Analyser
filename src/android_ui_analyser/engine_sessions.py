@@ -357,16 +357,21 @@ def session_start(
             # fence before rollback takes the exclusive stop/ownership transaction.
             self.release_device_use()
             with contextlib.suppress(Exception):
-                self.virtual_target_stop_instance(
-                    str(
-                        prepared.get("instance_token")
-                        or prepared.get("instance")
-                        or ""
-                    ),
-                    expected_pid=prepared.get("pid"),
-                    owner=getattr(self, "_lease_owner_resolved", None),
-                    requested_by="session-start-rollback",
-                )
+                from . import leases
+
+                target = TargetRef(self.platform.name, str(prepared["serial"]))
+                owner = getattr(self, "_lease_owner_resolved", None)
+                # Keep confirmation and release in the same ownership transaction. A
+                # concurrent claim must not slip between stopping this boot and releasing it.
+                with leases.device_transaction(self.config.lease.registry_dir, target):
+                    cleanup = self.virtual_target_stop_instance(
+                        str(prepared.get("instance_token") or prepared.get("instance") or ""),
+                        expected_pid=prepared.get("pid"),
+                        owner=owner,
+                        requested_by="session-start-rollback",
+                    )
+                    if owner is not None and target.target_id in cleanup.get("stopped_target_ids", []):
+                        leases.release(self.config.lease.registry_dir, target, owner=owner)
             self.close()
         raise
     plan = self._goal_session_plan(goal, observed)

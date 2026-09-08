@@ -313,7 +313,7 @@ def test_bad_inline_phase_annotation_warns_but_does_not_cancel_the_action(
     monkeypatch.setattr(cli, "_route", route)
     result = runner.invoke(
         app,
-        ["--phase-done", "not-a-checkpoint", "key-and-analyze", "back", "--no-observe"],
+        ["--phase-done", "not-a-checkpoint", "key-and-analyze", "back"],
     )
 
     assert result.exit_code == 0, result.output

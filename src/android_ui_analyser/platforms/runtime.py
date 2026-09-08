@@ -13,6 +13,7 @@ from __future__ import annotations
 import time
 from abc import ABC
 from collections.abc import Sequence
+from typing import Any
 
 from ..errors import DeviceError
 from ..providers.base import Bounds, ScreenImage
@@ -330,6 +331,24 @@ class TargetRuntime(ABC):
 
     def stop_recording(self, local_path: str) -> str:
         raise DeviceError("screen recording is unsupported by this target runtime")
+
+    def archive_stale_recording(self, remote_path: str, instance_token: str) -> str | None:
+        """Preserve old metadata/evidence after proving a different boot and inert path.
+
+        Return the quarantine metadata path, or None for the same boot. Unknown identity,
+        unreadable liveness or conflicting ownership must raise without touching evidence.
+        The caller retains the original undo under a separate key before recording again.
+        """
+        raise DeviceError("recording recovery is unsupported by this target runtime")
+
+    def recording_metadata(self) -> dict[str, Any] | None:
+        """Lifecycle, original segments and coverage limits for device.recording.timeline.
+
+        A successful start confirms startup only. Duration checks and explicit gaps in a
+        finalized report must be evaluated before using the recording as continuous evidence.
+        None means this runtime has no timeline evidence.
+        """
+        return None
 
     def discard_recording(self, remote_path: str) -> None:
         """Stop and delete an unfinished recording without installing it as evidence."""

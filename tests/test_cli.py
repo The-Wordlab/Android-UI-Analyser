@@ -41,14 +41,14 @@ HIERARCHY_XML = """<?xml version="1.0" encoding="UTF-8"?>
 
 
 @pytest.fixture
-def patched_device(monkeypatch: pytest.MonkeyPatch) -> FakeDevice:
+def patched_device(monkeypatch: pytest.MonkeyPatch, fake_cli_device) -> FakeDevice:
     """Patch Engine._connect_target to return a FakeDevice with the labeled hierarchy."""
     device = FakeDevice(
         hierarchy_xml=HIERARCHY_XML,
         text_index={"Continue": (40, 200, 1040, 320), "Welcome": (0, 0, 1080, 120)},
     )
     monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: device)
-    return device
+    return fake_cli_device(device)
 
 
 @pytest.fixture(autouse=True)
@@ -88,11 +88,10 @@ def test_explicit_action_name_cannot_disable_its_analysis(patched_device: FakeDe
         ["--no-cache", "tap-and-analyze", "--rid", "continue_btn", "--no-observe"],
     )
 
-    assert result.exit_code == 0, result.stderr
-    data = json.loads(result.stdout)
-    assert data["action"] == "tap"
-    assert data["observation_present"] is True
-    assert data["observation"]["elements"]
+    assert result.exit_code == 2, result.stderr
+    assert "--no-observe" in result.stderr
+    assert patched_device.calls == []
+    assert patched_device.screenshot_calls == 0
 
 
 def test_version_prints_and_exits_zero() -> None:
@@ -187,7 +186,7 @@ def test_has_match_modes(patched_device: FakeDevice, args: list[str], exit_code:
     assert result.exit_code == exit_code, result.stdout + result.stderr
 
 
-def test_has_ocr_fallback_found_via_ocr(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_has_ocr_fallback_found_via_ocr(monkeypatch: pytest.MonkeyPatch, fake_cli_device) -> None:
     """Hierarchy misses; the OCR chain finds the text → found via `ocr` (AC11)."""
 
     class StubFactory(ProviderFactory):
@@ -202,6 +201,7 @@ def test_has_ocr_fallback_found_via_ocr(monkeypatch: pytest.MonkeyPatch) -> None
 
     # Empty hierarchy text_index → hierarchy miss; engine falls back to OCR.
     device = FakeDevice(text_index={})
+    fake_cli_device(device)
     monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: device)
 
     real_engine = engine_mod.Engine
@@ -219,9 +219,10 @@ def test_has_ocr_fallback_found_via_ocr(monkeypatch: pytest.MonkeyPatch) -> None
     assert data["source"] == "ocr"
 
 
-def test_has_no_ocr_fallback_misses(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_has_no_ocr_fallback_misses(monkeypatch: pytest.MonkeyPatch, fake_cli_device) -> None:
     """With --no-ocr-fallback, a hierarchy miss is final (exit 1), OCR never consulted."""
     device = FakeDevice(text_index={})
+    fake_cli_device(device)
     monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: device)
     result = runner.invoke(app, ["has", "Checkout", "--no-ocr-fallback"])
     assert result.exit_code == 1

@@ -20,9 +20,10 @@ XML = """<hierarchy rotation="0">
 
 @pytest.mark.parametrize("command", ["action", "action-and-analyze"])
 def test_selector_only_a11y_action_parses_and_dispatches(
-    tmp_path, monkeypatch, command: str
+    tmp_path, monkeypatch, fake_cli_device, command: str
 ) -> None:  # type: ignore[no-untyped-def]
     device = FakeDevice(hierarchy_xml=XML)
+    fake_cli_device(device)
     monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: device)
     monkeypatch.setenv("AUA_CACHE__DIR", str(tmp_path / "cache"))
     monkeypatch.setenv("AUA_MEMORY__DIR", str(tmp_path / "memory"))
@@ -30,7 +31,8 @@ def test_selector_only_a11y_action_parses_and_dispatches(
 
     result = CliRunner().invoke(
         app,
-        ["a11y", command, "--rid", "expand_button", "CLICK", "--no-observe"],
+        ["a11y", command, "--rid", "expand_button", "CLICK"]
+        + (["--no-observe"] if command == "action" else []),
     )
 
     assert result.exit_code == 0, result.stderr
@@ -39,8 +41,9 @@ def test_selector_only_a11y_action_parses_and_dispatches(
     assert any(name == "a11y_action" and args[-1] == "CLICK" for name, args in device.calls)
 
 
-def test_legacy_id_then_action_order_still_works(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_legacy_id_then_action_order_still_works(tmp_path, monkeypatch, fake_cli_device) -> None:  # type: ignore[no-untyped-def]
     device = FakeDevice(hierarchy_xml=XML)
+    fake_cli_device(device)
     monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: device)
     monkeypatch.setenv("AUA_CACHE__DIR", str(tmp_path / "cache"))
     monkeypatch.setenv("AUA_MEMORY__DIR", str(tmp_path / "memory"))

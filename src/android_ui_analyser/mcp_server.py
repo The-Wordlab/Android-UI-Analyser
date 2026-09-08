@@ -2038,8 +2038,9 @@ def _tool_definitions() -> list[types.Tool]:
         types.Tool(
             name="screen_record_start",
             description=(
-                "Start an MP4 SCREEN VIDEO recording on the device. This captures pixels, not "
-                "HTTP traffic — for traffic use mock_record."
+                "Start native screen video. Android rotates original MP4 segments for up to "
+                "30 minutes; rotation is not guaranteed gapless. Startup success does not prove "
+                "continuous coverage. For HTTP traffic use mock_record."
             ),
             inputSchema={
                 "type": "object",
@@ -2056,7 +2057,15 @@ def _tool_definitions() -> list[types.Tool]:
         ),
         types.Tool(
             name="screen_record_stop",
-            description="Stop the screen video recording and pull the MP4 to a local path.",
+            description=(
+                "Stop native video and save a playable MP4 at PATH (also returned in detail). "
+                "Android retains PATH.segments/ and PATH.recording.json; multiple segments require host ffmpeg. "
+                "Inspect lifecycle, gaps and duration_check; failed coverage returns ok=false. "
+                "Native within-segment timing is preserved; joined media omits gaps. Coverage is unverified; "
+                "no missing footage is synthesized. Encoder failure salvages finalized segments with "
+                "failed coverage; partial originals and pending cleanup are reported. No playable segments "
+                "is an error with retained diagnostics. Export failures retain remote evidence for retry."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {"path": {"type": "string"}},
@@ -2080,7 +2089,7 @@ def _tool_definitions() -> list[types.Tool]:
         ),
         types.Tool(
             name="record_stop",
-            description="Deprecated alias for screen_record_stop; stops and pulls MP4 screen video.",
+            description="Deprecated alias for screen_record_stop; saves playable MP4 at PATH, with original segments and unverified coverage sidecar on Android.",
             inputSchema={
                 "type": "object",
                 "properties": {"path": {"type": "string"}},

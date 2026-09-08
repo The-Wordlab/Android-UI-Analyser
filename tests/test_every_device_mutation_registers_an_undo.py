@@ -39,6 +39,7 @@ BACKENDS = (
     "app_database.py",
     "platforms/android.py",
     "platforms/android_device.py",
+    "platforms/android_recording.py",
 )
 
 # Commands that change state the device keeps after the command returns.

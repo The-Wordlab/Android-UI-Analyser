@@ -95,6 +95,21 @@ def record_start(self: Engine, path: str | None = None) -> ActionResult:
             hint="Run `aua record stop <path>` before starting another.",
         )
     pending = self._pending_device_change("screen_recording", serial=runtime.target_id)
+    if pending is not None and self.platform.supports("device.recording.recovery"):
+        from . import device_ledger
+
+        recovery = self.platform.runtime_capability("device.recording.recovery", runtime)
+        current = runtime.instance_token()
+        if pending.instance_token and current and pending.instance_token != current:
+            archived = recovery.archive_stale_recording(
+                str(pending.args.get("remote_path", "")), pending.instance_token,
+            )
+            if archived and runtime.instance_token() == current:
+                device_ledger.retain_stale_recording(
+                    runtime.target_id, pending, archive_path=archived, current_instance=current,
+                    registry_dir=self.config.lease.registry_dir, platform=self.platform.name,
+                )
+                pending = None
     if pending is not None:
         raise DeviceError(
             "an earlier screen recording still has pending target-side cleanup",
@@ -114,14 +129,27 @@ def record_start(self: Engine, path: str | None = None) -> ActionResult:
         detail=f"screen recording started at {remote_path}",
     )
     remote = runtime.start_recording(remote_path)
-    return ActionResult(ok=True, action="record-start", detail=remote)
+    metadata = (
+        self.platform.runtime_capability("device.recording.timeline", runtime).recording_metadata()
+        if self.platform.supports("device.recording.timeline") else None
+    )
+    return ActionResult(ok=True, action="record-start", detail=remote, recording=metadata,
+                        note="Recording started; continuous coverage is not yet verified.")
 
 
 def record_stop(self: Engine, local_path: str) -> ActionResult:
     runtime = self.platform.runtime_capability("device.recording", self.device)
     saved = runtime.stop_recording(local_path)
-    self.forget_device_change("screen_recording")
-    return ActionResult(ok=True, action="record-stop", detail=saved)
+    metadata = (
+        self.platform.runtime_capability("device.recording.timeline", runtime).recording_metadata()
+        if self.platform.supports("device.recording.timeline") else None
+    )
+    if not metadata or not metadata.get("cleanup_pending"):
+        self.forget_device_change("screen_recording")
+    return ActionResult(ok=metadata is None or metadata.get("duration_check") != "failed",
+                        action="record-stop", detail=saved, recording=metadata,
+                        note="Evidence collected. Inspect recording gaps and duration_check; "
+                        "collection success does not prove continuous coverage.")
 
 
 def _capture_hint(self: Engine) -> str | None:
