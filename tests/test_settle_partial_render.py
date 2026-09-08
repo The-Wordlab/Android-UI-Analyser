@@ -14,17 +14,41 @@ because `analyze` ran against the header-only frame. Every action observed on de
 from __future__ import annotations
 
 import io
-import time
 from functools import cache
 
+import pytest
 from PIL import Image, ImageDraw
 
+from android_ui_analyser import engine_observation
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.providers.base import ScreenImage
 from conftest import FakeDevice, make_config
 from test_memory import _hier, _node
 
 PKG = "com.example.app"
+
+
+class SettleClock:
+    """Charge only the settle loop's poll intervals and the fake device's dump cost."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+@pytest.fixture
+def settle_clock(monkeypatch: pytest.MonkeyPatch) -> SettleClock:
+    clock = SettleClock()
+    # Replace only this module's clock, not the shared time module. A host pause between
+    # polls can legitimately let pixel-idle win before the first 40ms hierarchy sample;
+    # these tests compare render/dump costs, not the CI scheduler's speed.
+    monkeypatch.setattr(engine_observation, "time", clock)
+    return clock
 
 
 @cache
@@ -35,8 +59,8 @@ def _frame(rows_drawn: int, *, w: int = 320, h: int = 640) -> bytes:
     every pixel changes gets ALL grid cells masked as animation, and an all-masked grid reports
     idle vacuously — which would make this test pass for the wrong reason.
 
-    Cached and rectangle-drawn because the settle loop is on a real clock: a slow frame factory
-    spends the caller's deadline and the wait times out on render cost that is the test's own.
+    Cached and rectangle-drawn to keep fixture construction cheap. Its host cost does not
+    advance the settle clock or consume the caller's simulated deadline.
     """
     img = Image.new("RGB", (w, h), (250, 250, 250))
     draw = ImageDraw.Draw(img)
@@ -90,9 +114,16 @@ class RenderingDevice(FakeDevice):
     """
 
     def __init__(
-        self, *, paint_frames: int = 0, rows: int = 5, dump_delay_s: float = 0.0, **kw: object
+        self,
+        *,
+        clock: SettleClock,
+        paint_frames: int = 0,
+        rows: int = 5,
+        dump_delay_s: float = 0.0,
+        **kw: object,
     ) -> None:
         super().__init__(hierarchy_xml=_rows(rows), **kw)  # type: ignore[arg-type]
+        self._clock = clock
         self._paint_frames = paint_frames
         self._rows = rows
         self._frames_served = 0
@@ -117,7 +148,7 @@ class RenderingDevice(FakeDevice):
     def dump_hierarchy(self, compressed: bool = False) -> str:  # type: ignore[override]
         self.hierarchy_calls += 1
         if self._dump_delay_s:
-            time.sleep(self._dump_delay_s)
+            self._clock.sleep(self._dump_delay_s)
         self.last_tree_served = _rows(self._rows if self._drawn() >= self._rows else 0)
         return self.last_tree_served
 
@@ -146,13 +177,13 @@ def _tree_of(xml: str, eng: Engine) -> tuple[str, ...]:
     return tuple(parts[:60])
 
 
-def test_the_wait_ends_on_the_full_tree_not_the_partial_one() -> None:
+def test_the_wait_ends_on_the_full_tree_not_the_partial_one(settle_clock: SettleClock) -> None:
     """The regression, stated as what the caller cares about: are the rows there?
 
     Old behaviour returned on the first hierarchy sample — a header with no rows — because it
     differed from the screen we had left.
     """
-    dev = RenderingDevice(paint_frames=6, package=PKG, width=320, height=640)
+    dev = RenderingDevice(clock=settle_clock, paint_frames=6, package=PKG, width=320, height=640)
     eng = _engine(dev)
     ready = _await(eng, _tree_of(PREVIOUS_SCREEN, eng))
     assert ready["timeout"] is False, f"must not fall back to the deadline: {ready}"
@@ -160,17 +191,18 @@ def test_the_wait_ends_on_the_full_tree_not_the_partial_one() -> None:
     assert dev.hierarchy_calls >= 2, "a painting screen must cost a confirming dump"
 
 
-def test_a_finished_screen_still_takes_the_fast_path() -> None:
+def test_a_finished_screen_still_takes_the_fast_path(settle_clock: SettleClock) -> None:
     """Speed must survive: an already-drawn screen is accepted on the first sample."""
-    dev = RenderingDevice(paint_frames=0, package=PKG, width=320, height=640)
+    dev = RenderingDevice(clock=settle_clock, paint_frames=0, package=PKG, width=320, height=640)
     eng = _engine(dev)
     ready = _await(eng, _tree_of(PREVIOUS_SCREEN, eng))
     assert ready["via"] == "hierarchy-fast", ready
     assert ready["timeout"] is False
     assert dev.hierarchy_calls == 1, "a drawn screen must not pay a confirming dump"
+    assert ready["ms"] == 56, "the production 28ms poll reaches the first tree sample at 56ms"
 
 
-def test_a_slow_dumping_device_pays_nothing_for_the_check() -> None:
+def test_a_slow_dumping_device_pays_nothing_for_the_check(settle_clock: SettleClock) -> None:
     """The check is only worth its cost where a dump can outrun the render.
 
     A dump slower than the render (measured 600-1200ms windowed, vs rows present in the first
@@ -178,9 +210,11 @@ def test_a_slow_dumping_device_pays_nothing_for_the_check() -> None:
     pure latency: +614ms per action, most of them hitting the deadline instead of returning.
     """
     dev = RenderingDevice(
-        paint_frames=6, dump_delay_s=0.30, package=PKG, width=320, height=640
+        clock=settle_clock, paint_frames=6, dump_delay_s=0.30, package=PKG, width=320, height=640
     )
     eng = _engine(dev)
     ready = _await(eng, _tree_of(PREVIOUS_SCREEN, eng))
     assert ready["via"] == "hierarchy-fast", ready
+    assert ready["timeout"] is False
     assert dev.hierarchy_calls == 1, "a slow-dumping device must not be made slower"
+    assert ready["ms"] == 356, "the 300ms dump cost must count against the 1100ms deadline"

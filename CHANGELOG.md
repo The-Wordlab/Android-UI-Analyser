@@ -11,6 +11,15 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.16.2] - 2026-09-08
+
+### Fixed
+
+- Includes the automatic MCP capture, capture-call accounting, and microphone error-evidence
+  fixes from the v0.16.1 tag, whose release publication was blocked by a timing-sensitive test.
+- Partial-render verification uses a controlled test clock so host scheduling delays cannot
+  change the expected settle path. Production polling, settling, and timeout behavior are unchanged.
+
 ## [0.16.1] - 2026-09-08
 
 ### Fixed
@@ -462,5 +471,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.16.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.16.0
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.16.1...HEAD
 [0.16.1]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.16.1
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.16.2...HEAD
+[0.16.2]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.16.2
