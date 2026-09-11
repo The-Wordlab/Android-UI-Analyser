@@ -866,9 +866,10 @@ def test_mcp_has_tool_roundtrip() -> None:
     assert data["source"] == "hierarchy"
 
 
-def test_mcp_analyze_via_monkeypatched_connect(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_mcp_analyze_via_monkeypatched_connect(monkeypatch: pytest.MonkeyPatch, fake_cli_device) -> None:
     """Same as AC8 but exercising the lazy connect path (_connect_target patched)."""
     device = FakeDevice(hierarchy_xml=HIERARCHY_XML)
+    fake_cli_device(device)
     monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: device)
     server = build_server(Engine(make_config()))  # no device passed → lazy connect
 
@@ -971,11 +972,12 @@ def test_mcp_flow_run_accepts_inline_yaml_and_artifact_options(tmp_path: Path) -
     assert Path(data["artifacts"]["junit"]).is_file()
 
 
-def test_mcp_navigate_requires_planner(monkeypatch) -> None:
+def test_mcp_navigate_requires_planner(monkeypatch, fake_cli_device) -> None:
     # navigate without planner.enabled → structured usage error, not a crash.
     from android_ui_analyser.engine import Engine
 
     device = FakeDevice(hierarchy_xml=HIERARCHY_XML)
+    fake_cli_device(device)
     monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: device)
     server = build_server(Engine(make_config()))
 

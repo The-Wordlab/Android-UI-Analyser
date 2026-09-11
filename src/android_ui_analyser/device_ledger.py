@@ -40,7 +40,7 @@ import signal
 import subprocess
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -284,6 +284,36 @@ def record(
     entries.append(entry)
     _write_ledger(ref, entries)
     return entry
+
+
+def retain_stale_recording(
+    target: TargetLike, expected: Entry, *, archive_path: str, current_instance: str,
+    registry_dir: str | Path, platform: str = LEGACY_PLATFORM,
+) -> None:
+    """Retain a proven prior-boot undo under its own key; never claim it was undone.
+
+    The selected recording recovery capability must first quarantine its metadata and
+    prove that the path is inert. Recheck the exact ledger entry under the target fence.
+    Old persistent footage remains recoverable, and replay still enforces its old boot.
+    """
+    from . import leases
+
+    ref = target_ref(target, platform=platform)
+    if (expected.key != "screen_recording" or expected.op != "discard_recording"
+            or not expected.instance_token or not current_instance
+            or expected.instance_token == current_instance or not archive_path):
+        raise ConfigError("stale recording recovery identity is invalid", code="device_ledger_invalid")
+    # Metadata-only recovery runs inside ordinary shared device use. Serialize with
+    # foreground commands; ownership transitions remain excluded by the shared fence.
+    with leases.device_command(registry_dir, ref):
+        entries = read_ledger(ref)
+        if next((e for e in entries if e.key == expected.key), None) != expected:
+            raise ConfigError("recording undo changed during recovery", code="device_ledger_invalid")
+        retained = replace(
+            expected, key=f"screen_recording:prior:{time.time_ns()}",
+            detail=f"Prior recording evidence retained; metadata: {archive_path}. {expected.detail}",
+        )
+        _write_ledger(ref, [retained if e.key == expected.key else e for e in entries])
 
 
 def options_fingerprints(entries: list[Entry]) -> frozenset[str]:
@@ -1009,7 +1039,15 @@ MUTATION_CATALOGUE: dict[str, Mutation] = {
         "screen_recording",
         "platforms/android_device.py:start_recording",
         "discard_recording",
-        "The target recorder and its remote file outlive the CLI process that started them.",
+        "The native supervisor, encoders, lifecycle log and all original segments outlive "
+        "the CLI process. The unique recorded destination owns their complete cleanup.",
+    ),
+    "native_recording_supervisor": Mutation(
+        "screen_recording",
+        "platforms/android_recording.py:start",
+        "discard_recording",
+        "Engine.record_start writes the screen_recording undo before starting this supervisor. "
+        "Its unique destination scopes the supervisor, encoders, and every segment.",
     ),
     "wall_clock": Mutation(
         "wall_clock",

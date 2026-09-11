@@ -308,6 +308,12 @@ class FakeDevice(Device):
         self.calls.append(("active_recording", ()))
         return self._recording
 
+    def archive_stale_recording(self, remote_path: str, instance_token: str) -> str | None:
+        return None  # no proof of a different instance from this generic fixture
+
+    def recording_metadata(self) -> dict[str, Any] | None:
+        return None
+
     def stop_recording(self, local_path: str) -> str:
         self.calls.append(("stop_recording", (local_path,)))
         self._recording = None

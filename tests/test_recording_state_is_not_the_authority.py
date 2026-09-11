@@ -59,9 +59,15 @@ class _FakeU2:
 
     def shell(self, command: str) -> str:
         self.shell_calls.append(command)
+        if command.startswith("# AUA_RECORDING_CMDLINES"):
+            requested = command.split("for pid in ", 1)[1].split(";", 1)[0].split()
+            table = dict(line.split(None, 1) for line in self.shell("ps -A -w -o PID,ARGS").splitlines()[1:])
+            return "\n".join(f"{pid} {table.get(pid, 'AUA_GONE')}" for pid in requested) + "\nAUA_CMDLINES_COMPLETE"
         if command.startswith("ps "):
             if self._ps is None:
                 raise RuntimeError("device offline")
+            if command == "ps -A -w -o PID,ARGS":
+                return "PID ARGS\n" + "\n".join(f"{i} {line}" for i, line in enumerate(self._ps.splitlines()[1:], 1))
             return self._ps
         if command.startswith("ls -l"):
             return command.split()[2] if self._remote_exists else ""
@@ -181,7 +187,7 @@ def test_start_clears_an_orphaned_handle_from_a_recycled_serial(
 
     monkeypatch.setattr("subprocess.Popen", _FakePopen)
 
-    remote = dev.start_recording("/sdcard/mine.mp4")
+    remote = dev.start_recording("/sdcard/mine.mp4", time_limit_s=30)
 
     assert remote == "/sdcard/mine.mp4"
     assert "screenrecord" in started["argv"]
@@ -193,7 +199,7 @@ def test_start_refuses_when_the_device_says_one_is_already_running() -> None:
     dev = _device(_FakeU2(_PS_RECORDING))
     assert not dev._recording_state_path().exists()
     with pytest.raises(DeviceError, match="already in progress"):
-        dev.start_recording("/sdcard/second.mp4")
+        dev.start_recording("/sdcard/second.mp4", time_limit_s=30)
 
 
 def test_start_refuses_on_an_unreadable_ps_rather_than_clearing_a_live_handle() -> None:
@@ -205,4 +211,4 @@ def test_start_refuses_on_an_unreadable_ps_rather_than_clearing_a_live_handle() 
     dev = _device(_FakeU2(None))
     dev._recording_state_path().write_text(json.dumps({"remote": "/sdcard/live.mp4"}))
     with pytest.raises(DeviceError, match="already in progress"):
-        dev.start_recording("/sdcard/second.mp4")
+        dev.start_recording("/sdcard/second.mp4", time_limit_s=30)

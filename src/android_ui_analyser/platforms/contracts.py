@@ -130,6 +130,12 @@ RUNTIME_CAPABILITIES: dict[str, CapabilitySpec] = {
         "stop_recording",
         "discard_recording",
     ),
+    "device.recording.recovery": _spec(
+        "device.recording.recovery", CapabilityScope.RUNTIME, "archive_stale_recording",
+    ),
+    "device.recording.timeline": _spec(
+        "device.recording.timeline", CapabilityScope.RUNTIME, "recording_metadata",
+    ),
     "device.clock": _spec(
         "device.clock",
         CapabilityScope.RUNTIME,

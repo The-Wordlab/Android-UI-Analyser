@@ -11,6 +11,21 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+- Recording cleanup and recovery verify encoder/supervisor roles as well as owned paths, so processes reading the same footage are neither signalled nor mistaken for active recorders.
+- Recording export supports output filesystems without hardlinks by copying to exclusively created destinations; existing files remain protected and failed publication retains remote evidence.
+
+- Multi-segment MP4 export copies video and optional audio while retaining Android non-media tracks in the original segment files, avoiding unsupported metadata-stream export failures.
+
+- Native recording protects the child from hangup before launch, detaches its session, and requires a bounded supervisor readiness acknowledgement before checking capture startup. Targets without `setsid` fail explicitly.
+
+- Recover prior-boot recording metadata under the normal command fence, avoiding a forbidden shared-to-exclusive lock upgrade while retaining old evidence and undo identity.
+
+### Breaking
+
+- Explicit action-and-analyze commands (including microphone commands) reject contradictory
+  `--no-observe` before their action callback. Observation flags do not disable screenshot,
+  rolling capture, or journal persistence.
+
 ### Fixed
 
 - Microphone injection accepts the emulator's empty successful gRPC response instead of turning
@@ -23,6 +38,33 @@ notes, so you can check for a newer version — and read what changed — withou
 - The offline release evaluator counts failed calls and post-finish cleanup from complete session
   journals, checks saved evidence files, and keeps incomplete attempts in the denominator.
   Missing accounting or independent verification remains explicit instead of appearing as a pass.
+
+- Native recording launches remain valid when the transport appends an exit-status suffix.
+  Empty process command lines are ignored only with matching zombie/dead stat evidence;
+  ambiguous or live processes still block cleanup. Legacy pending recordings retain their
+  actionable cleanup hint.
+
+- Failed bootstrap releases its own lease only after exact-instance cleanup confirms the target
+  stopped. Failed or skipped cleanup preserves ownership; foreign leases remain protected.
+- Android recording rotates native encoders beyond the 180-second process limit, bounded to
+  30 minutes by default. Original segments preserve their timestamps and pauses. Lifecycle,
+  rotation gaps, duration shortfalls and unverified coverage are explicit; gapless recording is
+  not guaranteed. `record stop PATH` still writes a playable MP4 at PATH and returns it in
+  `detail`, using direct copy for one segment or optional host ffmpeg bitstream-copy concat
+  for multiple segments. Original segments and a gap/coverage sidecar are retained; the
+  export omits uncaptured gaps. Missing ffmpeg or export failure preserves remote evidence
+  for retry. Incomplete coverage returns `ok=false` after collecting evidence.
+- Recording cleanup verifies directory ownership; failed directory allocation cannot authorize
+  deletion of an existing directory. An absent allocation can be safely undone.
+- A verified new recording boot quarantines stale metadata and retains its original undo and
+  footage, allowing fresh recording without deleting earlier evidence. Ambiguous identity or
+  process inspection fails closed; process discovery uses wide output and batched full cmdlines.
+- Encoder failure salvages finalized segments into the requested MP4 with failed coverage;
+  partial originals and missing/unexported segment metadata remain available. No playable
+  segments produces a structured error with retained diagnostics and originals. The bounded
+  recording default can use several GB; export retains both originals and concatenated media.
+- Missing microphone endpoints point callers to the existing `session start --audio` preflight
+  without assuming that missing opt-in was the cause.
 
 ## [0.16.2] - 2026-09-08
 

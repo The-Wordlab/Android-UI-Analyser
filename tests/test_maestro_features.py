@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -81,7 +82,10 @@ def test_cli_maestro_commands(fake_cli_device) -> None:
 
     assert runner.invoke(app, ["clipboard", "set", "hi"]).exit_code == 0
     assert runner.invoke(app, ["clipboard", "get"]).exit_code == 0
-    assert runner.invoke(app, ["paste-and-analyze", "--no-observe"]).exit_code == 0
+    pasted = runner.invoke(app, ["paste-and-analyze"])
+    assert pasted.exit_code == 0, pasted.stderr
+    assert ("paste", ()) in dev.calls
+    assert any(e["text"] == "Continue" for e in json.loads(pasted.stdout)["observation"]["elements"])
     assert runner.invoke(app, ["copy", "--text", "Continue"]).exit_code == 0
     assert runner.invoke(app, ["location", "set", "37.42,-122.08"]).exit_code == 0
     assert runner.invoke(app, ["orientation", "set", "portrait"]).exit_code == 0

@@ -409,6 +409,44 @@ def test_session_provisioning_uses_neutral_service_and_exact_rollback_token(
     assert all(name != "stop" for name, _request in service.calls)
 
 
+@pytest.mark.parametrize("outcome", ["stopped", "preserved", "failed", "foreign"])
+def test_failed_session_bootstrap_clears_only_confirmed_owned_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str,
+) -> None:
+    class Service(_StrictVirtualTargets):
+        def stop_virtual_target_instance(self, request):
+            assert request.instance_token == "owned-boot-token"
+            if outcome == "failed":
+                raise DeviceError("synthetic stop failure")
+            if outcome == "preserved":
+                return VirtualTargetStopResult(preserved_target_ids=("attached-target",))
+            return VirtualTargetStopResult(stopped_target_ids=("attached-target",))
+
+    engine = _engine(tmp_path, Service())
+    registry = engine.config.lease.registry_dir
+    platform = engine.platform.name
+    engine._lease_owner_resolved = "fictional-owner"
+    owner = "foreign-owner" if outcome == "foreign" else "fictional-owner"
+    assert leases.acquire(registry, "attached-target", owner=owner, platform=platform)
+    monkeypatch.setattr(engine, "_prepare_session_target", lambda **kw: {
+        "serial": "attached-target", "virtual_target_started": True,
+        "instance_token": "owned-boot-token",
+    })
+    def fail_launch(*args, **kwargs):
+        raise DeviceError("synthetic launch mismatch", code="launch_observation_mismatch")
+    monkeypatch.setattr(engine, "app", fail_launch)
+    with pytest.raises(DeviceError, match="synthetic launch mismatch"):
+        engine.session_start("open fictional screen", package="org.example.fiction")
+    assert leases.holder(registry, "attached-target", platform=platform) == (
+        None if outcome == "stopped" else owner
+    )
+    if outcome == "stopped":
+        assert leases.choose_device(
+            registry, owner="fictional-owner", explicit=None,
+            candidates=[("replacement-target", {})], platform=platform,
+        )[0] == "replacement-target"
+
+
 def test_android_neutral_list_preserves_exact_emulator_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

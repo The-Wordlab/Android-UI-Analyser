@@ -932,6 +932,7 @@ class Uiautomator2Device(AndroidRuntimeBase):
         self._device_locale_read = False
         self._recording_remote: str | None = None
         self._recording_proc: subprocess.Popen[bytes] | None = None
+        self._recording_report: dict[str, Any] | None = None
         self._connect()
 
     # -- connection --------------------------------------------------------
@@ -1725,16 +1726,41 @@ class Uiautomator2Device(AndroidRuntimeBase):
         return True, None
 
     def active_recording(self) -> str | None:
-        observed, remote = self._live_recording()
-        if not observed:
-            raise DeviceError(
-                "could not determine whether a screen recording is already running",
-                code="recording_status_unknown",
-                hint="No recording was started; repair target process inspection and retry.",
-            )
-        return remote
+        from . import android_recording
+
+        state = android_recording.recover(self, quarantine_stale=True)
+        if state is not None:
+            # Even a stopped supervisor owns pending evidence until stop/discard collects it.
+            return str(state["remote"])
+        return android_recording.active_output(self)
+
+    def archive_stale_recording(self, remote_path: str, instance_token: str) -> str | None:
+        from . import android_recording
+
+        if not android_recording._ROOT.fullmatch(remote_path):
+            # Legacy one-file undos still require deliberate cleanup; preserve its hint.
+            return None
+        return android_recording.archive_stale(self, remote_path, instance_token)
+
+    def recording_destination(self, requested: str | None = None) -> str:
+        from . import android_recording
+
+        return android_recording.destination(requested)
+
+    def recording_metadata(self) -> dict[str, Any] | None:
+        from . import android_recording
+
+        return getattr(self, "_recording_report", None) or android_recording.recover(self)
 
     def start_recording(self, remote_path: str, *, time_limit_s: int = 1800) -> str:
+        if time_limit_s > _SCREENRECORD_MAX_S:
+            from . import android_recording
+
+            if self.active_recording() is not None:
+                raise DeviceError("a screen recording is already in progress")
+            if not android_recording._ROOT.fullmatch(remote_path):
+                remote_path = android_recording.destination(remote_path)
+            return android_recording.start(self, remote_path, time_limit_s=time_limit_s)
         state = self._recording_state_path()
         observed, live_remote = self._live_recording()
         if live_remote is not None:
@@ -1836,6 +1862,11 @@ class Uiautomator2Device(AndroidRuntimeBase):
         return False
 
     def stop_recording(self, local_path: str) -> str:
+        from . import android_recording
+
+        segmented = android_recording.recover(self)
+        if segmented is not None:
+            return android_recording.stop(self, local_path, segmented)
         state_file = self._recording_state_path()
         if self._recording_remote is None and state_file.exists():
             # Started by an earlier `aua` invocation — recover the handle from disk.
@@ -1951,6 +1982,11 @@ class Uiautomator2Device(AndroidRuntimeBase):
         path written into the ledger before it is signalled.
         """
 
+        from . import android_recording
+
+        if android_recording._ROOT.fullmatch(remote_path):
+            android_recording.discard(self, remote_path)
+            return
         observed, live_remote = self._live_recording()
         if not observed:
             raise DeviceError(

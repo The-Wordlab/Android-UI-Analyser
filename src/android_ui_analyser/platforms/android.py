@@ -217,6 +217,8 @@ class AndroidPlatform(PlatformAdapter):
             "device.orientation",
             "device.proxy",
             "device.recording",
+            "device.recording.timeline",
+            "device.recording.recovery",
             "device.shell",
             "device.touch",
             "app_database",

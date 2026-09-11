@@ -709,7 +709,12 @@ def discover_emulator_endpoint(
     raise DeviceError(
         f"emulator '{serial}' {detail}",
         code="mic_endpoint_missing",
-        hint="Use a recent Android Emulator, keep its authenticated gRPC endpoint enabled, and retry after it is fully started.",
+        hint=(
+            "For microphone work, begin with `aua session start --audio --goal '<goal>'` "
+            "so endpoint/authentication preflight runs before app setup. A missing endpoint "
+            "does not prove audio was disabled: check this target's discovery record and "
+            "authenticated gRPC endpoint after it is fully started."
+        ),
     )
 
 

@@ -476,8 +476,9 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "`tap_and_analyze`, `input_and_analyze`, `scroll_and_analyze`, and the corresponding "
         "names for every observed action. The ambiguous short MCP names are not exposed. On "
         "the CLI, prefer the matching `tap-and-analyze` / `input-and-analyze` names; these "
-        "explicit forms force the observation even if `--no-observe` is supplied. "
-        "Pass `--no-observe` to skip it on action-only sequences. Action `observation` waits "
+        "explicit forms reject contradictory `--no-observe` before the action. "
+        "Observation options control action readback, not all screenshot, rolling capture, "
+        "or journal persistence; `observe=False` is not a privacy boundary. Action `observation` waits "
         "for a pixel change + idle (animation-aware) before dumping the tree, and a screen "
         "whose content is still streaming in has to hold still for one confirming sample — so "
         "the response includes the best available arrival evidence. Inspect `readiness` and "
@@ -1067,7 +1068,17 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "list|apply|status|restore` (all modes are saved, verified, and reversible), "
         "`media add PATH`, `mic inject PCM-WAV [CONTROL-ID] [--control-mode hold|toggle]`, "
         "`mic speak TEXT [CONTROL-ID]`, "
-        "`record start|stop PATH` (stop validates a finalized MP4), `clock set --ms <unix-ms>` / "
+        "`record start|stop PATH` (Android records native segments for up to 30 minutes; stop "
+        "saves a playable MP4 at `PATH`, plus `PATH.recording.json` and `PATH.segments/*.mp4`; "
+        "multiple segments require optional host ffmpeg). The export joins captured media, omitting "
+        "wall-clock gaps; coverage remains unverified. Encoder failure salvages finalized media with "
+        "failed coverage, preserving partial originals and pending cleanup. No finalized media is an "
+        "error with retained diagnostics. Recording can use several GB; export retains originals. "
+        "Read the sidecar's "
+        "`duration_check`, lifecycle, and `gaps`; rotation is not guaranteed gapless. Original "
+        "within-segment timing is retained; missing footage is never synthesized. Sampled "
+        "`capture export` animations are not continuous wall-clock evidence. "
+        "`clock set --ms <unix-ms>` / "
         "`clock restore` (time travel invalidates auth — always restore)",
     ),
     (
@@ -2001,7 +2012,7 @@ Use AUA MCP tools or the `aua` CLI; the plugin does not put `aua` on `PATH`. Act
 2. Prefer verified `goto`, saved `flow`, proven deeplink, then manual action. Arrival requires
    equal mapped `logical_name`, state and surface. Preview risky routes; goal text never
    authorizes destructive, external, settings, data, payment, send or sign-out effects.
-3. Use analyzed actions' observation. Send its `el:` IDs back directly. Use `--rid` for resource IDs.
+3. Reuse analyzed observations; `--no-observe` is rejected. Send its `el:` IDs back directly. Use `--rid` for resource IDs.
    Filter `observation.elements` by `clickable`, `checked` or `scrollable`. `--submit` is IME-only:
    check `submitted`; if false, use its `recommended_call` or `--send rid:<control>`, never retype.
    `observation_contract` separates `action_succeeded`, `evidence_fresh`, `elements_available`

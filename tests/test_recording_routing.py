@@ -9,6 +9,7 @@ daemon route, which also keeps CLI and MCP on the same Engine implementation.
 from __future__ import annotations
 
 import ast
+import json
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -57,3 +58,24 @@ def test_recording_cli_routes_remote_and_caller_resolved_local_paths(
         ("record_start", {"path": "/sdcard/journey.mp4"}),
         ("record_stop", {"local_path": str(destination.resolve())}),
     ]
+
+
+def test_recording_cli_returns_failure_with_collected_incomplete_evidence(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli_mod, "_route", lambda *a, **kw: {
+        "ok": False, "action": "record-stop", "detail": "journey.mp4",
+        "recording": {"duration_check": "failed", "continuous_coverage_verified": False},
+    })
+    result = runner.invoke(app, ["record", "stop", str(tmp_path / "journey")])
+    assert result.exit_code != 0
+    assert "journey.mp4" in result.stdout
+    assert json.loads(result.stdout)["recording"]["duration_check"] == "failed"
+
+
+def test_cli_preserves_final_symlink_for_runtime_existing_output_check(monkeypatch, tmp_path):
+    destination = tmp_path / "journey.mp4"
+    destination.symlink_to(tmp_path / "missing.mp4")
+    calls = []
+    monkeypatch.setattr(cli_mod, "_route", lambda *args, **kwargs: calls.append(kwargs) or {"ok": True})
+    result = runner.invoke(app, ["record", "stop", str(destination)])
+    assert result.exit_code == 0
+    assert calls == [{"local_path": str(destination)}]

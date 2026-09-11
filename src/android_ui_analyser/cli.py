@@ -126,10 +126,29 @@ class AnnotateCommand(JournalCommand):
 class AnalyzeCommand(AnnotateCommand):
     """An explicit action-and-read command whose post-action analysis cannot be disabled."""
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        for param in self.params:
+            if isinstance(param, click.Option) and param.name in {"observe", "no_observe"}:
+                param.default = param.name == "observe"
+                param.help = (
+                    "This command always analyzes; --no-observe is rejected before the action. "
+                    "Observation options do not disable capture or journal persistence."
+                )
+
     def invoke(self, ctx: click.Context) -> Any:
-        # The explicit name is a contract, not a default. Keep the existing callback signatures
-        # for one implementation path, but do not let a contradictory legacy flag turn
-        # ``tap-and-analyze`` back into the ambiguous action-only response it exists to prevent.
+        # Shared callbacks can default to action-only. Distinguish that inherited default
+        # from a caller's explicit refusal, including environment/default-map overrides.
+        for name, refused in (("observe", False), ("no_observe", True)):
+            if (
+                ctx.params.get(name) is refused
+                and ctx.get_parameter_source(name) is not click.core.ParameterSource.DEFAULT
+            ):
+                raise click.UsageError(
+                    "--no-observe contradicts this command's required analysis; "
+                    "no action was performed. Remove --no-observe to proceed.",
+                    ctx=ctx,
+                )
         if "observe" in ctx.params:
             ctx.params["observe"] = True
         if "no_observe" in ctx.params:
@@ -6664,7 +6683,7 @@ def mic_speak_cmd(
     _run(ctx, go)
 
 
-record_app = typer.Typer(help="Screen recording (Maestro startRecording / stopRecording).")
+record_app = typer.Typer(help="Native screen recording with lifecycle and coverage metadata.")
 app.add_typer(record_app, name="record")
 
 
@@ -6674,7 +6693,7 @@ def record_start_cmd(
     remote: str | None = typer.Option(
         None,
         "--remote",
-        help="Target path override; the selected platform chooses its default when omitted.",
+        help="Target path prefix; Android allocates an owned native-segment directory.",
     ),
 ) -> None:
     def go(engine: Engine, fmt: OutputFormat) -> None:
@@ -6686,13 +6705,19 @@ def record_start_cmd(
 @record_app.command("stop")
 def record_stop_cmd(
     ctx: typer.Context,
-    path: str = typer.Argument(..., help="Local path to save the MP4."),
+    path: str = typer.Argument(
+        ..., help="Playable MP4 path. Android also retains PATH.segments/ and PATH.recording.json; multiple segments require host ffmpeg."
+    ),
 ) -> None:
     def go(engine: Engine, fmt: OutputFormat) -> None:
         # Resolve in the caller's cwd. A warm daemon may have been launched from a
         # different directory and must not save the recording there.
-        local_path = str(Path(path).expanduser().resolve())
-        _emit(_route(engine, "record_stop", local_path=local_path), fmt)
+        requested = Path(path).expanduser().absolute()
+        local_path = str(requested.parent.resolve() / requested.name)
+        result = _route(engine, "record_stop", local_path=local_path)
+        _emit(result, fmt)
+        _exit_unless_ok(result, ExitCode.DEVICE, code="recording_coverage_failed",
+                        hint="Evidence was collected; inspect the recording manifest for missing coverage.")
 
     _run(ctx, go)
 
@@ -10408,8 +10433,8 @@ def _register_removed_alias(
             f"`aua {spoken}` was removed. Use `aua {replacement}` instead.",
             hint=(
                 f"`{replacement}` performs the same action and returns the resulting screen "
-                f"in the same response, so a follow-up `analyze` is not needed. Every option "
-                f"you passed to `{spoken}` is accepted unchanged."
+                "in the same response, so a follow-up `analyze` is not needed. "
+                "The replacement rejects --no-observe before performing the action."
             ),
         )
         emit_error(err)

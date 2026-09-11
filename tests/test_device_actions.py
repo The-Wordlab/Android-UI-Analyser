@@ -58,9 +58,9 @@ def test_hide_keyboard_and_double_tap() -> None:
     assert ("hide_keyboard", ()) in dev.calls
 
 
-def test_cli_app_clear_and_hide_keyboard(monkeypatch) -> None:
+def test_cli_app_clear_and_hide_keyboard(fake_cli_device) -> None:
     dev = FakeDevice(hierarchy_xml=_XML, package="com.x")
-    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: dev)
+    fake_cli_device(dev)
 
     r = runner.invoke(app, ["app", "clear", "com.x", "--yes"])
     assert r.exit_code == 0, r.stderr
@@ -69,17 +69,21 @@ def test_cli_app_clear_and_hide_keyboard(monkeypatch) -> None:
     r2 = runner.invoke(app, ["app", "grant", "com.x"])
     assert r2.exit_code == 0, r2.stderr
 
-    r3 = runner.invoke(app, ["hide-keyboard-and-analyze", "--no-observe"])
+    r3 = runner.invoke(app, ["hide-keyboard-and-analyze"])
     assert r3.exit_code == 0, r3.stderr
     assert ("hide_keyboard", ()) in dev.calls
+    assert any(e["text"] == "Continue" for e in json.loads(r3.stdout)["observation"]["elements"])
 
-    r4 = runner.invoke(app, ["double-tap-and-analyze", "--rid", "continue_btn", "--no-observe"])
+    r4 = runner.invoke(app, ["double-tap-and-analyze", "--rid", "continue_btn"])
     assert r4.exit_code == 0, r4.stderr
     assert any(c == "double_click" for c, _ in dev.calls)
+    assert ("double_click", (540, 260)) in dev.calls
+    assert any(e["text"] == "Continue" for e in json.loads(r4.stdout)["observation"]["elements"])
 
 
-def test_cli_internal_error_exits_one_with_structured_stderr(monkeypatch) -> None:
+def test_cli_internal_error_exits_one_with_structured_stderr(monkeypatch, fake_cli_device) -> None:
     """Regression: generic handler must not crash with ValueError: 1 is not a valid ExitCode."""
+    fake_cli_device(FakeDevice())
 
     def boom(serial: str | None = None):  # pragma: no cover - exercised via CLI
         raise RuntimeError("simulated daemon permission failure")

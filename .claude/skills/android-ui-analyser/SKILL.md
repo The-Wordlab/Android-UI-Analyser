@@ -23,7 +23,7 @@ Use AUA MCP tools or the `aua` CLI; the plugin does not put `aua` on `PATH`. Act
 2. Prefer verified `goto`, saved `flow`, proven deeplink, then manual action. Arrival requires
    equal mapped `logical_name`, state and surface. Preview risky routes; goal text never
    authorizes destructive, external, settings, data, payment, send or sign-out effects.
-3. Use analyzed actions' observation. Send its `el:` IDs back directly. Use `--rid` for resource IDs.
+3. Reuse analyzed observations; `--no-observe` is rejected. Send its `el:` IDs back directly. Use `--rid` for resource IDs.
    Filter `observation.elements` by `clickable`, `checked` or `scrollable`. `--submit` is IME-only:
    check `submitted`; if false, use its `recommended_call` or `--send rid:<control>`, never retype.
    `observation_contract` separates `action_succeeded`, `evidence_fresh`, `elements_available`

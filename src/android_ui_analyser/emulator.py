@@ -1863,6 +1863,37 @@ def _owned_instance_pid(meta: dict[str, Any]) -> int | None:
     return None
 
 
+_OWNED_STOP_TIMEOUT_S = 5.0
+
+
+def _wait_owned_process_exit(pid: int, started: str | None) -> bool:
+    """A delivered signal is not proof of exit. Never escalate to killing a reused pid."""
+    from .leases import _proc_started
+
+    deadline = time.monotonic() + _OWNED_STOP_TIMEOUT_S
+    while True:
+        # Failed bootstrap can still be the emulator's parent. An unreaped child is a
+        # zombie: kill(pid, 0) succeeds until waitpid consumes its exit status.
+        try:
+            if os.waitpid(pid, os.WNOHANG)[0] == pid:
+                return True
+        except (ChildProcessError, OSError):
+            pass  # an emulator owned by an earlier CLI is no longer our child
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            return False
+        if started:
+            current = _proc_started(pid)
+            if current and current != started:
+                return True  # the original process exited and its pid has been reused
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
 def stop_spawned_instance(
     *,
     instance: str,
@@ -1958,16 +1989,27 @@ def stop_spawned_instance(
                 # the gap before our own claim). Terminating our process would kill it.
                 may_kill_own_process = False
         if may_kill_own_process and isinstance(own_pid, int) and own_pid > 1:
-            with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            try:
                 os.killpg(own_pid, signal.SIGTERM)
-                if serial and foreign is None:
-                    stopped.append(serial)
-        if record_is_ours and may_kill_own_process and meta_path is not None:
-            if not process_gone:
+            except ProcessLookupError:
+                # The group can already be gone; verify the recorded process as well.
+                process_gone = _wait_owned_process_exit(own_pid, meta.get("process_started"))
+            except OSError:
+                process_gone = False
+            else:
+                process_gone = _wait_owned_process_exit(own_pid, meta.get("process_started"))
+        if record_is_ours and may_kill_own_process and process_gone and meta_path is not None:
+            if serial and foreign is None and own_pid is not None:
+                stopped.append(serial)
+                if lease_registry_dir is not None and owner is not None:
+                    from . import leases
+
+                    leases.release(lease_registry_dir, serial, owner=owner)
+            if own_pid is not None:
                 _kill_watchdog(meta)
             meta_path.unlink(missing_ok=True)
             port = meta.get("port")
-            if isinstance(port, int) and not process_gone:
+            if isinstance(port, int) and own_pid is not None:
                 release_console_port(port)
     matched = (
         [_instance_identity({**meta, "_path": str(meta_path)})] if record_is_ours else []
