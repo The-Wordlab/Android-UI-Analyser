@@ -929,6 +929,13 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "saving to PATH. Read that file for visual checks; no separate `screenshot` is needed.",
     ),
     (
+        "scroll evidence",
+        "Directions describe the finger: `up` reveals later content, `down` earlier content. "
+        "Changed labels count as scroll evidence only while the same container remains "
+        "identifiable. A popup or replaced container leaves movement unverified, even for "
+        "`--to-end`; inspect the returned observation before another gesture.",
+    ),
+    (
         "analyze — views (use these instead of post-processing JSON)",
         "`--fields <csv>` (`id,text,rid,desc,bounds,center,type,clickable,enabled,focused,"
         "checkable,checked,selected,scrollable,long_clickable,password,resource_id,parent,source,"

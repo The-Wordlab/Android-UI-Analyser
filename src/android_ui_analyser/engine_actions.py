@@ -45,7 +45,14 @@ from .schema import (
     center_of,
     publish_ids,
 )
-from .scroll_geom import Box, Sample, _contains, region_probe, scroll_movement, scrollable_boxes
+from .scroll_geom import (
+    Box,
+    ScrollProbe,
+    _contains,
+    scroll_movement,
+    scroll_probe,
+    scrollable_boxes,
+)
 from .selectors import (
     _MAX_CANDIDATES,
     app_elements,
@@ -59,6 +66,7 @@ from .selectors import (
 
 if TYPE_CHECKING:
     from .engine import Engine
+    from .platforms.base import NormalizedTree
 
 
 def _input_runtime(self: Engine) -> TargetRuntime:
@@ -1563,15 +1571,18 @@ def _dump(self: Engine) -> str:
 def _scroll_elements(self: Engine, raw_tree: str = "") -> list[Element]:
     """Normalize one native hierarchy before shared scroll geometry inspects it."""
 
+    return _scroll_tree(self, raw_tree).elements
+
+
+def _scroll_tree(self: Engine, raw_tree: str = "") -> NormalizedTree:
     runtime = self.platform.runtime_capability("ui.tree", self.device)
     size = runtime.window_size()
-    normalized = self.platform.normalize_tree(
+    return self.platform.normalize_tree(
         raw_tree or self.platform.dump_tree(runtime),
         size,
         geometry=runtime.display_geometry(),
         ignored_app_ids=self.config.memory.ignore_packages,
     )
-    return normalized.elements
 
 
 def _scroll_box(
@@ -1655,8 +1666,9 @@ def _settle_after_swipe(self: Engine) -> None:
     time.sleep(0.05)
 
 
-def _probe(self: Engine, box: Box) -> Sample:
-    return region_probe(self._scroll_elements(), box)
+def _probe(self: Engine, box: Box) -> ScrollProbe:
+    normalized = _scroll_tree(self)
+    return scroll_probe(normalized.elements, box, normalized.app_id)
 
 
 def _swipe_once(
@@ -1676,14 +1688,18 @@ def _swipe_once(
         shift along the requested axis remains the primary verdict. For hierarchy-declared
         scrollable containers, substantial removal *and* addition of labels also proves a
         virtualized grid turned over even when sticky labels keep the median shift at zero.
+        Unverified container ownership stops verification without implying an end or replaying.
         """
     before = self._probe(box)
     x1, y1, x2, y2 = self._swipe_path(box, direction, percent)
     _input_runtime(self).swipe(x1, y1, x2, y2)
     self._settle_after_swipe()
+    after = self._probe(box)
+    if allow_content_turnover and not before.same_container(after):
+        return 0, False, "container-unverified"
     return scroll_movement(
-        before,
-        self._probe(box),
+        before.sample,
+        after.sample,
         direction,
         allow_content_turnover=allow_content_turnover,
     )
@@ -1740,20 +1756,25 @@ def swipe(
             allow_content_turnover=real,
         )
     self._record_action_safe(step)
-    # ok stays True — the gesture WAS performed, and a swipe is also used to dismiss or
+    # A no-change swipe stays successful — a swipe is also used to dismiss or
     # page things where "the screen did not move" is the expected outcome. The verdict
     # is reported instead of swallowed; `aua scroll-and-analyze` is the strict-exit-code variant.
     return self._observe(
         ActionResult(
-            ok=True,
+            ok=evidence != "container-unverified",
             action="swipe",
             target=[x1, y1, x2, y2],
             detail=detail_tokens(
-                "moved" if moved else "no-change",
+                "movement-unverified"
+                if evidence == "container-unverified"
+                else "moved" if moved else "no-change",
                 dy=abs(distance) if moved and distance else None,
                 scrollable=str(real).lower(),
                 evidence=evidence,
             ),
+            hint="Inspect the returned observation; the scroll container could not be verified."
+            if evidence == "container-unverified"
+            else None,
         ),
         observe,
         with_image,
@@ -1782,6 +1803,8 @@ def scroll(
         where being at the end IS the postcondition. Everywhere else a scroll that moved
         nothing is a failure, because "nothing left to scroll" and "my swipe missed the
         list" must not look the same to a caller looping until something appears.
+        ``movement-unverified`` is never end proof: the selected container/context was lost
+        or could not be established from the hierarchy.
         """
     if to_end and to_start:
         raise UsageError("--to-end and --to-start are mutually exclusive")
@@ -1805,6 +1828,8 @@ def scroll(
                 allow_content_turnover=real,
             )
             if not moved:
+                if swipe_evidence == "container-unverified":
+                    evidence = swipe_evidence
                 break
             steps += 1
             travelled += abs(dy)
@@ -1812,13 +1837,15 @@ def scroll(
                 evidence = swipe_evidence
     self._record_action_safe(step)
     at_end = steps < limit
-    if steps == 0:
+    if evidence == "container-unverified":
+        outcome = "movement-unverified"
+    elif steps == 0:
         outcome = "already-at-end"
     elif at_end:
         outcome = "reached-end"
     else:
         outcome = "moved"
-    ok = steps > 0 or to_end or to_start
+    ok = evidence != "container-unverified" and (steps > 0 or to_end or to_start)
     return self._observe(
         ActionResult(
             ok=ok,
@@ -1832,6 +1859,9 @@ def scroll(
                 scrollable=str(real).lower(),
                 evidence=evidence,
             ),
+            hint="Inspect the returned observation; the scroll container could not be verified."
+            if evidence == "container-unverified"
+            else None,
         ),
         observe,
         with_image,
@@ -1911,6 +1941,10 @@ def scroll_to(
                 percent,
                 allow_content_turnover=real,
             )
+            if swipe_evidence == "container-unverified":
+                evidence = swipe_evidence
+                exhausted = False
+                break
             if moved:
                 steps += 1
                 travelled += abs(dy)
@@ -1921,7 +1955,9 @@ def scroll_to(
                 exhausted = False
                 break
     self._record_action_safe(step)
-    if found is not None:
+    if evidence == "container-unverified":
+        outcome = "movement-unverified"
+    elif found is not None:
         outcome = "moved"
     elif steps == 0:
         outcome = "already-at-end"
@@ -1941,7 +1977,9 @@ def scroll_to(
                 exhausted="true" if (found is None and exhausted) else None,
             ),
             target=list(found) if found else None,
-            hint=locate_hint()
+            hint="Inspect the returned observation; the scroll container could not be verified."
+            if evidence == "container-unverified"
+            else locate_hint()
             if found is not None
             else self._text_miss_hint(self.device, by, query, tried_translations=True),
         ),

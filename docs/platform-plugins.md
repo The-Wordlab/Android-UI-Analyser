@@ -187,6 +187,14 @@ The adapter passes `geometry.bounds_to_canonical(native_bounds)` into each norma
 The runtime accepts canonical points from the Engine and calls `geometry.to_native(point)` before
 its native input transport. Do not infer scale or orientation in shared code.
 
+`Element.parent` remains optional for general analysis. Verified list movement requires enough
+parent links to associate the sampled rows with their actual scrollable container. Return the
+parent's element ID from the same normalized frame; these IDs may change between frames. AUA
+compares container ancestry, application context, and root structure before accepting row movement
+or virtualized content turnover. A flat tree without row ownership returns `movement-unverified`,
+including for `to_end`; it cannot establish that the list reached an end. Preserve real ownership
+from the native tree rather than inventing parents from overlapping bounds.
+
 ## Capability scopes
 
 Complete structural specifications live in `platforms/contracts.py` and

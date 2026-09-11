@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from collections import Counter
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from .schema import Element
 
@@ -18,6 +19,84 @@ logger = logging.getLogger("android_ui_analyser.scroll_geom")
 Box = tuple[int, int, int, int]
 Sample = tuple[tuple[str, int, int], ...]
 _SCROLL_JITTER_PX = 8
+_ContainerNode = tuple[str, str | None, str | None, str | None, Box]
+
+
+@dataclass(frozen=True)
+class ScrollProbe:
+    sample: Sample
+    app_id: str | None
+    container: tuple[_ContainerNode, ...] | None
+    roots: tuple[_ContainerNode, ...]
+
+    def same_container(self, other: ScrollProbe) -> bool:
+        return (
+            self.container is not None
+            and self.app_id == other.app_id
+            and self.container == other.container
+            and self.roots == other.roots
+        )
+
+
+def scroll_probe(elements: Sequence[Element], box: Box, app_id: str | None) -> ScrollProbe:
+    """Retain the selected container and its context from the same position sample.
+
+    Frame-local element IDs only link ancestors within a sample. They are never compared
+    across frames, and row labels are excluded from container identity so virtualization
+    can replace every visible row without replacing the container.
+    """
+    visible = [element for element in elements if element.window not in {"system", "ime"}]
+    by_id = {element.id: element for element in visible}
+
+    def identity(element: Element) -> _ContainerNode:
+        x1, y1, x2, y2 = element.bounds
+        return (
+            element.type,
+            element.resource_id,
+            element.content_desc,
+            element.window,
+            (x1, y1, x2, y2),
+        )
+
+    roots = tuple(
+        sorted((identity(element) for element in visible if element.parent is None), key=repr)
+    )
+    candidates = [
+        element
+        for element in visible
+        if element.scrollable is True and tuple(element.bounds) == box
+    ]
+    if len(candidates) != 1:
+        return ScrollProbe(region_probe(elements, box), app_id, None, roots)
+    selected = candidates[0]
+    chain: list[_ContainerNode] = []
+    visited: set[int | str] = set()
+    node = selected
+    while node.id not in visited:
+        visited.add(node.id)
+        chain.append(identity(node))
+        if node.parent is None:
+            break
+        parent = by_id.get(node.parent)
+        if parent is None:
+            return ScrollProbe(region_probe(elements, box), app_id, None, roots)
+        node = parent
+    else:
+        return ScrollProbe(region_probe(elements, box), app_id, None, roots)
+
+    descendants = {selected.id}
+    pending = [element for element in visible if element.id != selected.id]
+    while pending:
+        children = [element for element in pending if element.parent in descendants]
+        if not children:
+            break
+        descendants.update(element.id for element in children)
+        pending = [element for element in pending if element.id not in descendants]
+    scoped = [element for element in visible if element.id in descendants]
+    if len(scoped) == 1:
+        # A flat tree cannot prove which labels belong to the list rather than an overlay.
+        return ScrollProbe(region_probe(elements, box), app_id, None, roots)
+    return ScrollProbe(region_probe(scoped, box), app_id, tuple(chain), roots)
 
 
 def _element_box(element: Element) -> Box | None:

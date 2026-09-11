@@ -28,6 +28,9 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- Verified scrolling no longer treats a popup or replaced scroll container as successful movement
+  merely because its labels changed. Movement remains unverified when the original container
+  cannot be identified, including requests to reach the end; the gesture is not repeated.
 - UI waits share one deadline across predicate checks and the final observation. Android reads
   stop at that deadline without reconnecting or restarting automation; an unavailable final
   observation is explicit instead of extending an expired wait with more captures. A zero timeout

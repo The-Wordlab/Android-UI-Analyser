@@ -112,12 +112,14 @@ class StrictExternalRuntime(TargetRuntime):
                     {
                         "type": "StaticText",
                         "text": "Card Alpha",
+                        "parent": 1,
                         "bounds": [50.0 - self._scroll_offset, 30.0, 65.0 - self._scroll_offset, 80.0],
                         "clickable": False,
                     },
                     {
                         "type": "StaticText",
                         "text": "Card Beta",
+                        "parent": 1,
                         "bounds": [75.0 - self._scroll_offset, 30.0, 90.0 - self._scroll_offset, 80.0],
                         "clickable": False,
                     },
@@ -250,6 +252,7 @@ class StrictExternalPlatform(PlatformAdapter):
                     type=node["type"],
                     text=node["text"],
                     resource_id=f"fixture:{index}",
+                    parent=node.get("parent"),
                     bounds=bounds,
                     center=((bounds[0] + bounds[2]) // 2, (bounds[1] + bounds[3]) // 2),
                     clickable=bool(node.get("clickable")),
