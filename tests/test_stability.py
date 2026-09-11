@@ -9,11 +9,13 @@ never built/invoked.
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
 
 import android_ui_analyser.engine as engine_mod
+from android_ui_analyser import engine_waits
 from android_ui_analyser.cli import app
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.errors import ExitCode, StabilityTimeout
@@ -373,12 +375,29 @@ def test_wait_absent_times_out_while_present() -> None:
     assert res.ok is False  # still present → not gone within the timeout
 
 
-def test_wait_observe_attaches_screen_even_on_miss() -> None:
-    # A failed wait still returns the current screen so the agent can diagnose in one call.
+def test_wait_observe_attaches_screen_even_on_miss(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Exercise a timely fake readback; a loaded runner may exhaust a real 200ms budget.
+    # Whole-call expiry and omitted late observations are tested in test_wait_wall_deadline.
+    now = [100.0]
+
+    def advance(seconds: float) -> None:
+        now[0] += seconds
+
+    monkeypatch.setattr(
+        engine_waits,
+        "time",
+        SimpleNamespace(monotonic=lambda: now[0], sleep=advance, time=time.time),
+    )
     dev = FakeDevice(hierarchy_xml=_XML)  # "Nope" is not in the tree
     eng = _engine(dev)
-    res = eng.wait(for_="Nope", timeout_ms=200, observe=True)
-    assert res.ok is False and res.observation is not None
+    try:
+        res = eng.wait(for_="Nope", timeout_ms=200, observe=True)
+        assert res.ok is False and res.observation is not None
+        assert res.observation.elements[0].text == "Continue"
+        assert dev.hierarchy_calls == 1
+        assert 0 < res.elapsed_ms < res.wait_budget_ms == 200
+    finally:
+        eng.close()
 
 
 def test_app_launch_activity_threads_to_device() -> None:

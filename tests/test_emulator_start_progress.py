@@ -9,7 +9,7 @@ it must explicitly say that startup is still running and that the same process s
 from __future__ import annotations
 
 import json
-import time
+import threading
 from typing import Any
 
 import pytest
@@ -19,8 +19,13 @@ from android_ui_analyser import cli
 
 
 class _SlowVirtualDevices:
+    def __init__(self, waiting_emitted: threading.Event) -> None:
+        self.waiting_emitted = waiting_emitted
+
     def start(self, avd: str | None, **kwargs: Any) -> dict[str, Any]:
-        time.sleep(0.04)
+        # Startup cannot complete before the real heartbeat has reached stderr. The
+        # timeout only prevents a broken emitter from hanging the test; it orders no race.
+        assert self.waiting_emitted.wait(5), "startup heartbeat was not emitted"
         return {
             "ok": True,
             "action": "emulator-start",
@@ -40,7 +45,18 @@ class _SlowVirtualDevices:
 def test_slow_cli_start_reports_progress_without_corrupting_json(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    service = _SlowVirtualDevices()
+    waiting_emitted = threading.Event()
+    service = _SlowVirtualDevices(waiting_emitted)
+    original_echo = cli.typer.echo
+
+    def echo(message: Any = None, *args: Any, **kwargs: Any) -> None:
+        original_echo(message, *args, **kwargs)
+        if isinstance(message, str) and message.startswith("AUA_PROGRESS "):
+            event = json.loads(message.removeprefix("AUA_PROGRESS "))
+            if event["stage"] == "waiting":
+                waiting_emitted.set()
+
+    monkeypatch.setattr(cli.typer, "echo", echo)
     monkeypatch.setattr(
         cli.Engine,
         "emulator_start",
