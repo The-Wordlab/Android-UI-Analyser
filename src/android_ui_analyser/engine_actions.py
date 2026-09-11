@@ -459,7 +459,8 @@ def _miss_observation(self: Engine, observation: AnalyzeResult) -> Any:
             meta=getattr(output, "observation_meta", None),
         )
         if view is None:
-            return observation
+            # Materialize the requested full shape before error serialization can compact it.
+            return observation.as_dict(_Fmt.json)
         trimmed = view.apply(observation.as_dict(_Fmt.json))
         meta = trimmed.get("meta")
         if isinstance(meta, dict) and observation.meta.capture_hint:

@@ -11,6 +11,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+- Missing-target errors preserve explicitly requested full observations, including default state flags, element sources and parent handles, without another UI read. Compact defaults remain unchanged.
+
 - Recording cleanup and recovery verify encoder/supervisor roles as well as owned paths, so processes reading the same footage are neither signalled nor mistaken for active recorders.
 - Recording export supports output filesystems without hardlinks by copying to exclusively created destinations; existing files remain protected and failed publication retains remote evidence.
 
