@@ -167,14 +167,25 @@ def _process_table(dev: Uiautomator2Device) -> list[tuple[int, str]]:
     return list(table.items())
 
 
-def _matches_root(command: str, root: str) -> bool:
-    return f"{root}/supervisor.sh" in command.split() or any(
-        re.fullmatch(re.escape(root) + r"/segment-\d+\.mp4", arg) for arg in command.split()
-    )
+def _recording_role(command: str, root: str) -> str | None:
+    # A path argument alone does not establish ownership: cat/tail and `sh -c`
+    # readers can reference our footage without being part of the recorder.
+    argv = command.split()
+    if not argv:
+        return None
+    executable = argv[0].rsplit("/", 1)[-1]
+    if (executable == "sh" and len(argv) == 4
+            and argv[1:3] == [f"{root}/supervisor.sh", root] and argv[3].isdigit()):
+        return "supervisor"
+    if (executable == "screenrecord" and len(argv) > 1
+            and re.fullmatch(re.escape(root) + r"/segment-\d+\.mp4", argv[-1])):
+        return "encoder"
+    return None
 
 
 def _processes(dev: Uiautomator2Device, root: str) -> list[tuple[int, str]]:
-    return [(pid, command) for pid, command in _process_table(dev) if _matches_root(command, root)]
+    return [(pid, command) for pid, command in _process_table(dev)
+            if _recording_role(command, root) is not None]
 
 
 def _read_identity(dev: Uiautomator2Device, root: str) -> dict[str, Any]:
@@ -261,7 +272,8 @@ def recover(dev: Uiautomator2Device, *, quarantine_stale: bool = False) -> dict[
     for _pid, command in _process_table(dev):
         for arg in command.split():
             root, _, name = arg.rpartition("/")
-            if (name == "supervisor.sh" or re.fullmatch(r"segment-\d+\.mp4", name)) and _ROOT.fullmatch(root):
+            if ((name == "supervisor.sh" or re.fullmatch(r"segment-\d+\.mp4", name))
+                    and _ROOT.fullmatch(root) and _recording_role(command, root) is not None):
                 roots.add(root)
     if len(roots) > 1:
         raise DeviceError("multiple recording owners are active", code="recording_status_unknown")
@@ -355,7 +367,7 @@ def quiesce(dev: Uiautomator2Device, root: str) -> float:
         if not processes:
             return stopped_at
         for pid, command in processes:
-            if pid in signalled or f"{root}/supervisor.sh" in command.split():
+            if pid in signalled or _recording_role(command, root) != "encoder":
                 continue
             # Verify the exact command again on target just before signalling. A recycled
             # pid must never turn teardown into a kill of somebody else's recording.
@@ -502,6 +514,24 @@ def _owned_directory(dev: Uiautomator2Device, root: str) -> bool:
 def _require_new_output(path: Path) -> None:
     if os.path.lexists(path):
         raise DeviceError("recording output already exists; choose a new destination", code="recording_output_exists")
+
+
+def _publish_file(source: Path, destination: Path) -> None:
+    """Claim a new output without requiring hardlink support from its filesystem."""
+    import errno
+
+    try:
+        os.link(source, destination)
+        return
+    except OSError as exc:
+        if exc.errno not in {errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS, errno.EXDEV, errno.EPERM}:
+            raise
+    # Linux also reports EPERM for filesystems without hardlinks. Source read and
+    # exclusive destination creation independently enforce copy permissions. In
+    # particular, xb refuses existing files and symlinks even after a preflight race.
+    # Any read/write/close failure propagates: the caller retains remote evidence.
+    with source.open("rb") as original, destination.open("xb") as published:
+        shutil.copyfileobj(original, published)
 
 
 def export_mp4(paths: list[Path], destination: Path) -> str:
@@ -653,10 +683,10 @@ def stop(dev: Uiautomator2Device, local_path: str, state: dict[str, Any]) -> str
         try:
             output.mkdir()
             for path in originals:
-                os.link(path, output / path.name)
-            os.link(staged_manifest, manifest)
+                _publish_file(path, output / path.name)
+            _publish_file(staged_manifest, manifest)
             if paths:
-                os.link(playable, destination)
+                _publish_file(playable, destination)
         except OSError as exc:
             raise DeviceError(
                 "recording publication failed; local/remote evidence retained; retry at a new destination",

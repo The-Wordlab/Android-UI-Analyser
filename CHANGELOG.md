@@ -11,6 +11,9 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+- Recording cleanup and recovery verify encoder/supervisor roles as well as owned paths, so processes reading the same footage are neither signalled nor mistaken for active recorders.
+- Recording export supports output filesystems without hardlinks by copying to exclusively created destinations; existing files remain protected and failed publication retains remote evidence.
+
 - Multi-segment MP4 export copies video and optional audio while retaining Android non-media tracks in the original segment files, avoiding unsupported metadata-stream export failures.
 
 - Native recording protects the child from hangup before launch, detaches its session, and requires a bounded supervisor readiness acknowledgement before checking capture startup. Targets without `setsid` fail explicitly.
