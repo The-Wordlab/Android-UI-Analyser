@@ -163,6 +163,94 @@ def test_real_axis_movement_and_a_verified_end_remain_successful(monkeypatch):
     assert len(runtime.swipes) == 2
 
 
+def clipped_article(*, shift=0, change=None):
+    frame = listing()
+    frame.elements[:] = frame.elements[:2] + [
+        node(20, (10, 110, 290, 330 + shift), parent=10, text="Long clipped article"),
+        node(21, (10, 460 + shift, 150, 480 + shift), parent=10, text="Related article"),
+        node(22, (160, 350 + shift, 190, 380 + shift), parent=10,
+             resource_id="example.app:id/save", clickable=True),
+        node(23, (210, 350 + shift, 240, 380 + shift), parent=10,
+             resource_id="example.app:id/share", clickable=True),
+    ]
+    # The article's clipped top stays still; the other labelled row moves or leaves view.
+    # Unlabelled controls must supply independent evidence rather than a label median.
+    if shift:
+        frame.elements[3] = frame.elements[3].model_copy(update={"text": "Later article"})
+    if change == "one_control":
+        frame.elements.pop()
+    elif change == "duplicate_resource":
+        frame.elements[-1] = frame.elements[-1].model_copy(
+            update={"resource_id": frame.elements[-2].resource_id}
+        )
+    elif change == "outside_owner":
+        for i in (-1, -2):
+            frame.elements[i] = frame.elements[i].model_copy(update={"parent": 100})
+    elif change == "resized" and shift:
+        for i in (-1, -2):
+            bounds = list(frame.elements[i].bounds)
+            bounds[3] += 10
+            frame.elements[i] = frame.elements[i].model_copy(update={"bounds": bounds})
+    elif change == "cross_axis" and shift:
+        for i in (-1, -2):
+            bounds = list(frame.elements[i].bounds)
+            bounds[0] += 20
+            bounds[2] += 20
+            frame.elements[i] = frame.elements[i].model_copy(update={"bounds": bounds})
+    elif change == "opposing" and shift:
+        bounds = list(frame.elements[-1].bounds)
+        bounds[1] -= 2 * shift
+        bounds[3] -= 2 * shift
+        frame.elements[-1] = frame.elements[-1].model_copy(update={"bounds": bounds})
+    elif change == "relabelled" and shift:
+        for i in (-1, -2):
+            frame.elements[i] = frame.elements[i].model_copy(update={"content_desc": "New item"})
+    return frame
+
+
+def test_two_named_leaf_controls_prove_scroll_despite_clipped_text(monkeypatch):
+    eng, runtime = engine(monkeypatch, [clipped_article(), clipped_article(shift=40)])
+    result = eng.scroll("down", observe=False)
+    assert result.ok and result.detail.startswith("moved ")
+    assert "dy=40" in result.detail and "evidence=axis-shift" in result.detail
+    assert len(runtime.swipes) == 1 and runtime.tree_reads == 3
+
+
+@pytest.mark.parametrize(
+    "change", ["one_control", "duplicate_resource", "outside_owner", "resized",
+               "cross_axis", "opposing", "relabelled"]
+)
+def test_unproven_control_correspondence_is_not_scroll_evidence(monkeypatch, change):
+    eng, runtime = engine(monkeypatch, [
+        clipped_article(change=change), clipped_article(shift=40, change=change)
+    ])
+    result = eng.scroll("down", observe=False)
+    assert not result.ok and result.detail.startswith("already-at-end ")
+    assert len(runtime.swipes) == 1 and runtime.tree_reads == 3
+
+
+@pytest.mark.parametrize("shift,direction", [(4, "down"), (40, "left")])
+def test_control_jitter_or_the_other_axis_is_not_scroll_evidence(monkeypatch, shift, direction):
+    eng, runtime = engine(monkeypatch, [clipped_article(), clipped_article(shift=shift)])
+    result = eng.scroll(direction, observe=False)
+    assert not result.ok and result.detail.startswith("already-at-end ")
+    assert len(runtime.swipes) == 1
+
+
+def test_named_controls_can_also_prove_horizontal_translation(monkeypatch):
+    before, after = clipped_article(), clipped_article()
+    for i in (-1, -2):
+        x1, y1, x2, y2 = after.elements[i].bounds
+        after.elements[i] = after.elements[i].model_copy(
+            update={"bounds": (x1 + 40, y1, x2 + 40, y2)}
+        )
+    eng, runtime = engine(monkeypatch, [before, after])
+    result = eng.scroll("right", observe=False)
+    assert result.ok and result.detail.startswith("moved ")
+    assert "dy=40" in result.detail and "evidence=axis-shift" in result.detail
+    assert len(runtime.swipes) == 1
+
+
 def test_popup_after_one_valid_step_does_not_become_a_reached_end(monkeypatch):
     eng, runtime = engine(monkeypatch, [listing(), listing(later=True), popup()])
     result = eng.scroll("up", to_end=True, observe=False)
@@ -216,5 +304,32 @@ def test_android_popup_hierarchy_cannot_replace_a_scrollable_list(monkeypatch):
     monkeypatch.setattr(eng, "_settle_after_swipe", lambda: None)
     result = eng.scroll("down", to_end=True, observe=False)
     assert not result.ok and result.detail.startswith("movement-unverified ")
+    assert len([call for call in runtime.calls if call[0] == "swipe"]) == 1
+    assert runtime.hierarchy_calls == 3
+
+
+def test_android_unnamed_controls_prove_motion_beside_a_clipped_article(monkeypatch):
+    def xml(shift):
+        return f'''<hierarchy><node package="example.app" class="android.widget.ScrollView"
+          resource-id="example.app:id/articles" scrollable="true" bounds="[0,100][300,550]">
+          <node class="android.widget.TextView" text="Clipped article"
+            bounds="[10,100][290,{300 + shift}]"/>
+          <node class="android.widget.ImageButton" resource-id="example.app:id/save"
+            clickable="true" bounds="[160,{350 + shift}][190,{380 + shift}]"/>
+          <node class="android.widget.ImageButton" resource-id="example.app:id/share"
+            clickable="true" bounds="[210,{350 + shift}][240,{380 + shift}]"/>
+        </node></hierarchy>'''
+
+    class AndroidFixture(FakeDevice):
+        def swipe(self, *args, **kwargs):
+            super().swipe(*args, **kwargs)
+            self._xml = xml(40)
+
+    runtime = AndroidFixture(hierarchy_xml=xml(0), width=300, height=600)
+    eng = Engine(make_config(memory={"enabled": False}, capture={"enabled": False}), device=runtime)
+    monkeypatch.setattr(eng, "_settle_after_swipe", lambda: None)
+    result = eng.scroll("down", observe=False)
+    assert result.ok and result.detail.startswith("moved ")
+    assert "dy=40" in result.detail and "evidence=axis-shift" in result.detail
     assert len([call for call in runtime.calls if call[0] == "swipe"]) == 1
     assert runtime.hierarchy_calls == 3

@@ -7,6 +7,7 @@ selected platform adapter; this module consumes only AUA's canonical schema.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections import Counter
 from collections.abc import Sequence
@@ -28,6 +29,7 @@ class ScrollProbe:
     app_id: str | None
     container: tuple[_ContainerNode, ...] | None
     roots: tuple[_ContainerNode, ...]
+    controls: Sample = ()
 
     def same_container(self, other: ScrollProbe) -> bool:
         return (
@@ -96,7 +98,60 @@ def scroll_probe(elements: Sequence[Element], box: Box, app_id: str | None) -> S
     if len(scoped) == 1:
         # A flat tree cannot prove which labels belong to the list rather than an overlay.
         return ScrollProbe(region_probe(elements, box), app_id, None, roots)
-    return ScrollProbe(region_probe(scoped, box), app_id, tuple(chain), roots)
+    return ScrollProbe(
+        region_probe(scoped, box), app_id, tuple(chain), roots, _control_probe(scoped, box)
+    )
+
+
+def _control_probe(elements: Sequence[Element], box: Box) -> Sample:
+    """Sample named leaf controls independently of clipped/sticky text labels.
+
+    Resource multiplicity is retained: two identically named row controls are not a
+    correspondence. Size is part of the key so a clipped or resized control cannot
+    supply translation evidence. These samples never assign element identities.
+    """
+    parents = {element.parent for element in elements}
+    counts = Counter(element.resource_id for element in elements if element.resource_id)
+    x1, y1, x2, y2 = box
+    return tuple(
+        (
+            json.dumps([
+                element.window, element.resource_id, element.type,
+                element.text, element.content_desc,
+                element.bounds[2] - element.bounds[0], element.bounds[3] - element.bounds[1],
+            ]),
+            element.bounds[0], element.bounds[1],
+        )
+        for element in elements
+        if element.resource_id and counts[element.resource_id] == 1
+        and element.id not in parents
+        and (element.clickable or element.long_clickable or element.checkable)
+        and not element.scrollable
+        and not element.password
+        and element.type.casefold() not in {
+            "edittext", "textfield", "textbox", "input", "textarea", "searchfield",
+        }
+        and x1 <= element.bounds[0] < element.bounds[2] <= x2
+        and y1 <= element.bounds[1] < element.bounds[3] <= y2
+    )
+
+
+def control_movement(before: Sample, after: Sample, direction: str) -> int:
+    """Two distinct, unchanged-size controls must translate together on the swipe axis."""
+    old = {key: (x, y) for key, x, y in before}
+    new = {key: (x, y) for key, x, y in after}
+    horizontal = direction in {"left", "right"}
+    axis, cross = (0, 1) if horizontal else (1, 0)
+    shifts = [
+        old[key][axis] - new[key][axis]
+        for key in old.keys() & new.keys()
+        if abs(old[key][cross] - new[key][cross]) <= _SCROLL_JITTER_PX
+        and abs(old[key][axis] - new[key][axis]) > _SCROLL_JITTER_PX
+    ]
+    if len(shifts) < 2:
+        return 0
+    distance = _median(shifts)
+    return distance if all(abs(shift - distance) <= _SCROLL_JITTER_PX for shift in shifts) else 0
 
 
 def _element_box(element: Element) -> Box | None:

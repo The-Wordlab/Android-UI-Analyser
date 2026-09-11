@@ -49,6 +49,7 @@ from .scroll_geom import (
     Box,
     ScrollProbe,
     _contains,
+    control_movement,
     scroll_movement,
     scroll_probe,
     scrollable_boxes,
@@ -1697,12 +1698,17 @@ def _swipe_once(
     after = self._probe(box)
     if allow_content_turnover and not before.same_container(after):
         return 0, False, "container-unverified"
-    return scroll_movement(
+    movement = scroll_movement(
         before.sample,
         after.sample,
         direction,
         allow_content_turnover=allow_content_turnover,
     )
+    if not movement[1] and allow_content_turnover:
+        distance = control_movement(before.controls, after.controls, direction)
+        if distance:
+            return distance, True, "axis-shift"
+    return movement
 
 
 def swipe(
