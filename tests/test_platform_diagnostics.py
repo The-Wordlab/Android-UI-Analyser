@@ -38,7 +38,8 @@ from conftest import FakeDevice, make_config
 
 class _NeutralPlatform(PlatformAdapter):
     name = "sample-os"
-    capabilities = frozenset({"device.logs"})
+    # Diagnostics are in memory; the injected FakeDevice supplies the deadline scope.
+    capabilities = frozenset({"device.logs", "ui.read_deadline"})
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
@@ -134,7 +135,7 @@ class _NeutralPlatform(PlatformAdapter):
 
 class _NoDiagnosticsPlatform(_NeutralPlatform):
     name = "no-diagnostics"
-    capabilities = frozenset()
+    capabilities = frozenset({"ui.read_deadline"})
 
 
 class _ExitPlatform(_NoDiagnosticsPlatform):
@@ -245,7 +246,7 @@ def test_log_wait_uses_normalized_window_and_never_the_runtime_logcat() -> None:
 
     result = Engine(cfg, device=runtime, platform=platform).await_predicate(
         "log:render complete",
-        timeout_ms=10,
+        timeout_ms=500,
         poll_ms=1,
         observe=False,
     )
@@ -259,10 +260,10 @@ def test_explicit_log_wait_on_an_unsupported_platform_is_typed() -> None:
     cfg = make_config(memory={"enabled": False}, lease={"enabled": False})
     runtime = FakeDevice()
 
-    with pytest.raises(UnsupportedPlatformCapabilityError):
+    with pytest.raises(UnsupportedPlatformCapabilityError, match="device.logs"):
         Engine(cfg, device=runtime, platform=_NoDiagnosticsPlatform(cfg)).await_predicate(
             "log:anything",
-            timeout_ms=1,
+            timeout_ms=500,
             poll_ms=1,
             observe=False,
         )

@@ -399,7 +399,7 @@ def test_negated_text_is_not_satisfied_by_a_hierarchy_only_miss(tmp_path) -> Non
 
     eng.analyze = rich  # type: ignore[method-assign]
 
-    out = eng.await_predicate("!text:Loading", timeout_ms=5, poll_ms=1)
+    out = eng.await_predicate("!text:Loading", timeout_ms=0, poll_ms=1)
 
     assert out.await_outcome == "timeout"
     assert rich_calls and all(call["with_ocr"] is True for call in rich_calls)

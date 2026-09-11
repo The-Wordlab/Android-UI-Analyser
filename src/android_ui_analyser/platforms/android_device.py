@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, BinaryIO
 
+from .. import read_budget
 from ..errors import DeviceError, UsageError
 from ..providers.base import Bounds, ScreenImage
 from ..schema import AppContext, DeviceInfo, MatchMode, ShellResult
@@ -55,9 +56,7 @@ _LOCALE_READS = (
     "getprop ro.product.locale",
 )
 
-_RUNTIME_PERMISSION_LINE = re.compile(
-    r"^\s*([A-Za-z][A-Za-z0-9_.]+):\s+granted=(true|false)\b"
-)
+_RUNTIME_PERMISSION_LINE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_.]+):\s+granted=(true|false)\b")
 
 
 def parse_locale(raw: str | None) -> str | None:
@@ -937,6 +936,48 @@ class Uiautomator2Device(AndroidRuntimeBase):
 
     # -- connection --------------------------------------------------------
 
+    def read_deadline(
+        self, budget: read_budget.ReadBudget
+    ) -> contextlib.AbstractContextManager[None]:
+        return read_budget.activate(budget)
+
+    def _bounded_rpc(self, method: str, params: list[Any]) -> Any:
+        from .android_bounded_reads import rpc
+
+        budget = read_budget.current()
+        assert budget is not None
+        return rpc(
+            self._d._dev._client.host,
+            self._d._dev._client.port,
+            self.serial,
+            self._d._device_server_port,
+            method,
+            params,
+            budget,
+        )
+
+    def _bounded_shell(self, command: str) -> str:
+        return self._bounded_command(["shell", command])
+
+    def _bounded_command(self, args: list[str]) -> str:
+        budget = read_budget.current()
+        assert budget is not None
+        try:
+            proc = subprocess.run(  # noqa: S603
+                ["adb", "-s", self.serial, *args],
+                capture_output=True,
+                text=True,
+                errors="replace",
+                check=False,
+                timeout=budget.remaining(),
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise read_budget.ReadDeadlineExceeded("Android shell read deadline reached") from exc
+        budget.check()
+        if proc.returncode:
+            raise DeviceError("bounded Android shell read failed")
+        return proc.stdout
+
     def _connect(self) -> None:
         try:
             import uiautomator2 as u2
@@ -1001,6 +1042,13 @@ class Uiautomator2Device(AndroidRuntimeBase):
         method or a property — the source of the ``'dict' object is not callable`` error).
         """
 
+        if read_budget.current() is not None:
+            # Bounded waits reach the explicit read methods below. Never let an incidental
+            # operation enter u2's reconnect/restart path while a passive deadline is active.
+            raise DeviceError(
+                f"{name} has no bounded read implementation", code="unsupported_capability"
+            )
+
         def invoke() -> Any:
             attr = getattr(self._d, name)
             return attr(*args, **kwargs) if callable(attr) else attr
@@ -1029,14 +1077,26 @@ class Uiautomator2Device(AndroidRuntimeBase):
         # Screen size is effectively static within a session; memoize to save an RPC
         # on the warm hierarchy hot path (PRD G1 < 150 ms).
         if self._winsize is None:
+            if read_budget.current() is not None:
+                info = self._bounded_rpc("deviceInfo", [])
+                return int(info["displayWidth"]), int(info["displayHeight"])
             ws = self._call("window_size")
             self._winsize = (int(ws[0]), int(ws[1]))
         return self._winsize
 
     def dump_hierarchy(self, compressed: bool = False) -> str:
+        if read_budget.current() is not None:
+            return str(self._bounded_rpc("dumpWindowHierarchy", [compressed, 50]))
         return str(self._call("dump_hierarchy", compressed=compressed))
 
     def screenshot(self) -> ScreenImage:
+        if read_budget.current() is not None:
+            import base64
+
+            data = self._bounded_rpc("takeScreenshot", [1, 80])
+            if not data:
+                raise DeviceError("bounded screenshot unavailable")
+            return ScreenImage(base64.b64decode(data))
         img = self._call("screenshot")  # PIL.Image by default
         return ScreenImage.from_pil(img)
 
@@ -1045,6 +1105,8 @@ class Uiautomator2Device(AndroidRuntimeBase):
 
         Slower than :meth:`screenshot` (device-side PNG encode) — see the base-class note.
         """
+        if read_budget.current() is not None:
+            return self.screenshot()
         try:
             proc = subprocess.run(  # noqa: S603
                 ["adb", "-s", self.serial, "exec-out", "screencap", "-p"],
@@ -1064,6 +1126,9 @@ class Uiautomator2Device(AndroidRuntimeBase):
         # that command waits about five seconds even when the answer is already available,
         # adding the delay to every observed action's change evidence. `dumpsys window`
         # exposes the same focused component in ~20ms. Keep u2 as the compatibility fallback.
+        if read_budget.current() is not None:
+            focused = _foreground_from_window_dump(self._bounded_shell("dumpsys window"))
+            return AppContext.coerce(focused or {})
         try:
             proc = subprocess.run(  # noqa: S603
                 ["adb", "-s", self.serial, "shell", "dumpsys", "window"],
@@ -1085,6 +1150,8 @@ class Uiautomator2Device(AndroidRuntimeBase):
         )
 
     def app_version(self, package: str) -> str | None:
+        if read_budget.current() is not None:
+            return None  # optional metadata must not enter an unbounded package-manager RPC
         try:
             info = self._d.app_info(package)
         except Exception:  # pragma: no cover - best effort / app not installed
@@ -1355,6 +1422,13 @@ class Uiautomator2Device(AndroidRuntimeBase):
                 if field == "resourceId"
                 else self._selector_kwargs(text, match, ignore_case, field)
             )
+            if read_budget.current() is not None:
+                from uiautomator2._selector import Selector
+
+                selector = Selector(**kwargs)
+                if self._bounded_rpc("exist", [selector]):
+                    return _bounds_from_info(self._bounded_rpc("objInfo", [selector]))
+                continue
             try:
                 el = self._d(**kwargs)
                 exists = el.exists
@@ -1368,6 +1442,9 @@ class Uiautomator2Device(AndroidRuntimeBase):
         return None
 
     def wait_idle(self, timeout_ms: int = 5000) -> None:
+        if read_budget.current() is not None:
+            self._bounded_rpc("waitForIdle", [timeout_ms])
+            return
         try:
             self._d.jsonrpc.waitForIdle(timeout_ms)
         except Exception:  # pragma: no cover - best effort
@@ -1631,9 +1708,7 @@ class Uiautomator2Device(AndroidRuntimeBase):
         if not src.is_file():
             raise DeviceError(f"media file not found: {src}")
         remote = f"{remote_dir.rstrip('/')}/{src.name}"
-        exists = self.shell(
-            f"if [ -e {shlex.quote(remote)} ]; then echo AUA_MEDIA_EXISTS; fi"
-        )
+        exists = self.shell(f"if [ -e {shlex.quote(remote)} ]; then echo AUA_MEDIA_EXISTS; fi")
         if "AUA_MEDIA_EXISTS" in exists:
             raise DeviceError(
                 f"refusing to overwrite existing target media: {remote}",
@@ -1650,9 +1725,7 @@ class Uiautomator2Device(AndroidRuntimeBase):
     def remove_added_media(self, local_path: str, *, remote_dir: str) -> None:
         remote = f"{remote_dir.rstrip('/')}/{Path(local_path).expanduser().name}"
         self.shell(f"rm -f {shlex.quote(remote)}")
-        remains = self.shell(
-            f"if [ -e {shlex.quote(remote)} ]; then echo AUA_MEDIA_REMAINS; fi"
-        )
+        remains = self.shell(f"if [ -e {shlex.quote(remote)} ]; then echo AUA_MEDIA_REMAINS; fi")
         if "AUA_MEDIA_REMAINS" in remains:
             raise DeviceError(
                 f"could not remove added target media: {remote}",
@@ -1902,9 +1975,7 @@ class Uiautomator2Device(AndroidRuntimeBase):
         # at 3232 bytes — ftyp plus the ``free`` placeholder the moov box was going to fill —
         # for a 4-second clip and for a two-minute one alike, and every recording in a QA sweep
         # was lost. Left alone, the client exits by itself once the device process is done.
-        finished = self._wait_for_recording_exit(
-            remote, timeout_s=_SCREENRECORD_FINALIZE_TIMEOUT_S
-        )
+        finished = self._wait_for_recording_exit(remote, timeout_s=_SCREENRECORD_FINALIZE_TIMEOUT_S)
         if proc is not None:
             with contextlib.suppress(Exception):
                 if not finished and proc.poll() is None:
@@ -2054,7 +2125,11 @@ class Uiautomator2Device(AndroidRuntimeBase):
 
     def get_clock_ms(self) -> int | None:
         try:
-            out = self._d.shell("date +%s%3N")
+            out = (
+                self._bounded_shell("date +%s%3N")
+                if read_budget.current() is not None
+                else self._d.shell("date +%s%3N")
+            )
             text = out if isinstance(out, str) else getattr(out, "output", str(out))
             digits = "".join(c for c in str(text).strip() if c.isdigit())
             if len(digits) >= 10:
@@ -2068,7 +2143,11 @@ class Uiautomator2Device(AndroidRuntimeBase):
 
     def utc_offset_minutes(self) -> int | None:
         try:
-            out = self._d.shell("date +%z")
+            out = (
+                self._bounded_shell("date +%z")
+                if read_budget.current() is not None
+                else self._d.shell("date +%z")
+            )
             text = out if isinstance(out, str) else getattr(out, "output", str(out))
             m = re.search(r"([+-])(\d{2})(\d{2})", str(text).strip())
             if not m:
@@ -2083,6 +2162,12 @@ class Uiautomator2Device(AndroidRuntimeBase):
             self._d.shell("input keyevent 67")  # KEYCODE_DEL
 
     def shell(self, command: str) -> str:
+        if read_budget.current() is not None:
+            if command not in (*_LOCALE_READS, "cat /proc/sys/kernel/random/boot_id"):
+                raise DeviceError(
+                    "shell operation has no bounded read contract", code="unsupported_capability"
+                )
+            return self._bounded_shell(command)
         try:
             out = self._d.shell(command)
         except Exception as exc:
@@ -2401,6 +2486,8 @@ class Uiautomator2Device(AndroidRuntimeBase):
             )
 
     def _logcat_dump(self, args: list[str]) -> str:
+        if read_budget.current() is not None:
+            return self._bounded_command(["logcat", "-d", "-v", "threadtime", *args])
         proc = subprocess.run(  # noqa: S603
             ["adb", "-s", self.serial, "logcat", "-d", "-v", "threadtime", *args],
             check=True,

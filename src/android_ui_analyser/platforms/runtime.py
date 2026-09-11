@@ -13,10 +13,12 @@ from __future__ import annotations
 import time
 from abc import ABC
 from collections.abc import Sequence
+from contextlib import AbstractContextManager
 from typing import Any
 
 from ..errors import DeviceError
 from ..providers.base import Bounds, ScreenImage
+from ..read_budget import ReadBudget
 from ..schema import AppContext, MatchMode, ShellResult
 from .geometry import DisplayGeometry
 
@@ -59,6 +61,17 @@ class TargetRuntime(ABC):
         return DisplayGeometry.identity(*self.window_size())
 
     # -- capability-gated capture -----------------------------------------
+
+    def read_deadline(self, budget: ReadBudget) -> AbstractContextManager[None]:
+        """Bound every synchronous UI read in this scope to one absolute deadline.
+
+        Optional ``ui.read_deadline`` contract. Implementations must cancel transport I/O
+        before returning and must not reconnect, retry mutations, or leave device workers
+        behind. An already connected runtime is required; provisioning has its own budget.
+        """
+        raise DeviceError(
+            "this target cannot enforce a UI-read deadline", code="unsupported_capability"
+        )
 
     def window_size(self) -> tuple[int, int]:
         """Size of AUA's canonical screen-coordinate space."""

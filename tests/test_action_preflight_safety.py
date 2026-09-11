@@ -70,6 +70,7 @@ def test_negative_only_global_until_is_accepted_by_standalone_wait(
     result = CliRunner().invoke(
         app,
         ["--until", "!text:Loading", "--until-timeout", "0", "wait-and-analyze"],
+        env={"AUA_OCR__AUGMENT_HIERARCHY": "false"},
     )
 
     assert result.exit_code == 0, result.stderr

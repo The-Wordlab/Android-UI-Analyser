@@ -14,13 +14,18 @@ _XML = """<?xml version="1.0" encoding="UTF-8"?>
 </hierarchy>"""
 
 
-def test_wait_timeout_detail_names_mode_and_candidates() -> None:
+def test_wait_timeout_detail_names_mode_without_a_new_read_after_expiry(monkeypatch) -> None:
     eng = Engine(make_config(), device=FakeDevice(hierarchy_xml=_XML))
+
+    def unexpected_analysis(*args, **kwargs):
+        raise AssertionError("an exhausted wait must not start timeout-diagnostic analysis")
+
+    monkeypatch.setattr(eng, "analyze", unexpected_analysis)
     res = eng.wait(for_="(Hi|Hello)", match="contains", timeout_ms=50)
     assert res.ok is False
     assert "match=contains" in (res.detail or "")
     assert "regex" in (res.detail or "").lower()
-    assert "closest" in (res.detail or "").lower()
+    assert "budget was exhausted" in (res.note or "")
 
 
 def test_wait_timeout_message_helper() -> None:
@@ -30,3 +35,4 @@ def test_wait_timeout_message_helper() -> None:
     )
     assert "match=contains" in msg
     assert "--match regex" in msg
+    assert "closest" in msg

@@ -879,6 +879,7 @@ class ActionResult(BaseModel):
     # Set when the caller asked to wait longer than `perf.max_wait_ms` allows. Carries the
     # *requested* value so the response explains itself: the wait was shortened on purpose and
     # "nothing yet" must not be read as "nothing there". `wait_ceiling_ms` is what was enforced.
+    wait_budget_ms: int | None = None
     wait_clamped_from_ms: int | None = None
     wait_ceiling_ms: int | None = None
     # Whether that ceiling was measured (`cold`/`adaptive`) or pinned (`fixed`/`pinned`).

@@ -368,6 +368,52 @@ class EvaluatorTest(unittest.TestCase):
             "runs": [{"run_id": "native", "scenario_id": "fixture", "lane": "candidate", "bundle": "native"}],
         })
 
+    def test_result_only_bundle_cannot_complete_despite_affirmative_verifier(self) -> None:
+        result = {
+            "verdict": "passed", "duration_ms": 1000, "finished": True, "terminated": True,
+            "cleanup": [{"action": "lease_release", "ok": True, "result": {"released": True}}],
+        }
+        for bundle in ("complete", "result-only"):
+            self.write_json(f"{bundle}/result.json", result)
+        self.write_json("complete/manifest.json", {"evidence": []})
+        self.write_json("verifier.json", {"passed": True, "cleanup_verified": True})
+        campaign = self.write_json("campaign.json", {
+            "schema_version": 1, "campaign_id": "missing-manifest",
+            "scenarios": [{"id": "fixture", "title": "Fixture", "goal": "Verify the fixture",
+                           "time_limit_s": 10, "required_checkpoints": [], "cleanup_required": True}],
+            "runs": [{"run_id": bundle, "scenario_id": "fixture", "lane": "candidate",
+                      "bundle": bundle, "verifier": "verifier.json"}
+                     for bundle in ("complete", "result-only")],
+        })
+
+        evaluation = evaluate_campaign(campaign)
+        complete, partial = evaluation["runs"]
+        self.assertTrue(complete["completed"])
+        self.assertTrue(partial["reported_pass"])
+        self.assertTrue(partial["verifier_pass"])
+        self.assertTrue(partial["cleanup_verified"])
+        self.assertEqual(partial["evidence_completeness"], 1.0)
+        self.assertFalse(partial["completed"])
+        self.assertEqual(partial["accounting_status"], "unavailable")
+        self.assertIsNone(partial["calls"])
+        self.assertEqual(evaluation["lanes"][0]["runs"], 2)
+        self.assertEqual(evaluation["lanes"][0]["completion_rate"], 0.5)
+
+    def test_native_journal_does_not_replace_missing_manifest_for_completion(self) -> None:
+        campaign = self.native_campaign()
+        value = json.loads(campaign.read_text())
+        value["scenarios"][0]["required_checkpoints"] = []
+        campaign.write_text(json.dumps(value))
+        self.assertTrue(evaluate_campaign(campaign)["runs"][0]["completed"])
+        (self.root / "native/manifest.json").unlink()
+
+        evaluation = evaluate_campaign(campaign)
+        run = evaluation["runs"][0]
+        self.assertFalse(run["completed"])
+        self.assertEqual(run["calls"], 6)
+        self.assertEqual(run["accounting_status"], "incomplete")
+        self.assertEqual(evaluation["lanes"][0]["runs"], 1)
+
     def test_native_journal_counts_errors_and_postfinish_but_folds_internal_wait(self) -> None:
         evaluation = evaluate_campaign(self.native_campaign())
         run = evaluation["runs"][0]

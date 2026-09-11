@@ -28,6 +28,10 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- UI waits share one deadline across predicate checks and the final observation. Android reads
+  stop at that deadline without reconnecting or restarting automation; an unavailable final
+  observation is explicit instead of extending an expired wait with more captures. A zero timeout
+  keeps its single-probe meaning, with its effective read budget reported as `wait_budget_ms`.
 - Microphone injection accepts the emulator's empty successful gRPC response instead of turning
   it into a false uncertain-delivery error. Genuine uncertain delivery still never triggers a replay.
 - Microphone injection waits for an active recording input before opening the emulator audio
@@ -37,7 +41,8 @@ notes, so you can check for a newer version — and read what changed — withou
   conflicting targets or orphan selector modifiers before preparing audio.
 - The offline release evaluator counts failed calls and post-finish cleanup from complete session
   journals, checks saved evidence files, and keeps incomplete attempts in the denominator.
-  Missing accounting or independent verification remains explicit instead of appearing as a pass.
+  Missing manifests, accounting, or independent verification remain explicit instead of appearing
+  as a pass.
 
 - Native recording launches remain valid when the transport appends an exit-status suffix.
   Empty process command lines are ignored only with matching zombie/dead stat evidence;

@@ -84,6 +84,11 @@ def make_screen_image(width: int = 200, height: int = 400, **kw: Any) -> ScreenI
 class FakeDevice(Device):
     """In-memory device for tests; records actions, returns canned perception."""
 
+    def read_deadline(self, budget):
+        from android_ui_analyser.read_budget import activate
+
+        return activate(budget)
+
     def __init__(
         self,
         *,
@@ -830,7 +835,9 @@ def fake_cli_device(monkeypatch: pytest.MonkeyPatch):
     def bind(device: FakeDevice) -> FakeDevice:
         monkeypatch.setenv("AUA_DEVICE__SERIAL", device.serial)
         monkeypatch.setattr(
-            Engine, "_list_targets", lambda _engine: [DeviceInfo(serial=device.serial, state="device")]
+            Engine,
+            "_list_targets",
+            lambda _engine: [DeviceInfo(serial=device.serial, state="device")],
         )
 
         def connect(_engine: Engine, serial: str | None = None) -> FakeDevice:

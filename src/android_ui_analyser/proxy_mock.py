@@ -561,9 +561,33 @@ def read_flows_since(
     if not path.is_file():
         return []
     out: list[dict[str, Any]] = []
+    from . import read_budget
+
+    budget = read_budget.current()
     try:
-        with path.open("r", encoding="utf-8") as fh:
-            for line in fh:
+        # A deadline-aware scan cannot wait on a FIFO substituted after is_file(), or
+        # materialize one arbitrarily large JSON line before its next checkpoint.
+        import stat
+
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "r", encoding="utf-8") as fh:
+            if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                return []
+            oversized = False
+            while True:
+                if budget is not None:
+                    budget.check()
+                line = fh.readline(256 * 1024) if budget is not None else fh.readline()
+                if not line:
+                    break
+                if budget is not None:
+                    budget.check()
+                    if not line.endswith("\n") and len(line) == 256 * 1024:
+                        oversized = True
+                        continue
+                    if oversized:
+                        oversized = False
+                        continue
                 line = line.strip()
                 if not line:
                     continue
@@ -573,6 +597,8 @@ def read_flows_since(
                     continue  # a half-written final line
                 if isinstance(entry, dict) and float(entry.get("ts") or 0) > since_ts:
                     out.append(entry)
+                if budget is not None:
+                    budget.check()
     except OSError:
         return []
     return out
@@ -593,9 +619,20 @@ def flow_matches(entry: dict[str, Any], spec: str) -> bool:
     text = text.strip()
     method: str | None = None
     parts = text.split(None, 1)
-    if len(parts) == 2 and parts[0].isalpha() and parts[0].upper() in {
-        "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS",
-    }:
+    if (
+        len(parts) == 2
+        and parts[0].isalpha()
+        and parts[0].upper()
+        in {
+            "GET",
+            "POST",
+            "PUT",
+            "PATCH",
+            "DELETE",
+            "HEAD",
+            "OPTIONS",
+        }
+    ):
         method, text = parts[0].upper(), parts[1].strip()
     if method and str(entry.get("method", "")).upper() != method:
         return False
@@ -821,6 +858,7 @@ def parse_proxy_target(raw: str | None) -> dict[str, Any] | None:
     value = str(raw).strip()
     if not value or value.lower() == "null" or value == ":0":
         return None
+
     def invalid(reason: str) -> dict[str, Any]:
         return {"raw": value, "host": None, "port": None, "kind": TARGET_INVALID, "error": reason}
 
@@ -852,9 +890,7 @@ def parse_proxy_target(raw: str | None) -> dict[str, Any] | None:
     return {"raw": value, "host": host, "port": port, "kind": classify_proxy_host(host)}
 
 
-def connect_failures_in_logcat(
-    serial: str, host: str, port: int, *, lines: int = 400
-) -> int:
+def connect_failures_in_logcat(serial: str, host: str, port: int, *, lines: int = 400) -> int:
     """How many recent app requests failed to reach ``host:port``, from logcat.
 
     Passive corroboration for a black-hole diagnosis, and deliberately the *only* device-side
@@ -868,9 +904,7 @@ def connect_failures_in_logcat(
     if port <= 0 or not host:
         return 0
     try:
-        proc = _adb(
-            serial, "logcat", "-d", "-t", str(int(lines)), check=False, timeout=15
-        )
+        proc = _adb(serial, "logcat", "-d", "-t", str(int(lines)), check=False, timeout=15)
     except (OSError, subprocess.TimeoutExpired):
         return 0
     if proc.returncode != 0:
@@ -1050,8 +1084,7 @@ def _unowned_health(
             "app works — but it is intercepted by a process this session did not start: your "
             "`aua mock` rules are NOT applied to it and `aua mock record` will capture "
             "nothing. Another agent may be using it — do NOT take it over. If you know that "
-            "holder is dead, `aua --serial <serial> proxy stop` un-points the device."
-            + stale_note
+            "holder is dead, `aua --serial <serial> proxy stop` un-points the device." + stale_note
         )
         return out
 
@@ -1063,8 +1096,7 @@ def _unowned_health(
         "logcat: buttons do nothing, screens stay empty, logins silently never complete. No "
         "aua owns this proxy, so nothing in `aua teardown` will ever clean it up. Fix: "
         "`aua --serial <serial> proxy stop` un-points the device (safe — no aua owns this "
-        "proxy), or `aua --serial <serial> proxy start` to put a working proxy there."
-        + stale_note
+        "proxy), or `aua --serial <serial> proxy start` to put a working proxy there." + stale_note
     )
     failures = connect_failures_in_logcat(serial, host, port)
     if failures:
@@ -1077,9 +1109,7 @@ def _unowned_health(
     return out
 
 
-def proxy_health(
-    serial: str, cache_dir: str | Path, *, self_heal: bool = True
-) -> dict[str, Any]:
+def proxy_health(serial: str, cache_dir: str | Path, *, self_heal: bool = True) -> dict[str, Any]:
     """Whether this device's traffic is reaching a proxy, and whether that proxy is ours.
 
     Three independent pieces of state all have to hold together for the device's traffic to
@@ -1135,8 +1165,7 @@ def proxy_health(
                 "pid": None,
                 "checks": {},
                 "detail": (
-                    "no proxy on this device — http_proxy is unset and no aua owns a proxy "
-                    "for it"
+                    "no proxy on this device — http_proxy is unset and no aua owns a proxy for it"
                 ),
             }
         return _unowned_health(serial, cache_dir, target)
@@ -1193,9 +1222,7 @@ def proxy_health(
     setting_check: dict[str, Any] = {
         "ok": setting_ok,
         "detail": (
-            f"device http_proxy is {device_proxy}"
-            if device_proxy
-            else "device http_proxy is unset"
+            f"device http_proxy is {device_proxy}" if device_proxy else "device http_proxy is unset"
         ),
     }
     if port and not setting_ok:
@@ -1476,8 +1503,7 @@ def guard_rule_scope(rule: dict[str, Any]) -> None:
     if path in ("", "*", "/", "/*", "**"):
         raise UsageError(
             f"rule path {path!r} with no --host matches every request on every host",
-            hint="Scope it: add `--host api.example.com`, or give a real path like "
-            "`/v1/chat`.",
+            hint="Scope it: add `--host api.example.com`, or give a real path like `/v1/chat`.",
         )
 
 
@@ -1686,7 +1712,9 @@ def android_cert_hash(pem: Path) -> str:
     return digest
 
 
-def _adb(serial: str, *args: str, check: bool = True, timeout: float = 60) -> subprocess.CompletedProcess[str]:
+def _adb(
+    serial: str, *args: str, check: bool = True, timeout: float = 60
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(  # noqa: S603
         ["adb", "-s", serial, *args],
         check=check,

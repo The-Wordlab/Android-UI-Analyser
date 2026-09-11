@@ -544,7 +544,13 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "auto-masked so they don't block). `--after-change` additionally requires a first change, "
         "visual settle, and a bounded quiet confirmation; a later result that replaces a stable "
         "loading shell restarts settling. Prefer an explicit final goal over either generic wait; "
-        "never fixed sleeps.",
+        "never fixed sleeps. A positive timeout budget covers both predicate reads and the final "
+        "observation on an already connected session. If that observation cannot finish in time, "
+        "the result says it is unavailable; do not treat missing evidence as an empty screen. "
+        "Cold visual providers are not started inside a wait, and an unverified visual absence "
+        "cannot satisfy a negated text term. Transport cleanup and journal overhead may add a "
+        "small amount of wall time. `timeout_ms=0` means one probe without polling, not zero wall "
+        "time: its reads use the normal caller ceiling, reported as `wait_budget_ms`.",
     ),
     (
         "Detach only waits that may outlive one agent call",

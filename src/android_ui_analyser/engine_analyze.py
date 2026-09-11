@@ -17,7 +17,7 @@ from concurrent.futures import TimeoutError as FuturesTimeout
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from . import routing
+from . import read_budget, routing
 from .engine_support import logger
 from .errors import ElementNotFoundError, ProviderError, UsageError
 from .memory import NavHints, _id_tail, screen_skips_ocr
@@ -117,7 +117,7 @@ def _capture_hierarchy(
     self: Engine, device: Device, w: int, h: int
 ) -> tuple[list[Element], str | None, str]:
     perf = self.config.perf
-    if perf.prefetch:
+    if perf.prefetch and read_budget.current() is None:
         slot = self._prefetch.take()
         if slot is not None:
             xml_hash = hashlib.sha1(slot.xml.encode()).hexdigest()
@@ -137,7 +137,7 @@ def _capture_hierarchy(
 
 def _kick_hierarchy_prefetch(self: Engine) -> None:
     """Speculatively dump+parse the hierarchy for the next analyze."""
-    if not self.config.perf.prefetch:
+    if not self.config.perf.prefetch or read_budget.current() is not None:
         return
     if self._device is None:
         return
@@ -190,17 +190,39 @@ def _screenshot(self: Engine, *, max_reuse_ms: float = 50.0) -> ScreenImage:
 def _start_hierarchy_ocr(self: Engine, *, with_ocr: bool | None) -> _PendingOcr | None:
     """Start the macOS OCR augmenter before the hierarchy capture begins.
 
-        This intentionally selects only Apple Vision from the configured OCR chain. A
-        heavyweight cross-platform OCR fallback must not silently run on every hierarchy
-        call; those providers remain available to the ordinary vision fallback.
-        """
+    This intentionally selects only Apple Vision from the configured OCR chain. A
+    heavyweight cross-platform OCR fallback must not silently run on every hierarchy
+    call; those providers remain available to the ordinary vision fallback.
+    """
     want_ocr = self.config.ocr.enabled if with_ocr is None else with_ocr
-    if (
-        not want_ocr
-        or not self.config.ocr.augment_hierarchy
-        or not self.factory.is_enabled("ocr")
-    ):
+    if not want_ocr or not self.config.ocr.augment_hierarchy or not self.factory.is_enabled("ocr"):
         return None
+    budget = read_budget.current()
+    if budget is not None:
+        # Only already-loaded OCR providers may enter a bounded wait. Model construction
+        # and imports have no cancellation contract. The worker receives pixels and one
+        # provider only, never an Engine, runtime, or device callback.
+        provider = next(
+            (
+                item
+                for name in self.factory.chain_names("ocr")
+                if isinstance(item := self.factory._instances.get(("ocr", name)), OcrProvider)
+            ),
+            None,
+        )
+        if provider is None:
+            return None
+        image = self._screenshot(max_reuse_ms=250.0)
+
+        def recognize(provider: OcrProvider, image: ScreenImage) -> list[TextBox]:
+            if not provider.is_available().ok:
+                raise RuntimeError("OCR provider unavailable")
+            return provider.recognize(image)
+
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="aua-image-ocr")
+        started_at = time.perf_counter()
+        future = executor.submit(recognize, provider, image)
+        return _PendingOcr(image, provider, future, executor, started_at)
     chain = self.factory.build_chain("ocr")
     provider = next(
         (
@@ -234,7 +256,12 @@ def _finish_hierarchy_ocr(
     try:
         elapsed = time.perf_counter() - pending.started_at
         timeout = max(0.0, self.config.timeouts.vision_ms / 1000.0 - elapsed)
+        budget = read_budget.current()
+        if budget is not None:
+            timeout = min(timeout, max(0.0, budget.deadline - budget.clock()))
         texts = pending.future.result(timeout=timeout)
+        if budget is not None:
+            budget.check()
         return texts, pending.provider.name, pending.image
     except FuturesTimeout:
         timed_out = True
@@ -296,11 +323,11 @@ def _capture_hierarchy_with_ocr(
 ) -> _HierarchyObservation:
     """Capture hierarchy, optionally fused with Apple OCR.
 
-        ``with_ocr=True`` keeps the parallel overlap (OCR starts before hierarchy).
-        Auto mode (``None``) captures hierarchy first, then skips OCR entirely when the
-        map already knows this screen is hierarchy-sufficient — experience-based cheap
-        analyze without risking unknown screens. Forced ``False`` is hierarchy-only.
-        """
+    ``with_ocr=True`` keeps the parallel overlap (OCR starts before hierarchy).
+    Auto mode (``None``) captures hierarchy first, then skips OCR entirely when the
+    map already knows this screen is hierarchy-sufficient — experience-based cheap
+    analyze without risking unknown screens. Forced ``False`` is hierarchy-only.
+    """
     if with_ocr is False:
         elements, package, xml_hash = self._capture_hierarchy(device, w, h)
         return _HierarchyObservation(elements, package, xml_hash, [], [], None, None)
@@ -402,18 +429,20 @@ def _run_vision(
     return elements, providers_used, img
 
 
-def _repair_lossy_text(self: Engine, device: Device, elements: list[Element]) -> tuple[int, str | None]:
+def _repair_lossy_text(
+    self: Engine, device: Device, elements: list[Element]
+) -> tuple[int, str | None]:
     """Fill in hierarchy labels the accessibility tree could not represent, using OCR.
 
-        The tree sometimes hands back U+FFFD instead of the real glyphs - formula and
-        WebView content especially. Element *structure* is fine, only the text is lost, so
-        replacing the whole observation with a vision pass would be wasteful and would
-        double the payload. Instead run OCR once and graft the recognised text onto the
-        elements that are broken, matched by geometric overlap.
+    The tree sometimes hands back U+FFFD instead of the real glyphs - formula and
+    WebView content especially. Element *structure* is fine, only the text is lost, so
+    replacing the whole observation with a vision pass would be wasteful and would
+    double the payload. Instead run OCR once and graft the recognised text onto the
+    elements that are broken, matched by geometric overlap.
 
-        Costs one OCR pass (~145ms with apple_vision) and only when something is actually
-        broken. Returns how many labels were repaired and which provider performed it.
-        """
+    Costs one OCR pass (~145ms with apple_vision) and only when something is actually
+    broken. Returns how many labels were repaired and which provider performed it.
+    """
     broken = [e for e in elements if e.text is not None and "\ufffd" in e.text]
     if not broken:
         return 0, None
@@ -527,9 +556,7 @@ def ask_screen(self: Engine, question: str) -> dict[str, Any]:
         },
         "provider": provider,
         "model": result.model,
-        "perception_providers": (
-            [observation.ocr_provider] if observation.ocr_provider else []
-        ),
+        "perception_providers": ([observation.ocr_provider] if observation.ocr_provider else []),
         "duration_ms": round((time.perf_counter() - t0) * 1000),
         "usage": result.usage,
         "input_image": result.input_image,
@@ -538,7 +565,9 @@ def ask_screen(self: Engine, question: str) -> dict[str, Any]:
     }
 
 
-def _resolve_pins(self: Engine, source: str | None, strategy: str | None) -> tuple[bool, bool, bool]:
+def _resolve_pins(
+    self: Engine, source: str | None, strategy: str | None
+) -> tuple[bool, bool, bool]:
     """Return (force_hierarchy, force_vision, pin_grounding). strategy > source."""
     s = (strategy or "").lower()
     if s in ("text", "selector", "hierarchy"):
@@ -565,10 +594,10 @@ def _attach_visual_identity(
 ) -> tuple[list[Element], ScreenImage | None, bool]:
     """Give unlabeled actionable controls pixel keys from one shared screenshot.
 
-        ``Device.screenshot`` is the platform-neutral runtime contract used by every other
-        perception path. A capture failure must degrade to the existing geometry key rather
-        than turn a hierarchy analysis into an error.
-        """
+    ``Device.screenshot`` is the platform-neutral runtime contract used by every other
+    perception path. A capture failure must degrade to the existing geometry key rather
+    than turn a hierarchy analysis into an error.
+    """
     from .identity import attach_visual_stable_keys, needs_visual_stable_key
 
     needed = any(needs_visual_stable_key(element) for element in elements)
@@ -606,6 +635,12 @@ def analyze(
     record: bool = True,
     record_ids: bool = True,
 ) -> AnalyzeResult:
+    budget = read_budget.current()
+    if budget is not None:
+        budget.check()
+        # Preserve hierarchy and warm image-only OCR. Cold provider loading and vision
+        # escalation have no bounded initialization contract.
+        source, no_cache = "hierarchy", True
     wi = self._effective_with_image(with_image)
     if wi:
         return self._with_raw_image(
@@ -694,9 +729,7 @@ def _analyze_screen(
     path = PathKind.hierarchy
 
     if not force_vision:
-        hierarchy_observation = self._capture_hierarchy_with_ocr(
-            device, w, h, with_ocr=with_ocr
-        )
+        hierarchy_observation = self._capture_hierarchy_with_ocr(device, w, h, with_ocr=with_ocr)
         hierarchy_elements = hierarchy_observation.elements
         elements = hierarchy_elements + hierarchy_observation.ocr_elements
         package = hierarchy_observation.package
@@ -773,7 +806,9 @@ def _analyze_screen(
                     map_hint=hints.map_hint,
                 )
             tracked = identities.assign(prev.elements, app=package, surface=activity)
-            same_ids = [el.published_id for el in tracked] == [el.published_id for el in prev.elements]
+            same_ids = [el.published_id for el in tracked] == [
+                el.published_id for el in prev.elements
+            ]
             from .perf import element_diff as _identity_diff
 
             reused = prev.model_copy(
@@ -791,7 +826,7 @@ def _analyze_screen(
                             if self.config.perf.differential
                             else prev.meta.element_diff,
                         }
-                    )
+                    ),
                 }
             )
             # Reusing the payload must not skip the side effect callers depend on: every
@@ -950,6 +985,7 @@ def _analyze_screen(
     _repaired, _repair_provider = (
         self._repair_lossy_text(device, elements)
         if not use_vision
+        and read_budget.current() is None
         and not (hierarchy_observation is not None and hierarchy_observation.ocr_provider)
         else (0, None)
     )
@@ -972,9 +1008,7 @@ def _analyze_screen(
         ediff = _identity_diff(self._last_analyze_elements, elements)
     self._last_analyze_elements = list(elements)
     result = AnalyzeResult(
-        screen=Screen(
-            width=w, height=h, package=package, activity=activity, source=screen_source
-        ),
+        screen=Screen(width=w, height=h, package=package, activity=activity, source=screen_source),
         elements=elements,
         meta=Meta(
             duration_ms=int((time.perf_counter() - t0) * 1000),
@@ -1075,9 +1109,7 @@ def _analyze_query(
 
     # --- T1/T2: satisfy from the hierarchy first (cheap-first) ---
     if not force_vision:
-        hierarchy_observation = self._capture_hierarchy_with_ocr(
-            device, w, h, with_ocr=with_ocr
-        )
+        hierarchy_observation = self._capture_hierarchy_with_ocr(device, w, h, with_ocr=with_ocr)
         hierarchy_elements = hierarchy_observation.elements
         pool = hierarchy_elements + hierarchy_observation.ocr_elements
         package = hierarchy_observation.package
@@ -1152,7 +1184,9 @@ def _analyze_query(
             known_screen, hints = self._record_screen_safe(
                 device, package, activity, pool, Tier.vision, h
             )
-        identity_app = hierarchy_observation.package if hierarchy_observation is not None else package
+        identity_app = (
+            hierarchy_observation.package if hierarchy_observation is not None else package
+        )
         pool = identities.assign(pool, app=identity_app, surface=activity)
         vis_ids = {el.id for el in vis_elements}
         cand, score = self._match_query(query, [el for el in pool if el.id in vis_ids])
@@ -1182,9 +1216,7 @@ def _analyze_query(
     grounding_ok = (
         routing.allows(Tier.grounding, ceiling)
         and self.factory.is_enabled("grounding")
-        and (
-            pin_grounding or routing.classify_query(query) is not routing.QueryKind.resource_id
-        )
+        and (pin_grounding or routing.classify_query(query) is not routing.QueryKind.resource_id)
     )
     if best_score < QUERY_CONFIDENT and grounding_ok:
         chain = self.factory.build_chain("grounding")
@@ -1272,9 +1304,7 @@ def _finish_query(
     )
     annotated = self._maybe_annotate(annotate, device, elements, img)
     result = AnalyzeResult(
-        screen=Screen(
-            width=w, height=h, package=package, activity=activity, source=screen_source
-        ),
+        screen=Screen(width=w, height=h, package=package, activity=activity, source=screen_source),
         elements=elements,
         meta=Meta(
             duration_ms=int((time.perf_counter() - t0) * 1000),
@@ -1345,9 +1375,7 @@ def _map_grounding(
         px, py = loc.x, loc.y
         # element containing the point, else nearest center
         containing = [
-            e
-            for e in pool
-            if e.bounds[0] <= px <= e.bounds[2] and e.bounds[1] <= py <= e.bounds[3]
+            e for e in pool if e.bounds[0] <= px <= e.bounds[2] and e.bounds[1] <= py <= e.bounds[3]
         ]
         if containing:
             return min(
@@ -1466,9 +1494,9 @@ def _with_raw_image(
 def _prune_run_frames(self: Engine, serial: str, *, suffix: str) -> None:
     """Keep only the newest :attr:`MAX_RUN_FRAMES` auto-named frames for this device.
 
-        Best-effort by design: a frame that cannot be deleted is a housekeeping problem, never
-        a reason to fail the analyze that produced it.
-        """
+    Best-effort by design: a frame that cannot be deleted is a housekeeping problem, never
+    a reason to fail the analyze that produced it.
+    """
     try:
         run_dir = Path(self.config.cache.dir).expanduser() / "runs"
         safe = TargetRef(self.platform.name, serial).storage_key

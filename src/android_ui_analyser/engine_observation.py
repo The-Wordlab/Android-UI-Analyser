@@ -14,6 +14,7 @@ import re
 import time
 from typing import TYPE_CHECKING, Any
 
+from . import read_budget
 from .engine_support import _label, logger
 from .errors import AuaError
 from .memory import _id_tail
@@ -72,7 +73,7 @@ def _analyze_post_action(
     # Hierarchy first because it is tens of milliseconds and answers for most screens.
     # But pinning the folded observation to hierarchy made every Compose/canvas/WebView
     # caller pay for a second explicit analyze. Escalate once through the normal gate.
-    if self.config.perception.observe_escalates_to_vision:
+    if self.config.perception.observe_escalates_to_vision and read_budget.current() is None:
         with contextlib.suppress(Exception):
             decision = self._gate_decide(
                 obs.elements,
@@ -113,37 +114,37 @@ def _unready_destination_risk(
 ) -> tuple[str, str] | None:
     """``(detector name, why)`` for a loading/unrendered destination, or ``None``.
 
-        The journalled failure this exists for: a tap started a new Activity that then waited
-        on the network before drawing. The settle wait truthfully reported quiet pixels and a
-        stable tree (``via=hierarchy``), the change summary said the Activity moved with
-        nothing added — and the result still cleared every caveat. The screen was *physically
-        settled and semantically loading*, so no settle-loop tuning can catch it; only
-        classification can. This is Phase 0 of the arrival design: classification only, from
-        evidence already in hand — no new waits, no new device reads, the same facts finally
-        consulted.
+    The journalled failure this exists for: a tap started a new Activity that then waited
+    on the network before drawing. The settle wait truthfully reported quiet pixels and a
+    stable tree (``via=hierarchy``), the change summary said the Activity moved with
+    nothing added — and the result still cleared every caveat. The screen was *physically
+    settled and semantically loading*, so no settle-loop tuning can catch it; only
+    classification can. This is Phase 0 of the arrival design: classification only, from
+    evidence already in hand — no new waits, no new device reads, the same facts finally
+    consulted.
 
-        Three detectors, most explicit first:
+    Three detectors, most explicit first:
 
-        * the screen *says* it is loading — a progress widget, loading text, or a mapped
-          ``loading`` screen (:meth:`_observation_is_loading`, until now consulted only by
-          goto/back/await). Explicit beats inference, so this fires even on a recognized or
-          additive destination: a loading shell that arrived is still a loading shell.
-        * departure without arrival — the Activity changed while nothing was added: no new
-          text, a tree that did not grow, and no new actionable control. Removal-only change
-          proves the old screen was *left*, not that the new one has rendered
-          (``_change_has_semantic_effect`` treats those symmetrically, which is exactly how
-          the journalled frame passed for arrival). Suppressed when recognition confirmed a
-          different known screen — the map is stronger arrival evidence than this inference —
-          and when the app left the foreground, which is its own, stronger report.
-        * the same departure without the Activity evidence — a strong subtractive transition
-          landing on a content-bare tree. Single-Activity (Compose) apps never change
-          Activity for in-app navigation, which measured live made the detector above inert
-          for the dominant modern app shape.
+    * the screen *says* it is loading — a progress widget, loading text, or a mapped
+      ``loading`` screen (:meth:`_observation_is_loading`, until now consulted only by
+      goto/back/await). Explicit beats inference, so this fires even on a recognized or
+      additive destination: a loading shell that arrived is still a loading shell.
+    * departure without arrival — the Activity changed while nothing was added: no new
+      text, a tree that did not grow, and no new actionable control. Removal-only change
+      proves the old screen was *left*, not that the new one has rendered
+      (``_change_has_semantic_effect`` treats those symmetrically, which is exactly how
+      the journalled frame passed for arrival). Suppressed when recognition confirmed a
+      different known screen — the map is stronger arrival evidence than this inference —
+      and when the app left the foreground, which is its own, stronger report.
+    * the same departure without the Activity evidence — a strong subtractive transition
+      landing on a content-bare tree. Single-Activity (Compose) apps never change
+      Activity for in-app navigation, which measured live made the detector above inert
+      for the dominant modern app shape.
 
-        Additive arrival is measured on the app's own elements, never on
-        ``change.text_added``: that field counts every window, and the status-bar clock
-        ticking over vetoed the verdict live on exactly the frame that needed it.
-        """
+    Additive arrival is measured on the app's own elements, never on
+    ``change.text_added``: that field counts every window, and the status-bar clock
+    ticking over vetoed the verdict live on exactly the frame that needed it.
+    """
     if self._observation_is_loading(obs):
         return (
             "loading_indicator",
@@ -213,11 +214,11 @@ def _unready_destination_risk(
 def _content_bare(obs: AnalyzeResult) -> bool:
     """No readable app content and at most one (unlabelled) affordance.
 
-        The launch-shell test refuses *any* clickable node; a navigated-to loading shell
-        usually keeps its one nav-back affordance, so a single unlabelled clickable is
-        allowed here. OCR-augmented reads put legible pixels into ``elements`` too, so a
-        canvas screen with readable text does not count as bare.
-        """
+    The launch-shell test refuses *any* clickable node; a navigated-to loading shell
+    usually keeps its one nav-back affordance, so a single unlabelled clickable is
+    allowed here. OCR-augmented reads put legible pixels into ``elements`` too, so a
+    canvas screen with readable text does not count as bare.
+    """
     affordances = 0
     for element in app_elements(obs.elements):
         if element.window in {"system", "ime", "overlay"}:
@@ -240,12 +241,12 @@ def _content_bare(obs: AnalyzeResult) -> bool:
 def _destination_confirmed(known_after: str | None, before_known: str | None) -> bool:
     """Recognition is arrival evidence only with a known origin to differ from.
 
-        The weak form — "recognised name differs from the before name" — is True on a cold
-        session (async memory, first action after the first analyze) whenever *anything* is
-        recognised, including the origin's own map entry, because the before name is still
-        unstamped. That let recognition clear stale caveats and suppress the unready verdict
-        on exactly the frames that need them. No known origin, no differential, no claim.
-        """
+    The weak form — "recognised name differs from the before name" — is True on a cold
+    session (async memory, first action after the first analyze) whenever *anything* is
+    recognised, including the origin's own map entry, because the before name is still
+    unstamped. That let recognition clear stale caveats and suppress the unready verdict
+    on exactly the frames that need them. No known origin, no differential, no claim.
+    """
     return bool(known_after and before_known and known_after != before_known)
 
 
@@ -260,16 +261,16 @@ def _post_action_change(
 ) -> tuple[dict[str, Any] | None, bool]:
     """Change summary + passive recognition for one post-action readback.
 
-        One method because the content wait can adopt a later, better readback, and the
-        second readback must be summarised and recognised exactly like the first — the
-        launch content poll grew a subtle drift bug from duplicating this by hand.
+    One method because the content wait can adopt a later, better readback, and the
+    second readback must be summarised and recognised exactly like the first — the
+    launch content poll grew a subtle drift bug from duplicating this by hand.
 
-        Post-action analyzes deliberately do not write memory: their frame may still be
-        transitional. Recognition against the existing map is safe, and is strong
-        destination evidence — evaluated before stale risk so a looping animation cannot
-        make a correctly recognised, semantically different destination look unsafe merely
-        because its extended quiet-window timed out.
-        """
+    Post-action analyzes deliberately do not write memory: their frame may still be
+    transitional. Recognition against the existing map is safe, and is strong
+    destination evidence — evaluated before stale risk so a looping animation cannot
+    make a correctly recognised, semantically different destination look unsafe merely
+    because its extended quiet-window timed out.
+    """
     change: dict[str, Any] | None = None
     if not hierarchy_only:
         with contextlib.suppress(Exception):
@@ -304,18 +305,18 @@ def _await_rendered_destination(
 ) -> AnalyzeResult | None:
     """Hold the call until the unready destination renders, bounded; None on expiry.
 
-        The launch content poll, generalised to actions: instead of handing back a frame the
-        classifier just called unready — sending the caller into a blind wait plus a
-        re-analyze, or worse, a tap on a control that no longer exists — spend a bounded
-        budget re-reading the cheap hierarchy until content that provably was not there
-        arrives. Only ever entered when the answer in hand is already wrong, so a settled
-        action pays nothing.
+    The launch content poll, generalised to actions: instead of handing back a frame the
+    classifier just called unready — sending the caller into a blind wait plus a
+    re-analyze, or worse, a tap on a control that no longer exists — spend a bounded
+    budget re-reading the cheap hierarchy until content that provably was not there
+    arrives. Only ever entered when the answer in hand is already wrong, so a settled
+    action pays nothing.
 
-        The polls are internal freshness reads (``record_ids=False``): none of them is
-        published, so a caller's ids always match the observation it was actually handed.
-        The accepted candidate is only a trigger — the caller-facing re-read happens in
-        ``_observe`` through the same ``_analyze_post_action`` path as the first readback.
-        """
+    The polls are internal freshness reads (``record_ids=False``): none of them is
+    published, so a caller's ids always match the observation it was actually handed.
+    The accepted candidate is only a trigger — the caller-facing re-read happens in
+    ``_observe`` through the same ``_analyze_post_action`` path as the first readback.
+    """
     package = initial.screen.package
     if not package or budget_ms <= 0:
         return None
@@ -357,10 +358,10 @@ def _await_rendered_destination(
 def _readable_label(label: str) -> bool:
     """Whether *label* is readable content, not decoration.
 
-        Measured live: a loading shell's page-indicator dot ("•") was the destination's only
-        text, and it counted both as content (not bare) and as additive arrival. Punctuation
-        and dingbats are decoration; one alphanumeric character in any script is the bar.
-        """
+    Measured live: a loading shell's page-indicator dot ("•") was the destination's only
+    text, and it counted both as content (not bare) and as additive arrival. Punctuation
+    and dingbats are decoration; one alphanumeric character in any script is the bar.
+    """
     return any(ch.isalnum() for ch in label)
 
 
@@ -396,12 +397,12 @@ def _arrival_report(
 ) -> dict[str, Any] | None:
     """The machine-readable arrival verdict, or ``None`` for a silently settled action.
 
-        Mirrors :meth:`_stale_observation_risk`'s branch order — the prose caveat and this
-        state must never disagree, and that method's docstring owns the reasoning for each
-        branch. Emitted only when there is something to say (a non-settled state, or a
-        settled one that had to be waited for): like ``screen_moved`` and ``stale_risk``,
-        absence is the cheap, healthy answer. Named evidence, never a confidence score.
-        """
+    Mirrors :meth:`_stale_observation_risk`'s branch order — the prose caveat and this
+    state must never disagree, and that method's docstring owns the reasoning for each
+    branch. Emitted only when there is something to say (a non-settled state, or a
+    settled one that had to be waited for): like ``screen_moved`` and ``stale_risk``,
+    absence is the cheap, healthy answer. Named evidence, never a confidence score.
+    """
     if not settle or hierarchy_only:
         return None
 
@@ -439,17 +440,15 @@ def _arrival_report(
     return None
 
 
-def _tap_settle_needs_confirmation(
-    action_kind: str | None, ready: dict[str, Any] | None
-) -> bool:
+def _tap_settle_needs_confirmation(action_kind: str | None, ready: dict[str, Any] | None) -> bool:
     """Whether an early tap settle needs a longer quiet window before analysis.
 
-        The synthetic transition fixtures defeat content heuristics in three different ways: an
-        old screen plus one pager node, OCR destination text over the old hierarchy, and a mixed hierarchy with
-        both old and new screens. Therefore no single early frame certifies arrival. Confirm every
-        tap-like fast hierarchy/pixel settle; slower double-sampled hierarchy settles keep their
-        existing path — but only when the tree *grew*.
-        """
+    The synthetic transition fixtures defeat content heuristics in three different ways: an
+    old screen plus one pager node, OCR destination text over the old hierarchy, and a mixed hierarchy with
+    both old and new screens. Therefore no single early frame certifies arrival. Confirm every
+    tap-like fast hierarchy/pixel settle; slower double-sampled hierarchy settles keep their
+    existing path — but only when the tree *grew*.
+    """
     if action_kind not in {"tap", "tap-point", "double-tap", "long-press"}:
         return False
     if not ready or ready.get("timeout") or not ready.get("changed"):
@@ -478,13 +477,20 @@ def _observe(
 ) -> ActionResult:
     """Attach the post-action screen so callers skip a separate ``analyze`` round-trip.
 
-        The folded ``analyze`` also re-populates the id cache, so the agent can act on an id
-        from ``result.observation`` immediately (e.g. type → tap send) in one fewer call.
+    The folded ``analyze`` also re-populates the id cache, so the agent can act on an id
+    from ``result.observation`` immediately (e.g. type → tap send) in one fewer call.
 
-        When ``settle`` is True (default for actions), wait until pixels differ from the
-        pre-action frame and the non-animated region is idle — otherwise agents get the
-        previous screen and burn a second ``wait --for-stable`` + re-analyze.
-        """
+    When ``settle`` is True (default for actions), wait until pixels differ from the
+    pre-action frame and the non-animated region is idle — otherwise agents get the
+    previous screen and burn a second ``wait --for-stable`` + re-analyze.
+    """
+    budget = read_budget.current()
+    if budget is not None:
+        # This is the boundary between proving the predicate and optionally reading the
+        # result screen. A late predicate must fail; a timely one can remain proved even
+        # when its final observation cannot finish inside the remaining budget.
+        budget.check()
+        budget.result = result
     if observe:
         with contextlib.suppress(Exception):  # observation is a bonus; never fail the action
             # Read before the settle consumes the pre-action bookkeeping.
@@ -503,7 +509,7 @@ def _observe(
             # that is finished, and in the field it returned `shown=0` as a settled
             # result. This is the knob that trade-off is tuned on; see
             # `perf.stable_delay_ms`.
-            spent_delay = self._spend_stable_delay()
+            spent_delay = self._spend_stable_delay() if budget is None else 0
             if spent_delay:
                 result.stable_delay_ms = spent_delay
             if settle:
@@ -604,9 +610,7 @@ def _observe(
                 result.action == "app-launch" and self._launch_observation_is_transitional(obs)
             )
             launch_content_ready = bool(
-                result.action == "app-launch"
-                and launch_content_wait_ms
-                and not launch_transitional
+                result.action == "app-launch" and launch_content_wait_ms and not launch_transitional
             )
             if launch_transitional:
                 caveat = (
@@ -646,28 +650,22 @@ def _observe(
             content_wait_ms = 0
             content_arrived = False
             entry_kind = arrival_unready[0] if arrival_unready else None
-            if (
-                arrival_unready
-                and result.action != "app-launch"
-                and not adopt_action
-            ):
+            if arrival_unready and result.action != "app-launch" and not adopt_action:
                 from .perf import arrival_extension_for
 
-                budget = arrival_extension_for(self.config) - int(
+                arrival_budget = arrival_extension_for(self.config) - int(
                     (ready or {}).get("confirmation_ms") or 0
                 )
-                if budget > 0:
+                if arrival_budget > 0:
                     wait_t0 = time.monotonic()
                     rendered = self._await_rendered_destination(
-                        obs, before_state, budget_ms=budget
+                        obs, before_state, budget_ms=arrival_budget
                     )
                     if rendered is not None:
                         # One caller-facing re-read through the same path as the first
                         # readback (image, vision gate, published ids), then re-derive the
                         # verdict from scratch — the wait proved nothing by itself.
-                        obs = self._analyze_post_action(
-                            with_image, record_screen=record_screen
-                        )
+                        obs = self._analyze_post_action(with_image, record_screen=record_screen)
                         change, destination_confirmed = self._post_action_change(
                             obs,
                             before_state,
@@ -679,9 +677,7 @@ def _observe(
                             settle,
                             ready,
                             destination_confirmed=destination_confirmed,
-                            semantic_change_confirmed=self._change_has_semantic_effect(
-                                change
-                            ),
+                            semantic_change_confirmed=self._change_has_semantic_effect(change),
                         )
                         arrival_unready = None
                         if caveat is None:
@@ -870,9 +866,7 @@ def _observe(
                         result.app_logs = self._app_logs(str(scope))
             if left:
                 result.crash_evidence = self._crash_evidence(str(left["from"]))
-                dialog = (
-                    " A system crash dialog is on screen." if left.get("crash_dialog") else ""
-                )
+                dialog = " A system crash dialog is on screen." if left.get("crash_dialog") else ""
                 evidence = result.crash_evidence
                 if evidence.get("available") and evidence.get("count"):
                     log_note = "The crash/error log block is attached in `crash_evidence`."
@@ -898,6 +892,18 @@ def _observe(
         if self.config.perf.prefetch:
             self._kick_hierarchy_prefetch()
         result.observation_present = False
+    if budget is not None and observe:
+        if result.observation is None:
+            result.observation_present = False
+            result.note = (
+                "The predicate was evaluated before the deadline; the final observation "
+                "was unavailable within the shared wait budget."
+            )
+        else:
+            result.note = (
+                (result.note or "")
+                + " Bounded wait observation uses accessibility and available warm OCR; cold providers and diagnostic enrichment were omitted."
+            )
     if self._frame_history_matters(result):
         hint = self._capture_hint()
         if hint:
@@ -911,13 +917,13 @@ def _observe(
 def _frame_history_matters(result: ActionResult) -> bool:
     """Is there anything about this response the rolling frame buffer could explain?
 
-        `capture_hint` names the one artefact that shows *what happened in between* — an
-        interstitial sliding in, a screen replaced twice — and it was trimmed out of the
-        observation because on a settled, successful action it answered a question nobody had
-        asked. Three verdicts do ask it: the action failed, the settle never confirmed the
-        screen had moved (`stale_risk` / `settled_unmet`), or the screen came back empty. A
-        healthy arrival raises none of them and pays nothing.
-        """
+    `capture_hint` names the one artefact that shows *what happened in between* — an
+    interstitial sliding in, a screen replaced twice — and it was trimmed out of the
+    observation because on a settled, successful action it answered a question nobody had
+    asked. Three verdicts do ask it: the action failed, the settle never confirmed the
+    screen had moved (`stale_risk` / `settled_unmet`), or the screen came back empty. A
+    healthy arrival raises none of them and pays nothing.
+    """
     observation = result.observation
     return bool(
         not result.ok
@@ -945,29 +951,29 @@ def _stale_observation_risk(
 ) -> str | None:
     """Why this post-action observation may describe the screen as it was *before* the action.
 
-        Observed: a `tap` succeeded and the device advanced, yet the returned observation reported
-        an empty `element_diff` with `unchanged=true` — measured against a snapshot taken before
-        the screen changed. A screenshot plus a fresh `analyze` showed the app had in fact moved
-        on.
+    Observed: a `tap` succeeded and the device advanced, yet the returned observation reported
+    an empty `element_diff` with `unchanged=true` — measured against a snapshot taken before
+    the screen changed. A screenshot plus a fresh `analyze` showed the app had in fact moved
+    on.
 
-        The mechanism is the settle wait giving up early. `_await_post_action_ready` returns
-        `via=unchanged` after ~80ms of identical frames, and `via=hierarchy-same` on two matching
-        trees; the folded `analyze` then dumps a tree that still matches the previous one, so
-        `skip_unchanged_analyze` reuses the *previous* payload and stamps `unchanged=true`. The
-        device advances a few milliseconds later. Nothing was wrong with any individual step —
-        the claim is just older than it looks.
+    The mechanism is the settle wait giving up early. `_await_post_action_ready` returns
+    `via=unchanged` after ~80ms of identical frames, and `via=hierarchy-same` on two matching
+    trees; the folded `analyze` then dumps a tree that still matches the previous one, so
+    `skip_unchanged_analyze` reuses the *previous* payload and stamps `unchanged=true`. The
+    device advances a few milliseconds later. Nothing was wrong with any individual step —
+    the claim is just older than it looks.
 
-        This is the dangerous direction. The other ways a tap can look inert risk an agent giving
-        up too early; this one risks it **repeating an action that already happened** — a second
-        submit, a second message, a second purchase attempt. So the engine cannot report
-        `unchanged` as a fact here: it genuinely cannot tell "no effect" from "not yet", and
-        saying which one it is would be a guess presented as evidence.
+    This is the dangerous direction. The other ways a tap can look inert risk an agent giving
+    up too early; this one risks it **repeating an action that already happened** — a second
+    submit, a second message, a second purchase attempt. So the engine cannot report
+    `unchanged` as a fact here: it genuinely cannot tell "no effect" from "not yet", and
+    saying which one it is would be a guess presented as evidence.
 
-        Deliberately conservative: only a *confirmed* transition (the wait saw the screen change
-        and then stop, without timing out) clears the caveat. A real in-screen no-op therefore
-        carries it too — correct, because the engine cannot distinguish that case either, and the
-        expensive mistake is the other direction.
-        """
+    Deliberately conservative: only a *confirmed* transition (the wait saw the screen change
+    and then stop, without timing out) clears the caveat. A real in-screen no-op therefore
+    carries it too — correct, because the engine cannot distinguish that case either, and the
+    expensive mistake is the other direction.
+    """
     if not settle:
         # No wait was performed, so there is nothing to be stale relative to; the caller
         # asked for a raw read.
@@ -1024,10 +1030,10 @@ def _stale_observation_risk(
 def _spend_stable_delay(self: Engine) -> int:
     """Sleep the configured post-action pause for the current action kind.
 
-        Deliberately blunt: a fixed pause the operator can sweep, rather than another
-        heuristic. Returns the milliseconds actually spent so a caller can attribute latency
-        to this knob instead of guessing at it.
-        """
+    Deliberately blunt: a fixed pause the operator can sweep, rather than another
+    heuristic. Returns the milliseconds actually spent so a caller can attribute latency
+    to this knob instead of guessing at it.
+    """
     from .perf import stable_delay_for
 
     delay_ms = stable_delay_for(self._last_action_kind, self.config)
@@ -1040,11 +1046,11 @@ def _spend_stable_delay(self: Engine) -> int:
 def _note_empty_observation(self: Engine, result: ActionResult) -> ActionResult:
     """Say so when the folded observation has nothing in it.
 
-        An action that reports ``ok`` while returning a screen with no visible elements sends
-        the caller away to wait for something that may already have arrived — which is how a
-        5s launch turned into a 42s wait downstream. Naming it costs one field and lets the
-        caller re-read instead of blocking.
-        """
+    An action that reports ``ok`` while returning a screen with no visible elements sends
+    the caller away to wait for something that may already have arrived — which is how a
+    5s launch turned into a 42s wait downstream. Naming it costs one field and lets the
+    caller re-read instead of blocking.
+    """
     obs = result.observation
     if obs is None:
         return result
@@ -1069,9 +1075,9 @@ def _await_post_action_ready(
 ) -> dict[str, Any]:
     """Wait for post-action content change, then pixel-idle (animation-aware).
 
-        Runs pixel settle and hierarchy double-sample in one loop so a Compose
-        transition that updates the tree early can return before pixels fully idle.
-        """
+    Runs pixel settle and hierarchy double-sample in one loop so a Compose
+    transition that updates the tree early can return before pixels fully idle.
+    """
     from . import imaging
 
     device = self.device
@@ -1080,9 +1086,7 @@ def _await_post_action_ready(
     self._pre_action_sig = None
     self._pre_action_tree_fp = None
     tree_device = (
-        self.platform.runtime_capability("ui.tree", device)
-        if pre_tree is not None
-        else device
+        self.platform.runtime_capability("ui.tree", device) if pre_tree is not None else device
     )
     try:
         screenshots = self.platform.adapter_capability("ui.screenshot")
@@ -1270,9 +1274,7 @@ def _observation_is_loading(self: Engine, observation: AnalyzeResult | None) -> 
         kind = (element.type or "").casefold()
         if kind.endswith("progressbar"):
             return True
-        label = " ".join(
-            value for value in (element.text, element.content_desc) if value
-        ).strip()
+        label = " ".join(value for value in (element.text, element.content_desc) if value).strip()
         if re.search(r"\b(?:loading|please wait)\b", label, re.IGNORECASE):
             return True
     return False
@@ -1297,15 +1299,20 @@ def _app_left_foreground(
 def _crash_evidence(self: Engine, app_id: str) -> dict[str, Any]:
     """Read and reduce the diagnostic window already opened before the failed action."""
     source = "device.logs"
+    if read_budget.current() is not None:
+        return {
+            "available": False,
+            "source": source,
+            "code": "wait_budget",
+            "detail": "Diagnostic enrichment is outside the bounded UI-read contract.",
+        }
     if not self.platform.supports(source):
         return {
             "available": False,
             "source": source,
             "app_id": app_id,
             "code": "platform_capability_unsupported",
-            "detail": (
-                f"platform {self.platform.name!r} does not support capability {source!r}"
-            ),
+            "detail": (f"platform {self.platform.name!r} does not support capability {source!r}"),
         }
 
     base: dict[str, Any] = {
@@ -1348,13 +1355,13 @@ def _crash_evidence(self: Engine, app_id: str) -> dict[str, Any]:
 def _app_logs(self: Engine, app_id: str) -> dict[str, Any] | None:
     """What *app_id* logged inside this action's own window, or None when it said nothing.
 
-        Reuses the ``last-action`` mark ``_acting`` already stamps before the device is touched,
-        so this costs one scoped dump and no extra bookkeeping. Returns None rather than an
-        "empty" structure for a quiet window: a field that appears on every action to say
-        nothing is a tax on every step of every flow, and measured on a real app most actions
-        are quiet — an idle window logged 0 lines and an ordinary tap 0 after filtering.
-        """
-    if not self.config.logs.enabled or not app_id:
+    Reuses the ``last-action`` mark ``_acting`` already stamps before the device is touched,
+    so this costs one scoped dump and no extra bookkeeping. Returns None rather than an
+    "empty" structure for a quiet window: a field that appears on every action to say
+    nothing is a tax on every step of every flow, and measured on a real app most actions
+    are quiet — an idle window logged 0 lines and an ordinary tap 0 after filtering.
+    """
+    if read_budget.current() is not None or not self.config.logs.enabled or not app_id:
         return None
     # Per-app first: what this app was told to keep or drop outranks the host-wide default,
     # and it is re-read per action on purpose — a preference another process just wrote (the
@@ -1408,14 +1415,16 @@ def _app_logs(self: Engine, app_id: str) -> dict[str, Any] | None:
     }
 
 
-def _change_summary(self: Engine, before: dict[str, Any] | None, obs: AnalyzeResult) -> dict[str, Any]:
+def _change_summary(
+    self: Engine, before: dict[str, Any] | None, obs: AnalyzeResult
+) -> dict[str, Any]:
     """Structured before/after deltas, with "nothing changed" stated rather than implied.
 
-        ``changed`` is an explicit boolean so a caller can branch on it without re-deriving the
-        answer from four other fields — and so "nothing changed" is machine-checkable, which is
-        the half that was missing. An unknown baseline is reported as ``None``, never as False:
-        "I could not compare" and "they are the same" are different claims.
-        """
+    ``changed`` is an explicit boolean so a caller can branch on it without re-deriving the
+    answer from four other fields — and so "nothing changed" is machine-checkable, which is
+    the half that was missing. An unknown baseline is reported as ``None``, never as False:
+    "I could not compare" and "they are the same" are different claims.
+    """
     # Not shortened. These become `change.text_added` / `text_removed`, which is the field a
     # caller reads to decide whether the action did what it was for — so a cut here lands in
     # the verdict itself. Saving a few dozen characters there is a false economy: the reader
@@ -1437,9 +1446,7 @@ def _change_summary(self: Engine, before: dict[str, Any] | None, obs: AnalyzeRes
     if context_after is not None:
         self._last_app_context = context_after
     activity_before = (
-        context_before
-        if isinstance(context_before, str)
-        else self._activity_string(context_before)
+        context_before if isinstance(context_before, str) else self._activity_string(context_before)
     )
     activity_after = self._activity_string(context_after)
 

@@ -17,10 +17,14 @@ import pytest
 
 from android_ui_analyser import leases
 from android_ui_analyser.config import Config
-from android_ui_analyser.errors import IncompatiblePlatformPluginError
-from android_ui_analyser.platforms import registry
+from android_ui_analyser.errors import (
+    IncompatiblePlatformPluginError,
+    UnsupportedPlatformCapabilityError,
+)
+from android_ui_analyser.platforms import ReadBudget, ReadDeadlineExceeded, registry
 from android_ui_analyser.platforms.conformance import (
     AttachedTargetCase,
+    PlatformConformanceError,
     run_attached_target_conformance,
 )
 from android_ui_analyser.platforms.identity import TargetRef
@@ -180,6 +184,8 @@ def test_real_entry_point_passes_the_external_attached_target_profile(
     assert ("send_text", ("aua conformance", True)) in runtime.events
     assert ("press", "fixture-back") in runtime.events
     assert any(name == "swipe" for name, _detail in runtime.events)
+    assert ("deadline_checked", "find_text") in runtime.events
+    assert ("read_deadline_exit", None) in runtime.events
     assert "engine-verified-swipe" in report.checks
     assert sum(name == "screenshot" for name, _detail in runtime.events) >= 2, (
         "the profile capture and Engine pre-action capture must both use the plugin"
@@ -188,6 +194,62 @@ def test_real_entry_point_passes_the_external_attached_target_profile(
         hasattr(runtime, name)
         for name in ("adb", "adb_reverse", "dumpsys", "logcat", "run_as", "shell")
     )
+
+
+def test_external_read_deadline_expires_and_restores_the_transport_free_scope(
+    tmp_path: Path,
+    external_plugins: None,
+) -> None:
+    adapter = registry.PlatformFactory(_config(tmp_path)).create()
+    runtime = adapter.connect("shared-target")
+    now = [0.0]
+    budget = ReadBudget(deadline=1.0, clock=lambda: now[0])
+    try:
+        with pytest.raises(ReadDeadlineExceeded), runtime.read_deadline(budget):
+            assert runtime.find_text("Continue") == (300, 20, 360, 60)
+            now[0] = 2.0
+            runtime.current_app()
+        # Scope exit restores normal reads; no expired budget or transport work leaks.
+        assert runtime.current_app().app_id == "org.example.conformance"
+    finally:
+        runtime.close()
+
+
+def test_external_adapter_without_deadline_refuses_wait_and_conformance_before_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    external_plugins: None,
+) -> None:
+    from android_ui_analyser.engine import Engine
+
+    config = _config(tmp_path)
+    adapter = registry.PlatformFactory(config).create()
+    runtime = adapter.connect("shared-target")
+    monkeypatch.setattr(type(adapter), "capabilities", adapter.capabilities - {"ui.read_deadline"})
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("unsupported deadline must not reconnect, read a target, or invoke Android")
+
+    monkeypatch.setattr(adapter, "connect", forbidden)
+    monkeypatch.setattr(runtime, "find_text", forbidden)
+    monkeypatch.setattr(registry, "_load_builtin", forbidden)
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    engine = Engine(config, device=runtime, platform=adapter)
+    engine._caller_latency_key = "platform-conformance"
+    try:
+        with pytest.raises(UnsupportedPlatformCapabilityError) as caught:
+            engine.wait(for_="Continue", timeout_ms=100, observe=False)
+        assert caught.value.code == "platform_capability_unsupported"
+        assert "ui.read_deadline" in caught.value.message
+        with pytest.raises(PlatformConformanceError, match="missing attached-target capabilities: ui.read_deadline"):
+            run_attached_target_conformance(
+                adapter,
+                AttachedTargetCase(target_id="shared-target", element_text="Continue",
+                                   expected_bounds=(300, 20, 360, 60)),
+            )
+    finally:
+        engine.close()
 
 
 def test_external_fixture_imports_plugin_contract_types_only_from_the_stable_facade() -> None:

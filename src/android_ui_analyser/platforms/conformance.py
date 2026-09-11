@@ -27,7 +27,9 @@ if TYPE_CHECKING:  # pragma: no cover - imports used only by type checkers
     from .base import PlatformAdapter
 
 
-ATTACHED_TARGET_CAPABILITIES = frozenset({"ui.tree", "ui.input", "ui.screenshot"})
+ATTACHED_TARGET_CAPABILITIES = frozenset(
+    {"ui.tree", "ui.input", "ui.screenshot", "ui.read_deadline"}
+)
 """Capabilities required by the API-v1 attached-target conformance profile."""
 
 _ANDROID_RUNTIME_MEMBERS = frozenset(

@@ -20,6 +20,7 @@ from copy import deepcopy
 from functools import wraps
 from typing import TYPE_CHECKING, Any
 
+from . import read_budget
 from .assertions import Selector, apply_structural_filters, check_contains_all, normalize_selector
 from .engine_support import (
     _AWAIT_PREFIXES,
@@ -77,6 +78,136 @@ def _image_output(method: Callable[..., ActionResult]) -> Callable[..., ActionRe
     return wrapped
 
 
+def _deadline_wait(method: Callable[..., ActionResult]) -> Callable[..., ActionResult]:
+    """One budget for probes and readback, with no lazy connection or detached device work."""
+    import inspect
+
+    default_ms = int(inspect.signature(method).parameters["timeout_ms"].default)
+
+    @wraps(method)
+    def wrapped(self: Engine, *args: Any, **kwargs: Any) -> ActionResult:
+        parsed_terms = None
+        if method.__name__ == "await_predicate":
+            predicate = args[0] if args else kwargs.get("predicate", "")
+            parsed_terms = _parse_await_terms(
+                predicate, require_positive=kwargs.get("adopt_action", False)
+            )
+        elif method.__name__ == "wait" and not kwargs.get("idle") and not kwargs.get("for_"):
+            raise UsageError("wait needs --for <text> or --idle")
+        if "match" in kwargs:
+            MatchMode(kwargs["match"])
+        self._start_call()
+        started = time.monotonic()
+        requested = kwargs.get("timeout_ms", default_ms)
+        timeout, clamped, ceiling = self._bounded_wait_ms(requested)
+        # Zero has historically meant one probe without polling. It still needs a bounded
+        # transport budget; report that budget explicitly instead of claiming zero wall time.
+        single_probe = requested == 0
+        io_budget_ms = ceiling if single_probe else timeout
+        device = self._device
+        if device is None:
+            raise UsageError(
+                "bounded waits require an already connected session runtime",
+                code="wait_runtime_not_ready",
+                hint="Start a session on the warm daemon or MCP server, then retry the wait.",
+            )
+        runtime = self.platform.runtime_capability("ui.read_deadline", device)
+        parent = read_budget.current()
+        deadline = started + max(0, io_budget_ms) / 1000.0
+        if parent is not None:
+            deadline = min(deadline, parent.deadline)
+        io_budget_ms = max(0, round((deadline - started) * 1000))
+        cancel = self._current_job_cancel_event()
+        budget = read_budget.ReadBudget(
+            deadline, time.monotonic, cancel.is_set if cancel is not None else lambda: False
+        )
+        if parsed_terms is not None:
+            budget.terms = [
+                {"term": term.text, "present": False, "satisfied": False} for term in parsed_terms
+            ]
+        reserve = (
+            min(1.0, max(0, io_budget_ms) / 4000.0)
+            if kwargs.get("observe") and not single_probe
+            else 0.0
+        )
+        budget.polling_deadline = deadline - reserve
+        if parent is not None and parent.polling_deadline is not None:
+            budget.polling_deadline = min(budget.polling_deadline, parent.polling_deadline)
+        with contextlib.ExitStack() as scope:
+            try:
+                scope.enter_context(runtime.read_deadline(budget))
+                budget.check()
+                result = method(self, *args, **kwargs)
+                if budget.cancelled():
+                    raise JobCancelledError("background wait cancelled")
+                if budget.result is None:
+                    budget.check()  # a predicate completed after its deadline cannot pass
+                result.elapsed_ms = int((time.monotonic() - started) * 1000)
+                result.wait_budget_ms = io_budget_ms
+                if single_probe:
+                    result.note = (
+                        (result.note or "")
+                        + f" timeout_ms=0 requested one probe without polling; its read/readback budget was {io_budget_ms}ms."
+                    )
+                return result
+            except read_budget.ReadDeadlineExceeded:
+                # No fresh final observation was completed. Never borrow the previous call's
+                # observation and present it as evidence for this wait.
+                action = method.__name__.replace("_", "-")
+                if method.__name__ in {"wait_stable", "wait_changed"}:
+                    self._journal_wait_gave_up(
+                        action, f"{action} reached its {timeout}ms read deadline"
+                    )
+                    raise StabilityTimeout(
+                        f"{action} reached its {timeout}ms read deadline",
+                        hint=self._hint_for_a_shortened_wait(
+                            "The screen did not satisfy the wait before the deadline.",
+                            clamped,
+                            ceiling,
+                        ),
+                    ) from None
+                detail = f"wait timed out after {timeout}ms; predicate was not proved before the deadline"
+                if method.__name__ == "wait_after_change":
+                    detail = f"still moving after {timeout}ms — returning without unproved settle evidence"
+                if budget.terms:
+                    unmet = [str(term["term"]) for term in budget.terms if not term["satisfied"]]
+                    detail += "; unmet: " + ", ".join(unmet)
+                if method.__name__ == "wait" and kwargs.get("for_"):
+                    needle, by, absent = _parse_wait_for_predicate(
+                        kwargs["for_"],
+                        by=kwargs.get("by", "text"),
+                        absent=kwargs.get("absent", False),
+                    )
+                    detail = self._wait_timeout_message(
+                        needle,
+                        mode=MatchMode(kwargs.get("match", "contains")),
+                        by=by,
+                        ignore_case=kwargs.get("ignore_case", False),
+                        absent=absent,
+                        inspect_screen=False,
+                    )
+                if budget.locale_hint:
+                    detail += " — " + budget.locale_hint
+                result = ActionResult(
+                    ok=method.__name__ == "wait_after_change",
+                    action="await" if method.__name__ == "await_predicate" else action,
+                    detail=detail,
+                    await_outcome="timeout" if method.__name__ == "await_predicate" else None,
+                    await_terms=budget.terms or None,
+                    elapsed_ms=int((time.monotonic() - started) * 1000),
+                    wait_budget_ms=io_budget_ms,
+                    settled_unmet=True if method.__name__ == "wait_after_change" else None,
+                    observation_present=False,
+                    note="Final observation omitted because the shared wait budget was exhausted.",
+                )
+                self._pending_wait_clamp = None
+                return self._finalize_observed_action(
+                    self._say_the_wait_was_shortened(result, clamped, ceiling)
+                )
+
+    return wrapped
+
+
 _LOCALE_CANDIDATE_CAP = 3  # translated-label retries per text miss (generic labels fan out)
 
 
@@ -127,6 +258,9 @@ def _job_checkpoint(self: Engine) -> None:
     event = self._current_job_cancel_event()
     if event is not None and event.is_set():
         raise JobCancelledError("background wait cancelled")
+    budget = read_budget.current()
+    if budget is not None:
+        budget.check()
 
 
 def _wait_input_runtime(self: Engine, device: Device) -> Device:
@@ -154,6 +288,9 @@ def _current_job_cancel_event(self: Engine) -> threading.Event | None:
 
 def _job_sleep(self: Engine, seconds: float) -> None:
     """Sleep interruptibly when this Engine is executing a background job."""
+    budget = read_budget.current()
+    if budget is not None:
+        seconds = min(seconds, budget.remaining())
     event = self._current_job_cancel_event()
     if event is None:
         time.sleep(seconds)
@@ -193,6 +330,7 @@ def job_list(self: Engine, **_kwargs: Any) -> None:
 
 
 @_image_output
+@_deadline_wait
 def wait_stable(
     self: Engine,
     *,
@@ -224,7 +362,7 @@ def wait_stable(
     self._start_call()
     device = self.device
     timeout_ms, clamped_from, ceiling_ms = self._bounded_wait_ms(timeout_ms)
-    deadline = time.monotonic() + timeout_ms / 1000.0
+    deadline = read_budget.poll_deadline(time.monotonic() + timeout_ms / 1000.0)
     samples = 0
 
     if ignore_animation:
@@ -573,29 +711,34 @@ def _wait_for_any(
     by: str,
 ) -> tuple[tuple[int, int, int, int] | None, tuple[str, str, str] | None]:
     """Poll for *text* or any known translated rendering; report which one matched."""
-    if not candidates:
+    if not candidates and read_budget.current() is None:
         return (
             _wait_input_runtime(self, device).wait_for(
                 text, match=mode, ignore_case=ignore_case, timeout_ms=timeout_ms, by=by
             ),
             None,
         )
-    deadline = time.monotonic() + timeout_ms / 1000.0
+    deadline = read_budget.poll_deadline(time.monotonic() + timeout_ms / 1000.0)
     while True:
+        self._job_checkpoint()
         bounds = _wait_input_runtime(self, device).find_text(
             text, match=mode, ignore_case=ignore_case, by=by
         )
+        self._job_checkpoint()
         if bounds is not None:
             return bounds, None
         for cand in candidates:
             bounds = _wait_input_runtime(self, device).find_text(
                 cand[0], match=mode, ignore_case=ignore_case, by=by
             )
+            self._job_checkpoint()
             if bounds is not None:
                 return bounds, cand
         if time.monotonic() >= deadline:
             return None, None
         self._sleep_between_polls(200.0, deadline)
+        if time.monotonic() >= deadline:
+            return None, None
 
 
 def _ocr_contains(
@@ -821,6 +964,7 @@ def _await_terms_on_observation(
     *,
     mode: MatchMode,
     ignore_case: bool,
+    require_visual_absence: bool = False,
 ) -> list[dict[str, Any]]:
     """Evaluate UI terms against one exact hierarchy frame.
 
@@ -868,6 +1012,12 @@ def _await_terms_on_observation(
                 "satisfied": (not present) if term.negated else present,
             }
         )
+        if require_visual_absence and term.negated and term.by in {"text", "desc"} and not present:
+            refreshed[-1].update(
+                satisfied=False,
+                evidence="unconfirmed",
+                reason="visual_absence_not_verified_in_destination",
+            )
     return refreshed
 
 
@@ -1009,6 +1159,7 @@ def _sample_action_destination(self: Engine) -> AnalyzeResult | None:
 
 
 @_image_output
+@_deadline_wait
 def await_predicate(
     self: Engine,
     predicate: str,
@@ -1067,6 +1218,9 @@ def await_predicate(
     self._pending_wait_clamp = (_await_clamped_from, _await_ceiling)
 
     terms = _parse_await_terms(predicate, require_positive=adopt_action)
+    budget = read_budget.current()
+    if budget is not None:
+        budget.terms = [{"term": term.text, "present": False, "satisfied": False} for term in terms]
     device = self.device
     # Diagnostic/network-only waits do not need an accessibility hierarchy. A platform may
     # legitimately expose normalized logs for an attached target before it implements UI
@@ -1174,6 +1328,19 @@ def await_predicate(
                     "satisfied": (not present) if term.negated else present,
                 }
             )
+            self._job_checkpoint()
+        if budget is not None:
+            budget.terms = [
+                {**row, "satisfied": False, "evidence": "unconfirmed"}
+                if term.negated
+                and term.by in {"text", "desc"}
+                and row["satisfied"]
+                and rich_ui
+                and self.config.ocr.enabled
+                and self.config.ocr.augment_hierarchy
+                else row
+                for term, row in zip(terms, out, strict=True)
+            ]
         return out
 
     ui_terms = [term for term in terms if term.by in {"text", "desc"}]
@@ -1191,6 +1358,15 @@ def await_predicate(
         try:
             observed = self.analyze(source="hierarchy", with_ocr=True, record=False)
         except Exception:  # noqa: BLE001 - unavailable OCR preserves hierarchy semantics
+            if budget is not None and self.config.ocr.enabled and self.config.ocr.augment_hierarchy:
+                unconfirmed = [
+                    {**row, "satisfied": False, "evidence": "unconfirmed"}
+                    if term.negated and term.by in {"text", "desc"}
+                    else row
+                    for term, row in zip(terms, results, strict=True)
+                ]
+                budget.terms = unconfirmed
+                return unconfirmed
             return None
         base_present = {str(result["term"]): bool(result["present"]) for result in results}
 
@@ -1229,6 +1405,22 @@ def await_predicate(
                     "satisfied": (not present) if term.negated else present,
                 }
             )
+            if (
+                budget is not None
+                and term.negated
+                and term.by in {"text", "desc"}
+                and not present
+                and self.config.ocr.enabled
+                and self.config.ocr.augment_hierarchy
+                and not observed.meta.providers_used
+            ):
+                rich[-1].update(
+                    satisfied=False,
+                    evidence="unconfirmed",
+                    reason="visual_evidence_unavailable_within_budget",
+                )
+        if budget is not None:
+            budget.terms = rich
         return rich
 
     started_at = time.monotonic()
@@ -1238,8 +1430,9 @@ def await_predicate(
     # primitive take 31s. Package boundaries are verified from that observation by
     # `back_until`, so omit redundant activity RPCs on this private fast path.
     origin = ("", "") if hierarchy_only else snapshot()
-    deadline = started_at + max(0.0, timeout_ms / 1000.0)
+    deadline = read_budget.poll_deadline(started_at + max(0.0, timeout_ms / 1000.0))
     next_negative_rich_at = started_at
+    next_positive_rich_at = started_at
     negative_ui_terms = any(term.negated for term in ui_terms)
     checks = 0
     self._job_checkpoint()
@@ -1280,6 +1473,34 @@ def await_predicate(
                         capture_terms=terms,
                     )
                 results = rich
+        if (
+            budget is not None
+            and rich_ui
+            and any(
+                not term.negated and term.by in {"text", "desc"} and not row["satisfied"]
+                for term, row in zip(terms, results, strict=True)
+            )
+            and time.monotonic() >= next_positive_rich_at
+        ):
+            # A positive canvas label needs OCR *before* the deadline. Deferring this
+            # until the polling loop expires would make a bounded rich attempt unreachable.
+            rich = evaluate_rich()
+            next_positive_rich_at = time.monotonic() + max(2.0, poll_ms / 250.0)
+            if rich is not None:
+                results = rich
+                if all(term["satisfied"] for term in rich):
+                    return self._await_result(
+                        held_outcome,
+                        rich,
+                        started_at,
+                        checks,
+                        origin,
+                        origin,
+                        observe,
+                        adopt_action,
+                        hierarchy_only=hierarchy_only,
+                        capture_terms=terms,
+                    )
         if detect_arrival_mismatch:
             destination = self._sample_action_destination()
             if destination is not None:
@@ -1289,6 +1510,12 @@ def await_predicate(
                     destination,
                     mode=mode,
                     ignore_case=ignore_case,
+                    require_visual_absence=bool(
+                        budget is not None
+                        and rich_ui
+                        and self.config.ocr.enabled
+                        and self.config.ocr.augment_hierarchy
+                    ),
                 )
                 if all(term["satisfied"] for term in destination_terms):
                     return self._await_result(
@@ -1376,7 +1603,7 @@ def await_predicate(
                 else:
                     stable_destination_identity = None
                     stable_destination_checks = 0
-        now = origin if hierarchy_only else snapshot()
+        now = origin if hierarchy_only or time.monotonic() >= deadline else snapshot()
         if now != origin and any(now):
             return self._await_result(
                 "screen-changed",
@@ -1391,23 +1618,9 @@ def await_predicate(
                 capture_terms=terms,
             )
         if time.monotonic() >= deadline:
-            rich = evaluate_rich()
-            if rich is not None and all(term["satisfied"] for term in rich):
-                return self._await_result(
-                    held_outcome,
-                    rich,
-                    started_at,
-                    checks,
-                    origin,
-                    origin,
-                    observe,
-                    adopt_action,
-                    hierarchy_only=hierarchy_only,
-                    capture_terms=terms,
-                )
             return self._await_result(
                 "timeout",
-                results,
+                budget.terms if budget is not None else results,
                 started_at,
                 checks,
                 origin,
@@ -1418,7 +1631,8 @@ def await_predicate(
                 capture_terms=terms,
             )
         self._sleep_between_polls(max(10.0, float(poll_ms)), deadline)
-        results = evaluate()
+        if time.monotonic() < deadline:
+            results = evaluate()
 
 
 def _unknown_map_selectors(self: Engine, unmet: list[str], package: str) -> list[dict[str, Any]]:
@@ -1519,7 +1733,11 @@ def _await_result(
         and capture_terms
     ):
         memory = self._memory
-        if memory is not None and self._join_memory_writers(timeout_s=5.0):
+        budget = read_budget.current()
+        join_timeout = (
+            min(5.0, max(0.0, budget.deadline - budget.clock())) if budget is not None else 5.0
+        )
+        if memory is not None and self._join_memory_writers(timeout_s=join_timeout):
             with contextlib.suppress(Exception):
                 memory.record_action_arrival(
                     self.device.serial,
@@ -1553,6 +1771,7 @@ def _await_result(
 
 
 @_image_output
+@_deadline_wait
 def wait(
     self: Engine,
     *,
@@ -1589,15 +1808,21 @@ def wait(
     for_, by, absent = _parse_wait_for_predicate(for_, by=by, absent=absent)
     mode = MatchMode(match)
     candidates = self._locale_candidates(device, for_, by)
+    budget = read_budget.current()
+    if budget is not None and candidates:
+        budget.locale_hint = "expected rendering: " + "; ".join(
+            self._translated_hint(label, locale, key, for_) for label, locale, key in candidates
+        )
     if absent:
         # Wait until the target is NO LONGER present (loading spinners, transient
         # dialogs) — Maestro's `notVisible`. ok=True once it's gone. Known translated
         # renderings count as present too, else a source-language spinner label
         # reports gone while its device-locale rendering is still on screen.
         probes = [for_] + [c for c, _, _ in candidates]
-        deadline = time.monotonic() + timeout_ms / 1000.0
+        deadline = read_budget.poll_deadline(time.monotonic() + timeout_ms / 1000.0)
         gone = False
         while True:
+            self._job_checkpoint()
             if all(
                 _wait_input_runtime(self, device).find_text(
                     p, match=mode, ignore_case=ignore_case, by=by
@@ -1605,11 +1830,14 @@ def wait(
                 is None
                 for p in probes
             ):
+                self._job_checkpoint()
                 gone = True
                 break
             if time.monotonic() >= deadline:
                 break
             self._sleep_between_polls(200.0, deadline)
+            if time.monotonic() >= deadline:
+                break
         if not gone:
             detail = self._wait_timeout_message(
                 for_, mode=mode, by=by, ignore_case=ignore_case, absent=True
@@ -1704,6 +1932,7 @@ def hierarchy_fingerprint(self: Engine, *, background: bool = False) -> str | No
 
 
 @_image_output
+@_deadline_wait
 def wait_changed(
     self: Engine,
     *,
@@ -1724,7 +1953,7 @@ def wait_changed(
     interval = interval_ms if interval_ms is not None else int(self.config.daemon.watch_interval_ms)
     baseline = self.hierarchy_fingerprint()
     timeout_ms, clamped_from, ceiling_ms = self._bounded_wait_ms(timeout_ms)
-    deadline = time.monotonic() + timeout_ms / 1000.0
+    deadline = read_budget.poll_deadline(time.monotonic() + timeout_ms / 1000.0)
     samples = 0
     while time.monotonic() < deadline:
         self._sleep_between_polls(max(50.0, float(interval)), deadline)
@@ -1763,6 +1992,7 @@ def wait_changed(
 
 
 @_image_output
+@_deadline_wait
 def wait_after_change(
     self: Engine,
     *,
@@ -1787,7 +2017,7 @@ def wait_after_change(
     """
     timeout_ms, clamped_from, ceiling = self._bounded_wait_ms(timeout_ms)
     started = self._start_call()
-    deadline = started + max(0.0, timeout_ms / 1000.0)
+    deadline = read_budget.poll_deadline(started + max(0.0, timeout_ms / 1000.0))
 
     def remaining_ms() -> int:
         return max(1, int((deadline - time.monotonic()) * 1000))
@@ -1897,6 +2127,7 @@ def _wait_timeout_message(
     by: str,
     ignore_case: bool,
     absent: bool,
+    inspect_screen: bool = True,
 ) -> str:
     """Rich timeout diagnosis — mode, fields, candidates, accidental-regex hint."""
     field = {"text": "text", "id": "resource-id", "desc": "content-desc"}.get(by, by)
@@ -1913,6 +2144,11 @@ def _wait_timeout_message(
             f"hint: pattern looks like regex but --match is '{mode.value}' "
             f"(matched literally as a substring). Use --match regex."
         )
+    budget = read_budget.current()
+    if budget is not None and budget.locale_hint:
+        parts.append(budget.locale_hint)
+    if not inspect_screen or budget is not None:
+        return " — ".join(parts)
     # A label written in another language than the device renders never matches.
     if not absent:
         locale_part = self._text_miss_hint(self.device, by, needle, tried_translations=True)

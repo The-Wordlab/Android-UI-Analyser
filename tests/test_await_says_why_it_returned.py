@@ -125,13 +125,16 @@ def test_a_timeout_names_the_terms_that_never_held(tmp_path: Path) -> None:
     dev = ScriptedScreens(frames=[{"Generating"}])
     eng = _engine(tmp_path, dev)
 
-    out = eng.await_predicate("text:Result ready,!text:Generating", timeout_ms=30, poll_ms=1)
+    # These scripted frames advance on reads, not time. One bounded probe tests term
+    # evidence without requiring the host scheduler to run two reads inside 30ms.
+    out = eng.await_predicate("text:Result ready,!text:Generating", timeout_ms=0, poll_ms=1)
 
     assert out.ok is False
     assert out.await_outcome == "timeout"
     unmet = [t["term"] for t in out.await_terms or [] if not t["satisfied"]]
     assert unmet == ["text:Result ready", "!text:Generating"]
     assert "unmet" in (out.detail or "")
+    assert dev.polls == 2
 
 
 def test_a_partly_satisfied_timeout_reads_as_a_failed_load(tmp_path: Path) -> None:
@@ -139,12 +142,13 @@ def test_a_partly_satisfied_timeout_reads_as_a_failed_load(tmp_path: Path) -> No
     dev = ScriptedScreens(frames=[{"Generating"}, set()])
     eng = _engine(tmp_path, dev)
 
-    out = eng.await_predicate("text:Result ready,!text:Generating", timeout_ms=40, poll_ms=1)
+    out = eng.await_predicate("text:Result ready,!text:Generating", timeout_ms=0, poll_ms=1)
 
     assert out.await_outcome == "timeout"
     by_term = {t["term"]: t["satisfied"] for t in out.await_terms or []}
     assert by_term["!text:Generating"] is True, "the spinner did go away"
     assert by_term["text:Result ready"] is False, "and nothing arrived — a failed load"
+    assert dev.polls == 2
 
 
 def test_the_screen_moving_underneath_is_its_own_outcome(tmp_path: Path) -> None:

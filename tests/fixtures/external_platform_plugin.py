@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import io
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from typing import Any
 
 from PIL import Image
@@ -24,9 +25,11 @@ from android_ui_analyser.platforms import (
     MatchMode,
     NormalizedTree,
     PlatformAdapter,
+    ReadBudget,
     ScreenImage,
     TargetInfo,
     TargetRuntime,
+    activate_read_budget,
 )
 
 TARGET_ID = "shared-target"
@@ -50,6 +53,7 @@ class StrictExternalRuntime(TargetRuntime):
         self.events: list[tuple[str, object]] = []
         self.closed = False
         self._scroll_offset = 0.0
+        self._read_budget: ReadBudget | None = None
         self._image = _png()
         self._geometry = DisplayGeometry(
             native_size=(100.0, 200.0),
@@ -58,13 +62,35 @@ class StrictExternalRuntime(TargetRuntime):
             native_to_canonical=(0.0, 2.0, -2.0, 0.0, 400.0, 0.0),
         )
 
+    @contextmanager
+    def read_deadline(self, budget: ReadBudget) -> Iterator[None]:
+        # All fixture reads are in-memory. Real plugin transports must additionally
+        # cancel their own I/O before the shared absolute deadline expires.
+        previous = self._read_budget
+        self._read_budget = budget
+        self.events.append(("read_deadline", budget.deadline))
+        try:
+            with activate_read_budget(budget):
+                yield
+        finally:
+            self._read_budget = previous
+            self.events.append(("read_deadline_exit", None))
+
+    def _check_read(self, operation: str) -> None:
+        if self._read_budget is not None:
+            self._read_budget.check()
+            self.events.append(("deadline_checked", operation))
+
     def window_size(self) -> tuple[int, int]:
+        self._check_read("window_size")
         return self._geometry.canonical_size
 
     def display_geometry(self) -> DisplayGeometry:
+        self._check_read("display_geometry")
         return self._geometry
 
     def dump_hierarchy(self, compressed: bool = False) -> str:
+        self._check_read("dump_hierarchy")
         self.events.append(("dump_hierarchy", compressed))
         return json.dumps(
             {
@@ -100,10 +126,12 @@ class StrictExternalRuntime(TargetRuntime):
         )
 
     def screenshot(self) -> ScreenImage:
+        self._check_read("screenshot")
         self.events.append(("screenshot", None))
         return ScreenImage(self._image, width=400, height=200)
 
     def current_app(self) -> AppContext:
+        self._check_read("current_app")
         return AppContext(app_id=APP_ID, surface_id="main")
 
     def click(self, x: int, y: int) -> None:
@@ -156,6 +184,7 @@ class StrictExternalRuntime(TargetRuntime):
         ignore_case: bool = False,
         by: str = "text",
     ) -> Bounds | None:
+        self._check_read("find_text")
         if by != "text":
             return None
         candidate = "Continue"
@@ -172,7 +201,7 @@ class StrictExternalRuntime(TargetRuntime):
 
 class StrictExternalPlatform(PlatformAdapter):
     platform_api_version = PLATFORM_API_VERSION
-    capabilities = frozenset({"ui.tree", "ui.input", "ui.screenshot"})
+    capabilities = frozenset({"ui.tree", "ui.input", "ui.screenshot", "ui.read_deadline"})
     last_runtime: StrictExternalRuntime | None = None
 
     def validate_options(self, options: Mapping[str, Any]) -> Mapping[str, Any]:

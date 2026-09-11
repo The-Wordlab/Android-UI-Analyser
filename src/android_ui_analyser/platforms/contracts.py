@@ -52,6 +52,7 @@ def _spec(
 # Per-target operations. The runtime is deliberately split into focused surfaces so a platform
 # can ship hierarchy/input first and explicitly refuse features it cannot support.
 RUNTIME_CAPABILITIES: dict[str, CapabilitySpec] = {
+    "ui.read_deadline": _spec("ui.read_deadline", CapabilityScope.RUNTIME, "read_deadline"),
     "ui.tree": _spec(
         "ui.tree",
         CapabilityScope.RUNTIME,
@@ -90,9 +91,7 @@ RUNTIME_CAPABILITIES: dict[str, CapabilitySpec] = {
         "write_app_file",
         "remove_app_files",
     ),
-    "app.links": _spec(
-        "app.links", CapabilityScope.RUNTIME, "open_link", "query_uri_handlers"
-    ),
+    "app.links": _spec("app.links", CapabilityScope.RUNTIME, "open_link", "query_uri_handlers"),
     "device.keyboard": _spec(
         "device.keyboard",
         CapabilityScope.RUNTIME,
@@ -131,10 +130,14 @@ RUNTIME_CAPABILITIES: dict[str, CapabilitySpec] = {
         "discard_recording",
     ),
     "device.recording.recovery": _spec(
-        "device.recording.recovery", CapabilityScope.RUNTIME, "archive_stale_recording",
+        "device.recording.recovery",
+        CapabilityScope.RUNTIME,
+        "archive_stale_recording",
     ),
     "device.recording.timeline": _spec(
-        "device.recording.timeline", CapabilityScope.RUNTIME, "recording_metadata",
+        "device.recording.timeline",
+        CapabilityScope.RUNTIME,
+        "recording_metadata",
     ),
     "device.clock": _spec(
         "device.clock",
@@ -143,9 +146,7 @@ RUNTIME_CAPABILITIES: dict[str, CapabilitySpec] = {
         "get_clock_ms",
         "utc_offset_minutes",
     ),
-    "device.accessibility": _spec(
-        "device.accessibility", CapabilityScope.RUNTIME, "a11y_action"
-    ),
+    "device.accessibility": _spec("device.accessibility", CapabilityScope.RUNTIME, "a11y_action"),
     "device.touch": _spec(
         "device.touch", CapabilityScope.RUNTIME, "click_once", "touch_down", "touch_up"
     ),
@@ -156,22 +157,16 @@ RUNTIME_CAPABILITIES: dict[str, CapabilitySpec] = {
         "reverse_port",
         "remove_reverse_port",
     ),
-    "device.shell": _spec(
-        "device.shell", CapabilityScope.RUNTIME, "run_read_only_shell"
-    ),
+    "device.shell": _spec("device.shell", CapabilityScope.RUNTIME, "run_read_only_shell"),
 }
 
 
 # Operations implemented by the adapter itself rather than its connected runtime.
 ADAPTER_CAPABILITIES: dict[str, CapabilitySpec] = {
-    "ui.screenshot": _spec(
-        "ui.screenshot", CapabilityScope.ADAPTER, "capture_screenshot"
-    ),
+    "ui.screenshot": _spec("ui.screenshot", CapabilityScope.ADAPTER, "capture_screenshot"),
     # A watcher's view of a target it does not drive: no runtime is connected, nothing is
     # installed or started on the target, and an agent's automation session is left alone.
-    "ui.peek": _spec(
-        "ui.peek", CapabilityScope.ADAPTER, "peek_foreground_app", "peek_screenshot"
-    ),
+    "ui.peek": _spec("ui.peek", CapabilityScope.ADAPTER, "peek_foreground_app", "peek_screenshot"),
     "app.status": _spec("app.status", CapabilityScope.ADAPTER, "installed_app"),
     "app.install": _spec(
         "app.install",

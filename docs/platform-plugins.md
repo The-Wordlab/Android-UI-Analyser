@@ -75,13 +75,14 @@ names the missing identity proof; `--force` does not authorize a different endpo
 An adapter that passes the API-v1 attached-target profile declares:
 
 ```python
-capabilities = frozenset({"ui.tree", "ui.input", "ui.screenshot"})
+capabilities = frozenset({"ui.tree", "ui.input", "ui.screenshot", "ui.read_deadline"})
 ```
 
 Its minimum shape is:
 
 ```python
 from collections.abc import Mapping, Sequence
+from contextlib import AbstractContextManager
 
 from android_ui_analyser.platforms import (
     AppContext,
@@ -90,6 +91,7 @@ from android_ui_analyser.platforms import (
     NormalizedTree,
     PLATFORM_API_VERSION,
     PlatformAdapter,
+    ReadBudget,
     ScreenImage,
     TargetInfo,
     TargetRuntime,
@@ -104,6 +106,7 @@ class IOSRuntime(TargetRuntime):
     def dump_hierarchy(self, compressed: bool = False) -> str: ...
     def screenshot(self) -> ScreenImage: ...
     def current_app(self) -> AppContext: ...
+    def read_deadline(self, budget: ReadBudget) -> AbstractContextManager[None]: ...
 
     # All coordinates received or returned here are canonical screenshot pixels.
     def click(self, x: int, y: int) -> None: ...
@@ -120,7 +123,7 @@ class IOSRuntime(TargetRuntime):
 
 class IOSPlatform(PlatformAdapter):
     platform_api_version = PLATFORM_API_VERSION
-    capabilities = frozenset({"ui.tree", "ui.input", "ui.screenshot"})
+    capabilities = frozenset({"ui.tree", "ui.input", "ui.screenshot", "ui.read_deadline"})
 
     def validate_options(self, options: Mapping[str, object]): ...
 
@@ -191,7 +194,7 @@ Complete structural specifications live in `platforms/contracts.py` and
 
 | Scope | Capability names |
 | --- | --- |
-| Runtime | `ui.tree`, `ui.input`, `app.lifecycle`, `app.files`, `app.links`, `device.keyboard`, `device.clipboard`, `device.location`, `device.orientation`, `device.airplane`, `device.media`, `device.recording`, `device.clock`, `device.accessibility`, `device.touch`, `device.proxy`, `device.shell` |
+| Runtime | `ui.tree`, `ui.input`, `ui.read_deadline`, `app.lifecycle`, `app.files`, `app.links`, `device.keyboard`, `device.clipboard`, `device.location`, `device.orientation`, `device.airplane`, `device.media`, `device.recording`, `device.clock`, `device.accessibility`, `device.touch`, `device.proxy`, `device.shell` |
 | Adapter | `ui.screenshot`, `ui.peek`, `app.status`, `app.install`, `device.logs` |
 | Service | `app_database`, `developer_settings`, `device_agent`, `feature_flags`, `microphone`, `network`, `network_profiles`, `proxy`, `target_supervision`, `virtual_targets`, `webview` |
 
@@ -215,6 +218,22 @@ attaching an automation session. Implement it with the platform's cheapest read-
 
 Native framework imports belong inside the selected adapter/runtime/service modules. Do not put
 them in the Engine, CLI, MCP server, daemon, dashboard, or generic state modules.
+
+`ui.read_deadline` supplies the runtime's `read_deadline(budget)` context manager for bounded
+waits. It activates the shared `ReadBudget` and bounds every synchronous read, including the
+final observation, to its absolute monotonic deadline. Transport timeouts must use the remaining
+budget; scope exit must cancel and join any owned transport work. A deadline must not trigger a
+reconnection, automation restart, replayed mutation, or device worker that continues after return.
+Import `ReadBudget`, `ReadDeadlineExceeded`, and `activate_read_budget` from the stable
+`android_ui_analyser.platforms` facade. The runtime enters `activate_read_budget(budget)` inside
+its `read_deadline` implementation, applies `budget.remaining()` to transport I/O, and calls
+`budget.check()` before returning a read. Merely activating the context does not bound a blocking
+transport: adapters must enforce and cancel their own I/O within that remaining time.
+Both CLI and MCP use this Engine path. A cold runtime returns `wait_runtime_not_ready`, and an
+adapter without this capability returns `platform_capability_unsupported`; neither falls back to Android.
+The built-in Android runtime uses a single read-only RPC attempt on its existing connection and
+bounded subprocess reads. Scheduler, journal, and transport cleanup overhead still apply, so this
+is an I/O deadline rather than a hard real-time guarantee.
 
 `target_supervision` is optional lifecycle metadata for dashboard observability. Its
 `target_supervision_status(target_id, cache_dir=...)` operation returns a
@@ -275,9 +294,13 @@ report = run_attached_target_conformance(
 Use a deterministic fake or disposable prepared screen: the profile intentionally taps the center
 of the named element. It verifies API version and capability declarations, discovery/connection,
 absence of Android transport conveniences, canonical geometry, screenshot dimensions, hierarchy
-normalization through the Engine, Engine-routed tap and wait, requested text/key/verified-swipe
+normalization through the Engine, Engine-routed tap and bounded wait, requested text/key/verified-swipe
 checks, and a typed refusal for one omitted optional capability. The connected runtime is closed
 before the report is returned.
+
+The profile requires `ui.read_deadline` because it exercises bounded waiting; adapters may omit
+that optional capability elsewhere, in which case waits refuse explicitly. Profile validation
+reports a missing declaration before connecting or sending its prepared tap.
 
 An adapter that passes this profile has proved the attached UI/input foundation. It has not proved
 every AUA feature or every process boundary: add focused tests for each optional runtime, adapter,

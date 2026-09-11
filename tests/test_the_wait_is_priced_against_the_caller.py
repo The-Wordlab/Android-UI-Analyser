@@ -516,7 +516,7 @@ class TestAbsenceIsHonestButNotArrival:
         cfg = make_config(memory={"dir": str(tmp_path / "home")}, daemon={"enabled": False})
         eng = Engine(cfg, device=dev, factory=ProviderFactory(cfg))
 
-        out = eng.await_predicate("!text:Start", timeout_ms=5, poll_ms=1, observe=False)
+        out = eng.await_predicate("!text:Start", timeout_ms=0, poll_ms=1, observe=False)
 
         assert out.await_outcome == "absence-satisfied"
         assert out.ok, "the wait did what it was asked to; the caveat is not a failure"
@@ -529,7 +529,7 @@ class TestAbsenceIsHonestButNotArrival:
         cfg = make_config(memory={"dir": str(tmp_path / "home")}, daemon={"enabled": False})
         eng = Engine(cfg, device=dev, factory=ProviderFactory(cfg))
 
-        out = eng.await_predicate("text:Allow notifications", timeout_ms=5, poll_ms=1)
+        out = eng.await_predicate("text:Allow notifications", timeout_ms=0, poll_ms=1)
 
         assert out.await_outcome == "satisfied"
 
@@ -542,7 +542,7 @@ class TestAbsenceIsHonestButNotArrival:
         eng = Engine(cfg, device=dev, factory=ProviderFactory(cfg))
 
         out = eng.await_predicate(
-            "text:Allow notifications,!text:Start", timeout_ms=5, poll_ms=1, observe=False
+            "text:Allow notifications,!text:Start", timeout_ms=0, poll_ms=1, observe=False
         )
 
         assert out.await_outcome == "satisfied"

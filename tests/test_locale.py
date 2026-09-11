@@ -322,7 +322,7 @@ def test_wait_bridges_locale() -> None:
 
 def test_wait_miss_names_expected_rendering() -> None:
     engine = engine_with_strings("es-ES")
-    res = engine.wait(for_="Edit basket", timeout_ms=1)
+    res = engine.wait(for_="Edit basket", timeout_ms=0)
     assert res.ok is False
     assert res.detail is not None and "Editar cesta" in res.detail
 

@@ -1,6 +1,8 @@
 """Pluggable platform strategies used by the AUA engine."""
 
 from ..providers.base import Bounds, ScreenImage
+from ..read_budget import ReadBudget, ReadDeadlineExceeded
+from ..read_budget import activate as activate_read_budget
 from ..schema import AppContext, DeviceInfo, Element, MatchMode, ShellResult, TargetInfo
 from .base import AppBundle, DiscoveredTarget, InstalledApp, NormalizedTree, PlatformAdapter
 from .conformance import (
@@ -115,6 +117,8 @@ __all__ = [
     "PlatformConformanceError",
     "PlatformFactory",
     "RUNTIME_CAPABILITIES",
+    "ReadBudget",
+    "ReadDeadlineExceeded",
     "ScreenImage",
     "ShellResult",
     "TARGET_SUPERVISION",
@@ -144,6 +148,7 @@ __all__ = [
     "VirtualTargetStopRequest",
     "VirtualTargetStopResult",
     "available_platforms",
+    "activate_read_budget",
     "app_ref",
     "register_platform",
     "registered_platforms",

@@ -538,7 +538,10 @@ def evaluate_campaign(campaign_path: Path) -> dict[str, Any]:
         time_limit_ms = float(scenario["time_limit_s"]) * 1000
         within_time_limit = None if duration_ms is None else duration_ms <= time_limit_ms
         completed = (
-            reported_pass
+            # Optional loading preserves partial attempts, but both bundle artifacts
+            # remain required even when cleanup is the only requested evidence.
+            bool(result) and bool(manifest)
+            and reported_pass
             and checkpoints_pass
             and (cleanup_verified or not cleanup_required)
             and within_time_limit is True

@@ -233,6 +233,7 @@ class AndroidPlatform(PlatformAdapter):
             "virtual_targets",
             "webview",
             "ui.input",
+            "ui.read_deadline",
             "ui.peek",
             "ui.screenshot",
             "ui.tree",
@@ -543,9 +544,7 @@ class AndroidPlatform(PlatformAdapter):
         android_runtime = cast("AndroidRuntimeBase", runtime)
         android_runtime.logcat(dump=False)
 
-    def diagnostic_source_policy(
-        self, app_id: str | None = None
-    ) -> DiagnosticSourcePolicy:
+    def diagnostic_source_policy(self, app_id: str | None = None) -> DiagnosticSourcePolicy:
         from ..logcat import android_source_policy
 
         return android_source_policy(app_id)
