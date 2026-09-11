@@ -11,6 +11,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+- Android key validation accepts the existing `paste` and `backspace` runtime aliases through both CLI and MCP; unknown key names still fail before input.
+
 - Missing-target errors preserve explicitly requested full observations, including default state flags, element sources and parent handles, without another UI read. Compact defaults remain unchanged.
 
 - Recording cleanup and recovery verify encoder/supervisor roles as well as owned paths, so processes reading the same footage are neither signalled nor mistaken for active recorders.

@@ -55,6 +55,8 @@ _ANDROID_KEY_NAMES = frozenset(
         "enter",
         "delete",
         "del",
+        "backspace",
+        "paste",
         "recent",
         "recents",
         "volume_up",
