@@ -993,7 +993,9 @@ def _wait_for_boot(shell: Callable[[str], str], *, timeout_s: float = 90.0) -> b
             if booted and "package:" in (shell("pm path android") or ""):
                 return time.monotonic() < deadline
         except subprocess.TimeoutExpired:
-            return False
+            # A cold read can exhaust its per-probe cap while the startup still has time.
+            # Retry only readiness reads; the shell retains the original absolute deadline.
+            pass
         time.sleep(min(_POLL_S, max(0.0, deadline - time.monotonic())))
     return False
 

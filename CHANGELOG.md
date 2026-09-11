@@ -22,12 +22,18 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Breaking
 
+- External adapters need `ui.read_deadline` for bounded UI waits and the attached-target
+  conformance profile. Verified list movement requires real parent links between rows and their
+  scroll container; flat trees remain valid for analysis but cannot prove movement or an end.
 - Explicit action-and-analyze commands (including microphone commands) reject contradictory
   `--no-observe` before their action callback. Observation flags do not disable screenshot,
   rolling capture, or journal persistence.
 
 ### Fixed
 
+- Emulator startup retries a timed-out readiness read while its existing overall boot budget
+  remains. It does not restart the emulator or ADB; terminal failure still cleans up only the
+  newly started instance.
 - Verified scrolling no longer treats a popup or replaced scroll container as successful movement
   merely because its labels changed. Movement remains unverified when the original container
   cannot be identified, including requests to reach the end; the gesture is not repeated.

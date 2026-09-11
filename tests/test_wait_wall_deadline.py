@@ -21,6 +21,9 @@ from android_ui_analyser.schema import Element
 from conftest import FakeDevice, StubOcr, make_config
 from test_platform_runtime import _NeutralAdapter, _NeutralRuntime
 
+REAL_WAIT_MS = 500
+MAX_ELAPSED_S = 1.5
+
 
 class Runtime(_NeutralRuntime):
     def __init__(self, *, probe_delay=0.0, foreground_delay=0.0, tree_delay=0.0):
@@ -28,16 +31,26 @@ class Runtime(_NeutralRuntime):
         self.foreground_delay = foreground_delay
         self.tree_delay = tree_delay
         self.reads = []
+        self.read_threads = []
+        self.read_waits = []
+        self.active_reads = 0
 
     def read_deadline(self, budget):
         return read_budget.activate(budget)
 
     def _read(self, name, duration):
         self.reads.append(name)
+        self.read_threads.append(threading.get_ident())
         budget = read_budget.current()
         assert budget is not None
-        threading.Event().wait(min(duration, budget.remaining()))
-        budget.check()
+        self.active_reads += 1
+        try:
+            wait_s = min(duration, budget.remaining())
+            self.read_waits.append((name, wait_s))
+            threading.Event().wait(wait_s)
+            budget.check()
+        finally:
+            self.active_reads -= 1
 
     def find_text(self, text, **kwargs):
         self._read("probe", self.probe_delay)
@@ -76,27 +89,34 @@ def test_slow_probe_is_bounded_without_background_device_work(method):
     eng = engine(runtime)
     started = time.monotonic()
     result = (
-        eng.wait(for_="Ready", timeout_ms=100, observe=True)
+        eng.wait(for_="Ready", timeout_ms=REAL_WAIT_MS, observe=True)
         if method == "wait"
-        else eng.await_predicate("text:Ready", timeout_ms=100, observe=True)
+        else eng.await_predicate("text:Ready", timeout_ms=REAL_WAIT_MS, observe=True)
     )
     elapsed = time.monotonic() - started
-    assert 0.08 <= elapsed < 0.5, elapsed
+    assert elapsed < MAX_ELAPSED_S, elapsed
     assert not result.ok
     assert result.observation is None
-    assert result.elapsed_ms is not None and result.elapsed_ms < 500
+    assert result.elapsed_ms is not None and result.elapsed_ms < MAX_ELAPSED_S * 1000
     assert runtime.reads.count("probe") == 1
+    assert 0 < dict(runtime.read_waits)["probe"] <= REAL_WAIT_MS / 1000
     assert "tree" not in runtime.reads
+    assert set(runtime.read_threads) == {threading.get_ident()}
+    assert runtime.active_reads == 0
     assert read_budget.current() is None
 
 
 def test_foreground_snapshot_is_inside_the_same_budget():
     runtime = Runtime(foreground_delay=2)
+    eng = engine(runtime)
     started = time.monotonic()
-    result = engine(runtime).await_predicate("text:Ready", timeout_ms=100, observe=True)
-    assert time.monotonic() - started < 0.5
+    result = eng.await_predicate("text:Ready", timeout_ms=REAL_WAIT_MS, observe=True)
+    assert time.monotonic() - started < MAX_ELAPSED_S
     assert not result.ok and result.await_outcome == "timeout"
     assert runtime.reads == ["foreground"]
+    assert 0 < dict(runtime.read_waits)["foreground"] <= REAL_WAIT_MS / 1000
+    assert runtime.read_threads == [threading.get_ident()]
+    assert runtime.active_reads == 0
 
 
 @pytest.mark.parametrize("absent", [False, True])
@@ -117,13 +137,17 @@ def test_a_late_predicate_cannot_pass_even_if_adapter_returns_a_match(monkeypatc
 
 def test_timely_predicate_is_distinct_from_final_observation_expiry():
     runtime = Runtime(tree_delay=2)
+    eng = engine(runtime)
     started = time.monotonic()
-    result = engine(runtime).wait(for_="Ready", timeout_ms=100, observe=True)
-    assert time.monotonic() - started < 0.5
+    result = eng.wait(for_="Ready", timeout_ms=REAL_WAIT_MS, observe=True)
+    assert time.monotonic() - started < MAX_ELAPSED_S
     assert result.ok  # the predicate held before readback started
     assert result.observation is None and result.observation_present is False
     assert "final observation" in result.note.lower()
     assert runtime.reads.count("tree") == 1
+    assert 0 < dict(runtime.read_waits)["tree"] <= REAL_WAIT_MS / 1000
+    assert set(runtime.read_threads) == {threading.get_ident()}
+    assert runtime.active_reads == 0
 
 
 def test_timely_final_observation_keeps_ids_on_the_shared_analyze_path():
@@ -144,19 +168,20 @@ def test_cold_runtime_refuses_without_connecting():
 def test_zero_performs_one_probe_with_an_explicit_bounded_read_budget():
     runtime = Runtime()
     eng = engine(runtime)
-    eng.config.perf.max_wait_ms = 200
+    eng.config.perf.max_wait_ms = REAL_WAIT_MS
     result = eng.wait(for_="Missing", timeout_ms=0, by="rid")
     assert not result.ok
     assert runtime.reads == ["probe"]
-    assert result.wait_budget_ms == 200
+    assert result.wait_budget_ms == REAL_WAIT_MS
     assert "one probe without polling" in result.note
 
 
 def test_missing_predicate_still_returns_one_fresh_readback_inside_the_budget():
     runtime = Runtime()
+    eng = engine(runtime)
     started = time.monotonic()
-    result = engine(runtime).wait(for_="Missing", timeout_ms=200, observe=True, with_image=False)
-    assert time.monotonic() - started < 0.5
+    result = eng.wait(for_="Missing", timeout_ms=REAL_WAIT_MS, observe=True, with_image=False)
+    assert time.monotonic() - started < MAX_ELAPSED_S
     assert not result.ok and result.observation is not None
     assert runtime.reads.count("tree") == 1
     assert result.observation.elements[0].text == "Ready"
@@ -164,9 +189,10 @@ def test_missing_predicate_still_returns_one_fresh_readback_inside_the_budget():
 
 def test_nested_wait_reports_the_parent_limited_effective_budget():
     runtime = Runtime()
+    eng = engine(runtime)
     parent = read_budget.ReadBudget(time.monotonic() + 0.15, time.monotonic)
     with runtime.read_deadline(parent):
-        result = engine(runtime).wait(for_="Missing", timeout_ms=1000, by="rid")
+        result = eng.wait(for_="Missing", timeout_ms=1000, by="rid")
         assert read_budget.current() is parent
     assert not result.ok
     assert 0 < result.wait_budget_ms <= 150
@@ -189,8 +215,9 @@ def test_expiry_journal_initialization_cannot_start_unbounded_device_metadata(mo
     monkeypatch.setattr(runtime, "instance_token", token)
     assert eng._mem is None
     started = time.monotonic()
-    result = eng.wait(for_="Missing", timeout_ms=100, by="rid")
-    assert time.monotonic() - started < 0.5
+    result = eng.wait(for_="Missing", timeout_ms=REAL_WAIT_MS, by="rid")
+    assert time.monotonic() - started < MAX_ELAPSED_S
+    assert runtime.reads.count("probe") == 1
     assert not result.ok and seen and all(item is not None for item in seen)
     assert eng._mem is not None
     assert eng._mem.load_session(runtime.target_id).calls[-1].outcome == "timeout"
@@ -228,7 +255,7 @@ def test_cancellation_during_final_observation_is_not_reported_as_success(monkey
 
     monkeypatch.setattr(runtime, "dump_hierarchy", cancelled_tree)
     with pytest.raises(JobCancelledError):
-        eng.wait(for_="Ready", timeout_ms=100, observe=True, with_image=False)
+        eng.wait(for_="Ready", timeout_ms=REAL_WAIT_MS, observe=True, with_image=False)
     assert read_budget.current() is None
 
 
@@ -247,11 +274,13 @@ def test_warm_ocr_only_positive_is_checked_before_deadline():
 
 def test_cold_ocr_cannot_prove_a_canvas_label_absent():
     config = make_config(ocr={"enabled": True, "augment_hierarchy": True, "chain": ["stub_ocr"]})
-    eng = Engine(config, device=FakeDevice())
-    result = eng.await_predicate("!text:Canvas loading", timeout_ms=50, observe=False)
+    runtime = FakeDevice()
+    eng = Engine(config, device=runtime)
+    result = eng.await_predicate("!text:Canvas loading", timeout_ms=0, observe=False)
     assert not result.ok and result.await_outcome == "timeout"
     assert result.await_terms[0]["satisfied"] is False
     assert result.await_terms[0]["evidence"] == "unconfirmed"
+    assert runtime.hierarchy_calls > 0
 
 
 @pytest.mark.parametrize("warm", [False, True])
@@ -266,10 +295,17 @@ def test_action_destination_does_not_override_unconfirmed_or_visible_canvas_text
         eng.factory._instances[("ocr", "stub_ocr")] = StubOcr(
             result=[TextBox(text="Canvas loading", bounds=(10, 10, 200, 50), confidence=0.99)]
         )
-    monkeypatch.setattr(eng, "_sample_action_destination", _observation)
+    destinations = []
+    monkeypatch.setattr(
+        eng, "_sample_action_destination", lambda: destinations.append(True) or _observation()
+    )
     result = eng.await_predicate(
-        "rid:catalogItemCard,!text:Canvas loading", timeout_ms=100, poll_ms=10, adopt_action=True
+        "rid:catalogItemCard,!text:Canvas loading", timeout_ms=0, adopt_action=True
     )
     assert not result.ok
     assert result.await_outcome == "timeout"
     assert not all(row["satisfied"] for row in result.await_terms)
+    assert destinations == [True]
+    assert runtime.hierarchy_calls > 0
+    if warm:
+        assert eng.factory._instances[("ocr", "stub_ocr")].calls > 0
