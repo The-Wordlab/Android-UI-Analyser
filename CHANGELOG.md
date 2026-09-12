@@ -43,6 +43,7 @@ notes, so you can check for a newer version — and read what changed — withou
 
 - Missing selectors return the observation already read during resolution, allowing recovery
   without a separate analyze call. Text fallback uses its latest complete vision frame.
+  MCP preserves existing observation metadata for other errors, including missing handles.
 - Detached daemons preserve explicitly unset local policy settings, preventing discovered model
   paths from causing repeated configuration mismatches for saved agent runs or explicit configs.
 - Verified scrolling can use two distinct resource-addressed leaf controls translating together

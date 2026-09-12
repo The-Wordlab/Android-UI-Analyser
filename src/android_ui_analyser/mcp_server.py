@@ -4399,33 +4399,35 @@ def build_server(engine: Engine) -> Server:
                 error["result"] = payload
                 emitted_error_result = payload
             elif isinstance(error, dict) and isinstance(error.get("observation"), dict):
-                # A selector miss already read the screen. Publish that evidence without
+                # The error already read the screen. Publish that evidence without
                 # success decoration: artifact policies there can acquire another screenshot.
-                from .agent_results import normalize_result
-                from .observation_contract import build_observation_contract
-
                 payload = publish_ids({"observation": error["observation"]})
-                recovery = payload["observation"]
-                metadata = recovery.get("meta")
-                original_contract = (
-                    metadata.get("observation_contract") if isinstance(metadata, dict) else None
-                )
-                if not isinstance(original_contract, dict):
-                    original_contract = build_observation_contract(recovery, command=name)
                 if error.get("code") == "selector_not_found":
+                    from .agent_results import normalize_result
+                    from .observation_contract import build_observation_contract
+
+                    # Selector misses carry a full frame for transport projection. Other
+                    # errors already prepared their evidence and must retain its metadata.
+                    recovery = payload["observation"]
+                    metadata = recovery.get("meta")
+                    original_contract = (
+                        metadata.get("observation_contract") if isinstance(metadata, dict) else None
+                    )
+                    if not isinstance(original_contract, dict):
+                        original_contract = build_observation_contract(recovery, command=name)
                     with contextlib.suppress(Exception):
                         payload = trim_observation_payload(
                             payload, observation_view(), fmt=OutputFormat.json
                         )
-                recovery = payload["observation"]
-                if isinstance(recovery.get("meta"), dict):
-                    # Recalculate visibility after projection while retaining any producer
-                    # refusal whose underlying caveat the requested fields might omit.
-                    recovery["meta"]["observation_contract"] = normalize_result(
-                        {"observation": recovery, "observation_contract": original_contract},
-                        command=name,
-                    )["observation_contract"]
-                error["observation"] = recovery
+                    recovery = payload["observation"]
+                    if isinstance(recovery.get("meta"), dict):
+                        # Recalculate visibility after projection while retaining any producer
+                        # refusal whose underlying caveat the requested fields might omit.
+                        recovery["meta"]["observation_contract"] = normalize_result(
+                            {"observation": recovery, "observation_contract": original_contract},
+                            command=name,
+                        )["observation_contract"]
+                error["observation"] = payload["observation"]
                 emitted_error_result = payload
             journal_call(ok=False, error=error if isinstance(error, dict) else None)
             from .coaching import emitted_fingerprint

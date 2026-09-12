@@ -13,7 +13,14 @@ from android_ui_analyser.cli import app
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.errors import ElementNotFoundError
 from android_ui_analyser.mcp_server import build_server
-from android_ui_analyser.schema import AnalyzeResult, Element, Meta, Screen, Source
+from android_ui_analyser.schema import (
+    AnalyzeResult,
+    Element,
+    Meta,
+    ObservationContract,
+    Screen,
+    Source,
+)
 from conftest import FakeDevice, make_config
 
 MISSING = "el:" + "f" * 32
@@ -170,8 +177,19 @@ def test_cli_full_missing_handle_observation_uses_the_shared_resolution(tmp_path
     assert_one_resolution(calls, device)
 
 
-def test_mcp_full_missing_handle_observation_uses_the_shared_resolution(tmp_path, monkeypatch):
+@pytest.mark.parametrize("producer_refuses_reuse", [False, True])
+def test_mcp_full_missing_handle_observation_uses_the_shared_resolution(
+    tmp_path, monkeypatch, producer_refuses_reuse
+):
     observed = observation()
+    if producer_refuses_reuse:
+        observed.meta.observation_contract = ObservationContract(
+            produced_by="analyze",
+            reusable=False,
+            evidence_fresh=False,
+            analyze_needed=True,
+            reason="The producer could not confirm freshness.",
+        )
     calls = resolution(monkeypatch, observed)
     device = FakeDevice(serial="fixture-target")
     engine = Engine(config(tmp_path), device=device)

@@ -191,18 +191,58 @@ class TestABoundedWaitNeverExitsAsAnError:
         assert result.settled_unmet is True
         assert "still moving" in (result.detail or "")
 
-    def test_the_returned_screen_is_not_discarded_on_expiry(self) -> None:
-        from conftest import make_png
+    def test_the_returned_screen_is_not_discarded_on_expiry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from types import SimpleNamespace
 
-        a = make_png(80, 80, color=(255, 255, 255))
-        b = make_png(80, 80, color=(0, 0, 0))
-        device = FakeDevice(hierarchy_xml=HOME, screenshots=[a, b] * 400)
-        engine = make_engine(device=device)
+        from android_ui_analyser import engine as engine_module
+        from android_ui_analyser import engine_waits, read_budget
+        from android_ui_analyser.providers.base import ScreenImage
+        from conftest import make_png
+        from test_wait_wall_deadline import Adapter, Runtime
+        from test_wait_wall_deadline import engine as make_wait_engine
+
+        # Polling expires first, leaving its reserved readback budget. Model timely
+        # adapter reads explicitly: a loaded host may otherwise exhaust the real 400 ms
+        # deadline, correctly omitting the unfinished observation. Separate real-wall
+        # tests in test_wait_wall_deadline cover that hard deadline.
+        now = [100.0]
+
+        def advance(seconds: float) -> None:
+            now[0] += seconds
+
+        frame = ScreenImage(make_png(80, 80), width=80, height=80)
+
+        class WaitAdapter(Adapter):
+            capabilities = Adapter.capabilities | {"ui.screenshot"}
+
+            def capture_screenshot(self, runtime):
+                runtime._read("screenshot", 0.01)
+                return frame
+
+        clock = SimpleNamespace(monotonic=lambda: now[0], sleep=advance, time=time.time)
+        monkeypatch.setattr(engine_module, "time", clock)
+        monkeypatch.setattr(engine_waits, "time", clock)
+        device = Runtime(foreground_delay=0.01, tree_delay=0.02)
+        monkeypatch.setattr(device, "_wait", advance)
+        engine = make_wait_engine(device, adapter=WaitAdapter)
         result = engine.wait_after_change(
-            timeout_ms=400, interval_ms=1, settle_ms=50, confirmation_ms=20, observe=True
+            timeout_ms=400,
+            interval_ms=1,
+            settle_ms=50,
+            confirmation_ms=20,
+            observe=True,
+            with_image=False,
         )
+        assert result.ok is True and result.settled_unmet is True
         assert result.observation is not None
-        assert result.observation.elements, "expiry threw away the screen it had already read"
+        assert result.observation.elements[0].text == "Ready"
+        assert result.observation.elements[0].published_id.startswith("el:")
+        assert device.reads.count("tree") > 1, "the wait must poll before its final readback"
+        assert 300 <= result.elapsed_ms < result.wait_budget_ms == 400
+        assert device.active_reads == 0
+        assert read_budget.current() is None
 
 
 class TestTheWallClockCannotReportSomeoneElsesCall:
