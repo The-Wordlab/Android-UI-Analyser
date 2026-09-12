@@ -8,16 +8,34 @@ correction, while standalone streaming waits keep their package/activity-only se
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from android_ui_analyser import engine_waits
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.providers.registry import ProviderFactory
 from android_ui_analyser.schema import ActionResult, AnalyzeResult, Element, Meta, Screen
 from conftest import FakeDevice, make_config
 
 PKG = "com.example.app"
+
+
+@pytest.fixture
+def controlled_wait_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Polling semantics depend on simulated time, not a loaded runner's scheduling."""
+    now = [100.0]
+
+    def advance(seconds: float) -> None:
+        now[0] += seconds
+
+    monkeypatch.setattr(
+        engine_waits,
+        "time",
+        SimpleNamespace(monotonic=lambda: now[0], sleep=advance, time=time.time),
+    )
 
 
 def _observation(*, title: str = "Recent items", loading: bool = False) -> AnalyzeResult:
@@ -175,6 +193,7 @@ def test_correct_action_predicate_succeeds_without_mismatch_sampling(
     assert len([call for call in device.calls if call[0] == "find_text"]) == 1
 
 
+@pytest.mark.usefixtures("controlled_wait_clock")
 def test_streaming_standalone_wait_keeps_package_activity_only_semantics(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -191,9 +210,6 @@ def test_streaming_standalone_wait_keeps_package_activity_only_semantics(
 
     result = engine.await_predicate(
         "text:Finished",
-        # Wide enough that "did it poll repeatedly" cannot depend on how fast the host is. At
-        # 45ms a 3-core CI runner fitted exactly two polls into the window and failed
-        # `> 2` — the wait behaved correctly, the assertion was really measuring the machine.
         timeout_ms=300,
         poll_ms=1,
         rich_ui=False,
@@ -204,6 +220,8 @@ def test_streaming_standalone_wait_keeps_package_activity_only_semantics(
     assert result.await_outcome == "timeout"
     assert result.arrival_mismatch is None
     assert len([call for call in device.calls if call[0] == "find_text"]) > 2
+    assert result.wait_budget_ms == 300
+    assert not any(call[0] in {"click", "press", "swipe"} for call in device.calls)
 
 
 def test_visible_loading_state_never_becomes_arrival_mismatch(
@@ -237,6 +255,7 @@ def test_visible_loading_state_never_becomes_arrival_mismatch(
     assert result.arrival_mismatch is None
 
 
+@pytest.mark.usefixtures("controlled_wait_clock")
 def test_changing_action_destination_is_not_declared_settled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -259,9 +278,6 @@ def test_changing_action_destination_is_not_declared_settled(
 
     result = engine.await_predicate(
         "text:Product detail",
-        # Same reason as the standalone-wait test above: `samples > 2` asks how many polls fit
-        # in the window, and at 45ms a 3-core CI runner fitted two. The sibling below keeps 45ms
-        # because it only asserts the wait timed out, which happens on any machine.
         timeout_ms=300,
         poll_ms=1,
         rich_ui=False,
@@ -272,6 +288,10 @@ def test_changing_action_destination_is_not_declared_settled(
     assert samples > 2
     assert result.await_outcome == "timeout"
     assert result.arrival_mismatch is None
+    assert result.observation is not None
+    assert result.observation.elements[0].text == "Streaming frame final"
+    assert 0 < result.elapsed_ms < result.wait_budget_ms == 300
+    assert not any(call[0] in {"click", "press", "swipe"} for call in device.calls)
 
 
 @pytest.mark.parametrize(

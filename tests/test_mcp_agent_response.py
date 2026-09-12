@@ -57,6 +57,7 @@ def _engine(tmp_path):
         capture={"enabled": False},
         lease={"enabled": False},
         logs={"enabled": False},
+        perf={"prefetch": False, "predictive_prefetch": False},
         output={"observation_fields": "all", "observation_meta": "all"},
     )
     device = FakeDevice(width=80, height=120, serial="agent-target")
@@ -120,6 +121,14 @@ def test_action_normalization_adds_no_acquisitions_or_dispatch_and_preserves_ima
 
     def exercise(mode):
         engine = _engine(tmp_path / str(mode))
+        # This comparison measures the response wrapper, not how many pixel polls the
+        # scheduler fits into a settle window. Use one fixed settled result in both lanes;
+        # the real action, analyze, screenshot and response paths remain exercised.
+        monkeypatch.setattr(
+            engine,
+            "_await_post_action_ready",
+            lambda **_kwargs: {"changed": True, "timeout": False, "via": "hierarchy", "ms": 1},
+        )
         server = build_server(engine)
 
         async def run():

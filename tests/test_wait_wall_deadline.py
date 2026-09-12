@@ -38,6 +38,9 @@ class Runtime(_NeutralRuntime):
     def read_deadline(self, budget):
         return read_budget.activate(budget)
 
+    def _wait(self, seconds):
+        threading.Event().wait(seconds)
+
     def _read(self, name, duration):
         self.reads.append(name)
         self.read_threads.append(threading.get_ident())
@@ -47,7 +50,7 @@ class Runtime(_NeutralRuntime):
         try:
             wait_s = min(duration, budget.remaining())
             self.read_waits.append((name, wait_s))
-            threading.Event().wait(wait_s)
+            self._wait(wait_s)
             budget.check()
         finally:
             self.active_reads -= 1
@@ -176,15 +179,32 @@ def test_zero_performs_one_probe_with_an_explicit_bounded_read_budget():
     assert "one probe without polling" in result.note
 
 
-def test_missing_predicate_still_returns_one_fresh_readback_inside_the_budget():
-    runtime = Runtime()
+def test_missing_predicate_still_returns_one_fresh_readback_inside_the_budget(monkeypatch):
+    # Model timely adapter reads and the polling reserve explicitly. The real-wall tests
+    # above separately prove that slow I/O expires without detached background work.
+    now = [100.0]
+
+    def advance(seconds):
+        now[0] += seconds
+
+    monkeypatch.setattr(
+        engine_waits,
+        "time",
+        SimpleNamespace(monotonic=lambda: now[0], sleep=advance, time=time.time),
+    )
+    runtime = Runtime(probe_delay=0.01, foreground_delay=0.01, tree_delay=0.02)
+    monkeypatch.setattr(runtime, "_wait", advance)
     eng = engine(runtime)
-    started = time.monotonic()
     result = eng.wait(for_="Missing", timeout_ms=REAL_WAIT_MS, observe=True, with_image=False)
-    assert time.monotonic() - started < MAX_ELAPSED_S
     assert not result.ok and result.observation is not None
+    assert runtime.reads.count("probe") > 1
     assert runtime.reads.count("tree") == 1
+    assert dict(runtime.read_waits)["tree"] == 0.02
     assert result.observation.elements[0].text == "Ready"
+    assert 0 < result.elapsed_ms < result.wait_budget_ms == REAL_WAIT_MS
+    assert set(runtime.read_threads) == {threading.get_ident()}
+    assert runtime.active_reads == 0
+    assert read_budget.current() is None
 
 
 def test_nested_wait_reports_the_parent_limited_effective_budget():
