@@ -12,11 +12,13 @@ from mcp.shared.memory import create_connected_server_and_client_session
 
 from android_ui_analyser import journal
 from android_ui_analyser.engine import Engine
-from android_ui_analyser.errors import AuaError, UsageError
+from android_ui_analyser.errors import AuaError, SelectorNotFoundError, UsageError
 from android_ui_analyser.mcp_server import _dispatch, _tool_definitions, build_server
 from android_ui_analyser.platforms.android import AndroidPlatform
 from android_ui_analyser.platforms.base import NormalizedTree, PlatformAdapter
 from android_ui_analyser.schema import Element
+from android_ui_analyser.session import create_session_state
+from android_ui_analyser.session_artifacts import SessionArtifactStore
 from conftest import FakeDevice, make_config, make_png
 
 
@@ -187,6 +189,129 @@ def test_action_normalization_adds_no_acquisitions_or_dispatch_and_preserves_ima
     assert all(item["result"]["observation"]["elements"] for item in mcp_actions)
 
 
+@pytest.mark.parametrize("agent_response", [False, True])
+@pytest.mark.parametrize("projected", [False, True])
+@pytest.mark.parametrize("config_fields", ["all", "id,text,rid"])
+def test_selector_miss_returns_usable_existing_screen_without_another_read(
+    tmp_path,
+    monkeypatch,
+    agent_response,
+    projected,
+    config_fields,
+):
+    def no_android(*args, **kwargs):
+        raise AssertionError("selector recovery reached Android tooling")
+
+    for method in ("connect", "dump_tree", "capture_screenshot"):
+        monkeypatch.setattr(AndroidPlatform, method, no_android)
+
+    # Compare against the resolver itself: publication of its already-read screen must
+    # add neither a hierarchy read nor a screenshot, in either MCP response mode.
+    baseline = _engine(tmp_path / "resolver")
+    try:
+        with pytest.raises(SelectorNotFoundError):
+            baseline.resolve_selector(rid="example:id/missing", prefer_clickable=True)
+        resolver_reads = (baseline._device.hierarchy_calls, baseline._device.screenshot_calls)
+        resolver_calls = list(baseline._device.calls)
+        assert resolver_reads[0] == 1
+        assert [name for name, _ in resolver_calls] == ["find_text"]
+    finally:
+        baseline.close()
+
+    engine = _engine(tmp_path / "mcp")
+    engine.config.output.observation_fields = config_fields
+    state = create_session_state(
+        engine.config.cache.dir,
+        goal="Verify Continue is visible",
+        serial=engine._device.serial,
+        platform=engine.platform.name,
+        owner="agent-owner",
+        recommended_kind="inspect",
+        recommended_cli="aua analyze",
+        network_backup_preexisting=False,
+        network_profile_preexisting=False,
+        artifact_dir=str(tmp_path / "artifacts"),
+        evidence="all",
+    )
+    engine._session_id = state.session_id
+    SessionArtifactStore.create(
+        state.artifact_dir,
+        session_id=state.session_id,
+        goal=state.goal,
+        evidence="all",
+        junit=False,
+        contract_yaml=None,
+    )
+    closed_fingerprints = []
+    close_turn = engine.close_caller_turn
+
+    def close(fingerprint=None):
+        closed_fingerprints.append(fingerprint)
+        close_turn(fingerprint)
+
+    monkeypatch.setattr(engine, "close_caller_turn", close)
+    monkeypatch.setattr(
+        engine,
+        "_await_post_action_ready",
+        lambda **_kwargs: {"changed": True, "timeout": False, "via": "hierarchy", "ms": 1},
+    )
+    server = build_server(engine)
+
+    async def run():
+        async with create_connected_server_and_client_session(server) as client:
+            if agent_response:
+                await client.call_tool("configure", {"agent_response": True})
+            arguments = {"rid": "example:id/missing"}
+            if projected:
+                arguments["observe_fields"] = "id,text,resource_id"
+            response = await client.call_tool("tap_and_analyze", arguments)
+            payload = _payload(response)
+            assert response.isError is agent_response
+            assert payload["error"]["code"] == "selector_not_found"
+            assert "Continue" in payload["error"]["hint"]
+            if agent_response:
+                assert payload["ok"] is False
+                observation = payload["observation"]
+                contract = payload["observation_contract"]
+            else:
+                observation = payload["error"]["observation"]
+                contract = observation["meta"]["observation_contract"]
+            (control,) = observation["elements"]
+            assert control["id"].startswith("el:")
+            assert control["text"] == "Continue"
+            if projected or config_fields == "all":
+                assert control["resource_id"] == "example:id/continue"
+            else:
+                assert control["rid"] == "continue"
+            if projected:
+                assert set(control) == {"id", "text", "resource_id"}
+            elif config_fields == "all":
+                assert control["bounds"] == [0, 0, 40, 40]
+            assert contract["reusable"] is True
+            assert contract["analyze_needed"] is False
+            assert contract["elements_available"] is True
+            assert contract.get("action_succeeded") is not True
+            assert (
+                engine._device.hierarchy_calls,
+                engine._device.screenshot_calls,
+            ) == resolver_reads
+            assert engine._device.calls == resolver_calls
+            assert closed_fingerprints[-1] == engine._last_analyze_result.meta.fingerprint
+
+            # An agent can immediately address the returned ID. No compensating analyze
+            # call is needed, and the failed selector must not have dispatched a gesture.
+            recovered = await client.call_tool("tap_and_analyze", {"id": control["id"]})
+            assert not recovered.isError
+            assert _payload(recovered)["ok"] is True
+            mutations = [call for call in engine._device.calls if call[0] != "find_text"]
+            assert mutations == [("click", (20, 20))]
+
+    try:
+        anyio.run(run)
+    finally:
+        engine.close()
+
+
 @pytest.mark.parametrize("attachment", ["result", "observation"])
 def test_failed_action_keeps_recovery_screen_and_image_but_remains_error(
     tmp_path,
@@ -201,6 +326,13 @@ def test_failed_action_keeps_recovery_screen_and_image_but_remains_error(
         "elements": [{"id": "rid:continue", "text": "Continue", "enabled": True}],
         "meta": {"raw_image": str(image_path)},
     }
+    if attachment == "observation":
+        observation["meta"]["observation_contract"] = {
+            "reusable": False,
+            "evidence_fresh": False,
+            "analyze_needed": True,
+            "reason": "The producer could not confirm freshness.",
+        }
     calls = []
     records = []
     monkeypatch.setattr(journal, "record", lambda **kwargs: records.append(deepcopy(kwargs)))
@@ -227,11 +359,17 @@ def test_failed_action_keeps_recovery_screen_and_image_but_remains_error(
     async def run():
         async with create_connected_server_and_client_session(server) as client:
             await client.call_tool("configure", {"agent_response": True})
-            response = await client.call_tool("key_and_analyze", {"name": "back"})
+            response = await client.call_tool(
+                "key_and_analyze", {"name": "back", "observe_fields": "id,text"}
+            )
             payload = _payload(response)
             assert payload["ok"] is False and response.isError
             assert payload["error"]["code"] == "action_outcome_unknown"
             assert payload["observation"]["elements"][0]["text"] == "Continue"
+            if attachment == "observation":
+                assert payload["observation_contract"]["reusable"] is False
+                assert payload["observation_contract"]["evidence_fresh"] is False
+                assert payload["observation_contract"]["analyze_needed"] is True
             images = [block for block in response.content if block.type == "image"]
             assert len(images) == 1
             assert base64.b64decode(images[0].data) == image_path.read_bytes()

@@ -4325,6 +4325,15 @@ def build_server(engine: Engine) -> Server:
                     ),
                 )
 
+        def observation_view() -> Projection | None:
+            spec = args_in.get("observe_fields")
+            if spec is None:
+                spec = getattr(engine.config.output, "observation_fields", None)
+            meta_spec = args_in.get("observe_meta")
+            if meta_spec is None:
+                meta_spec = getattr(engine.config.output, "observation_meta", None)
+            return Projection.for_observation(spec, meta=meta_spec, fmt=OutputFormat.json)
+
         def prepare_response(result: Any) -> Any:
             from .coaching import decorate_result
 
@@ -4343,14 +4352,9 @@ def build_server(engine: Engine) -> Server:
             # shared helper, because these two surfaces had already drifted once: MCP was
             # returning every field of every element on every action while the CLI trimmed.
             if isinstance(result, dict) and name in _OBSERVATION_TOOL_NAMES:
-                spec = args_in.get("observe_fields")
-                if spec is None:
-                    spec = getattr(engine.config.output, "observation_fields", None)
-                meta_spec = args_in.get("observe_meta")
-                if meta_spec is None:
-                    meta_spec = getattr(engine.config.output, "observation_meta", None)
-                view = Projection.for_observation(spec, meta=meta_spec, fmt=OutputFormat.json)
-                result = trim_observation_payload(result, view, fmt=OutputFormat.json)
+                result = trim_observation_payload(
+                    result, observation_view(), fmt=OutputFormat.json
+                )
             if annotation_warnings and isinstance(result, dict):
                 result["annotation_warnings"] = annotation_warnings
             return result
@@ -4393,6 +4397,35 @@ def build_server(engine: Engine) -> Server:
                 with contextlib.suppress(Exception):
                     payload = prepare_response(payload)
                 error["result"] = payload
+                emitted_error_result = payload
+            elif isinstance(error, dict) and isinstance(error.get("observation"), dict):
+                # A selector miss already read the screen. Publish that evidence without
+                # success decoration: artifact policies there can acquire another screenshot.
+                from .agent_results import normalize_result
+                from .observation_contract import build_observation_contract
+
+                payload = publish_ids({"observation": error["observation"]})
+                recovery = payload["observation"]
+                metadata = recovery.get("meta")
+                original_contract = (
+                    metadata.get("observation_contract") if isinstance(metadata, dict) else None
+                )
+                if not isinstance(original_contract, dict):
+                    original_contract = build_observation_contract(recovery, command=name)
+                if error.get("code") == "selector_not_found":
+                    with contextlib.suppress(Exception):
+                        payload = trim_observation_payload(
+                            payload, observation_view(), fmt=OutputFormat.json
+                        )
+                recovery = payload["observation"]
+                if isinstance(recovery.get("meta"), dict):
+                    # Recalculate visibility after projection while retaining any producer
+                    # refusal whose underlying caveat the requested fields might omit.
+                    recovery["meta"]["observation_contract"] = normalize_result(
+                        {"observation": recovery, "observation_contract": original_contract},
+                        command=name,
+                    )["observation_contract"]
+                error["observation"] = recovery
                 emitted_error_result = payload
             journal_call(ok=False, error=error if isinstance(error, dict) else None)
             from .coaching import emitted_fingerprint

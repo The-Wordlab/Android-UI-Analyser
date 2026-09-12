@@ -436,6 +436,7 @@ def _run(ctx: typer.Context, fn: Callable[[Engine, OutputFormat], T]) -> T:
     Unknown exceptions become a generic structured error on stderr with exit 1.
     """
     opts = _opts(ctx)
+    observation_view: Projection | None = None
     try:
         global _INVOCATION_ID, _CLI_OUTPUT_FORMAT, _CLI_OBSERVE_FIELDS_SPEC
         from .cli_invocations import current
@@ -504,7 +505,8 @@ def _run(ctx: typer.Context, fn: Callable[[Engine, OutputFormat], T]) -> T:
         meta_spec = opts.observe_meta
         if meta_spec is None:
             meta_spec = getattr(engine.config.output, "observation_meta", None)
-        _OBSERVATION_VIEW = Projection.for_observation(spec, meta=meta_spec, fmt=cfg_fmt)
+        observation_view = Projection.for_observation(spec, meta=meta_spec, fmt=cfg_fmt)
+        _OBSERVATION_VIEW = observation_view
         _ENGINE = engine
         _EXPECTED_ERROR_CODE = opts.expect_error
         _ANNOTATION_WARNINGS = []
@@ -566,6 +568,8 @@ def _run(ctx: typer.Context, fn: Callable[[Engine, OutputFormat], T]) -> T:
     except AuaError as err:
         from .cli_invocations import current
 
+        if isinstance(err, SelectorNotFoundError):
+            _project_error_observation(err, observation_view)
         invocation = current()
         if invocation is not None:
             error_payload = err.to_dict().get("error")
@@ -580,6 +584,30 @@ def _run(ctx: typer.Context, fn: Callable[[Engine, OutputFormat], T]) -> T:
         generic.exit_code = ExitCode.INTERNAL
         emit_error(generic)
         raise typer.Exit(int(ExitCode.INTERNAL)) from exc
+
+
+def _project_error_observation(error: AuaError, view: Projection | None) -> None:
+    """Honor this call's width settings using only the error's existing recovery screen."""
+    if not hasattr(error, "observation"):
+        return
+    observation = getattr(error, "observation", None)
+    if view is None or observation is None:
+        return
+    # Projection is optional presentation work; failure must retain the typed action error.
+    with contextlib.suppress(Exception):
+        payload = (
+            observation.as_dict(OutputFormat.json)
+            if hasattr(observation, "as_dict")
+            else observation
+        )
+        if not isinstance(payload, dict):
+            return
+        projected = view.apply(payload)
+        meta = payload.get("meta")
+        projected_meta = projected.get("meta")
+        if isinstance(meta, dict) and meta.get("capture_hint") and isinstance(projected_meta, dict):
+            projected_meta["capture_hint"] = meta["capture_hint"]
+        error.observation = projected
 
 
 def _apply_answers(engine: Engine, answers: tuple[str, ...]) -> None:

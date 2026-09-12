@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from android_ui_analyser.errors import SelectorNotFoundError
+from android_ui_analyser.errors import DeviceError, SelectorNotFoundError
 from android_ui_analyser.schema import AnalyzeResult, Element, Meta, Screen
 
 
@@ -45,6 +45,7 @@ class _FakeEngine:
         self._tree = tree
         self._seen = seen
         self.vision_calls = 0
+        self.hierarchy_calls = 0
 
     def analyze(self, *, source="auto", record=True, **_kw):
         if source == "vision":
@@ -52,6 +53,7 @@ class _FakeEngine:
             if self._seen is None:
                 raise AssertionError("vision was consulted when it should not have been")
             return self._seen
+        self.hierarchy_calls += 1
         return self._tree
 
     def _read_cache(self):
@@ -133,3 +135,65 @@ def test_fallback_can_be_switched_off():
     with pytest.raises(SelectorNotFoundError):
         engine.resolve_selector(text="Continue", vision_fallback=False)
     assert engine.vision_calls == 0
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [{"rid": "missing"}, {"desc": "missing"}, {"text": "missing", "vision_fallback": False}],
+)
+def test_hierarchy_miss_returns_the_existing_observation(selector):
+    tree = _result(_el(1, "Continue", rid="continueButton"))
+    engine = _bind(_FakeEngine(tree=tree))
+
+    with pytest.raises(SelectorNotFoundError) as exc:
+        engine.resolve_selector(**selector)
+
+    assert exc.value.observation == tree.as_dict("json")
+    assert engine.hierarchy_calls == 1
+    assert engine.vision_calls == 0
+
+
+def test_vision_miss_returns_only_the_latest_complete_frame():
+    tree = _result(_el(1, "Old control", rid="oldButton"))
+    seen = _result(_el(7, "Current control"), tier="vision")
+    engine = _bind(_FakeEngine(tree=tree, seen=seen))
+
+    with pytest.raises(SelectorNotFoundError) as exc:
+        engine.resolve_selector(text="Missing control")
+
+    assert exc.value.observation == seen.as_dict("json")
+    observation = exc.value.to_dict()["error"]["observation"]
+    assert observation["screen"]["source"] == "vision"
+    assert [row["text"] for row in observation["elements"]] == ["Current control"]
+    assert engine.hierarchy_calls == engine.vision_calls == 1
+
+
+def test_failed_vision_read_does_not_present_the_earlier_tree_as_current(monkeypatch):
+    tree = _result(_el(1, "Old control", rid="oldButton"))
+    engine = _bind(_FakeEngine(tree=tree))
+    analyze = engine.analyze
+
+    def unavailable(*, source="auto", **kwargs):
+        if source == "vision":
+            engine.vision_calls += 1
+            raise DeviceError("screen read unavailable")
+        return analyze(source=source, **kwargs)
+
+    monkeypatch.setattr(engine, "analyze", unavailable)
+    with pytest.raises(SelectorNotFoundError) as exc:
+        engine.resolve_selector(text="Missing control")
+
+    assert exc.value.observation is None
+    assert engine.hierarchy_calls == engine.vision_calls == 1
+
+
+def test_cached_lookup_does_not_present_an_older_frame_as_fresh(monkeypatch):
+    tree = _result(_el(1, "Old control", rid="oldButton"))
+    engine = _bind(_FakeEngine(tree=tree))
+    monkeypatch.setattr(engine, "_read_cache", lambda: tree)
+
+    with pytest.raises(SelectorNotFoundError) as exc:
+        engine.resolve_selector(desc="Missing control", fresh=False)
+
+    assert exc.value.observation is None
+    assert engine.hierarchy_calls == engine.vision_calls == 0

@@ -260,6 +260,8 @@ def resolve_selector(
         )
     cached = None if fresh else self._read_cache()
     result = cached if cached is not None else self.analyze(source="hierarchy", record=False)
+    # Recovery evidence belongs to this lookup, never a previous call's cached frame.
+    miss_observation: AnalyzeResult | None = result if cached is None else None
     elements = result.elements
     # Fused OCR readings of text the tree already reports would break tiering: see
     # drop_redundant_ocr. Must happen before matching, not after.
@@ -273,7 +275,7 @@ def resolve_selector(
         if container is not None:
             return container
     if not matches and text and vision_fallback:
-        matches, elements = self._match_by_vision(elements, text)
+        matches, elements, miss_observation = self._match_by_vision(elements, text)
     if not matches:
         needle = rid or text or desc or ""
         near = nearest_elements(elements, needle)
@@ -289,12 +291,17 @@ def resolve_selector(
             )
         elif near:
             hint = "nearest: " + " | ".join(element_digest(el) for el in near)
+        elif miss_observation is not None:
+            hint = "Inspect the returned observation to choose a visible control."
         else:
             hint = "Run `aua analyze` to see what is on screen."
         raise SelectorNotFoundError(
             f"no element matches {label} "
             f"({len(app_elements(elements))} app elements on screen)",
             hint=hint,
+            observation=(
+                miss_observation.as_dict("json") if miss_observation is not None else None
+            ),
         )
     if len(matches) > 1:
         if index is not None:
@@ -334,7 +341,7 @@ def resolve_selector(
 
 def _match_by_vision(
     self: Engine, elements: list[Element], text: str
-) -> tuple[list[Element], list[Element]]:
+) -> tuple[list[Element], list[Element], AnalyzeResult | None]:
     """Look again with vision when the hierarchy has no element carrying ``text``.
 
         Web content publishes almost nothing to the accessibility tree, so `--text Continue`
@@ -346,19 +353,20 @@ def _match_by_vision(
         Only a label falls back. A resource-id is a property of the tree and pixels cannot
         supply one; a content-desc is likewise unobservable, so `--desc` stays strict.
 
-        Returns the matches and the element list to describe the screen with, so that on a
-        miss the "nearest" hint names what is *visible* rather than an empty WebView node.
+        Returns matches, hint candidates and the complete latest observation. Hint candidates
+        can span both reads; they must never be published as a single fresh observation.
+        A failed vision read supplies no replacement evidence for the earlier hierarchy.
         """
     try:
         seen = self.analyze(source="vision", record=False)
     except AuaError as exc:  # vision unavailable is not a selector error
         logger.debug("vision fallback for %r unavailable: %s", text, exc)
-        return [], elements
+        return [], elements, None
     matches = match_selector(seen.elements, text=text)
     if matches:
         logger.info("resolved --text %r by vision; the hierarchy had no match", text)
-        return matches, seen.elements
-    return [], elements + [el for el in seen.elements if el not in elements]
+        return matches, seen.elements, seen
+    return [], elements + [el for el in seen.elements if el not in elements], seen
 
 
 def _resolve_container_rid(self: Engine, rid: str) -> Element | None:
