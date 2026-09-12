@@ -2894,6 +2894,15 @@ def _tool_definitions() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "agent_response": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "Return a shared agent envelope with explicit success/error, current "
+                            "session context, and the observation/image already produced by this "
+                            "call. Persists on this MCP server; false restores legacy responses."
+                        ),
+                    },
                     "with_image": {
                         "type": "boolean",
                         "description": "Default with_image for action tools that observe.",
@@ -3962,6 +3971,11 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         result = getattr(engine, "resolve")(args["target"])  # noqa: B009
         return _dump(result)
     if name == "configure":
+        if "agent_response" in args:
+            if not isinstance(args["agent_response"], bool):
+                raise UsageError("agent_response must be a boolean")
+            # This flag belongs to the server, not the platform/runtime Engine interface.
+            setattr(engine, "_mcp_agent_response", args["agent_response"])  # noqa: B010
         if "with_image" in args:
             engine._default_with_image = args["with_image"]
         if "app_logs" in args:
@@ -3988,7 +4002,7 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 value = int(args[arg])
             setattr(engine.config.logs, field, value)
             engine._session_log_fields.add(field)
-        return {
+        configured = {
             "ok": True,
             "with_image": getattr(engine, "_default_with_image", None),
             "app_logs": engine.config.logs.enabled,
@@ -3999,6 +4013,9 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
             "app_log_keep_tags": list(engine.config.logs.keep_tags),
             "app_log_only_tags": list(engine.config.logs.only_tags),
         }
+        if "agent_response" in args or getattr(engine, "_mcp_agent_response", False):
+            configured["agent_response"] = getattr(engine, "_mcp_agent_response", False)
+        return configured
     raise AuaError(f"unknown tool '{name}'", code="usage")
 
 
@@ -4023,6 +4040,55 @@ def _image_block(name: str, payload: Any) -> types.ImageContent | None:
     except OSError:
         return None
     return types.ImageContent(type="image", data=data, mimeType="image/png")
+
+
+def _agent_response_context(engine: Engine) -> dict[str, Any]:
+    """Copy held context without connecting, reading a device, or consulting old results."""
+    device = getattr(engine, "_device", None)
+    return {
+        "platform": engine.platform.name,
+        "target_id": (
+            getattr(device, "serial", None)
+            or getattr(engine, "_lease_serial", None)
+            or engine.config.device.serial
+        ),
+        "owner": (
+            getattr(engine, "_lease_owner_resolved", None)
+            or getattr(engine, "_lease_owner", None)
+        ),
+        # Capture tools also return session_id, but that names a buffer, never the goal.
+        "session_id": getattr(engine, "_session_id", None),
+        "cache_dir": str(engine.config.cache.dir),
+    }
+
+
+def _agent_response(
+    engine: Engine,
+    name: str,
+    payload: Any,
+    image: types.ImageContent | None,
+    *,
+    exit_code: int | None = None,
+    transport_error: bool = False,
+) -> types.CallToolResult:
+    """Adapt this call's result; image selection happens against the original payload."""
+    from .agent_results import normalize_result
+
+    normalized = normalize_result(
+        payload,
+        command=name,
+        context=_agent_response_context(engine),
+        exit_code=exit_code,
+        transport_error=transport_error,
+    )
+    blocks: list[types.ContentBlock] = [
+        types.TextContent(type="text", text=json.dumps(normalized, ensure_ascii=False))
+    ]
+    if image is not None:
+        blocks.append(image)
+    return types.CallToolResult(
+        content=blocks, structuredContent=normalized, isError=not normalized["ok"]
+    )
 
 
 # --------------------------------------------------------------------------- server
@@ -4196,7 +4262,9 @@ def build_server(engine: Engine) -> Server:
         return _tool_definitions()
 
     @server.call_tool()
-    async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.ContentBlock]:
+    async def call_tool(
+        name: str, arguments: dict[str, Any]
+    ) -> list[types.ContentBlock] | types.CallToolResult:
         from . import journal as journal_mod
 
         args_in = dict(arguments or {})
@@ -4334,12 +4402,27 @@ def build_server(engine: Engine) -> Server:
                 types.TextContent(type="text", text=json.dumps(envelope, ensure_ascii=False))
             ]
             image = _image_block(name, emitted_error_result)
+            if getattr(engine, "_mcp_agent_response", False):
+                if image is None and isinstance(error, dict):
+                    image = _image_block(name, error)
+                return _agent_response(
+                    engine, name, envelope, image, exit_code=int(err.exit_code)
+                )
             if image is not None:
                 error_blocks.append(image)
             return error_blocks
         except Exception as err:
             journal_call(ok=False, error={"code": "error", "message": str(err)})
             engine.close_caller_turn()
+            if getattr(engine, "_mcp_agent_response", False):
+                return _agent_response(
+                    engine,
+                    name,
+                    {"error": {"code": "internal_error", "message": str(err)}},
+                    None,
+                    exit_code=1,
+                    transport_error=True,
+                )
             raise
         finally:
             engine.release_device_use()
@@ -4349,6 +4432,8 @@ def build_server(engine: Engine) -> Server:
         journal_call(ok=not (isinstance(payload, dict) and payload.get("ok") is False))
         blocks: list[types.ContentBlock] = [types.TextContent(type="text", text=text)]
         image = _image_block(name, payload)
+        if getattr(engine, "_mcp_agent_response", False):
+            return _agent_response(engine, name, payload, image)
         if image is not None:
             blocks.append(image)
         return blocks

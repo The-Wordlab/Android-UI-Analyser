@@ -10136,6 +10136,74 @@ def suite_run_cmd(
 # --------------------------------------------------------------------------- guide
 
 
+run_app = typer.Typer(help="Keep one agent's CLI goal context and normalize returned evidence.")
+app.add_typer(run_app, name="run")
+
+
+@run_app.command("init")
+def run_init_cmd(
+    ctx: typer.Context,
+    path: Path = typer.Argument(..., help="New private run context file; never overwritten."),
+) -> None:
+    """Freeze configuration for one goal without acquiring a device."""
+    import json
+
+    from .agent_results import normalize_result
+    from .agent_run import create_run
+
+    opts = _opts(ctx)
+    try:
+        config = opts.load().model_copy(deep=True)
+        if opts.observe_fields is not None:
+            config.output.observation_fields = opts.observe_fields
+        if opts.observe_meta is not None:
+            config.output.observation_meta = opts.observe_meta
+        context = create_run(path, config, owner=opts.owner, needs=_split_needs(opts.needs))
+        payload = normalize_result(
+            {"ok": True, "path": str(path.expanduser().absolute())},
+            command="run_init", context=context.public(),
+        )
+    except (AuaError, OSError) as error:
+        failure = error if isinstance(error, AuaError) else ConfigError(str(error))
+        typer.echo(json.dumps(normalize_result(failure.to_dict(), command="run_init")))
+        raise typer.Exit(int(failure.exit_code)) from error
+    typer.echo(json.dumps(payload, ensure_ascii=False))
+
+
+@run_app.command("exec", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def run_exec_cmd(
+    ctx: typer.Context,
+    path: Path = typer.Argument(..., help="Run file created by `aua run init`."),
+) -> None:
+    """Run an existing AUA command once: run exec PATH -- session start --goal ..."""
+    import json
+
+    from .agent_results import normalize_result
+    from .agent_run import execute_run
+
+    try:
+        root = ctx.find_root()
+        if any(
+            root.get_parameter_source(name) == click.core.ParameterSource.COMMANDLINE
+            for name in root.params
+        ):
+            raise UsageError(
+                "put per-call options after `run exec PATH --`; run-wide options belong on run init",
+                code="run_context_usage",
+            )
+        arguments = list(ctx.args)
+        if arguments[:1] == ["--"]:
+            arguments = arguments[1:]
+        payload, exit_code = execute_run(path, arguments)
+    except (AuaError, OSError) as error:
+        failure = error if isinstance(error, AuaError) else ConfigError(str(error))
+        payload = normalize_result(failure.to_dict(), command="run_exec")
+        exit_code = int(failure.exit_code)
+    typer.echo(json.dumps(payload, ensure_ascii=False))
+    if exit_code:
+        raise typer.Exit(exit_code)
+
+
 @app.command(cls=AnnotateCommand, name="guide")
 def guide_cmd(
     ctx: typer.Context,
@@ -10313,20 +10381,24 @@ def alias_fields_on_actions(argv: list[str]) -> list[str]:
 
     Only rewritten when the target command has no `--fields` of its own, so `analyze` keeps hers.
     """
-    if not any(a == "--fields" or a.startswith("--fields=") for a in argv):
+    end = argv.index("--") if "--" in argv else len(argv)
+    head, tail = argv[:end], argv[end:]
+    if not any(a == "--fields" or a.startswith("--fields=") for a in head):
         return argv
-    start = _first_subcommand(argv)
-    if start is None or _defines_option(argv[start:], "--fields"):
+    start = _first_subcommand(head)
+    if start is None or _defines_option(head[start:], "--fields"):
         return argv
     out: list[str] = []
-    for arg in argv:
+    for arg in head:
         if arg == "--fields":
             out.append("--observe-fields")
         elif arg.startswith("--fields="):
             out.append("--observe-fields=" + arg.split("=", 1)[1])
         else:
             out.append(arg)
-    return out
+    # The tail may be literal input text or a nested `run exec` command. Its own
+    # parser decides what flags mean; the outer command must preserve it verbatim.
+    return out + tail
 
 
 def hoist_global_options(argv: list[str]) -> list[str]:

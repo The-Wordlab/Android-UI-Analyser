@@ -1929,6 +1929,42 @@ def render_markdown(*, brief: bool = False) -> str:
     )
 
     p.append("")
+    p.append("## Optional shared agent responses")
+    p.append(
+        "For a consistent response shape and preserved CLI context, initialize one run file "
+        "per caller process and goal. `run init` only saves host configuration; the first "
+        "executed command remains `session start`, which selects or provisions the target."
+    )
+    p.append("```bash")
+    p.append("aua run init /tmp/example-aua-run.json")
+    p.append(
+        "aua run exec /tmp/example-aua-run.json -- session start --goal 'Verify Settings opens'"
+    )
+    p.append("aua run exec /tmp/example-aua-run.json -- tap-and-analyze 'el:<returned-id>'")
+    p.append("aua run exec /tmp/example-aua-run.json -- session finish")
+    p.append("```")
+    p.append(
+        "Replace the example ID with an actual returned handle. Put run-wide config, profile, "
+        "owner, platform, serial and observation defaults before `run init`; ordinary per-call "
+        "options go after `run exec PATH --`. The run freezes effective configuration, uses "
+        "an isolated AUA cache with the shared lease registry, and executes from the "
+        "initialization directory. It rejects scope changes and use by another caller process. "
+        "A new caller or goal needs a new file. `aua agent` remains an alias for this guide."
+    )
+    p.append(
+        "MCP callers opt in with `configure(agent_response=true)`; false restores legacy output. "
+        "Both opt-in paths return `schema_version: 1`, `ok`, `error`, `observation`, "
+        "`observation_contract`, `result` and `context`. Check CLI exit/MCP `isError` and then "
+        "the envelope's `ok` before interpreting results; SDK validation errors can precede "
+        "the envelope. `error` retains typed failure details; `result` holds non-UI facts, "
+        "including recommendations and goal progress. Analyze and action screens both live "
+        "in `observation`, including recovery evidence on failure. Reuse its returned image "
+        "references or MCP image blocks and check the observation contract before acting. "
+        "The wrapper adds no capture, UI cache, previous-screen substitution or retry. "
+        "Legacy calls are unchanged. See `docs/agent-runs.md` for the contract and lifecycle."
+    )
+
+    p.append("")
     p.append("## Exit codes")
     p.append(_md_table(["Code", "Meaning"], EXIT_CODES))
     p.append(

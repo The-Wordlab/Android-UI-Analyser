@@ -11,6 +11,12 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+- Opt-in shared agent responses normalize CLI and MCP results into one error, observation and
+  context envelope, preserving recovery evidence and existing image references. `aua run init`
+  saves host configuration for one caller and goal; `aua run exec PATH -- ...` keeps that context
+  across commands. MCP enables the same response shape with `configure(agent_response=true)`.
+  Legacy output remains unchanged; the wrapper adds no capture, previous-screen substitution or retry.
+
 - Android key validation accepts the existing `paste` and `backspace` runtime aliases through both CLI and MCP; unknown key names still fail before input.
 
 - Missing-target errors preserve explicitly requested full observations, including default state flags, element sources and parent handles, without another UI read. Compact defaults remain unchanged.
