@@ -41,6 +41,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- Detached daemons preserve explicitly unset local policy settings, preventing discovered model
+  paths from causing repeated configuration mismatches for saved agent runs or explicit configs.
 - Verified scrolling can use two distinct resource-addressed leaf controls translating together
   when clipped text stays fixed. The evidence requires unchanged control sizes and proven list
   ownership; duplicate controls, resizing, and movement on the other axis do not qualify.

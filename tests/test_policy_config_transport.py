@@ -15,6 +15,7 @@ from mcp.shared.memory import create_connected_server_and_client_session
 from typer.testing import CliRunner
 
 import android_ui_analyser.cli as cli_mod
+import android_ui_analyser.config as config_mod
 import android_ui_analyser.daemon as daemon_mod
 import android_ui_analyser.engine as engine_mod
 import android_ui_analyser.mcp_server as mcp_mod
@@ -121,6 +122,7 @@ def test_daemon_environment_roundtrips_only_the_effective_policy_slice(
     config.models["openai"]["model"] = "must-not-be-serialized"
     monkeypatch.setenv("AUA_POLICY__OBSOLETE", "stale")
     monkeypatch.setenv("AUA_MODELS__FUNCTIONGEMMA__OBSOLETE", "stale")
+    monkeypatch.setenv("AUA_MODELS__QWEN3__OBSOLETE", "stale")
     monkeypatch.setenv("INHERITED_MARKER", "preserved")
 
     env = daemon_mod._daemon_environment(config)
@@ -128,6 +130,7 @@ def test_daemon_environment_roundtrips_only_the_effective_policy_slice(
     assert env["INHERITED_MARKER"] == "preserved"
     assert "AUA_POLICY__OBSOLETE" not in env
     assert "AUA_MODELS__FUNCTIONGEMMA__OBSOLETE" not in env
+    assert "AUA_MODELS__QWEN3__OBSOLETE" not in env
     assert env["AUA_POLICY__ENABLED"] == "true"
     assert env["AUA_POLICY__CHAIN"] == "functiongemma"
     assert env["AUA_POLICY__MODE"] == "shadow"
@@ -145,6 +148,50 @@ def test_daemon_environment_roundtrips_only_the_effective_policy_slice(
     assert child.policy == config.policy
     assert child.models["functiongemma"] == config.models["functiongemma"]
     assert child.memory.destructive_labels == config.memory.destructive_labels
+
+
+@pytest.mark.parametrize("discovered_layer", ["user", "project"])
+def test_daemon_preserves_explicit_null_policy_fields_over_discovered_config(
+    tmp_path: Path, monkeypatch, discovered_layer: str
+) -> None:
+    discovered = _policy_config(tmp_path)
+    discovered.models["gemma4"].update(
+        model_path="/fictional/local-reviewer", revision="fictional-revision"
+    )
+    discovered.models["qwen3"].update(
+        model_path="/fictional/local-selector", adapter_path="/fictional/local-selector-adapter"
+    )
+    discovered_path = tmp_path / "discovered.json"
+    discovered_path.write_text(discovered.model_dump_json(), encoding="utf-8")
+    monkeypatch.setattr(
+        config_mod,
+        "user_config_path",
+        lambda: discovered_path if discovered_layer == "user" else tmp_path / "absent.json",
+    )
+    monkeypatch.setattr(
+        config_mod,
+        "find_project_config",
+        lambda _cwd: discovered_path if discovered_layer == "project" else None,
+    )
+    explicit = Config()
+    explicit.cache.dir = str(tmp_path / "explicit-cache")
+    explicit_path = tmp_path / "explicit.json"
+    explicit_path.write_text(explicit.model_dump_json(), encoding="utf-8")
+    parent = load_config(explicit_path=explicit_path, env={}, cwd=tmp_path)
+    monkeypatch.setenv("AUA_MODELS__QWEN3__MODEL_PATH", "/fictional/stale-selector")
+    monkeypatch.setenv("AUA_MODELS__QWEN3__OBSOLETE", "stale")
+
+    env = daemon_mod._daemon_environment(parent)
+    child = load_config(env=env, cwd=tmp_path)
+
+    assert "AUA_MODELS__QWEN3__OBSOLETE" not in env
+    for name in ("functiongemma", "gemma4", "qwen3"):
+        assert child.models[name] == parent.models[name]
+        assert child.models[name]["model_path"] is None
+    assert child.policy == parent.policy
+    assert daemon_mod.policy_config_fingerprint(child) == daemon_mod.policy_config_fingerprint(
+        parent
+    )
 
 
 def test_daemon_environment_roundtrips_selective_hybrid_reviewer(tmp_path: Path) -> None:

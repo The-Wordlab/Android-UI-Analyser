@@ -64,6 +64,7 @@ _POLICY_ENV_PREFIXES = (
     "AUA_POLICY__",
     "AUA_MODELS__FUNCTIONGEMMA__",
     "AUA_MODELS__GEMMA4__",
+    "AUA_MODELS__QWEN3__",
     "AUA_MEMORY__DESTRUCTIVE_LABELS",
 )
 _POLICY_ENV_FIELDS = {
@@ -160,8 +161,10 @@ def _daemon_environment(config: Config) -> dict[str, str]:
             del env[key]
     for key, path in _POLICY_ENV_FIELDS.items():
         value = _env_value(_config_value(config, path))
-        if value is not None:
-            env[key] = value
+        # An unset effective field must also override the child's discovered config. Omitting
+        # it lets user/project model paths or checksums reappear and makes every restart retain
+        # the wrong policy fingerprint. The nested-env loader decodes "null" as explicit None.
+        env[key] = "null" if value is None else value
     # The socket name is host-global/per-device, while these directories can be overridden per
     # QA run. Pin the effective values into the child instead of inheriting whatever happened
     # to be in the launching shell. A later caller compares a digest and replaces this daemon
