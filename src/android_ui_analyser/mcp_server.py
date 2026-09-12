@@ -430,7 +430,7 @@ def _as_analyzed_tool(tool: types.Tool) -> types.Tool:
 
 def _with_phase_checkpoint(tool: types.Tool) -> types.Tool:
     """Give every MCP operation the same no-extra-call phase checkpoint as the CLI."""
-    if tool.name == "session_start":
+    if tool.name in {"session_start", "credential_request"}:
         return tool
     schema = dict(tool.inputSchema)
     properties = dict(schema.get("properties") or {})
@@ -454,6 +454,37 @@ def _tool_definitions() -> list[types.Tool]:
     match_enum = ["exact", "contains", "regex"]
     source_enum = ["auto", "hierarchy", "vision"]
     tools = [
+        types.Tool(
+            name="credential_request",
+            description=(
+                "Open a private masked Save/Cancel dialog on the MCP server host and save "
+                "one environment variable to a .env file. Use when a required API key is "
+                "missing; the user types it directly, never in chat or a tool argument. "
+                "Returns status only. No device/session is required. A nonempty saved value "
+                "is preserved unless replace=true. Requires a graphical desktop on the server "
+                "host; remote/headless clients cannot display it locally. The consumer must "
+                "load .env as data; saving does not update the server's environment."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+                        "description": "Environment variable name, never its secret value.",
+                    },
+                    "env_file": {
+                        "type": "string",
+                        "default": ".env",
+                        "description": "Host .env path; prefer an absolute project path.",
+                    },
+                    "replace": {"type": "boolean", "default": False},
+                    "timeout_s": {"type": "integer", "default": 300, "minimum": 1, "maximum": 3600},
+                },
+                "required": ["name"],
+                "additionalProperties": False,
+            },
+        ),
         types.Tool(
             name="capabilities",
             description=(
@@ -2971,6 +3002,18 @@ def _tool_definitions() -> list[types.Tool]:
 # --------------------------------------------------------------------------- dispatch
 
 
+def _request_credential(args: dict[str, Any]) -> dict[str, Any]:
+    """Host credential boundary shared by direct dispatch and the MCP handler."""
+    from .credentials import request_secret
+
+    return request_secret(
+        args.get("name", ""),
+        args.get("env_file", ".env"),
+        replace=args.get("replace", False),
+        timeout_s=args.get("timeout_s", 300),
+    )
+
+
 def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
     """Call the engine method for ``name``; the server brackets the complete response turn."""
     return _dispatch_tool(engine, name, args)
@@ -2978,6 +3021,8 @@ def _dispatch(engine: Engine, name: str, args: dict[str, Any]) -> Any:
 
 def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
     """Call the engine method for ``name`` and return a JSON-serialisable payload."""
+    if name == "credential_request":
+        return _request_credential(args)
     args = dict(args)
     internal_name = _ANALYZED_TOOL_BASES.get(name)
     if internal_name is not None:
@@ -4108,6 +4153,7 @@ class _McpStartedTarget:
 _MCP_STARTED_TARGETS: dict[tuple[int, str, str], _McpStartedTarget] = {}
 _LEASE_FREE_TOOLS = frozenset(
     {
+        "credential_request",
         "app_log_prefs_get",
         "app_log_prefs_set",
         "capabilities",
@@ -4265,6 +4311,16 @@ def build_server(engine: Engine) -> Server:
     async def call_tool(
         name: str, arguments: dict[str, Any]
     ) -> list[types.ContentBlock] | types.CallToolResult:
+        if name == "credential_request":
+            import anyio
+
+            # GUI input never enters an Engine turn, device journal, coaching, or image path.
+            # A worker thread keeps unrelated MCP traffic responsive while the dialog waits.
+            result = await anyio.to_thread.run_sync(_request_credential, dict(arguments or {}))
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False))],
+                isError=not result.get("ok", False),
+            )
         from . import journal as journal_mod
 
         args_in = dict(arguments or {})

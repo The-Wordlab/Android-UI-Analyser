@@ -93,7 +93,7 @@ wheels = [
 
 [[package]]
 name = "android-ui-analyser"
-version = "0.16.2"
+version = "0.17.0"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
@@ -102,6 +102,7 @@ dependencies = [
     { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "pillow" },
     { name = "pydantic" },
+    { name = "python-dotenv" },
     { name = "pyyaml" },
     { name = "qrcode" },
     { name = "typer" },
@@ -208,6 +209,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
     { name = "pytest-xdist", marker = "extra == 'dev'", specifier = ">=3.6" },
+    { name = "python-dotenv", specifier = ">=1.0,<2" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "qrcode", specifier = ">=8.1,<9" },
     { name = "rapidocr-onnxruntime", marker = "extra == 'rapidocr'", specifier = ">=1.3" },

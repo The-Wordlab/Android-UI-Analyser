@@ -1978,8 +1978,21 @@ def render_markdown(*, brief: bool = False) -> str:
         "Config is the nearest `.android-ui-analyser.yaml` (project) → user config; inspect with "
         "`aua config show` / `aua config path`, scaffold with `aua config init`. Swap a model with "
         "one line (e.g. `ocr.chain: [apple_vision, rapidocr]`). **Secrets are env-var names only** "
-        "(`api_key_env: OPENAI_API_KEY`); set the env var — never paste keys. Check readiness with "
+        "(`api_key_env: OPENAI_API_KEY`). Check readiness with "
         "`aua doctor` (it never prints secret values)."
+    )
+    p.append(
+        "When a required key is missing, run `aua config secret OPEN_ROUTER_API_KEY "
+        "--env-file /absolute/project/.env`, or MCP `credential_request` with `name` and "
+        "`env_file`. The user types directly into a masked Save/Cancel dialog on the CLI/MCP "
+        "server host. No device/session is needed; no key value is accepted in command/tool "
+        "arguments or returned in results. Existing nonempty values are preserved unless "
+        "`--replace` / `replace=true` is requested. Any environment-variable name is supported. "
+        "CLI returns JSON status; cancellation exits 130 and errors exit 1. A graphical desktop "
+        "is required. Never fall back to asking for the key in chat or printing the .env file. "
+        "Saving writes data only: the consuming program must load this exact file with dotenv "
+        "interpolation disabled (`interpolate=False`), not shell `source`. Running processes "
+        "are not updated. See `docs/credentials.md` for setup and safe loading examples."
     )
     p.append(
         "`aua ask` is provider-neutral: configure `grounding.chain: [gemini, openai]`. The factory "
@@ -2050,28 +2063,32 @@ def render_skill_markdown() -> str:
     """Compact triggered instructions; deeper guidance stays in the CLI manual."""
     return """# Android UI Analyser
 
-Use AUA MCP tools or the `aua` CLI; the plugin does not put `aua` on `PATH`. Act by ID, never raw `adb`.
+Use AUA MCP or CLI; the plugin does not put `aua` on `PATH`. Act by ID, never raw `adb`.
+
+Missing API key: `aua config secret NAME --env-file PATH` / MCP `credential_request(name, env_file)`
+opens a private host dialog. Never ask/read keys in chat. Save does not load: use dotenv
+`interpolate=False`, not shell `source`. Details: `aua guide` / `docs/credentials.md`.
 
 ## Operating loop
 
 1. Start with MCP `session_start(goal="<what must be verified>")`, or
    `aua session start --goal "<goal>"`. It leaves leased targets alone and
-   provisions a free instance. `--app` selects a package; `--apk` installs it. Reuse the observation
+   provisions a free instance. `--app` selects; `--apk` installs. Reuse observation
    and `recommended_call`; `--contract` requires proof, `--artifacts-dir` records it.
 2. Prefer verified `goto`, saved `flow`, proven deeplink, then manual action. Arrival requires
-   equal mapped `logical_name`, state and surface. Preview risky routes; goal text never
-   authorizes destructive, external, settings, data, payment, send or sign-out effects.
+   matching mapped `logical_name`, state and surface. Preview risky routes; goals never
+   authorize destructive, external, settings, data, payment, send or sign-out effects.
 3. Reuse analyzed observations; `--no-observe` is rejected. Send its `el:` IDs back directly. Use `--rid` for resource IDs.
    Filter `observation.elements` by `clickable`, `checked` or `scrollable`. `--submit` is IME-only:
    check `submitted`; if false, use its `recommended_call` or `--send rid:<control>`, never retype.
-   `observation_contract` separates `action_succeeded`, `evidence_fresh`, `elements_available`
-   and `readiness`. Only `ready` confirms arrival; `not_checked` makes no destination claim.
+   Check `observation_contract`: `action_succeeded`, `evidence_fresh`, `elements_available`,
+   `readiness`. Only `ready` confirms arrival; `not_checked` proves none.
    Inspect `unconfirmed`/`unmet`; check `reusable` before using controls.
-   Read `image_path`/`meta.raw_image` for visual checks; don't recapture. Actions/waits share `--with-image [PATH]`.
+   Inspect `image_path`/`meta.raw_image`; don't recapture. Actions/waits share `--with-image [PATH]`.
 4. Fold arrival into actions: `--until 'rid:resultCard,!text:Loading'`. On `settled-unmet`,
-   inspect the returned evidence and correct the predicate; never repeat the action.
-   Use `await-and-analyze` for absence-only checks, `back-until-and-analyze` for nested returns.
-5. Keep hierarchy-first; filter with `--where-rid`/`--where-text`/`--region`. Use vision for opaque screens.
+   inspect evidence and correct the predicate; never repeat the action.
+   `await-and-analyze` for absence-only checks; `back-until-and-analyze` for nested returns.
+5. Hierarchy-first; filter `--where-rid`/`--where-text`/`--region`. Vision for opaque screens.
 6. Carry `goal_progress.checkpoint` on the next call with `--phase-done` (MCP: `phase_done`).
    `aua job start await ...` detaches read-only waits; reconnect by job id.
    On `daemon_outcome_unknown`, wait and inspect; never repeat the action.
@@ -2094,23 +2111,19 @@ yields an unmapped `satisfied_action_until` arrival.
 - `--no-start-emulator` forbids provisioning; `--headed` shows the target. `--audio` verifies an
   authenticated microphone endpoint before app installation.
   Use `mic inject`/`mic speak`; never repeat uncertain delivery.
-- Animation scales restore at finish. After the transition/wait, use the action/job's
-  `capture_evidence.ref`: `capture sheet PATH.png --evidence REF`, then `capture export PATH.gif`
-  with that REF. First inspection fixes the window; no guessed seconds or replay. Exports
-  preserve prior observation validity. Obey the raw-`adb` plugin guard.
-- Use `aua network offline --verify`; session cleanup restores it. Guarded `aua db` for
-  debuggable SQLite.
-- Deeplink delivery or spinner disappearance is not arrival—check `verified` and the final affordance.
-- Assert observed text or `--rid` — labels render in `meta.device_locale`.
+- Animations restore at finish. After transition/wait, use action/job `capture_evidence.ref`:
+  `capture sheet PATH.png --evidence REF`, then `capture export PATH.gif` with the same REF.
+  First inspection fixes the window; no guessed seconds/replay. Exports keep observation validity.
+- `aua network offline --verify` restores at cleanup. Guarded `aua db` for debuggable SQLite.
+- Deeplink/spinner changes do not prove arrival; check `verified` and final affordance.
+- Assert text or `--rid`; labels use `meta.device_locale`.
 - Never execute `policy_suggestion`; `session autopilot` is off by default and **taps only**.
   No login/text entry. Use screen words (`Open Catalog`); no goal word match yields `policy_handoff`.
 
 ## Load more when needed
 
-CLI: `logcat`; `app launch-and-analyze`; `key-and-analyze back`.
-
-- Call MCP `capabilities(goal="<goal>")`, or CLI `aua capabilities --goal "<goal>"`, for discovery.
-- Run `aua guide` for the full reference or `aua guide --brief` for the field guide.
+- Discover with MCP `capabilities(goal="<goal>")` or CLI `aua capabilities --goal "<goal>"`.
+- Run `aua guide` for full reference; `aua guide --brief` for the field guide.
 """
 
 

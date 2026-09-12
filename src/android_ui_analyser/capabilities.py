@@ -28,6 +28,15 @@ class Capability:
 
 CAPABILITIES: tuple[Capability, ...] = (
     Capability(
+        "credentials",
+        "Ask the user privately for a missing API key and save it to a host .env file; status only.",
+        ("api key", "apikey", "credential", "secret", "openrouter", ".env"),
+        1,
+        "aua config secret <ENV_NAME> --env-file <project>/.env",
+        "credential_request",
+        risk="host file update after private Save; no device or session required",
+    ),
+    Capability(
         "session",
         "Start from a goal: observe once, track ordered phases, and receive the exact next call.",
         ("test", "verify", "inspect", "navigate", "open", "offline", "android"),
@@ -339,5 +348,9 @@ def render_mcp_instructions() -> str:
         "prior scales at session_finish. Use capture_sheet for a bounded timestamped PNG "
         "timeline without ffmpeg. "
         "Unsafe or destructive effects require explicit "
-        "authorization. capabilities(goal) provides progressive discovery for uncommon tasks."
+        "authorization. For missing API keys, credential_request opens a private dialog on "
+        "this server's desktop and saves a host .env file; pass only the variable name and "
+        "path, never the secret. No device session is needed. The consumer must explicitly "
+        "load the file as data; saving does not change this process's environment. "
+        "capabilities(goal) provides progressive discovery for uncommon tasks."
     )

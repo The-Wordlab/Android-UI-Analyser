@@ -11,6 +11,14 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-09-12
+
+- `aua config secret NAME --env-file PATH` and MCP `credential_request` open a private masked
+  Save/Cancel dialog to save an API key or other environment variable. Values stay out of command
+  arguments and tool results; existing nonempty values are preserved unless replacement is
+  requested. The host-only operation needs no device or session. The generated skills and new
+  `docs/credentials.md` tutorial cover setup and loading the resulting dotenv file as data.
+
 - Opt-in shared agent responses normalize CLI and MCP results into one error, observation and
   context envelope, preserving recovery evidence and existing image references. `aua run init`
   saves host configuration for one caller and goal; `aua run exec PATH -- ...` keeps that context
@@ -560,5 +568,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.16.1]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.16.1
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.16.2...HEAD
 [0.16.2]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.16.2
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.17.0

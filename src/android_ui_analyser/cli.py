@@ -7271,9 +7271,34 @@ def daemon(
 
 
 config_app = typer.Typer(
-    name="config", help="Inspect and initialise configuration.", no_args_is_help=True
+    name="config", help="Inspect configuration or save credentials privately.", no_args_is_help=True
 )
 app.add_typer(config_app, name="config")
+
+
+@config_app.command("secret")
+def config_secret(
+    name: str = typer.Argument(..., help="Environment variable name, never its secret value."),
+    env_file: Path = typer.Option(Path(".env"), "--env-file", help="Host .env file to update."),
+    replace: bool = typer.Option(
+        False, "--replace", help="Ask for a replacement even when a nonempty value is saved."
+    ),
+    timeout: int = typer.Option(300, "--timeout", help="Seconds to leave the private dialog open."),
+) -> None:
+    """Open a private Save/Cancel dialog and return JSON status without the secret.
+
+    No device or session is required. The dialog opens on this host. Saving .env does not
+    load it into AUA or the shell; the consuming program must load that file as data.
+    """
+    import json
+
+    from .credentials import request_secret
+
+    # Keep this host operation outside _run, Engine, the daemon, and device evidence.
+    result = request_secret(name, env_file, replace=replace, timeout_s=timeout)
+    typer.echo(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+    if not result.get("ok"):
+        raise typer.Exit(130 if result.get("status") == "cancelled" else 1)
 
 
 @config_app.command("init")

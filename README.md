@@ -91,11 +91,11 @@ directly from GitHub:
 
 ```bash
 uvx --from \
-  'android-ui-analyser[apple,rapidocr,audio] @ git+https://github.com/The-Wordlab/Android-UI-Analyser.git@v0.16.2' \
+  'android-ui-analyser[apple,rapidocr,audio] @ git+https://github.com/The-Wordlab/Android-UI-Analyser.git@v0.17.0' \
   aua --version
 ```
 
-`uvx` creates an isolated environment and caches it for later calls. Replace `v0.16.2` with the
+`uvx` creates an isolated environment and caches it for later calls. Replace `v0.17.0` with the
 release you want; no clone, `git pull`, editable environment, or global `aua` executable is needed.
 The command is `uvx --from … aua`, not `uv aua`: the shorter `uvx aua` becomes possible only after
 the distribution is published to PyPI. Until then the explicit Git source keeps the release origin
@@ -308,7 +308,7 @@ Pin a clone-based install to a release instead of tracking `main`:
 
 ```bash
 git fetch --tags
-git checkout v0.16.2
+git checkout v0.17.0
 ./install.sh
 ```
 
@@ -883,13 +883,23 @@ flags:
 
 **Secrets are never stored in config.** The config references the env-var **name** (`api_key_env: OPENAI_API_KEY`); the tool reads the value at runtime. `aua config show` and `aua doctor` never print secret values.
 
-For convenience, keep a gitignored `.env` file and source it before running `aua`:
+Ask for a key through a private masked Save/Cancel dialog, without putting its value in agent
+chat or terminal arguments. This host-only command works before device setup:
 
 ```bash
-echo "GEMINI_API_KEY=..." >> .env
-# Or add OPENAI_API_KEY instead. `.env` is already gitignored.
-set -a; source .env; set +a   # export entries so `aua` and its daemon inherit them
+aua config secret GEMINI_API_KEY --env-file /absolute/project/.env
+# Other variables use the same dialog, including OPEN_ROUTER_API_KEY.
 ```
+
+MCP agents use `credential_request(name="GEMINI_API_KEY", env_file="/absolute/project/.env")`.
+The result contains only status, variable name, and destination. Existing nonempty values are
+preserved unless `--replace` / `replace=true` is supplied. The dialog opens on the CLI/MCP server
+host, so it requires that host's graphical desktop.
+
+Saving `.env` does **not** load it into the shell, AUA, or an existing daemon. The consuming
+program must parse this exact file as dotenv data with interpolation disabled, never shell
+`source`. Keep the file outside version control. See the [credential setup tutorial](docs/credentials.md)
+for safe loading examples, cancellation, and headless-host behavior.
 
 ### Example config
 
@@ -946,6 +956,7 @@ aua config init          # write commented default config to the user config pat
 aua config show          # print the current config (secrets masked)
 aua config show --effective  # print after all precedence layers are merged
 aua config path          # print the resolved config file path
+aua config secret OPEN_ROUTER_API_KEY --env-file /absolute/project/.env  # private dialog
 ```
 
 ---
@@ -1465,7 +1476,7 @@ Example MCP client config (Claude Desktop / `claude_desktop_config.json`):
       "args": [
         "--quiet",
         "--from",
-        "android-ui-analyser[apple,rapidocr,audio] @ git+https://github.com/The-Wordlab/Android-UI-Analyser.git@v0.16.2",
+        "android-ui-analyser[apple,rapidocr,audio] @ git+https://github.com/The-Wordlab/Android-UI-Analyser.git@v0.17.0",
         "aua",
         "mcp"
       ]
