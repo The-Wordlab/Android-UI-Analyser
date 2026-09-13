@@ -311,6 +311,7 @@ class Decider:
         max_tokens: int = 1024,
         cost_limit_usd: float = 0.05,
         repair_budget: int = 1,
+        fallbacks: Sequence[tuple[str, dict[str, Any] | None]] = (),
         output: Path | None = None,
     ) -> None:
         if backend not in BACKENDS:
@@ -324,6 +325,17 @@ class Decider:
         self.settings = validate_request_config(request_config or {}) if self.hosted else copy.deepcopy(request_config or {})
         self.max_tokens = max_tokens
         self.repair_budget = repair_budget
+        # Rungs tried in order once the model in hand has spent its repair budget. A judge
+        # that cannot produce its own schema is not going to produce it on the fourth ask;
+        # a stronger model is a better use of the next request than another repair.
+        self.ladder: list[tuple[str, dict[str, Any]]] = [(model, self.settings)]
+        for rung_model, rung_config in fallbacks:
+            if not isinstance(rung_model, str) or not rung_model.strip():
+                raise RunError("each decider fallback needs a model id")
+            rung = (validate_request_config(rung_config or request_config or {}) if self.hosted
+                    else copy.deepcopy(rung_config or request_config or {}))
+            self.ladder.append((rung_model, rung))
+        self.escalations = 0
         self.guard = CostGuard(cost_limit_usd) if self.hosted else None
         self.output = Path(output) if output is not None else None
         self.decisions = 0
@@ -373,21 +385,33 @@ class Decider:
         ]
         tool = {"type": "function", "function": {"name": name, "description": f"Record the {role} decision.", "parameters": schema}}
         record: dict[str, Any] = {"role": role, "name": name, "repairs": 0, "usage": [], "cost": 0.0,
-                                  "images": len(shots)}
+                                  "images": len(shots), "requested_model": self.model,
+                                  "escalations": 0}
         result: dict[str, Any] | None = None
         error: str | None = None
-        for attempt in range(self.repair_budget + 1):
+        rung = 0
+        attempts = (self.repair_budget + 1) * len(self.ladder)
+        for attempt in range(attempts):
+            # Each rung gets the full repair budget before the next one is asked at all.
+            if attempt and attempt % (self.repair_budget + 1) == 0 and rung + 1 < len(self.ladder):
+                rung += 1
+                self.escalations += 1
+                record["escalations"] = rung
+                record["escalated_to"] = self.ladder[rung][0]
+                # No extra nudge: the failed repair already appended what was wrong with the
+                # last answer, and the stronger model reads the same thread.
+            rung_model, rung_settings = self.ladder[rung]
             payload: dict[str, Any] = {
-                "model": self.model, "messages": copy.deepcopy(messages), "tools": [tool],
+                "model": rung_model, "messages": copy.deepcopy(messages), "tools": [tool],
                 "tool_choice": {"type": "function", "function": {"name": name}},
                 "parallel_tool_calls": False, "stream": False,
                 "max_tokens": max_tokens if max_tokens is not None else self.max_tokens,
             }
             if self.hosted:
-                payload = configure_payload(payload, self.settings)
+                payload = configure_payload(payload, rung_settings)
                 self.guard.before_request()
             else:
-                payload.update(copy.deepcopy(self.settings))
+                payload.update(copy.deepcopy(rung_settings))
             tick = time.monotonic()
             self.requests += 1
             response = await self.send(payload)
@@ -400,8 +424,8 @@ class Decider:
             if self.guard is not None:
                 self.guard.consume(response)
                 record["cost"] += float((usage or {}).get("cost") or 0)
-            record.setdefault("model", response.get("model"))
-            record.setdefault("provider", response.get("provider"))
+            record["model"] = response.get("model")
+            record["provider"] = response.get("provider")
             try:
                 message, native = completion(response)
                 if native is None or native.get("name") != name:
@@ -419,16 +443,20 @@ class Decider:
         if result is None:
             record["error"] = error
             self._log(record)
-            raise RunError("decider could not obtain a valid structured answer: " + str(error))
+            walked = " -> ".join(model for model, _ in self.ladder)
+            raise RunError("decider could not obtain a valid structured answer from "
+                           + walked + ": " + str(error))
         self.decisions += 1
         record["result"] = result
         self._log(record)
         return {"result": result, "cost": record["cost"], "usage": record["usage"],
                 "model": record.get("model"), "provider": record.get("provider"),
-                "request_ms": record["request_ms"], "repairs": record["repairs"]}
+                "request_ms": record["request_ms"], "repairs": record["repairs"],
+                "escalations": record["escalations"]}
 
     def report(self) -> dict[str, Any]:
         return {"decisions": self.decisions, "requests": self.requests,
+                "ladder": [model for model, _ in self.ladder], "escalations": self.escalations,
                 "reported_usd": round(self.total_cost, 8), "request_ms": self.request_ms,
                 "spend_guard": self.guard.report() if self.guard is not None else None}
 
