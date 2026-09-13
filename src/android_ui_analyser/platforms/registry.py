@@ -26,6 +26,7 @@ _REGISTRY: dict[str, type[PlatformAdapter]] = {}
 _BUILTINS_LOADED = False
 _BUILTIN_MODULES: dict[str, str] = {
     "android": "android_ui_analyser.platforms.android",
+    "ios": "android_ui_analyser.platforms.ios",
 }
 _ENTRY_POINTS: dict[str, list[metadata.EntryPoint]] | None = None
 
