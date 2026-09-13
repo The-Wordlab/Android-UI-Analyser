@@ -298,6 +298,10 @@ def test_start_inventory_failure_reaps_only_the_spawned_process(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     from android_ui_analyser import emulator as emu
+    from android_ui_analyser import leases
+
+    monkeypatch.setattr(leases, "_proc_started", lambda _pid: "fake-boot-start")
+    monkeypatch.setattr(emu, "_wait_owned_process_exit", lambda *_args: True)
 
     monkeypatch.setattr(
         emu, "list_avds", lambda: {"ok": True, "avds": ["only"], "count": 1, "emulator": "x"}

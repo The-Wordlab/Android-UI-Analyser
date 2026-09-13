@@ -1125,14 +1125,46 @@ def _rollback_failed_start(
     meta: dict[str, Any],
     meta_path: Path,
     console_port: int | None,
-) -> None:
+) -> bool:
     """Reap only the process this start spawned, without consulting shared ADB state."""
 
+    from .leases import _proc_started
+
+    if _owned_instance_pid({**meta, "_path": str(meta_path)}) != pid:
+        return False
+    started = meta.get("process_started")
+    process_gone = False
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        # A crash-report dialog can ignore TERM. Before either signal, recheck the
+        # recorded identity so escalation cannot hit a process that reused this pid.
+        current = _proc_started(pid)
+        if started and current and current != started:
+            process_gone = True
+            break
+        if not started or not current:
+            # Missing identity is not permission to signal an arbitrary live pid.
+            process_gone = _wait_owned_process_exit(pid, started)
+            break
+        try:
+            os.killpg(pid, sig)
+        except ProcessLookupError:
+            pass  # the group may be gone before its child has been reaped
+        except OSError:
+            break
+        process_gone = _wait_owned_process_exit(pid, started)
+        if process_gone:
+            break
+    if not process_gone:
+        logger.warning(
+            "startup cleanup could not confirm emulator exit; keeping ownership record %s "
+            "and console port reservation",
+            meta_path,
+        )
+        return False
     _kill_watchdog(meta)
-    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-        os.killpg(pid, signal.SIGTERM)
     meta_path.unlink(missing_ok=True)
     release_console_port(console_port)
+    return True
 
 
 def _spawn_idle_watchdog(
@@ -1412,18 +1444,20 @@ def start(
         meta["owner"] = owner_tag
 
     cleanup_done = False
+    cleanup_succeeded = False
 
-    def rollback_failed_start() -> None:
-        nonlocal cleanup_done
+    def rollback_failed_start() -> bool:
+        nonlocal cleanup_done, cleanup_succeeded
         if cleanup_done:
-            return
+            return cleanup_succeeded
         cleanup_done = True
-        _rollback_failed_start(
+        cleanup_succeeded = _rollback_failed_start(
             pid=proc.pid,
             meta=meta,
             meta_path=meta_path,
             console_port=console_port,
         )
+        return cleanup_succeeded
 
     def startup_step(operation: Callable[[], Any]) -> Any:
         try:
@@ -1465,10 +1499,6 @@ def start(
             hint="Retry the start; a different console port will be allocated.",
         )
 
-    # The instance is up and adb can see it, so the reservation has done its job and the
-    # normal used-port detection takes over from here.
-    release_console_port(console_port)
-
     # Check once as soon as adb exposes the serial. Some images publish their persisted global
     # settings this early, and removing a dead proxy before NetworkMonitor's first probe avoids
     # a transient offline classification. Android may restore the setting later in boot, though,
@@ -1500,11 +1530,18 @@ def start(
             shell, timeout_s=min(90.0, max(0.0, startup_deadline - time.monotonic()))
         )
     ):
-        rollback_failed_start()
+        stopped = rollback_failed_start()
         raise DeviceError(
             "emulator transport appeared, but Android and its package manager did not become ready",
             code="emulator_boot_timeout",
-            hint=f"Inspect the emulator log: {log_path}. Only this newly started instance was stopped.",
+            hint=(
+                f"Inspect the emulator log: {log_path}. "
+                + (
+                    "Only this newly started instance was stopped."
+                    if stopped
+                    else f"Cleanup could not confirm process exit; ownership is retained in {meta_path}."
+                )
+            ),
         )
     proxy_cleanup = startup_step(
         lambda: _clear_inherited_blackholed_proxy(serial, cache_dir=cache_dir)
@@ -1515,6 +1552,10 @@ def start(
         from . import mic
 
         audio_preflight = startup_step(lambda: mic.preflight(serial))
+
+    # Retain the claim throughout readiness/preflight: a failed boot that cannot be
+    # stopped must keep its port reserved even if it disappears from ADB inventory.
+    release_console_port(console_port)
 
     # Animations off by default. Measured on a windowed AVD: a tap settles in 272ms instead
     # of 357ms, and the spread narrows from 225ms to 69ms — the predictability matters more

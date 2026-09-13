@@ -173,6 +173,10 @@ def test_boot_read_timeout_retries_readiness_inside_the_original_budget(
 
 @pytest.mark.parametrize("remaining_s", [5.0, 35.0])
 def test_exhausted_readiness_retries_clean_only_the_owned_start(monkeypatch, tmp_path, remaining_s):
+    from android_ui_analyser import leases
+
+    monkeypatch.setattr(leases, "_proc_started", lambda _pid: "fake-boot-start")
+    monkeypatch.setattr(emulator, "_wait_owned_process_exit", lambda *_args: True)
     now = [0.0]
     monkeypatch.setattr(
         emulator,
@@ -240,9 +244,14 @@ def test_exhausted_readiness_retries_clean_only_the_owned_start(monkeypatch, tmp
     assert not (tmp_path / "emulator" / "example.p5998.json").exists()
 
 
+@pytest.mark.parametrize("cleanup_confirmed", [False, True])
 def test_start_shares_readiness_budget_and_rolls_back_an_unready_boot(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, cleanup_confirmed
 ) -> None:
+    from android_ui_analyser import leases
+
+    monkeypatch.setattr(leases, "_proc_started", lambda _pid: "fake-boot-start")
+    monkeypatch.setattr(emulator, "_wait_owned_process_exit", lambda *_args: cleanup_confirmed)
     now = [0.0]
     monkeypatch.setattr(emulator.time, "monotonic", lambda: now[0])
     monkeypatch.setattr(emulator, "list_avds", lambda: {"avds": ["example"], "count": 1})
@@ -279,6 +288,7 @@ def test_start_shares_readiness_budget_and_rolls_back_an_unready_boot(
         )
     assert raised.value.code == "emulator_boot_timeout"
     assert boot_budgets == [2.0]
-    assert killed == [4242]
-    assert released and set(released) == {5998}
-    assert not (tmp_path / "emulator" / "example.p5998.json").exists()
+    assert killed == ([4242] if cleanup_confirmed else [4242, 4242])
+    assert released == ([5998] if cleanup_confirmed else [])
+    assert (tmp_path / "emulator" / "example.p5998.json").exists() is not cleanup_confirmed
+    assert ("instance was stopped" in raised.value.hint) is cleanup_confirmed
