@@ -1534,7 +1534,8 @@ def render_markdown(*, brief: bool = False) -> str:
     p.append("# android-ui-analyser (`aua`) — agent operating manual")
     p.append("")
     p.append(
-        "`aua` reports **what's on an Android screen and where**, so you act on **stable "
+        "`aua` reports **what's on an Android screen and where** (iOS simulators too, with "
+        "`--platform ios`), so you act on **stable "
         "element IDs, not pixels**. It reads the accessibility/view hierarchy first (fast, "
         "exact) and falls back to image vision (detection + OCR, optional grounding VLM) on "
         "screens the hierarchy can't see. It remembers each app's layout so you start each "
@@ -1637,6 +1638,18 @@ def render_markdown(*, brief: bool = False) -> str:
         "`analyze` visibly misses content, force it:\n"
         "```bash\naua --format compact analyze --source vision --annotate\n```\n"
         "`meta.annotated_image` is a PNG with numbered boxes you can open."
+    )
+
+    p.append("")
+    p.append("## iOS simulators (`--platform ios`)")
+    p.append(
+        "Same commands, same ids. Select once with `aua --platform ios …` or `AUA_PLATFORM=ios`; "
+        "`aua --platform ios doctor` checks `xcrun`, AXe (`brew install cameroncooke/axe/axe`) and "
+        "which simulators are booted. `resource_id` is the accessibilityIdentifier (use `--rid`), "
+        "`screen.package` is the bundle id, `key back` performs the edge-swipe back gesture, "
+        "`aua install` takes an iphonesimulator `.app`, and non-ASCII text is pasted for you. "
+        "Logs, recording and `virtual-target` provisioning are not available on iOS yet; those "
+        "calls return `platform_capability_unsupported`. Details: `docs/ios.md`."
     )
 
     p.append("")

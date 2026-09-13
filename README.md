@@ -36,6 +36,7 @@ the local MCP server from the Git tag matching the plugin version.
 You do **not** need Android Studio's IDE, Gradle, or the app's source code — `aua` works against any app already installed on the device, including release builds. (Android Studio is just the easiest way to obtain `adb` and an emulator.)
 
 Optional, only for specific features:
+- **Xcode 26+ and [AXe](https://github.com/cameroncooke/AXe)** (`brew tap cameroncooke/axe && brew install axe`) — only for [iOS simulators](#ios-simulators) via `--platform ios`.
 - **`tesseract`** system binary — only if you enable the `tesseract` OCR extra.
 - A **GPU** (CUDA / Apple Metal) — speeds up the `yolo`/`omniparser` detectors and local grounding, but everything also runs on CPU.
 - **API keys** (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY`) — only if you opt into a commercial grounding provider (off by default).
@@ -1169,10 +1170,26 @@ so later agents and contributors can reproduce or improve the adapter without de
 
 ---
 
+## iOS simulators
+
+The same commands drive an iOS simulator when you select the built-in `ios` platform:
+
+```bash
+brew tap cameroncooke/axe && brew install axe   # accessibility tree + HID input for simulators
+aua --platform ios doctor                       # xcrun, axe, and which simulators are booted
+aua --platform ios --format compact analyze     # or: export AUA_PLATFORM=ios
+aua --platform ios tap-and-analyze --text "General"
+```
+
+Elements, ids, `has`/`wait`, flows and maps behave as on Android; `resource_id` is the
+`accessibilityIdentifier`, `key back` performs the iOS back gesture, and `aua install` takes an
+`iphonesimulator` `.app` bundle. Physical iPhones are not supported. Details, the capability table
+and troubleshooting: [docs/ios.md](docs/ios.md).
+
 ## Adding a platform adapter
 
-Android is the only built-in platform today, but the engine selects it through a platform
-strategy. `device.platform`, `--platform`, or `AUA_PLATFORM` can select an installed adapter;
+Android is the default platform and iOS simulators are the second built-in, both selected through
+a platform strategy. `device.platform`, `--platform`, or `AUA_PLATFORM` can select an installed adapter;
 third-party packages register adapters through the `aua.platforms` Python entry-point group.
 The choice is process/config scoped (not repeated on every command), and both target actions and
 optional services are gated: another platform never silently falls back to ADB.

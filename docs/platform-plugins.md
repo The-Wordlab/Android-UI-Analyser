@@ -1,8 +1,9 @@
 # Platform adapter API v1
 
 AUA selects one platform strategy from `device.platform`, `--platform`, or `AUA_PLATFORM`.
-`android` is the built-in default. A third-party distribution can add another strategy without
-changing AUA's Engine, CLI, MCP server, daemon, or state stores.
+`android` is the built-in default and `ios` (simulators, see [docs/ios.md](ios.md)) is the second
+built-in. A third-party distribution can add another strategy without changing AUA's Engine, CLI,
+MCP server, daemon, or state stores.
 
 API v1 separates three scopes:
 

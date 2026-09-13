@@ -23,6 +23,13 @@ notes, so you can check for a newer version — and read what changed — withou
   permission grant, and deferred app launch. The CLI exposes the same permission and launch
   controls, so harnesses can acquire or provision a leased target, install the app, and prepare
   recording before the first product launch without agent orchestration.
+- Built-in `ios` platform: `aua --platform ios` (or `AUA_PLATFORM=ios`) drives iOS simulators
+  through Apple's `simctl` and the AXe accessibility CLI. `analyze`, id-based actions, waits,
+  flows and maps work unchanged; elements carry accessibility identifiers as `resource_id`,
+  bounds are screenshot pixels, and `key-and-analyze back` performs the iOS back gesture.
+  Covers the attached-target profile plus app install/launch/stop/clear/grant, links,
+  clipboard and location. Logs, recording and simulator provisioning stay Android-only for
+  now. See `docs/ios.md`.
 
 ### Changed
 
