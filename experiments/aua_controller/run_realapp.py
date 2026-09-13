@@ -728,11 +728,12 @@ def main() -> int:
 
     async def execute() -> dict[str, Any]:
         import httpx
-        from mcp import ClientSession, StdioServerParameters
+        from experiments.aua_controller.run_live import mcp_server
+        from mcp import ClientSession
         from mcp.client.stdio import stdio_client
 
         headers = {"Authorization": f"Bearer {key}"}
-        server = StdioServerParameters(command=args.aua_command, args=["mcp"])
+        server = mcp_server(args.aua_command)
         async with httpx.AsyncClient(headers=headers, timeout=120, follow_redirects=False) as http:
             async def send(payload: dict[str, Any]) -> dict[str, Any]:
                 response = await http.post(args.base_url.rstrip("/") + "/chat/completions", json=payload)

@@ -34,7 +34,32 @@ from experiments.aua_controller.hosted import (
     validate_request_config,
 )
 from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+from mcp.client.stdio import get_default_environment, stdio_client
+
+# Config the `aua mcp` child must inherit. The MCP stdio client scrubs the child environment down
+# to a tiny safe allowlist (HOME/PATH/SHELL/…), which silently drops AUA_CACHE__DIR and AUA_SERIAL.
+# A caller that scoped a run to its own cache lane or pinned a serial then had the server ignore
+# both: it wrote to the shared default cache and leased or provisioned whatever it liked. We forward
+# every AUA_* variable (cache dir, owner, worker scope, pinned serial) plus the Android SDK/adb
+# pointers, overlaid on the SDK's safe base.
+_FORWARDED_CHILD_ENV = (
+    "ANDROID_SERIAL", "ANDROID_HOME", "ANDROID_SDK_ROOT", "ANDROID_AVD_HOME",
+    "ANDROID_ADB_SERVER_PORT", "ANDROID_ADB_SERVER_ADDRESS", "ADB_SERVER_SOCKET",
+)
+
+
+def mcp_server(aua_command: str) -> StdioServerParameters:
+    """Launch parameters for the `aua mcp` server that keep the caller's AUA/Android config.
+
+    Without an explicit ``env`` the stdio client applies its default scrub, so a scoped
+    ``AUA_CACHE__DIR`` or a pinned ``AUA_SERIAL`` never reaches the server. Overlay both kinds of
+    pointer on the SDK's safe base so lane isolation and serial pinning actually hold.
+    """
+    env = dict(get_default_environment())
+    for name, value in os.environ.items():
+        if name.startswith("AUA_") or name in _FORWARDED_CHILD_ENV:
+            env[name] = value
+    return StdioServerParameters(command=aua_command, args=["mcp"], env=env)
 
 ROOT = Path(__file__).resolve().parents[2]
 SCENARIOS = {"classic-sort", "compose-sort", "async-recovery"}
@@ -724,7 +749,7 @@ def main() -> int:
         headers = {}
         if key := os.environ.get(api_key_env):
             headers["Authorization"] = f"Bearer {key}"
-        server = StdioServerParameters(command=args.aua_command, args=["mcp"])
+        server = mcp_server(args.aua_command)
         async with httpx.AsyncClient(headers=headers, timeout=args.request_timeout, follow_redirects=False) as http:
             async def send(payload: dict[str, Any]) -> dict[str, Any]:
                 response = await http.post(args.base_url.rstrip("/") + "/chat/completions", json=payload)
