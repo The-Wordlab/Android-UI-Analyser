@@ -2934,6 +2934,116 @@ def _tool_definitions() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="datastore_list",
+            description=(
+                "List a debuggable package's Jetpack DataStore preference files. These hold "
+                "theme, onboarding and similar app state; feature flags live in shared_prefs."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {"package": {"type": "string"}},
+                "required": ["package"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="datastore_get",
+            description=(
+                "Read one DataStore file as typed key/value pairs. Does not stop the app, so "
+                "the caller keeps its navigation state."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "package": {"type": "string"},
+                    "datastore": {"type": "string"},
+                    "keys": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["package", "datastore"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="datastore_set",
+            description=(
+                "Merge typed values into one DataStore file: force-stops the app (a running "
+                "app never re-reads the file), takes a restore point, writes, and relaunches by "
+                "default. Keys not named are preserved. The app is back at its cold-start "
+                "screen afterwards, so re-navigate."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "package": {"type": "string"},
+                    "datastore": {"type": "string"},
+                    "values": {
+                        "type": "object",
+                        "description": (
+                            "Keyed by preference name. Either a bare JSON value, or "
+                            '{\"type\": \"bool|int|long|float|double|string|string_set\", '
+                            '\"value\": ...} when the stored type must be pinned.'
+                        ),
+                    },
+                    "restart": {"type": "boolean", "default": True},
+                    "confirmed": {
+                        "type": "boolean",
+                        "description": "Must be true after reviewing the values to write.",
+                    },
+                },
+                "required": ["package", "datastore", "values", "confirmed"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="datastore_backup",
+            description="Copy one DataStore file to a private host restore point.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "package": {"type": "string"},
+                    "datastore": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["package", "datastore"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="datastore_backups",
+            description="List restore points scoped to this device, package, and datastore.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "package": {"type": "string"},
+                    "datastore": {"type": "string"},
+                },
+                "required": ["package", "datastore"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="datastore_restore",
+            description=(
+                "Restore a confirmed datastore backup after preserving the current state as a "
+                "new safety backup."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "package": {"type": "string"},
+                    "datastore": {"type": "string"},
+                    "backup_id": {"type": "string"},
+                    "restart": {"type": "boolean", "default": True},
+                    "confirmed": {
+                        "type": "boolean",
+                        "description": "Must be true after reviewing the restore point id.",
+                    },
+                },
+                "required": ["package", "datastore", "backup_id", "confirmed"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
             name="resolve",
             description="Remap a previous-frame id or stable_key onto the current screen.",
             inputSchema={
@@ -4053,6 +4163,38 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         return engine.database_restore(
             args["package"],
             args["database"],
+            args["backup_id"],
+            restart=args.get("restart", True),
+            confirmed=args.get("confirmed", False),
+        )
+    if name == "datastore_list":
+        return engine.datastore_list(args["package"])
+    if name == "datastore_get":
+        return engine.datastore_get(
+            args["package"],
+            args["datastore"],
+            keys=args.get("keys"),
+        )
+    if name == "datastore_set":
+        return engine.datastore_set(
+            args["package"],
+            args["datastore"],
+            args["values"],
+            restart=args.get("restart", True),
+            confirmed=args.get("confirmed", False),
+        )
+    if name == "datastore_backup":
+        return engine.datastore_backup(
+            args["package"],
+            args["datastore"],
+            reason=args.get("reason", "manual"),
+        )
+    if name == "datastore_backups":
+        return engine.datastore_backups(args["package"], args["datastore"])
+    if name == "datastore_restore":
+        return engine.datastore_restore(
+            args["package"],
+            args["datastore"],
             args["backup_id"],
             restart=args.get("restart", True),
             confirmed=args.get("confirmed", False),

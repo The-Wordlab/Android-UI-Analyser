@@ -6173,6 +6173,193 @@ def database_restore_cmd(
     _run(ctx, go)
 
 
+datastore_app = typer.Typer(
+    help="Read, write, back up, and restore a debuggable app's Jetpack DataStore preferences.",
+    no_args_is_help=True,
+)
+app.add_typer(datastore_app, name="datastore")
+
+_DATASTORE_RESTART = typer.Option(
+    True,
+    "--restart/--no-restart",
+    help="Relaunch the package after the write. DataStore is only re-read on a cold start.",
+)
+
+
+def _datastore_values(raw: str | None, file: str | None) -> dict[str, Any]:
+    """Parse the ``{key: {type, value}}`` (or bare ``{key: value}``) mapping a write applies."""
+    if raw is not None and file is not None:
+        raise UsageError("pass values as an argument or with --file, not both")
+    import json
+
+    if file is not None:
+        path = Path(file).expanduser()
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise UsageError(f"could not read values file {path}: {exc}") from exc
+    else:
+        text = raw or ""
+    if not text.strip():
+        raise UsageError("values are required (JSON argument or --file PATH)")
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise UsageError(f"values must be valid JSON: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise UsageError("values must be a JSON object keyed by preference name")
+    return parsed
+
+
+@datastore_app.command("list")
+def datastore_list_cmd(
+    ctx: typer.Context,
+    package: str = typer.Argument(..., help="Debuggable app package id."),
+) -> None:
+    """List the app's `*.preferences_pb` files by the name its Kotlin code uses."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(_route(engine, "datastore_list", package=package), fmt)
+
+    _run(ctx, go)
+
+
+@datastore_app.command("get")
+def datastore_get_cmd(
+    ctx: typer.Context,
+    package: str = typer.Argument(..., help="Debuggable app package id."),
+    datastore: str = typer.Argument(..., help="Datastore name from `aua datastore list`."),
+    key: list[str] = typer.Option(
+        [],
+        "--key",
+        "-k",
+        help="Read only these keys; repeatable. Omit for the whole store.",
+    ),
+) -> None:
+    """Read one DataStore file. Does not stop the app: the read costs no UI state."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(
+            _route(
+                engine,
+                "datastore_get",
+                package=package,
+                datastore=datastore,
+                keys=list(key) or None,
+            ),
+            fmt,
+        )
+
+    _run(ctx, go)
+
+
+@datastore_app.command("set")
+def datastore_set_cmd(
+    ctx: typer.Context,
+    package: str = typer.Argument(..., help="Debuggable app package id."),
+    datastore: str = typer.Argument(..., help="Datastore name from `aua datastore list`."),
+    values: str = typer.Argument(
+        None,
+        help='JSON, e.g. \'{"themeMode": 1}\' or \'{"themeMode": {"type": "int", "value": 1}}\'.',
+    ),
+    file: str = typer.Option(None, "--file", help="Read the JSON values from this file instead."),
+    restart: bool = _DATASTORE_RESTART,
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        help="Required: confirms force-stopping the app and rewriting its stored preferences.",
+    ),
+) -> None:
+    """Merge values into one DataStore file: stop the app, back up, write, relaunch.
+
+    The force-stop is not a precaution. A running app keeps DataStore's version counter in its
+    own process, so it never notices a new file and may overwrite it from memory. Keys you do
+    not name are preserved, in their original order.
+    """
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(
+            _route(
+                engine,
+                "datastore_set",
+                package=package,
+                datastore=datastore,
+                values=_datastore_values(values, file),
+                restart=restart,
+                confirmed=yes,
+            ),
+            fmt,
+        )
+
+    _run(ctx, go)
+
+
+@datastore_app.command("backup")
+def datastore_backup_cmd(
+    ctx: typer.Context,
+    package: str = typer.Argument(..., help="Debuggable app package id."),
+    datastore: str = typer.Argument(..., help="Datastore name from `aua datastore list`."),
+) -> None:
+    """Copy one DataStore file to a private host restore point, leaving the app running."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(
+            _route(engine, "datastore_backup", package=package, datastore=datastore),
+            fmt,
+        )
+
+    _run(ctx, go)
+
+
+@datastore_app.command("backups")
+def datastore_backups_cmd(
+    ctx: typer.Context,
+    package: str = typer.Argument(..., help="Debuggable app package id."),
+    datastore: str = typer.Argument(..., help="Datastore name from `aua datastore list`."),
+) -> None:
+    """List restore points for this device, package, and datastore."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(
+            _route(engine, "datastore_backups", package=package, datastore=datastore),
+            fmt,
+        )
+
+    _run(ctx, go)
+
+
+@datastore_app.command("restore")
+def datastore_restore_cmd(
+    ctx: typer.Context,
+    package: str = typer.Argument(..., help="Debuggable app package id."),
+    datastore: str = typer.Argument(..., help="Datastore name from `aua datastore list`."),
+    backup_id: str = typer.Argument(..., help="Restore point from `aua datastore backups`."),
+    restart: bool = _DATASTORE_RESTART,
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        help="Required: confirms replacing the current preferences with this restore point.",
+    ),
+) -> None:
+    """Restore a backup after first preserving the current state as another backup."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(
+            _route(
+                engine,
+                "datastore_restore",
+                package=package,
+                datastore=datastore,
+                backup_id=backup_id,
+                restart=restart,
+                confirmed=yes,
+            ),
+            fmt,
+        )
+
+    _run(ctx, go)
+
+
 clipboard_app = typer.Typer(help="Clipboard — Maestro setClipboard / copyTextFrom / pasteText.")
 app.add_typer(clipboard_app, name="clipboard")
 

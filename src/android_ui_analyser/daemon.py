@@ -21,7 +21,9 @@ swipe, scroll_to, key, open_link, wait, wait_stable, wait_after_change, memory_u
 flow_run, flow_save, navigate, orient, list_devices, app, install_app, logcat,
 job_start, job_status, job_wait, job_cancel, job_list,
 logcat_mark, suite_run, database_list, database_schema, database_query,
-database_execute, database_backup, database_backups, database_restore
+database_execute, database_backup, database_backups, database_restore,
+datastore_list, datastore_get, datastore_set, datastore_backup, datastore_backups,
+datastore_restore
 """
 
 from __future__ import annotations
@@ -949,6 +951,24 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
         elif cmd == "database_restore":
             return _result_ok(engine.database_restore(**args))
 
+        elif cmd == "datastore_list":
+            return _result_ok(engine.datastore_list(**args))
+
+        elif cmd == "datastore_get":
+            return _result_ok(engine.datastore_get(**args))
+
+        elif cmd == "datastore_set":
+            return _result_ok(engine.datastore_set(**args))
+
+        elif cmd == "datastore_backup":
+            return _result_ok(engine.datastore_backup(**args))
+
+        elif cmd == "datastore_backups":
+            return _result_ok(engine.datastore_backups(**args))
+
+        elif cmd == "datastore_restore":
+            return _result_ok(engine.datastore_restore(**args))
+
         elif cmd == "logcat":
             return _result_ok(engine.logcat(**args))
 
@@ -1053,6 +1073,8 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
                 "app_status, shell, install_app, "
                 "database_list, database_schema, database_query, database_execute, "
                 "database_backup, database_backups, database_restore, "
+                "datastore_list, datastore_get, datastore_set, datastore_backup, "
+                "datastore_backups, datastore_restore, "
                 "logcat, logcat_mark, app_log_prefs, app_log_prefs_set, "
                 "suite_run, dev_show, dev_anim, dev_crashes, dev_profile, "
                 "a11y_scroll, a11y_action, flags_set, flags_apply, proxy_start, proxy_stop, "
