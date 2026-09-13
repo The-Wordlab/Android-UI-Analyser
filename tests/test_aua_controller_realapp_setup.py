@@ -19,7 +19,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from experiments.aua_controller.judgement import encode_image, frame_fingerprint, screenshot_index
 from experiments.aua_controller.run_live import RunError
 from experiments.aua_controller.run_realapp import build_setup_flows, parse_pairs, run_realapp
-from tests.test_aua_controller_realapp import (
+
+# The sibling is imported by its bare module name: pytest puts tests/ on sys.path, while a
+# dependency's stray top-level `tests` package in the venv shadows `tests.<module>`.
+from test_aua_controller_realapp import (
     MCP_SCHEMAS,
     FakeModel,
     frame,
