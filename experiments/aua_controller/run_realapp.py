@@ -37,6 +37,8 @@ from experiments.aua_controller.judgement import (
     encode_image,
     frame_fingerprint,
     judge_outcome_votes,
+    judged_frame_sample,
+    screenshot_for,
     screenshot_index,
     summarize_route,
 )
@@ -239,6 +241,7 @@ async def run_realapp(
     judge_request_config: dict[str, Any] | None = None,
     judge: bool = True,
     judge_votes: int = 2,
+    judge_frames: int = 8,
     name_screens: bool = False,
     max_named_screens: int = 8,
     max_steps: int = 24,
@@ -482,7 +485,7 @@ async def run_realapp(
             if result["claim"]:
                 context_actions.append({"step": len(actions), "tool": "session_finish",
                                         "arguments": {"controller_claim_untrusted": result["claim"]}})
-            judged_frames = [frame["raw"] for frame in frames[-4:-1]] if len(frames) > 1 else []
+            judged_frames = judged_frame_sample([frame["raw"] for frame in frames], judge_frames)
             images: list[str] = []
             if vision:
                 # Element text cannot answer a question about appearance. Pair each judged
@@ -490,8 +493,7 @@ async def run_realapp(
                 # final screen is the last image the judge sees.
                 shot_index = screenshot_index((output / "aua" / "manifest.json").resolve())
                 for frame in [*judged_frames, final]:
-                    fingerprint = frame_fingerprint(frame)
-                    shot = shot_index.get(fingerprint) if fingerprint else None
+                    shot = screenshot_for(shot_index, frame_fingerprint(frame))
                     encoded = encode_image(shot) if shot else None
                     if encoded:
                         images.append(encoded)
@@ -681,6 +683,10 @@ def main() -> int:
                         help="Manifest candidate used only for judgement; defaults to --model")
     parser.add_argument("--no-judge", action="store_true")
     parser.add_argument("--judge-votes", type=int, default=2, choices=[1, 2])
+    parser.add_argument("--judge-frames", type=int, default=8,
+                        help="How many observations to show the judge, spread across the whole "
+                             "journey. A contract bullet about the route is unverifiable from "
+                             "the tail alone.")
     parser.add_argument("--map", action="store_true", help="Name screens and summarise the route (paid)")
     parser.add_argument("--max-steps", type=int, default=24)
     parser.add_argument("--time-limit", type=float, default=300)
@@ -783,7 +789,8 @@ def main() -> int:
                     vision=args.vision,
                     judge_model=judge_candidate["repository"] if args.judge_model else None,
                     judge_request_config=judge_config,
-                    judge=not args.no_judge, judge_votes=args.judge_votes, name_screens=args.map,
+                    judge=not args.no_judge, judge_votes=args.judge_votes,
+                    judge_frames=args.judge_frames, name_screens=args.map,
                     max_steps=args.max_steps, time_limit_s=args.time_limit, max_tokens=args.max_tokens,
                     cost_limit_usd=args.cost_limit_usd, judge_cost_limit_usd=args.judge_cost_limit_usd,
                     judge_max_tokens=args.judge_max_tokens,

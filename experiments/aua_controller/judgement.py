@@ -19,7 +19,7 @@ import copy
 import io
 import json
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -217,6 +217,30 @@ def encode_image(path: Any, *, max_width: int = MAX_IMAGE_WIDTH, quality: int = 
     return "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
+def judged_frame_sample(frames: Sequence[Any], limit: int = 8) -> list[Any]:
+    """Pick frames that span the whole journey rather than only its tail.
+
+    The judge is asked about the *route* -- "the first interactive screen is the authentication
+    landing", "taking that option ends on home" -- and the previous ``frames[-4:-1]`` showed it
+    only the last few observations.  Bullets about the start of a journey were then not false
+    but unobservable, and the judge correctly recorded them as unevidenced, which turns a
+    passing run into a BLOCKED one.  Most contracts describe a route, so this was not an edge
+    case.
+
+    The final observation is judged separately, so the last element is left out here.  Below
+    *limit* every frame is kept; above it the first and last are always kept and the remainder
+    are spread evenly between them, so a long journey still shows its beginning.
+    """
+    body = list(frames[:-1])
+    if limit <= 0 or len(body) <= limit:
+        return body
+    if limit == 1:
+        return body[:1]
+    last = len(body) - 1
+    picks = sorted({round(index * last / (limit - 1)) for index in range(limit)})
+    return [body[index] for index in picks]
+
+
 def screenshot_index(manifest_path: Any) -> dict[str, str]:
     """Map an observation fingerprint to the screenshot AUA captured with it.
 
@@ -238,6 +262,27 @@ def screenshot_index(manifest_path: Any) -> dict[str, str]:
         if fingerprint and Path(str(shot)).is_file():
             index.setdefault(fingerprint, str(shot))
     return index
+
+
+def screenshot_for(index: Mapping[str, str], fingerprint: str | None) -> str | None:
+    """The screenshot recorded with *fingerprint*, tolerating a truncated evidence id.
+
+    AUA's ``evidence_id`` ends with a *prefix* of the observation fingerprint -- 24 hex
+    characters of the 40 the frame itself reports -- so an exact dict lookup never matches and
+    ``--vision`` silently attaches no images at all.  The failure is invisible from the outside:
+    the run still reports ``frames: 4`` and a confident textual verdict, and the only tell is
+    ``images_attached: 0`` buried in the result.  Match on the prefix, and keep the exact hit
+    first so a future full-length evidence id costs nothing.
+    """
+    if not fingerprint:
+        return None
+    exact = index.get(fingerprint)
+    if exact:
+        return exact
+    for key, shot in index.items():
+        if key and fingerprint.startswith(key):
+            return shot
+    return None
 
 
 def frame_fingerprint(frame: Any) -> str | None:
