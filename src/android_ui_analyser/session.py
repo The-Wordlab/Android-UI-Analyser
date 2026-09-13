@@ -26,7 +26,9 @@ from .atomic import atomic_write_text
 from .errors import UsageError
 from .flows import Flow
 from .memory import (
+    LEGACY_CONTEXT_ID,
     AppMap,
+    KnowledgeItem,
     RouteEdge,
     RouteStep,
     ScreenRecord,
@@ -98,6 +100,7 @@ class GoalSessionPlan(BaseModel):
     recommended_call: GoalCall
     warnings: list[str] = Field(default_factory=list)
     relevant_capabilities: list[dict[str, Any]] = Field(default_factory=list)
+    relevant_knowledge: list[dict[str, Any]] = Field(default_factory=list)
 
 
 PhaseIntent: TypeAlias = Literal[
@@ -2670,6 +2673,73 @@ def _goal_terms(goal: str) -> list[str]:
     return terms or _GOAL_WORD.findall(goal.casefold())
 
 
+KNOWLEDGE_MATCH_THRESHOLD = 20
+KNOWLEDGE_TEXT_LIMIT = 400
+
+
+def knowledge_match_score(goal: str, item: KnowledgeItem) -> int:
+    """Score one knowledge item against a goal.
+
+    Aliases and the name bind a fact to goal phrasings and use the same scorer as flows.
+    Body text only adds a capped hint: a long claim mentions many words, so per-term hits
+    there stop counting after three. An author who wants a fact to surface for a goal
+    writes that goal's words as an alias.
+    """
+    strong = _match_score(goal, item.name, *item.aliases)
+    terms = _goal_terms(goal)
+    text_terms = set(_GOAL_WORD.findall(item.text.casefold()))
+    hits = sum(1 for term in terms if term in text_terms)
+    return strong + min(5 * hits, 15)
+
+
+def relevant_knowledge(
+    app: AppMap,
+    goal: str,
+    *,
+    context_id: str | None = None,
+    limit: int = 5,
+    threshold: int = KNOWLEDGE_MATCH_THRESHOLD,
+) -> list[dict[str, Any]]:
+    """Accepted, in-scope knowledge whose aliases, name or text match *goal*, best first.
+
+    Returned as compact dictionaries for a response payload: long text is cut so a hint
+    never becomes a second manual. Nothing here executes; it is advice next to the plan.
+    """
+
+    def in_scope(item: KnowledgeItem) -> bool:
+        scope = item.scope
+        if scope.app_version and app.app_version and scope.app_version != app.app_version:
+            return False
+        return context_id is None or scope.context_id in (None, context_id, LEGACY_CONTEXT_ID)
+
+    scored = []
+    for item in app.knowledge:
+        if item.status != "accepted" or not in_scope(item):
+            continue
+        score = knowledge_match_score(goal, item)
+        if score >= threshold:
+            scored.append((score, item))
+    scored.sort(key=lambda pair: (-pair[0], pair[1].last_verified or pair[1].created_at, pair[1].id))
+    out = []
+    for score, item in scored[: max(0, limit)]:
+        text = item.text
+        if len(text) > KNOWLEDGE_TEXT_LIMIT:
+            text = text[: KNOWLEDGE_TEXT_LIMIT - 1] + "…"
+        out.append(
+            {
+                "id": item.id,
+                "kind": item.kind,
+                "name": item.name,
+                "aliases": list(item.aliases),
+                "text": text,
+                "source": item.source,
+                "last_verified": item.last_verified,
+                "score": score,
+            }
+        )
+    return out
+
+
 def _match_score(goal: str, *values: str | None, exactness: str | None = None) -> int:
     haystack = " ".join(value for value in values if value).casefold()
     if not haystack:
@@ -3214,6 +3284,14 @@ def plan_goal_session(
     candidates.sort(key=lambda item: (order[item.kind], -item.score, item.name))
     selected = next((candidate for candidate in candidates if candidate.safe), None)
     warnings: list[str] = []
+    knowledge: list[dict[str, Any]] = []
+    if app is not None and app.package == observation.screen.package:
+        knowledge = relevant_knowledge(app, goal, context_id=context_id)
+    if knowledge:
+        warnings.append(
+            f"{len(knowledge)} recorded fact(s) match this goal; read relevant_knowledge "
+            "before acting. They are advice with provenance, not verified state."
+        )
     if "offline" in goal.casefold() or "airplane" in goal.casefold():
         warnings.append(
             "Use `aua network offline --verify`, not airplane mode. Because this is a goal "
@@ -3274,4 +3352,5 @@ def plan_goal_session(
         recommended_call=recommendation,
         warnings=warnings,
         relevant_capabilities=list(relevant_capabilities),
+        relevant_knowledge=knowledge,
     )

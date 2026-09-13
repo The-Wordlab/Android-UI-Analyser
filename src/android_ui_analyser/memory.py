@@ -228,6 +228,9 @@ class KnowledgeItem(BaseModel):
     kind: Literal["description", "note", "recipe", "deeplink", "claim"] = "note"
     text: str
     name: str | None = None
+    # Goal phrasings this fact applies to, e.g. "change theme". Retrieval binds on these
+    # the way flows bind on their aliases; body text alone is a weak signal on purpose.
+    aliases: list[str] = Field(default_factory=list)
     scope: KnowledgeScope
     source: Literal["legacy", "user", "agent", "runtime", "source"] = "agent"
     agent: str | None = None
@@ -1719,6 +1722,20 @@ def _stable_id(kind: str, *parts: object) -> str:
     return f"{kind}_{hashlib.sha1(raw.encode('utf-8')).hexdigest()[:12]}"
 
 
+def clean_knowledge_aliases(aliases: list[str] | None) -> list[str]:
+    """Trim, casefold-dedupe and drop empty alias phrasings; order is preserved."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for alias in aliases or []:
+        if alias is None:
+            continue
+        text = re.sub(r"\s+", " ", str(alias)).strip()
+        if text and text.casefold() not in seen:
+            seen.add(text.casefold())
+            out.append(text)
+    return out
+
+
 def _knowledge_id(package: str, kind: str, name: str | None, text: str) -> str:
     return _stable_id("knowledge", package, kind, name or "", text)
 
@@ -3077,6 +3094,7 @@ class AppMemoryStore:
         kind: Literal["description", "note", "recipe", "deeplink", "claim"],
         text: str,
         name: str | None = None,
+        aliases: list[str] | None = None,
         context_id: str | None = None,
         app_version: str | None = None,
         flags: dict[str, str] | None = None,
@@ -3092,12 +3110,14 @@ class AppMemoryStore:
         kid = _knowledge_id(package, kind, name, text)
         now = _now_iso()
         item = next((known for known in app.knowledge if known.id == kid), None)
+        clean_aliases = clean_knowledge_aliases(aliases)
         if item is None:
             item = KnowledgeItem(
                 id=kid,
                 kind=kind,
                 text=text,
                 name=name,
+                aliases=clean_aliases,
                 scope=KnowledgeScope(
                     package=package,
                     app_version=app_version,
@@ -3118,6 +3138,9 @@ class AppMemoryStore:
             item.last_verified = now if status == "accepted" else item.last_verified
             if evidence:
                 item.evidence = evidence
+            for alias in clean_aliases:
+                if alias not in item.aliases:
+                    item.aliases.append(alias)
         self.save(app)
         return item
 
