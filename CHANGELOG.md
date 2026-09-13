@@ -11,6 +11,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.19.1] - 2026-09-13
+
 ### Fixed
 
 - Emulator startup honors an explicitly configured Android SDK ahead of PATH. A launcher that
@@ -614,5 +616,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.18.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.18.0
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.19.0...HEAD
 [0.19.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.19.0
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.19.1...HEAD
+[0.19.1]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.19.1
