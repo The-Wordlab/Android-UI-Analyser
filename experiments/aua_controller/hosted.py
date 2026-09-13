@@ -47,6 +47,28 @@ def _nonnegative(value: Any, label: str) -> Decimal:
     return number
 
 
+SORT_ORDERS = ("throughput", "latency", "price")
+
+
+def _validate_pinned(provider: dict[str, Any]) -> None:
+    """One named provider serves every request, so a result is attributable to it."""
+    only = provider.get("only")
+    if (not isinstance(only, list) or len(only) != 1 or not isinstance(only[0], str)
+            or not only[0].strip() or provider.get("order", only) != only):
+        raise HostedError("pin one provider with only/order and allow_fallbacks=false")
+    if "sort" in provider:
+        raise HostedError("a pinned route has nothing to sort; drop sort or allow fallbacks")
+
+
+def _validate_open(provider: dict[str, Any]) -> None:
+    """Any provider within the price cap may serve, so a burst on one does not end the run."""
+    if provider.get("only") or provider.get("order"):
+        raise HostedError("an open route must not also name only/order")
+    sort = provider.get("sort")
+    if sort is not None and sort not in SORT_ORDERS:
+        raise HostedError(f"provider.sort must be one of {', '.join(SORT_ORDERS)}")
+
+
 def validate_request_config(config: dict[str, Any]) -> dict[str, Any]:
     """Allow routing/reasoning options, never replacement messages/tools/models."""
     if not isinstance(config, dict) or set(config) - {"reasoning", "provider", "plugins", "temperature"}:
@@ -54,20 +76,29 @@ def validate_request_config(config: dict[str, Any]) -> dict[str, Any]:
     out = copy.deepcopy(config)
     provider = out.get("provider")
     allowed = {"only", "order", "allow_fallbacks", "require_parameters", "data_collection", "zdr",
-               "quantizations", "max_price", "enforce_distillable_text"}
+               "quantizations", "max_price", "enforce_distillable_text", "sort"}
     if not isinstance(provider, dict) or set(provider) - allowed:
         raise HostedError("OpenRouter requires explicit supported provider settings")
-    only = provider.get("only")
-    if (not isinstance(only, list) or len(only) != 1 or not isinstance(only[0], str)
-            or not only[0].strip() or provider.get("order", only) != only
-            or provider.get("allow_fallbacks") is not False):
-        raise HostedError("pin one provider with only/order and allow_fallbacks=false")
+    # Two shapes are valid, and which one is in force must be stated rather than defaulted.
+    # A benchmark comparing models needs the pinned shape: a number is only attributable to
+    # a provider that actually served it. A QA run needs the open shape: 28 providers serve
+    # deepseek-v4-flash-0731, and pinning one of them turned that provider's 429 into a
+    # BLOCKED verdict for a product that was working.
+    fallbacks = provider.get("allow_fallbacks")
+    if fallbacks is False:
+        _validate_pinned(provider)
+    elif fallbacks is True:
+        _validate_open(provider)
+    else:
+        raise HostedError("provider.allow_fallbacks must be explicitly true (open) or false (pinned)")
     # require_parameters is optional. OpenRouter's parameter filter has excluded pinned
     # providers that do serve the request (a 404 "Filter by Parameters" observed the day
-    # after the pilot), so the harness no longer mandates it. The single pin plus
-    # allow_fallbacks=false still prevents silent rerouting.
+    # after the pilot), so the harness no longer mandates it. On an open route it is worth
+    # setting: it drops the endpoints that cannot serve native tool calls at all.
     if provider.get("require_parameters", False) not in (True, False):
         raise HostedError("provider.require_parameters must be a boolean when present")
+    # Required on both shapes. On an open route it is the only thing standing between a
+    # cheap model and the most expensive endpoint that happens to be fastest right now.
     caps = provider.get("max_price")
     if not isinstance(caps, dict) or set(caps) != {"prompt", "completion"}:
         raise HostedError("provider.max_price requires prompt and completion price caps per million tokens")
