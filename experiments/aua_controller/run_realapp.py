@@ -51,6 +51,7 @@ from experiments.aua_controller.run_live import (
     tool_result,
 )
 from experiments.aua_controller.session_state import observation_frame
+from experiments.aua_controller.transport import resilient_request
 
 FORMAT = "aua-realapp-run-v1"
 CONTROLLER_TOOLS = (
@@ -239,6 +240,7 @@ async def run_realapp(
     vision: bool = False,
     judge_model: str | None = None,
     judge_request_config: dict[str, Any] | None = None,
+    judge_fallbacks: Sequence[tuple[str, dict[str, Any] | None]] = (),
     judge: bool = True,
     judge_votes: int = 2,
     judge_frames: int = 8,
@@ -278,6 +280,7 @@ async def run_realapp(
     result: dict[str, Any] = {
         "format": FORMAT, "goal": goal, "package": package, "model": model, "backend": backend,
         "request_config": settings, "judge_model": judging_model,
+        "judge_ladder": [judging_model, *(name for name, _ in judge_fallbacks)],
         "session_id": None, "serial": None, "setup": [],
         "controller": None, "claim": None, "verdict": None, "screens": [], "route": None,
         "recording": None,
@@ -476,7 +479,7 @@ async def run_realapp(
                                  "reasons": ["AUA accepted session_finish against its own contract."]}
         elif stop in ("terminal_claimed", "model_text", "no_progress") and judge:
             decider = Decider(send, model=judging_model, backend=backend,
-                              request_config=judge_settings,
+                              request_config=judge_settings, fallbacks=judge_fallbacks,
                               max_tokens=judge_max_tokens, cost_limit_usd=judge_cost_limit_usd,
                               output=output / "judge")
             # AUA's goal_progress without an authored contract is always 0/1 active; it would
@@ -681,6 +684,9 @@ def main() -> int:
                         help="Show the judge the captured screenshots; needs an image-capable model")
     parser.add_argument("--judge-model",
                         help="Manifest candidate used only for judgement; defaults to --model")
+    parser.add_argument("--judge-fallback", action="append", default=[], metavar="CANDIDATE",
+                        help="Stronger manifest candidate to ask when the judge cannot produce "
+                             "its schema. Repeatable; tried in the order given.")
     parser.add_argument("--no-judge", action="store_true")
     parser.add_argument("--judge-votes", type=int, default=2, choices=[1, 2])
     parser.add_argument("--judge-frames", type=int, default=8,
@@ -725,6 +731,16 @@ def main() -> int:
         judge_config = validate_request_config(
             copy.deepcopy(judge_candidate.get("request_config", {}))
         )
+    judge_fallbacks: list[tuple[str, dict[str, Any]]] = []
+    for name in args.judge_fallback:
+        rung = next((item for item in manifest["models"]
+                     if name in {item["id"], item["repository"]}), None)
+        if rung is None:
+            parser.error(f"--judge-fallback {name} is not a candidate in the manifest")
+        if args.vision and not rung.get("vision"):
+            parser.error(f"--vision needs image-capable fallbacks; {rung['id']} is text-only")
+        judge_fallbacks.append((rung["repository"],
+                                validate_request_config(copy.deepcopy(rung.get("request_config", {})))))
     if args.vision and not judge_candidate.get("vision"):
         parser.error(f"--vision needs an image-capable judge; {judge_candidate['id']} is text-only. "
                      "The manifest records which candidates accept images; pass --judge-model.")
@@ -739,12 +755,31 @@ def main() -> int:
         from mcp.client.stdio import stdio_client
 
         headers = {"Authorization": f"Bearer {key}"}
+        retries: list[dict[str, Any]] = []
         server = mcp_server(args.aua_command)
         async with httpx.AsyncClient(headers=headers, timeout=120, follow_redirects=False) as http:
+            def classify(exc: BaseException):
+                """(status, headers) for a transport failure; None for anything else."""
+                if isinstance(exc, httpx.HTTPStatusError):
+                    return exc.response.status_code, exc.response.headers
+                if isinstance(exc, (httpx.TransportError, httpx.StreamError)):
+                    return None, None  # Nothing was served, so nothing was charged.
+                return None
+
+            def note_retry(attempt: int, delay: float, status: int | None) -> None:
+                retries.append({"attempt": attempt, "delay_s": round(delay, 2), "status": status})
+                print(f"provider busy (HTTP {status}); retry {attempt} in {delay:.1f}s",
+                      file=sys.stderr, flush=True)
+
             async def send(payload: dict[str, Any]) -> dict[str, Any]:
-                response = await http.post(args.base_url.rstrip("/") + "/chat/completions", json=payload)
-                response.raise_for_status()
-                body = response.json()
+                async def once() -> dict[str, Any]:
+                    response = await http.post(
+                        args.base_url.rstrip("/") + "/chat/completions", json=payload)
+                    response.raise_for_status()
+                    return response.json()
+
+                body = await resilient_request(
+                    once, classify=classify, sleep=asyncio.sleep, on_retry=note_retry)
                 if not isinstance(body, dict):
                     raise RunError("endpoint returned non-object JSON")
                 return body
@@ -774,7 +809,7 @@ def main() -> int:
                         schemas[data["name"]] = schema
                     return schemas
 
-                return await run_realapp(
+                outcome = await run_realapp(
                     call_tool=call_tool, list_tools=list_tools, send=send, goal=args.goal,
                     package=args.package, output=args.output.resolve(), model=candidate["repository"],
                     request_config=request_config, launch=args.launch, activity=args.activity,
@@ -789,6 +824,7 @@ def main() -> int:
                     vision=args.vision,
                     judge_model=judge_candidate["repository"] if args.judge_model else None,
                     judge_request_config=judge_config,
+                    judge_fallbacks=judge_fallbacks,
                     judge=not args.no_judge, judge_votes=args.judge_votes,
                     judge_frames=args.judge_frames, name_screens=args.map,
                     max_steps=args.max_steps, time_limit_s=args.time_limit, max_tokens=args.max_tokens,
@@ -797,13 +833,19 @@ def main() -> int:
                     terminal_claim_limit=args.terminal_claim_limit, no_progress_limit=args.no_progress_limit,
                     max_elements=args.max_elements,
                 )
+                # A run that needed four retries to finish is healthy but degrading, and the
+                # only place that shows is here.
+                outcome["provider_retries"] = retries
+                return outcome
 
     result = asyncio.run(execute())
     print(json.dumps({
         "verdict": result["verdict"]["verdict"], "oracle": result["verdict"]["oracle"],
         "stop_reason": (result["controller"] or {}).get("stop_reason"), "claim": result.get("claim"),
         "steps": (result["controller"] or {}).get("steps_consumed"),
-        "total_usd": result["cost"]["total_usd"], "error": result["error"], "output": str(args.output),
+        "total_usd": result["cost"]["total_usd"], "error": result["error"],
+        "provider_retries": len(result.get("provider_retries") or []),
+        "output": str(args.output),
     }, default=str))
     return 0 if result["verdict"]["verdict"] in {"pass", "pass_with_warning"} else 1
 

@@ -253,6 +253,74 @@
       "route_change_reason": "Separate image-capable judge route through the unchanged account data policy.",
       "vision": true,
       "notes": "Vision judge route with forced named tool calls; keep a larger answer budget."
+    },
+    {
+      "id": "or-deepseek-v4-flash-0731-low-open",
+      "repository": "deepseek/deepseek-v4-flash-0731",
+      "canonical_slug": "deepseek/deepseek-v4-flash-20260731",
+      "backend": "openrouter",
+      "revision": null,
+      "weight_identity": "provider_advertised_not_independently_verified",
+      "provider_quantization": "provider default within the price cap; an open route is not attributable to one quantization and must not be read as a weights comparison",
+      "request_config": {
+        "reasoning": {
+          "effort": "low",
+          "exclude": false
+        },
+        "provider": {
+          "allow_fallbacks": true,
+          "sort": "throughput",
+          "require_parameters": true,
+          "data_collection": "deny",
+          "max_price": {
+            "prompt": 0.15,
+            "completion": 0.4
+          }
+        },
+        "plugins": [
+          {
+            "id": "context-compression",
+            "enabled": false
+          }
+        ]
+      },
+      "cost_limit_usd": 0.1,
+      "route_change_reason": "2026-09-14: QA route. 28 providers serve this model; pinning DeepInfra turned its 429 into a BLOCKED verdict for a working product. Sorted by throughput, capped at 0.15/0.40 per million, which admits roughly fifteen endpoints including the DeepInfra pin.",
+      "vision": false
+    },
+    {
+      "id": "or-deepseek-v4p1-flash-low-open",
+      "repository": "deepseek/deepseek-v4.1-flash",
+      "canonical_slug": "deepseek/deepseek-v4.1-flash-20260910",
+      "backend": "openrouter",
+      "revision": null,
+      "weight_identity": "provider_advertised_not_independently_verified",
+      "provider_quantization": "provider default within the price cap; an open route is not attributable to one quantization and must not be read as a weights comparison",
+      "request_config": {
+        "reasoning": {
+          "effort": "low",
+          "exclude": false
+        },
+        "provider": {
+          "allow_fallbacks": true,
+          "sort": "throughput",
+          "require_parameters": true,
+          "data_collection": "deny",
+          "max_price": {
+            "prompt": 0.3,
+            "completion": 1.2
+          }
+        },
+        "plugins": [
+          {
+            "id": "context-compression",
+            "enabled": false
+          }
+        ]
+      },
+      "cost_limit_usd": 0.1,
+      "route_change_reason": "2026-09-14: QA route, and the open-route counterpart of the 0731 entry so the two models can be compared on equal routing. 14 providers serve it; the existing 0.30/1.20 caps admit twelve of them.",
+      "vision": true
     }
   ],
   "model_runs_executed": 16,
