@@ -47,10 +47,17 @@ def test_the_qa_route_still_refuses_data_collection(entry_id):
 
 
 @pytest.mark.parametrize("entry_id", OPEN_IDS)
-def test_the_qa_route_only_accepts_endpoints_that_serve_native_tools(entry_id):
-    # SiliconFlow serves deepseek-v4.1-flash without tool support. The controller is nothing
-    # but tool calls, so an endpoint that cannot make them is a wasted request, not a fallback.
-    assert BY_ID[entry_id]["request_config"]["provider"]["require_parameters"] is True
+def test_the_qa_route_does_not_use_openrouter_s_parameter_filter(entry_id):
+    """require_parameters looks right and is not: it has now emptied a healthy pool twice.
+
+    Run A5 on 2026-09-14 answered 404 "No endpoints found that support the provided
+    'tool_choice' value" on a route whose price cap admits twelve endpoints that every one
+    advertise tools and tool_choice - and three runs of the identical config had just
+    succeeded. The pinned DeepInfra entry carries the same note from the day after the pilot.
+
+    allow_fallbacks does the job instead: OpenRouter moves on when a provider cannot serve.
+    """
+    assert "require_parameters" not in BY_ID[entry_id]["request_config"]["provider"]
 
 
 def test_the_pinned_benchmark_entries_were_left_alone():
@@ -67,7 +74,7 @@ def test_the_two_models_under_comparison_have_matching_open_routes():
     first, second = (BY_ID[entry_id]["request_config"]["provider"] for entry_id in OPEN_IDS)
     assert first["sort"] == second["sort"]
     assert first["allow_fallbacks"] == second["allow_fallbacks"]
-    assert first["require_parameters"] == second["require_parameters"]
+    assert first.get("require_parameters") == second.get("require_parameters")
 
 
 def test_an_open_judge_route_can_take_images():

@@ -270,7 +270,6 @@
         "provider": {
           "allow_fallbacks": true,
           "sort": "throughput",
-          "require_parameters": true,
           "data_collection": "deny",
           "max_price": {
             "prompt": 0.15,
@@ -285,7 +284,7 @@
         ]
       },
       "cost_limit_usd": 0.1,
-      "route_change_reason": "2026-09-14: QA route. 28 providers serve this model; pinning DeepInfra turned its 429 into a BLOCKED verdict for a working product. Sorted by throughput, capped at 0.15/0.40 per million, which admits roughly fifteen endpoints including the DeepInfra pin.",
+      "route_change_reason": "2026-09-14: QA route. 28 providers serve this model; pinning DeepInfra turned its 429 into a BLOCKED verdict for a working product. Sorted by throughput, capped at 0.15/0.40 per million, which admits roughly fifteen endpoints including the DeepInfra pin. 2026-09-14: require_parameters removed after it answered 404 'No endpoints found that support the provided tool_choice value' on a route whose price cap admits 12 endpoints that all advertise tools and tool_choice. That is the same spurious filter already recorded against the pinned DeepInfra entry. allow_fallbacks carries the routing instead.",
       "vision": false
     },
     {
@@ -304,7 +303,6 @@
         "provider": {
           "allow_fallbacks": true,
           "sort": "throughput",
-          "require_parameters": true,
           "data_collection": "deny",
           "max_price": {
             "prompt": 0.3,
@@ -319,7 +317,7 @@
         ]
       },
       "cost_limit_usd": 0.1,
-      "route_change_reason": "2026-09-14: QA route, and the open-route counterpart of the 0731 entry so the two models can be compared on equal routing. 14 providers serve it; the existing 0.30/1.20 caps admit twelve of them.",
+      "route_change_reason": "2026-09-14: QA route, and the open-route counterpart of the 0731 entry so the two models can be compared on equal routing. 14 providers serve it; the existing 0.30/1.20 caps admit twelve of them. 2026-09-14: require_parameters removed after it answered 404 'No endpoints found that support the provided tool_choice value' on a route whose price cap admits 12 endpoints that all advertise tools and tool_choice. That is the same spurious filter already recorded against the pinned DeepInfra entry. allow_fallbacks carries the routing instead.",
       "vision": true
     }
   ],
