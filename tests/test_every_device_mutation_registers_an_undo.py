@@ -37,6 +37,7 @@ BACKENDS = (
     "network_profiles.py",
     "proxy_mock.py",
     "app_database.py",
+    "app_datastore.py",
     "platforms/android.py",
     "platforms/android_device.py",
     "platforms/android_recording.py",

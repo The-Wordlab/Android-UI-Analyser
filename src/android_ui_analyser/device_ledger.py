@@ -942,6 +942,31 @@ def _undo_restore_app_prefs(ctx: UndoContext, args: dict[str, Any]) -> str:
     return flags.restore_prefs(ctx.require_device(), path)
 
 
+def _undo_restore_app_datastore(ctx: UndoContext, args: dict[str, Any]) -> str:
+    """Put an app's Jetpack DataStore file back the way the first AUA write found it.
+
+    The same argument as ``restore_app_prefs``, with a sharper edge: a datastore holds theme,
+    onboarding state and session flags, so an unreplayed record leaves the next agent driving an
+    app configured for someone else's precondition -- and the UI gives no hint that AUA is why.
+    """
+    datastore = ctx.require_capability("app_datastore")
+    package = str(args.get("package") or "")
+    name = str(args.get("datastore") or "")
+    backup_id = str(args.get("backup_id") or "")
+    if not (package and name and backup_id):
+        raise RuntimeError("incomplete datastore undo record; undo remains pending")
+    datastore.restore_datastore(
+        ctx.require_device(),
+        package,
+        name,
+        backup_id,
+        confirmed=True,
+        restart=False,
+        cache_dir=args.get("cache_dir"),
+    )
+    return f"{package} datastore/{name}.preferences_pb restored"
+
+
 def _undo_disable_device_agent(ctx: UndoContext, args: dict[str, Any]) -> str:
     agent = ctx.require_capability("device_agent")
     agent.restore_state(ctx.serial, args)
@@ -1007,6 +1032,9 @@ UNDO_OPS: dict[str, UndoOp] = {
     ),
     "restore_app_prefs": UndoOp(
         _undo_restore_app_prefs, True, 45, "restore the app's own shared preferences"
+    ),
+    "restore_app_datastore": UndoOp(
+        _undo_restore_app_datastore, True, 46, "restore the app's own DataStore preferences"
     ),
     "set_clock": UndoOp(_undo_set_clock, True, 50, "restore the wall clock"),
     "stop_device_agent_touch_capture": UndoOp(
@@ -1272,6 +1300,15 @@ MUTATION_CATALOGUE: dict[str, Mutation] = {
         None,
         "`db execute` already creates its own restore point and requires --yes; "
         "`aua db restore` is the documented rollback.",
+    ),
+    "app_datastore": Mutation(
+        "app_datastore",
+        "app_datastore.py:set_datastore",
+        "restore_app_datastore",
+        "A setup step writing the app's own DataStore preferences - the theme, the onboarding "
+        "flag, a counter a scenario needs pre-set. Unlike `db execute`, this is a precondition "
+        "an agent sets and forgets, so the rollback cannot wait to be asked for: the record is "
+        "journalled before the first write and replayed at teardown.",
     ),
 }
 

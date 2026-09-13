@@ -42,6 +42,7 @@ from .registry import (
 from .runtime import TargetRuntime
 from .services import (
     APP_DATABASE,
+    APP_DATASTORE,
     CAPABILITY_METHODS,
     DEVELOPER_SETTINGS,
     DEVICE_AGENT,
@@ -78,6 +79,7 @@ from .virtual_targets import (
 __all__ = [
     "ADAPTER_CAPABILITIES",
     "APP_DATABASE",
+    "APP_DATASTORE",
     "ATTACHED_TARGET_CAPABILITIES",
     "ENTRY_POINT_GROUP",
     "AppBundle",

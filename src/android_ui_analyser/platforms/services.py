@@ -31,6 +31,7 @@ from .virtual_targets import (
 )
 
 APP_DATABASE: Final = "app_database"
+APP_DATASTORE: Final = "app_datastore"
 DEVICE_AGENT: Final = "device_agent"
 DEVELOPER_SETTINGS: Final = "developer_settings"
 FEATURE_FLAGS: Final = "feature_flags"
@@ -125,6 +126,20 @@ CAPABILITY_METHODS: dict[str, frozenset[str]] = {
             "list_databases",
             "query_database",
             "restore_database",
+        }
+    ),
+    # Jetpack DataStore Preferences, which no Android system binary can edit: a protobuf map
+    # under ``files/datastore``.  Separate from ``app_database`` because the storage, the
+    # failure modes and the safety rules are different -- a bad write here does not corrupt a
+    # file, it makes the app's corruption handler silently delete every key in it.
+    APP_DATASTORE: frozenset(
+        {
+            "backup_datastore",
+            "get_datastore",
+            "list_backups",
+            "list_datastores",
+            "restore_datastore",
+            "set_datastore",
         }
     ),
     # An optional in-target agent: a platform-side process AUA can talk to instead of
@@ -383,6 +398,7 @@ def _signature_compatible(implementation: Any, contract: Any) -> bool:
 
 __all__ = [
     "APP_DATABASE",
+    "APP_DATASTORE",
     "CAPABILITY_METHODS",
     "CAPABILITY_PROTOCOLS",
     "DEVELOPER_SETTINGS",

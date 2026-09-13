@@ -32,6 +32,7 @@ GENERIC_MODULES = (
 )
 ANDROID_SERVICE_MODULES = {
     "app_database",
+    "app_datastore",
     "device_agent",
     "devopts",
     "emulator",
@@ -45,6 +46,7 @@ ANDROID_SERVICE_MODULES = {
 NATIVE_COMMAND_PREFIXES = ("adb", "dumpsys", "run-as", "settings ", "svc ")
 ANDROID_BACKENDS = {
     "app_database.py",
+    "app_datastore.py",
     "device.py",
     "device_agent.py",
     "devopts.py",

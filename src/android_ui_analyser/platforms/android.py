@@ -224,6 +224,7 @@ class AndroidPlatform(PlatformAdapter):
             "device.shell",
             "device.touch",
             "app_database",
+            "app_datastore",
             "device_agent",
             "developer_settings",
             "feature_flags",
@@ -382,6 +383,7 @@ class AndroidPlatform(PlatformAdapter):
 
     _CAPABILITY_MODULES = {
         "app_database": "app_database",
+        "app_datastore": "app_datastore",
         "device_agent": "device_agent",
         "developer_settings": "devopts",
         "feature_flags": "flags",
