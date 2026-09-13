@@ -11,6 +11,13 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-09-13
+
+### Breaking
+
+- Default TSV observations append `id_reusable` and `selector` recovery columns. Scripts that
+  require the original three columns should request `--fields id,text,clickable` explicitly.
+
 ### Fixed
 
 - Explicit running timer/progress labels and native clock widgets no longer invalidate an
@@ -596,5 +603,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.17.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.17.0
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.18.0...HEAD
 [0.18.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.18.0
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.19.0
