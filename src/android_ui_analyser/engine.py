@@ -2582,7 +2582,7 @@ class Engine:
     _execute_guarded_policy_call = engine_policy._execute_guarded_policy_call
     session_autopilot = engine_policy.session_autopilot
 
-    # engine_apps: The app under test: launch/stop/clear and install with the launch observation that follows, feature flags and prefs, private databases, logcat and per-app log preferences (stored and effective), and the app-under-test process bookkeeping.
+    # engine_apps: The app under test: launch/stop/clear and install with the launch observation that follows, feature flags and prefs, private databases and DataStore preferences, logcat and per-app log preferences (stored and effective), and the app-under-test process bookkeeping.
     _launch_observation_is_transitional = staticmethod(engine_apps._launch_observation_is_transitional)
     _await_meaningful_launch_observation = engine_apps._await_meaningful_launch_observation
     _await_foreground = staticmethod(engine_apps._await_foreground)
@@ -2609,6 +2609,12 @@ class Engine:
     database_backup = engine_apps.database_backup
     database_backups = engine_apps.database_backups
     database_restore = engine_apps.database_restore
+    datastore_list = engine_apps.datastore_list
+    datastore_get = engine_apps.datastore_get
+    datastore_set = engine_apps.datastore_set
+    datastore_backup = engine_apps.datastore_backup
+    datastore_backups = engine_apps.datastore_backups
+    datastore_restore = engine_apps.datastore_restore
     logcat_mark = engine_apps.logcat_mark
     logcat = engine_apps.logcat
     app_log_prefs = engine_apps.app_log_prefs

@@ -1,4 +1,4 @@
-"""The app under test: launch/stop/clear and install with the launch observation that follows, feature flags and prefs, private databases, logcat and per-app log preferences (stored and effective), and the app-under-test process bookkeeping.
+"""The app under test: launch/stop/clear and install with the launch observation that follows, feature flags and prefs, private databases and DataStore preferences, logcat and per-app log preferences (stored and effective), and the app-under-test process bookkeeping.
 
 Engine methods for apps. Each function's first parameter ``self`` is the
 :class:`~android_ui_analyser.engine.Engine`; ``Engine`` binds these functions as methods in its
@@ -1374,6 +1374,135 @@ def database_restore(
         backup_id,
         restart=restart,
         confirmed=confirmed,
+    )
+
+
+def datastore_list(self: Engine, package: str) -> dict[str, Any]:
+    app_datastore = self.platform.capability("app_datastore")
+
+    return app_datastore.list_datastores(self.device, package)
+
+
+def datastore_get(
+    self: Engine,
+    package: str,
+    datastore: str,
+    *,
+    keys: list[str] | None = None,
+) -> dict[str, Any]:
+    app_datastore = self.platform.capability("app_datastore")
+
+    return app_datastore.get_datastore(self.device, package, datastore, keys)
+
+
+def datastore_set(
+    self: Engine,
+    package: str,
+    datastore: str,
+    values: dict[str, Any],
+    *,
+    restart: bool = True,
+    confirmed: bool = False,
+) -> dict[str, Any]:
+    """Merge values into one DataStore file, journalling the undo before anything is written.
+
+    ``set_datastore`` takes its own restore point, but it takes it *inside* the write, which is
+    too late for the ledger: a process killed between the device write and the journal entry
+    would leave an app AUA changed and no record of how to put it back. So the pre-write backup
+    is taken here, the undo is recorded against it, and only then is the mutation run --
+    the same order ``app_prefs`` uses, for the same reason.
+
+    Repeated writes in one session keep the *first* entry, so teardown restores the state
+    before AUA touched the store at all rather than the last intermediate value.
+    """
+    app_datastore = self.platform.capability("app_datastore")
+
+    device = self.device
+    cache_dir = str(self.config.cache.dir)
+    key = f"app_datastore:{package}:{datastore}"
+    recorded = any(
+        entry.key == key and entry.op == "restore_app_datastore"
+        for entry in self._pending_device_changes(serial=device.target_id)
+    )
+    if not recorded and confirmed:
+        backup = app_datastore.backup_datastore(
+            device,
+            package,
+            datastore,
+            reason="before-first-set",
+            cache_dir=cache_dir,
+        )
+        self.record_device_change(
+            key=key,
+            kind="app_datastore",
+            op="restore_app_datastore",
+            args={
+                "package": package,
+                "datastore": datastore,
+                "backup_id": backup["backup_id"],
+                "cache_dir": cache_dir,
+            },
+            detail=f"{package} datastore/{datastore}.preferences_pb rewritten by AUA",
+        )
+    return app_datastore.set_datastore(
+        device,
+        package,
+        datastore,
+        values,
+        confirmed=confirmed,
+        restart=restart,
+        cache_dir=cache_dir,
+    )
+
+
+def datastore_backup(
+    self: Engine,
+    package: str,
+    datastore: str,
+    *,
+    reason: str = "manual",
+) -> dict[str, Any]:
+    app_datastore = self.platform.capability("app_datastore")
+
+    return app_datastore.backup_datastore(
+        self.device,
+        package,
+        datastore,
+        reason=reason,
+        cache_dir=str(self.config.cache.dir),
+    )
+
+
+def datastore_backups(self: Engine, package: str, datastore: str) -> dict[str, Any]:
+    app_datastore = self.platform.capability("app_datastore")
+
+    return app_datastore.list_backups(
+        self.device,
+        package,
+        datastore,
+        cache_dir=str(self.config.cache.dir),
+    )
+
+
+def datastore_restore(
+    self: Engine,
+    package: str,
+    datastore: str,
+    backup_id: str,
+    *,
+    restart: bool = True,
+    confirmed: bool = False,
+) -> dict[str, Any]:
+    app_datastore = self.platform.capability("app_datastore")
+
+    return app_datastore.restore_datastore(
+        self.device,
+        package,
+        datastore,
+        backup_id,
+        confirmed=confirmed,
+        restart=restart,
+        cache_dir=str(self.config.cache.dir),
     )
 
 
