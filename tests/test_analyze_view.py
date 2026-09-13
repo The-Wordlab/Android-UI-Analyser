@@ -168,7 +168,7 @@ def test_tsv_is_comment_header_then_columns_then_rows(device: FakeDevice) -> Non
     assert lines[0].startswith("# screen=")
     assert "package=com.test.app" in lines[0] and "1080x2400" in lines[0]
     assert lines[1].startswith("# elements=")
-    assert lines[2] == "id\ttext\tclickable"
+    assert lines[2] == "id\ttext\tclickable\tid_reusable\tselector"
 
 
 def test_tsv_default_view_hides_system_chrome_and_unlabelled_rows(device: FakeDevice) -> None:
@@ -195,7 +195,7 @@ def test_tsv_respects_field_order(device: FakeDevice) -> None:
 def test_tsv_no_meta_emits_only_columns_and_rows(device: FakeDevice) -> None:
     out = _run("--format", "tsv", "analyze", "--no-meta")
     assert not out.startswith("#")
-    assert out.strip().splitlines()[0] == "id\ttext\tclickable"
+    assert out.strip().splitlines()[0] == "id\ttext\tclickable\tid_reusable\tselector"
 
 
 def test_tsv_meta_selection_becomes_comment_lines(device: FakeDevice) -> None:

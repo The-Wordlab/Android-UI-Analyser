@@ -357,7 +357,7 @@ class OutputCfg(BaseModel):
     # acted on, it is absent unless that control has history, and the `changed` meta preset
     # below deliberately drops `slow_controls`. Without the column a learned cost cannot
     # reach an acting caller at all.
-    observation_fields: str = "id,text,desc,clickable,enabled,checked,selected,cost"
+    observation_fields: str = "id,text,desc,clickable,enabled,checked,selected,cost,id_reusable,selector"
     # `meta` keys kept in that observation: a preset name from
     # `projection.OBSERVATION_META_PRESETS`, `"all"`, or an explicit comma-separated list.
     #
@@ -1086,7 +1086,7 @@ output:
   annotate: false
   with_image: true        # save the frame each analyze already captured (see meta.raw_image)
   # The post-action `observation` budget — two independent dials, either accepting "all".
-  observation_fields: id,text,desc,clickable,enabled,checked,selected,cost
+  observation_fields: id,text,desc,clickable,enabled,checked,selected,cost,id_reusable,selector
   observation_meta: changed   # changed | all | <comma-separated meta keys>
   next_actions: false         # also emit the derived pre-filtered actionable list
 

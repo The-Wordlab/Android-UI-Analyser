@@ -35,6 +35,8 @@ from .schema import Meta, OutputFormat, drop_default_flags
 # the fully-qualified id (what a selector needs).
 FIELD_ALIASES: dict[str, str] = {
     "id": "id",
+    "id_reusable": "id_reusable",
+    "selector": "selector",
     "type": "type",
     "text": "text",
     "rid": "resource_id",
@@ -112,7 +114,7 @@ def resolve_field_name(name: str) -> str:
 # `id == "rid:" + rid` exactly and the other 12 differed only by the uniqueness ordinal. Ask
 # for it with `--fields id,rid` when the *class* of a row is the question; match on it with
 # `--where-rid`, which reads the full payload and never needed the column.
-TSV_DEFAULT_FIELDS: tuple[str, ...] = ("id", "text", "clickable")
+TSV_DEFAULT_FIELDS: tuple[str, ...] = ("id", "text", "clickable", "id_reusable", "selector")
 
 # Named `meta` budgets for a folded post-action observation. The full `meta` is sized for a
 # question a caller *asked* — it carries research tasks, deeplink suggestions, a capture hint,

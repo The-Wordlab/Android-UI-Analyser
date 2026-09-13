@@ -303,14 +303,14 @@ def resolve_selector(
                 miss_observation.as_dict("json") if miss_observation is not None else None
             ),
         )
+    if index is not None:
+        if not 0 <= index < len(matches):
+            raise UsageError(
+                f"--index {index} out of range: {label} matches {len(matches)} elements",
+                hint="Indexes are 0-based and follow reading order (top-left first).",
+            )
+        return matches[index]
     if len(matches) > 1:
-        if index is not None:
-            if not 0 <= index < len(matches):
-                raise UsageError(
-                    f"--index {index} out of range: {label} matches {len(matches)} elements",
-                    hint="Indexes are 0-based and follow reading order (top-left first).",
-                )
-            return matches[index]
         if prefer_clickable:
             # Compose routinely renders a clickable icon tile and a caption beneath it
             # carrying the same text, as two separate accessibility nodes with no
@@ -514,12 +514,23 @@ def _resolve_action_key(
     moved = self._note_screen_moved(shown, current)
     if not hits:
         if is_handle(key):
+            # Supply a recovery path from this read, including for a uniquely addressed
+            # control whose semantic context changed. Never execute that selector implicitly.
+            from .element_handles import selector_alternative
+
+            current = current.model_copy(update={"elements": [
+                el.model_copy(update={"selector": selector_alternative(el, current.elements)})
+                for el in current.elements
+            ]})
             raise ElementNotFoundError(
                 f"could not establish a unique current element for handle {key!r}",
                 hint=(
                     "No action was sent. The element may be absent, indistinguishable from "
                     "another item, changed, or from an expired target lifetime. Inspect the "
-                    "attached observation and use a uniquely identified control."
+                    "attached observation. If id_reusable is false, refreshing its ID will "
+                    "not help. To choose a visible control, pass its selector explicitly "
+                    "(CLI --rid/--text/--desc and --index; MCP selector fields). An index "
+                    "selects the current position, not the same item after a reorder."
                 ),
                 observation=self._miss_observation(current),
             )

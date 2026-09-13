@@ -205,6 +205,10 @@ class Element(BaseModel):
     # Assigned by the engine's persistent identity registry. Kept apart from stable_key,
     # which remains a reusable selector fingerprint for maps, timings, and saved flows.
     handle: str | None = None
+    # False means this frame cannot establish a reusable identity. The explicit selector
+    # addresses the current screen (including its reading-order index), not a durable item.
+    id_reusable: bool | None = None
+    selector: dict[str, str | int] | None = None
     # Window layer: app | ime | system | overlay (hierarchy package heuristics).
     window: str | None = None
     # ``id`` of the nearest *collected* ancestor, or None for a root / vision element. Kept
@@ -265,6 +269,10 @@ class Element(BaseModel):
             out["stable_key"] = self.stable_key
         if self.handle is not None:
             out["handle"] = self.handle
+        if self.id_reusable is not None:
+            out["id_reusable"] = self.id_reusable
+        if self.selector is not None:
+            out["selector"] = self.selector
         if self.window is not None:
             out["window"] = self.window
         if self.parent is not None:

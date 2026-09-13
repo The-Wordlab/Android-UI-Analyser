@@ -11,6 +11,16 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Fixed
+
+- Explicit running timer/progress labels and native clock widgets no longer invalidate an
+  otherwise unchanged sibling control handle. Dialog subjects and item identities stay strict.
+- Indistinguishable controls expose `id_reusable: false` and an explicit current-screen selector,
+  including an index where needed. Missing-handle observations also offer selectors, so agents
+  can recover without repeatedly requesting unusable IDs.
+- Failed emulator startup waits for its owned process to exit and escalates when it ignores
+  termination. Ownership records and the console-port reservation remain until exit is confirmed.
+
 ## [0.18.0] - 2026-09-13
 
 - `aua config exec --env-file PATH --require NAME -- COMMAND ARGS...` resolves required

@@ -30,6 +30,8 @@
     "window": "app",
     "parent": null,
     "cost": null,
-    "handle": null
+    "handle": null,
+    "id_reusable": null,
+    "selector": null
   }
 ]

@@ -391,6 +391,10 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "That `id` is a tracked handle (`el:...`). It follows a uniquely identified item "
         "through movement and reordering; send it straight back. An absent, changed, "
         "ambiguous, or expired identity is refused with a fresh observation. "
+        "When `id_reusable` is false, use the supplied `selector` instead of refreshing IDs: "
+        "pass its `rid`, `text` or `desc`, plus `index` when present (CLI: `--rid ... --index N`; "
+        "MCP: the same named fields). An index chooses the current position, so inspect again "
+        "after reordering. "
         "The separate `stable_key` is a reusable selector, not a persistent item handle. "
         "A selector such as `rid:continue_btn` can also be passed into `--rid`; AUA strips "
         "the redundant matching prefix. The same applies to "
@@ -2084,22 +2088,23 @@ def render_skill_markdown() -> str:
     """Compact triggered instructions; deeper guidance stays in the CLI manual."""
     return """# Android UI Analyser
 
-Use AUA MCP or CLI; the plugin does not put `aua` on `PATH`. Act by ID, never raw `adb`.
+Use AUA MCP or CLI (plugin adds no `aua` to `PATH`). Act by ID, never raw `adb`.
 
-API key: `aua config exec --env-file PATH --require NAME -- COMMAND ARGS` opens a private
-dialog then launches once after Save; cancel stops. `config secret` / MCP `credential_request`
-only saves. Never ask/read keys in chat or shell-source .env. Details: `aua guide` / `docs/credentials.md`.
+Keys: `aua config exec --env-file PATH --require NAME -- COMMAND ARGS` opens a private dialog;
+Save launches once, cancel stops. `config secret` / MCP `credential_request` only saves.
+Never read keys in chat or shell-source .env. See `docs/credentials.md`.
 
 ## Operating loop
 
 1. Start with MCP `session_start(goal="<what must be verified>")`, or
    `aua session start --goal "<goal>"`. It leaves leased targets alone and
    provisions a free instance. `--app` selects; `--apk` installs. Reuse observation
-   and `recommended_call`; `--contract` requires proof, `--artifacts-dir` records it.
+   and `recommended_call`; `--contract` requires proof.
 2. Prefer verified `goto`, saved `flow`, proven deeplink, then manual action. Arrival requires
    matching mapped `logical_name`, state and surface. Preview risky routes; goals never
    authorize destructive, external, settings, data, payment, send or sign-out effects.
-3. Reuse analyzed observations; `--no-observe` is rejected. Send its `el:` IDs back directly. Use `--rid` for resource IDs.
+3. Reuse observations; `--no-observe` is rejected. Send reusable `el:` IDs back directly.
+   For `id_reusable: false`, pass `selector` fields; `index` selects current position (`aua guide`).
    Filter `observation.elements` by `clickable`, `checked` or `scrollable`. `--submit` is IME-only:
    check `submitted`; if false, use its `recommended_call` or `--send rid:<control>`, never retype.
    Check `observation_contract`: `action_succeeded`, `evidence_fresh`, `elements_available`,

@@ -252,8 +252,8 @@ def test_guidance_teaches_the_agent_closure_recovery_contracts() -> None:
 
     assert "redundant matching prefix" in full
     assert "`--rid <resource-id>` still works" in brief
-    assert "Use `--rid` for resource IDs" in skill
-    assert "Send its `el:` IDs back directly" in skill
+    assert "`id_reusable: false`" in skill and "`selector` fields" in skill
+    assert "Send reusable `el:` IDs back directly" in skill
 
 
 def test_guide_defines_authoritative_call_accounting_without_inflating_calls() -> None:
@@ -328,7 +328,7 @@ def test_compact_skill_works_with_plugin_mcp_without_a_global_cli() -> None:
     assert 'session_start(goal="<what must be verified>")' in skill
     assert "MCP `session_finish`" in skill
     assert 'capabilities(goal="<goal>")' in skill
-    assert "plugin does not put `aua` on `PATH`" in skill
+    assert "plugin adds no `aua` to `PATH`" in skill
 
 
 def test_codex_metadata_and_bundle_share_the_canonical_skill(tmp_path: Path) -> None:

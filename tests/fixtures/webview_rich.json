@@ -30,7 +30,9 @@
     "window": "app",
     "parent": null,
     "cost": null,
-    "handle": null
+    "handle": null,
+    "id_reusable": null,
+    "selector": null
   },
   {
     "id": 1,
@@ -63,7 +65,9 @@
     "window": "app",
     "parent": null,
     "cost": null,
-    "handle": null
+    "handle": null,
+    "id_reusable": null,
+    "selector": null
   },
   {
     "id": 2,
@@ -96,7 +100,9 @@
     "window": "app",
     "parent": null,
     "cost": null,
-    "handle": null
+    "handle": null,
+    "id_reusable": null,
+    "selector": null
   },
   {
     "id": 3,
@@ -129,7 +135,9 @@
     "window": "app",
     "parent": 2,
     "cost": null,
-    "handle": null
+    "handle": null,
+    "id_reusable": null,
+    "selector": null
   },
   {
     "id": 4,
@@ -162,7 +170,9 @@
     "window": "app",
     "parent": 2,
     "cost": null,
-    "handle": null
+    "handle": null,
+    "id_reusable": null,
+    "selector": null
   },
   {
     "id": 5,
@@ -195,7 +205,9 @@
     "window": "app",
     "parent": 2,
     "cost": null,
-    "handle": null
+    "handle": null,
+    "id_reusable": null,
+    "selector": null
   },
   {
     "id": 6,
@@ -228,7 +240,9 @@
     "window": "app",
     "parent": 2,
     "cost": null,
-    "handle": null
+    "handle": null,
+    "id_reusable": null,
+    "selector": null
   },
   {
     "id": 7,
@@ -261,7 +275,9 @@
     "window": "app",
     "parent": 2,
     "cost": null,
-    "handle": null
+    "handle": null,
+    "id_reusable": null,
+    "selector": null
   },
   {
     "id": 8,
@@ -294,7 +310,9 @@
     "window": "app",
     "parent": 2,
     "cost": null,
-    "handle": null
+    "handle": null,
+    "id_reusable": null,
+    "selector": null
   },
   {
     "id": 9,
@@ -327,7 +345,9 @@
     "window": "app",
     "parent": 2,
     "cost": null,
-    "handle": null
+    "handle": null,
+    "id_reusable": null,
+    "selector": null
   },
   {
     "id": 10,
@@ -360,7 +380,9 @@
     "window": "app",
     "parent": 2,
     "cost": null,
-    "handle": null
+    "handle": null,
+    "id_reusable": null,
+    "selector": null
   },
   {
     "id": 11,
@@ -393,6 +415,8 @@
     "window": "app",
     "parent": 2,
     "cost": null,
-    "handle": null
+    "handle": null,
+    "id_reusable": null,
+    "selector": null
   }
 ]

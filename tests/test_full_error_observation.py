@@ -129,7 +129,18 @@ def assert_full(payload, observed):
     assert error["hint"].startswith("No action was sent.")
     assert error["observation_present"] is True
     actual = error["observation"]
-    assert actual == observed.as_dict("json")
+    expected = observed.as_dict("json")
+    expected_selectors = {
+        PARENT: {"rid": "fiction:group"},
+        EDITOR: {"rid": "fiction:draft"},
+        DISABLED: {"text": "Alerts"},
+        VISUAL: None,  # OCR rows cannot supply a hierarchy-only recovery selector.
+    }
+    for row in expected["elements"]:
+        assert row["selector"] is None and row["id_reusable"] is None
+        row["selector"] = expected_selectors[row["id"]]
+    # Recovery adds explicit selectors; every original evidence field stays exact.
+    assert actual == expected
     rows = {e["id"]: e for e in actual["elements"]}
     assert rows[EDITOR]["parent"] == PARENT
     assert rows[EDITOR]["enabled"] is True and rows[EDITOR]["source"] == "hierarchy"

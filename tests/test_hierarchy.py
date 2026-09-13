@@ -57,6 +57,7 @@ def test_all_elements_source_hierarchy() -> None:
     els = parse_hierarchy((FIXTURES / "normal_views.xml").read_text(encoding="utf-8"), SCREEN)
     assert all(e.source is Source.hierarchy for e in els)
     assert all(e.confidence is None for e in els)
+    assert all(e.handle is None and e.id_reusable is None and e.selector is None for e in els)
 
 
 def test_normal_views_keeps_labeled_controls() -> None:

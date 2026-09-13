@@ -36,6 +36,13 @@ _LOCAL_LIFETIMES: WeakKeyDictionary[Any, str] = WeakKeyDictionary()
 _RELATIVE_AGE = re.compile(
     r"(?P<title>.*\S)\s+\d+\s+(?:seconds?|minutes?|hours?|days?|weeks?|months?|years?)\s+ago$"
 )
+# These whole-label forms explicitly describe running state. Arbitrary numbers and
+# generic labels remain identity evidence ("Delete item 10?" must never become item 11).
+_CONTEXT_STATE = re.compile(
+    r"(?P<timer>timer|elapsed(?: time)?|(?:time )?remaining)\s*:\s*"
+    r"\d+(?:[.:]\d+){0,2}(?:\s*(?:ms|s|secs?|seconds?|mins?|minutes?|hours?))?"
+    r"|(?P<progress>progress)\s*:\s*\d+(?:\.\d+)?\s*%"
+)
 
 
 def is_handle(value: Any) -> bool:
@@ -59,6 +66,43 @@ def _editable(element: Element) -> bool:
         "textarea",
         "searchfield",
     }
+
+
+def _context_label(element: Element) -> str:
+    value = _label(element.content_desc) or _label(element.text)
+    if not value:
+        return ""
+    if not element.content_desc and element.type.casefold() in {"chronometer", "textclock"}:
+        return f"\0clock:{element.type.casefold()}:{element.resource_id or ''}"
+    state = _CONTEXT_STATE.fullmatch(value)
+    if state is not None:
+        return f"\0state:{state['timer'] or state['progress']}"
+    return value
+
+
+def selector_alternative(element: Element, elements: list[Element]) -> dict[str, str | int] | None:
+    """An explicit current-position request using the same matches as action resolution."""
+    from .selectors import drop_redundant_ocr, match_selector
+
+    # One-shot selectors re-read the hierarchy. Do not offer an index that depends
+    # on an OCR/detection candidate the action's fresh read may not contain.
+    if element.source.value != "hierarchy":
+        return None
+    available = drop_redundant_ocr(elements)
+    for field, value in (
+        ("rid", element.resource_id),
+        ("desc", element.content_desc),
+        ("text", None if _editable(element) else element.text),
+    ):
+        if not value:
+            continue
+        matches = match_selector(available, **{field: value})
+        if any(match.source.value != "hierarchy" for match in matches):
+            continue
+        for index, match in enumerate(matches):
+            if match.id == element.id:
+                return {field: value, **({"index": index} if len(matches) > 1 else {})}
+    return None
 
 
 def descriptors(elements: list[Element]) -> list[str]:
@@ -107,7 +151,7 @@ def descriptors(elements: list[Element]) -> list[str]:
                         or child.checkable
                         or child.scrollable
                     )
-                    if (label := _label(child.content_desc) or _label(child.text))
+                    if (label := _context_label(child))
                 }
             )
         )
@@ -243,7 +287,12 @@ class HandleStore:
                 # display those elements, but an action must refuse to guess their identity.
                 if counts[key] == 1:
                     records[key] = {"handle": handle, "source": str(el.source.value)}
-                result.append(el.model_copy(update={"handle": handle}))
+                ambiguous = counts[key] != 1
+                result.append(el.model_copy(update={
+                    "handle": handle,
+                    "id_reusable": False if ambiguous else None,
+                    "selector": selector_alternative(el, elements) if ambiguous else None,
+                }))
             state["records"] = dict(list(records.items())[-MAX_RECORDS:])
             try:
                 atomic_write_text(self.path, json.dumps(state, separators=(",", ":")))
