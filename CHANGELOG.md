@@ -42,6 +42,8 @@ notes, so you can check for a newer version — and read what changed — withou
   `session_finish` call is now only an untrusted completion claim, so it cannot release the target
   before fresh evidence, judgement, and recording finalization. Recording or session cleanup
   failures invalidate otherwise successful harness verdicts.
+- `aua doctor` names discovered targets by their neutral `target_id` when a platform reports no
+  Android serial, instead of `?`.
 
 ## [0.19.1] - 2026-09-13
 

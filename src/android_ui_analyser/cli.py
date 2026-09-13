@@ -8250,7 +8250,10 @@ def _render_doctor_pretty(report: dict[str, Any]) -> str:
     dev = checks.get("devices", {})
     dev_detail = dev.get("detail", "")
     if isinstance(dev_detail, list):
-        dev_detail = ", ".join(d.get("serial", "?") for d in dev_detail) or "(none)"
+        dev_detail = (
+            ", ".join(str(d.get("serial") or d.get("target_id") or "?") for d in dev_detail)
+            or "(none)"
+        )
     lines.append(f"[{mark(dev.get('ok', False))}] devices       {dev_detail}")
     if dev.get("hint"):
         lines.append(f"               hint: {dev['hint']}")
