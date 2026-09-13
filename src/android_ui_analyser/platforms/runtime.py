@@ -342,6 +342,21 @@ class TargetRuntime(ABC):
 
         raise DeviceError("screen recording status is unsupported by this target runtime")
 
+    def clear_failed_recording_state(self) -> None:
+        """Remove local state left by a failed start after liveness was disproved."""
+
+        raise DeviceError("screen recording cleanup is unsupported by this target runtime")
+
+    def failed_recording_start(self) -> bool:
+        """Whether persisted recording state specifically represents an unconfirmed start."""
+
+        return False
+
+    def recording_is_inert(self) -> bool:
+        """Prove that this runtime has no recorder owner still running."""
+
+        raise DeviceError("screen recording status is unsupported by this target runtime")
+
     def stop_recording(self, local_path: str) -> str:
         raise DeviceError("screen recording is unsupported by this target runtime")
 
@@ -353,6 +368,18 @@ class TargetRuntime(ABC):
         The caller retains the original undo under a separate key before recording again.
         """
         raise DeviceError("recording recovery is unsupported by this target runtime")
+
+    def recording_path_is_owned(self, remote_path: str) -> bool:
+        """Whether *remote_path* has this platform's verifiable recording shape."""
+
+        return False
+
+    def recording_path_is_unrecoverable(
+        self, remote_path: str, *, provenance: str | None = None
+    ) -> bool:
+        """Whether explicitly marked legacy host metadata cannot be target-recovered."""
+
+        return False
 
     def recording_metadata(self) -> dict[str, Any] | None:
         """Lifecycle, original segments and coverage limits for device.recording.timeline.

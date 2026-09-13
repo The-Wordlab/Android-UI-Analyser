@@ -725,10 +725,15 @@ def _command_guard(
 def device_command(
     cache_dir: str | Path, serial: TargetLike, *, platform: str = LEGACY_PLATFORM
 ) -> Iterator[None]:
-    """One foreground command: exclusive against commands, shared with perception readers."""
+    """One foreground command, acquiring host coordination before device fencing.
+
+    Ledger writes happen during ordinary commands.  Taking the registry lock here makes their
+    order the same as recovery (host transaction, then device command), while retaining the
+    shared device-use fence against ownership transitions and perception readers.
+    """
 
     ref = target_ref(serial, platform=platform)
-    with _command_guard(cache_dir, ref), device_use(cache_dir, ref):
+    with host_transaction(cache_dir, f"ledger|{ref.storage_key}"), _command_guard(cache_dir, ref), device_use(cache_dir, ref):
         yield
 
 
@@ -738,7 +743,10 @@ def device_transaction(
 ) -> Iterator[None]:
     """Keep a full device command or ownership transition exclusive on one target."""
 
-    with _device_guard(cache_dir, serial, platform=platform):
+    ref = target_ref(serial, platform=platform)
+    with host_transaction(cache_dir, f"ledger|{ref.storage_key}"), _device_guard(
+        cache_dir, ref, platform=platform
+    ):
         yield
 
 

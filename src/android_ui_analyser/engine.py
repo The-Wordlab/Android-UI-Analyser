@@ -964,6 +964,7 @@ class Engine:
         args: dict[str, Any] | None = None,
         detail: str = "",
         serial: str | None = None,
+        remote_path_provenance: str | None = None,
     ) -> None:
         """Journal how to undo a persistent device change — **before** making it.
 
@@ -993,7 +994,9 @@ class Engine:
             detail=detail,
             instance_token=token,
             platform=self.platform.name,
+            registry_dir=self.config.lease.registry_dir,
             platform_options_fingerprint=options_fingerprint,
+            remote_path_provenance=remote_path_provenance,
             **identity,
         )
         self._ensure_teardown_watchdog(target)
@@ -1043,7 +1046,10 @@ class Engine:
         target = serial or (self._device.serial if self._device else self.config.device.serial)
         if target:
             with contextlib.suppress(Exception):
-                device_ledger.forget(target, *keys, platform=self.platform.name)
+                device_ledger.forget(
+                    target, *keys, platform=self.platform.name,
+                    registry_dir=self.config.lease.registry_dir,
+                )
 
     def _ensure_teardown_watchdog(self, serial: str) -> None:
         if not getattr(self.config.teardown, "watchdog", True):

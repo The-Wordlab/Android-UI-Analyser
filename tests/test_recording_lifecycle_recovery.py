@@ -133,6 +133,51 @@ def test_engine_start_after_new_boot_preserves_old_evidence_and_undo(tmp_path, m
     assert not target.commands  # old-boot undo cannot delete persistent prior footage
 
 
+def test_new_boot_archives_legacy_host_local_recording_path_and_unblocks_start(
+    tmp_path, monkeypatch,
+):
+    target, dev, engine, old = setup_recording(tmp_path, monkeypatch)
+    entries = device_ledger.read_ledger(dev.target_id, platform="strict-fake")
+    stale = next(entry for entry in entries if entry.key == "screen_recording")
+    stale = stale.__class__(**{**stale.to_json(),
+        "args": {"remote_path": str(tmp_path / "host" / ("journey.aua-recording-" + "0" * 32))},
+        "remote_path_provenance": "legacy-host-local"})
+    device_ledger._write_ledger(dev.target_id, [stale], platform="strict-fake")
+    target.running = False
+    target.boot = NEW_BOOT
+
+    fresh = engine.record_start()
+
+    assert fresh.ok and fresh.detail != stale.args["remote_path"]
+    assert not device_ledger.read_ledger(dev.target_id, platform="strict-fake")[0].args["remote_path"].startswith(str(tmp_path))
+    archives = list((device_ledger.ledger_dir() / "discarded").glob("*.json"))
+    assert any("host-local path" in p.read_text() for p in archives)
+
+
+def test_android_recording_root_provenance_does_not_reject_mount_paths():
+    root = "/mnt/media_rw/fictional.aua-recording-" + "0" * 32
+
+    assert android_recording.is_android_recording_root(root)
+    assert not android_recording.is_unrecoverable_recording_root(root)
+    assert android_recording.is_unrecoverable_recording_root(
+        root, provenance="legacy-host-local"
+    )
+
+
+def test_supervisor_only_failed_start_cannot_start_a_second_supervisor(tmp_path, monkeypatch):
+    target, _dev, engine, _old = setup_recording(tmp_path, monkeypatch)
+    target.process_lines = lambda: {
+        101: f"sh {target.root}/supervisor.sh {target.root} 1800",
+    }
+    target.running = True
+    target.commands.clear()
+
+    with pytest.raises(DeviceError, match="already in progress|liveness"):
+        engine.record_start()
+
+    assert not any(c.startswith(("umask", "nohup")) for c in target.commands)
+
+
 @pytest.mark.parametrize("fault", ["boot_unknown", "identity", "scan", "proc", "same_root_live", "foreign"])
 def test_new_boot_recovery_fails_closed_without_touching_current_recorders(tmp_path, monkeypatch, fault):
     target, dev, engine, old = setup_recording(tmp_path, monkeypatch)

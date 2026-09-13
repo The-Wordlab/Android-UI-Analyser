@@ -11,6 +11,12 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Fixed
+
+- Recording starts recover same-session failed-start metadata after the target proves no recording
+  owner is live, and quarantine legacy host-local recording paths without weakening target cleanup
+  identity checks.
+
 ## [0.19.1] - 2026-09-13
 
 ### Fixed

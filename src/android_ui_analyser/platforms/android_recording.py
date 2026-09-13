@@ -41,6 +41,16 @@ def _validate_root(root: str) -> None:
         raise DeviceError("invalid owned recording directory", code="recording_identity_invalid")
 
 
+def is_android_recording_root(root: str) -> bool:
+    """Return whether a recording root has the validated target-side shape."""
+    return bool(_ROOT.fullmatch(root))
+
+
+def is_unrecoverable_recording_root(root: str, *, provenance: str | None = None) -> bool:
+    """Recognize only explicitly marked legacy host-local ledger corruption."""
+    return bool(_ROOT.fullmatch(root)) and provenance == "legacy-host-local"
+
+
 def supervisor_script() -> str:
     # /proc/uptime is monotonic across device clock changes. Keep encoder timestamps;
     # do not assume an idle tail was captured. No sampling or artificial frames.
@@ -255,6 +265,19 @@ def active_output(dev: Uiautomator2Device) -> str | None:
                 raise DeviceError("active recording destination is ambiguous", code="recording_status_unknown")
             return argv[-1]
     return None
+
+
+def is_inert(dev: Uiautomator2Device) -> bool:
+    """Prove that no AUA-owned supervisor or encoder is running on this target."""
+    if any(command.split() and command.split()[0].rsplit("/", 1)[-1] == "screenrecord"
+           for _pid, command in _process_table(dev)):
+        return False
+    return not any(
+        _recording_role(command, root) is not None
+        for _pid, command in _process_table(dev)
+        for root, _, _name in (arg.rpartition("/") for arg in command.split())
+        if _ROOT.fullmatch(root)
+    )
 
 
 def recover(dev: Uiautomator2Device, *, quarantine_stale: bool = False) -> dict[str, Any] | None:

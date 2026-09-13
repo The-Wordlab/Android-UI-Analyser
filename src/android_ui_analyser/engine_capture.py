@@ -88,28 +88,84 @@ def _capture_screenshot_fn(self: Engine) -> Any:
 def record_start(self: Engine, path: str | None = None) -> ActionResult:
     runtime = self.platform.runtime_capability("device.recording", self.device)
     remote_path = runtime.recording_destination(path)
-    active = runtime.active_recording()
-    if active is not None:
-        raise DeviceError(
-            f"a screen recording is already in progress at {active}",
-            hint="Run `aua record stop <path>` before starting another.",
-        )
     pending = self._pending_device_change("screen_recording", serial=runtime.target_id)
+    try:
+        active = runtime.active_recording()
+    except DeviceError as exc:
+        # A failed start on this boot can leave only an unverified target directory and
+        # its write-ahead ledger. If the entry is ours and no recorder can be proven,
+        # archive that exact metadata so the next start can proceed safely.
+        current = runtime.instance_token()
+        owner = self._lease_owner_resolved or self._lease_owner
+        if (pending is None or exc.code != "recording_identity_mismatch"
+                or pending.owner != owner or pending.instance_token != current):
+            raise
+        from . import device_ledger
+        if not runtime.failed_recording_start() or not runtime.recording_is_inert():
+            raise DeviceError("recording liveness is unverified; refusing a second recorder",
+                              code="recording_status_unknown") from exc
+        device_ledger.discard_unrecoverable_recording(
+            runtime.target_id, pending,
+            reason="current-session recording start left an unverified target directory",
+            registry_dir=self.config.lease.registry_dir,
+            platform=self.platform.name,
+        )
+        pending = None
+        active = None
+    if active is not None:
+        if (pending is not None
+                and (runtime.instance_token() is None
+                     or runtime.instance_token() == pending.instance_token)):
+            from . import device_ledger
+
+            # A prior start may have persisted state before its encoder was ready. If
+            # the target proves there is no live recorder, discard only that failed
+            # current-session write-ahead entry and retry with a fresh owned root.
+            if runtime.failed_recording_start() and runtime.recording_is_inert():
+                device_ledger.discard_unrecoverable_recording(
+                    runtime.target_id, pending,
+                    reason="current-session recording state had no live encoder",
+                    registry_dir=self.config.lease.registry_dir,
+                    platform=self.platform.name,
+                )
+                runtime.clear_failed_recording_state()
+                pending = None
+                active = None
+        if active is None:
+            pass
+        else:
+            raise DeviceError(
+                f"a screen recording is already in progress at {active}",
+                hint="Run `aua record stop <path>` before starting another.",
+            )
     if pending is not None and self.platform.supports("device.recording.recovery"):
         from . import device_ledger
 
         recovery = self.platform.runtime_capability("device.recording.recovery", runtime)
         current = runtime.instance_token()
         if pending.instance_token and current and pending.instance_token != current:
-            archived = recovery.archive_stale_recording(
-                str(pending.args.get("remote_path", "")), pending.instance_token,
-            )
-            if archived and runtime.instance_token() == current:
-                device_ledger.retain_stale_recording(
-                    runtime.target_id, pending, archive_path=archived, current_instance=current,
-                    registry_dir=self.config.lease.registry_dir, platform=self.platform.name,
+            pending_path = str(pending.args.get("remote_path", ""))
+            # A pre-0.16 caller could persist a host-local path in the target-side undo.
+            # It can never be inspected on Android, so archive that metadata directly and
+            # unblock the current boot without pretending the old target was restored.
+            if recovery.recording_path_is_unrecoverable(
+                pending_path, provenance=pending.remote_path_provenance
+            ):
+                device_ledger.discard_unrecoverable_recording(
+                    runtime.target_id, pending,
+                    reason="stale recording undo carried a host-local path; target recovery is impossible",
+                    registry_dir=self.config.lease.registry_dir,
+                    platform=self.platform.name,
                 )
                 pending = None
+            else:
+                archived = recovery.archive_stale_recording(pending_path, pending.instance_token)
+                if archived and runtime.instance_token() == current:
+                    device_ledger.retain_stale_recording(
+                        runtime.target_id, pending, archive_path=archived, current_instance=current,
+                        registry_dir=self.config.lease.registry_dir, platform=self.platform.name,
+                    )
+                    pending = None
     if pending is not None:
         raise DeviceError(
             "an earlier screen recording still has pending target-side cleanup",
@@ -127,6 +183,7 @@ def record_start(self: Engine, path: str | None = None) -> ActionResult:
         op="discard_recording",
         args={"remote_path": remote_path},
         detail=f"screen recording started at {remote_path}",
+        remote_path_provenance="target",
     )
     remote = runtime.start_recording(remote_path)
     metadata = (

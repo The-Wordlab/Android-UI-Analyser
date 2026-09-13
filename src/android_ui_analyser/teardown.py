@@ -207,7 +207,10 @@ def reap(
         instance_token=token,
         platform=ref.platform,
     )
-    report = device_ledger.replay(ref, entries=entries, context=context, dry_run=dry_run)
+    report = device_ledger.replay(
+        ref, entries=entries, context=context, dry_run=dry_run,
+        registry_dir=lease_registry_dir,
+    )
     report["reason"] = why or "forced"
     if report["undone"]:
         logger.info(

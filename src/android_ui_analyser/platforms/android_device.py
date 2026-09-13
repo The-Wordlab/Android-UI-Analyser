@@ -1807,6 +1807,20 @@ class Uiautomator2Device(AndroidRuntimeBase):
             return str(state["remote"])
         return android_recording.active_output(self)
 
+    def recording_is_inert(self) -> bool:
+        from . import android_recording
+
+        return android_recording.is_inert(self)
+
+    def clear_failed_recording_state(self) -> None:
+        self._recording_state_path().unlink(missing_ok=True)
+
+    def failed_recording_start(self) -> bool:
+        from . import android_recording
+
+        state = android_recording._state(self)
+        return bool(state and state.get("state") == "starting")
+
     def archive_stale_recording(self, remote_path: str, instance_token: str) -> str | None:
         from . import android_recording
 
@@ -1814,6 +1828,15 @@ class Uiautomator2Device(AndroidRuntimeBase):
             # Legacy one-file undos still require deliberate cleanup; preserve its hint.
             return None
         return android_recording.archive_stale(self, remote_path, instance_token)
+
+    def recording_path_is_unrecoverable(
+        self, remote_path: str, *, provenance: str | None = None
+    ) -> bool:
+        from . import android_recording
+
+        return android_recording.is_unrecoverable_recording_root(
+            remote_path, provenance=provenance
+        )
 
     def recording_destination(self, requested: str | None = None) -> str:
         from . import android_recording

@@ -117,6 +117,8 @@ class Entry:
     # Keyed identity of the opaque adapter options used for this mutation. The options
     # themselves may contain credentials and are deliberately never written to this file.
     platform_options_fingerprint: str = ""
+    # Provenance for recording paths; absent means legacy/unknown, never host-local.
+    remote_path_provenance: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -135,6 +137,7 @@ class Entry:
             "platform": self.platform,
             "target_id": self.target_id,
             "platform_options_fingerprint": self.platform_options_fingerprint,
+            "remote_path_provenance": self.remote_path_provenance,
         }
 
     @classmethod
@@ -165,6 +168,10 @@ class Entry:
             target_id=str(raw.get("target_id") or (target.target_id if target else "")),
             platform_options_fingerprint=(
                 str(raw.get("platform_options_fingerprint") or "").strip()
+            ),
+            remote_path_provenance=(
+                raw.get("remote_path_provenance")
+                if isinstance(raw.get("remote_path_provenance"), str) else None
             ),
         )
 
@@ -232,7 +239,7 @@ def _write_ledger(target: TargetLike, entries: list[Entry], *, platform: str = L
     atomic_write_text(path, json.dumps(payload, indent=2) + "\n")
 
 
-def record(
+def _record_unlocked(
     target: TargetLike,
     *,
     key: str,
@@ -248,6 +255,7 @@ def record(
     leased: bool = True,
     platform: str = LEGACY_PLATFORM,
     platform_options_fingerprint: str | None = None,
+    remote_path_provenance: str | None = None,
 ) -> Entry:
     """Record an undo **before** performing the mutation. Idempotent on *key*.
 
@@ -279,11 +287,43 @@ def record(
         platform=ref.platform,
         target_id=ref.target_id,
         platform_options_fingerprint=fingerprint,
+        remote_path_provenance=remote_path_provenance,
     )
     entries = [e for e in entries if e.key != key]
     entries.append(entry)
     _write_ledger(ref, entries)
     return entry
+
+
+def record(
+    target: TargetLike, *, key: str, kind: str, op: str, args: dict[str, Any] | None = None,
+    detail: str = "", owner: str | None = None, owner_pid: int | None = None,
+    owner_started: str | None = None, instance_token: str | None = None,
+    cache_dir: str | Path | None = None, leased: bool = True,
+    platform: str = LEGACY_PLATFORM, platform_options_fingerprint: str | None = None,
+    remote_path_provenance: str | None = None,
+    registry_dir: str | Path | None = None,
+) -> Entry:
+    """Record an undo, serializing ledger writers when the lease registry is available."""
+    if registry_dir is None:
+        return _record_unlocked(
+            target, key=key, kind=kind, op=op, args=args, detail=detail, owner=owner,
+            owner_pid=owner_pid, owner_started=owner_started, instance_token=instance_token,
+            cache_dir=cache_dir, leased=leased, platform=platform,
+            platform_options_fingerprint=platform_options_fingerprint,
+            remote_path_provenance=remote_path_provenance,
+        )
+    from . import leases
+
+    ref = target_ref(target, platform=platform)
+    with leases.host_transaction(registry_dir, f"ledger|{ref.storage_key}"):
+        return _record_unlocked(
+            ref, key=key, kind=kind, op=op, args=args, detail=detail, owner=owner,
+            owner_pid=owner_pid, owner_started=owner_started, instance_token=instance_token,
+            cache_dir=cache_dir, leased=leased,
+            platform_options_fingerprint=platform_options_fingerprint,
+            remote_path_provenance=remote_path_provenance,
+        )
 
 
 def retain_stale_recording(
@@ -305,7 +345,9 @@ def retain_stale_recording(
         raise ConfigError("stale recording recovery identity is invalid", code="device_ledger_invalid")
     # Metadata-only recovery runs inside ordinary shared device use. Serialize with
     # foreground commands; ownership transitions remain excluded by the shared fence.
-    with leases.device_command(registry_dir, ref):
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(leases.host_transaction(registry_dir, f"ledger|{ref.storage_key}"))
+        stack.enter_context(leases.device_command(registry_dir, ref))
         entries = read_ledger(ref)
         if next((e for e in entries if e.key == expected.key), None) != expected:
             raise ConfigError("recording undo changed during recovery", code="device_ledger_invalid")
@@ -367,15 +409,21 @@ def require_options_match(
 
 
 def forget(
-    target: TargetLike, *keys: str, platform: str = LEGACY_PLATFORM
+    target: TargetLike, *keys: str, platform: str = LEGACY_PLATFORM,
+    registry_dir: str | Path | None = None,
 ) -> int:
     """Drop records by key — call after undoing a mutation deliberately (``proxy stop``)."""
     ref = target_ref(target, platform=platform)
-    entries = read_ledger(ref)
-    kept = [e for e in entries if e.key not in keys]
-    if len(kept) != len(entries):
-        _write_ledger(ref, kept)
-    return len(entries) - len(kept)
+    if registry_dir is None:
+        entries = read_ledger(ref)
+        kept = [e for e in entries if e.key not in keys]
+        if len(kept) != len(entries):
+            _write_ledger(ref, kept)
+        return len(entries) - len(kept)
+    from . import leases
+
+    with leases.host_transaction(registry_dir, f"ledger|{ref.storage_key}"):
+        return forget(ref, *keys, platform=platform)
 
 
 def clear(target: TargetLike, *, platform: str = LEGACY_PLATFORM) -> None:
@@ -443,7 +491,9 @@ def discard(
     ref = target_ref(target)
     if not confirmed or not keys or any(not key.strip() for key in keys) or not reason.strip():
         raise UsageError("discard requires explicit keys, a reason, and confirmed=true")
-    with leases.device_transaction(lease_registry_dir, ref):
+    with leases.host_transaction(lease_registry_dir, f"ledger|{ref.storage_key}"), leases.device_transaction(
+        lease_registry_dir, ref, platform=ref.platform
+    ):
         entries = read_ledger(ref)
         for directory in _lease_dirs(entries, lease_registry_dir):
             if leases.read_lease(directory, ref) is not None:
@@ -476,6 +526,45 @@ def discard(
         "device_touched": False, "restored": False,
         "detail": "undo records archived and discarded; device state was not restored",
     }
+
+
+def discard_unrecoverable_recording(
+    target: TargetLike, expected: Entry, *, reason: str, registry_dir: str | Path,
+    platform: str = LEGACY_PLATFORM,
+) -> dict[str, Any]:
+    """Archive a stale recording undo whose remote path is not an Android-owned path.
+
+    Older callers accidentally persisted a host-local path in ``remote_path``.  That path
+    cannot be validated or undone on a later boot, but it must not poison a new recording
+    in the same live session.  Keep the exact entry in the discarded audit archive, then
+    remove only that entry from the pending ledger.
+    """
+    from . import leases
+
+    ref = target_ref(target, platform=platform)
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(leases.host_transaction(registry_dir, f"ledger|{ref.storage_key}"))
+        stack.enter_context(leases.device_command(registry_dir, ref))
+        entries = read_ledger(ref)
+        current = next((entry for entry in entries if entry.key == expected.key), None)
+        if current != expected:
+            raise ConfigError(
+                "recording undo changed during stale recovery", code="device_ledger_invalid"
+            )
+        archive_dir = ledger_dir() / "discarded"
+        archive_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        archive_dir.chmod(0o700)
+        archive = archive_dir / f"{ref.storage_key}.{time.time_ns()}.json"
+        atomic_write_text(archive, json.dumps({
+            "target": ref.to_json(),
+            "entry": expected.to_json(),
+            "reason": reason,
+            "discarded_at": time.time(),
+            "automatic_stale_recording_recovery": True,
+        }, indent=2) + "\n")
+        archive.chmod(0o600)
+        _write_ledger(ref, [entry for entry in entries if entry.key != expected.key])
+    return {"discarded": [expected.key], "archive": str(archive), "remaining": len(entries) - 1}
 
 
 def pending_serials(*, platform: str = LEGACY_PLATFORM) -> list[str]:
@@ -1206,6 +1295,7 @@ def replay(
     context: UndoContext,
     dry_run: bool = False,
     platform: str = LEGACY_PLATFORM,
+    registry_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run the pending undos for *serial*. Safe to call twice; each success is forgotten.
 
@@ -1214,6 +1304,15 @@ def replay(
     an unproven target. Host-only residue may still be cleaned independently.
     """
     ref = target_ref(target, platform=platform)
+    if registry_dir is not None:
+        from . import leases
+
+        with leases.host_transaction(registry_dir, f"ledger|{ref.storage_key}"), leases.device_command(
+            registry_dir, ref, platform=platform
+        ):
+            return replay(
+                ref, entries=entries, context=context, dry_run=dry_run, platform=platform
+            )
     pending = read_ledger(ref) if entries is None else entries
     if context.target_ref != ref or any(
         (entry.platform, entry.target_id) != (ref.platform, ref.target_id) for entry in pending

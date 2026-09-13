@@ -23,6 +23,12 @@ class Runtime(TargetRuntime):
     def active_recording(self):
         return None
 
+    def clear_failed_recording_state(self):
+        pass
+
+    def recording_is_inert(self):
+        return True
+
     def start_recording(self, remote_path):
         entries = device_ledger.read_ledger(self.target_id, platform="strict-fake")
         assert any(e.kind == "screen_recording" for e in entries), "start must have a durable undo"
