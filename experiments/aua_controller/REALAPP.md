@@ -92,6 +92,14 @@ allow_incomplete: true`.
 records them as the claim and calls AUA with the harness-owned arguments only. The claim
 reaches the judge labelled `controller_claim_untrusted`.
 
+The first user message carries the goal and then whatever `session_start` returned as
+`relevant_knowledge`: the accepted knowledge items whose aliases match the goal, at most five,
+rendered as `- [kind name] text` and labelled as advice with provenance that may be stale. A
+live run once started with three accurate facts in the store (where a setting lives, that a
+fresh install overwrites it, the route to it) and re-derived all of them by hand, because the
+store was pull-only. Ids stay host-side; `result.json` lists them under `knowledge_shown`. The
+judges never see this text: they decide from frames alone.
+
 Cost is surfaced per tier (controller, judge, map) with model and provider, and totalled.
 Every model call is a paid OpenRouter call and needs `OPEN_ROUTER_API_KEY` in the
 environment; nothing runs without `--model` naming a manifest candidate.

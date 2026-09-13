@@ -67,6 +67,35 @@ asked, use "not_achievable". A separate reviewer verifies your claim from the sc
 """
 
 
+KNOWLEDGE_SHOWN = 5
+
+
+def host_knowledge(start: dict[str, Any]) -> list[dict[str, Any]]:
+    """The facts ``session_start`` ranked against the goal: recorded advice, never verified state."""
+    items = start.get("relevant_knowledge")
+    if not isinstance(items, list):
+        return []
+    return [item for item in items if isinstance(item, dict) and str(item.get("text") or "").strip()][:KNOWLEDGE_SHOWN]
+
+
+def goal_prompt(goal: str, knowledge: list[dict[str, Any]]) -> str:
+    """The first user message: the goal, then what the host already knows about it.
+
+    Without this the model re-derives facts the store already holds (where a setting lives, that a
+    fresh install overwrites it, the route to it). Ids stay out: they are host bookkeeping.
+    """
+    lines = ["Goal: " + goal]
+    if knowledge:
+        lines += ["", "Recorded knowledge about this app that matches the goal. It is advice with provenance, "
+                      "possibly stale: prefer it over rediscovering, but confirm on screen before you rely on it."]
+        for item in knowledge:
+            head = str(item.get("kind") or "fact")
+            if item.get("name"):
+                head += " " + str(item["name"])
+            lines.append(f"- [{head}] {str(item['text']).strip()}")
+    return "\n".join(lines)
+
+
 def finish_schema() -> dict[str, Any]:
     return {
         "type": "object",
@@ -215,6 +244,8 @@ async def run_realapp(
         if not isinstance(session_id, str) or not session_id:
             raise RunError("session_start returned no session_id")
         result["session_id"], result["serial"] = session_id, start.get("serial")
+        knowledge = host_knowledge(start)
+        result["knowledge_shown"] = [item.get("id") for item in knowledge]
         if fresh_app:
             # MCP session_start has no --apk/--fresh bootstrap, so a real target arrives either
             # with no app at all (AUA just booted a bare AVD) or with whatever the last session
@@ -278,7 +309,7 @@ async def run_realapp(
         compactor = FrameCompactor(max_elements=max_elements)
         report = await run_agent(
             send=send, call_tool=controller_call, tools=tools,
-            system_prompt=SYSTEM + COMPACT_SYSTEM + REALAPP_SYSTEM, user_prompt="Goal: " + goal,
+            system_prompt=SYSTEM + COMPACT_SYSTEM + REALAPP_SYSTEM, user_prompt=goal_prompt(goal, knowledge),
             initial_observation=initial, model=model, output=output / "controller",
             request_config=settings, backend=backend, max_tokens=max_tokens, max_steps=max_steps,
             time_limit_s=time_limit_s, max_request_bytes=max_request_bytes,

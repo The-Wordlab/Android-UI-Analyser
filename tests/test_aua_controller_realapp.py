@@ -116,15 +116,19 @@ MCP_SCHEMAS = {
 class FakeAua:
     """Enough of AUA's MCP surface for the runner: a session, three screens, one tap."""
 
-    def __init__(self, *, accept_finish=False):
+    def __init__(self, *, accept_finish=False, knowledge=None):
         self.calls = []
         self.accept_finish = accept_finish
+        self.knowledge = knowledge
         self.screen = frame("fp-home", ("Chats", "Settings"))
 
     async def call_tool(self, name, arguments):
         self.calls.append((name, copy.deepcopy(arguments)))
         if name == "session_start":
-            return {"ok": True, "session_id": "sess-1", "serial": "emulator-0000", "recommended_call": {"secret": 1}}
+            start = {"ok": True, "session_id": "sess-1", "serial": "emulator-0000", "recommended_call": {"secret": 1}}
+            if self.knowledge is not None:
+                start["relevant_knowledge"] = copy.deepcopy(self.knowledge)
+            return start
         if name == "analyze_screen":
             return copy.deepcopy(self.screen)
         if name == "tap_and_analyze":
@@ -230,6 +234,39 @@ def test_realapp_claim_stops_the_loop_and_two_judges_decide(tmp_path):
     assert json.loads((output / "final-observation.json").read_text())["observation"]["meta"]["fingerprint"] == "fp-theme"
     assert (output / "judge" / "judgements.jsonl").exists()
     assert not (output / "screens.json").exists(), "map building is opt-in"
+
+
+def test_realapp_puts_host_knowledge_into_the_first_user_message(tmp_path):
+    """A live run started with three accurate facts in the store and re-derived all of them by hand."""
+    fact = {"id": "knowledge_theme", "kind": "claim", "name": None, "aliases": ["switch theme"], "score": 70,
+            "text": "The appearance setting lives in a preferences file; a fresh install forces dark."}
+    recipe = {"id": "knowledge_recipe", "kind": "recipe", "name": "open-theme", "score": 40, "text": "Tap Settings, then Theme."}
+    junk = {"id": "knowledge_blank", "kind": "note", "text": "   "}
+
+    def turns():
+        return [model_call("tap_and_analyze", {"id": "el:fp-home-1"}),
+                model_call("session_finish", {"outcome": "achieved", "note": "Light is selected"}, call_id="native-2")]
+
+    def judges():
+        return {"record_verdict": [verdict("pass", "final frame lists Light"), verdict("pass", "Light visible")]}
+
+    informed = FakeModel(controller=turns(), judgements=judges())
+    result = run(tmp_path, FakeAua(knowledge=[fact, recipe, junk]), informed)
+    first_user = informed.payloads[0]["messages"][1]["content"]
+    assert first_user.startswith("Goal: Switch the app theme to Light\n\nRecorded knowledge")
+    assert "- [claim] The appearance setting lives in a preferences file" in first_user
+    assert "- [recipe open-theme] Tap Settings, then Theme." in first_user
+    assert first_user.index("Recorded knowledge") < first_user.index("Initial observation:")
+    assert "knowledge_theme" not in first_user and "secret" not in first_user, "ids and hidden keys stay host-side"
+    assert result["knowledge_shown"] == ["knowledge_theme", "knowledge_recipe"]
+    for payload in informed.payloads[1:]:
+        if isinstance(payload.get("tool_choice"), dict):
+            assert "preferences file" not in payload["messages"][1]["content"], "judges decide from frames alone"
+
+    uninformed = FakeModel(controller=turns(), judgements=judges())
+    plain = run(tmp_path, FakeAua(), uninformed, output=tmp_path / "plain")
+    assert uninformed.payloads[0]["messages"][1]["content"].startswith("Goal: Switch the app theme to Light\n\nInitial observation:")
+    assert plain["knowledge_shown"] == []
 
 
 def test_realapp_contract_acceptance_needs_no_judge(tmp_path):
