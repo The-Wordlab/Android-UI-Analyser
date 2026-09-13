@@ -4,7 +4,7 @@ description: >-
   Drive, inspect, and verify Android app UIs on a device/emulator with AUA MCP tools or the
   `aua` CLI. It returns stable element IDs and acts by ID instead of guessed pixels. Use for
   Android tasks: inspect a screen, act on controls, automate or debug a flow, verify a change,
-  test offline/network or voice input, or inspect/seed a debuggable SQLite database. Start with
+  test offline/network or voice input, or read/seed debuggable SQLite or DataStore. Start with
   MCP `session_start` or CLI `aua session start --goal`. AUA is hierarchy-first with OCR,
   detection, and grounding fallbacks for opaque screens.
 ---

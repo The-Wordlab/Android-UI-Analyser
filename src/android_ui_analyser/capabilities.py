@@ -204,6 +204,19 @@ CAPABILITIES: tuple[Capability, ...] = (
         risk="queries may expose private test data; mutation requires confirmation and backup",
     ),
     Capability(
+        "datastore",
+        "Read or pre-set a debuggable app's Jetpack DataStore preferences - theme, onboarding "
+        "state, counters - as a scenario precondition instead of driving the UI for it.",
+        ("datastore", "preferences", "theme", "dark mode", "onboarding", "precondition"),
+        60,
+        "aua datastore list <package>",
+        "datastore_list",
+        risk=(
+            "a write force-stops the app, so all in-app navigation state is lost; requires "
+            "confirmation and takes a restore point first"
+        ),
+    ),
+    Capability(
         "flags",
         "Apply configured feature flags and verify the required app restart.",
         ("flag", "experiment", "variant", "treatment"),

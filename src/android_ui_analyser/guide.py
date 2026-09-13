@@ -27,7 +27,8 @@ SKILL_DESCRIPTION = (
     "Drive, inspect, and verify Android app UIs on a device/emulator with AUA MCP tools or the "
     "`aua` CLI. It returns stable element IDs and acts by ID instead of guessed pixels. Use for "
     "Android tasks: inspect a screen, act on controls, automate or debug a flow, verify a change, "
-    "test offline/network or voice input, or inspect/seed a debuggable SQLite database. Start with "
+    "test offline/network or voice input, or read/seed debuggable SQLite or DataStore. "
+    "Start with "
     "MCP `session_start` or CLI `aua session start --goal`. AUA is hierarchy-first with OCR, "
     "detection, and grounding fallbacks for opaque screens."
 )
@@ -231,6 +232,22 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "request only the columns and rows the task needs. For human inspection, the "
         "per-device `aua dashboard` detail view has a database workspace backed by the "
         "same service and typed mutation/restore confirmations.",
+    ),
+    (
+        "Pre-set app state that is a precondition, not the thing under test",
+        "Feature flags live in `shared_prefs` (`aua flags set`), but theme, onboarding state "
+        "and similar app state live in Jetpack DataStore - a protobuf map under "
+        "`files/datastore` that no `adb` or `settings` command can touch. `aua datastore list "
+        "<pkg>` finds the files, `aua datastore get <pkg> <name>` reads them as typed "
+        "key/value pairs without stopping the app, and `aua datastore set <pkg> <name> "
+        "'{\"themeMode\": 1}' --yes` writes one. A write force-stops the app first, because "
+        "DataStore keeps its version counter in the app's own process: a running app never "
+        "re-reads the file and may overwrite it from memory. So the app comes back at its "
+        "cold-start screen - re-navigate, do not assume you are where you were. AUA takes a "
+        "restore point before the first write and replays it at teardown, and refuses to "
+        "install bytes it cannot read back (the app's corruption handler would silently delete "
+        "every key, the session included). Use this when a scenario *needs* a setting to be "
+        "true; drive the real UI when the setting change is itself the thing under test.",
     ),
     (
         "Index an app you don't know yet",
@@ -1177,6 +1194,12 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "a stub or rewrite from what it just saw; "
         "the detail view browses debuggable app "
         "databases, schema, bounded queries, restore points, and guarded writes; enables capture",
+    ),
+    (
+        "datastore",
+        "`datastore list <pkg>`, `datastore get <pkg> <name> [-k key]`, "
+        "`datastore set <pkg> <name> '{\"key\": value}' --yes` (force-stops the app), "
+        "`datastore backup|backups|restore` - Jetpack DataStore preferences, not shared_prefs",
     ),
     (
         "dev",
