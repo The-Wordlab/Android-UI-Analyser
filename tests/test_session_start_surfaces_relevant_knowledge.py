@@ -136,7 +136,7 @@ def test_long_text_is_cut_and_limit_applies() -> None:
     long_item = _item("theme " * 200, aliases=["change theme"], ident="knowledge_long")
     hits = relevant_knowledge(_app(long_item, THEME_CLAIM), "change theme", limit=1)
     assert len(hits) == 1
-    assert len(hits[0]["text"]) <= 400 and hits[0]["text"].endswith("…")
+    assert len(hits[0]["text"]) <= 700 and hits[0]["text"].endswith("…")
 
 
 def test_unrelated_goal_returns_nothing() -> None:

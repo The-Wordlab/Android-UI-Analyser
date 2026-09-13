@@ -2674,7 +2674,7 @@ def _goal_terms(goal: str) -> list[str]:
 
 
 KNOWLEDGE_MATCH_THRESHOLD = 20
-KNOWLEDGE_TEXT_LIMIT = 400
+KNOWLEDGE_TEXT_LIMIT = 700
 
 
 def knowledge_match_score(goal: str, item: KnowledgeItem) -> int:
