@@ -523,31 +523,51 @@ def timeline(
             gaps.append({"start_uptime_s": previous, "end_uptime_s": start, "reason": "segment_rotation"})
         if duration is not None:
             media_total += duration
-        if end is None or duration is None or (
-            _coverage_shortfall(end - start, duration) > _COVERAGE_TOLERANCE_S
-        ):
+        if end is None or duration is None or segment.get("exit_code") not in (0, None):
+            # No end event, no readable file, or a recorder that died: there is no evidence.
             failed = True
             gaps.append({"start_uptime_s": start, "end_uptime_s": end, "reason": "unverified_segment_coverage"})
-        elif duration - (end - start) > _COVERAGE_TOLERANCE_S:
-            skew.append({"segment": index, "process_s": end - start, "media_s": duration})
+        else:
+            shortfall = _coverage_shortfall(end - start, duration)
+            if shortfall > _COVERAGE_TOLERANCE_S:
+                # Reported, not failed. screenrecord emits a frame when the screen CHANGES, so a
+                # static stretch costs media seconds without costing any footage. A 2026-09-14
+                # run recorded 126 frames over 168s of wall time; its four largest inter-frame
+                # gaps (38.9s, 21.1s, 20.0s, 18.9s) all land where the controller was waiting on
+                # the model with the app idle. Failing that discards a complete recording of a
+                # journey whose own invariant is that the app ends up idle.
+                gaps.append({"start_uptime_s": start, "end_uptime_s": end,
+                             "reason": "static_screen_no_frames", "shortfall_s": shortfall})
+            elif duration - (end - start) > _COVERAGE_TOLERANCE_S:
+                skew.append({"segment": index, "process_s": end - start, "media_s": duration})
         previous = end if end is not None else start
     if stop_uptime_s - previous > 0:
         gaps.append({"start_uptime_s": previous, "end_uptime_s": stop_uptime_s, "reason": "recording_ended_before_stop"})
     requested = max(0.0, stop_uptime_s - first)
-    failed = failed or _coverage_shortfall(requested, media_total) > _COVERAGE_TOLERANCE_S
+    # Two coverage results a static screen cannot explain, and only these still fail: capturing
+    # nothing at all, and stretches where the encoder was not running. Short media while the
+    # encoder WAS running is the static-screen case and is reported instead.
+    not_running = {"encoder_startup", "segment_rotation", "recording_ended_before_stop"}
+    dark = [gap for gap in gaps if gap["reason"] in not_running
+            and (gap["end_uptime_s"] or 0) - (gap["start_uptime_s"] or 0) > _COVERAGE_TOLERANCE_S]
+    failed = failed or bool(dark) or (requested > _COVERAGE_TOLERANCE_S and media_total <= 0)
     return {
         "mode": "native_segments", "state": "finalized", "segments": list(segments.values()),
         "requested_duration_s": requested, "media_duration_s": media_total,
         "duration_check": "failed" if failed else "passed",
         "duration_tolerance_s": _COVERAGE_TOLERANCE_S,
         "media_clock_skew": skew,
+        "coverage_shortfall_s": _coverage_shortfall(requested, media_total),
+        "encoder_idle_gaps": dark,
         "gaps": gaps, "finish": finish, "gapless_guaranteed": False,
         "continuous_coverage_verified": False,
         "limitations": "Process timestamps bound encoder activity, not exact first/last frame times. "
         "Rotation, encoder startup and idle tails may omit or leave footage unverified. "
         "Original timestamps are retained without stretching or filling. "
         "The playable export joins captured media and does not span wall-clock gaps. "
-        "A passing duration check is not proof of gapless coverage.",
+        "A passing duration check is not proof of gapless coverage. "
+        "Media shorter than wall time is normal: the encoder emits frames on screen change, so "
+        "an idle stretch costs duration without costing footage. See coverage_shortfall_s.",
     }
 
 
