@@ -585,14 +585,31 @@ def _reservation_dir() -> Path:
     return d
 
 
+@contextlib.contextmanager
+def _port_reservation_lock() -> Iterator[None]:
+    """Keep dead-claim cleanup from unlinking another caller's replacement claim."""
+    from .leases import _acquire_file_lock, _release_file_lock, _thread_lock
+
+    path = _reservation_dir() / ".lock"
+    with _thread_lock(f"emulator-portlocks|{path}"), path.open("a+") as handle:
+        backend = _acquire_file_lock(handle, exclusive=True)
+        try:
+            yield
+        finally:
+            _release_file_lock(handle, backend)
+
+
+@_port_reservation_lock()
 def _reserved_console_ports() -> set[int]:
     """Ports claimed by a starting instance, dropping reservations that went stale.
 
     A reservation only has to survive the gap between choosing a port and the emulator
-    binding it. Anything older than the window is either booted (and therefore visible to
-    adb) or dead, so it must not block the range forever.
+    binding it. A dead owner is reclaimed immediately; unknown owners retain the existing
+    bounded window. The starter hands the reservation to its emulator child after spawn.
     """
     import time as _time
+
+    from .leases import _process_exists
 
     out: set[int] = set()
     for f in _reservation_dir().glob("*.port"):
@@ -606,7 +623,13 @@ def _reserved_console_ports() -> set[int]:
             age = _time.time() - f.stat().st_mtime
         except OSError:
             continue
-        if age > _RESERVATION_TTL_S:
+        owner_gone = False
+        try:
+            pid = int(f.read_text().strip())
+            owner_gone = pid > 1 and not _process_exists(pid)
+        except (OSError, ValueError):
+            pass  # an empty/in-progress or unreadable claim keeps its bounded TTL
+        if owner_gone or age > _RESERVATION_TTL_S:
             with contextlib.suppress(Exception):
                 f.unlink()
             continue
@@ -614,6 +637,7 @@ def _reserved_console_ports() -> set[int]:
     return out
 
 
+@_port_reservation_lock()
 def _claim_console_port(port: int) -> bool:
     """Atomically claim ``port``. False means another process already holds it."""
     target = _reservation_dir() / f"{int(port)}.port"
@@ -630,6 +654,12 @@ def _claim_console_port(port: int) -> bool:
     return True
 
 
+@_port_reservation_lock()
+def _transfer_console_port(port: int, pid: int) -> None:
+    (_reservation_dir() / f"{port}.port").write_text(f"{pid}\n")
+
+
+@_port_reservation_lock()
 def release_console_port(port: int | None) -> None:
     """Drop a port reservation once the instance owns the port (or failed to start)."""
     if port is None:
@@ -723,7 +753,9 @@ def allocate_console_port(
             raise DeviceError(
                 f"emulator port {port} already in use",
                 hint="Omit --port to auto-allocate, or pick a free even port "
-                f"(used: {', '.join(str(p) for p in sorted(used)) or 'none'}).",
+                f"(used: {', '.join(str(p) for p in sorted(used)) or 'none'}). "
+                "AUA also checks instance records, live leases, and shared startup "
+                f"reservations in {_reservation_dir()} (outside AUA_CACHE__DIR).",
             )
         return port
     for port in range(_EMULATOR_PORT_MIN, _EMULATOR_PORT_MAX + 1, 2):
@@ -1469,6 +1501,11 @@ def start(
     startup_step(
         lambda: meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
     )
+
+    if console_port is not None:
+        # After spawning, the emulator owns the boot gap. A killed starter must not
+        # make a still-booting child look abandoned to a caller with another cache.
+        startup_step(lambda: _transfer_console_port(console_port, proc.pid))
 
     startup_deadline = time.monotonic() + max(0.0, wait_s)
     if expected_serial is not None:

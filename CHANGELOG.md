@@ -11,6 +11,12 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Fixed
+
+- Emulator startup reclaims reservations left by dead starters immediately, including across
+  isolated lane caches. Live starters and their booting emulator children stay protected;
+  port-conflict hints identify the shared reservation directory.
+
 ## [0.19.0] - 2026-09-13
 
 ### Breaking
