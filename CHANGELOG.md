@@ -13,6 +13,9 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- Emulator startup honors an explicitly configured Android SDK ahead of PATH. A launcher that
+  exits before connecting now fails promptly with its executable, exit code, and only the
+  current attempt's log tail, instead of waiting for the full boot timeout.
 - Emulator startup reclaims reservations left by dead starters immediately, including across
   isolated lane caches. Live starters and their booting emulator children stay protected;
   port-conflict hints identify the shared reservation directory.

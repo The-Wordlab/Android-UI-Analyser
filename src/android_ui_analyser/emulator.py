@@ -85,6 +85,13 @@ def sdk_root() -> Path | None:
 
 def emulator_bin() -> str:
     """Path to the ``emulator`` binary, or raise :class:`UsageError`."""
+    # An explicitly selected SDK must not be shadowed by an older launcher on PATH.
+    # Let that SDK's launcher choose its QEMU host/guest architecture and boot flags.
+    for key in ("ANDROID_HOME", "ANDROID_SDK_ROOT"):
+        if raw := os.environ.get(key):
+            candidate = Path(raw).expanduser() / "emulator" / "emulator"
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
     which = shutil.which("emulator")
     if which:
         return which
@@ -1435,6 +1442,7 @@ def start(
 
     log_path = _pid_dir(cache_dir) / f"{inst}.log"
     log_fh = reservation_step(lambda: open(log_path, "a"))  # noqa: SIM115
+    log_offset = log_fh.tell()
     try:
         proc = reservation_step(
             lambda: subprocess.Popen(  # noqa: S603
@@ -1501,26 +1509,43 @@ def start(
     startup_step(
         lambda: meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
     )
-
     if console_port is not None:
         # After spawning, the emulator owns the boot gap. A killed starter must not
         # make a still-booting child look abandoned to a caller with another cache.
         startup_step(lambda: _transfer_console_port(console_port, proc.pid))
 
+    def launch_log_hint() -> str:
+        with open(log_path, encoding="utf-8", errors="replace") as fh:
+            fh.seek(log_offset)
+            tail = fh.read()[-800:]
+        return f"Launcher: {bin_path}\nCheck the log: {log_path}\n{tail}"
+
+    def check_launcher() -> None:
+        returncode = proc.poll()
+        if returncode is not None:
+            raise DeviceError(
+                f"emulator {avd!r} exited during startup (exit code {returncode})",
+                hint=launch_log_hint(),
+            )
+
     startup_deadline = time.monotonic() + max(0.0, wait_s)
     if expected_serial is not None:
         serial = startup_step(
-            lambda: _wait_for_serial(expected_serial, timeout_s=wait_s, expect_avd=avd)
+            lambda: _wait_for_serial(
+                expected_serial, timeout_s=wait_s, expect_avd=avd, check_launcher=check_launcher
+            )
         )
     else:
-        serial = startup_step(lambda: _wait_for_new_emulator(before, timeout_s=wait_s))
+        serial = startup_step(
+            lambda: _wait_for_new_emulator(
+                before, timeout_s=wait_s, check_launcher=check_launcher
+            )
+        )
     if serial is None:
         rollback_failed_start()
-        with open(log_path, encoding="utf-8", errors="replace") as fh:
-            tail = fh.read()[-800:]
         raise DeviceError(
             f"emulator {avd!r} did not become ready within {int(wait_s)}s",
-            hint=f"Check the log: {log_path}\n{tail}",
+            hint=launch_log_hint(),
         )
 
     if proc.poll() is not None:
@@ -1672,7 +1697,10 @@ def avd_name_of_serial(serial: str) -> str | None:
     return None
 
 
-def _wait_for_serial(serial: str, *, timeout_s: float, expect_avd: str | None = None) -> str | None:
+def _wait_for_serial(
+    serial: str, *, timeout_s: float, expect_avd: str | None = None,
+    check_launcher: Callable[[], None] | None = None,
+) -> str | None:
     """Wait for ``serial`` to appear, optionally proving it is the AVD we launched.
 
     ``expect_avd`` guards against answering to somebody else's device: if two instances
@@ -1692,6 +1720,8 @@ def _wait_for_serial(serial: str, *, timeout_s: float, expect_avd: str | None = 
 
     deadline = time.monotonic() + max(0.0, timeout_s)
     while time.monotonic() < deadline:
+        if check_launcher is not None:
+            check_launcher()
         for d in running_emulators():
             if time.monotonic() >= deadline:
                 return None
@@ -1701,9 +1731,14 @@ def _wait_for_serial(serial: str, *, timeout_s: float, expect_avd: str | None = 
     return None
 
 
-def _wait_for_new_emulator(before: set[str], *, timeout_s: float) -> str | None:
+def _wait_for_new_emulator(
+    before: set[str], *, timeout_s: float,
+    check_launcher: Callable[[], None] | None = None,
+) -> str | None:
     deadline = time.monotonic() + max(0.0, timeout_s)
     while time.monotonic() < deadline:
+        if check_launcher is not None:
+            check_launcher()
         for d in running_emulators():
             if time.monotonic() >= deadline:
                 return None
