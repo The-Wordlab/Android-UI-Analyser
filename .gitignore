@@ -24,6 +24,10 @@ htmlcov/
 !tests/**/*.png
 !src/android_ui_analyser/data/aua-dashboard-logo.png
 runs/
+# An AUA run cache placed inside the checkout. `runs/` was ignored but `.run/` was not,
+# so a local lane's cache showed up as untracked and tripped the app-specific-reference
+# guard on its lane name - in a public repo that guard must only ever fire on real leaks.
+.run/
 # Local policy/perception weights and generated checkpoints stay out of Git. The
 # one reviewed 15 MB FunctionGemma LoRA below is the narrow exception; base weights
 # and every other model format remain ignored.
