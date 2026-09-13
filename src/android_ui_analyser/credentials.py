@@ -8,6 +8,7 @@ No device, daemon, network, environment export, shell, or clipboard is involved.
 from __future__ import annotations
 
 import contextlib
+import errno
 import io
 import os
 import re
@@ -15,6 +16,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -167,36 +169,104 @@ def _updated(snapshot: _Snapshot, name: str, value: str) -> bytes:
     return result
 
 
-def _write(path: Path, before: _Snapshot, data: bytes) -> None:
-    # Serialize cooperating AUA saves only during commit, never while the person
-    # types. The snapshot also detects ordinary editor changes during the dialog.
+def _lock_identity(info: os.stat_result) -> tuple[int, int]:
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise _CredentialError("credential_unsafe_lock", "The credential lock must be a regular file, not a link.")
+    return info.st_dev, info.st_ino
+
+
+def _verify_lock(path: Path, fd: int) -> None:
+    # Never follow or unlink a replacement lock: another writer could already hold it.
+    try:
+        current = path.lstat()
+    except FileNotFoundError:
+        raise _CredentialError("credential_lock_changed", "The credential lock changed during saving; retry the request.") from None
+    held = os.fstat(fd)
+    if _lock_identity(current) != (held.st_dev, held.st_ino):
+        raise _CredentialError("credential_lock_changed", "The credential lock changed during saving; retry the request.")
+    _lock_identity(held)
+
+
+def _acquire_lock(fd: int) -> None:
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            windows_lock: Any = msvcrt
+            # Windows locks byte zero. Initializers only write the same nonsecret
+            # marker, never truncate existing legacy lock files or copy their bytes.
+            if os.fstat(fd).st_size == 0:
+                os.lseek(fd, 0, os.SEEK_SET)
+                os.write(fd, b"\0")
+            os.lseek(fd, 0, os.SEEK_SET)
+            windows_lock.locking(fd, windows_lock.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+            raise _CredentialError("credential_save_busy", "Another credential save is active for this file; retry when it finishes.") from None
+        raise
+
+
+@contextlib.contextmanager
+def _save_lock(path: Path) -> Iterator[tuple[Path, int]]:
+    """Retain a stable, secret-free lock inode; the OS releases ownership on death.
+
+    The sibling remains after use and accepts orphaned v0.17 lock files. Never
+    unlink it: a waiter could hold that inode while another process opens a new one.
+    Legacy writers did not use OS locks; finish those saves before upgrading.
+    """
     lock = path.with_name(path.name + ".aua-lock")
     try:
-        lock_fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError:
-        raise _CredentialError("credential_save_busy", "A credential save lock exists beside this file. Wait for active saves; if a save was interrupted, see docs/credentials.md for recovery.") from None
-    temporary: str | None = None
+        before = _lock_identity(lock.lstat())
+    except FileNotFoundError:
+        before = None
+    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
-        os.close(lock_fd)
-        if _snapshot(path) != before:
-            raise _CredentialError("credential_file_changed", "The dotenv file changed while the dialog was open; retry to preserve those edits.")
-        fd, temporary = tempfile.mkstemp(prefix=".aua-credential-", dir=path.parent)
-        with os.fdopen(fd, "wb") as target:
-            if hasattr(os, "fchmod"):
-                os.fchmod(target.fileno(), 0o600)
-            target.write(data)
-            target.flush()
-            os.fsync(target.fileno())
-        if _snapshot(path) != before:
-            raise _CredentialError("credential_file_changed", "The dotenv file changed during saving; retry to preserve those edits.")
-        os.replace(temporary, path)
-        temporary = None
+        fd = os.open(lock, flags, 0o600)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise _CredentialError("credential_unsafe_lock", "The credential lock must be a regular file, not a link.") from None
+        raise
+    try:
+        _verify_lock(lock, fd)
+        if before is not None and before != _lock_identity(os.fstat(fd)):
+            raise _CredentialError("credential_lock_changed", "The credential lock changed during saving; retry the request.")
+        _acquire_lock(fd)
+        _verify_lock(lock, fd)
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
+        yield lock, fd
     finally:
-        if temporary is not None:
-            with contextlib.suppress(OSError):
-                os.unlink(temporary)
-        with contextlib.suppress(OSError):
-            lock.unlink()
+        os.close(fd)
+
+
+def _write(path: Path, before: _Snapshot, data: bytes) -> None:
+    # Lock only while committing, never while the user types. Snapshot checks
+    # preserve ordinary editor changes in addition to serializing AUA writers.
+    with _save_lock(path) as (lock, lock_fd):
+        temporary: str | None = None
+        try:
+            if _snapshot(path) != before:
+                raise _CredentialError("credential_file_changed", "The dotenv file changed while the dialog was open; retry to preserve those edits.")
+            fd, temporary = tempfile.mkstemp(prefix=".aua-credential-", dir=path.parent)
+            with os.fdopen(fd, "wb") as target:
+                if hasattr(os, "fchmod"):
+                    os.fchmod(target.fileno(), 0o600)
+                target.write(data)
+                target.flush()
+                os.fsync(target.fileno())
+            if _snapshot(path) != before:
+                raise _CredentialError("credential_file_changed", "The dotenv file changed during saving; retry to preserve those edits.")
+            _verify_lock(lock, lock_fd)
+            os.replace(temporary, path)
+            temporary = None
+        finally:
+            if temporary is not None:
+                with contextlib.suppress(OSError):
+                    os.unlink(temporary)
 
 
 def _dialog(name: str, path: Path, timeout_s: int) -> tuple[str, str]:

@@ -1995,6 +1995,27 @@ def render_markdown(*, brief: bool = False) -> str:
         "are not updated. See `docs/credentials.md` for setup and safe loading examples."
     )
     p.append(
+        "To continue automatically after Save, wrap the intended program: "
+        "`aua config exec --env-file /absolute/project/.env --require OPEN_ROUTER_API_KEY "
+        "-- python /absolute/project/runner.py`. Repeat `--require NAME` for each needed "
+        "variable. Nonempty inherited environment values win; otherwise only the named "
+        "variables are read from that exact dotenv file, without interpolation. Missing values "
+        "open the private dialog; Save launches the child exactly once after all requirements "
+        "are satisfied. Cancel or setup failure launches nothing. `--no-prompt` fails on missing "
+        "credentials without a dialog. Child flags must follow `--`; normal child output and "
+        "exit status pass through, with literal required credential values redacted from stdout "
+        "and stderr. Wrapper errors can override the child exit status: "
+        "`credential_output_incomplete` means output pipes remained open beyond "
+        "the one-second drain after the direct child exited. Read handles close; descendants "
+        "are not killed. Any error with `started: true` means execution began: inspect its "
+        "normal status/evidence and never rerun side effects merely to recover output. "
+        "Programs must still avoid printing transformed secrets or writing them to "
+        "logs/files. Parent shells, existing daemons, and the MCP server are not enriched. "
+        "This can wrap `aua run exec PATH -- ...` or an external harness; it does not add an "
+        "MCP execution tool or ship an experimental harness. Python callers can use "
+        "`credential_exec.run_with_credentials`; see `docs/credentials.md`."
+    )
+    p.append(
         "`aua ask` is provider-neutral: configure `grounding.chain: [gemini, openai]`. The factory "
         "tries that order and skips providers whose API-key env var is absent, so one config works "
         "with either key. Reverse the list to prefer OpenAI when both exist. On macOS, Apple "
@@ -2065,9 +2086,9 @@ def render_skill_markdown() -> str:
 
 Use AUA MCP or CLI; the plugin does not put `aua` on `PATH`. Act by ID, never raw `adb`.
 
-Missing API key: `aua config secret NAME --env-file PATH` / MCP `credential_request(name, env_file)`
-opens a private host dialog. Never ask/read keys in chat. Save does not load: use dotenv
-`interpolate=False`, not shell `source`. Details: `aua guide` / `docs/credentials.md`.
+API key: `aua config exec --env-file PATH --require NAME -- COMMAND ARGS` opens a private
+dialog then launches once after Save; cancel stops. `config secret` / MCP `credential_request`
+only saves. Never ask/read keys in chat or shell-source .env. Details: `aua guide` / `docs/credentials.md`.
 
 ## Operating loop
 

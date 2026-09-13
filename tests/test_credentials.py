@@ -1,11 +1,16 @@
 """Credential values stay in local memory/file, never command or result channels."""
 from __future__ import annotations
 
+import errno
 import io
 import json
 import os
 import stat
 import subprocess
+import sys
+import time
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from dotenv import dotenv_values
@@ -32,7 +37,7 @@ def test_save_preserves_other_content_and_returns_only_status(tmp_path, monkeypa
     assert path.read_text().startswith('# Keep this\nOTHER="same" # comment\n')
     assert read(path) == {"OTHER": "same", "EXAMPLE_API_KEY": SECRET}
     assert SECRET not in json.dumps(result) + capsys.readouterr().out + caplog.text
-    assert not list(tmp_path.glob("*.aua-lock"))
+    assert path.with_name(".env.aua-lock").is_file()
     assert not list(tmp_path.glob(".aua-credential-*"))
     if os.name != "nt":
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
@@ -153,7 +158,7 @@ def test_concurrent_editor_change_is_preserved(tmp_path, monkeypatch, existing):
     assert result["error"]["code"] == "credential_file_changed"
     assert path.read_text() == "OTHER=new"
     assert not list(tmp_path.glob(".aua-credential-*"))
-    assert not list(tmp_path.glob("*.aua-lock"))
+    assert path.with_name(".env.aua-lock").is_file()
 
 
 def test_atomic_failure_preserves_file_and_cleans_temporary(tmp_path, monkeypatch):
@@ -167,7 +172,7 @@ def test_atomic_failure_preserves_file_and_cleans_temporary(tmp_path, monkeypatc
     assert result["error"]["code"] == "credential_file_error"
     assert SECRET not in json.dumps(result)
     assert path.read_text() == "OTHER=old"
-    assert sorted(p.name for p in tmp_path.iterdir()) == [".env"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == [".env", ".env.aua-lock"]
 
 
 def test_other_save_lock_is_not_removed(tmp_path, monkeypatch):
@@ -175,9 +180,133 @@ def test_other_save_lock_is_not_removed(tmp_path, monkeypatch):
     lock = tmp_path / ".env.aua-lock"
     lock.write_text("another writer")
     dialog(monkeypatch)
-    assert c.request_secret("EXAMPLE_TOKEN", path)["error"]["code"] == "credential_save_busy"
-    assert lock.read_text() == "another writer"
+    with c._save_lock(path):
+        identity = lock.stat().st_ino
+        assert c.request_secret("EXAMPLE_TOKEN", path)["error"]["code"] == "credential_save_busy"
+        assert lock.read_text() == "another writer"
+        assert lock.stat().st_ino == identity
+        assert not path.exists()
+    assert c.request_secret("EXAMPLE_TOKEN", path)["status"] == "saved"
+    assert lock.stat().st_ino == identity
+
+
+@pytest.mark.parametrize("legacy_bytes", [b"", b"old lock contents"])
+def test_orphaned_legacy_lock_is_reused_without_manual_recovery(tmp_path, monkeypatch, legacy_bytes):
+    path = tmp_path / ".env"
+    lock = tmp_path / ".env.aua-lock"
+    lock.write_bytes(legacy_bytes)
+    identity = lock.stat().st_ino
+    dialog(monkeypatch)
+    assert c.request_secret("EXAMPLE_TOKEN", path)["status"] == "saved"
+    assert lock.stat().st_ino == identity
+    assert lock.read_bytes() == (b"\0" if os.name == "nt" and not legacy_bytes else legacy_bytes)
+    assert read(path)["EXAMPLE_TOKEN"] == SECRET
+
+
+@pytest.mark.parametrize("kind", ["symlink", "directory", "hardlink", "dangling_symlink", "fifo"])
+def test_refuses_unsafe_lock_without_touching_other_file(tmp_path, monkeypatch, kind):
+    path, lock, other = tmp_path / ".env", tmp_path / ".env.aua-lock", tmp_path / "other"
+    other.write_text("UNCHANGED")
+    if kind == "directory":
+        lock.mkdir()
+    elif kind == "symlink":
+        lock.symlink_to(other)
+    elif kind == "dangling_symlink":
+        lock.symlink_to(tmp_path / "absent")
+    elif kind == "fifo":
+        if not hasattr(os, "mkfifo"):
+            pytest.skip("FIFOs are unavailable")
+        os.mkfifo(lock)
+    else:
+        os.link(other, lock)
+    dialog(monkeypatch)
+    result = c.request_secret("EXAMPLE_TOKEN", path)
+    assert result["error"]["code"] == "credential_unsafe_lock"
+    assert other.read_text() == "UNCHANGED"
     assert not path.exists()
+
+
+def test_lock_replacement_during_save_is_preserved_and_stops_commit(tmp_path, monkeypatch):
+    path, lock = tmp_path / ".env", tmp_path / ".env.aua-lock"
+    path.write_text("OTHER=original\n")
+    dialog(monkeypatch)
+    original_fsync = c.os.fsync
+
+    def replace_lock(fd):
+        original_fsync(fd)
+        lock.unlink()
+        lock.write_bytes(b"replacement lock")
+
+    monkeypatch.setattr(c.os, "fsync", replace_lock)
+    assert c.request_secret("EXAMPLE_TOKEN", path)["error"]["code"] == "credential_lock_changed"
+    assert lock.read_bytes() == b"replacement lock"
+    assert path.read_text() == "OTHER=original\n"
+    assert not list(tmp_path.glob(".aua-credential-*"))
+
+
+def test_killed_process_releases_lock_and_next_save_succeeds(tmp_path, monkeypatch):
+    path, lock, ready = tmp_path / ".env", tmp_path / ".env.aua-lock", tmp_path / "ready"
+    script = """import sys, time
+from pathlib import Path
+sys.path.insert(0, sys.argv[3])
+from android_ui_analyser.credentials import _save_lock
+with _save_lock(Path(sys.argv[1])):
+    Path(sys.argv[2]).write_text('ready')
+    time.sleep(60)
+"""
+    child = subprocess.Popen(
+        [sys.executable, "-c", script, str(path), str(ready), str(Path(c.__file__).parents[1])],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not ready.exists() and child.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists(), "The independent lock holder did not start"
+        identity = lock.stat().st_ino
+        dialog(monkeypatch)
+        assert c.request_secret("EXAMPLE_TOKEN", path)["error"]["code"] == "credential_save_busy"
+        child.kill()
+        stdout, stderr = child.communicate(timeout=5)
+        assert not stdout and not stderr
+        assert lock.stat().st_ino == identity
+        assert c.request_secret("EXAMPLE_TOKEN", path)["status"] == "saved"
+        assert lock.stat().st_ino == identity
+        assert read(path)["EXAMPLE_TOKEN"] == SECRET
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.communicate(timeout=5)
+
+
+@pytest.mark.parametrize("busy", [False, True])
+def test_windows_byte_lock_initializes_only_a_nonsecret_marker(tmp_path, monkeypatch, busy):
+    lock = tmp_path / ".env.aua-lock"
+    fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
+    calls = []
+
+    def locking(actual_fd, mode, length):
+        calls.append((actual_fd, mode, length, os.lseek(actual_fd, 0, os.SEEK_CUR)))
+        if busy:
+            raise PermissionError(errno.EACCES, SECRET)
+
+    fake = SimpleNamespace(locking=locking, LK_NBLCK=2)
+    try:
+        with monkeypatch.context() as windows:
+            windows.setattr(c.os, "name", "nt")
+            windows.setitem(sys.modules, "msvcrt", fake)
+            if busy:
+                with pytest.raises(c._CredentialError) as failure:
+                    c._acquire_lock(fd)
+                assert failure.value.code == "credential_save_busy"
+                assert SECRET not in str(failure.value)
+            else:
+                c._acquire_lock(fd)
+        assert calls == [(fd, 2, 1, 0)]
+        assert lock.read_bytes() == b"\0"
+    finally:
+        os.close(fd)
 
 
 @pytest.mark.parametrize("platform", ["darwin", "linux", "win32"])

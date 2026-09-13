@@ -80,4 +80,4 @@ def test_editor_change_after_temp_write_preserved_and_temp_removed(tmp_path, mon
     else:
         raise AssertionError("A concurrent edit must stop the save")
     assert destination.read_text() == "OTHER=editor-update\n"
-    assert sorted(path.name for path in tmp_path.iterdir()) == [".env"]
+    assert sorted(path.name for path in tmp_path.iterdir()) == [".env", ".env.aua-lock"]

@@ -7271,9 +7271,68 @@ def daemon(
 
 
 config_app = typer.Typer(
-    name="config", help="Inspect configuration or save credentials privately.", no_args_is_help=True
+    name="config", help="Inspect configuration, save credentials, or launch a configured command.", no_args_is_help=True
 )
 app.add_typer(config_app, name="config")
+
+
+class CredentialExecCommand(JournalCommand):
+    """Keep the child argv boundary explicit before Click consumes the separator."""
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        ctx.meta["credential_exec_command"] = (
+            args[args.index("--") + 1 :] if "--" in args else None
+        )
+        return super().parse_args(ctx, args)
+
+
+@config_app.command("exec", cls=CredentialExecCommand)
+def config_exec(
+    ctx: typer.Context,
+    command: list[str] = typer.Argument(
+        ..., metavar="COMMAND [ARGS]...", help="Child command and arguments, after --."
+    ),
+    env_file: Path = typer.Option(Path(".env"), "--env-file", help="Exact host .env file to read."),
+    require: list[str] = typer.Option(
+        ..., "--require", metavar="NAME", help="Required environment variable name; repeat for each."
+    ),
+    timeout: int = typer.Option(300, "--timeout", help="Private dialog timeout in seconds."),
+    no_prompt: bool = typer.Option(
+        False, "--no-prompt", help="Fail if a required credential is missing; never open a dialog."
+    ),
+) -> None:
+    """Resolve required credentials, then launch COMMAND once automatically after Save.
+
+    Existing nonempty process values win; only named variables are loaded from .env into
+    the child. Missing values open a private host dialog. Cancellation prevents launch.
+    Child text output is redacted. Wrapper errors can override the child's exit status;
+    an error with started=true must not trigger a repeat of side effects.
+    """
+    import json
+
+    from .credential_exec import run_with_credentials
+
+    if command != ctx.meta.get("credential_exec_command"):
+        typer.echo(
+            json.dumps({
+                "ok": False,
+                "status": "error",
+                "started": False,
+                "error": {
+                    "code": "credential_command_separator_required",
+                    "message": "Put -- before the child command and its arguments.",
+                },
+            }),
+            err=True,
+        )
+        raise typer.Exit(2)
+    result, exit_code = run_with_credentials(
+        command, required=require, env_file=env_file, timeout_s=timeout, prompt=not no_prompt
+    )
+    if not result.get("started") or result.get("error"):
+        typer.echo(json.dumps(result, ensure_ascii=False, separators=(",", ":")), err=True)
+    if exit_code:
+        raise typer.Exit(exit_code)
 
 
 @config_app.command("secret")

@@ -14,9 +14,9 @@ description: >-
 
 Use AUA MCP or CLI; the plugin does not put `aua` on `PATH`. Act by ID, never raw `adb`.
 
-Missing API key: `aua config secret NAME --env-file PATH` / MCP `credential_request(name, env_file)`
-opens a private host dialog. Never ask/read keys in chat. Save does not load: use dotenv
-`interpolate=False`, not shell `source`. Details: `aua guide` / `docs/credentials.md`.
+API key: `aua config exec --env-file PATH --require NAME -- COMMAND ARGS` opens a private
+dialog then launches once after Save; cancel stops. `config secret` / MCP `credential_request`
+only saves. Never ask/read keys in chat or shell-source .env. Details: `aua guide` / `docs/credentials.md`.
 
 ## Operating loop
 

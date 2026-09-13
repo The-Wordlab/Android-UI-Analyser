@@ -11,6 +11,20 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-09-13
+
+- `aua config exec --env-file PATH --require NAME -- COMMAND ARGS...` resolves required
+  credentials and launches the selected command once, continuing automatically after the
+  private dialog's Save. Existing process values take precedence; only named dotenv values
+  are passed to the child. Cancellation or missing credentials with `--no-prompt` prevents
+  launch. Child output and exit status pass through with literal required values redacted.
+  A descendant holding output pipes after the direct child exits returns an explicit
+  `credential_output_incomplete` error instead of hanging or rerunning the command.
+
+- Credential saves use an OS-held lock that releases on process exit or crash. The persistent
+  sibling lock file is reused, including leftovers from older versions, so interrupted saves
+  no longer require deleting a stale lock. Finish older-version saves before upgrading.
+
 ## [0.17.0] - 2026-09-12
 
 - `aua config secret NAME --env-file PATH` and MCP `credential_request` open a private masked
@@ -570,5 +584,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.16.2]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.16.2
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.17.0...HEAD
 [0.17.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.17.0
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.18.0

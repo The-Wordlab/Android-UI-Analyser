@@ -37,6 +37,14 @@ CAPABILITIES: tuple[Capability, ...] = (
         risk="host file update after private Save; no device or session required",
     ),
     Capability(
+        "credential_exec",
+        "Resolve named credentials and launch a command once, continuing automatically after Save.",
+        ("api key", "apikey", "credential", "openrouter", ".env", "missing key"),
+        2,
+        "aua config exec --env-file <project>/.env --require <ENV_NAME> -- <command> <args>",
+        risk="executes the caller-selected host command; missing credentials use a private dialog",
+    ),
+    Capability(
         "session",
         "Start from a goal: observe once, track ordered phases, and receive the exact next call.",
         ("test", "verify", "inspect", "navigate", "open", "offline", "android"),
@@ -352,5 +360,8 @@ def render_mcp_instructions() -> str:
         "this server's desktop and saves a host .env file; pass only the variable name and "
         "path, never the secret. No device session is needed. The consumer must explicitly "
         "load the file as data; saving does not change this process's environment. "
+        "For an external program, CLI `aua config exec --env-file PATH --require NAME -- "
+        "COMMAND ARGS` resolves credentials and continues once after Save; cancellation "
+        "prevents launch. This wrapper is available through the terminal, not an MCP exec tool. "
         "capabilities(goal) provides progressive discovery for uncommon tasks."
     )
