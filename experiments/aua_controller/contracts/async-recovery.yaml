@@ -1,0 +1,17 @@
+version: 1
+checkpoints:
+  - id: signal_error
+    description: Observe the initial temporary signal error and the available retry control
+    assertions:
+      - assert: {rid: async_status, text_is: "Temporary signal error"}
+      - assert: {rid: async_retry, exists: true, enabled: true}
+  - id: expedition_ready
+    description: Recover from the temporary error and verify the expedition is ready with no retry control
+    assertions:
+      - assert: {rid: async_status, text_is: "Expedition ready: Aurora Trail"}
+      - assert: {rid: async_retry, absent: true}
+cleanup:
+  description: Return to the fixture home after the ready expedition was verified
+  assertions:
+    - assert: {rid: fixture_home, exists: true}
+    - assert: {rid: async_status, absent: true}

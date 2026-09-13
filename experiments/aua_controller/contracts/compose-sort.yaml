@@ -1,0 +1,64 @@
+version: 1
+checkpoints:
+  - id: default_name_order
+    description: Confirm all four Compose products start in name order with their correct prices
+    assertions: &name_order
+      # AUA exposes these text leaves; Compose's nonactionable grid/card containers and
+      # their parent identities are pruned. Verify the complete interleaved traversal.
+      - assert: {rid: compose_order_status, count: 1, text_is: "Current order: name"}
+      - assert: {rid: compose_name_, count: 4}
+      - assert: {rid: compose_price_, count: 4}
+      - assert_order:
+          axis: reading
+          selectors:
+            - {rid: compose_name_alpine_mug}
+            - {rid: compose_price_alpine_mug}
+            - {rid: compose_name_beacon_lamp}
+            - {rid: compose_price_beacon_lamp}
+            - {rid: compose_name_cedar_notebook}
+            - {rid: compose_price_cedar_notebook}
+            - {rid: compose_name_drift_puzzle}
+            - {rid: compose_price_drift_puzzle}
+      - assert: {rid: compose_name_alpine_mug, count: 1, text_is: Alpine Mug}
+      - assert: {rid: compose_price_alpine_mug, count: 1, text_is: "$7.99"}
+      - assert: {rid: compose_name_beacon_lamp, count: 1, text_is: Beacon Lamp}
+      - assert: {rid: compose_price_beacon_lamp, count: 1, text_is: "$12.50"}
+      - assert: {rid: compose_name_cedar_notebook, count: 1, text_is: Cedar Notebook}
+      - assert: {rid: compose_price_cedar_notebook, count: 1, text_is: "$4.25"}
+      - assert: {rid: compose_name_drift_puzzle, count: 1, text_is: Drift Puzzle}
+      - assert: {rid: compose_price_drift_puzzle, count: 1, text_is: "$18.00"}
+  - id: price_sorted
+    description: Confirm all four Compose products are ordered by ascending price with correct price pairing
+    assertions:
+      - assert: {rid: compose_order_status, count: 1, text_is: "Current order: price"}
+      - assert: {rid: compose_name_, count: 4}
+      - assert: {rid: compose_price_, count: 4}
+      - assert_order:
+          axis: reading
+          selectors:
+            - {rid: compose_name_cedar_notebook}
+            - {rid: compose_price_cedar_notebook}
+            - {rid: compose_name_alpine_mug}
+            - {rid: compose_price_alpine_mug}
+            - {rid: compose_name_beacon_lamp}
+            - {rid: compose_price_beacon_lamp}
+            - {rid: compose_name_drift_puzzle}
+            - {rid: compose_price_drift_puzzle}
+      - assert: {rid: compose_name_alpine_mug, count: 1, text_is: Alpine Mug}
+      - assert: {rid: compose_price_alpine_mug, count: 1, text_is: "$7.99"}
+      - assert: {rid: compose_name_beacon_lamp, count: 1, text_is: Beacon Lamp}
+      - assert: {rid: compose_price_beacon_lamp, count: 1, text_is: "$12.50"}
+      - assert: {rid: compose_name_cedar_notebook, count: 1, text_is: Cedar Notebook}
+      - assert: {rid: compose_price_cedar_notebook, count: 1, text_is: "$4.25"}
+      - assert: {rid: compose_name_drift_puzzle, count: 1, text_is: Drift Puzzle}
+      - assert: {rid: compose_price_drift_puzzle, count: 1, text_is: "$18.00"}
+  - id: name_order_restored
+    description: Restore name order and verify all four Compose products and prices before returning home
+    assertions: *name_order
+cleanup:
+  description: Return to the fixture home after the restored name order was verified
+  assertions:
+    - assert: {rid: fixture_home, count: 1}
+    - assert: {rid: compose_order_status, absent: true}
+    - assert: {rid: compose_name_, count: 0}
+    - assert: {rid: compose_price_, count: 0}

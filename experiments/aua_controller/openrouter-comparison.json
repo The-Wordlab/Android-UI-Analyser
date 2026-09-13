@@ -1,0 +1,320 @@
+{
+  "format": "aua-hosted-controller-comparison-v1",
+  "research_date": "2026-09-12",
+  "status": "pilot_completed_training_not_started",
+  "inference_location": "openrouter_hosted_with_local_mac_control",
+  "training_location": "runpod_only",
+  "training_enabled": false,
+  "fixture_campaign": "../../evals/agent_loop/example-campaign.json",
+  "scenario_ids": [
+    "classic-sort",
+    "compose-sort",
+    "async-recovery"
+  ],
+  "repeats_per_model_scenario": 1,
+  "profile": "compact-v1",
+  "observation_profile": "hosted-v1",
+  "max_output_tokens": 4096,
+  "max_steps": 32,
+  "max_request_bytes": 100000,
+  "interaction_seconds": 180,
+  "request_timeout_seconds": 60,
+  "reported_cost_stop_per_run_usd": 0.1,
+  "reported_cost_stop_campaign_usd": 1.0,
+  "cost_limit_note": "Reported-usage stops after completed requests; not a provider-enforced hard cap on an in-flight request. Provider token-price caps and request/output/time bounds also apply.",
+  "context_comparison": "Hosted services have larger advertised context. Record usage and flag prompts plus requested output above 32768; no independently verified hosted tokenizer. Do not pool with the old local profile.",
+  "models": [
+    {
+      "id": "or-deepseek-v4p1-flash-low",
+      "repository": "deepseek/deepseek-v4.1-flash",
+      "canonical_slug": "deepseek/deepseek-v4.1-flash-20260910",
+      "backend": "openrouter",
+      "revision": null,
+      "weight_identity": "provider_advertised_not_independently_verified",
+      "provider_quantization": "unknown",
+      "request_config": {
+        "reasoning": {
+          "effort": "low",
+          "exclude": false
+        },
+        "provider": {
+          "only": [
+            "deepseek"
+          ],
+          "order": [
+            "deepseek"
+          ],
+          "allow_fallbacks": false,
+          "require_parameters": true,
+          "max_price": {
+            "prompt": 0.3,
+            "completion": 1.2
+          }
+        },
+        "plugins": [
+          {
+            "id": "context-compression",
+            "enabled": false
+          }
+        ]
+      },
+      "cost_limit_usd": 0.1
+    },
+    {
+      "id": "or-mercury-2p5-low",
+      "repository": "inception/mercury-2.5",
+      "canonical_slug": "inception/mercury-2.5-20260908",
+      "backend": "openrouter",
+      "revision": null,
+      "weight_identity": "provider_advertised_not_independently_verified",
+      "provider_quantization": "unknown",
+      "request_config": {
+        "reasoning": {
+          "effort": "low",
+          "exclude": false
+        },
+        "provider": {
+          "only": [
+            "inception"
+          ],
+          "order": [
+            "inception"
+          ],
+          "allow_fallbacks": false,
+          "require_parameters": true,
+          "max_price": {
+            "prompt": 0.2,
+            "completion": 0.75
+          }
+        },
+        "plugins": [
+          {
+            "id": "context-compression",
+            "enabled": false
+          }
+        ],
+        "temperature": 0.5
+      },
+      "cost_limit_usd": 0.1
+    },
+    {
+      "id": "or-gemma4-26b-thinking",
+      "repository": "google/gemma-4-26b-a4b-it",
+      "canonical_slug": "google/gemma-4-26b-a4b-it-20260403",
+      "backend": "openrouter",
+      "revision": null,
+      "weight_identity": "provider_advertised_not_independently_verified",
+      "provider_quantization": "bf16",
+      "request_config": {
+        "reasoning": {
+          "enabled": true,
+          "exclude": false
+        },
+        "provider": {
+          "only": [
+            "dekallm/bf16"
+          ],
+          "order": [
+            "dekallm/bf16"
+          ],
+          "allow_fallbacks": false,
+          "require_parameters": true,
+          "max_price": {
+            "prompt": 0.06,
+            "completion": 0.33
+          }
+        },
+        "plugins": [
+          {
+            "id": "context-compression",
+            "enabled": false
+          }
+        ],
+        "temperature": 0
+      },
+      "cost_limit_usd": 0.1
+    },
+    {
+      "id": "or-deepseek-v4-flash-0731-low-deepinfra",
+      "repository": "deepseek/deepseek-v4-flash-0731",
+      "canonical_slug": "deepseek/deepseek-v4-flash-20260731",
+      "backend": "openrouter",
+      "revision": null,
+      "weight_identity": "provider_advertised_not_independently_verified",
+      "provider_quantization": "fp8 (provider default; explicit deepinfra/fp8 pin no longer routes)",
+      "request_config": {
+        "reasoning": {
+          "effort": "low",
+          "exclude": false
+        },
+        "provider": {
+          "only": [
+            "deepinfra"
+          ],
+          "order": [
+            "deepinfra"
+          ],
+          "allow_fallbacks": false,
+          "require_parameters": false,
+          "data_collection": "deny",
+          "max_price": {
+            "prompt": 0.06,
+            "completion": 0.18
+          }
+        },
+        "plugins": [
+          {
+            "id": "context-compression",
+            "enabled": false
+          }
+        ]
+      },
+      "cost_limit_usd": 0.1,
+      "route_change_reason": "Separate July31 V4 Flash model after V4.1 routes blocked by account policy or upstream shared-pool rate limits; not a retry of identical model weights. 2026-09-13: deepinfra/fp8 with require_parameters returned 404 'Filter by Parameters'; plain deepinfra without require_parameters routes and serves native tools."
+    },
+    {
+      "id": "or-deepseek-v4p1-flash-low-novita",
+      "repository": "deepseek/deepseek-v4.1-flash",
+      "canonical_slug": "deepseek/deepseek-v4.1-flash-20260910",
+      "backend": "openrouter",
+      "revision": null,
+      "weight_identity": "provider_advertised_not_independently_verified",
+      "provider_quantization": "fp8",
+      "request_config": {
+        "reasoning": {
+          "effort": "low",
+          "exclude": false
+        },
+        "provider": {
+          "only": [
+            "novita/fp8"
+          ],
+          "order": [
+            "novita/fp8"
+          ],
+          "allow_fallbacks": false,
+          "require_parameters": true,
+          "data_collection": "deny",
+          "max_price": {
+            "prompt": 0.3,
+            "completion": 1.2
+          }
+        },
+        "plugins": [
+          {
+            "id": "context-compression",
+            "enabled": false
+          }
+        ]
+      },
+      "cost_limit_usd": 0.1,
+      "route_change_reason": "User requested provider comparison; explicit separate route through the unchanged account data policy."
+    }
+  ],
+  "model_runs_executed": 16,
+  "initial_planned_candidates": [
+    "or-deepseek-v4p1-flash-low",
+    "or-mercury-2p5-low",
+    "or-gemma4-26b-thinking"
+  ],
+  "execution_summary": {
+    "report": "OPENROUTER_STATUS.md",
+    "initial_trials": 15,
+    "initial_verified_passes": 13,
+    "initial_unverified": 1,
+    "initial_provider_interrupted": 1,
+    "separate_retry_trials": 1,
+    "separate_retry_verified_passes": 1,
+    "total_trials": 16,
+    "total_verified_passes": 14,
+    "hosted_trials": 13,
+    "local_control_trials": 3,
+    "task_reported_cost_usd": 0.025051274,
+    "protocol_diagnostic_reported_cost_usd": 0.000810164,
+    "total_reported_cost_usd": 0.025861438,
+    "returned_hosted_responses_with_cost": 70,
+    "returned_hosted_responses_missing_cost": 0,
+    "model_requests_all_trials": 76,
+    "largest_hosted_prompt_plus_requested_output": 16391,
+    "hosted_requests_above_32768": 0,
+    "source_code_changed_during_pilot": false,
+    "training_runs": 0,
+    "runpod_resources_created": false,
+    "local_server_stopped_verified_utc": "2026-09-12T12:36:15.611390+00:00",
+    "validation": {
+      "pytest_passed": 258,
+      "pytest_failed": 0,
+      "ruff": "passed",
+      "independent_audited_original_files_unchanged": 480,
+      "screenshots_inspected": 49
+    },
+    "limitation": "Prepared public fixture tasks, one initial trial per configuration/task plus one disclosed Novita retry; oracle-assisted verification, different pretrained weights and sampling settings; no unseen-app reliability claim."
+  },
+  "executed_configurations": [
+    {
+      "id": "or-deepseek-v4-flash-0731-low-deepinfra",
+      "initial_passes": 3,
+      "initial_trials": 3,
+      "mean_verified_model_http_seconds": 11.201,
+      "cost_per_verified_completion_usd": 0.00137542
+    },
+    {
+      "id": "or-gemma4-26b-thinking",
+      "initial_passes": 3,
+      "initial_trials": 3,
+      "mean_verified_model_http_seconds": 11.953,
+      "cost_per_verified_completion_usd": 0.00222935
+    },
+    {
+      "id": "or-mercury-2p5-low",
+      "initial_passes": 2,
+      "initial_trials": 3,
+      "initial_unverified": 1,
+      "mean_verified_model_http_seconds": 7.037,
+      "cost_per_verified_completion_usd": 0.002178658
+    },
+    {
+      "id": "or-deepseek-v4p1-flash-low-novita",
+      "initial_passes": 2,
+      "initial_trials": 3,
+      "initial_provider_interrupted": 1,
+      "separate_retry_passes": 1,
+      "separate_retry_trials": 1,
+      "mean_verified_model_http_seconds_including_retry": 8.305,
+      "cost_per_verified_completion_usd_including_failed_attempt": 0.003293216
+    },
+    {
+      "id": "local-gemma4-e4b-hosted-projection",
+      "initial_passes": 3,
+      "initial_trials": 3,
+      "mean_verified_model_http_seconds": 38.381,
+      "api_cost_per_verified_completion_usd": null
+    }
+  ],
+  "protocol_route_diagnostics": [
+    {
+      "model": "deepseek/deepseek-v4.1-flash",
+      "provider": "deepseek",
+      "outcome": "excluded_by_existing_account_data_policy",
+      "aua_trials": 0
+    },
+    {
+      "model": "deepseek/deepseek-v4.1-flash",
+      "provider": "fireworks",
+      "outcome": "protocol_failed_and_diagnostic_upstream429; separate_first_turn_diagnostic_succeeded",
+      "aua_trials": 0
+    },
+    {
+      "model": "deepseek/deepseek-v4.1-flash",
+      "provider": "deepinfra/fp8",
+      "outcome": "protocol_failed_and_diagnostic_upstream429",
+      "aua_trials": 0
+    },
+    {
+      "model": "deepseek/deepseek-v4.1-flash",
+      "provider": "siliconflow/fp8",
+      "outcome": "HTTP404_tool_compatibility_filter",
+      "aua_trials": 0
+    }
+  ]
+}

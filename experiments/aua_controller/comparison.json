@@ -1,0 +1,320 @@
+{
+  "format": "aua-pretrained-controller-comparison-v1",
+  "research_date": "2026-09-11",
+  "status": "pilot_completed_training_not_started",
+  "model_runs_executed": 33,
+  "training_location": "runpod_only",
+  "training_enabled": false,
+  "fixture_campaign": "../../evals/agent_loop/example-campaign.json",
+  "scenario_ids": [
+    "classic-sort",
+    "compose-sort",
+    "async-recovery"
+  ],
+  "follow_up_scenario_ids": [
+    "canvas-reveal",
+    "notification-permission"
+  ],
+  "repeats_per_model_scenario": 3,
+  "initial_precision": "bfloat16",
+  "initial_context_limit": 16384,
+  "initial_concurrency": 1,
+  "candidate_inference_runtime": "mlx-lm==0.31.3; mlx==0.32.0",
+  "runtime_verified_on_gpu": true,
+  "models": [
+    {
+      "id": "gemma4-e4b",
+      "repository": "google/gemma-4-E4B-it",
+      "revision": "ee0ef6023621cff504d758262d4e04895a5af4a2",
+      "model_type": "gemma4",
+      "license": "apache-2.0",
+      "role": "smaller_gemma_candidate",
+      "tool_call_parser": "gemma4",
+      "reasoning_parser": "gemma4",
+      "chat_template_kwargs": {
+        "enable_thinking": false
+      },
+      "thinking_enabled_comparison": "thinking32k_executed_separately"
+    },
+    {
+      "id": "gemma4-12b",
+      "repository": "google/gemma-4-12B-it",
+      "revision": "707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7",
+      "model_type": "gemma4_unified",
+      "license": "apache-2.0",
+      "role": "larger_gemma_reference",
+      "tool_call_parser": "gemma4",
+      "reasoning_parser": "gemma4",
+      "chat_template_kwargs": {
+        "enable_thinking": false
+      },
+      "thinking_enabled_comparison": "separate_lane_if_needed"
+    },
+    {
+      "id": "lfm25-2p6b",
+      "repository": "LiquidAI/LFM2.5-2.6B",
+      "revision": "654f9463ce32b05d0429d76fe1f580b27d4c1ac0",
+      "model_type": "lfm2",
+      "license": "lfm1.0",
+      "role": "small_liquid_candidate",
+      "tool_call_parser": "lfm2",
+      "reasoning_parser": "qwen3",
+      "chat_template_kwargs": {},
+      "thinking_control": "native_template_no_enable_thinking_override"
+    },
+    {
+      "id": "lfm25-8b-a1b",
+      "repository": "LiquidAI/LFM2.5-8B-A1B",
+      "revision": "5dd22602c2e9f6a097b1de4c4efe0658b605015c",
+      "model_type": "lfm2_moe",
+      "license": "lfm1.0",
+      "role": "liquid_moe_comparison",
+      "tool_call_parser": "lfm2",
+      "reasoning_parser": "qwen3",
+      "chat_template_kwargs": {},
+      "thinking_control": "reasoning_only"
+    }
+  ],
+  "execution_summary": {
+    "completed_date_local": "2026-09-12",
+    "timezone": "Europe/Madrid",
+    "protocol_version": 2,
+    "protocol_passed_models": 4,
+    "evidence_oracle": "aua_contract_replay_v2",
+    "original_common_plan_runs": 36,
+    "common_plan_completed_runs": 12,
+    "common_plan_unrun_repeats": 24,
+    "scripted_checks_are_model_runs": false,
+    "pooled_success_rate_is_comparable": false,
+    "training_runs_executed": 0,
+    "model_weights_modified": false,
+    "promising_configuration": {
+      "model": "gemma4-e4b",
+      "profile": "compact-v1",
+      "chat_template_kwargs": {
+        "enable_thinking": true
+      },
+      "passes": 3,
+      "attempts": 3
+    },
+    "limitation": "Single public-fixture trial per task for the promising configuration; restricted tools and host-authored verification; no unseen-app validation.",
+    "gpu": {
+      "type": "NVIDIA H100 80GB HBM3",
+      "precision": "bfloat16",
+      "concurrency": 1,
+      "deleted_verified_utc": "2026-09-11T23:54:27.939761+00:00",
+      "remaining_pods": 0,
+      "remaining_network_volumes": 0,
+      "current_spend_per_hour_usd_at_teardown": 0
+    },
+    "validation": {
+      "pytest_passed": 165,
+      "pytest_failed": 0,
+      "ruff": "passed",
+      "whitespace_check": "passed"
+    },
+    "execution_location": "historical_runpod",
+    "candidate_inference_runtime": "vllm==0.29.0"
+  },
+  "executed_lanes": [
+    {
+      "id": "diagnostic16k",
+      "profile": "baseline",
+      "context_tokens": 16384,
+      "max_output_tokens": 1536,
+      "max_steps": 32,
+      "max_request_bytes": 100000,
+      "interaction_seconds": 180,
+      "request_timeout_seconds": 60,
+      "repeats_per_model_scenario": 3,
+      "models": [
+        {
+          "id": "lfm25-2p6b",
+          "passes": 1,
+          "attempts": 9,
+          "chat_template_kwargs": {}
+        }
+      ]
+    },
+    {
+      "id": "common32k",
+      "profile": "baseline",
+      "context_tokens": 32768,
+      "max_output_tokens": 4096,
+      "max_steps": 32,
+      "max_request_bytes": 100000,
+      "interaction_seconds": 180,
+      "request_timeout_seconds": 60,
+      "repeats_per_model_scenario": 1,
+      "models": [
+        {
+          "id": "gemma4-e4b",
+          "passes": 0,
+          "attempts": 3,
+          "chat_template_kwargs": {
+            "enable_thinking": false
+          }
+        },
+        {
+          "id": "gemma4-12b",
+          "passes": 1,
+          "attempts": 3,
+          "chat_template_kwargs": {
+            "enable_thinking": false
+          }
+        },
+        {
+          "id": "lfm25-2p6b",
+          "passes": 1,
+          "attempts": 3,
+          "chat_template_kwargs": {}
+        },
+        {
+          "id": "lfm25-8b-a1b",
+          "passes": 1,
+          "attempts": 3,
+          "chat_template_kwargs": {}
+        }
+      ]
+    },
+    {
+      "id": "compact32k",
+      "profile": "compact-v1",
+      "context_tokens": 32768,
+      "max_output_tokens": 4096,
+      "max_steps": 32,
+      "max_request_bytes": 100000,
+      "interaction_seconds": 180,
+      "request_timeout_seconds": 60,
+      "repeats_per_model_scenario": 1,
+      "models": [
+        {
+          "id": "gemma4-e4b",
+          "passes": 0,
+          "attempts": 3,
+          "chat_template_kwargs": {
+            "enable_thinking": false
+          }
+        },
+        {
+          "id": "lfm25-2p6b",
+          "passes": 1,
+          "attempts": 3,
+          "chat_template_kwargs": {}
+        }
+      ]
+    },
+    {
+      "id": "thinking32k",
+      "profile": "compact-v1",
+      "context_tokens": 32768,
+      "max_output_tokens": 4096,
+      "max_steps": 32,
+      "max_request_bytes": 100000,
+      "repeats_per_model_scenario": 1,
+      "models": [
+        {
+          "id": "gemma4-e4b",
+          "passes": 3,
+          "attempts": 3,
+          "chat_template_kwargs": {
+            "enable_thinking": true
+          }
+        }
+      ],
+      "scenario_time_budgets": [
+        {
+          "scenario": "classic-sort",
+          "interaction_seconds": 90,
+          "request_timeout_seconds": 30
+        },
+        {
+          "scenario": "compose-sort",
+          "interaction_seconds": 60,
+          "request_timeout_seconds": 20
+        },
+        {
+          "scenario": "async-recovery",
+          "interaction_seconds": 30,
+          "request_timeout_seconds": 15
+        }
+      ]
+    },
+    {
+      "id": "local_mlx_bf16",
+      "execution_location": "local_mac",
+      "runtime": "mlx-lm==0.31.3; mlx==0.32.0",
+      "precision": "bfloat16",
+      "profile": "compact-v1",
+      "context_tokens": 32768,
+      "max_output_tokens": 4096,
+      "max_steps": 32,
+      "max_request_bytes": 100000,
+      "interaction_seconds": 180,
+      "request_timeout_seconds": 60,
+      "repeats_per_model_scenario": 1,
+      "models": [
+        {
+          "id": "gemma4-e4b",
+          "passes": 3,
+          "attempts": 3,
+          "chat_template_kwargs": {
+            "enable_thinking": true
+          }
+        }
+      ]
+    }
+  ],
+  "inference_location": "local_mac_only",
+  "execution_policy": {
+    "updated_date": "2026-09-12",
+    "inference": "local_mac_only",
+    "training": "runpod_only",
+    "historical_cloud_inference": "Completed before the user clarified the inference location; retained as historical evidence, not the default workflow."
+  },
+  "local_execution_summary": {
+    "completed_date_local": "2026-09-12",
+    "timezone": "Europe/Madrid",
+    "execution_location": "local_mac",
+    "report": "LOCAL_STATUS.md",
+    "hardware": {
+      "chip": "Apple M5 Max",
+      "unified_memory_gb": 128,
+      "os": "macOS 26.6.2",
+      "architecture": "arm64"
+    },
+    "runtime": {
+      "mlx": "0.32.0",
+      "mlx_lm": "0.31.3",
+      "precision": "bfloat16",
+      "concurrency": 1
+    },
+    "model_runs_executed": 3,
+    "passes": 3,
+    "protocol_version": 2,
+    "protocol_passed": true,
+    "evidence_oracle": "aua_contract_replay_v2",
+    "strict_replays_passed": 3,
+    "checkpoint_screenshots_inspected": 9,
+    "native_tool_calls": 15,
+    "rejected_finish_attempts": 1,
+    "schema_repairs": 0,
+    "prompt_tokens": 123101,
+    "output_tokens_including_reasoning": 4078,
+    "reasoning_tokens": null,
+    "reasoning_token_status": "unknown_not_reported_by_runtime",
+    "model_http_seconds": 132.717569,
+    "setup_seconds": 111.92394,
+    "runner_overall_seconds": 272.056628,
+    "cloud_resources_created": false,
+    "training_runs_executed": 0,
+    "model_weights_modified": false,
+    "local_server_stopped_verified_utc": "2026-09-12T12:03:57.878041+00:00",
+    "validation": {
+      "pytest_passed": 216,
+      "pytest_failed": 0,
+      "ruff": "passed"
+    },
+    "limitation": "One trial per public fixture task; oracle-assisted control with authored verification; no unseen-app or quantized-performance validation."
+  }
+}
