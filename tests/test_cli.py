@@ -73,6 +73,14 @@ def test_help_exits_zero() -> None:
     assert "tap-and-analyze" in result.stdout
 
 
+def test_session_start_help_exposes_deterministic_app_bootstrap() -> None:
+    result = runner.invoke(app, ["session", "start", "--help"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0
+    assert "--grant-permissions" in result.stdout
+    assert "--no-launch-app" in result.stdout
+
+
 def test_session_autopilot_help_exposes_bounded_local_loop() -> None:
     result = runner.invoke(app, ["session", "autopilot", "--help"])
 

@@ -16,6 +16,8 @@ from experiments.aua_controller.judgement import (
     Decider,
     ScreenNamer,
     combine_votes,
+    contract_criteria,
+    contract_max_tokens,
     judge_outcome_votes,
     summarize_route,
 )
@@ -134,6 +136,80 @@ def test_two_stances_must_agree_and_never_see_element_ids():
         assert "secret controller thoughts" not in evidence
         assert "bounds" not in evidence
     assert "refute" in sender.payloads[1]["messages"][0]["content"].lower()
+
+
+def test_contract_token_budget_scales_for_exact_per_criterion_output():
+    contract = "\n".join(f"- criterion {index}" for index in range(21))
+    assert contract_max_tokens(1200, contract) == 2612
+    assert contract_max_tokens(1200, None) == 1200
+
+
+def test_contract_criteria_preserve_wrapped_markdown_bullets():
+    contract = (
+        "## UX contract\n"
+        "- The first interactive screen offers a way to\n"
+        "  continue without an account.\n"
+        "- Home is usable.\n"
+        "\n"
+        "Judgement guidance: a slow launch is only a warning."
+    )
+
+    assert contract_criteria(contract) == [
+        "The first interactive screen offers a way to continue without an account.",
+        "Home is usable.",
+    ]
+
+
+def test_failed_required_criterion_overrides_unverified_top_level_votes():
+    criteria = [{
+        "criterion": "Home is usable.",
+        "result": "failed",
+        "evidence": "Home stayed blank.",
+    }]
+    votes = [
+        {"stance": stance, "criteria_order": ["Home is usable."], "cost": 0.0,
+         "result": {"verdict": "unverified", "confidence": 0.8, "reasons": ["blank"],
+                    "criteria": criteria}}
+        for stance in ("neutral", "skeptical")
+    ]
+
+    assert combine_votes(votes)["verdict"] == "fail"
+
+
+def test_contract_votes_report_each_exact_criterion_with_evidence():
+    contract = "## UX contract\n- Theme row shows Light selected.\n- Main surfaces use a light palette."
+    checks_neutral = [
+        {"criterion": "Theme row shows Light selected.", "result": "verified", "evidence": "Theme row reads Light."},
+        {"criterion": "Main surfaces use a light palette.", "result": "verified", "evidence": "The visible surface is light."},
+    ]
+    checks_skeptical = [
+        {"criterion": "Theme row shows Light selected.", "result": "verified", "evidence": "Selected Light label is visible."},
+        {"criterion": "Main surfaces use a light palette.", "result": "verified", "evidence": "No dark surface is shown."},
+    ]
+    first, second = verdict("pass"), verdict("pass", 0.8)
+    first["criteria"], second["criteria"] = checks_neutral, checks_skeptical
+    sender = Sender([
+        tool_reply("record_verdict", first),
+        tool_reply("record_verdict", second),
+    ])
+
+    result = asyncio.run(judge_outcome_votes(
+        decider(sender),
+        goal="Switch the theme to Light",
+        final_frame=frame("fp-final"),
+        contract=contract,
+    ))
+
+    assert [item["criterion"] for item in result["criteria"]] == [
+        "Theme row shows Light selected.",
+        "Main surfaces use a light palette.",
+    ]
+    judge_prompt = sender.payloads[0]["messages"][1]["content"]
+    assert "A negative criterion is verified by evidence that the forbidden state is absent" in judge_prompt
+    assert all(item["result"] == "verified" for item in result["criteria"])
+    assert sender.payloads[0]["max_tokens"] == contract_max_tokens(512, contract)
+    assert "neutral:" in result["criteria"][0]["evidence"]
+    assert "skeptical:" in result["criteria"][0]["evidence"]
 
 
 def test_disagreement_is_unverified_and_soft_pass_combinations():

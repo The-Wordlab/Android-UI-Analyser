@@ -189,6 +189,12 @@ PUBLIC_AUA_ARGUMENTS: dict[str, frozenset[str]] = {
             "needs",
             "package",
             "activity",
+            "apk",
+            "reinstall",
+            "fresh",
+            "confirmed",
+            "grant_permissions",
+            "launch_app",
         }
     ),
     "session_progress": frozenset({"session_id", "phase_done", "expect_error"}),

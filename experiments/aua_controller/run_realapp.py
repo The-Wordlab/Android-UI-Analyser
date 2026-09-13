@@ -164,6 +164,52 @@ def verdict_markdown(result: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _target_start_failed(payload: dict[str, Any]) -> bool:
+    """Return true only for lease/provision failures that are safe to retry by waiting."""
+    error = payload.get("error")
+    code = payload.get("code")
+    if isinstance(error, dict):
+        code = error.get("code") or code
+    normalized = str(code or "").strip().casefold()
+    if normalized in {
+        "device_unavailable",
+        "device_leased",
+        "lease_unavailable",
+        "virtual_target_start_failed",
+        "virtual_target_provision_failed",
+        "emulator_start_failed",
+    }:
+        return True
+    if normalized != "device":
+        return False
+    text = json.dumps(payload, ensure_ascii=False, default=str).casefold()
+    return any(word in text for word in ("lease", "emulator", "virtual target", "boot", "disk"))
+
+
+def _mark_cleanup_failure(result: dict[str, Any], message: str) -> None:
+    """Never leave a successful verdict on a run whose evidence or lease cleanup failed."""
+    prior = str(result.get("error") or "").strip()
+    result["error"] = f"{prior}; {message}".strip("; ")
+    verdict = result.get("verdict")
+    if isinstance(verdict, dict):
+        reasons = [str(item) for item in (verdict.get("reasons") or [])]
+        if message not in reasons:
+            reasons.append(message)
+        verdict["reasons"] = reasons
+        verdict["cleanup_verified"] = False
+        if verdict.get("verdict") in {"pass", "pass_with_warning"}:
+            verdict["verdict"] = "unverified"
+            verdict["verified"] = False
+    else:
+        result["verdict"] = {
+            "oracle": "none",
+            "verified": False,
+            "verdict": "unverified",
+            "reasons": [message],
+            "cleanup_verified": False,
+        }
+
+
 async def run_realapp(
     *,
     call_tool: Callable[[str, dict[str, Any]], Awaitable[Any]],
@@ -179,10 +225,18 @@ async def run_realapp(
     activity: str | None = None,
     fresh_app: bool = False,
     apk: str | None = None,
+    grant_permissions: bool = False,
+    record: bool = False,
+    lease_wait_s: float = 0,
+    fallback_lease_wait_s: float = 600,
+    provision_target: bool = True,
     flags: dict[str, str] | None = None,
+    prelaunch_setup_flows: Sequence[tuple[str, dict[str, str]]] = (),
     setup_flows: Sequence[tuple[str, dict[str, str]]] = (),
     contract: str | None = None,
     vision: bool = False,
+    judge_model: str | None = None,
+    judge_request_config: dict[str, Any] | None = None,
     judge: bool = True,
     judge_votes: int = 2,
     name_screens: bool = False,
@@ -202,16 +256,29 @@ async def run_realapp(
     """Return the run result; also written to ``<output>/result.json`` and ``verdict.md``."""
     if backend not in BACKENDS:
         raise RunError("unknown backend")
+    if fresh_app and not apk:
+        raise RunError("fresh_app needs --apk: a booted AVD has no app to clear")
+    if lease_wait_s < 0 or fallback_lease_wait_s < 0:
+        raise RunError("lease waits must be non-negative")
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     if any(output.iterdir()):
         raise RunError("real-app output directory must be empty")
     settings = validate_request_config(request_config or {}) if backend == "openrouter" else copy.deepcopy(request_config or {})
+    judging_model = judge_model or model
+    judge_settings = (
+        validate_request_config(judge_request_config or request_config or {})
+        if backend == "openrouter"
+        else copy.deepcopy(judge_request_config or request_config or {})
+    )
     started = time.monotonic()
     result: dict[str, Any] = {
         "format": FORMAT, "goal": goal, "package": package, "model": model, "backend": backend,
-        "request_config": settings, "session_id": None, "serial": None, "setup": [],
+        "request_config": settings, "judge_model": judging_model,
+        "session_id": None, "serial": None, "setup": [],
         "controller": None, "claim": None, "verdict": None, "screens": [], "route": None,
+        "recording": None,
+        "lifecycle": {"lease_strategy": "reuse_or_provision"},
         "cost": {"total_usd": 0.0}, "error": None, "report_is_untrusted": True,
     }
     setup_log = output / "setup-calls.jsonl"
@@ -236,36 +303,72 @@ async def run_realapp(
                 handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
 
     session_id: str | None = None
+    recording_started = False
+    recording_path = (output / "journey.mp4").resolve()
+
     try:
-        start = await call("session_start", {"goal": goal, "package": package, "headed": False,
-                                             "artifacts_dir": str((output / "aua").resolve()),
-                                             "evidence": "all"}, "setup")
+        start_arguments: dict[str, Any] = {
+            "goal": goal,
+            "package": package,
+            "headed": False,
+            "artifacts_dir": str((output / "aua").resolve()),
+            "evidence": "all",
+            "launch_app": False,
+            "grant_permissions": grant_permissions,
+            "wait_for_lease_s": lease_wait_s,
+            "provision_target": provision_target,
+        }
+        if activity:
+            start_arguments["activity"] = activity
+        if apk:
+            start_arguments["apk"] = apk
+        if fresh_app:
+            start_arguments.update({"fresh": True, "confirmed": True})
+        start = await call("session_start", start_arguments, "setup")
         session_id = start.get("session_id")
+        if (
+            (not isinstance(session_id, str) or not session_id)
+            and provision_target
+            and fallback_lease_wait_s > 0
+            and _target_start_failed(start)
+        ):
+            retry_arguments = dict(start_arguments)
+            retry_arguments["provision_target"] = False
+            retry_arguments["wait_for_lease_s"] = fallback_lease_wait_s
+            result["lifecycle"]["lease_strategy"] = "waited_after_provision_failure"
+            start = await call("session_start", retry_arguments, "setup")
+            session_id = start.get("session_id")
         if not isinstance(session_id, str) or not session_id:
-            raise RunError("session_start returned no session_id")
+            raise RunError("session_start returned no session_id: " + json.dumps(start)[:500])
         result["session_id"], result["serial"] = session_id, start.get("serial")
         knowledge = host_knowledge(start)
         result["knowledge_shown"] = [item.get("id") for item in knowledge]
-        if fresh_app:
-            # MCP session_start has no --apk/--fresh bootstrap, so a real target arrives either
-            # with no app at all (AUA just booted a bare AVD) or with whatever the last session
-            # left behind. install_app mode=fresh covers both: it installs the build and wipes
-            # prior app data. `app clear` is deliberately not used here — the MCP `app` tool
-            # cannot pass the engine's required `confirmed`, so clear silently no-ops.
-            if not apk:
-                raise RunError("fresh_app needs --apk: a booted AVD has no app to clear")
-            installed = await call("install_app", {"bundle": apk, "package": package,
-                                                   "mode": "fresh", "confirmed": True}, "setup")
-            granted = await call("app", {"action": "grant", "package": package}, "setup")
-            result["setup"].append({"fresh_app": True, "install_ok": installed.get("ok"),
-                                    "grant_ok": granted.get("ok")})
-            if installed.get("ok") is not True:
-                raise RunError("fresh install failed: " + json.dumps(installed)[:400])
-        if launch:
-            arguments: dict[str, Any] = {"package": package}
-            if activity:
-                arguments["activity"] = activity
-            await call("app_launch_and_analyze", arguments, "setup")
+        result["setup"].append({
+            "session_bootstrap": True,
+            "fresh_app": fresh_app,
+            "apk": bool(apk),
+            "provision_target": provision_target,
+        })
+        if record:
+            started_recording = await call("screen_record_start", {}, "setup")
+            if started_recording.get("ok") is not True:
+                raise RunError("screen recording failed to start: " + json.dumps(started_recording)[:400])
+            recording_started = True
+            result["recording"] = {"path": str(recording_path), "started": True, "stop_ok": None}
+        for index, (flow_yaml, flow_params) in enumerate(prelaunch_setup_flows):
+            prelaunch_arguments: dict[str, Any] = {"yaml": flow_yaml, "assist": False}
+            if flow_params:
+                prelaunch_arguments["params"] = {
+                    str(k): str(v) for k, v in flow_params.items()
+                }
+            flow = await call("flow_run", prelaunch_arguments, "setup")
+            result["setup"].append({"prelaunch_setup_flow": index,
+                                    "params": dict(flow_params or {}),
+                                    "flow_run_ok": flow.get("ok"), "error": flow.get("error")})
+            if flow.get("ok") is not True:
+                raise RunError(
+                    f"prelaunch setup flow {index} failed: " + json.dumps(flow)[:400]
+                )
         if flags:
             # Feature-flag context is part of the oracle: a scenario judged in the wrong arm is
             # a verdict about a different product. flags_apply verifies each key against the
@@ -280,8 +383,14 @@ async def run_realapp(
                                                  "restart": True, "verify": True}, "setup")
             result["setup"].append({"flags": dict(flags), "flags_ok": applied.get("ok")})
             result["flag_context"] = dict(flags)
-            if applied.get("ok") is not True:
-                raise RunError("feature flags not applied: " + json.dumps(applied)[:400])
+            if applied.get("ok") is not True or applied.get("verified") is not True:
+                raise RunError("feature flags not applied and verified: " + json.dumps(applied)[:400])
+        launch_arguments: dict[str, Any] = {"package": package}
+        if activity:
+            launch_arguments["activity"] = activity
+        launched = await call("app_launch_and_analyze", launch_arguments, "setup")
+        if launched.get("ok") is not True:
+            raise RunError("app launch failed: " + json.dumps(launched)[:400])
         for index, (flow_yaml, flow_params) in enumerate(setup_flows):
             arguments: dict[str, Any] = {"yaml": flow_yaml, "assist": False}
             if flow_params:
@@ -290,8 +399,14 @@ async def run_realapp(
             result["setup"].append({"setup_flow": index, "params": dict(flow_params or {}),
                                     "flow_run_ok": flow.get("ok"), "error": flow.get("error")})
             if flow.get("ok") is not True:
-                raise RunError(f"setup flow {index} failed: " + json.dumps(flow.get("error") or flow)[:500])
-        initial = await call("analyze_screen", {"source": "hierarchy", "no_cache": True}, "setup")
+                raise RunError(
+                    f"setup flow {index} failed: " + json.dumps(flow)[:400]
+                )
+        if flags or setup_flows or observation_frame(launched) is None:
+            initial = await call("analyze_screen", {"source": "hierarchy", "no_cache": True}, "setup")
+        else:
+            assert launched is not None
+            initial = launched
         if observation_frame(initial) is None:
             raise RunError("initial analyze_screen returned no fresh frame")
         schemas = await list_tools()
@@ -301,15 +416,19 @@ async def run_realapp(
         async def controller_call(name: str, arguments: dict[str, Any]) -> Any:
             if name == "session_finish":
                 claims.append(copy.deepcopy(arguments))
-                arguments = {"session_id": session_id, "allow_incomplete": False, "summary": False}
-            elif name == "session_progress":
+                # This is a model completion claim, not infrastructure authority. Keep the AUA
+                # session and its lease alive through the final observation, judges, recording
+                # export and finally cleanup.
+                return {"ok": False, "finished": False, "claim_recorded": True}
+            if name == "session_progress":
                 arguments = {"session_id": session_id}
             return await call_tool(name, arguments)
 
         compactor = FrameCompactor(max_elements=max_elements)
         report = await run_agent(
             send=send, call_tool=controller_call, tools=tools,
-            system_prompt=SYSTEM + COMPACT_SYSTEM + REALAPP_SYSTEM, user_prompt=goal_prompt(goal, knowledge),
+            system_prompt=SYSTEM + COMPACT_SYSTEM + REALAPP_SYSTEM,
+            user_prompt=goal_prompt(goal, knowledge),
             initial_observation=initial, model=model, output=output / "controller",
             request_config=settings, backend=backend, max_tokens=max_tokens, max_steps=max_steps,
             time_limit_s=time_limit_s, max_request_bytes=max_request_bytes,
@@ -353,7 +472,8 @@ async def run_realapp(
             result["verdict"] = {"oracle": "aua_session_contract", "verified": True, "verdict": "pass",
                                  "reasons": ["AUA accepted session_finish against its own contract."]}
         elif stop in ("terminal_claimed", "model_text", "no_progress") and judge:
-            decider = Decider(send, model=model, backend=backend, request_config=settings,
+            decider = Decider(send, model=judging_model, backend=backend,
+                              request_config=judge_settings,
                               max_tokens=judge_max_tokens, cost_limit_usd=judge_cost_limit_usd,
                               output=output / "judge")
             # AUA's goal_progress without an authored contract is always 0/1 active; it would
@@ -368,10 +488,10 @@ async def run_realapp(
                 # Element text cannot answer a question about appearance. Pair each judged
                 # frame with the screenshot AUA already captured for it, oldest first, so the
                 # final screen is the last image the judge sees.
-                index = screenshot_index((output / "aua" / "manifest.json").resolve())
+                shot_index = screenshot_index((output / "aua" / "manifest.json").resolve())
                 for frame in [*judged_frames, final]:
                     fingerprint = frame_fingerprint(frame)
-                    shot = index.get(fingerprint) if fingerprint else None
+                    shot = shot_index.get(fingerprint) if fingerprint else None
                     encoded = encode_image(shot) if shot else None
                     if encoded:
                         images.append(encoded)
@@ -387,7 +507,7 @@ async def run_realapp(
                 verdict["reasons"].insert(0, "Controller stalled on an unchanged screen before finishing.")
             verdict["controller_stop_reason"] = stop
             result["verdict"] = verdict
-            result["cost"]["judge"] = {"model": model, "provider": (verdict["votes"][0].get("provider") if verdict["votes"] else None),
+            result["cost"]["judge"] = {"model": judging_model, "provider": (verdict["votes"][0].get("provider") if verdict["votes"] else None),
                                        "usd": verdict["cost"], "decider": decider.report()}
         else:
             reason = report.get("error") or f"controller stopped with {stop}"
@@ -427,11 +547,46 @@ async def run_realapp(
             result["verdict"] = {"oracle": "none", "verified": False, "verdict": "unverified",
                                  "reasons": [result["error"][:300]]}
     finally:
+        if recording_started:
+            try:
+                stopped_recording = await call(
+                    "screen_record_stop", {"path": str(recording_path)}, "cleanup"
+                )
+                stop_ok = stopped_recording.get("ok") is True and recording_path.is_file()
+                if result["recording"] is not None:
+                    result["recording"]["stop_ok"] = stop_ok
+                if not stop_ok:
+                    message = "recording cleanup failed: " + str(
+                        stopped_recording.get("error") or stopped_recording
+                    )[:500]
+                    result["recording_cleanup_error"] = message
+                    _mark_cleanup_failure(result, message)
+                recording_started = False
+            except Exception as exc:
+                message = "recording cleanup failed: " + _error_text(exc)
+                result["recording_cleanup_error"] = message
+                _mark_cleanup_failure(result, message)
         if session_id:
             try:
-                await call("session_finish", {"session_id": session_id, "allow_incomplete": True, "summary": False}, "cleanup")
-            except Exception as exc:  # cleanup failure is recorded, never masks the run
-                result["cleanup_error"] = _error_text(exc)
+                finished_session = await call(
+                    "session_finish",
+                    {"session_id": session_id, "allow_incomplete": True, "summary": False},
+                    "cleanup",
+                )
+                finish_ok = finished_session.get("ok") is True and (
+                    finished_session.get("finished") is True
+                    or finished_session.get("terminated") is True
+                )
+                if not finish_ok:
+                    message = "session cleanup failed: " + str(
+                        finished_session.get("error") or finished_session
+                    )[:500]
+                    result["cleanup_error"] = message
+                    _mark_cleanup_failure(result, message)
+            except Exception as exc:
+                message = "session cleanup failed: " + _error_text(exc)
+                result["cleanup_error"] = message
+                _mark_cleanup_failure(result, message)
         result["cost"]["total_usd"] = round(sum(
             float(entry["usd"]) for key, entry in result["cost"].items()
             if key != "total_usd" and isinstance(entry, dict)), 8)
@@ -475,6 +630,12 @@ def build_setup_flows(paths: Sequence[Any], params: Sequence[str]) -> list[tuple
     return flows
 
 
+def mcp_read_timeout(lease_wait_s: float, fallback_lease_wait_s: float) -> timedelta:
+    """Cover both sequential lease waits plus bounded bootstrap overhead."""
+    seconds = max(180.0, lease_wait_s + fallback_lease_wait_s + 120.0)
+    return timedelta(seconds=seconds)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--goal", required=True)
@@ -486,10 +647,26 @@ def main() -> int:
     parser.add_argument("--base-url", default="https://openrouter.ai/api/v1")
     parser.add_argument("--api-key-env", default="OPEN_ROUTER_API_KEY")
     parser.add_argument("--aua-command", default="aua")
-    parser.add_argument("--launch", action="store_true", help="app_launch_and_analyze before the goal")
-    parser.add_argument("--fresh", action="store_true", help="Clear app data and re-grant permissions before the setup flow")
-    parser.add_argument("--apk", help="Build to install fresh when --fresh is set")
+    parser.add_argument("--launch", action="store_true", help="Compatibility flag; app launch is automatic")
+    parser.add_argument("--fresh", action="store_true", help="Clear app data and reinstall the selected APK")
+    parser.add_argument("--apk", help="Build installed by session bootstrap when provided")
+    parser.add_argument(
+        "--grant-permissions",
+        action="store_true",
+        help="Grant every declared runtime permission after install (off by default)",
+    )
     parser.add_argument("--activity")
+    parser.add_argument("--record", action="store_true", help="Record from the first app launch through judgement")
+    parser.add_argument("--lease-wait", type=float, default=0,
+                        help="Seconds to wait for a free device before provisioning another")
+    parser.add_argument("--fallback-lease-wait", type=float, default=600,
+                        help="Seconds to wait for an existing lease after provisioning fails")
+    parser.add_argument("--no-provision", action="store_true",
+                        help="Never create a new virtual target; only wait for an existing device")
+    parser.add_argument("--prelaunch-setup-flow", type=Path, action="append", default=[],
+                        help="AUA flow YAML run before flags and the first product launch; repeatable")
+    parser.add_argument("--prelaunch-setup-params", action="append", default=[],
+                        help="K=V[,K=V] for the prelaunch flow at the same position")
     parser.add_argument("--setup-flow", type=Path, action="append", default=[],
                         help="AUA flow YAML run before the goal; repeat to chain flows in order")
     parser.add_argument("--setup-params", action="append", default=[],
@@ -500,6 +677,8 @@ def main() -> int:
                         help="Authored acceptance criteria the judge answers against")
     parser.add_argument("--vision", action="store_true",
                         help="Show the judge the captured screenshots; needs an image-capable model")
+    parser.add_argument("--judge-model",
+                        help="Manifest candidate used only for judgement; defaults to --model")
     parser.add_argument("--no-judge", action="store_true")
     parser.add_argument("--judge-votes", type=int, default=2, choices=[1, 2])
     parser.add_argument("--map", action="store_true", help="Name screens and summarise the route (paid)")
@@ -508,11 +687,15 @@ def main() -> int:
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument("--cost-limit-usd", type=float, default=0.05)
     parser.add_argument("--judge-cost-limit-usd", type=float, default=0.02)
+    parser.add_argument("--judge-max-tokens", type=int, default=1024)
     parser.add_argument("--terminal-claim-limit", type=int, default=1)
     parser.add_argument("--no-progress-limit", type=int, default=4)
     parser.add_argument("--max-elements", type=int, default=60)
     args = parser.parse_args()
 
+    prelaunch_setup_flows = build_setup_flows(
+        args.prelaunch_setup_flow, args.prelaunch_setup_params
+    )
     setup_flows = build_setup_flows(args.setup_flow, args.setup_params)
     manifest = json.loads(args.manifest.read_text())
     candidate = next((item for item in manifest["models"] if args.model in {item["id"], item["repository"]}), None)
@@ -523,9 +706,22 @@ def main() -> int:
         request_config.setdefault("provider", {})
         request_config["provider"]["only"] = [args.provider]
         request_config["provider"]["order"] = [args.provider]
-    if args.vision and not candidate.get("vision"):
-        parser.error(f"--vision needs an image-capable model; {candidate['id']} is text-only. "
-                     "The manifest records which candidates accept images.")
+    judge_candidate = candidate
+    judge_config = None
+    if args.judge_model:
+        judge_candidate = next(
+            (item for item in manifest["models"]
+             if args.judge_model in {item["id"], item["repository"]}),
+            None,
+        )
+        if judge_candidate is None:
+            parser.error("--judge-model must be a candidate in the manifest")
+        judge_config = validate_request_config(
+            copy.deepcopy(judge_candidate.get("request_config", {}))
+        )
+    if args.vision and not judge_candidate.get("vision"):
+        parser.error(f"--vision needs an image-capable judge; {judge_candidate['id']} is text-only. "
+                     "The manifest records which candidates accept images; pass --judge-model.")
     request_config = validate_request_config(request_config)
     key = os.environ.get(args.api_key_env)
     validate_endpoint(args.base_url, key)
@@ -548,7 +744,13 @@ def main() -> int:
 
             async with (
                 stdio_client(server) as (read, write),
-                ClientSession(read, write, read_timeout_seconds=timedelta(seconds=180)) as session,
+                ClientSession(
+                    read,
+                    write,
+                    read_timeout_seconds=mcp_read_timeout(
+                        args.lease_wait, args.fallback_lease_wait
+                    ),
+                ) as session,
             ):
                 await session.initialize()
 
@@ -570,13 +772,20 @@ def main() -> int:
                     package=args.package, output=args.output.resolve(), model=candidate["repository"],
                     request_config=request_config, launch=args.launch, activity=args.activity,
                     fresh_app=args.fresh, apk=args.apk,
+                    grant_permissions=args.grant_permissions, record=args.record,
+                    lease_wait_s=args.lease_wait, fallback_lease_wait_s=args.fallback_lease_wait,
+                    provision_target=not args.no_provision,
                     flags=parse_pairs(args.flags, what="--flags"),
+                    prelaunch_setup_flows=prelaunch_setup_flows,
                     setup_flows=setup_flows,
                     contract=args.contract.read_text(encoding="utf-8") if args.contract else None,
                     vision=args.vision,
+                    judge_model=judge_candidate["repository"] if args.judge_model else None,
+                    judge_request_config=judge_config,
                     judge=not args.no_judge, judge_votes=args.judge_votes, name_screens=args.map,
                     max_steps=args.max_steps, time_limit_s=args.time_limit, max_tokens=args.max_tokens,
                     cost_limit_usd=args.cost_limit_usd, judge_cost_limit_usd=args.judge_cost_limit_usd,
+                    judge_max_tokens=args.judge_max_tokens,
                     terminal_claim_limit=args.terminal_claim_limit, no_progress_limit=args.no_progress_limit,
                     max_elements=args.max_elements,
                 )

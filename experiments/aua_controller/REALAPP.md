@@ -76,21 +76,33 @@ that serves native tools today.
 ```
 python -m experiments.aua_controller.run_realapp \
   --goal "Open settings and switch the theme to Dark" \
-  --package <app.package> --launch [--activity <cls>] [--setup-flow login.yaml] \
+  --package <app.package> --fresh --apk <build.apk> --record [--activity <cls>] \
+  [--prelaunch-setup-flow environment.yaml] \
+  [--setup-flow login.yaml] \
   --model or-deepseek-v4-flash-0731-low-deepinfra --map \
   --output <private-dir>
 ```
 
-Flow: `session_start` → optional launch / setup flow → `analyze_screen` → `run_agent` with
-compact-v1 tools, hosted-v1 projection, compaction and both breakers → fresh `analyze_screen`
-→ judge (skipped when AUA accepted a contract) → optional screen naming and route summary
-→ `result.json`, `verdict.md`, `screens.json`, `route.json` → `session_finish
-allow_incomplete: true`.
+Flow: `session_start` deterministically leases a free target or provisions a new one, installs the
+APK fresh, and defers product launch → optional recording starts → prelaunch setup flows →
+feature flags → `app_launch_and_analyze` with the pinned activity → persona/setup flows →
+`run_agent` with compact-v1 tools, hosted-v1 projection,
+compaction and both breakers → fresh `analyze_screen` → two independent judge votes with one
+evidence-backed result per authored criterion → optional screen naming and route summary →
+recording stops → `session_finish allow_incomplete: true` releases the target → `result.json`,
+`verdict.md`, `screens.json`, and `route.json`. `--grant-permissions` is explicit rather than a
+harness default so guest and limited-access scenarios do not silently receive capabilities their
+persona withholds.
+If provisioning fails before a session exists (for example, host capacity is exhausted), the
+runner switches to a bounded wait for an existing lease; the MCP transport timeout expands to
+cover that wait. No model chooses a serial, installs or starts the app, controls recording, or
+releases the target.
 
 `session_finish` is offered to the model with two fields of its own, `outcome`
 (`achieved | already_satisfied | blocked | not_achievable`) and a short `note`. The runner
-records them as the claim and calls AUA with the harness-owned arguments only. The claim
-reaches the judge labelled `controller_claim_untrusted`.
+records it as an untrusted claim without releasing the lease. Only the harness's `finally` cleanup
+calls AUA `session_finish`; that keeps the device owned through fresh evidence, judgement, and
+recording finalization. The claim reaches the judge labelled `controller_claim_untrusted`.
 
 The first user message carries the goal and then whatever `session_start` returned as
 `relevant_knowledge`: the accepted knowledge items whose aliases match the goal, at most five,
@@ -141,10 +153,11 @@ Evidence for these runs is in the session's private scratch directory, not in th
 
 `tests/test_aua_controller_compaction.py`, `tests/test_aua_controller_judgement.py`,
 `tests/test_aua_controller_realapp.py` cover the filter, the decider (fresh window, forced
-tool, repair, spend stop, id stripping, two-vote agreement, namer cache) and the runner end
-to end with a fake AUA and a fake model (claim stops the loop, contract acceptance skips the
-judge, disagreement is unverified, stall downgrades to warning, map is opt-in, setup failure
-still cleans up). The hosted routing test now asserts `require_parameters` is optional.
+tool, repair, spend stop, id stripping, two-vote agreement, exact per-criterion evidence, namer
+cache) and the runner end to end with a fake AUA and a fake model (claim stops the loop without
+releasing the device, independent judgement, cleanup failures fail closed, disagreement is
+unverified, stall downgrades to warning, map is opt-in, and setup failure still cleans up).
+The hosted routing test now asserts `require_parameters` is optional.
 
 ## What this means for core AUA
 

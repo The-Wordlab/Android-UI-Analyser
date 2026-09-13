@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from typer.testing import CliRunner
 
 from android_ui_analyser import engine as engine_mod
-from android_ui_analyser import journal, network, network_profiles
+from android_ui_analyser import journal, leases, network, network_profiles
 from android_ui_analyser.cli import _apply_phases_done, app
 from android_ui_analyser.coaching import decorate_result
 from android_ui_analyser.daemon import dispatch
 from android_ui_analyser.engine import Engine
+from android_ui_analyser.errors import DeviceError
 from android_ui_analyser.schema import AnalyzeResult, DeviceInfo, Element, Meta, Screen, Source
 from android_ui_analyser.session import (
     complete_environment_phase,
@@ -676,6 +678,205 @@ def test_session_start_app_alias_launches_and_reuses_that_observation(
 
     assert launches == [("com.example.catalog", ".MainActivity")]
     assert started["package"] == "com.example.catalog"
+
+
+def test_session_start_can_install_and_grant_without_launching(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    engine = _engine(tmp_path, "goal-app-bootstrap")
+    observed = _observation(engine.device.serial)
+    observed.screen.package = "com.android.launcher"
+    app_actions: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(
+        engine,
+        "install_app",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            ok=True,
+            app_install={"package": "com.example.catalog"},
+        ),
+    )
+
+    def app_action(action: str, **kwargs: Any) -> Any:
+        app_actions.append((action, kwargs["package"]))
+        return engine_mod.ActionResult(ok=True, action=f"app-{action}")
+
+    monkeypatch.setattr(engine, "app", app_action)
+    monkeypatch.setattr(engine, "analyze", lambda **_kwargs: observed)
+
+    started = engine.session_start(
+        "inspect catalog",
+        package="com.example.catalog",
+        apk="/tmp/example.apk",
+        fresh=True,
+        confirmed=True,
+        grant_permissions=True,
+        launch_app=False,
+    )
+
+    assert app_actions == [("grant", "com.example.catalog")]
+    assert started["package"] == "com.example.catalog"
+
+
+def test_bootstrap_failure_does_not_finish_a_preexisting_session_id(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    engine = _engine(tmp_path, "preexisting-session-id")
+    engine._session_id = "existing-session"
+    monkeypatch.setattr(
+        engine,
+        "_prepare_session_target",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("synthetic target failure")),
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic target failure"):
+        engine.session_start("inspect catalog")
+
+    assert engine._session_id == "existing-session"
+
+
+def test_failed_bootstrap_releases_a_new_lease_on_a_reused_target(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    engine = _engine(tmp_path, "goal-reused-bootstrap-failure")
+    serial = engine.device.serial
+    owner = "harness-bootstrap-owner"
+    assert leases.acquire(engine.config.lease.registry_dir, serial, owner=owner)
+    engine._lease_serial = serial
+    engine._lease_owner_resolved = owner
+    engine._lease_was_preexisting = False
+    monkeypatch.setattr(
+        engine,
+        "_prepare_session_target",
+        lambda **_kwargs: {"serial": serial, "virtual_target_started": False},
+    )
+    monkeypatch.setattr(
+        engine,
+        "install_app",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            DeviceError("synthetic install failure", code="install_failed")
+        ),
+    )
+
+    with pytest.raises(DeviceError, match="synthetic install failure"):
+        engine.session_start(
+            "inspect catalog",
+            package="com.example.catalog",
+            apk="/tmp/example.apk",
+        )
+
+    assert leases.holder(engine.config.lease.registry_dir, serial) is None
+
+
+def test_failed_bootstrap_releases_in_the_selected_platform_namespace(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    engine = _engine(tmp_path, "goal-platform-release")
+    serial = engine.device.serial
+    owner = "harness-platform-owner"
+    assert leases.acquire(engine.config.lease.registry_dir, serial, owner=owner)
+    engine._lease_serial = serial
+    engine._lease_owner_resolved = owner
+    engine._lease_was_preexisting = False
+    monkeypatch.setattr(
+        engine,
+        "_prepare_session_target",
+        lambda **_kwargs: {"serial": serial, "virtual_target_started": False},
+    )
+    monkeypatch.setattr(
+        engine,
+        "install_app",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            DeviceError("synthetic install failure", code="install_failed")
+        ),
+    )
+    releases: list[dict[str, Any]] = []
+
+    def release(*_args: Any, **kwargs: Any) -> bool:
+        releases.append(kwargs)
+        return True
+
+    monkeypatch.setattr(leases, "release", release)
+
+    with pytest.raises(DeviceError, match="synthetic install failure"):
+        engine.session_start("inspect catalog", package="com.example.catalog", apk="/tmp/example.apk")
+
+    assert releases == [{"owner": owner, "platform": engine.platform.name}]
+
+
+def test_goal_planning_failure_releases_a_new_bootstrap_lease(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    engine = _engine(tmp_path, "goal-planning-failure")
+    serial = engine.device.serial
+    owner = "harness-planning-owner"
+    assert leases.acquire(engine.config.lease.registry_dir, serial, owner=owner)
+    engine._lease_serial = serial
+    engine._lease_owner_resolved = owner
+    engine._lease_was_preexisting = False
+    monkeypatch.setattr(
+        engine,
+        "_prepare_session_target",
+        lambda **_kwargs: {"serial": serial, "virtual_target_started": False},
+    )
+    monkeypatch.setattr(
+        engine,
+        "_goal_session_plan",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("synthetic planning failure")),
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic planning failure"):
+        engine.session_start("inspect catalog", package="com.example.catalog", launch_app=False)
+
+    assert leases.holder(engine.config.lease.registry_dir, serial) is None
+
+
+def test_goal_planning_failure_stops_a_newly_provisioned_virtual_target(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    engine = _engine(tmp_path, "virtual-planning-failure")
+    serial = "emulator-5598"
+    owner = "virtual-planning-owner"
+    stops: list[dict[str, Any]] = []
+
+    def prepare(**_kwargs: Any) -> dict[str, Any]:
+        assert leases.acquire(engine.config.lease.registry_dir, serial, owner=owner)
+        engine._lease_serial = serial
+        engine._lease_owner_resolved = owner
+        engine._lease_was_preexisting = False
+        return {
+            "serial": serial,
+            "virtual_target_started": True,
+            "definition_id": "Small_Phone",
+            "instance_token": "Small_Phone.p5598",
+            "pid": 5598,
+        }
+
+    monkeypatch.setattr(engine, "_prepare_session_target", prepare)
+    monkeypatch.setattr(engine, "analyze", lambda **_kwargs: _observation(serial))
+    monkeypatch.setattr(
+        engine,
+        "_goal_session_plan",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("synthetic planning failure")),
+    )
+    monkeypatch.setattr(engine, "release_device_use", lambda: None)
+    monkeypatch.setattr(
+        engine,
+        "virtual_target_stop_instance",
+        lambda instance, **kwargs: stops.append({"instance": instance, **kwargs})
+        or {"ok": True, "stopped_target_ids": [serial]},
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic planning failure"):
+        engine.session_start("inspect catalog", start_emulator=True)
+
+    assert stops == [{
+        "instance": "Small_Phone.p5598",
+        "expected_pid": 5598,
+        "owner": owner,
+        "requested_by": "session-start-rollback",
+    }]
+    assert leases.holder(engine.config.lease.registry_dir, serial) is None
 
 
 def test_session_start_refreshes_an_explicitly_unstable_launch_readback(

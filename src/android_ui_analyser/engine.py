@@ -354,6 +354,9 @@ class Engine:
         # map update it just queued.
         _LIVE_ENGINES.add(self)
         self._claimed_instance_token: str | None = None
+        # Transient rollback context exists only until session_start returns a persisted session.
+        self._session_bootstrap_prepared: dict[str, Any] | None = None
+        self._session_bootstrap_animation: tuple[Path, str] | None = None
         self._action_recording_suppression = 0
         # Set only by the warm daemon/MCP job manager. Supported wait loops consult the event
         # between device reads; the manager object is transport state, intentionally typed Any

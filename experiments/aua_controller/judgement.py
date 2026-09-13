@@ -54,6 +54,56 @@ OUTCOME_SCHEMA: dict[str, Any] = {
     "required": ["verdict", "confidence", "reasons"],
     "additionalProperties": False,
 }
+
+
+def contract_criteria(contract: str | None) -> list[str]:
+    """Return authored markdown bullets in source order, without rewriting their text."""
+    if not contract:
+        return []
+    criteria: list[str] = []
+    for line in str(contract).splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- ") and stripped[2:].strip():
+            criteria.append(stripped[2:].strip())
+        elif criteria and line[:1].isspace() and stripped:
+            criteria[-1] = f"{criteria[-1]} {stripped}"
+    return criteria
+
+
+def contract_max_tokens(requested: int, contract: str | None) -> int:
+    """Reserve enough output for every exact criterion plus concise evidence."""
+    criteria = contract_criteria(contract)
+    if not criteria:
+        return requested
+    return max(requested, 512 + 100 * len(criteria))
+
+
+def outcome_schema(contract: str | None) -> dict[str, Any]:
+    """Require an evidence-bearing answer for every authored contract bullet."""
+    criteria = contract_criteria(contract)
+    schema = copy.deepcopy(OUTCOME_SCHEMA)
+    if not criteria:
+        return schema
+    schema["properties"]["criteria"] = {
+        "type": "array",
+        "minItems": len(criteria),
+        "maxItems": len(criteria),
+        "items": {
+            "type": "object",
+            "properties": {
+                "criterion": {"type": "string", "enum": criteria},
+                "result": {
+                    "type": "string",
+                    "enum": ["verified", "failed", "not_verified", "not_applicable"],
+                },
+                "evidence": {"type": "string", "minLength": 1, "maxLength": 400},
+            },
+            "required": ["criterion", "result", "evidence"],
+            "additionalProperties": False,
+        },
+    }
+    schema["required"].append("criteria")
+    return schema
 SCREEN_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -253,6 +303,7 @@ class Decider:
         schema: dict[str, Any],
         name: str,
         images: Sequence[str] = (),
+        max_tokens: int | None = None,
     ) -> dict[str, Any]:
         """Ask one question; return the validated object plus usage and cost accounting.
 
@@ -284,7 +335,8 @@ class Decider:
             payload: dict[str, Any] = {
                 "model": self.model, "messages": copy.deepcopy(messages), "tools": [tool],
                 "tool_choice": {"type": "function", "function": {"name": name}},
-                "parallel_tool_calls": False, "stream": False, "max_tokens": self.max_tokens,
+                "parallel_tool_calls": False, "stream": False,
+                "max_tokens": max_tokens if max_tokens is not None else self.max_tokens,
             }
             if self.hosted:
                 payload = configure_payload(payload, self.settings)
@@ -370,15 +422,26 @@ async def judge_outcome(
     question = ("Was this goal achieved, as shown by the frames? The final frame is the current screen.")
     if contract:
         question = ("Judge the run against `authored_contract`, which is the authority here. Every "
-                    "criterion it states must hold. If a criterion cannot be checked from this "
-                    "evidence, do not assume it passed: say so and return 'unverified' unless "
+                    "criterion it states must hold. Return one `criteria` entry for every exact "
+                    "markdown bullet, in source order, with observed evidence. A negative criterion "
+                    "is verified by evidence that the forbidden state is absent throughout its "
+                    "relevant journey; do not mark it not_applicable merely because the forbidden "
+                    "state did not occur. Reserve not_applicable for a genuinely conditional clause "
+                    "whose trigger did not occur. If a criterion cannot be checked from this evidence, "
+                    "do not assume it passed: mark it not_verified and return 'unverified' unless "
                     "another criterion is outright broken, which is 'fail'.")
+    criteria = contract_criteria(contract)
     decision = await decider.decide(
         role="outcome judge (" + stance + ")", instructions=JUDGE_INSTRUCTIONS[stance] + CLAIM_NOTE,
-        question=question, context=context, schema=OUTCOME_SCHEMA, name="record_verdict",
+        question=question, context=context, schema=outcome_schema(contract), name="record_verdict",
         images=images,
+        max_tokens=contract_max_tokens(decider.max_tokens, contract),
     )
-    return {**decision, "stance": stance}
+    if criteria:
+        returned = [item.get("criterion") for item in decision["result"].get("criteria", [])]
+        if returned != criteria:
+            raise RunError("contract judgement did not return every criterion in source order")
+    return {**decision, "stance": stance, "criteria_order": criteria}
 
 
 def combine_votes(votes: list[dict[str, Any]]) -> dict[str, Any]:
@@ -401,9 +464,30 @@ def combine_votes(votes: list[dict[str, Any]]) -> dict[str, Any]:
         for reason in vote["result"].get("reasons", []):
             if reason not in reasons:
                 reasons.append(reason)
+    criteria: list[dict[str, str]] = []
+    order = votes[0].get("criteria_order") or []
+    for criterion in order:
+        entries = []
+        for vote in votes:
+            by_name = {item.get("criterion"): item for item in vote["result"].get("criteria", [])}
+            entries.append(by_name.get(criterion))
+        statuses = [entry.get("result") if isinstance(entry, dict) else "not_verified"
+                    for entry in entries]
+        status = str(statuses[0]) if len(set(statuses)) == 1 else "not_verified"
+        evidence = []
+        for vote, entry in zip(votes, entries, strict=True):
+            detail = str(entry.get("evidence")) if isinstance(entry, dict) else "criterion omitted"
+            evidence.append(f"{vote['stance']}: {detail}")
+        criteria.append({"criterion": criterion, "result": status, "evidence": " | ".join(evidence)})
+    if any(item["result"] == "failed" for item in criteria):
+        verdict = "fail"
+    elif verdict in {"pass", "pass_with_warning"} and any(
+        item["result"] == "not_verified" for item in criteria
+    ):
+        verdict = "unverified"
     return {
         "oracle": ORACLE, "verified": False, "verdict": verdict, "agreement": len(distinct) == 1,
-        "confidence": confidence, "reasons": reasons[:8],
+        "confidence": confidence, "reasons": reasons[:8], "criteria": criteria,
         "votes": [{"stance": vote["stance"], **vote["result"], "cost": vote["cost"],
                    "provider": vote.get("provider"), "request_ms": vote.get("request_ms")} for vote in votes],
         "cost": sum(vote["cost"] for vote in votes),

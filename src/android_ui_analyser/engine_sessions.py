@@ -10,6 +10,7 @@ it in ``Engine``.
 from __future__ import annotations
 
 import contextlib
+import functools
 import re
 import shlex
 import uuid
@@ -37,6 +38,75 @@ _ANIMATION_GOAL_RE = re.compile(
     r"\b(?:animation|animations|animated|motion|transition|transitions|easing|tween|tweening)\b",
     re.IGNORECASE,
 )
+
+
+def _release_new_bootstrap_lease(self: Engine) -> None:
+    """Release a reused target claimed by a session start that never returned a session."""
+    if (
+        not getattr(self, "_lease_serial", None)
+        or not getattr(self, "_lease_owner_resolved", None)
+        or getattr(self, "_lease_was_preexisting", False)
+    ):
+        return
+    self.release_device_use()
+    from . import leases
+
+    platform = self.platform.name
+    holder = leases.holder(
+        self.config.lease.registry_dir,
+        str(self._lease_serial),
+        platform=platform,
+    )
+    released = holder is None or leases.release(
+        self.config.lease.registry_dir,
+        str(self._lease_serial),
+        owner=str(self._lease_owner_resolved),
+        platform=platform,
+    )
+    if not released:
+        raise DeviceError(
+            "session bootstrap failed and its newly acquired lease could not be released",
+            code="bootstrap_lease_release_failed",
+        )
+    self._lease_serial = None
+    self._leased_serial_resolved = None
+    self._lease_owner_resolved = None
+    self._lease_generation_resolved = None
+    self.close()
+
+
+def _rollback_new_bootstrap(self: Engine) -> None:
+    """Undo resources acquired before session_start returns its session id."""
+    prepared = getattr(self, "_session_bootstrap_prepared", None)
+    animation = getattr(self, "_session_bootstrap_animation", None)
+    if animation:
+        backup_path, change_key = animation
+        if Path(backup_path).is_file():
+            with contextlib.suppress(Exception):
+                self.platform.capability("developer_settings").anim_restore(
+                    self.device, Path(backup_path)
+                )
+                self.forget_device_change(str(change_key))
+    if isinstance(prepared, dict) and prepared.get("virtual_target_started"):
+        self.release_device_use()
+        from . import leases
+
+        target = TargetRef(self.platform.name, str(prepared["serial"]))
+        owner = getattr(self, "_lease_owner_resolved", None)
+        with leases.device_transaction(self.config.lease.registry_dir, target):
+            cleanup = self.virtual_target_stop_instance(
+                str(prepared.get("instance_token") or prepared.get("instance") or ""),
+                expected_pid=prepared.get("pid"),
+                owner=owner,
+                requested_by="session-start-rollback",
+            )
+            if owner is not None and target.target_id in cleanup.get("stopped_target_ids", []):
+                leases.release(self.config.lease.registry_dir, target, owner=owner)
+        self.close()
+    else:
+        _release_new_bootstrap_lease(self)
+    self._session_bootstrap_prepared = None
+    self._session_bootstrap_animation = None
 
 
 def _goal_session_plan(self: Engine, goal: str, observation: AnalyzeResult) -> Any:
@@ -112,7 +182,7 @@ def _goal_session_plan(self: Engine, goal: str, observation: AnalyzeResult) -> A
     )
 
 
-def session_start(
+def _session_start_impl(
     self: Engine,
     goal: str,
     *,
@@ -137,6 +207,8 @@ def session_start(
     reinstall: bool = False,
     fresh: bool = False,
     confirmed: bool = False,
+    grant_permissions: bool = False,
+    launch_app: bool = True,
 ) -> dict[str, Any]:
     """Observe once and return the safest goal-specific CLI and MCP next call.
 
@@ -196,6 +268,8 @@ def session_start(
     virtual_target_started = False
     virtual_target_definition_id: str | None = None
     virtual_target_instance_token: str | None = None
+    self._session_bootstrap_prepared = None
+    self._session_bootstrap_animation = None
     if observation is None:
         prepared = self._prepare_session_target(
             wait_for_lease_s=wait_for_lease_s,
@@ -221,6 +295,7 @@ def session_start(
             if prepared.get("instance_token") is not None
             else None
         )
+        self._session_bootstrap_prepared = dict(prepared)
         self._lease_waited_ms = int(prepared.get("lease_waited_ms") or 0)
     installed_bundle: dict[str, Any] | None = None
     animation_backup_path: Path | None = None
@@ -249,6 +324,7 @@ def session_start(
                 / f"{target_key}-{uuid.uuid4().hex}.json"
             )
             animation_change_key = f"session_animations:{animation_backup_path.name}"
+            self._session_bootstrap_animation = (animation_backup_path, animation_change_key)
             self.record_device_change(
                 key=animation_change_key,
                 kind="developer_settings",
@@ -288,7 +364,14 @@ def session_start(
             if package is None and installed_bundle:
                 # The bundle names the app, so `--apk` alone is enough to know what to open.
                 package = str(installed_bundle.get("package") or "") or None
-        if observation is None and package:
+        if package and grant_permissions:
+            granted = self.app("grant", package=package)
+            if getattr(granted, "ok", False) is not True:
+                raise DeviceError(
+                    f"could not grant runtime permissions to {package}",
+                    code="app_grant_failed",
+                )
+        if observation is None and package and launch_app:
             launched = self.app(
                 "launch",
                 package=package,
@@ -314,7 +397,7 @@ def session_start(
                 self._finish_launch_content_observation(launched)
                 observation = launched.observation
         observed = observation or self.analyze(source="hierarchy", with_ocr=False)
-        if package and observed.screen.package != package:
+        if package and launch_app and observed.screen.package != package:
             # A launch readback must never combine the requested package with a hierarchy
             # captured from the app we just left. Discard every speculative/cached seam and
             # take one authoritative hierarchy-only sample. If Android still reports a
@@ -373,6 +456,13 @@ def session_start(
                     if owner is not None and target.target_id in cleanup.get("stopped_target_ids", []):
                         leases.release(self.config.lease.registry_dir, target, owner=owner)
             self.close()
+        elif getattr(self, "_lease_serial", None):
+            # A failed install/grant/launch on a reused target happens before a SessionState exists,
+            # so session_finish cannot release the lease. Release only the fresh claim made by this
+            # bootstrap; a lease that predated the call still belongs to its caller.
+            _release_new_bootstrap_lease(self)
+        self._session_bootstrap_prepared = None
+        self._session_bootstrap_animation = None
         raise
     plan = self._goal_session_plan(goal, observed)
     from .session import complete_current_ui_phase_from_observation, create_session_state
@@ -431,6 +521,7 @@ def session_start(
         capture_start_order=capture_start_order,
         platform=self.platform.name,
     )
+    self._session_id = state.session_id
     if artifacts_dir:
         from .session import update_session_state
         from .session_artifacts import SessionArtifactStore
@@ -461,7 +552,6 @@ def session_start(
             state,
             observation=observed,
         )
-    self._session_id = state.session_id
     # Recommend only the active checkpoint from this frame. Future phases must be planned
     # lazily from the observation that activates them; projecting a launcher frame onto every
     # later checkpoint produced stale and sometimes misleading calls.
@@ -481,6 +571,11 @@ def session_start(
                 call=call,
             )
     out = plan.model_dump(mode="json")
+    if package and not launch_app:
+        # The current observation can legitimately belong to the launcher while a harness starts
+        # recording. Preserve the app selected for the deferred deterministic launch.
+        out["package"] = package
+        out["launch_deferred"] = True
     from .session import phase_progress
 
     # Bootstrap is a routing response, not a second copy of the persisted session document.
@@ -604,6 +699,35 @@ def session_start(
             )
         )
     return out
+
+
+@functools.wraps(_session_start_impl)
+def session_start(self: Engine, *args: Any, **kwargs: Any) -> dict[str, Any]:
+    """Start a session and never leak a lease when bootstrap fails before returning its ID."""
+    previous_session_id = getattr(self, "_session_id", None)
+    try:
+        result = _session_start_impl(self, *args, **kwargs)
+        self._session_bootstrap_prepared = None
+        self._session_bootstrap_animation = None
+        return result
+    except Exception:
+        current_session_id = getattr(self, "_session_id", None)
+        failed_session_id = (
+            current_session_id if current_session_id != previous_session_id else None
+        )
+        _rollback_new_bootstrap(self)
+        if failed_session_id:
+            from .session import finish_session_state, load_session_state
+
+            state = load_session_state(
+                self.config.cache.dir,
+                session_id=failed_session_id,
+                platform=self.platform.name,
+            )
+            if state is not None and state.finished_ms is None:
+                finish_session_state(self.config.cache.dir, state)
+            self._session_id = previous_session_id
+        raise
 
 
 def _phase_recommended_call(

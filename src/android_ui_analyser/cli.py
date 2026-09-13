@@ -4430,6 +4430,16 @@ def session_start_cmd(
         help="With --apk, uninstall any existing copy first (wipes app data). Needs --yes.",
     ),
     yes: bool = typer.Option(False, "--yes", help="Required for --fresh."),
+    grant_permissions: bool = typer.Option(
+        False,
+        "--grant-permissions",
+        help="Grant runtime permissions after app installation.",
+    ),
+    launch_app: bool = typer.Option(
+        True,
+        "--launch-app/--no-launch-app",
+        help="Launch the selected package during bootstrap.",
+    ),
 ) -> None:
     """Observe once and return the safest exact CLI and MCP next call.
 
@@ -4471,6 +4481,8 @@ def session_start_cmd(
             reinstall=reinstall,
             fresh=fresh,
             confirmed=yes,
+            grant_permissions=grant_permissions,
+            launch_app=launch_app,
         )
         if isinstance(result, dict) and _OBSERVATION_VIEW is not None:
             result = trim_observation_payload(result, _OBSERVATION_VIEW, fmt=fmt)

@@ -602,6 +602,31 @@ def _tool_definitions() -> list[types.Tool]:
                         "type": "string",
                         "description": "Optional launcher Activity to pin with package.",
                     },
+                    "apk": {
+                        "type": "string",
+                        "description": "Install this APK before planning; the bundle may name the package.",
+                    },
+                    "reinstall": {"type": "boolean", "default": False},
+                    "fresh": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Uninstall an existing copy before installing the APK.",
+                    },
+                    "confirmed": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Required confirmation for a destructive fresh install.",
+                    },
+                    "grant_permissions": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Grant runtime permissions after app installation.",
+                    },
+                    "launch_app": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "Launch the selected package during bootstrap.",
+                    },
                 },
                 "required": ["goal"],
                 "additionalProperties": False,
@@ -3099,6 +3124,12 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
             "needs": args.get("needs"),
             "package": args.get("package"),
             "activity": args.get("activity"),
+            "apk": args.get("apk"),
+            "reinstall": bool(args.get("reinstall", False)),
+            "fresh": bool(args.get("fresh", False)),
+            "confirmed": bool(args.get("confirmed", False)),
+            "grant_permissions": bool(args.get("grant_permissions", False)),
+            "launch_app": bool(args.get("launch_app", True)),
         }
         if "provision_target" in args:
             start_kwargs["provision_target"] = bool(args["provision_target"])

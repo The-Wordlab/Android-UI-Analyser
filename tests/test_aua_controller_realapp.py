@@ -129,6 +129,8 @@ class FakeAua:
             if self.knowledge is not None:
                 start["relevant_knowledge"] = copy.deepcopy(self.knowledge)
             return start
+        if name == "app_launch_and_analyze":
+            return copy.deepcopy(self.screen)
         if name == "analyze_screen":
             return copy.deepcopy(self.screen)
         if name == "tap_and_analyze":
@@ -205,10 +207,12 @@ def test_realapp_claim_stops_the_loop_and_two_judges_decide(tmp_path):
     assert result["controller"]["steps_consumed"] == 2, "no wasted evidence hunt after the claim"
 
     names = [name for name, _ in aua.calls]
-    assert names == ["session_start", "analyze_screen", "tap_and_analyze", "session_finish", "analyze_screen", "session_finish"]
-    model_finish = aua.calls[3][1]
-    assert model_finish == {"session_id": "sess-1", "allow_incomplete": False, "summary": False}, "claim fields never reach AUA"
-    assert aua.calls[5][1]["allow_incomplete"] is True, "cleanup closes the session"
+    assert names == [
+        "session_start", "app_launch_and_analyze", "tap_and_analyze", "analyze_screen", "session_finish"
+    ]
+    assert aua.calls[4][1]["allow_incomplete"] is True, (
+        "the model's completion claim must not release the lease before evidence and judgement"
+    )
 
     controller_payloads = [p for p in model.payloads if not isinstance(p.get("tool_choice"), dict)]
     judge_payloads = [p for p in model.payloads if isinstance(p.get("tool_choice"), dict)]
@@ -269,14 +273,22 @@ def test_realapp_puts_host_knowledge_into_the_first_user_message(tmp_path):
     assert plain["knowledge_shown"] == []
 
 
-def test_realapp_contract_acceptance_needs_no_judge(tmp_path):
+def test_model_finish_claim_still_requires_independent_judgement(tmp_path):
     aua = FakeAua(accept_finish=True)
-    model = FakeModel(controller=[model_call("session_finish", {"outcome": "already_satisfied"})], judgements={})
+    model = FakeModel(
+        controller=[model_call("session_finish", {"outcome": "already_satisfied"})],
+        judgements={
+            "record_verdict": [
+                verdict("pass", "final frame confirms the goal"),
+                verdict("pass", "fresh evidence agrees"),
+            ]
+        },
+    )
     result = run(tmp_path, aua, model)
-    assert result["verdict"] == {"oracle": "aua_session_contract", "verified": True, "verdict": "pass",
-                                 "reasons": ["AUA accepted session_finish against its own contract."]}
-    assert result["controller"]["stop_reason"] == "terminal_tool"
-    assert "judge" not in result["cost"] and result["cost"]["total_usd"] == pytest.approx(0.001)
+    assert result["verdict"]["oracle"] == "model_judgement_v1"
+    assert result["verdict"]["verdict"] == "pass"
+    assert result["controller"]["stop_reason"] == "terminal_claimed"
+    assert result["cost"]["judge"]["usd"] > 0
 
 
 def test_realapp_disagreement_is_unverified_and_stall_downgrades(tmp_path):
@@ -335,8 +347,11 @@ def test_realapp_records_setup_failures_and_still_cleans_up(tmp_path):
 
     aua = BrokenAua()
     result = run(tmp_path, aua, FakeModel([], {}), setup_flows=[("steps: []", {})])
-    assert result["verdict"]["verdict"] == "unverified" and "setup flow 0 failed" in result["error"]
-    assert [name for name, _ in aua.calls] == ["session_start", "flow_run", "session_finish"]
+    assert result["verdict"]["verdict"] == "unverified"
+    assert "setup flow 0 failed" in result["error"]
+    assert any(item.get("flow_run_ok") is False for item in result["setup"])
+    assert aua.calls[-1][0] == "session_finish"
+    assert aua.calls[-1][1]["allow_incomplete"] is True
     assert (tmp_path / "run" / "result.json").exists()
 
 

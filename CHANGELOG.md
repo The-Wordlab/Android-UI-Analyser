@@ -19,12 +19,29 @@ notes, so you can check for a newer version — and read what changed — withou
   `knowledge_add` `aliases` field; `aua knowledge list --query "<goal>"` and MCP
   `knowledge_list` `query` return the same ranked view mid-run. Facts recorded for an app used
   to be pull-only through `aua about`; nothing surfaced them for the goal at hand.
+- MCP `session_start` now exposes the existing APK install/fresh bootstrap, optional runtime
+  permission grant, and deferred app launch. The CLI exposes the same permission and launch
+  controls, so harnesses can acquire or provision a leased target, install the app, and prepare
+  recording before the first product launch without agent orchestration.
+
+### Changed
+
+- The real-app controller owns the complete deterministic lifecycle: reuse or provision a target,
+  fall back to waiting when provisioning cannot start, bootstrap the app through `session_start`,
+  run prelaunch environment setup and verified flags before the pinned product launch, record from
+  first launch through judgement, and release the session. MCP transport timeouts now
+  cover both sequential lease waits, and authored contract bullets receive independent evidence
+  results from both judges with an output budget that scales to the criterion count.
 
 ### Fixed
 
 - Recording starts recover same-session failed-start metadata after the target proves no recording
   owner is live, and quarantine legacy host-local recording paths without weakening target cleanup
   identity checks.
+- Failed bootstrap on a reused device releases the lease acquired by that attempt. A controller's
+  `session_finish` call is now only an untrusted completion claim, so it cannot release the target
+  before fresh evidence, judgement, and recording finalization. Recording or session cleanup
+  failures invalidate otherwise successful harness verdicts.
 
 ## [0.19.1] - 2026-09-13
 

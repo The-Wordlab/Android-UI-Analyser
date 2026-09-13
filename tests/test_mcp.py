@@ -348,7 +348,18 @@ def test_mcp_session_and_reach_dispatch_contract(monkeypatch: pytest.MonkeyPatch
     async def run() -> list[dict[str, object]]:
         async with create_connected_server_and_client_session(server) as client:
             results = [
-                await client.call_tool("session_start", {"goal": "open settings", "headed": True}),
+                await client.call_tool(
+                    "session_start",
+                    {
+                        "goal": "open settings",
+                        "headed": True,
+                        "apk": "/tmp/fixture.apk",
+                        "fresh": True,
+                        "confirmed": True,
+                        "grant_permissions": True,
+                        "launch_app": False,
+                    },
+                ),
                 await client.call_tool("reach", {"goal": "settings", "poll_ms": 25}),
                 await client.call_tool("session_review", {"session_id": "session-1"}),
                 await client.call_tool(
@@ -374,6 +385,12 @@ def test_mcp_session_and_reach_dispatch_contract(monkeypatch: pytest.MonkeyPatch
                 "needs": None,
                 "package": None,
                 "activity": None,
+                "apk": "/tmp/fixture.apk",
+                "reinstall": False,
+                "fresh": True,
+                "confirmed": True,
+                "grant_permissions": True,
+                "launch_app": False,
             },
         ),
         (

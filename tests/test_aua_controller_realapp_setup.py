@@ -33,15 +33,30 @@ from test_aua_controller_realapp import (
 SETTINGS = {"provider": {"only": ["fictional"], "allow_fallbacks": False,
                          "max_price": {"prompt": 0.3, "completion": 1.2}},
             "reasoning": {"effort": "low"}}
+VISION_SETTINGS = {"provider": {"only": ["seeing"], "order": ["seeing"],
+                                "allow_fallbacks": False,
+                                "max_price": {"prompt": 0.4, "completion": 1.6}},
+                   "reasoning": {"effort": "low"}}
 
 
 class SetupAua:
     """AUA's MCP surface for the setup phase, recording what each stage was asked to do."""
 
-    def __init__(self, *, flags_ok=True, flow_ok=True, evidence_colours=None):
+    def __init__(
+        self,
+        *,
+        flags_ok=True,
+        flow_ok=True,
+        evidence_colours=None,
+        session_starts=None,
+        record_stop_ok=True,
+        finish_ok=True,
+    ):
         self.calls: list[tuple[str, dict]] = []
         self.flags_ok, self.flow_ok = flags_ok, flow_ok
+        self.record_stop_ok, self.finish_ok = record_stop_ok, finish_ok
         self.evidence_colours = evidence_colours or {}
+        self.session_starts = list(session_starts or [])
         self.screen = frame("fp-home", ("Chats", "Settings"))
 
     def _write_evidence(self, artifacts_dir):
@@ -64,13 +79,24 @@ class SetupAua:
             # directory is empty when it starts. The fake writes it at the same moment.
             if self.evidence_colours:
                 self._write_evidence(Path(arguments["artifacts_dir"]))
+            if self.session_starts:
+                return copy.deepcopy(self.session_starts.pop(0))
             return {"ok": True, "session_id": "sess-1", "serial": "emulator-0000"}
         if name == "install_app":
             return {"ok": True, "app_install": {"installed": True, "uninstalled_first": True}}
         if name == "app":
             return {"ok": True, "action": "app-grant"}
+        if name == "screen_record_start":
+            return {"ok": True, "action": "screen-record-start"}
+        if name == "screen_record_stop":
+            if not self.record_stop_ok:
+                return {"ok": False, "error": {"code": "record_stop_failed"}}
+            Path(arguments["path"]).write_bytes(b"fake-mp4")
+            return {"ok": True, "action": "screen-record-stop", "path": arguments["path"]}
+        if name == "app_launch_and_analyze":
+            return copy.deepcopy(self.screen)
         if name == "flags_apply":
-            return {"ok": True} if self.flags_ok else {"ok": False, "error": {"code": "flag_ignored"}}
+            return {"ok": True, "verified": True} if self.flags_ok else {"ok": False, "error": {"code": "flag_ignored"}}
         if name == "flow_run":
             return {"ok": True} if self.flow_ok else {"ok": False, "error": {"code": "flow_step_failed"}}
         if name == "analyze_screen":
@@ -79,8 +105,11 @@ class SetupAua:
             self.screen = frame("fp-theme", ("Theme", "Light Mode Selected"))
             return copy.deepcopy(self.screen)
         if name == "session_finish":
-            return {"ok": arguments.get("allow_incomplete") is True, "finished": False,
-                    "terminated": arguments.get("allow_incomplete") is True}
+            return {
+                "ok": self.finish_ok and arguments.get("allow_incomplete") is True,
+                "finished": False,
+                "terminated": self.finish_ok and arguments.get("allow_incomplete") is True,
+            }
         raise AssertionError(f"unexpected tool {name}")
 
     async def list_tools(self):
@@ -90,12 +119,22 @@ class SetupAua:
         return [args for called, args in self.calls if called == name]
 
 
-def two_step_model():
+def two_step_model(criteria=None):
+    neutral = verdict("pass", "Light Mode Selected is visible")
+    skeptical = verdict("pass", "the theme row agrees")
+    if criteria:
+        neutral["criteria"] = [
+            {"criterion": criterion, "result": "verified", "evidence": "visible in the captured frame"}
+            for criterion in criteria
+        ]
+        skeptical["criteria"] = [
+            {"criterion": criterion, "result": "verified", "evidence": "independently confirmed"}
+            for criterion in criteria
+        ]
     return FakeModel(
         controller=[model_call("tap_and_analyze", {"id": "el:fp-home-1"}),
                     model_call("session_finish", {"outcome": "achieved", "note": "done"}, call_id="native-2")],
-        judgements={"record_verdict": [verdict("pass", "Light Mode Selected is visible"),
-                                       verdict("pass", "the theme row agrees")]},
+        judgements={"record_verdict": [neutral, skeptical]},
     )
 
 
@@ -109,6 +148,16 @@ def run(tmp_path, aua, model, **kwargs):
 
 
 # --- argument shapes -----------------------------------------------------------------
+
+
+def test_mcp_timeout_covers_both_sequential_lease_waits():
+    from datetime import timedelta
+
+    from experiments.aua_controller.run_realapp import mcp_read_timeout
+
+    assert mcp_read_timeout(0.0, 0.0) == timedelta(seconds=180.0)
+    assert mcp_read_timeout(30.0, 600.0) == timedelta(seconds=750.0)
+
 
 @pytest.mark.parametrize("given,expected", [
     (["a=1"], {"a": "1"}),
@@ -141,7 +190,166 @@ def test_setup_params_bind_to_flows_by_position(tmp_path):
         build_setup_flows([first], ["A=1", "B=2"])
 
 
+# --- deterministic lifecycle ----------------------------------------------------------
+
+
+def test_permission_grant_does_not_require_a_fresh_reinstall(tmp_path):
+    aua = SetupAua()
+
+    run(
+        tmp_path,
+        aua,
+        two_step_model(),
+        fresh_app=False,
+        apk="/tmp/example.apk",
+        grant_permissions=True,
+    )
+
+    start = aua.named("session_start")[0]
+    assert start["grant_permissions"] is True
+    assert start.get("fresh") is not True
+
+
+def test_session_bootstrap_owns_install_and_recording_wraps_launch_to_cleanup(tmp_path):
+    aua = SetupAua()
+
+    result = run(
+        tmp_path,
+        aua,
+        two_step_model(),
+        launch=True,
+        record=True,
+        lease_wait_s=0,
+        fallback_lease_wait_s=45,
+    )
+
+    started = aua.named("session_start")
+    assert len(started) == 1
+    assert started[0] == {
+        "goal": "Switch the app theme to Light",
+        "package": "com.example.fictional",
+        "headed": False,
+        "artifacts_dir": str((tmp_path / "run" / "aua").resolve()),
+        "evidence": "all",
+        "apk": "/tmp/example.apk",
+        "fresh": True,
+        "confirmed": True,
+        "grant_permissions": False,
+        "launch_app": False,
+        "wait_for_lease_s": 0,
+        "provision_target": True,
+    }
+    assert aua.named("install_app") == []
+    assert aua.named("app") == []
+    order = [name for name, _ in aua.calls]
+    assert order.index("screen_record_start") < order.index("app_launch_and_analyze")
+    assert order.index("screen_record_stop") < max(
+        index for index, name in enumerate(order) if name == "session_finish"
+    )
+    assert Path(result["recording"]["path"]).read_bytes() == b"fake-mp4"
+
+
+def test_recording_cleanup_failure_forces_an_unverified_result(tmp_path):
+    result = run(
+        tmp_path,
+        SetupAua(record_stop_ok=False),
+        two_step_model(),
+        record=True,
+    )
+
+    assert result["verdict"]["verdict"] == "unverified"
+    assert result["verdict"]["oracle"] == "model_judgement_v1"
+    assert result["verdict"]["reasons"], "judge evidence survives cleanup invalidation"
+    assert "recording cleanup" in (result["error"] or "")
+    assert result["recording"]["stop_ok"] is False
+
+
+def test_failed_extra_emulator_falls_back_to_waiting_for_a_released_lease(tmp_path):
+    aua = SetupAua(session_starts=[
+        {"ok": False, "error": {"code": "virtual_target_start_failed", "message": "insufficient disk"}},
+        {"ok": True, "session_id": "sess-waited", "serial": "emulator-5556"},
+    ])
+
+    result = run(
+        tmp_path,
+        aua,
+        two_step_model(),
+        lease_wait_s=0,
+        fallback_lease_wait_s=45,
+    )
+
+    attempts = aua.named("session_start")
+    assert len(attempts) == 2
+    assert attempts[0]["provision_target"] is True
+    assert attempts[0]["wait_for_lease_s"] == 0
+    assert attempts[1]["provision_target"] is False
+    assert attempts[1]["wait_for_lease_s"] == 45
+    assert result["session_id"] == "sess-waited"
+    assert result["lifecycle"]["lease_strategy"] == "waited_after_provision_failure"
+
+
 # --- feature flags -------------------------------------------------------------------
+
+def test_prelaunch_setup_runs_before_flags_and_product_launch(tmp_path):
+    aua = SetupAua()
+    run(
+        tmp_path,
+        aua,
+        two_step_model(),
+        prelaunch_setup_flows=[("name: environment", {"ENVIRONMENT": "Curie"})],
+        flags={"simplification_experiment": "a"},
+        setup_flows=[("name: login", {})],
+    )
+
+    ordered = [
+        (name, arguments.get("yaml"))
+        for name, arguments in aua.calls
+        if name in {"flow_run", "flags_apply", "app_launch_and_analyze"}
+    ]
+    assert ordered == [
+        ("flow_run", "name: environment"),
+        ("flags_apply", None),
+        ("app_launch_and_analyze", None),
+        ("flow_run", "name: login"),
+    ]
+
+
+def test_the_judge_can_use_a_different_model_from_the_controller(tmp_path):
+    aua, model = SetupAua(), two_step_model()
+    result = run(
+        tmp_path,
+        aua,
+        model,
+        setup_flows=[],
+        judge_model="vision/model",
+        judge_request_config=VISION_SETTINGS,
+    )
+    assert result["judge_model"] == "vision/model"
+    controller_turns = [p for p in model.payloads if not isinstance(p.get("tool_choice"), dict)]
+    judge_turns = [p for p in model.payloads if isinstance(p.get("tool_choice"), dict)]
+    assert {p["model"] for p in controller_turns} == {"fictional/model"}
+    assert {p["model"] for p in judge_turns} == {"vision/model"}
+
+
+def test_unverified_flag_readback_stops_before_product_journey(tmp_path):
+    class UnverifiedFlagsAua(SetupAua):
+        async def call_tool(self, name: str, arguments: dict):
+            if name == "flags_apply":
+                self.calls.append((name, arguments))
+                return {"ok": True, "verified": False, "verification_error": "prefs unreadable"}
+            return await SetupAua.call_tool(self, name, arguments)
+
+    aua = UnverifiedFlagsAua()
+    result = run(
+        tmp_path,
+        aua,
+        two_step_model(),
+        flags={"experiment": "a"},
+    )
+
+    assert "verified" in result["error"]
+    assert all(name != "app_launch_and_analyze" for name, _arguments in aua.calls)
+
 
 def test_flags_are_written_verified_and_recorded_before_the_setup_flow(tmp_path):
     aua = SetupAua()
@@ -156,8 +364,8 @@ def test_flags_are_written_verified_and_recorded_before_the_setup_flow(tmp_path)
     assert "simplification_experiment: a" in written
     assert result["flag_context"] == {"simplification_experiment": "a"}
     order = [name for name, _ in aua.calls]
-    assert order.index("install_app") < order.index("flags_apply") < order.index("flow_run"), (
-        "flags need the installed app, and the setup flow needs the flag arm already applied")
+    assert order.index("session_start") < order.index("flags_apply") < order.index("flow_run"), (
+        "session bootstrap needs to install the app before flags, and setup needs the flag arm")
 
 
 def test_an_ignored_flag_fails_the_run_instead_of_judging_the_wrong_arm(tmp_path):
@@ -188,17 +396,45 @@ def test_setup_flows_run_in_order_each_with_its_own_parameters(tmp_path):
     assert "params" not in ran[1], "a flow with no parameters is not sent an empty mapping"
 
 
-def test_a_failing_setup_flow_names_which_one_failed(tmp_path):
+def test_a_failing_setup_flow_stops_before_the_controller(tmp_path):
     aua = SetupAua(flow_ok=False)
-    result = run(tmp_path, aua, two_step_model(), setup_flows=[("name: environment", {"ENVIRONMENT": "Curie"})])
-    assert "setup flow 0 failed" in (result["error"] or "")
+    result = run(
+        tmp_path,
+        aua,
+        two_step_model(),
+        setup_flows=[("name: environment", {"ENVIRONMENT": "Curie"})],
+    )
+
+    assert "setup flow 0 failed" in result["error"]
+    assert any(
+        item.get("flow_run_ok") is False for item in result["setup"]
+    )
+    assert result["controller"] is None
+
+
+def test_a_failing_prelaunch_flow_stops_before_flags_and_product_launch(tmp_path):
+    aua = SetupAua(flow_ok=False)
+    result = run(
+        tmp_path,
+        aua,
+        two_step_model(),
+        prelaunch_setup_flows=[("name: environment", {"ENVIRONMENT": "Curie"})],
+        flags={"experiment": "a"},
+    )
+
+    assert "prelaunch setup flow 0 failed" in result["error"]
+    assert all(name not in {"flags_apply", "app_launch_and_analyze"} for name, _ in aua.calls)
 
 
 # --- authored contract and vision ------------------------------------------------------
 
 def test_the_authored_contract_reaches_the_judge_and_element_text_does_not_replace_it(tmp_path):
-    aua, model = SetupAua(), two_step_model()
+    aua = SetupAua()
     contract = "- The theme list marks the chosen option as selected.\n- Surfaces render light."
+    model = two_step_model([
+        "The theme list marks the chosen option as selected.",
+        "Surfaces render light.",
+    ])
     run(tmp_path, aua, model, setup_flows=[], contract=contract)
     judged = [p for p in model.payloads if isinstance(p.get("tool_choice"), dict)]
     assert judged, "the judge was asked"
