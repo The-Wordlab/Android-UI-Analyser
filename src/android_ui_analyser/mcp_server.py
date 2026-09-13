@@ -2398,12 +2398,16 @@ def _tool_definitions() -> list[types.Tool]:
         ),
         types.Tool(
             name="knowledge_list",
-            description="List provenance-bearing app knowledge.",
+            description=(
+                "List provenance-bearing app knowledge. With query, return only accepted "
+                "facts whose aliases, name or text match that goal phrasing, best first."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "package": {"type": "string"},
                     "status": {"type": "string"},
+                    "query": {"type": "string"},
                 },
                 "required": ["package"],
                 "additionalProperties": False,
@@ -2419,6 +2423,7 @@ def _tool_definitions() -> list[types.Tool]:
                     "kind": {"type": "string"},
                     "text": {"type": "string"},
                     "name": {"type": "string"},
+                    "aliases": {"type": "array", "items": {"type": "string"}},
                     "context": {"type": "string"},
                     "source": {"type": "string"},
                     "agent": {"type": "string"},
@@ -3827,6 +3832,15 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 )
             if name == "knowledge_list":
                 status = args.get("status")
+                query = args.get("query")
+                if isinstance(query, str) and query.strip():
+                    from .session import relevant_knowledge
+
+                    return {
+                        "package": package,
+                        "query": query,
+                        "knowledge": relevant_knowledge(app_map, query, limit=10),
+                    }
                 return {
                     "package": package,
                     "knowledge": [
@@ -3841,6 +3855,7 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                     kind=args.get("kind", "claim"),
                     text=args["text"],
                     name=args.get("name"),
+                    aliases=[str(alias) for alias in args.get("aliases", [])],
                     context_id=args.get("context"),
                     source=args.get("source", "agent"),
                     agent=args.get("agent"),

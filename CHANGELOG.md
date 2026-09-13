@@ -11,6 +11,15 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Added
+
+- `aua session start` returns `relevant_knowledge`: accepted knowledge items whose aliases,
+  name or text match the goal, best first, with a warning line pointing at them. Knowledge
+  items gain `aliases` (goal phrasings), settable with `aua knowledge add --alias` and the MCP
+  `knowledge_add` `aliases` field; `aua knowledge list --query "<goal>"` and MCP
+  `knowledge_list` `query` return the same ranked view mid-run. Facts recorded for an app used
+  to be pull-only through `aua about`; nothing surfaced them for the goal at hand.
+
 ### Fixed
 
 - Recording starts recover same-session failed-start metadata after the target proves no recording

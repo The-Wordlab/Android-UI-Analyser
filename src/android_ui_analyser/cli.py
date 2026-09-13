@@ -8448,15 +8448,26 @@ def knowledge_list(
     status: str | None = typer.Option(
         None, "--status", help="Filter accepted/proposed/stale/rejected."
     ),
+    query: str | None = typer.Option(
+        None,
+        "--query",
+        help="Goal phrasing; returns only accepted facts whose aliases/name/text match, best first.",
+    ),
 ) -> None:
     """List durable knowledge with source, scope, and status."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
         import json
 
+        from .session import relevant_knowledge
+
         opts = _opts(ctx)
         pkg = _resolve_package(engine, app_pkg)
         app_map = AppMemoryStore.from_config(opts.load()).load(pkg) or AppMap(package=pkg)
+        if query and query.strip():
+            payload = {"package": pkg, "query": query, "knowledge": relevant_knowledge(app_map, query, limit=10)}
+            typer.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+            return
         items = [
             item.model_dump(mode="json")
             for item in app_map.knowledge
@@ -8495,6 +8506,9 @@ def knowledge_add(
     text: str = typer.Option(..., "--text", help="Fact or experience to retain."),
     kind: str = typer.Option("claim", "--kind", help="description|note|recipe|deeplink|claim"),
     name: str | None = typer.Option(None, "--name", help="Recipe name or deeplink URI."),
+    alias: list[str] | None = typer.Option(
+        None, "--alias", help="Goal phrasing this fact applies to (e.g. 'change theme'); repeat."
+    ),
     context: str | None = typer.Option(None, "--context", help="Feature-flag context scope."),
     source: str = typer.Option("agent", "--source", help="user|agent|runtime|source"),
     agent: str | None = typer.Option(None, "--agent", help="Agent/provider name."),
@@ -8520,6 +8534,7 @@ def knowledge_add(
             kind=kind,  # type: ignore[arg-type]
             text=text,
             name=name,
+            aliases=alias,
             context_id=context,
             source=source,  # type: ignore[arg-type]
             agent=agent,

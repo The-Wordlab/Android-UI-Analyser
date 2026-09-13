@@ -188,7 +188,11 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "`aua map` (or `aua map --brief`) prints the app's known screens + routes — but you "
         "usually don't need to call it: every `analyze` already returns `meta.known_screen` plus "
         "inline `meta.known_routes` / `meta.suggested_gotos` / `meta.map_hint`; unresolved "
-        "map questions arrive in `meta.research_tasks`. Act on those "
+        "map questions arrive in `meta.research_tasks`. `aua session start` also returns "
+        "`relevant_knowledge`: recorded facts, recipes and deeplinks whose aliases or text match "
+        "the goal (where a setting really lives, what a fresh install forces, which dev deeplink "
+        "sets it). Read them before navigating by hand; mid-run, `aua knowledge list --query "
+        '"<goal>"` asks the same question. Act on those '
         'instead of re-exploring. `aua map --find "<goal>"` gives only a verified route to a '
         "target; provisional evidence is shown as no verified route, never as runnable steps. "
         "Feature-flag sets are separate contexts; use `--all-contexts` to compare variants and "
@@ -240,7 +244,8 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
     (
         "Feed research back and correct the map",
         "`aua knowledge add` stores an experience with source/agent/session/evidence so future "
-        "runs inherit it. AUA also creates research tasks automatically when a new map entry is "
+        "runs inherit it; add `--alias \"<goal phrasing>\"` for each way a goal might name the "
+        "situation, because that is what makes the fact surface in `relevant_knowledge`. AUA also creates research tasks automatically when a new map entry is "
         "ambiguous or a route is provisional/unreplayable. **The cheapest of those is answered in "
         "passing.** A response may carry `meta.ask` — a `# aua asks: …` line under `--format tsv` "
         "— which is ONE question about the screen you are standing on, almost always *this name "
