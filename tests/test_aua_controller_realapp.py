@@ -297,8 +297,8 @@ def test_realapp_records_setup_failures_and_still_cleans_up(tmp_path):
             return await super().call_tool(name, arguments)
 
     aua = BrokenAua()
-    result = run(tmp_path, aua, FakeModel([], {}), setup_flow_yaml="steps: []")
-    assert result["verdict"]["verdict"] == "unverified" and "setup flow failed" in result["error"]
+    result = run(tmp_path, aua, FakeModel([], {}), setup_flows=[("steps: []", {})])
+    assert result["verdict"]["verdict"] == "unverified" and "setup flow 0 failed" in result["error"]
     assert [name for name, _ in aua.calls] == ["session_start", "flow_run", "session_finish"]
     assert (tmp_path / "run" / "result.json").exists()
 

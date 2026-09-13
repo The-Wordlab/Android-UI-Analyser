@@ -14,9 +14,12 @@ caller enables them explicitly and every result records reported cost.
 
 from __future__ import annotations
 
+import base64
 import copy
+import io
 import json
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -136,6 +139,70 @@ def evidence_frame(result: Any, *, max_elements: int = 40, keep_ids: bool = Fals
     return compact if keep_ids else _strip_ids(compact)
 
 
+MAX_IMAGE_WIDTH = 360
+MAX_IMAGES = 4
+
+
+def encode_image(path: Any, *, max_width: int = MAX_IMAGE_WIDTH, quality: int = 70) -> str | None:
+    """Return a downscaled JPEG data URI for one screenshot, or None when it cannot be read.
+
+    Judges reason about layout and appearance, not fine detail, so the image is narrowed to
+    ``max_width`` before encoding. A full 720px screen costs roughly ten times as many tokens
+    for no extra decidable signal.
+    """
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+    try:
+        with Image.open(str(path)) as image:
+            image = image.convert("RGB")
+            if image.width > max_width:
+                height = max(1, round(image.height * max_width / image.width))
+                image = image.resize((max_width, height))
+            buffer = io.BytesIO()
+            image.save(buffer, format="JPEG", quality=quality)
+    except Exception:
+        return None
+    return "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def screenshot_index(manifest_path: Any) -> dict[str, str]:
+    """Map an observation fingerprint to the screenshot AUA captured with it.
+
+    The evidence id ends with the same fingerprint the compacted frame carries in
+    ``meta.fingerprint``, which is what lets a text frame be paired with its own image.
+    """
+    try:
+        manifest = json.loads(Path(str(manifest_path)).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    index: dict[str, str] = {}
+    for entry in manifest.get("entries") or []:
+        if not isinstance(entry, dict):
+            continue
+        shot, evidence_id = entry.get("screenshot"), entry.get("evidence_id")
+        if not shot or not isinstance(evidence_id, str):
+            continue
+        fingerprint = evidence_id.rsplit(":", 1)[-1]
+        if fingerprint and Path(str(shot)).is_file():
+            index.setdefault(fingerprint, str(shot))
+    return index
+
+
+def frame_fingerprint(frame: Any) -> str | None:
+    """The fingerprint of a raw or already-compacted frame, if it carries one."""
+    if not isinstance(frame, dict):
+        return None
+    for candidate in (frame, frame.get("observation") if isinstance(frame.get("observation"), dict) else None):
+        if not isinstance(candidate, dict):
+            continue
+        meta = candidate.get("meta")
+        if isinstance(meta, dict) and isinstance(meta.get("fingerprint"), str):
+            return meta["fingerprint"]
+    return None
+
+
 class Decider:
     """Fresh-window structured decisions sharing the controller's model and routing."""
 
@@ -185,15 +252,32 @@ class Decider:
         context: Any,
         schema: dict[str, Any],
         name: str,
+        images: Sequence[str] = (),
     ) -> dict[str, Any]:
-        """Ask one question; return the validated object plus usage and cost accounting."""
+        """Ask one question; return the validated object plus usage and cost accounting.
+
+        ``images`` are data URIs appended to the user turn, for a question that cannot be
+        answered from element text alone. They are sent only when the caller supplies them,
+        so a text-only model and a text-only question are unaffected.
+        """
         jsonschema.validators.validator_for(schema).check_schema(schema)
+        text = question + "\n\nEvidence:\n" + json.dumps(context, ensure_ascii=False)
+        shots = [url for url in list(images)[:MAX_IMAGES] if isinstance(url, str) and url]
+        if shots:
+            text += ("\n\nThe attached screenshots are the rendered frames, oldest first, and the "
+                     "last one is the final screen. Use them for anything about appearance, "
+                     "layout, colour or legibility, which element text cannot show.")
+            content: Any = [{"type": "text", "text": text}]
+            content += [{"type": "image_url", "image_url": {"url": url}} for url in shots]
+        else:
+            content = text
         messages = [
             {"role": "system", "content": DECIDER_SYSTEM + "\n\nRole: " + role + ".\n" + instructions},
-            {"role": "user", "content": question + "\n\nEvidence:\n" + json.dumps(context, ensure_ascii=False)},
+            {"role": "user", "content": content},
         ]
         tool = {"type": "function", "function": {"name": name, "description": f"Record the {role} decision.", "parameters": schema}}
-        record: dict[str, Any] = {"role": role, "name": name, "repairs": 0, "usage": [], "cost": 0.0}
+        record: dict[str, Any] = {"role": role, "name": name, "repairs": 0, "usage": [], "cost": 0.0,
+                                  "images": len(shots)}
         result: dict[str, Any] | None = None
         error: str | None = None
         for attempt in range(self.repair_budget + 1):
@@ -261,8 +345,14 @@ async def judge_outcome(
     actions: list[dict[str, Any]] = (),
     progress: Any = None,
     stance: str = "neutral",
+    images: Sequence[str] = (),
+    contract: str | None = None,
 ) -> dict[str, Any]:
-    """One independent verdict from observed frames. The controller's narrative is not input."""
+    """One independent verdict from observed frames. The controller's narrative is not input.
+
+    ``contract`` is the authored acceptance criteria for this goal. When supplied it is the
+    oracle the judge answers against, instead of its own reading of a one-line goal.
+    """
     if stance not in JUDGE_INSTRUCTIONS:
         raise RunError("unknown judge stance")
     context = {
@@ -275,10 +365,18 @@ async def judge_outcome(
     }
     if progress is not None:
         context["aua_goal_progress"] = progress
+    if contract:
+        context["authored_contract"] = str(contract)[:12000]
+    question = ("Was this goal achieved, as shown by the frames? The final frame is the current screen.")
+    if contract:
+        question = ("Judge the run against `authored_contract`, which is the authority here. Every "
+                    "criterion it states must hold. If a criterion cannot be checked from this "
+                    "evidence, do not assume it passed: say so and return 'unverified' unless "
+                    "another criterion is outright broken, which is 'fail'.")
     decision = await decider.decide(
         role="outcome judge (" + stance + ")", instructions=JUDGE_INSTRUCTIONS[stance] + CLAIM_NOTE,
-        question="Was this goal achieved, as shown by the frames? The final frame is the current screen.",
-        context=context, schema=OUTCOME_SCHEMA, name="record_verdict",
+        question=question, context=context, schema=OUTCOME_SCHEMA, name="record_verdict",
+        images=images,
     )
     return {**decision, "stance": stance}
 

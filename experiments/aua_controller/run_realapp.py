@@ -22,7 +22,7 @@ import json
 import os
 import sys
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -34,7 +34,10 @@ from experiments.aua_controller.hosted_projection import hosted_model_view
 from experiments.aua_controller.judgement import (
     Decider,
     ScreenNamer,
+    encode_image,
+    frame_fingerprint,
     judge_outcome_votes,
+    screenshot_index,
     summarize_route,
 )
 from experiments.aua_controller.run_live import (
@@ -145,7 +148,12 @@ async def run_realapp(
     backend: str = "openrouter",
     launch: bool = False,
     activity: str | None = None,
-    setup_flow_yaml: str | None = None,
+    fresh_app: bool = False,
+    apk: str | None = None,
+    flags: dict[str, str] | None = None,
+    setup_flows: Sequence[tuple[str, dict[str, str]]] = (),
+    contract: str | None = None,
+    vision: bool = False,
     judge: bool = True,
     judge_votes: int = 2,
     name_screens: bool = False,
@@ -185,6 +193,10 @@ async def run_realapp(
         try:
             decoded = tool_result(await call_tool(name, arguments))
             record["ok"] = decoded.get("ok")
+            if decoded.get("ok") is not True:
+                # A failing AUA call does not always populate `error`; keep a bounded copy of the
+                # payload so the reason survives in the log instead of reading as `error: null`.
+                record["payload"] = json.dumps(decoded, ensure_ascii=False, default=str)[:2000]
             return decoded
         except Exception as exc:
             record["error"] = _error_text(exc)
@@ -203,16 +215,51 @@ async def run_realapp(
         if not isinstance(session_id, str) or not session_id:
             raise RunError("session_start returned no session_id")
         result["session_id"], result["serial"] = session_id, start.get("serial")
+        if fresh_app:
+            # MCP session_start has no --apk/--fresh bootstrap, so a real target arrives either
+            # with no app at all (AUA just booted a bare AVD) or with whatever the last session
+            # left behind. install_app mode=fresh covers both: it installs the build and wipes
+            # prior app data. `app clear` is deliberately not used here — the MCP `app` tool
+            # cannot pass the engine's required `confirmed`, so clear silently no-ops.
+            if not apk:
+                raise RunError("fresh_app needs --apk: a booted AVD has no app to clear")
+            installed = await call("install_app", {"bundle": apk, "package": package,
+                                                   "mode": "fresh", "confirmed": True}, "setup")
+            granted = await call("app", {"action": "grant", "package": package}, "setup")
+            result["setup"].append({"fresh_app": True, "install_ok": installed.get("ok"),
+                                    "grant_ok": granted.get("ok")})
+            if installed.get("ok") is not True:
+                raise RunError("fresh install failed: " + json.dumps(installed)[:400])
         if launch:
             arguments: dict[str, Any] = {"package": package}
             if activity:
                 arguments["activity"] = activity
             await call("app_launch_and_analyze", arguments, "setup")
-        if setup_flow_yaml:
-            flow = await call("flow_run", {"yaml": setup_flow_yaml, "assist": False}, "setup")
-            result["setup"].append({"flow_run_ok": flow.get("ok"), "error": flow.get("error")})
-            if flow.get("ok") is False:
-                raise RunError("setup flow failed: " + json.dumps(flow.get("error"))[:300])
+        if flags:
+            # Feature-flag context is part of the oracle: a scenario judged in the wrong arm is
+            # a verdict about a different product. flags_apply verifies each key against the
+            # app's own stored prefs and restarts, so a key the build no longer knows is a
+            # loud failure here rather than a silently dropped precondition.
+            flag_file = output / "feature-flags.yaml"
+            flag_file.write_text(
+                "app: " + package + "\nflags:\n"
+                + "".join(f"  {key}: {value}\n" for key, value in flags.items()),
+                encoding="utf-8")
+            applied = await call("flags_apply", {"path": str(flag_file.resolve()), "package": package,
+                                                 "restart": True, "verify": True}, "setup")
+            result["setup"].append({"flags": dict(flags), "flags_ok": applied.get("ok")})
+            result["flag_context"] = dict(flags)
+            if applied.get("ok") is not True:
+                raise RunError("feature flags not applied: " + json.dumps(applied)[:400])
+        for index, (flow_yaml, flow_params) in enumerate(setup_flows):
+            arguments: dict[str, Any] = {"yaml": flow_yaml, "assist": False}
+            if flow_params:
+                arguments["params"] = {str(k): str(v) for k, v in flow_params.items()}
+            flow = await call("flow_run", arguments, "setup")
+            result["setup"].append({"setup_flow": index, "params": dict(flow_params or {}),
+                                    "flow_run_ok": flow.get("ok"), "error": flow.get("error")})
+            if flow.get("ok") is not True:
+                raise RunError(f"setup flow {index} failed: " + json.dumps(flow.get("error") or flow)[:500])
         initial = await call("analyze_screen", {"source": "hierarchy", "no_cache": True}, "setup")
         if observation_frame(initial) is None:
             raise RunError("initial analyze_screen returned no fresh frame")
@@ -284,10 +331,25 @@ async def run_realapp(
             if result["claim"]:
                 context_actions.append({"step": len(actions), "tool": "session_finish",
                                         "arguments": {"controller_claim_untrusted": result["claim"]}})
+            judged_frames = [frame["raw"] for frame in frames[-4:-1]] if len(frames) > 1 else []
+            images: list[str] = []
+            if vision:
+                # Element text cannot answer a question about appearance. Pair each judged
+                # frame with the screenshot AUA already captured for it, oldest first, so the
+                # final screen is the last image the judge sees.
+                index = screenshot_index((output / "aua" / "manifest.json").resolve())
+                for frame in [*judged_frames, final]:
+                    fingerprint = frame_fingerprint(frame)
+                    shot = index.get(fingerprint) if fingerprint else None
+                    encoded = encode_image(shot) if shot else None
+                    if encoded:
+                        images.append(encoded)
+                result["vision"] = {"requested": True, "frames": len(judged_frames) + 1,
+                                    "images_attached": len(images)}
             verdict = await judge_outcome_votes(
                 decider, votes=judge_votes, goal=goal, final_frame=final,
-                frames=[frame["raw"] for frame in frames[-4:-1]] if len(frames) > 1 else [],
-                actions=context_actions,
+                frames=judged_frames, actions=context_actions,
+                images=images, contract=contract,
             )
             if stop == "no_progress" and verdict["verdict"] == "pass":
                 verdict["verdict"] = "pass_with_warning"
@@ -348,6 +410,40 @@ async def run_realapp(
     return result
 
 
+def parse_pairs(items: Sequence[str], *, what: str) -> dict[str, str]:
+    """Parse repeated or comma-joined ``K=V`` arguments into one mapping."""
+    pairs: dict[str, str] = {}
+    for item in items or ():
+        for chunk in str(item).split(","):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            if "=" not in chunk:
+                raise RunError(f"{what} needs K=V, got {chunk!r}")
+            key, _, value = chunk.partition("=")
+            key, value = key.strip(), value.strip()
+            if not key:
+                raise RunError(f"{what} needs a name before '=', got {chunk!r}")
+            pairs[key] = value
+    return pairs
+
+
+def build_setup_flows(paths: Sequence[Any], params: Sequence[str]) -> list[tuple[str, dict[str, str]]]:
+    """Pair each --setup-flow with the --setup-params given at the same position.
+
+    Position, not name, is what binds them: two flows can legitimately take a parameter of
+    the same name with different values, and a flow that needs none is skipped with ''.
+    """
+    if len(params) > len(paths):
+        raise RunError("more --setup-params than --setup-flow")
+    flows: list[tuple[str, dict[str, str]]] = []
+    for index, path in enumerate(paths):
+        raw = params[index] if index < len(params) else ""
+        flows.append((Path(path).read_text(encoding="utf-8"),
+                      parse_pairs([raw], what="--setup-params")))
+    return flows
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--goal", required=True)
@@ -360,8 +456,19 @@ def main() -> int:
     parser.add_argument("--api-key-env", default="OPEN_ROUTER_API_KEY")
     parser.add_argument("--aua-command", default="aua")
     parser.add_argument("--launch", action="store_true", help="app_launch_and_analyze before the goal")
+    parser.add_argument("--fresh", action="store_true", help="Clear app data and re-grant permissions before the setup flow")
+    parser.add_argument("--apk", help="Build to install fresh when --fresh is set")
     parser.add_argument("--activity")
-    parser.add_argument("--setup-flow", type=Path, help="AUA flow YAML run before the goal (login, reset)")
+    parser.add_argument("--setup-flow", type=Path, action="append", default=[],
+                        help="AUA flow YAML run before the goal; repeat to chain flows in order")
+    parser.add_argument("--setup-params", action="append", default=[],
+                        help="K=V[,K=V] for the --setup-flow at the same position; use '' to skip one")
+    parser.add_argument("--flags", action="append", default=[],
+                        help="Feature flag K=V applied and verified before the setup flows; repeatable")
+    parser.add_argument("--contract", type=Path,
+                        help="Authored acceptance criteria the judge answers against")
+    parser.add_argument("--vision", action="store_true",
+                        help="Show the judge the captured screenshots; needs an image-capable model")
     parser.add_argument("--no-judge", action="store_true")
     parser.add_argument("--judge-votes", type=int, default=2, choices=[1, 2])
     parser.add_argument("--map", action="store_true", help="Name screens and summarise the route (paid)")
@@ -375,6 +482,7 @@ def main() -> int:
     parser.add_argument("--max-elements", type=int, default=60)
     args = parser.parse_args()
 
+    setup_flows = build_setup_flows(args.setup_flow, args.setup_params)
     manifest = json.loads(args.manifest.read_text())
     candidate = next((item for item in manifest["models"] if args.model in {item["id"], item["repository"]}), None)
     if candidate is None:
@@ -384,6 +492,9 @@ def main() -> int:
         request_config.setdefault("provider", {})
         request_config["provider"]["only"] = [args.provider]
         request_config["provider"]["order"] = [args.provider]
+    if args.vision and not candidate.get("vision"):
+        parser.error(f"--vision needs an image-capable model; {candidate['id']} is text-only. "
+                     "The manifest records which candidates accept images.")
     request_config = validate_request_config(request_config)
     key = os.environ.get(args.api_key_env)
     validate_endpoint(args.base_url, key)
@@ -427,7 +538,11 @@ def main() -> int:
                     call_tool=call_tool, list_tools=list_tools, send=send, goal=args.goal,
                     package=args.package, output=args.output.resolve(), model=candidate["repository"],
                     request_config=request_config, launch=args.launch, activity=args.activity,
-                    setup_flow_yaml=args.setup_flow.read_text() if args.setup_flow else None,
+                    fresh_app=args.fresh, apk=args.apk,
+                    flags=parse_pairs(args.flags, what="--flags"),
+                    setup_flows=setup_flows,
+                    contract=args.contract.read_text(encoding="utf-8") if args.contract else None,
+                    vision=args.vision,
                     judge=not args.no_judge, judge_votes=args.judge_votes, name_screens=args.map,
                     max_steps=args.max_steps, time_limit_s=args.time_limit, max_tokens=args.max_tokens,
                     cost_limit_usd=args.cost_limit_usd, judge_cost_limit_usd=args.judge_cost_limit_usd,

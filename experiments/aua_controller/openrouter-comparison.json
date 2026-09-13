@@ -58,7 +58,8 @@
           }
         ]
       },
-      "cost_limit_usd": 0.1
+      "cost_limit_usd": 0.1,
+      "vision": true
     },
     {
       "id": "or-mercury-2p5-low",
@@ -95,7 +96,8 @@
         ],
         "temperature": 0.5
       },
-      "cost_limit_usd": 0.1
+      "cost_limit_usd": 0.1,
+      "vision": false
     },
     {
       "id": "or-gemma4-26b-thinking",
@@ -132,7 +134,8 @@
         ],
         "temperature": 0
       },
-      "cost_limit_usd": 0.1
+      "cost_limit_usd": 0.1,
+      "vision": true
     },
     {
       "id": "or-deepseek-v4-flash-0731-low-deepinfra",
@@ -170,7 +173,8 @@
         ]
       },
       "cost_limit_usd": 0.1,
-      "route_change_reason": "Separate July31 V4 Flash model after V4.1 routes blocked by account policy or upstream shared-pool rate limits; not a retry of identical model weights. 2026-09-13: deepinfra/fp8 with require_parameters returned 404 'Filter by Parameters'; plain deepinfra without require_parameters routes and serves native tools."
+      "route_change_reason": "Separate July31 V4 Flash model after V4.1 routes blocked by account policy or upstream shared-pool rate limits; not a retry of identical model weights. 2026-09-13: deepinfra/fp8 with require_parameters returned 404 'Filter by Parameters'; plain deepinfra without require_parameters routes and serves native tools.",
+      "vision": false
     },
     {
       "id": "or-deepseek-v4p1-flash-low-novita",
@@ -208,7 +212,8 @@
         ]
       },
       "cost_limit_usd": 0.1,
-      "route_change_reason": "User requested provider comparison; explicit separate route through the unchanged account data policy."
+      "route_change_reason": "User requested provider comparison; explicit separate route through the unchanged account data policy.",
+      "vision": true
     }
   ],
   "model_runs_executed": 16,
