@@ -28,6 +28,12 @@ if TYPE_CHECKING:
 
 _ROOT = re.compile(r"/[A-Za-z0-9_./-]+\.aua-recording-[0-9a-f]{32}\Z")
 _FINALIZE_S = 15.0
+# Coverage is only ever judged in one direction: media *shorter* than the recorder ran is
+# footage that may be missing, and media *longer* is the device's media clock running ahead of
+# its uptime clock. Two real emulator runs of the same scenario failed this check in opposite
+# directions -- one 42s short, the next 37s long -- and the long one cannot have lost anything,
+# because there was more footage than there was time to lose. See `_coverage_shortfall`.
+_COVERAGE_TOLERANCE_S = 2.0
 
 
 def destination(requested: str | None) -> str:
@@ -443,6 +449,20 @@ def media_duration(path: Path) -> float | None:
         return boxes(0, total)
 
 
+def _coverage_shortfall(process_s: float, media_s: float) -> float:
+    """How much footage is missing, in seconds. Never negative.
+
+    Only a shortfall is evidence of a problem. Media longer than the recorder ran is the
+    device's media clock running ahead of its uptime clock, which is routine on an emulator and
+    cannot mean lost footage -- there was more of it than there was time to lose. The old check
+    compared the two with ``abs()`` against a two-second tolerance, so ordinary skew read as a
+    failed recording: two runs of the same scenario failed it in opposite directions, one 42s
+    short and the next 37s long. Skew is still reported, under ``media_clock_skew``, so a caller
+    can see it without it failing the run.
+    """
+    return max(0.0, process_s - media_s)
+
+
 def timeline(
     events: str, paths: list[Path], *, stop_uptime_s: float,
     start_uptime_s: float | None = None,
@@ -484,6 +504,7 @@ def timeline(
         except (ValueError, KeyError) as exc:
             raise DeviceError("recording lifecycle log is incomplete", code="recording_timeline_invalid") from exc
     gaps: list[dict[str, Any]] = []
+    skew: list[dict[str, Any]] = []
     media_total = 0.0
     failed = not segments or finish is None or finish.get("reason") == "encoder_failed"
     first = min((s["start_uptime_s"] for s in segments.values()), default=stop_uptime_s)
@@ -502,18 +523,24 @@ def timeline(
             gaps.append({"start_uptime_s": previous, "end_uptime_s": start, "reason": "segment_rotation"})
         if duration is not None:
             media_total += duration
-        if end is None or duration is None or abs((end - start) - duration) > 2.0:
+        if end is None or duration is None or (
+            _coverage_shortfall(end - start, duration) > _COVERAGE_TOLERANCE_S
+        ):
             failed = True
             gaps.append({"start_uptime_s": start, "end_uptime_s": end, "reason": "unverified_segment_coverage"})
+        elif duration - (end - start) > _COVERAGE_TOLERANCE_S:
+            skew.append({"segment": index, "process_s": end - start, "media_s": duration})
         previous = end if end is not None else start
     if stop_uptime_s - previous > 0:
         gaps.append({"start_uptime_s": previous, "end_uptime_s": stop_uptime_s, "reason": "recording_ended_before_stop"})
     requested = max(0.0, stop_uptime_s - first)
-    failed = failed or requested - media_total > 2.0
+    failed = failed or _coverage_shortfall(requested, media_total) > _COVERAGE_TOLERANCE_S
     return {
         "mode": "native_segments", "state": "finalized", "segments": list(segments.values()),
         "requested_duration_s": requested, "media_duration_s": media_total,
-        "duration_check": "failed" if failed else "passed", "duration_tolerance_s": 2.0,
+        "duration_check": "failed" if failed else "passed",
+        "duration_tolerance_s": _COVERAGE_TOLERANCE_S,
+        "media_clock_skew": skew,
         "gaps": gaps, "finish": finish, "gapless_guaranteed": False,
         "continuous_coverage_verified": False,
         "limitations": "Process timestamps bound encoder activity, not exact first/last frame times. "
