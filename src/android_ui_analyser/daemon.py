@@ -739,6 +739,10 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
             result = engine.key(**args)
             return _result_ok(result.model_dump(mode="json"))
 
+        elif cmd == "back_gesture":
+            result = engine.back_gesture(**args)
+            return _result_ok(result.model_dump(mode="json"))
+
         elif cmd == "back_until":
             result = engine.back_until(**args)
             return _result_ok(result.model_dump(mode="json"))
@@ -1063,7 +1067,7 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
                 "unknown_command",
                 f"unknown command: {cmd!r}",
                 hint="Valid commands: ping, analyze, has, inspect, screenshot, "
-                "tap, long_press, mic_inject, mic_speak, double_tap, input, clear, swipe, scroll, scroll_to, expect, key, "
+                "tap, long_press, mic_inject, mic_speak, double_tap, input, clear, swipe, scroll, scroll_to, expect, key, back_gesture, "
                 "hide_keyboard, paste, copy_text, erase, clipboard_set, clipboard_get, "
                 "location_set, orientation_set, orientation_get, airplane_set, airplane_toggle, "
                 "network_status, network_offline, network_restore, "
