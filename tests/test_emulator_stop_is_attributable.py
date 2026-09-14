@@ -70,7 +70,7 @@ def _write_record(cache: Path, *, instance: str, serial: str, owner: str | None)
                 "instance": instance,
                 "serial": serial,
                 "owner": owner,
-                "pid": 4242,
+                "pid": 2**22 + 4242,  # above any pid_max: the exit probe answers "gone" on every host
                 "started_by_aua": True,
                 "last_activity": 0.0,
             }

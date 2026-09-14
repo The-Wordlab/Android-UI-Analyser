@@ -16,6 +16,12 @@ from conftest import make_config
 runner = CliRunner()
 
 
+# Recorded pids for stop tests sit above any host's pid_max. The signal itself is stubbed, but
+# the exit probe (os.kill(pid, 0)) reaches the real host, and a low pid such as 99 belongs to a
+# system daemon on a macOS runner - which reads as "still running" and fails the stop.
+GONE_PID = 2**22
+
+
 def test_started_record_scan_tolerates_parallel_cleanup(tmp_path: Path, monkeypatch) -> None:
     from android_ui_analyser import emulator as emu
 
@@ -534,7 +540,7 @@ def test_stop_mine_scoped_by_owner(
                 "avd": "a",
                 "instance": "a.p5554",
                 "serial": "emulator-5554",
-                "pid": 101,
+                "pid": GONE_PID + 101,
                 "owner": "agent-a",
                 "started_by_aua": True,
             }
@@ -547,7 +553,7 @@ def test_stop_mine_scoped_by_owner(
                 "avd": "a",
                 "instance": "a.p5556",
                 "serial": "emulator-5556",
-                "pid": 102,
+                "pid": GONE_PID + 102,
                 "owner": "agent-b",
                 "started_by_aua": True,
             }
@@ -589,7 +595,7 @@ def test_stop_mine_kills_recorded(
                 "avd": "only",
                 "instance": "only",
                 "serial": "emulator-5554",
-                "pid": 99,
+                "pid": GONE_PID + 99,
                 "started_by_aua": True,
             }
         ),
@@ -619,7 +625,7 @@ def test_stop_owned_serial_uses_recorded_pid_without_shared_adb(
                 "avd": "only",
                 "instance": "only.p5554",
                 "serial": "emulator-5554",
-                "pid": 4242,
+                "pid": GONE_PID + 4242,
                 "started_by_aua": True,
             }
         ),
@@ -640,7 +646,7 @@ def test_stop_owned_serial_uses_recorded_pid_without_shared_adb(
 
     out = emu.stop(serial="emulator-5554", cache_dir=tmp_path)
 
-    assert signalled == [4242]
+    assert signalled == [GONE_PID + 4242]
     assert out["stopped"] == ["emulator-5554"]
     assert out["requested_via"] == "serial"
     assert not record.exists()
