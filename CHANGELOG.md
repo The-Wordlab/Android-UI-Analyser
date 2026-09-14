@@ -11,6 +11,11 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Fixed
+
+- `back-gesture-and-analyze` now dispatches through a warm AUA daemon instead of returning
+  `unknown_command`; `v0.24.0` did not publish because release CI caught the missing branch.
+
 ## [0.24.0] - 2026-09-14
 
 ### Added
