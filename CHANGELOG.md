@@ -13,6 +13,20 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Added
 
+- The controller harness can route a hosted model through any provider instead of one pinned
+  endpoint. Manifest entries may now set `provider.allow_fallbacks: true` with an optional
+  `sort` of `throughput`, `latency` or `price`; the single-provider pin stays valid and stays
+  required for benchmark runs, where a number is only attributable to the endpoint that produced
+  it. `max_price` is required on both shapes. Two open QA routes ship with the manifest.
+- Hosted model requests retry a provider that asks for the request later - 429, 5xx, 408/409/425
+  and transport failures - with jittered backoff and the provider's own `Retry-After` when it
+  sends a usable one. A 400 or 402 is a real refusal and still fails on the first try. Retries
+  are printed and recorded under `provider_retries`.
+- `run_realapp --judge-fallback <candidate>` builds a ladder of judge models. Each rung spends
+  its full repair budget, then the next model reads the same thread and answers, so a judge that
+  cannot produce its own schema no longer ends the run. Repeatable; the ladder, the escalation
+  count and the model that actually answered are all recorded.
+
 - `aua session start` returns `relevant_knowledge`: accepted knowledge items whose aliases,
   name or text match the goal, best first, with a warning line pointing at them. Knowledge
   items gain `aliases` (goal phrasings), settable with `aua knowledge add --alias` and the MCP
@@ -33,6 +47,19 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Changed
 
+- Recording coverage no longer fails a run because the media is shorter than the wall clock.
+  `screenrecord` emits a frame when the screen *changes*, so an idle stretch costs duration
+  without costing footage: one run recorded 126 frames over 168s with its largest inter-frame
+  gaps landing exactly where the controller was waiting on the model. `duration_check` now fails
+  only on the two results stillness cannot explain - capturing nothing at all, and stretches
+  where the encoder was not running. The shortfall is reported as `coverage_shortfall_s`, a
+  `static_screen_no_frames` gap, and `encoder_idle_gaps`.
+- Controller and judge token caps are no longer set below what the models use. The controller
+  default moves from 4096 to 32768 and the judge from 1024 to 8192, after a run lost nine steps
+  of device work to `model completion truncated` and the judge was measured answering at exactly
+  its ceiling on nearly every request. `CostGuard` is the real money stop and takes matching
+  headroom: `cost_limit_usd` 0.05 to 0.15, `judge_cost_limit_usd` 0.02 to 0.10.
+
 - The real-app controller owns the complete deterministic lifecycle: reuse or provision a target,
   fall back to waiting when provisioning cannot start, bootstrap the app through `session_start`,
   run prelaunch environment setup and verified flags before the pinned product launch, record from
@@ -41,6 +68,13 @@ notes, so you can check for a newer version — and read what changed — withou
   results from both judges with an output budget that scales to the criterion count.
 
 ### Fixed
+
+- `.venv` is no longer tracked. It had been committed as a symlink, and `.gitignore` listed
+  `.venv/`, which matches a directory - in a linked worktree `.venv` is a symlink, so the rule
+  never applied. Pulling it replaced a real virtualenv with a link to its own path. If you
+  pulled `main` between those commits, re-run `uv sync --all-extras`.
+- An AUA run cache written to `.run/` inside the checkout is ignored. It was enumerated as
+  untracked and tripped the app-specific-reference guard on its lane name.
 
 - Recording starts recover same-session failed-start metadata after the target proves no recording
   owner is live, and quarantine legacy host-local recording paths without weakening target cleanup
