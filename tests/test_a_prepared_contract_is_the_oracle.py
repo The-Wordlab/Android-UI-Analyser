@@ -24,6 +24,7 @@ from experiments.aua_controller.run_realapp import (
     contract_satisfied,
     goal_progress_of,
     realapp_tools,
+    unmet_checkpoint,
 )
 
 from test_aua_controller_realapp import MCP_SCHEMAS as SCHEMAS
@@ -76,3 +77,47 @@ class TestAskingAuaWhetherItWasMet:
         assert goal_progress_of({"ok": True, "goal_progress": {"total": 3}}) == {"total": 3}
         assert goal_progress_of({"ok": True, "total": 3})["total"] == 3
         assert goal_progress_of({"ok": True, "detail": "nothing useful"}) is None
+
+
+class TestSayingWhichCheckpointStayedOpen:
+    """A contract that cannot be satisfied and a feature that does not work look identical.
+
+    An assertion naming a selector the app never publishes can never match, however well the
+    run went. Measured: a contract asserting a label as `desc` where the accessibility tree
+    carries it as *text* left both checkpoints open and came back `unverified`, with nothing in
+    the result pointing at the contract rather than the app. Two device runs went into finding
+    that by hand.
+    """
+
+    def test_nothing_proven_points_at_the_contract_first(self) -> None:
+        unmet = unmet_checkpoint({
+            "ok": True,
+            "goal_progress": {
+                "completed": 0, "total": 2, "done": False,
+                "current": {"id": "observed", "objective": "the badge shows on first open"},
+            },
+        })
+
+        assert unmet["id"] == "observed"
+        assert unmet["completed"] == 0
+        assert "can never match" in unmet["hint"]
+
+    def test_stopping_part_way_is_a_different_story(self) -> None:
+        unmet = unmet_checkpoint({
+            "ok": True,
+            "goal_progress": {
+                "completed": 1, "total": 2, "done": False,
+                "current": {"id": "not_repeated", "objective": "and never again"},
+            },
+        })
+
+        assert unmet["id"] == "not_repeated"
+        assert "can never match" not in unmet["hint"]
+
+    def test_a_satisfied_contract_has_nothing_to_report(self) -> None:
+        assert unmet_checkpoint(
+            {"ok": True, "goal_progress": {"completed": 2, "total": 2, "done": True}}
+        ) is None
+
+    def test_a_run_with_no_contract_has_nothing_to_report(self) -> None:
+        assert unmet_checkpoint(None) is None

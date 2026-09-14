@@ -190,6 +190,36 @@ def goal_progress_of(progress: Mapping[str, Any] | None) -> Mapping[str, Any] | 
     return progress if "total" in progress else None
 
 
+def unmet_checkpoint(progress: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """The checkpoint a contract run stopped on, so a reader knows what to look at.
+
+    An authored contract can be unsatisfiable rather than unsatisfied - an assertion naming a
+    selector the app never publishes can never match, no matter how well the run went. Measured
+    on 2026-09-14: a contract asserting `desc:"Create, New"` against a label the accessibility
+    tree carries as *text* left both checkpoints open, and the run came back `unverified` with
+    nothing pointing at the reason. This does not judge which it was; it names the checkpoint
+    and what it asked for, which is the difference between a re-run and a fix.
+    """
+    counts = goal_progress_of(progress)
+    if counts is None or counts.get("done") is True:
+        return None
+    current = counts.get("current")
+    if not isinstance(current, Mapping):
+        return None
+    return {
+        "id": current.get("id"),
+        "objective": current.get("objective"),
+        "completed": counts.get("completed"),
+        "total": counts.get("total"),
+        "hint": (
+            "no checkpoint completed, so check the contract before the app: an assertion whose "
+            "selector the app never publishes can never match. Compare it against the elements "
+            "in the captured observations."
+        ) if counts.get("completed") == 0 else
+        "the run stopped part-way through the contract; this checkpoint was still open.",
+    }
+
+
 def contract_satisfied(progress: Mapping[str, Any] | None) -> bool:
     """True only when AUA itself reports every authored checkpoint complete.
 
@@ -639,6 +669,7 @@ async def run_realapp(
             # fresh assertions rather than on anything the model said.
             contract_progress = await call("session_progress", {}, "judgement")
             result["contract_progress"] = contract_progress
+            result["contract_unmet"] = unmet_checkpoint(contract_progress)
         if stop == "terminal_tool":
             result["verdict"] = {"oracle": "aua_session_contract", "verified": True, "verdict": "pass",
                                  "reasons": ["AUA accepted session_finish against its own contract."]}

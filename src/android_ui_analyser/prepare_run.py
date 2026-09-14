@@ -277,6 +277,12 @@ def run_scenario(
     payload["ok"] = verdict in PASSING_VERDICTS
     if reasons:
         payload["reasons"] = reasons
+    unmet = result.get("contract_unmet")
+    if isinstance(unmet, Mapping) and not payload["ok"]:
+        # A contract that cannot be satisfied and a feature that does not work look identical
+        # from here. Naming the checkpoint that stayed open is what tells the agent whether to
+        # re-run or to fix what it wrote.
+        payload["checkpoint_not_met"] = dict(unmet)
     warnings = result.get("warnings")
     if isinstance(warnings, list) and warnings:
         # A run that adapted around a stale precondition reached its verdict by a different

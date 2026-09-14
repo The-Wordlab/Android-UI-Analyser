@@ -79,6 +79,14 @@ These two become the contract, so they are written in the predicate grammar AUA 
 | `!rid:hubBadge` | that element is **absent** |
 | `desc:"Create, New"` | a value containing a comma — quote it, or the comma splits it in two |
 
+**Write `text:` unless you have seen `desc:` in an observation.** A `contentDescription` in the
+source is not automatically a `desc` in the tree: Android flattens a labelled container, and the
+string usually arrives as the element's **text**. A contract asserting `desc:` against a label the
+tree carries as text cannot match, however well the run goes — and an unsatisfiable contract looks
+exactly like a broken feature. When a run comes back with `checkpoint_not_met` and nothing
+completed, suspect the selector before the app, and check it against the elements in the captured
+observations.
+
 **AUA will not translate a sentence into an assertion.** A generated oracle that looks right and
 asserts the wrong thing is worse than no contract, so the translation stays mechanical and the
 `provenance` in the result shows you every checkpoint next to the answer it came from. Read it.

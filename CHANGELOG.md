@@ -90,6 +90,9 @@ them cost a complete device run.
   run came back `model_judgement_v1` / `verified: false` with the stronger answer sitting unused in
   the same file. `run_realapp --session-contract` hands it to `session_start`, and `prepare run`
   passes it every time.
+- A contract run that proved nothing now says which checkpoint stayed open, and that an assertion
+  whose selector the app never publishes can never match. An unsatisfiable contract and a broken
+  feature are the same `unverified` otherwise; finding out which took two device runs.
 
 ## [0.20.0] - 2026-09-14
 
