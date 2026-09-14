@@ -159,3 +159,18 @@ def test_an_unknown_prepare_id_says_how_to_get_a_real_one(tmp_path) -> None:
 
     assert result.exit_code != 0
     assert "aua prepare start" in result.output
+
+
+def test_an_abandoned_interview_can_be_dropped_without_touching_the_scenarios(tmp_path) -> None:
+    kept = _start(tmp_path)["prepare_id"]
+    _answer_everything(tmp_path, kept)
+    abandoned = _start(tmp_path, goal="something else entirely")["prepare_id"]
+
+    assert _aua(tmp_path, "prepare", "discard", abandoned, "--app", PACKAGE)["discarded"]
+
+    listed = _aua(tmp_path, "prepare", "list", "--app", PACKAGE)
+    assert listed["in_progress"] == []
+    assert len(listed["scenarios"]) == 1
+
+    # Dropping one that is not there says so rather than pretending.
+    assert not _aua(tmp_path, "prepare", "discard", abandoned, "--app", PACKAGE)["discarded"]

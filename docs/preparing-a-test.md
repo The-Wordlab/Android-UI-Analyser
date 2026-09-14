@@ -198,6 +198,7 @@ it, and AUA does not pretend to have done that for you.
 | `aua prepare answer <id> --app <pkg> --answer k=v ...` | Answer; the last answer writes the scenario |
 | `aua prepare show <id> --app <pkg>` | The interview so far, unchanged |
 | `aua prepare list --app <pkg>` | Interviews in flight and scenarios already prepared |
+| `aua prepare discard <id> --app <pkg>` | Drop an unfinished interview; saved scenarios are untouched |
 | `aua prepare run <scenario> --app <pkg>` | Run it, driven by AUA or by you |
 
 ## Two answers that decide whether a run works at all

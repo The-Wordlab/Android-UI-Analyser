@@ -8902,6 +8902,25 @@ def prepare_show_cmd(
     _run(ctx, go)
 
 
+@prepare_app.command("discard")
+def prepare_discard_cmd(
+    ctx: typer.Context,
+    prepare_id: str = typer.Argument(..., help="Id from `aua prepare list`."),
+    app_pkg: str = typer.Option(..., "--app", "--package", help="Package under test."),
+) -> None:
+    """Drop an interview that was never finished. Saved scenarios are untouched."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        import json
+
+        from .prepare_store import PrepareStore
+
+        dropped = PrepareStore(_prepare_store(ctx)).discard_session(app_pkg, prepare_id)
+        typer.echo(json.dumps({"ok": True, "prepare_id": prepare_id, "discarded": dropped}))
+
+    _run(ctx, go)
+
+
 @prepare_app.command("run")
 def prepare_run_cmd(
     ctx: typer.Context,
