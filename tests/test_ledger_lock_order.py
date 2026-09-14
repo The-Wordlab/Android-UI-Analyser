@@ -56,9 +56,13 @@ def test_ordinary_and_recovery_paths_have_one_lock_order(tmp_path: Path):
         recovery_control.put("release")
         # With the old order both workers now wait forever: ordinary wants host while recovery
         # wants device. The new order lets recovery finish, then ordinary acquires both locks.
+        # Queue ordering is guaranteed only per producer, so either worker's final message may
+        # arrive first after recovery releases the locks.
         assert recovery_done.wait(timeout=5)
-        assert events.get(timeout=5) == "recovery-done"
-        assert events.get(timeout=5) == "ordinary-device-lock"
+        assert {events.get(timeout=5), events.get(timeout=5)} == {
+            "recovery-done",
+            "ordinary-device-lock",
+        }
         ordinary_control.put("release")
         assert ordinary_done.wait(timeout=5)
         ordinary.join(timeout=5)
