@@ -11,6 +11,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-09-14
+
 ### Added
 
 - `back-gesture-and-analyze` / `back_gesture_and_analyze` performs Android's left-edge back
@@ -889,5 +891,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.22.1]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.22.1
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.23.0...HEAD
 [0.23.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.23.0
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.24.0...HEAD
+[0.24.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.24.0
