@@ -17,8 +17,9 @@ def _ordinary_worker(root: str, events, control, done) -> None:
         events.put("ordinary-device-lock")
         control.get(timeout=5)
     events.put("ordinary-done")
+    events.close()
+    events.join_thread()
     done.set()
-    events.cancel_join_thread()
 
 
 def _recovery_worker(root: str, events, control, done) -> None:
@@ -29,8 +30,9 @@ def _recovery_worker(root: str, events, control, done) -> None:
         with leases.device_command(root, ref):
             pass
     events.put("recovery-done")
+    events.close()
+    events.join_thread()
     done.set()
-    events.cancel_join_thread()
 
 
 @pytest.mark.skipif(

@@ -11,6 +11,11 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Fixed
+
+- The cross-process lock-order regression test now flushes child-process queue events before it
+  signals completion, avoiding a Linux CI race that could block an otherwise valid release.
+
 ## [0.26.0] - 2026-09-14
 
 ### Added
