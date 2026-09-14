@@ -11,6 +11,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-09-14
+
 ### Added
 
 - `aua helper model-run GOAL --checks FILE` runs the experimental DeepSeek V4.1 Flash control
@@ -865,5 +867,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.22.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.22.0
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.22.1...HEAD
 [0.22.1]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.22.1
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.23.0...HEAD
+[0.23.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.23.0
