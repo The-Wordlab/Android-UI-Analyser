@@ -158,11 +158,13 @@ def test_stop_mine_kills_watchdog(
     killed_pids: list[int] = []
     monkeypatch.setattr(emu, "_adb_emu_kill", lambda s: killed_emu.append(s))
     monkeypatch.setattr(emu, "running_emulators", lambda: [])
-    monkeypatch.setattr(
-        emu.os,
-        "kill",
-        lambda pid, sig: killed_pids.append(pid),
-    )
+
+    def kill(pid: int, sig: int) -> None:
+        if pid == 99 and sig == 0:
+            raise ProcessLookupError  # the emulator exits once its group is signalled
+        killed_pids.append(pid)
+
+    monkeypatch.setattr(emu.os, "kill", kill)
     monkeypatch.setattr(
         emu.os,
         "killpg",

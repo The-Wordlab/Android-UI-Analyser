@@ -2009,6 +2009,44 @@ def _wait_owned_process_exit(pid: int, started: str | None) -> bool:
         time.sleep(0.05)
 
 
+def _terminate_recorded_process(pid: int, started: str | None) -> bool:
+    """SIGTERM a recorded instance's process group and wait until it has exited.
+
+    A delivered signal is not a stopped device: only an exited process frees its console
+    port and its lease. A pid AUA may not signal counts as gone only when its start time
+    proves the recorded process has exited and the pid was reused.
+    """
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass  # the group is already gone; the recorded process may still be a zombie
+    except OSError:
+        from .leases import _proc_started
+
+        current = _proc_started(pid) if started else ""
+        return bool(started and current and current != started)
+    return _wait_owned_process_exit(pid, started)
+
+
+def _release_stopped_lease(
+    lease_registry_dir: str | Path | None, serial: str | None, owner: str | None
+) -> None:
+    """Drop the lease on a device this stop has just brought down.
+
+    The caller holds the target fence and has already established that no other live agent
+    leases *serial*, so what remains is this caller's own lease or an expired record - and a
+    device that no longer exists is nobody's to hold. Leases are bound to the calling
+    agent's process, which is deliberately long-lived (an IDE, an agent harness, a reused CI
+    worker): left behind, a lease outlived the emulator it named, and the next
+    ``emulator start`` on that console port was refused as already in use (#12).
+    """
+    if lease_registry_dir is None or not serial:
+        return
+    from . import leases
+
+    leases.release(lease_registry_dir, serial, owner=owner)
+
+
 def stop_spawned_instance(
     *,
     instance: str,
@@ -2240,6 +2278,7 @@ def stop(
             return payload
         stopped_mine: list[str] = []
         skipped_mine: list[dict[str, Any]] = []
+        still_running_mine: list[str] = []
         for meta in records:
             ser = meta.get("serial")
             target_serial = ser if isinstance(ser, str) else None
@@ -2255,11 +2294,16 @@ def stop(
                     )
                     continue
                 pid = _owned_instance_pid(meta)
-                if pid is not None:
-                    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-                        os.killpg(pid, signal.SIGTERM)
-                        if target_serial:
-                            stopped_mine.append(target_serial)
+                if pid is not None and not _terminate_recorded_process(
+                    pid, meta.get("process_started")
+                ):
+                    # Still alive after the signal: record, watchdog and lease all stay, so
+                    # the next stop finds it and nobody allocates its port meanwhile.
+                    still_running_mine.append(target_serial or str(meta.get("instance") or ""))
+                    continue
+                if pid is not None and target_serial:
+                    stopped_mine.append(target_serial)
+                _release_stopped_lease(lease_registry_dir, target_serial, lease_owner)
                 _kill_watchdog(meta)
                 path = Path(str(meta.get("_path") or ""))
                 if path.is_file():
@@ -2278,6 +2322,7 @@ def stop(
             "action": "emulator-stop",
             "stopped": stopped_mine,
             "skipped_leased": skipped_mine,
+            "still_running": still_running_mine,
             "owner": owner_tag,
             "matched": matched,
             "considered": considered,
@@ -2325,6 +2370,7 @@ def stop(
         if avd_records:
             stopped_avd: list[str] = []
             skipped_avd: list[dict[str, Any]] = []
+            still_running_avd: list[str] = []
             for meta in avd_records:
                 ser = meta.get("serial")
                 target_serial = ser if isinstance(ser, str) else None
@@ -2338,11 +2384,16 @@ def stop(
                         )
                         continue
                     pid = _owned_instance_pid(meta)
-                    if pid is not None:
-                        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-                            os.killpg(pid, signal.SIGTERM)
-                            if target_serial:
-                                stopped_avd.append(target_serial)
+                    if pid is not None and not _terminate_recorded_process(
+                        pid, meta.get("process_started")
+                    ):
+                        still_running_avd.append(
+                            target_serial or str(meta.get("instance") or "")
+                        )
+                        continue
+                    if pid is not None and target_serial:
+                        stopped_avd.append(target_serial)
+                    _release_stopped_lease(lease_registry_dir, target_serial, lease_owner)
                     _kill_watchdog(meta)
                     path = Path(str(meta.get("_path") or ""))
                     if path.is_file():
@@ -2362,6 +2413,7 @@ def stop(
                 "action": "emulator-stop",
                 "stopped": stopped_avd,
                 "skipped_leased": skipped_avd,
+                "still_running": still_running_avd,
                 "matched": avd_matched,
                 "requested_via": "avd-records",
                 "origin": origin,
@@ -2380,6 +2432,7 @@ def stop(
 
     if not targets and serial is None and avd is None:
         stopped_pids: list[int] = []
+        still_running: list[str] = []
         for path in list(_pid_dir(cache_dir).glob("*.json")):
             try:
                 meta = json.loads(path.read_text(encoding="utf-8"))
@@ -2396,9 +2449,11 @@ def stop(
                     continue  # a record whose device another live agent leases is not residue
                 pid = _owned_instance_pid({**meta, "_path": str(path)})
                 if pid is not None:
-                    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-                        os.killpg(pid, signal.SIGTERM)
-                        stopped_pids.append(pid)
+                    if not _terminate_recorded_process(pid, meta.get("process_started")):
+                        still_running.append(target_serial or path.stem)
+                        continue
+                    stopped_pids.append(pid)
+                _release_stopped_lease(lease_registry_dir, target_serial, lease_owner)
                 _kill_watchdog(meta)
                 path.unlink(missing_ok=True)
         _log_stop(
@@ -2418,6 +2473,7 @@ def stop(
             "origin": origin,
             "detail": "no running emulator-* devices; cleared aua pid records if any",
             "signalled_pids": stopped_pids,
+            "still_running": still_running,
         }
 
     if not targets:
@@ -2440,9 +2496,11 @@ def stop(
                 continue
             try:
                 _adb_emu_kill(ser)
-                stopped.append(ser)
             except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
                 logger.debug("emu kill %s failed: %s", ser, exc)
+                continue
+            stopped.append(ser)
+            _release_stopped_lease(lease_registry_dir, ser, lease_owner)
 
     for path in list(_pid_dir(cache_dir).glob("*.json")):
         try:

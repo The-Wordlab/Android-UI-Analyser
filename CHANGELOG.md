@@ -11,6 +11,16 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Fixed
+
+- `aua emulator stop` drops the lease of every device it stops - `--mine`, `--owner`, `--avd` and
+  `--all` included; only the serial-scoped rollback did before. A lease is bound to the calling
+  agent's process, which is an IDE, an agent harness or a reused CI worker and outlives every
+  emulator it starts, so the file a clean stop left behind never expired, and the next
+  `emulator start --port` on that console port was refused as already in use (#12). A stop now also
+  waits for the process to exit before reporting it `stopped`; one that survives the signal is
+  listed under `still_running` and keeps its record and lease for the next stop to find.
+
 ## [0.21.1] - 2026-09-14
 
 ### Fixed
