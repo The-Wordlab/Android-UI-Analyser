@@ -11,6 +11,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.24.1] - 2026-09-14
+
 ### Fixed
 
 - `back-gesture-and-analyze` now dispatches through a warm AUA daemon instead of returning
@@ -898,5 +900,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.23.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.23.0
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.24.0...HEAD
 [0.24.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.24.0
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.24.1...HEAD
+[0.24.1]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.24.1
