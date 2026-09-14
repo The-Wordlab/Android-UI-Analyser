@@ -11,6 +11,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-09-14
+
 ### Added
 
 - `session_finish` can now stop only the exact virtual-target boot created by its session via
@@ -927,5 +929,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.24.1]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.24.1
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.25.0...HEAD
 [0.25.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.25.0
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.26.0...HEAD
+[0.26.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.26.0
