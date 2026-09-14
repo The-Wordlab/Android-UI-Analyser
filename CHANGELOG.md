@@ -11,6 +11,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.26.1] - 2026-09-14
+
 ### Fixed
 
 - The cross-process lock-order regression test now flushes child-process queue events before it
@@ -936,5 +938,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.25.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.25.0
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.26.0...HEAD
 [0.26.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.26.0
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.26.1...HEAD
+[0.26.1]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.26.1
