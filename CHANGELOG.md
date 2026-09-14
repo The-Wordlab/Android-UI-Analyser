@@ -40,6 +40,36 @@ notes, so you can check for a newer version — and read what changed — withou
   that AUA has not read them for you.
 - New `controller` configuration section (disabled by default) naming the model, judge ladder,
   budget and recording for driven runs.
+- `aua prepare discard <id>` drops an interview that was never finished; saved scenarios are
+  untouched.
+
+### Fixed
+
+Everything here was found by running `aua prepare` end to end against a real app, and every one of
+them cost a complete device run.
+
+- A predicate value containing a comma is one assertion again. `desc:"Create, New"` was split on
+  the comma, and the second half asserted a bare word anywhere on screen - a contract that passes
+  on the wrong evidence. Quote the value; an unclosed quote is refused.
+- Only an answer a previous interview saved may skip a question. Matching every question against
+  the goal, at a threshold that accepted one shared word, let a note about theme stand as the
+  answer to *where is the build* - which does not add a wrong answer, it removes the question, and
+  the run starts with no APK. Merely related knowledge is now shown beside the question as
+  `related_knowledge` and never substituted for it.
+- The controller's verdict is an object, not a string. Reading it as one raised
+  `unhashable type: 'dict'` after a successful install, sign-in, drive and recording had all
+  completed - losing a finished result at the last step. Both shapes are read, and the reasons
+  come through.
+- The controller no longer calls `flags_apply`, which was renamed to `flags_apply_and_analyze`.
+  Its usage error arrived as "feature flags not applied and verified", a precondition failure
+  wearing a product failure's clothes. A test now checks every tool name the controller mentions
+  against what AUA publishes, so the next rename fails in CI rather than on a leased device.
+- Each `prepare run` gets its own cache. The cache holds the in-flight screen-recording marker,
+  keyed by serial, so a run that died mid-recording blocked the next run on a recycled serial with
+  "a screen recording is already in progress". Leases stay host-wide, which is what stops two
+  workers driving one device.
+- `seeding=reinstall` grants runtime permissions. A fresh install has none, and the system dialog
+  that follows looks exactly like a product failure to anything judging the screen.
 
 ## [0.20.0] - 2026-09-14
 
