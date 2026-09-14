@@ -79,7 +79,7 @@ SEEDING_STRATEGIES: tuple[SeedingStrategy, ...] = (
     SeedingStrategy(
         key="database",
         summary="Update the row the feature reads, in the app's own SQLite database.",
-        calls=("aua database backup", "aua database execute", "aua database restore"),
+        calls=("aua db backup", "aua db execute", "aua db restore"),
         seconds=3,
         reversible=True,
         fakes=("local",),
@@ -119,7 +119,7 @@ SEEDING_STRATEGIES: tuple[SeedingStrategy, ...] = (
     SeedingStrategy(
         key="ui",
         summary="Drive the app by hand into the state, using no back door at all.",
-        calls=("aua goto", "aua tap"),
+        calls=("aua goto", "aua tap-and-analyze"),
         seconds=60,
         reversible=True,
         fakes=(),

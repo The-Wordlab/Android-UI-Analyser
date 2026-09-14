@@ -1895,6 +1895,7 @@ All action commands (`tap`, `long-press`, `input`, `clear`, `swipe`, `scroll-to`
 
 ## Further reading
 
+- [`docs/preparing-a-test.md`](docs/preparing-a-test.md) — `aua prepare`: agree what a test must prove with the agent that wrote the feature, then keep the scenario.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — design decisions and the hierarchy-first thesis.
 - [`docs/NATIVE_ROADMAP.md`](docs/NATIVE_ROADMAP.md) — `aua-fast`, delta/msgpack, WS push, fanout, vision defaults.
 - [`docs/RESEARCH.md`](docs/RESEARCH.md) — landscape research behind the approach.

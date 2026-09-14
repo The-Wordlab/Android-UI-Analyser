@@ -45,6 +45,29 @@ CAPABILITIES: tuple[Capability, ...] = (
         risk="executes the caller-selected host command; missing credentials use a private dialog",
     ),
     Capability(
+        "prepare",
+        "Agree what a test must prove with the agent that wrote the feature, then keep the "
+        "scenario: AUA asks only what it cannot know (build, sign-in, the pre-condition in terms "
+        "the app stores, how to seed it, UI-only or end-to-end, what must be on screen), writes a "
+        "contract whose every checkpoint quotes the answer it came from, and runs it on request.",
+        (
+            "prepare",
+            "new feature",
+            "just implemented",
+            "first run",
+            "first open",
+            "shows once",
+            "what should i test",
+            "how do i test",
+            "scenario",
+            "regression",
+        ),
+        0,
+        'aua prepare start --goal "<claim>" --app <package>',
+        "prepare_start",
+        risk="no device; the interview and the saved scenario are host files",
+    ),
+    Capability(
         "session",
         "Start from a goal: observe once, track ordered phases, and receive the exact next call.",
         ("test", "verify", "inspect", "navigate", "open", "offline", "android"),

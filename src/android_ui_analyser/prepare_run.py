@@ -156,9 +156,9 @@ def manual_plan(scenario: Mapping[str, Any], *, output: Path, reason: str) -> di
         commands[0] += f" --apk {build}"
         if answers.get("seeding") == "reinstall":
             commands[0] += " --fresh --yes"
-    commands.append("aua screen-record start")
+    commands.append("aua record start")
     commands.append("# ...drive to the goal; each checkpoint completes from fresh assertions...")
-    commands.append("aua screen-record stop")
+    commands.append("aua record stop")
     commands.append("aua session finish --full")
     return {
         "ok": True,

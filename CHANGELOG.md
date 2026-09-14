@@ -11,6 +11,36 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Added
+
+- `aua prepare` — the conversation between AUA and the agent that wrote the feature, before any
+  device is touched. `prepare start` returns only what AUA cannot work out for itself (the build,
+  how to sign in, what the pre-condition is in terms the app stores, how to reach it, UI-only or
+  end-to-end, and what must be on screen); questions the app map already answers are not asked.
+  `prepare answer` records answers across processes, and the last one writes a proof contract,
+  saves the scenario, and returns the run command. `prepare show`, `prepare list`, and
+  `prepare run` complete the surface, with matching MCP tools — the first four lease-free, because
+  a conversation about an app should not queue behind a device it does not use yet.
+- Every generated checkpoint is a literal translation of exactly one answer, and the `provenance`
+  beside it quotes what was said. `success`/`repeat` are AUA predicate terms (`rid:hubBadge`,
+  `!text:New`), never prose: a generated oracle that looks right and asserts the wrong thing is
+  worse than no contract. The emitted YAML is re-parsed by the authored contract schema before it
+  is returned, so a generator mistake fails before a device is leased.
+- AUA suggests how to reach a pre-condition and shows its arithmetic — datastore, database, flags,
+  mock, reinstall or driving the UI, each ranked by reversibility and cost, each carrying what it
+  does not prove. `scope=e2e` pushes mocking down the list. Only `seeding=reinstall` wipes an app.
+- `aua prepare run <scenario>` runs a prepared scenario. With `controller.enabled` and its API key
+  set, AUA drives the whole loop on its own model and the calling agent pays for one question and
+  one answer instead of one round trip per tap; otherwise the same contract comes back as commands
+  to run yourself. The result always says which, and why the other was unavailable. A controller
+  that dies before judging returns `blocked`, never `failed`.
+- Every run hands back an `evidence` block: screenshots, video, report and raw call log grouped by
+  kind with paths and sizes, so a bundle can be published without re-walking the directory. Device
+  and network records are flagged for review rather than dropped, and the payload says plainly
+  that AUA has not read them for you.
+- New `controller` configuration section (disabled by default) naming the model, judge ladder,
+  budget and recording for driven runs.
+
 ## [0.20.0] - 2026-09-14
 
 ### Added
