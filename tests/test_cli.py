@@ -13,6 +13,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import typer.main
 from typer.testing import CliRunner
 
 import android_ui_analyser.engine as engine_mod
@@ -74,11 +75,24 @@ def test_help_exits_zero() -> None:
 
 
 def test_session_start_help_exposes_deterministic_app_bootstrap() -> None:
-    result = runner.invoke(app, ["session", "start", "--help"], env={"COLUMNS": "200"})
+    """The flags exist and `--help` renders. Asserting on the rendered names cannot work.
 
-    assert result.exit_code == 0
-    assert "--grant-permissions" in result.stdout
-    assert "--no-launch-app" in result.stdout
+    Rich lays the options table out at whatever width it believes it has, and under a test
+    runner that is 80 columns whatever COLUMNS, TERMINAL_WIDTH or MAX_WIDTH say - the first
+    two are read when typer.rich_utils is imported, long before any fixture runs. At 80
+    columns it prints `--grant-permiss…`, so the literal name is not in the output at all.
+    That is a rendering detail; the contract is that the option exists and is documented.
+    """
+    start = typer.main.get_command(app).commands["session"].commands["start"]
+    names = {name for param in start.params
+             for name in (*param.opts, *param.secondary_opts)}
+
+    assert "--grant-permissions" in names
+    assert "--no-launch-app" in names
+    assert all(param.help for param in start.params if param.opts != ["--help"]), (
+        "an undocumented flag is invisible to an agent reading --help"
+    )
+    assert runner.invoke(app, ["session", "start", "--help"]).exit_code == 0
 
 
 def test_session_autopilot_help_exposes_bounded_local_loop() -> None:

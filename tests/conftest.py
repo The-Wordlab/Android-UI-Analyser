@@ -14,6 +14,7 @@ Provides:
 from __future__ import annotations
 
 import io
+import sys
 import time
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -21,6 +22,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
+# The `experiments/` package sits beside `src/` and is not installed, so a test that
+# imports it resolves only when the repository root is importable. Individual modules used
+# to insert this themselves; four new files forgot and CI failed on ModuleNotFoundError
+# while passing locally, where the root happened to be on the path already.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from android_ui_analyser.config import Config
 from android_ui_analyser.device import Device
