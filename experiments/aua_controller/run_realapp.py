@@ -22,7 +22,7 @@ import json
 import os
 import sys
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -58,6 +58,15 @@ CONTROLLER_TOOLS = (
     "analyze_screen", "tap_and_analyze", "input_and_analyze", "swipe_and_analyze",
     "wait_and_analyze", "key_and_analyze", "session_progress", "session_finish",
 )
+#: The one extra tool a contract-driven run needs. A checkpoint completes only on fresh
+#: assertion proof, so without a way to assert, a loaded contract can never be satisfied and
+#: every verdict falls back to a model reading frames - the weaker answer, from a run that was
+#: given the stronger one. Added only when there is a contract: a run with no checkpoints has
+#: nothing to assert against, and one more tool in the list is one more way to spend a step.
+CONTRACT_TOOL = "expect_and_analyze"
+#: One selector and one predicate is the whole vocabulary a checkpoint assertion needs, and
+#: every extra argument is another one a small model can get wrong.
+CONTRACT_TOOL_PROPERTIES = ("rid", "text", "desc", "exists", "absent", "text_contains")
 FINISH_OUTCOMES = ("achieved", "already_satisfied", "blocked", "not_achievable")
 REALAPP_SYSTEM = """
 Real-application mode. There is no authored checklist; you decide when the goal is met.
@@ -67,6 +76,16 @@ once with outcome "achieved" and a one-line note; do not spend steps collecting 
 If a login wall, permission prompt, network failure or missing precondition stops you, call
 session_finish with outcome "blocked" and say what blocked you. If the app cannot do what is
 asked, use "not_achievable". A separate reviewer verifies your claim from the screens.
+"""
+CONTRACT_SYSTEM = """
+This run adds expect_and_analyze to the compact-v1 subset: the note above about expect being
+unavailable does not apply here, because proving an assertion is the whole job.
+This run has an authored contract, so you are not the one who decides it is met. session_progress
+names the current checkpoint and the assertions it needs. Drive the app to that state, then prove
+each assertion on the live screen with expect_and_analyze - a checkpoint completes only on fresh
+proof, and nothing you say completes one. When session_progress reports every checkpoint complete,
+call session_finish with outcome "achieved". If you cannot reach a checkpoint, finish with
+"blocked" and say which assertion you could not prove.
 """
 
 
@@ -81,13 +100,23 @@ def host_knowledge(start: dict[str, Any]) -> list[dict[str, Any]]:
     return [item for item in items if isinstance(item, dict) and str(item.get("text") or "").strip()][:KNOWLEDGE_SHOWN]
 
 
-def goal_prompt(goal: str, knowledge: list[dict[str, Any]]) -> str:
-    """The first user message: the goal, then what the host already knows about it.
+def goal_prompt(
+    goal: str, knowledge: list[dict[str, Any]], setup_notes: Sequence[str] = ()
+) -> str:
+    """The first user message: the goal, what the host already knows, what setup did not finish.
 
     Without this the model re-derives facts the store already holds (where a setting lives, that a
     fresh install overwrites it, the route to it). Ids stay out: they are host bookkeeping.
+
+    *setup_notes* carries any setup flow that diverged. The alternative - saying nothing - makes the
+    model start from a screen the harness expected to be somewhere else, with no idea which part of
+    the precondition is missing.
     """
     lines = ["Goal: " + goal]
+    if setup_notes:
+        lines += ["", "Setup did not finish as written. Establish the rest yourself before judging, "
+                      "and say so if you cannot:"]
+        lines += [f"- {note}" for note in setup_notes]
     if knowledge:
         lines += ["", "Recorded knowledge about this app that matches the goal. It is advice with provenance, "
                       "possibly stale: prefer it over rediscovering, but confirm on screen before you rely on it."]
@@ -111,19 +140,70 @@ def finish_schema() -> dict[str, Any]:
     }
 
 
-def realapp_tools(schemas: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+def contract_tool_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """The assert tool, trimmed to one selector and one predicate.
+
+    Built here rather than through `compact_schema`, because compact-v1 is `run_live`'s
+    benchmark profile and deliberately offers no `expect`. Widening it there would change what
+    every benchmark run is handed, to serve a contract those runs do not have.
+    """
+    properties = {
+        key: value
+        for key, value in (schema.get("properties") or {}).items()
+        if key in CONTRACT_TOOL_PROPERTIES
+    }
+    missing = set(schema.get("required") or ()) - properties.keys()
+    if missing:
+        raise RunError(f"{CONTRACT_TOOL} now requires {', '.join(sorted(missing))}")
+    return {"type": "object", "properties": properties, "additionalProperties": False}
+
+
+def realapp_tools(
+    schemas: dict[str, dict[str, Any]], *, contract: bool = False
+) -> list[dict[str, Any]]:
     """compact-v1 tools, with session_finish carrying the model's outcome claim."""
     tools = []
-    for name in CONTROLLER_TOOLS:
+    for name in (*CONTROLLER_TOOLS, *((CONTRACT_TOOL,) if contract else ())):
         if name not in schemas:
             raise RunError(f"AUA MCP does not offer {name}")
-        parameters = finish_schema() if name == "session_finish" else compact_schema(name, schemas[name])
+        if name == "session_finish":
+            parameters = finish_schema()
+        elif name == CONTRACT_TOOL:
+            parameters = contract_tool_schema(schemas[name])
+        else:
+            parameters = compact_schema(name, schemas[name])
         description = str(schemas[name].get("description") or "")[:300]
         if name == "session_finish":
             description = "Claim the goal is finished (or blocked) with an outcome and a short note."
         tools.append({"type": "function", "function": {"name": name, "description": description,
                                                        "parameters": parameters}})
     return tools
+
+
+def goal_progress_of(progress: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+    """The counts inside a `session_progress` reply, whichever level they arrive at."""
+    if not isinstance(progress, Mapping) or progress.get("ok") is False:
+        return None
+    inner = progress.get("goal_progress")
+    if isinstance(inner, Mapping):
+        return inner
+    return progress if "total" in progress else None
+
+
+def contract_satisfied(progress: Mapping[str, Any] | None) -> bool:
+    """True only when AUA itself reports every authored checkpoint complete.
+
+    Deliberately strict about shape: a missing or malformed progress block means the contract
+    was not proven, and the judge answers instead. Reading "probably fine" out of a payload we
+    did not understand is how a harness reports a verdict nobody produced.
+    """
+    counts = goal_progress_of(progress)
+    if counts is None:
+        return False
+    total, completed = counts.get("total"), counts.get("completed")
+    if not isinstance(total, int) or not isinstance(completed, int) or total <= 0:
+        return False
+    return completed == total and counts.get("done") is True
 
 
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -146,6 +226,11 @@ def verdict_markdown(result: dict[str, Any]) -> str:
     lines.append(f"Oracle: `{verdict['oracle']}` · verified: {verdict['verified']} · controller stop: `{stop}`")
     if result.get("error"):
         lines.append(f"Run error: {result['error']}")
+    for warning in result.get("warnings") or []:
+        # A run that adapted around a stale precondition is not the same run as one that did
+        # not, and a reader who cannot see the difference will read the verdict as stronger
+        # than it is.
+        lines.append(f"Adapted: {warning}")
     claim = result.get("claim")
     if claim:
         lines.append(f"Controller claim: **{claim.get('outcome')}** — {claim.get('note') or ''}".rstrip(" —"))
@@ -213,6 +298,51 @@ def _mark_cleanup_failure(result: dict[str, Any], message: str) -> None:
         }
 
 
+SETUP_FLOW_RESUMES = 4
+"""How often a setup flow may re-issue a wait the ceiling cut short.
+
+`perf.max_wait_ms` ends every observation wait at 5s, so a flow that writes
+`timeout_ms: 60000` gets 5s and reports `wait_timeout` whether the screen is late or
+genuinely absent. The remedy AUA documents is to ask again, not to pass a bigger number the
+ceiling ignores. Four resumes buy a precondition about 25s without letting a wrong flow spin:
+a setup flow is the fast path, not the oracle, and a run abandoned because a cold start took
+seven seconds is a verdict about the harness rather than about the product.
+"""
+
+
+async def replay_setup_flow(
+    call: Callable[[str, dict[str, Any], str], Awaitable[dict[str, Any]]],
+    flow_yaml: str,
+    flow_params: Mapping[str, str] | None,
+    *,
+    actor: str = "setup",
+) -> tuple[dict[str, Any], int]:
+    """Replay one setup flow, re-issuing a wait that ran out of budget rather than screen.
+
+    Only `wait_timeout` resumes, and only from the step the engine names: every other
+    divergence - a missing element, an unsafe step, a failed assertion - is information about
+    the flow or the app, and repeating it just spends a device on the same answer.
+    """
+    arguments: dict[str, Any] = {"yaml": flow_yaml, "assist": False}
+    if flow_params:
+        arguments["params"] = {str(k): str(v) for k, v in flow_params.items()}
+    flow = await call("flow_run", dict(arguments), actor)
+    resumes = 0
+    while (
+        flow.get("ok") is not True
+        and flow.get("code") == "wait_timeout"
+        and isinstance(flow.get("resume_from_step"), int)
+        and resumes < SETUP_FLOW_RESUMES
+    ):
+        resumes += 1
+        flow = await call(
+            "flow_run",
+            {**arguments, "from_step": int(flow["resume_from_step"])},
+            actor,
+        )
+    return flow, resumes
+
+
 async def run_realapp(
     *,
     call_tool: Callable[[str, dict[str, Any]], Awaitable[Any]],
@@ -237,6 +367,7 @@ async def run_realapp(
     prelaunch_setup_flows: Sequence[tuple[str, dict[str, str]]] = (),
     setup_flows: Sequence[tuple[str, dict[str, str]]] = (),
     contract: str | None = None,
+    session_contract: str | None = None,
     vision: bool = False,
     judge_model: str | None = None,
     judge_request_config: dict[str, Any] | None = None,
@@ -285,7 +416,7 @@ async def run_realapp(
         "controller": None, "claim": None, "verdict": None, "screens": [], "route": None,
         "recording": None,
         "lifecycle": {"lease_strategy": "reuse_or_provision"},
-        "cost": {"total_usd": 0.0}, "error": None, "report_is_untrusted": True,
+        "cost": {"total_usd": 0.0}, "error": None, "warnings": [], "report_is_untrusted": True,
     }
     setup_log = output / "setup-calls.jsonl"
 
@@ -309,6 +440,7 @@ async def run_realapp(
                 handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
 
     session_id: str | None = None
+    setup_notes: list[str] = []
     recording_started = False
     recording_path = (output / "journey.mp4").resolve()
 
@@ -324,6 +456,13 @@ async def run_realapp(
             "wait_for_lease_s": lease_wait_s,
             "provision_target": provision_target,
         }
+        if session_contract:
+            # AUA's own checkpoints, not just the judge's reading material. With them the
+            # session can only be finished on fresh assertion proof, so the verdict comes back
+            # `aua_session_contract` / verified rather than a model reading frames. Without
+            # them AUA derives one phase from the goal sentence, with no assertions - which is
+            # what `aua prepare` writes a contract to avoid.
+            start_arguments["contract_yaml"] = session_contract
         if activity:
             start_arguments["activity"] = activity
         if apk:
@@ -362,14 +501,10 @@ async def run_realapp(
             recording_started = True
             result["recording"] = {"path": str(recording_path), "started": True, "stop_ok": None}
         for index, (flow_yaml, flow_params) in enumerate(prelaunch_setup_flows):
-            prelaunch_arguments: dict[str, Any] = {"yaml": flow_yaml, "assist": False}
-            if flow_params:
-                prelaunch_arguments["params"] = {
-                    str(k): str(v) for k, v in flow_params.items()
-                }
-            flow = await call("flow_run", prelaunch_arguments, "setup")
+            flow, resumes = await replay_setup_flow(call, flow_yaml, flow_params)
             result["setup"].append({"prelaunch_setup_flow": index,
                                     "params": dict(flow_params or {}),
+                                    "wait_resumes": resumes,
                                     "flow_run_ok": flow.get("ok"), "error": flow.get("error")})
             if flow.get("ok") is not True:
                 raise RunError(
@@ -402,15 +537,30 @@ async def run_realapp(
         if launched.get("ok") is not True:
             raise RunError("app launch failed: " + json.dumps(launched)[:400])
         for index, (flow_yaml, flow_params) in enumerate(setup_flows):
-            arguments: dict[str, Any] = {"yaml": flow_yaml, "assist": False}
-            if flow_params:
-                arguments["params"] = {str(k): str(v) for k, v in flow_params.items()}
-            flow = await call("flow_run", arguments, "setup")
+            flow, resumes = await replay_setup_flow(call, flow_yaml, flow_params)
             result["setup"].append({"setup_flow": index, "params": dict(flow_params or {}),
+                                    "wait_resumes": resumes,
                                     "flow_run_ok": flow.get("ok"), "error": flow.get("error")})
             if flow.get("ok") is not True:
-                raise RunError(
-                    f"setup flow {index} failed: " + json.dumps(flow)[:400]
+                # A setup flow is the fast path to a precondition, not the oracle. When it
+                # diverges the app is still running and still on a screen, so ending the run
+                # here throws away a device to say nothing: measured on 2026-09-14, a guest
+                # entry that had plainly succeeded returned `unverified` because the flow's
+                # arrival marker had moved. AUA's own rule is that a divergence is recovery
+                # information - hand the controller where it stopped and let it finish the
+                # precondition semantically. What it must not do is hide, so the divergence
+                # rides on the result, into the goal prompt, and past the judge.
+                remaining = ", ".join(
+                    str(step) for step in flow.get("remaining_steps") or []
+                )
+                setup_notes.append(
+                    f"the setup flow stopped at step {flow.get('step_index')} "
+                    f"({flow.get('code')}) on screen "
+                    f"{flow.get('current_screen') or 'unknown'}; it still owed: "
+                    f"{remaining or 'nothing'}"
+                )
+                result.setdefault("warnings", []).append(
+                    f"setup flow {index} diverged: " + json.dumps(flow)[:400]
                 )
         if flags or setup_flows or observation_frame(launched) is None:
             initial = await call("analyze_screen", {"source": "hierarchy", "no_cache": True}, "setup")
@@ -420,7 +570,7 @@ async def run_realapp(
         if observation_frame(initial) is None:
             raise RunError("initial analyze_screen returned no fresh frame")
         schemas = await list_tools()
-        tools = realapp_tools(schemas)
+        tools = realapp_tools(schemas, contract=bool(session_contract))
         claims: list[dict[str, Any]] = []
 
         async def controller_call(name: str, arguments: dict[str, Any]) -> Any:
@@ -437,8 +587,10 @@ async def run_realapp(
         compactor = FrameCompactor(max_elements=max_elements)
         report = await run_agent(
             send=send, call_tool=controller_call, tools=tools,
-            system_prompt=SYSTEM + COMPACT_SYSTEM + REALAPP_SYSTEM,
-            user_prompt=goal_prompt(goal, knowledge),
+            system_prompt=SYSTEM + COMPACT_SYSTEM + (
+                CONTRACT_SYSTEM if session_contract else REALAPP_SYSTEM
+            ),
+            user_prompt=goal_prompt(goal, knowledge, setup_notes),
             initial_observation=initial, model=model, output=output / "controller",
             request_config=settings, backend=backend, max_tokens=max_tokens, max_steps=max_steps,
             time_limit_s=time_limit_s, max_request_bytes=max_request_bytes,
@@ -478,9 +630,27 @@ async def run_realapp(
             if call_record.get("executed") is True
         ]
         stop = report.get("stop_reason")
+        contract_progress = None
+        if session_contract:
+            # The model's session_finish never reaches AUA here - it is a claim, and the
+            # session has to outlive it for the final observation, the judge and the recording.
+            # So ask AUA directly instead: `session_progress` is the same authority that would
+            # have accepted or refused the finish, and every checkpoint in it was completed on
+            # fresh assertions rather than on anything the model said.
+            contract_progress = await call("session_progress", {}, "judgement")
+            result["contract_progress"] = contract_progress
         if stop == "terminal_tool":
             result["verdict"] = {"oracle": "aua_session_contract", "verified": True, "verdict": "pass",
                                  "reasons": ["AUA accepted session_finish against its own contract."]}
+        elif contract_satisfied(contract_progress):
+            counts = goal_progress_of(contract_progress) or {}
+            result["verdict"] = {
+                "oracle": "aua_session_contract", "verified": True, "verdict": "pass",
+                "reasons": [
+                    f"AUA completed all {counts.get('total')} authored checkpoints on fresh "
+                    "assertions; no model read the frames to decide this."
+                ],
+            }
         elif stop in ("terminal_claimed", "model_text", "no_progress") and judge:
             decider = Decider(send, model=judging_model, backend=backend,
                               request_config=judge_settings, fallbacks=judge_fallbacks,
@@ -684,6 +854,10 @@ def main() -> int:
                         help="Feature flag K=V applied and verified before the setup flows; repeatable")
     parser.add_argument("--contract", type=Path,
                         help="Authored acceptance criteria the judge answers against")
+    parser.add_argument("--session-contract", type=Path,
+                        help="Version-1 checkpoint YAML AUA itself holds the session to, so "
+                             "session_finish is accepted on fresh assertion proof rather than "
+                             "on the model's word. Usually the same file as --contract.")
     parser.add_argument("--vision", action="store_true",
                         help="Show the judge the captured screenshots; needs an image-capable model")
     parser.add_argument("--judge-model",
@@ -825,6 +999,11 @@ def main() -> int:
                     prelaunch_setup_flows=prelaunch_setup_flows,
                     setup_flows=setup_flows,
                     contract=args.contract.read_text(encoding="utf-8") if args.contract else None,
+                    session_contract=(
+                        args.session_contract.read_text(encoding="utf-8")
+                        if args.session_contract
+                        else None
+                    ),
                     vision=args.vision,
                     judge_model=judge_candidate["repository"] if args.judge_model else None,
                     judge_request_config=judge_config,

@@ -110,6 +110,10 @@ MCP_SCHEMAS = {
     "session_progress": {"type": "object", "properties": {"session_id": {"type": "string"}}},
     "session_finish": {"type": "object", "properties": {"session_id": {"type": "string"}, "allow_incomplete": {"type": "boolean"},
                                                         "summary": {"type": "boolean"}}},
+    "expect_and_analyze": {"type": "object", "properties": {"rid": {"type": "string"}, "text": {"type": "string"},
+                                                            "desc": {"type": "string"}, "exists": {"type": "boolean"},
+                                                            "absent": {"type": "boolean"},
+                                                            "text_contains": {"type": "string"}}},
 }
 
 
@@ -347,8 +351,12 @@ def test_realapp_records_setup_failures_and_still_cleans_up(tmp_path):
 
     aua = BrokenAua()
     result = run(tmp_path, aua, FakeModel([], {}), setup_flows=[("steps: []", {})])
+    # The model here answers nothing, so there is no verdict to reach; what this pins is that a
+    # diverged setup flow is recorded as an adaptation rather than swallowing the run, and that
+    # cleanup still happens either way.
     assert result["verdict"]["verdict"] == "unverified"
-    assert "setup flow 0 failed" in result["error"]
+    assert result["error"] is None
+    assert any("setup flow 0 diverged" in warning for warning in result["warnings"])
     assert any(item.get("flow_run_ok") is False for item in result["setup"])
     assert aua.calls[-1][0] == "session_finish"
     assert aua.calls[-1][1]["allow_incomplete"] is True

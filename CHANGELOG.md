@@ -70,6 +70,26 @@ them cost a complete device run.
   workers driving one device.
 - `seeding=reinstall` grants runtime permissions. A fresh install has none, and the system dialog
   that follows looks exactly like a product failure to anything judging the screen.
+- A flow's `wait_for` failure now says whether the budget or the app ended it. Every observation
+  wait is capped by `perf.max_wait_ms`, so a flow that writes `timeout_ms: 60000` gets ~5s and
+  reports `wait_timeout` whether the screen was late or absent - two opposite remedies behind one
+  code. The clamp was already on the wait; it now rides out to the failure, beside the
+  `resume_from_step` that acts on it.
+- A setup flow that ran out of wait budget is re-issued from the step it stopped on, up to four
+  times, instead of ending the run. A guest-entry flow whose cold start needed seven seconds
+  produced `unverified` and spent a whole device on a healthy app. Any other divergence still
+  reports once: repeating a missing element only buys the same answer.
+- A setup flow that diverges for any other reason now hands the controller the screen it reached
+  instead of ending the run, with a note saying which part of the precondition is still owed. A
+  committed flow whose arrival marker had moved returned `unverified` on an app that was plainly
+  running. The adaptation comes back on the handback as `adapted` and stands in the verdict, so a
+  run that worked around a stale flow is never mistaken for one that did not.
+- The contract `prepare` writes is now AUA's own oracle, not just the judge's reading material. It
+  was passed as acceptance criteria only, so the session fell back to one phase derived from the
+  goal sentence carrying no assertions - `session_finish` could never be accepted, and a passing
+  run came back `model_judgement_v1` / `verified: false` with the stronger answer sitting unused in
+  the same file. `run_realapp --session-contract` hands it to `session_start`, and `prepare run`
+  passes it every time.
 
 ## [0.20.0] - 2026-09-14
 

@@ -96,6 +96,11 @@ def harness_command(
         str(output),
         "--contract",
         str(scenario["contract"]),
+        # The same file, twice, in its two roles: what the judge answers against, and what AUA
+        # holds the session to. `prepare` writes a real version-1 contract precisely so the
+        # oracle can be the checkpoints rather than a model reading frames afterwards.
+        "--session-contract",
+        str(scenario["contract"]),
         "--model",
         controller.model,
         "--judge-model",
@@ -272,6 +277,12 @@ def run_scenario(
     payload["ok"] = verdict in PASSING_VERDICTS
     if reasons:
         payload["reasons"] = reasons
+    warnings = result.get("warnings")
+    if isinstance(warnings, list) and warnings:
+        # A run that adapted around a stale precondition reached its verdict by a different
+        # route than one that did not. The agent reading this handback is deciding whether to
+        # trust the answer; it has to see the adaptation to decide that.
+        payload["adapted"] = [str(warning) for warning in warnings]
     payload["driven_by"] = "aua"
     payload["model"] = cfg.controller.model
     payload["scenario"] = scenario.get("name")

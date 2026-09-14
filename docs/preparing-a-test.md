@@ -212,3 +212,13 @@ saved AUA flow and it is replayed in seconds instead of rediscovered by the mode
 `--answer setup_flow=flows/common/enter-as-guest.yaml`.
 
 Both are optional, both are remembered per app, and `none` is a real answer to either.
+
+**A setup flow is the fast path, not the oracle.** Flows go stale — a screen is renamed, an arrival
+marker moves, a cold start outlasts the wait ceiling — and when one does, the app is still running
+and still on a screen. So a setup flow that runs out of wait budget is re-issued from the step it
+stopped on, and one that diverges for any other reason hands the controller the screen it reached,
+with a note saying which part of the precondition is still owed. The adaptation comes back on the
+handback as `adapted`, and it is in the verdict: a run that worked around a stale flow did not
+reach its answer the same way as one that did not, and the agent deciding whether to trust the
+verdict has to see that. What still ends a run before the model is spent: a flag that would not
+apply, and a **prelaunch** flow, which sets up state nothing downstream can observe.

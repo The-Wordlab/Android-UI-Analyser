@@ -384,6 +384,27 @@ def test_no_flags_means_no_flag_call_at_all(tmp_path):
 
 # --- chained setup flows --------------------------------------------------------------
 
+def test_a_session_contract_is_given_to_aua_not_only_to_the_judge(tmp_path):
+    """The checkpoints have to reach `session_start` to be able to decide anything.
+
+    `--contract` alone is the judge's reading material. Only `contract_yaml` on the session
+    makes AUA hold the run to fresh assertion proof, which is the difference between
+    `oracle: aua_session_contract, verified: true` and a model's reading of the frames.
+    """
+    aua = SetupAua()
+    run(tmp_path, aua, two_step_model(), session_contract="version: 1\ncheckpoints: []\n")
+
+    started = aua.named("session_start")[0]
+    assert started["contract_yaml"] == "version: 1\ncheckpoints: []\n"
+
+
+def test_without_one_no_contract_is_invented_for_the_session(tmp_path):
+    aua = SetupAua()
+    run(tmp_path, aua, two_step_model())
+
+    assert "contract_yaml" not in aua.named("session_start")[0]
+
+
 def test_setup_flows_run_in_order_each_with_its_own_parameters(tmp_path):
     aua = SetupAua()
     run(tmp_path, aua, two_step_model(), setup_flows=[
@@ -396,7 +417,15 @@ def test_setup_flows_run_in_order_each_with_its_own_parameters(tmp_path):
     assert "params" not in ran[1], "a flow with no parameters is not sent an empty mapping"
 
 
-def test_a_failing_setup_flow_stops_before_the_controller(tmp_path):
+def test_a_diverging_setup_flow_hands_the_controller_the_screen_it_reached(tmp_path):
+    """A setup flow is the fast path to a precondition, not the oracle.
+
+    It used to end the run. Measured on 2026-09-14 against a real app: a guest entry that had
+    plainly succeeded returned `unverified`, because the committed flow's arrival marker had
+    moved - a whole device spent to say nothing about the product. The app is still running
+    and still on a screen, so the controller drives on and establishes the rest semantically.
+    The adaptation is recorded, because a verdict reached this way is not the same verdict.
+    """
     aua = SetupAua(flow_ok=False)
     result = run(
         tmp_path,
@@ -405,11 +434,38 @@ def test_a_failing_setup_flow_stops_before_the_controller(tmp_path):
         setup_flows=[("name: environment", {"ENVIRONMENT": "Curie"})],
     )
 
-    assert "setup flow 0 failed" in result["error"]
-    assert any(
-        item.get("flow_run_ok") is False for item in result["setup"]
+    assert result["error"] is None
+    assert any(item.get("flow_run_ok") is False for item in result["setup"])
+    assert result["controller"] is not None
+    assert any("setup flow 0 diverged" in warning for warning in result["warnings"]), result[
+        "warnings"
+    ]
+
+
+def test_the_model_is_told_which_part_of_setup_did_not_finish():
+    """Driving on silently is worse than not driving on.
+
+    The model starts from a screen the harness expected to be somewhere else; without the
+    note it has no way to know which half of the precondition it still owes.
+    """
+    from experiments.aua_controller.run_realapp import goal_prompt
+
+    prompt = goal_prompt(
+        "Switch the app theme to Light",
+        [],
+        ["the setup flow stopped at step 4 (wait_timeout) on screen chat__1; it still owed: "
+         "wait-for 'containerDetail'"],
     )
-    assert result["controller"] is None
+
+    assert "Setup did not finish as written" in prompt
+    assert "wait_timeout" in prompt
+    assert "containerDetail" in prompt
+
+
+def test_a_goal_with_nothing_outstanding_says_nothing_about_setup():
+    from experiments.aua_controller.run_realapp import goal_prompt
+
+    assert "Setup did not finish" not in goal_prompt("Switch the app theme to Light", [])
 
 
 def test_a_failing_prelaunch_flow_stops_before_flags_and_product_launch(tmp_path):

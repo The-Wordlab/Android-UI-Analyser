@@ -84,6 +84,22 @@ def test_the_invocation_carries_the_contract_the_budget_and_the_judge_ladder(tmp
     assert "--fresh" not in argv
 
 
+def test_the_prepared_contract_is_the_oracle_not_only_the_judges_reading(tmp_path) -> None:
+    """AUA holds the session to the checkpoints it was given.
+
+    Without this the session derives one phase from the goal sentence, carrying no assertions
+    at all, so `session_finish` can never be accepted and the verdict falls to a model reading
+    frames. Measured on a real run: the contract `prepare` had written was passed only to the
+    judge, and a passing run came back `oracle: model_judgement_v1, verified: false` - the
+    weaker of the two answers, with the stronger one sitting unused in the same file.
+    """
+    argv = harness_command(_cfg(), SCENARIO, output=tmp_path, command=["python", "run.py"])
+
+    pairs = dict(zip(argv, argv[1:], strict=False))
+    assert pairs["--session-contract"] == SCENARIO["contract"]
+    assert pairs["--contract"] == SCENARIO["contract"]
+
+
 def test_choosing_the_wipe_is_the_only_thing_that_wipes(tmp_path) -> None:
     scenario = {**SCENARIO, "answers": {**SCENARIO["answers"], "seeding": "reinstall"}}
     argv = harness_command(_cfg(), scenario, output=tmp_path, command=["python", "run.py"])
