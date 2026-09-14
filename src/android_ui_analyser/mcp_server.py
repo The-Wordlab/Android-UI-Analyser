@@ -146,9 +146,7 @@ def _optional_mic_target(
     if isinstance(value, str) and not value.strip():
         raise UsageError("microphone control target must not be empty")
     identity = target_key == "stable_key" or (target_key == "id" and _ordinal(value) is None)
-    if target_key in {"id", "stable_key"} and (
-        args.get("index") is not None or args.get("first")
-    ):
+    if target_key in {"id", "stable_key"} and (args.get("index") is not None or args.get("first")):
         raise UsageError("index/first cannot modify a microphone control id or stable_key")
     bounds = args.get("bounds")
     if bounds is not None:
@@ -2460,6 +2458,66 @@ def _tool_definitions() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="prepare_start",
+            description=(
+                "Before testing an unfamiliar claim: get the short list of things AUA cannot work "
+                "out for itself (build, sign-in, what the pre-condition is in code, how to reach "
+                "it, UI-only or end-to-end, and what must be on screen). Questions the app map "
+                "already answers are not asked."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "package": {"type": "string"},
+                    "goal": {"type": "string"},
+                    "context": {"type": "string"},
+                },
+                "required": ["package", "goal"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="prepare_answer",
+            description=(
+                "Answer prepare_start's questions. When none are left this writes the contract, "
+                "saves the scenario, and returns the run command plus the translation of every "
+                "answer into an assertion - check it before running."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "package": {"type": "string"},
+                    "prepare_id": {"type": "string"},
+                    "answers": {"type": "object", "additionalProperties": {"type": "string"}},
+                    "artifacts_dir": {"type": "string"},
+                    "remember": {"type": "boolean"},
+                    "agent": {"type": "string"},
+                },
+                "required": ["package", "prepare_id", "answers"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="prepare_show",
+            description="Show one interview without changing it.",
+            inputSchema={
+                "type": "object",
+                "properties": {"package": {"type": "string"}, "prepare_id": {"type": "string"}},
+                "required": ["package", "prepare_id"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="prepare_list",
+            description="Interviews in flight and scenarios already prepared for this app.",
+            inputSchema={
+                "type": "object",
+                "properties": {"package": {"type": "string"}},
+                "required": ["package"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
             name="knowledge_stale",
             description="Mark one knowledge item stale while retaining its evidence.",
             inputSchema={
@@ -2980,8 +3038,8 @@ def _tool_definitions() -> list[types.Tool]:
                         "type": "object",
                         "description": (
                             "Keyed by preference name. Either a bare JSON value, or "
-                            '{\"type\": \"bool|int|long|float|double|string|string_set\", '
-                            '\"value\": ...} when the stored type must be pinned.'
+                            '{"type": "bool|int|long|float|double|string|string_set", '
+                            '"value": ...} when the stored type must be pinned.'
                         ),
                     },
                     "restart": {"type": "boolean", "default": True},
@@ -3907,6 +3965,36 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 verify=args.get("verify", True),
             )
         )
+    if name in {"prepare_start", "prepare_answer", "prepare_show", "prepare_list"}:
+        # Preparation is a conversation about an app, not a run on a device: it needs the app map
+        # and nothing else, which is why these are lease-free.
+        from . import prepare_store
+
+        store = engine._memory
+        if store is None:
+            raise AuaError("memory is disabled", code="usage")
+        package = str(args["package"])
+        if name == "prepare_start":
+            return prepare_store.start(
+                store, package=package, goal=str(args["goal"]), context=args.get("context")
+            )
+        if name == "prepare_show":
+            return prepare_store.show(store, package=package, prepare_id=str(args["prepare_id"]))
+        if name == "prepare_list":
+            return prepare_store.catalogue(store, package=package)
+        answers = args.get("answers") or {}
+        if not isinstance(answers, dict) or not answers:
+            raise AuaError("prepare_answer needs a non-empty `answers` object", code="usage")
+        return prepare_store.answer(
+            store,
+            package=package,
+            prepare_id=str(args["prepare_id"]),
+            answers={str(key): str(value) for key, value in answers.items()},
+            remember=bool(args.get("remember", True)),
+            artifacts_dir=args.get("artifacts_dir"),
+            agent=args.get("agent"),
+        )
+
     if name in {
         "map_audit",
         "reconcile_plan",
@@ -4286,8 +4374,7 @@ def _agent_response_context(engine: Engine) -> dict[str, Any]:
             or engine.config.device.serial
         ),
         "owner": (
-            getattr(engine, "_lease_owner_resolved", None)
-            or getattr(engine, "_lease_owner", None)
+            getattr(engine, "_lease_owner_resolved", None) or getattr(engine, "_lease_owner", None)
         ),
         # Capture tools also return session_id, but that names a buffer, never the goal.
         "session_id": getattr(engine, "_session_id", None),
@@ -4365,6 +4452,10 @@ _LEASE_FREE_TOOLS = frozenset(
         "knowledge_add",
         "knowledge_list",
         "knowledge_stale",
+        "prepare_answer",
+        "prepare_list",
+        "prepare_show",
+        "prepare_start",
         "list_devices",
         "map_audit",
         "map_find",
@@ -4506,7 +4597,9 @@ def build_server(engine: Engine) -> Server:
             # A worker thread keeps unrelated MCP traffic responsive while the dialog waits.
             result = await anyio.to_thread.run_sync(_request_credential, dict(arguments or {}))
             return types.CallToolResult(
-                content=[types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False))],
+                content=[
+                    types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False))
+                ],
                 isError=not result.get("ok", False),
             )
         from . import journal as journal_mod
@@ -4596,9 +4689,7 @@ def build_server(engine: Engine) -> Server:
             # shared helper, because these two surfaces had already drifted once: MCP was
             # returning every field of every element on every action while the CLI trimmed.
             if isinstance(result, dict) and name in _OBSERVATION_TOOL_NAMES:
-                result = trim_observation_payload(
-                    result, observation_view(), fmt=OutputFormat.json
-                )
+                result = trim_observation_payload(result, observation_view(), fmt=OutputFormat.json)
             if annotation_warnings and isinstance(result, dict):
                 result["annotation_warnings"] = annotation_warnings
             return result
@@ -4684,9 +4775,7 @@ def build_server(engine: Engine) -> Server:
             if getattr(engine, "_mcp_agent_response", False):
                 if image is None and isinstance(error, dict):
                     image = _image_block(name, error)
-                return _agent_response(
-                    engine, name, envelope, image, exit_code=int(err.exit_code)
-                )
+                return _agent_response(engine, name, envelope, image, exit_code=int(err.exit_code))
             if image is not None:
                 error_blocks.append(image)
             return error_blocks

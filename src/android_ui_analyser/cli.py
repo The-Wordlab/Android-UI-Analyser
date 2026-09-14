@@ -390,6 +390,7 @@ def _journal_cli_recovery(
                 if error is not None and error.code == "unknown_command"
                 else value
             )
+
         opts = ctx.obj if isinstance(ctx.obj, GlobalOpts) else None
         cfg = opts.load() if opts is not None else load_config()
         owner = leases.resolve_owner(opts.owner if opts is not None else None)
@@ -1087,7 +1088,10 @@ def _record_cli_emitted(
             from .coaching import finalize_session_artifact
 
             finalize_session_artifact(
-                _ENGINE, result, invocation_id=context.invocation_id, evidence_result=artifact_result
+                _ENGINE,
+                result,
+                invocation_id=context.invocation_id,
+                evidence_result=artifact_result,
             )
     with contextlib.suppress(Exception):
         from . import journal as journal_mod
@@ -6933,7 +6937,8 @@ def record_start_cmd(
 def record_stop_cmd(
     ctx: typer.Context,
     path: str = typer.Argument(
-        ..., help="Playable MP4 path. Android also retains PATH.segments/ and PATH.recording.json; multiple segments require host ffmpeg."
+        ...,
+        help="Playable MP4 path. Android also retains PATH.segments/ and PATH.recording.json; multiple segments require host ffmpeg.",
     ),
 ) -> None:
     def go(engine: Engine, fmt: OutputFormat) -> None:
@@ -6943,8 +6948,12 @@ def record_stop_cmd(
         local_path = str(requested.parent.resolve() / requested.name)
         result = _route(engine, "record_stop", local_path=local_path)
         _emit(result, fmt)
-        _exit_unless_ok(result, ExitCode.DEVICE, code="recording_coverage_failed",
-                        hint="Evidence was collected; inspect the recording manifest for missing coverage.")
+        _exit_unless_ok(
+            result,
+            ExitCode.DEVICE,
+            code="recording_coverage_failed",
+            hint="Evidence was collected; inspect the recording manifest for missing coverage.",
+        )
 
     _run(ctx, go)
 
@@ -7470,7 +7479,9 @@ def daemon(
 
 
 config_app = typer.Typer(
-    name="config", help="Inspect configuration, save credentials, or launch a configured command.", no_args_is_help=True
+    name="config",
+    help="Inspect configuration, save credentials, or launch a configured command.",
+    no_args_is_help=True,
 )
 app.add_typer(config_app, name="config")
 
@@ -7479,9 +7490,7 @@ class CredentialExecCommand(JournalCommand):
     """Keep the child argv boundary explicit before Click consumes the separator."""
 
     def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
-        ctx.meta["credential_exec_command"] = (
-            args[args.index("--") + 1 :] if "--" in args else None
-        )
+        ctx.meta["credential_exec_command"] = args[args.index("--") + 1 :] if "--" in args else None
         return super().parse_args(ctx, args)
 
 
@@ -7493,7 +7502,10 @@ def config_exec(
     ),
     env_file: Path = typer.Option(Path(".env"), "--env-file", help="Exact host .env file to read."),
     require: list[str] = typer.Option(
-        ..., "--require", metavar="NAME", help="Required environment variable name; repeat for each."
+        ...,
+        "--require",
+        metavar="NAME",
+        help="Required environment variable name; repeat for each.",
     ),
     timeout: int = typer.Option(300, "--timeout", help="Private dialog timeout in seconds."),
     no_prompt: bool = typer.Option(
@@ -7513,15 +7525,17 @@ def config_exec(
 
     if command != ctx.meta.get("credential_exec_command"):
         typer.echo(
-            json.dumps({
-                "ok": False,
-                "status": "error",
-                "started": False,
-                "error": {
-                    "code": "credential_command_separator_required",
-                    "message": "Put -- before the child command and its arguments.",
-                },
-            }),
+            json.dumps(
+                {
+                    "ok": False,
+                    "status": "error",
+                    "started": False,
+                    "error": {
+                        "code": "credential_command_separator_required",
+                        "message": "Put -- before the child command and its arguments.",
+                    },
+                }
+            ),
             err=True,
         )
         raise typer.Exit(2)
@@ -8667,7 +8681,11 @@ def knowledge_list(
         pkg = _resolve_package(engine, app_pkg)
         app_map = AppMemoryStore.from_config(opts.load()).load(pkg) or AppMap(package=pkg)
         if query and query.strip():
-            payload = {"package": pkg, "query": query, "knowledge": relevant_knowledge(app_map, query, limit=10)}
+            payload = {
+                "package": pkg,
+                "query": query,
+                "knowledge": relevant_knowledge(app_map, query, limit=10),
+            }
             typer.echo(json.dumps(payload, indent=2, ensure_ascii=False))
             return
         items = [
@@ -8769,6 +8787,138 @@ def knowledge_stale(
         item.status = "stale"
         store.save(app_map)
         typer.echo(json.dumps({"ok": True, "id": knowledge_id, "status": "stale"}))
+
+    _run(ctx, go)
+
+
+prepare_app = typer.Typer(
+    name="prepare",
+    help="Agree what a test must prove with the agent that wrote the feature, then keep it.",
+    no_args_is_help=True,
+)
+app.add_typer(prepare_app, name="prepare")
+
+
+def _prepare_store(ctx: typer.Context) -> AppMemoryStore:
+    """Memory store without touching a device: preparation is a conversation, not a run."""
+
+    store = AppMemoryStore.from_config(_opts(ctx).load())
+    if not store.cfg.enabled:
+        raise UsageError(
+            "preparation needs app memory enabled",
+            hint="Set `memory.enabled: true`; the interview is stored beside the app map.",
+        )
+    return store
+
+
+@prepare_app.command("start")
+def prepare_start_cmd(
+    ctx: typer.Context,
+    goal: str = typer.Option(..., "--goal", help="The claim to prove, in a sentence."),
+    app_pkg: str = typer.Option(..., "--app", "--package", help="Package under test."),
+    context: str | None = typer.Option(None, "--context", help="Feature-flag context scope."),
+) -> None:
+    """Ask the calling agent only what AUA cannot work out for itself."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        import json
+
+        from .prepare_store import start
+
+        typer.echo(
+            json.dumps(
+                start(_prepare_store(ctx), package=app_pkg, goal=goal, context=context),
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+
+    _run(ctx, go)
+
+
+@prepare_app.command("answer")
+def prepare_answer_cmd(
+    ctx: typer.Context,
+    prepare_id: str = typer.Argument(..., help="Id returned by `aua prepare start`."),
+    app_pkg: str = typer.Option(..., "--app", "--package", help="Package under test."),
+    answer: list[str] = typer.Option(
+        ...,
+        "--answer",
+        help="`key=value`; repeat. Keys come from the question list.",
+    ),
+    artifacts_dir: str | None = typer.Option(
+        None, "--artifacts-dir", help="Where the proving run should write its evidence."
+    ),
+    remember: bool = typer.Option(
+        True,
+        "--remember/--no-remember",
+        help="Keep durable facts (build, sign-in, pre-condition) in the app map.",
+    ),
+    agent: str | None = typer.Option(None, "--agent", help="Who answered, for provenance."),
+) -> None:
+    """Answer open questions; when nothing is outstanding this writes the scenario."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        import json
+
+        from .prepare import parse_answer_pairs
+        from .prepare_store import answer as record
+
+        result = record(
+            _prepare_store(ctx),
+            package=app_pkg,
+            prepare_id=prepare_id,
+            answers=parse_answer_pairs(answer),
+            remember=remember,
+            artifacts_dir=artifacts_dir,
+            agent=agent,
+        )
+        typer.echo(json.dumps(result, indent=2, ensure_ascii=False))
+
+    _run(ctx, go)
+
+
+@prepare_app.command("show")
+def prepare_show_cmd(
+    ctx: typer.Context,
+    prepare_id: str = typer.Argument(..., help="Id returned by `aua prepare start`."),
+    app_pkg: str = typer.Option(..., "--app", "--package", help="Package under test."),
+) -> None:
+    """Show one interview: what is known, what is answered, what is still missing."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        import json
+
+        from .prepare_store import show
+
+        typer.echo(
+            json.dumps(
+                show(_prepare_store(ctx), package=app_pkg, prepare_id=prepare_id),
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+
+    _run(ctx, go)
+
+
+@prepare_app.command("list")
+def prepare_list_cmd(
+    ctx: typer.Context,
+    app_pkg: str = typer.Option(..., "--app", "--package", help="Package under test."),
+) -> None:
+    """Interviews in flight and scenarios already prepared for this app."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        import json
+
+        from .prepare_store import catalogue
+
+        typer.echo(
+            json.dumps(
+                catalogue(_prepare_store(ctx), package=app_pkg), indent=2, ensure_ascii=False
+            )
+        )
 
     _run(ctx, go)
 
@@ -10490,7 +10640,8 @@ def run_init_cmd(
         context = create_run(path, config, owner=opts.owner, needs=_split_needs(opts.needs))
         payload = normalize_result(
             {"ok": True, "path": str(path.expanduser().absolute())},
-            command="run_init", context=context.public(),
+            command="run_init",
+            context=context.public(),
         )
     except (AuaError, OSError) as error:
         failure = error if isinstance(error, AuaError) else ConfigError(str(error))
@@ -10499,7 +10650,9 @@ def run_init_cmd(
     typer.echo(json.dumps(payload, ensure_ascii=False))
 
 
-@run_app.command("exec", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+@run_app.command(
+    "exec", context_settings={"allow_extra_args": True, "ignore_unknown_options": True}
+)
 def run_exec_cmd(
     ctx: typer.Context,
     path: Path = typer.Argument(..., help="Run file created by `aua run init`."),
