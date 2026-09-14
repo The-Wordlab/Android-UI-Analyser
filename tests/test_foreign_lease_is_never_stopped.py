@@ -69,10 +69,11 @@ def _no_real_devices(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
 
 
 def test_live_leased_console_port_stays_unavailable_when_adb_omits_it(
-    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     registry = tmp_path / "registry"
     assert leases.acquire(registry, "emulator-5554", owner=_live_owner())
+    monkeypatch.setattr(em, "_console_answers", lambda port: port == 5554)  # it is running
 
     # adb reports nothing and this cache has no boot records — the registry alone must
     # keep the foreign worker's port out of the allocatable set.

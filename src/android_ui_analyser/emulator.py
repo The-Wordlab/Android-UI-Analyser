@@ -675,26 +675,57 @@ def release_console_port(port: int | None) -> None:
         (_reservation_dir() / f"{int(port)}.port").unlink()
 
 
-def _leased_console_ports(lease_registry_dir: str | Path | None) -> set[int]:
-    """Console ports of serials the lease registry says are held by a live owner.
+_CONSOLE_PROBE_TIMEOUT_S = 0.5
+
+
+def _console_answers(port: int) -> bool:
+    """Whether something accepts connections on emulator console port *port*.
+
+    A running emulator binds ``127.0.0.1:<port>`` before adb can see it and holds it until
+    the process exits, so this is the one liveness signal that survives an adb blink. A
+    connection that is neither accepted nor refused within the timeout counts as answering:
+    fail closed.
+    """
+    try:
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=_CONSOLE_PROBE_TIMEOUT_S):
+            return True
+    except (ConnectionRefusedError, ConnectionResetError):
+        return False
+    except OSError:
+        return True
+
+
+def _leased_console_port_holders(lease_registry_dir: str | Path | None) -> dict[int, str]:
+    """Console ports the lease registry still holds, each with its holder's label.
 
     The adb snapshot is not the authority on which ports are occupied: a live failure saw
     adb briefly omit a foreign worker's emulator-5554 while a second agent allocated a
     port, so 5554 looked free, the new boot answered on the foreign device, and the
     claim-failure rollback stopped it. The registry is host-wide and process-bound, so a
-    live lease marks its port used regardless of what adb happens to report — and a dead
+    live lease marks its port used regardless of what adb happens to report - and a dead
     owner's lease reads as expired, freeing the port immediately.
+
+    A live lease is not a live emulator, though. The lease is bound to the calling agent's
+    process, which is deliberately long-lived - an IDE, an agent harness, a reused CI worker -
+    and outlives every emulator it ever started; a lease for an emulator that died a day
+    earlier still read as live and its port was refused (#12). What the registry protects is
+    the port of an emulator that is *running*, and a running emulator always answers on its
+    console port. So a lease holds its port only while that console answers. A lease that
+    cannot be read is honoured regardless: fail closed.
     """
     if lease_registry_dir is None:
-        return set()
-    out: set[int] = set()
+        return {}
+    out: dict[int, str] = {}
     try:
         from . import leases
 
-        for serial in leases.live_leased_serials(lease_registry_dir):
-            p = _port_from_serial(serial)
-            if p is not None:
-                out.add(p)
+        for entry in leases.list_leases(lease_registry_dir):
+            port = _port_from_serial(str(entry.get("target_id") or entry.get("serial") or ""))
+            if port is None:
+                continue
+            if not entry.get("inaccessible") and not _console_answers(port):
+                continue
+            out[port] = str(entry.get("owner") or "unknown")
     except OSError as exc:
         raise DeviceError(
             "cannot read the host-wide lease registry; refusing emulator provisioning",
@@ -704,6 +735,10 @@ def _leased_console_ports(lease_registry_dir: str | Path | None) -> set[int]:
             ),
         ) from exc
     return out
+
+
+def _leased_console_ports(lease_registry_dir: str | Path | None) -> set[int]:
+    return set(_leased_console_port_holders(lease_registry_dir))
 
 
 def allocate_console_port(
@@ -720,11 +755,8 @@ def allocate_console_port(
     to adb, while its serial actually belonged to the winner's AVD. Two agents then drove
     one device believing they each had their own.
     """
-    used = (
-        _used_console_ports(cache_dir=cache_dir)
-        | _reserved_console_ports()
-        | _leased_console_ports(lease_registry_dir)
-    )
+    leased = _leased_console_port_holders(lease_registry_dir)
+    used = _used_console_ports(cache_dir=cache_dir) | _reserved_console_ports() | set(leased)
 
     def claim_unused(port: int) -> bool:
         if not _claim_console_port(port):
@@ -762,7 +794,8 @@ def allocate_console_port(
                 hint="Omit --port to auto-allocate, or pick a free even port "
                 f"(used: {', '.join(str(p) for p in sorted(used)) or 'none'}). "
                 "AUA also checks instance records, live leases, and shared startup "
-                f"reservations in {_reservation_dir()} (outside AUA_CACHE__DIR).",
+                f"reservations in {_reservation_dir()} (outside AUA_CACHE__DIR)."
+                + _leased_port_reason(port, leased.get(port)),
             )
         return port
     for port in range(_EMULATOR_PORT_MIN, _EMULATOR_PORT_MAX + 1, 2):
@@ -776,6 +809,18 @@ def allocate_console_port(
         "no free emulator console ports left",
         hint=f"All even ports {_EMULATOR_PORT_MIN}–{_EMULATOR_PORT_MAX} are taken — "
         "`aua emulator stop --mine` (or `--owner`) to free some.",
+    )
+
+
+def _leased_port_reason(port: int, holder: str | None) -> str:
+    """Why a leased port was refused, so nobody has to open the registry to find out."""
+    if holder is None:
+        return ""
+    if holder.startswith("<"):
+        return f" Port {port}: its lease record cannot be read, so it is treated as held ({holder})."
+    return (
+        f" Port {port}: leased by {holder!r} and its console still answers, so that emulator "
+        "is running."
     )
 
 

@@ -20,6 +20,14 @@ notes, so you can check for a newer version — and read what changed — withou
   `emulator start --port` on that console port was refused as already in use (#12). A stop now also
   waits for the process to exit before reporting it `stopped`; one that survives the signal is
   listed under `still_running` and keeps its record and lease for the next stop to find.
+- A lease holds its emulator's console port only while that console still answers. The
+  registry is in the port allocator so a live emulator's port stays safe when adb blinks - but a
+  live lease is not a live emulator: bound to a long-lived agent process, a lease for an emulator
+  that had died 27 hours earlier still read as live, and `emulator start --port` was refused on a
+  port nothing listened on (#12). A running emulator always answers on `127.0.0.1:<port>`; a dead
+  one never does. A lease whose record cannot be read still holds its port, and the refusal now
+  names the holder and says its emulator is running, so nobody has to open the registry to find
+  out why.
 
 ## [0.21.1] - 2026-09-14
 

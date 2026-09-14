@@ -7699,7 +7699,8 @@ def lease_cmd(
     is still alive — and an owner is stable for the life of the calling process, so a
     long-running orchestrator that touched a device keeps holding it (a warm daemon serving
     that device keeps the entry fresh). `aua emulator stop` drops the lease of every device
-    it stops. The sole exception to process-bound ageing is an explicitly pending transfer:
+    it stops, and a lease holds an emulator's console port only while that console still
+    answers. The sole exception to process-bound ageing is an explicitly pending transfer:
     its reservation survives a source crash for at most five minutes so the receiver can accept
     it. When a device is wedged, break it with
     `aua lease release <serial> --force`; `aua lease list` names the holder.
