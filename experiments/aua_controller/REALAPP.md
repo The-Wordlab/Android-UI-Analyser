@@ -99,10 +99,30 @@ comparison profile. `long_press_and_analyze` accepts only a fresh element id fro
 observation, so pin, unpin and rename menus retain AUA's stale-selector refusal. The separate
 `back_gesture_and_analyze` action accepts no arguments: Android derives the left-edge swipe inside
 its platform adapter instead of giving the controller arbitrary coordinates.
+
+Long asynchronous UI work is opt-in through `--controller-capability async-ui-wait`. It adds one
+small `wait_for_ui_condition` tool: the model supplies exactly one positive semantic `rid:`,
+`text:` or `desc:` anchor, temporary pending text that must disappear, and a 1–900 second timeout.
+The harness starts `job_start(operation="await")` on the already leased AUA session and polls its
+durable job id with `job_status`; polling yields the event loop and makes no model request. The
+terminal job result, including its fresh observation and capture evidence, is returned as the one
+tool result. A controller timeout or cancellation requests `job_cancel` before normal session
+cleanup. Only this virtual tool receives the longer 960-second tool-call ceiling; ordinary model
+requests and UI actions retain their configured request timeout, and the whole-run `--time-limit`
+still applies.
+
 If provisioning fails before a session exists (for example, host capacity is exhausted), the
 runner switches to a bounded wait for an existing lease; the MCP transport timeout expands to
 cover that wait. No model chooses a serial, installs or starts the app, controls recording, or
 releases the target.
+
+The ordered controller ladder treats a response as usable only after its finish reason and native
+tool-call envelope parse successfully. A malformed response advances to the next configured model
+before any action from it is dispatched. Valid multiple-call or schema-invalid responses retain
+the assistant response plus matched `executed:false` tool feedback for bounded repair; if one model
+exhausts that repair budget, the same conversation continues on the next model. A timeout after a
+device dispatch remains an unknown outcome and ends the controller instead of falling back or
+replaying the action.
 
 `session_finish` is offered to the model with two fields of its own, `outcome`
 (`achieved | already_satisfied | blocked | not_achievable`) and a short `note`. The runner

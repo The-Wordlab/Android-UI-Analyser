@@ -380,6 +380,104 @@ def test_model_request_failure_escalates_once_and_stays_on_ordered_fallback(tmp_
     assert [turn["model_rung"] for turn in turns] == [0, 1, 1]
 
 
+@pytest.mark.parametrize("kind", ["abnormal", "truncated", "malformed_arguments", "missing_id"])
+def test_unusable_response_envelope_escalates_before_any_device_dispatch(tmp_path, kind):
+    unusable = response()
+    choice = unusable["choices"][0]
+    if kind == "abnormal":
+        choice["finish_reason"] = "content_filter"
+    elif kind == "truncated":
+        choice["finish_reason"] = "length"
+    elif kind == "malformed_arguments":
+        choice["message"]["tool_calls"][0]["function"]["arguments"] = "{"
+    else:
+        choice["message"]["tool_calls"][0].pop("id")
+
+    report, requests, calls = run(
+        tmp_path,
+        [unusable, response(), response(content="Done")],
+        model_fallbacks=[("fictional/fallback", SETTINGS)],
+    )
+
+    assert calls == [("tap", {"id": "el:1"})]
+    assert [payload["model"] for payload in requests] == [
+        "fictional/model",
+        "fictional/fallback",
+        "fictional/fallback",
+    ]
+    assert report["model_escalations"] == 1
+    assert report["tool_calls_executed"] == 1
+    assert report["unknown_tool_outcomes"] == 0
+    assert report["cost_accounting"]["reported_usd"] == 0.003
+    turns = records(tmp_path / "controller/model-turns.jsonl")
+    assert turns[0]["model_rung"] == 0 and turns[0]["error"]
+    assert "response" in turns[0], "the unusable but billable response remains auditable"
+
+
+def test_valid_multi_call_protocol_repair_does_not_advance_the_model_ladder(tmp_path):
+    report, requests, calls = run(
+        tmp_path,
+        [multiple_response(), response(), response(content="Done")],
+        tools=multiple_tools(),
+        model_fallbacks=[("fictional/fallback", SETTINGS)],
+    )
+
+    assert calls == [("tap", {"id": "el:1"})]
+    assert [payload["model"] for payload in requests] == ["fictional/model"] * 3
+    assert report["protocol_repairs"] == 1
+    assert report["model_escalations"] == 0
+
+
+def test_exhausted_schema_repairs_continue_on_fallback_with_matched_feedback(tmp_path):
+    invalid = response(arguments={})
+    report, requests, calls = run(
+        tmp_path,
+        [invalid, invalid, invalid, invalid, response(), response(content="Done")],
+        model_fallbacks=[("fictional/fallback", SETTINGS)],
+    )
+
+    assert [payload["model"] for payload in requests] == [
+        "fictional/model",
+        "fictional/model",
+        "fictional/model",
+        "fictional/model",
+        "fictional/fallback",
+        "fictional/fallback",
+    ]
+    assert calls == [("tap", {"id": "el:1"})]
+    assert report["repair_count"] == report["schema_repairs"] == 3
+    assert report["model_escalations"] == 1
+    assert report["model_failures"][-1]["error"] == "controller schema repair budget exhausted"
+    fallback_history = requests[4]["messages"]
+    assert fallback_history[-2]["role"] == "assistant"
+    assert fallback_history[-1]["role"] == "tool"
+    assert json.loads(fallback_history[-1]["content"])["error"]["executed"] is False
+    assert len(records(tmp_path / "controller/controller-feedback.jsonl")) == 4
+
+
+def test_exhausted_protocol_repairs_continue_on_fallback_without_device_replay(tmp_path):
+    invalid = multiple_response()
+    report, requests, calls = run(
+        tmp_path,
+        [invalid, invalid, invalid, invalid, response(), response(content="Done")],
+        tools=multiple_tools(),
+        model_fallbacks=[("fictional/fallback", SETTINGS)],
+    )
+
+    assert [payload["model"] for payload in requests[-2:]] == [
+        "fictional/fallback",
+        "fictional/fallback",
+    ]
+    assert calls == [("tap", {"id": "el:1"})]
+    assert report["repair_count"] == report["protocol_repairs"] == 3
+    assert report["model_escalations"] == 1
+    assert report["model_failures"][-1]["error"] == "controller protocol repair budget exhausted"
+    fallback_history = requests[4]["messages"]
+    assert fallback_history[-3]["role"] == "assistant"
+    assert [entry["role"] for entry in fallback_history[-2:]] == ["tool", "tool"]
+    assert len(records(tmp_path / "controller/controller-feedback.jsonl")) == 8
+
+
 def test_model_fallback_never_replays_a_tool_with_unknown_outcome(tmp_path):
     async def slow_tool(name, arguments):
         await asyncio.sleep(10)

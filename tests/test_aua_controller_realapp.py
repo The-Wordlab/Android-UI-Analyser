@@ -12,12 +12,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from experiments.aua_controller.agent_loop import run_agent
 from experiments.aua_controller.run_live import RunError
 from experiments.aua_controller.run_realapp import (
+    ASYNC_UI_WAIT_MAX_SECONDS,
+    ASYNC_UI_WAIT_TOOL,
     CONTROLLER_TOOLS,
     WALL_CLOCK_WAIT_SECONDS,
     WALL_CLOCK_WAIT_TOOL,
+    async_ui_wait_spec,
     controller_tool_timeouts,
     normalize_element_id_argument,
     realapp_tools,
+    run_async_ui_wait,
     run_realapp,
 )
 
@@ -151,6 +155,9 @@ MCP_SCHEMAS = {
                                                             "text_contains": {"type": "string"}}},
     "network_offline": {"type": "object", "properties": {"verify": {"type": "boolean"}}},
     "network_restore": {"type": "object", "properties": {"timeout_ms": {"type": "integer"}}},
+    "job_start": {"type": "object", "properties": {"operation": {"type": "string"}}},
+    "job_status": {"type": "object", "properties": {"job_id": {"type": "string"}}},
+    "job_cancel": {"type": "object", "properties": {"job_id": {"type": "string"}}},
 }
 
 
@@ -275,25 +282,244 @@ def test_contract_mode_keeps_session_progress_for_authored_checkpoints():
 def test_realapp_tools_add_only_requested_resilience_capabilities():
     tools = realapp_tools(
         MCP_SCHEMAS,
-        capabilities=["network", "wall-clock-wait", "app-lifecycle"],
+        capabilities=["network", "wall-clock-wait", "async-ui-wait", "app-lifecycle"],
     )
     names = [tool["function"]["name"] for tool in tools]
-    assert names[-5:] == [
+    assert names[-6:] == [
         "network_offline",
         "network_restore",
         "wait_uninterrupted_620_seconds",
+        "wait_for_ui_condition",
         "app_force_stop",
         "app_relaunch_and_analyze",
     ]
+    async_schema = next(
+        tool["function"]["parameters"]
+        for tool in tools
+        if tool["function"]["name"] == ASYNC_UI_WAIT_TOOL
+    )
+    assert async_schema["required"] == ["anchor", "pending_text"]
+    assert async_schema["properties"]["timeout_seconds"]["maximum"] == ASYNC_UI_WAIT_MAX_SECONDS
     with pytest.raises(RunError, match="unknown controller capabilities"):
         realapp_tools(MCP_SCHEMAS, capabilities=["shell"])
+    with pytest.raises(RunError, match="does not offer job_cancel"):
+        realapp_tools(
+            {name: schema for name, schema in MCP_SCHEMAS.items() if name != "job_cancel"},
+            capabilities=["async-ui-wait"],
+        )
 
 
-def test_only_wall_clock_wait_gets_a_long_controller_tool_timeout():
-    configured = controller_tool_timeouts(["network", "wall-clock-wait", "app-lifecycle"])
-    assert set(configured) == {WALL_CLOCK_WAIT_TOOL}
+def test_only_explicit_harness_waits_get_long_controller_tool_timeouts():
+    configured = controller_tool_timeouts(
+        ["network", "wall-clock-wait", "async-ui-wait", "app-lifecycle"]
+    )
+    assert set(configured) == {WALL_CLOCK_WAIT_TOOL, ASYNC_UI_WAIT_TOOL}
     assert configured[WALL_CLOCK_WAIT_TOOL] > WALL_CLOCK_WAIT_SECONDS
+    assert configured[ASYNC_UI_WAIT_TOOL] > ASYNC_UI_WAIT_MAX_SECONDS
     assert controller_tool_timeouts(["network", "app-lifecycle"]) == {}
+
+
+def test_async_ui_wait_builds_one_bounded_positive_and_negative_predicate():
+    assert async_ui_wait_spec({
+        "anchor": r"text:Report\, ready",
+        "pending_text": r"Working, please wait",
+        "timeout_seconds": 620,
+    }) == (r"text:Report\, ready,!text:Working\, please wait", 620)
+    for arguments in (
+        {"anchor": "!text:Working", "pending_text": "Working"},
+        {"anchor": "net:GET /result", "pending_text": "Working"},
+        {"anchor": "text:Ready,text:Extra", "pending_text": "Working"},
+        {"anchor": "text:Working", "pending_text": "Working"},
+        {
+            "anchor": "text:Ready",
+            "pending_text": "Working",
+            "timeout_seconds": ASYNC_UI_WAIT_MAX_SECONDS + 1,
+        },
+    ):
+        with pytest.raises(RunError, match="async UI wait"):
+            async_ui_wait_spec(arguments)
+
+
+def test_async_ui_wait_uses_one_model_call_then_host_polls_the_durable_job(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "experiments.aua_controller.run_realapp.ASYNC_UI_WAIT_STATUS_POLL_SECONDS", 0
+    )
+
+    class DeferredAua(FakeAua):
+        async def call_tool(self, name, arguments):
+            if name == "job_start":
+                self.calls.append((name, copy.deepcopy(arguments)))
+                return {"ok": True, "job_id": "job-1", "status": "running", "terminal": False}
+            if name == "job_status":
+                self.calls.append((name, copy.deepcopy(arguments)))
+                self.screen = frame("fp-ready", ("Report ready",))
+                completed = {
+                    **copy.deepcopy(self.screen),
+                    "action": "await",
+                    "await_outcome": "satisfied",
+                    "capture_evidence": {"ref": "job:job-1", "finished": True},
+                }
+                return {
+                    "ok": True,
+                    "job_id": "job-1",
+                    "status": "succeeded",
+                    "terminal": True,
+                    "run_ok": True,
+                    "result": completed,
+                }
+            return await super().call_tool(name, arguments)
+
+    aua = DeferredAua()
+    model = FakeModel(
+        controller=[
+            model_call(
+                ASYNC_UI_WAIT_TOOL,
+                {
+                    "anchor": "text:Report ready",
+                    "pending_text": "Working",
+                    "timeout_seconds": 620,
+                },
+            ),
+            model_call(
+                "session_finish",
+                {"outcome": "achieved", "note": "The report is ready"},
+                call_id="native-2",
+            ),
+        ],
+        judgements={
+            "record_verdict": [
+                verdict("pass", "ready frame captured"),
+                verdict("pass", "fresh evidence agrees"),
+            ]
+        },
+    )
+
+    result = run(
+        tmp_path,
+        aua,
+        model,
+        controller_capabilities=["async-ui-wait"],
+        time_limit_s=700,
+    )
+
+    controller_payloads = [
+        payload for payload in model.payloads if not isinstance(payload.get("tool_choice"), dict)
+    ]
+    assert len(controller_payloads) == 2, "the wait itself spent no model polling turns"
+    assert [name for name, _ in aua.calls].count("job_start") == 1
+    assert [name for name, _ in aua.calls].count("job_status") == 1
+    start = next(arguments for name, arguments in aua.calls if name == "job_start")
+    assert start == {
+        "operation": "await",
+        "predicate": "text:Report ready,!text:Working",
+        "timeout_ms": 620_000,
+        "poll_ms": 500,
+        "observe": True,
+    }
+    assert result["deferred_waits"][0]["model_calls_during_wait"] == 0
+    assert result["deferred_waits"][0]["capture_evidence"]["ref"] == "job:job-1"
+    wait_call = json.loads(
+        (tmp_path / "run/controller/tool-calls.jsonl").read_text().splitlines()[0]
+    )
+    assert wait_call["tool"] == ASYNC_UI_WAIT_TOOL
+    assert wait_call["result"]["observation"]["meta"]["fingerprint"] == "fp-ready"
+    assert json.loads((tmp_path / "run/deferred-waits.json").read_text())[0]["status"] == "succeeded"
+
+
+def test_async_ui_wait_cancels_its_owned_job_when_the_controller_is_cancelled(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "experiments.aua_controller.run_realapp.ASYNC_UI_WAIT_STATUS_POLL_SECONDS", 0
+    )
+    output = tmp_path / "run"
+    output.mkdir()
+    calls = []
+    status_started = asyncio.Event()
+    never = asyncio.Event()
+
+    async def call(name, arguments, actor):
+        calls.append((name, copy.deepcopy(arguments), actor))
+        if name == "job_start":
+            return {"ok": True, "job_id": "job-cancel", "status": "running", "terminal": False}
+        if name == "job_status":
+            status_started.set()
+            await never.wait()
+        if name == "job_cancel":
+            return {
+                "ok": True,
+                "job_id": "job-cancel",
+                "status": "cancelled",
+                "terminal": True,
+            }
+        raise AssertionError(name)
+
+    async def exercise():
+        result = {"deferred_waits": []}
+        task = asyncio.create_task(
+            run_async_ui_wait(
+                call=call,
+                arguments={
+                    "anchor": "rid:result_card",
+                    "pending_text": "Working",
+                    "timeout_seconds": 30,
+                },
+                result=result,
+                output=output,
+            )
+        )
+        await status_started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return result
+
+    result = asyncio.run(exercise())
+    assert [name for name, _, _ in calls] == ["job_start", "job_status", "job_cancel"]
+    assert calls[-1][1] == {"job_id": "job-cancel", "wait_ms": 10_000}
+    assert result["deferred_waits"][0]["cancelled"] is True
+
+
+def test_async_ui_wait_cancels_its_owned_job_when_status_poll_times_out(tmp_path):
+    output = tmp_path / "run"
+    output.mkdir()
+    calls = []
+
+    async def call(name, arguments, actor):
+        calls.append((name, copy.deepcopy(arguments), actor))
+        if name == "job_start":
+            return {"ok": True, "job_id": "job-timeout", "status": "running", "terminal": False}
+        if name == "job_status":
+            raise TimeoutError("status deadline")
+        if name == "job_cancel":
+            return {
+                "ok": True,
+                "job_id": "job-timeout",
+                "status": "cancelled",
+                "terminal": True,
+            }
+        raise AssertionError(name)
+
+    result = {"deferred_waits": []}
+    with pytest.raises(TimeoutError, match="status deadline"):
+        asyncio.run(
+            run_async_ui_wait(
+                call=call,
+                arguments={
+                    "anchor": "desc:Result ready",
+                    "pending_text": "Still processing",
+                    "timeout_seconds": 30,
+                },
+                result=result,
+                output=output,
+            )
+        )
+
+    assert [name for name, _, _ in calls] == ["job_start", "job_status", "job_cancel"]
+    assert calls[-1][1] == {"job_id": "job-timeout", "wait_ms": 10_000}
+    assert result["deferred_waits"][0]["cancelled"] is True
 
 
 def test_realapp_claim_stops_the_loop_and_two_judges_decide(tmp_path):

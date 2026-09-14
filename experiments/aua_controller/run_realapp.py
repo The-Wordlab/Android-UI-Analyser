@@ -58,6 +58,9 @@ from experiments.aua_controller.run_live import (
 from experiments.aua_controller.session_state import observation_frame
 from experiments.aua_controller.transport import resilient_request, retryable_http_status
 
+from android_ui_analyser.engine_support import _parse_await_terms
+from android_ui_analyser.errors import UsageError
+
 FORMAT = "aua-realapp-run-v1"
 CONTROLLER_TOOLS = (
     "analyze_screen", "tap_and_analyze", "long_press_and_analyze", "input_and_analyze",
@@ -80,13 +83,22 @@ CONTRACT_TOOL = "expect_and_analyze"
 #: One selector and one predicate is the whole vocabulary a checkpoint assertion needs, and
 #: every extra argument is another one a small model can get wrong.
 CONTRACT_TOOL_PROPERTIES = ("rid", "text", "desc", "exists", "absent", "text_contains")
-CONTROLLER_CAPABILITIES = frozenset({"network", "wall-clock-wait", "app-lifecycle"})
+CONTROLLER_CAPABILITIES = frozenset({
+    "network", "wall-clock-wait", "async-ui-wait", "app-lifecycle",
+})
 WALL_CLOCK_WAIT_TOOL = "wait_uninterrupted_620_seconds"
 WALL_CLOCK_WAIT_SECONDS = 620
 # Boundary clock reads, detached-job dispatch and the first/last status poll sit outside the
 # duration itself. This timeout applies only to the harness-owned wait tool; model calls and
 # ordinary UI tools retain the normal request timeout.
 WALL_CLOCK_WAIT_TOOL_TIMEOUT_S = WALL_CLOCK_WAIT_SECONDS + 120
+ASYNC_UI_WAIT_TOOL = "wait_for_ui_condition"
+ASYNC_UI_WAIT_DEFAULT_SECONDS = 120
+ASYNC_UI_WAIT_MAX_SECONDS = 900
+ASYNC_UI_WAIT_GRACE_SECONDS = 60
+ASYNC_UI_WAIT_TOOL_TIMEOUT_S = ASYNC_UI_WAIT_MAX_SECONDS + ASYNC_UI_WAIT_GRACE_SECONDS
+ASYNC_UI_WAIT_STATUS_POLL_SECONDS = 5.0
+ASYNC_UI_WAIT_STATUS_CALL_SECONDS = 15.0
 FINISH_OUTCOMES = ("achieved", "already_satisfied", "blocked", "not_achievable")
 REALAPP_SYSTEM = """
 Real-application mode. There is no authored checklist; you decide when the goal is met.
@@ -116,11 +128,160 @@ _BARE_ELEMENT_UUID = re.compile(r"^[0-9a-f]{32}$")
 def controller_tool_timeouts(capabilities: Sequence[str]) -> dict[str, float]:
     """Exact harness-owned tools allowed to outlive an ordinary request window."""
 
-    return (
-        {WALL_CLOCK_WAIT_TOOL: WALL_CLOCK_WAIT_TOOL_TIMEOUT_S}
-        if "wall-clock-wait" in capabilities
-        else {}
+    requested = set(capabilities)
+    timeouts: dict[str, float] = {}
+    if "wall-clock-wait" in requested:
+        timeouts[WALL_CLOCK_WAIT_TOOL] = WALL_CLOCK_WAIT_TOOL_TIMEOUT_S
+    if "async-ui-wait" in requested:
+        timeouts[ASYNC_UI_WAIT_TOOL] = ASYNC_UI_WAIT_TOOL_TIMEOUT_S
+    return timeouts
+
+
+def async_ui_wait_spec(arguments: Mapping[str, Any]) -> tuple[str, int]:
+    """Build one positive-arrival/negative-pending predicate from bounded model input."""
+
+    anchor = arguments.get("anchor")
+    pending = arguments.get("pending_text")
+    timeout_seconds = arguments.get("timeout_seconds", ASYNC_UI_WAIT_DEFAULT_SECONDS)
+    if (
+        not isinstance(anchor, str)
+        or not 1 <= len(anchor.strip()) <= 160
+        or any(ord(char) < 32 for char in anchor)
+    ):
+        raise RunError("async UI wait anchor must be a 1-160 character semantic selector")
+    if not isinstance(pending, str) or not 1 <= len(pending.strip()) <= 120:
+        raise RunError("async UI wait pending_text must be 1-120 characters")
+    if any(ord(char) < 32 for char in pending):
+        raise RunError("async UI wait pending_text cannot contain control characters")
+    if (
+        not isinstance(timeout_seconds, int)
+        or isinstance(timeout_seconds, bool)
+        or not 1 <= timeout_seconds <= ASYNC_UI_WAIT_MAX_SECONDS
+    ):
+        raise RunError(
+            f"async UI wait timeout_seconds must be an integer from 1 to {ASYNC_UI_WAIT_MAX_SECONDS}"
+        )
+    try:
+        terms = _parse_await_terms(anchor, require_positive=True)
+    except UsageError as exc:
+        raise RunError("async UI wait anchor is not a valid semantic selector") from exc
+    if len(terms) != 1 or terms[0].negated or terms[0].by not in {"rid", "text", "desc"}:
+        raise RunError("async UI wait anchor must be exactly one positive rid:, text:, or desc: selector")
+    if terms[0].by in {"text", "desc"} and terms[0].value.casefold() == pending.strip().casefold():
+        raise RunError("async UI wait anchor and pending_text cannot describe the same label")
+
+    def escape(value: str) -> str:
+        return value.replace("\\", "\\\\").replace(",", "\\,")
+
+    positive = f"{terms[0].by}:{escape(terms[0].value)}"
+    negative = f"!text:{escape(pending.strip())}"
+    predicate = f"{positive},{negative}"
+    _parse_await_terms(predicate, require_positive=True)
+    return predicate, timeout_seconds
+
+
+async def run_async_ui_wait(
+    *,
+    call: Callable[[str, dict[str, Any], str], Awaitable[dict[str, Any]]],
+    arguments: Mapping[str, Any],
+    result: dict[str, Any],
+    output: Path,
+) -> dict[str, Any]:
+    """Run one durable AUA await while this controller spends no additional model turns."""
+
+    predicate, timeout_seconds = async_ui_wait_spec(arguments)
+    started_job = await call(
+        "job_start",
+        {
+            "operation": "await",
+            "predicate": predicate,
+            "timeout_ms": timeout_seconds * 1_000,
+            "poll_ms": 500,
+            "observe": True,
+        },
+        "harness-ui-wait-start",
     )
+    job_id = started_job.get("job_id")
+    if started_job.get("ok") is not True or not isinstance(job_id, str) or not job_id:
+        raise RunError("AUA could not detach the UI wait: " + json.dumps(started_job)[:500])
+    wait_started_at = datetime.now().astimezone()
+    receipt: dict[str, Any] = {
+        "job_id": job_id,
+        "operation": "await",
+        "predicate": predicate,
+        "requested_seconds": timeout_seconds,
+        "status": started_job.get("status"),
+        "started_at": wait_started_at.isoformat(),
+        "deadline_at": (wait_started_at + timedelta(seconds=timeout_seconds)).isoformat(),
+        "model_calls_during_wait": 0,
+        "reconnect": {"tool": "job_status", "arguments": {"job_id": job_id}},
+    }
+    result["deferred_waits"].append(receipt)
+
+    def persist() -> None:
+        (output / "deferred-waits.json").write_text(
+            json.dumps(result["deferred_waits"], ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    persist()
+    host_deadline = time.monotonic() + timeout_seconds + ASYNC_UI_WAIT_GRACE_SECONDS
+    status = started_job
+    try:
+        while status.get("terminal") is not True:
+            remaining = host_deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("durable AUA UI wait did not reach a terminal status")
+            status = await asyncio.wait_for(
+                call("job_status", {"job_id": job_id}, "harness-ui-wait-status"),
+                timeout=min(ASYNC_UI_WAIT_STATUS_CALL_SECONDS, max(0.001, remaining)),
+            )
+            receipt["status"] = status.get("status")
+            receipt["progress_percent"] = status.get("progress_percent")
+            persist()
+            if status.get("terminal") is not True:
+                remaining = host_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("durable AUA UI wait did not reach a terminal status")
+                await asyncio.sleep(min(ASYNC_UI_WAIT_STATUS_POLL_SECONDS, remaining))
+    except BaseException:
+        receipt["cancel_requested"] = True
+        try:
+            cancelled = await asyncio.shield(
+                asyncio.wait_for(
+                    call(
+                        "job_cancel",
+                        {"job_id": job_id, "wait_ms": 10_000},
+                        "harness-ui-wait-cancel",
+                    ),
+                    timeout=ASYNC_UI_WAIT_STATUS_CALL_SECONDS,
+                )
+            )
+            receipt["status"] = cancelled.get("status")
+            receipt["cancelled"] = cancelled.get("status") == "cancelled"
+        except BaseException as cleanup_error:  # preserve the original timeout/cancellation
+            receipt["cancel_error"] = f"{type(cleanup_error).__name__}: {cleanup_error}"
+        persist()
+        raise
+    if status.get("status") != "succeeded":
+        raise RunError("AUA UI wait job failed: " + json.dumps(status)[:500])
+    completed = status.get("result")
+    if not isinstance(completed, dict):
+        raise RunError("AUA UI wait job returned no structured result")
+    receipt.update({
+        "status": "succeeded",
+        "finished_at": datetime.now().astimezone().isoformat(),
+        "run_ok": status.get("run_ok"),
+        "await_outcome": completed.get("await_outcome"),
+        "capture_evidence": completed.get("capture_evidence"),
+    })
+    persist()
+    return {
+        **completed,
+        "deferred_job_id": job_id,
+        "harness_owned_wait": True,
+        "model_calls_during_wait": 0,
+    }
 
 
 def normalize_element_id_argument(arguments: dict[str, Any]) -> tuple[dict[str, Any], bool]:
@@ -308,6 +469,49 @@ def realapp_tools(
                     "records host-monotonic and device-clock boundary evidence."
                 ),
                 "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+                },
+            })
+    if "async-ui-wait" in requested:
+        for name in ("job_start", "job_status", "job_cancel"):
+            if name not in schemas:
+                raise RunError(f"AUA MCP does not offer {name}")
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": ASYNC_UI_WAIT_TOOL,
+                "description": (
+                    "Wait once for a positive semantic AUA anchor to appear while temporary "
+                    "pending text disappears. The harness owns one durable AUA job and polls it "
+                    "without model turns; do not call this tool again while it runs."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "anchor": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 160,
+                            "description": (
+                                "Exactly one positive rid:, text:, or desc: selector; escape a "
+                                "literal comma as \\,."
+                            ),
+                        },
+                        "pending_text": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 120,
+                            "description": "Temporary visible text that must disappear.",
+                        },
+                        "timeout_seconds": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": ASYNC_UI_WAIT_MAX_SECONDS,
+                            "default": ASYNC_UI_WAIT_DEFAULT_SECONDS,
+                        },
+                    },
+                    "required": ["anchor", "pending_text"],
+                    "additionalProperties": False,
+                },
             },
         })
     if "app-lifecycle" in requested:
@@ -933,6 +1137,13 @@ async def run_realapp(
                     relaunch_arguments["activity"] = activity
                 return await call(
                     "app_launch_and_analyze", relaunch_arguments, "controller"
+                )
+            if name == ASYNC_UI_WAIT_TOOL:
+                return await run_async_ui_wait(
+                    call=call,
+                    arguments=arguments,
+                    result=result,
+                    output=output,
                 )
             if name == WALL_CLOCK_WAIT_TOOL:
                 before_host = time.monotonic()

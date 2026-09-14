@@ -307,6 +307,7 @@ async def run_agent(
                    "tool_seconds": resolved_tool_timeouts,
                    "max_tokens": max_tokens, "request_bytes": max_request_bytes},
         "schema_repair_budget": SCHEMA_REPAIR_BUDGET, "schema_repairs": 0,
+        "repair_budget_scope": "per_model_rung",
         "repair_budget": SCHEMA_REPAIR_BUDGET, "repair_count": 0, "protocol_repairs": 0,
         "model_requests": 0, "model_responses": 0, "tool_calls_executed": 0,
         "host_actions_selected": 0, "host_tool_calls_executed": 0, "model_tool_calls_executed": 0,
@@ -363,6 +364,7 @@ async def run_agent(
 
     conversation_started = False
     active_model_rung = 0
+    rung_repair_count = 0
     try:
         messages = conversation._start(binding) if conversation is not None else []
         conversation_started = conversation is not None
@@ -459,54 +461,98 @@ async def run_agent(
                     }
                     tick = time.monotonic()
                     report["model_requests"] += 1
+                    candidate_response: dict[str, Any] | None = None
+                    response_error: Exception | None = None
                     try:
-                        candidate_response = await asyncio.wait_for(send(payload), remaining())
-                        if not isinstance(candidate_response, dict):
+                        received = await asyncio.wait_for(send(payload), remaining())
+                        if not isinstance(received, dict):
                             raise RunError("model response must be a JSON object")
+                        candidate_response = received
+                        turn["response"] = candidate_response
+                        # A transport success is not yet a usable controller turn. Validate the
+                        # native envelope while it is still safe to advance the model rung: no
+                        # device call selected by this response has been dispatched yet. Valid
+                        # multi-call envelopes remain a same-model protocol repair below.
+                        multiple = _multiple_calls(candidate_response)
+                        if multiple is None:
+                            message, native = completion(candidate_response)
+                            if native is not None and (
+                                not isinstance(native.get("name"), str)
+                                or not native["name"].strip()
+                            ):
+                                raise RunError("invalid native function name")
                         response = candidate_response
-                        turn["response"] = response
                     except Exception as exc:
-                        error = _error_text(exc)
-                        turn["error"] = error
-                        if active_model_rung + 1 >= len(model_ladder):
-                            raise
-                        report["model_failures"].append(
-                            {"model": rung_model, "error": error[:400]}
-                        )
-                        active_model_rung += 1
-                        report["model_escalations"] += 1
-                        report["warnings"].append(
-                            "controller model request failed before a usable response; "
-                            f"continued with fallback {model_ladder[active_model_rung][0]}"
-                        )
+                        response_error = exc
+                        turn["error"] = _error_text(exc)
                     finally:
                         turn["request_ms"] = (time.monotonic() - tick) * 1000
                         report["model_request_ms"].append(turn["request_ms"])
                         _append(output / "model-turns.jsonl", turn)
+                    # A malformed but billable response must still be accounted before fallback.
+                    # Keep budget enforcement outside the fallback catch: exceeding the run's
+                    # spend limit is terminal, not permission to spend again on another model.
+                    if candidate_response is not None:
+                        report["model_responses"] += 1
+                        report["usage"].append(candidate_response.get("usage"))
+                        for field, collection in (("model", "returned_models"), ("provider", "providers")):
+                            value = candidate_response.get(field)
+                            if isinstance(value, str) and value not in report[collection]:
+                                report[collection].append(value)
+                        if candidate_response.get("warnings"):
+                            report["warnings"].append(candidate_response["warnings"])
+                        if guard is not None:
+                            guard.consume(candidate_response)
+                    if response_error is not None:
+                        error = _error_text(response_error)
+                        if active_model_rung + 1 >= len(model_ladder):
+                            raise response_error
+                        report["model_failures"].append(
+                            {"model": rung_model, "error": error[:400]}
+                        )
+                        active_model_rung += 1
+                        rung_repair_count = 0
+                        report["model_escalations"] += 1
+                        report["warnings"].append(
+                            "controller model request or response failed before a usable turn; "
+                            f"continued with fallback {model_ladder[active_model_rung][0]}"
+                        )
                 if response is None:
                     break
-                report["model_responses"] += 1
-                report["usage"].append(response.get("usage"))
-                for field, collection in (("model", "returned_models"), ("provider", "providers")):
-                    value = response.get(field)
-                    if isinstance(value, str) and value not in report[collection]:
-                        report[collection].append(value)
-                if response.get("warnings"):
-                    report["warnings"].append(response["warnings"])
-                if guard is not None:
-                    guard.consume(response)
                 multiple = _multiple_calls(response)
                 if multiple is not None:
                     message, native_calls = multiple
-                    if report["repair_count"] >= SCHEMA_REPAIR_BUDGET:
-                        raise RunError("controller repair budget exhausted")
-                    report["repair_count"] += 1
-                    report["protocol_repairs"] += 1
-                    messages.append(assistant_message(message))
                     feedback = {"ok": False, "error": {
                         "code": "multiple_tool_calls", "executed": False,
                         "message": "None of the calls in this response were executed. Retry with exactly one native tool call; wait for its result before choosing another.",
                     }}
+                    if rung_repair_count >= SCHEMA_REPAIR_BUDGET:
+                        if active_model_rung + 1 >= len(model_ladder):
+                            raise RunError("controller repair budget exhausted")
+                        messages.append(assistant_message(message))
+                        for native in native_calls:
+                            _append(output / "controller-feedback.jsonl", {
+                                "step": step, "tool_call_id": native["id"], "tool": native["name"], "feedback": feedback,
+                            })
+                            messages.append({"role": "tool", "tool_call_id": native["id"], "name": native["name"],
+                                             "content": json.dumps(feedback)})
+                        report["model_failures"].append({
+                            "model": model_ladder[active_model_rung][0],
+                            "error": "controller protocol repair budget exhausted",
+                        })
+                        active_model_rung += 1
+                        rung_repair_count = 0
+                        report["model_escalations"] += 1
+                        report["warnings"].append(
+                            "controller protocol repair budget exhausted; the rejected response "
+                            "dispatched no device action, so the same conversation continued with "
+                            f"fallback {model_ladder[active_model_rung][0]}"
+                        )
+                        continue
+                    report["repair_count"] += 1
+                    report["protocol_repairs"] += 1
+                    rung_repair_count += 1
+                    messages.append(assistant_message(message))
                     for native in native_calls:
                         _append(output / "controller-feedback.jsonl", {
                             "step": step, "tool_call_id": native["id"], "tool": native["name"], "feedback": feedback,
@@ -530,10 +576,41 @@ async def run_agent(
                 except jsonschema.ValidationError as exc:
                     invalid = str(exc.message)[:768]
             if invalid is not None:
-                if report["repair_count"] >= SCHEMA_REPAIR_BUDGET:
+                if (
+                    actor == "model"
+                    and rung_repair_count >= SCHEMA_REPAIR_BUDGET
+                    and active_model_rung + 1 < len(model_ladder)
+                ):
+                    feedback = {"ok": False, "error": {
+                        "code": "invalid_tool_arguments", "message": invalid, "executed": False,
+                    }}
+                    _append(output / "controller-feedback.jsonl", {
+                        "step": step, "actor": actor, "tool": name,
+                        "tool_call_id": native["id"], "feedback": feedback,
+                    })
+                    messages.append({
+                        "role": "tool", "tool_call_id": native["id"],
+                        "name": name if isinstance(name, str) else "invalid_tool",
+                        "content": json.dumps(feedback),
+                    })
+                    report["model_failures"].append({
+                        "model": model_ladder[active_model_rung][0],
+                        "error": "controller schema repair budget exhausted",
+                    })
+                    active_model_rung += 1
+                    rung_repair_count = 0
+                    report["model_escalations"] += 1
+                    report["warnings"].append(
+                        "controller schema repair budget exhausted; the rejected response "
+                        "dispatched no device action, so the same conversation continued with "
+                        f"fallback {model_ladder[active_model_rung][0]}"
+                    )
+                    continue
+                if rung_repair_count >= SCHEMA_REPAIR_BUDGET:
                     raise RunError("controller repair budget exhausted")
                 report["repair_count"] += 1
                 report["schema_repairs"] += 1
+                rung_repair_count += 1
                 feedback = {"ok": False, "error": {"code": "invalid_tool_arguments", "message": invalid,
                                                    "executed": False}}
                 entry = {"step": step, "actor": actor, "tool": name, "feedback": feedback}

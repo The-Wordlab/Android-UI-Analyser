@@ -11,6 +11,19 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Added
+
+- The experimental real-app controller has an opt-in `async-ui-wait` capability. Its bounded
+  `wait_for_ui_condition` tool starts one durable AUA predicate job, polls it in the harness with
+  no paid model turns, returns the completed observation and cancels the job if supervision ends.
+
+### Fixed
+
+- Ordered controller fallbacks now reject abnormal or malformed model-response envelopes before
+  any device dispatch, and continue on the next model after one rung exhausts protocol/schema
+  repairs. Rejected assistant/tool feedback stays in the shared conversation and uncertain device
+  actions are never replayed.
+
 ## [0.24.1] - 2026-09-14
 
 ### Fixed
