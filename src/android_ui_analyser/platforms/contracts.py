@@ -74,6 +74,9 @@ RUNTIME_CAPABILITIES: dict[str, CapabilitySpec] = {
         "press",
         "find_text",
     ),
+    "ui.back_gesture": _spec(
+        "ui.back_gesture", CapabilityScope.RUNTIME, "back_gesture"
+    ),
     "app.lifecycle": _spec(
         "app.lifecycle",
         CapabilityScope.RUNTIME,

@@ -283,6 +283,7 @@ _ANALYZED_TOOL_NAMES: dict[str, str] = {
     "input": "input_and_analyze",
     "swipe": "swipe_and_analyze",
     "key": "key_and_analyze",
+    "back_gesture": "back_gesture_and_analyze",
     "wait": "wait_and_analyze",
     "wait_changed": "wait_changed_and_analyze",
     "long_press": "long_press_and_analyze",
@@ -1361,6 +1362,20 @@ def _tool_definitions() -> list[types.Tool]:
                     "with_image": _WITH_IMAGE_PROP,
                 },
                 "required": ["id"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="back_gesture",
+            description=(
+                "Perform Android's left-edge back gesture without accepting coordinates."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "observe": _OBSERVE_PROP,
+                    "with_image": _WITH_IMAGE_PROP,
+                },
                 "additionalProperties": False,
             },
         ),
@@ -3581,6 +3596,13 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         return _dump(
             engine.key(
                 args["name"],
+                observe=args.get("observe", True),
+                with_image=img,
+            )
+        )
+    if name == "back_gesture":
+        return _dump(
+            engine.back_gesture(
                 observe=args.get("observe", True),
                 with_image=img,
             )

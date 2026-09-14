@@ -93,6 +93,12 @@ recording stops → `session_finish allow_incomplete: true` releases the target 
 `verdict.md`, `screens.json`, and `route.json`. `--grant-permissions` is explicit rather than a
 harness default so guest and limited-access scenarios do not silently receive capabilities their
 persona withholds.
+
+The real-app compact surface adds two navigation actions without widening the fixed fixture
+comparison profile. `long_press_and_analyze` accepts only a fresh element id from the current AUA
+observation, so pin, unpin and rename menus retain AUA's stale-selector refusal. The separate
+`back_gesture_and_analyze` action accepts no arguments: Android derives the left-edge swipe inside
+its platform adapter instead of giving the controller arbitrary coordinates.
 If provisioning fails before a session exists (for example, host capacity is exhausted), the
 runner switches to a bounded wait for an existing lease; the MCP transport timeout expands to
 cover that wait. No model chooses a serial, installs or starts the app, controls recording, or

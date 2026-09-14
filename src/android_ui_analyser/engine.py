@@ -2384,6 +2384,7 @@ class Engine:
     scroll = engine_actions.scroll
     scroll_to = engine_actions.scroll_to
     key = engine_actions.key
+    back_gesture = engine_actions.back_gesture
     hide_keyboard = engine_actions.hide_keyboard
     _ime_shown = engine_actions._ime_shown
     paste = engine_actions.paste

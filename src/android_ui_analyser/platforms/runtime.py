@@ -151,6 +151,11 @@ class TargetRuntime(ABC):
 
         raise DeviceError("key input is unsupported by this target runtime")
 
+    def back_gesture(self) -> None:
+        """Perform the platform's semantic edge-back gesture without caller coordinates."""
+
+        raise DeviceError("edge-back gestures are unsupported by this target runtime")
+
     def find_text(
         self,
         text: str,

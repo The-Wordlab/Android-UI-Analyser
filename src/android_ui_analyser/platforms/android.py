@@ -235,6 +235,7 @@ class AndroidPlatform(PlatformAdapter):
             "target_supervision",
             "virtual_targets",
             "webview",
+            "ui.back_gesture",
             "ui.input",
             "ui.read_deadline",
             "ui.peek",

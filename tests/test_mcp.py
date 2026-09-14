@@ -77,6 +77,7 @@ def test_mcp_lists_core_tools() -> None:
         "input_and_analyze",
         "swipe_and_analyze",
         "key_and_analyze",
+        "back_gesture_and_analyze",
         "back_until_and_analyze",
         "wait_and_analyze",
         "wait_changed_and_analyze",
@@ -922,6 +923,22 @@ def test_mcp_long_press_drives_device() -> None:
     data = anyio.run(run)
     assert data["ok"] is True and data["action"] == "long-press"
     assert any(c[0] == "long_click" for c in eng.device.calls)  # type: ignore[attr-defined]
+
+
+def test_mcp_back_gesture_uses_android_owned_geometry() -> None:
+    eng = _engine()
+    server = build_server(eng)
+
+    async def run() -> dict:
+        async with create_connected_server_and_client_session(server) as client:
+            result = await client.call_tool("back_gesture_and_analyze", {})
+            assert not result.isError, result
+            return json.loads(_first_text(result))
+
+    data = anyio.run(run)
+    assert data["ok"] is True and data["action"] == "back-gesture"
+    assert ("swipe", (10, 1200, 432, 1200, 300)) in eng.device.calls  # type: ignore[attr-defined]
+    assert not any(name == "press" for name, _args in eng.device.calls)  # type: ignore[attr-defined]
 
 
 def test_mcp_wait_stable_settles_on_static_screen() -> None:

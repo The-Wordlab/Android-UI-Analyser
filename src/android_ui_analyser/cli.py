@@ -3832,6 +3832,38 @@ def key(
     _run(ctx, go)
 
 
+@app.command(name="back-gesture-and-analyze", cls=AnalyzeCommand)
+def back_gesture_cmd(
+    ctx: typer.Context,
+    observe: bool = typer.Option(
+        True,
+        "--observe/--no-observe",
+        help="Also return the screen after the edge-back gesture.",
+    ),
+    with_image: str | None = typer.Option(
+        None,
+        "--with-image",
+        metavar="[PATH]",
+        help="Also save the raw screenshot; bare flag uses a timestamped default path.",
+        show_default=False,
+    ),
+) -> None:
+    """Perform Android's left-edge back gesture without caller coordinates."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emit(
+            _route(
+                engine,
+                "back_gesture",
+                observe=observe,
+                with_image=_annotate_arg(with_image),
+            ),
+            fmt,
+        )
+
+    _run(ctx, go)
+
+
 @app.command(name="back-until-and-analyze", cls=AnalyzeCommand)
 def back_until_cmd(
     ctx: typer.Context,

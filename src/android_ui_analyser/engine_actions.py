@@ -2032,6 +2032,23 @@ def key(
     )
 
 
+def back_gesture(
+    self: Engine,
+    *,
+    observe: bool = True,
+    with_image: bool | str | None = None,
+) -> ActionResult:
+    """Perform the platform-owned edge-back gesture and return the resulting screen."""
+
+    step = self._step("back-gesture")
+    with self._acting("back-gesture"):
+        self.platform.runtime_capability("ui.back_gesture", self.device).back_gesture()
+    self._record_action_safe(step)
+    return self._observe(
+        ActionResult(ok=True, action="back-gesture"), observe, with_image
+    )
+
+
 def hide_keyboard(
     self: Engine, *, observe: bool = True, with_image: bool | str | None = None
 ) -> ActionResult:

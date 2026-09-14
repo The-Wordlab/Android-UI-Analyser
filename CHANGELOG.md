@@ -11,8 +11,16 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Added
+
+- `back-gesture-and-analyze` / `back_gesture_and_analyze` performs Android's left-edge back
+  gesture through a platform-owned semantic operation; agents never supply swipe coordinates.
+
 ### Fixed
 
+- The experimental real-app controller now exposes ID-only `long_press_and_analyze` for context
+  menus and the coordinate-free back gesture, while keeping the fixed compact-v1 comparison
+  profile unchanged.
 - The experimental real-app controller gives only its explicit detached wall-clock wait a longer
   tool deadline, so a 620-second inactivity proof is no longer cancelled by the ordinary
   90-second model/tool request timeout.

@@ -60,9 +60,17 @@ from experiments.aua_controller.transport import resilient_request, retryable_ht
 
 FORMAT = "aua-realapp-run-v1"
 CONTROLLER_TOOLS = (
-    "analyze_screen", "tap_and_analyze", "input_and_analyze", "swipe_and_analyze",
-    "wait_and_analyze", "key_and_analyze", "session_progress", "session_finish",
+    "analyze_screen", "tap_and_analyze", "long_press_and_analyze", "input_and_analyze",
+    "swipe_and_analyze", "back_gesture_and_analyze", "wait_and_analyze",
+    "key_and_analyze", "session_progress", "session_finish",
 )
+# Real-app-only additions to compact-v1. Keep them here rather than widening run_live's fixed
+# comparison profile: these close product-scenario capability gaps without changing an existing
+# model benchmark. Long-press accepts only a fresh AUA id; edge-back accepts no geometry at all.
+REALAPP_COMPACT_PROPERTIES = {
+    "long_press_and_analyze": frozenset({"id"}),
+    "back_gesture_and_analyze": frozenset(),
+}
 #: The one extra tool a contract-driven run needs. A checkpoint completes only on fresh
 #: assertion proof, so without a way to assert, a loaded contract can never be satisfied and
 #: every verdict falls back to a model reading frames - the weaker answer, from a run that was
@@ -224,6 +232,21 @@ def contract_tool_schema(schema: dict[str, Any]) -> dict[str, Any]:
     return {"type": "object", "properties": properties, "additionalProperties": False}
 
 
+def realapp_compact_schema(name: str, schema: dict[str, Any]) -> dict[str, Any]:
+    """Trim real-app-only actions without widening the fixed compact-v1 benchmark."""
+
+    allowed = REALAPP_COMPACT_PROPERTIES.get(name)
+    if allowed is None:
+        return compact_schema(name, schema)
+    compact = offered_schema(name, schema)
+    compact["properties"] = {
+        key: value for key, value in compact["properties"].items() if key in allowed
+    }
+    if set(compact.get("required", ())) - compact["properties"].keys():
+        raise RunError(f"{name} requires an argument outside the real-app compact schema")
+    return compact
+
+
 def realapp_tools(
     schemas: dict[str, dict[str, Any]],
     *,
@@ -243,10 +266,20 @@ def realapp_tools(
         elif name == CONTRACT_TOOL:
             parameters = contract_tool_schema(schemas[name])
         else:
-            parameters = compact_schema(name, schemas[name])
+            parameters = realapp_compact_schema(name, schemas[name])
         description = str(schemas[name].get("description") or "")[:300]
         if name == "session_finish":
             description = "Claim the goal is finished (or blocked) with an outcome and a short note."
+        elif name == "long_press_and_analyze":
+            description = (
+                "Long-press one element using its fresh id from the current AUA observation, "
+                "then return the resulting screen."
+            )
+        elif name == "back_gesture_and_analyze":
+            description = (
+                "Perform Android's left-edge back gesture and return the resulting screen; "
+                "coordinates are intentionally unavailable."
+            )
         tools.append({"type": "function", "function": {"name": name, "description": description,
                                                        "parameters": parameters}})
     requested = set(capabilities)

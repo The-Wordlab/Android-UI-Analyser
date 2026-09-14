@@ -422,8 +422,9 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "the redundant matching prefix. The same applies to "
         "`text:` with `--text` and `desc:` with `--desc`. "
         "Prefer handles over positional `#1`/`#2` selector keys in changing lists. "
-        '`aua tap-and-analyze <id>`, `aua input-and-analyze <id> "text"`, '
-        "`aua swipe-and-analyze up`, `aua key-and-analyze back`. "
+        '`aua tap-and-analyze <id>`, `aua long-press-and-analyze <id>`, '
+        '`aua input-and-analyze <id> "text"`, `aua swipe-and-analyze up`, '
+        "`aua key-and-analyze back`. "
         'Use `aua has "<text>"` (exit 0/1) to branch cheaply without parsing JSON.',
     ),
     (
@@ -1313,7 +1314,9 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "observed actions (`*_and_analyze` MCP / `*-and-analyze` CLI)",
         "return the post-action screen inline (`observation`, fresh ids), and the explicit "
         "names cannot disable that readback. Prefer `hide-keyboard-and-analyze` over "
-        "`key-and-analyze back` when the IME is covering the tree. For nested navigation use "
+        "`key-and-analyze back` when the IME is covering the tree. Use "
+        "`back-gesture-and-analyze` when the behavior under test specifically requires "
+        "Android's left-edge back gesture; it accepts no coordinates. For nested navigation use "
         "`back-until-and-analyze '<known_screen>'` for a mapped destination, or pass positive "
         "`rid:`/`text:`/`desc:` evidence; use `--back-id <fresh-id>` only when the first "
         "app-owned Back icon is unlabeled",

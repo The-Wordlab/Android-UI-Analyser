@@ -515,6 +515,27 @@ class AndroidRuntimeBase(TargetRuntime, ABC):
     @abstractmethod
     def press(self, key: str) -> None: ...
 
+    def back_gesture(self) -> None:
+        """Swipe inward from Android's left edge using canonical screen coordinates.
+
+        The caller asks for the semantic operation, never pixel coordinates. Android owns the
+        deterministic geometry so a small controller cannot turn this into an arbitrary swipe.
+        Starting one percent inside the edge remains inside the system gesture region while
+        avoiding transports that reject coordinate zero; the endpoint crosses far enough for
+        Android to commit the back gesture on phone and tablet aspect ratios.
+        """
+
+        width, height = self.window_size()
+        if width < 3 or height < 3:
+            raise DeviceError(
+                f"invalid Android display size for a back gesture: {width}x{height}",
+                code="invalid_screen_geometry",
+            )
+        start_x = max(1, min(width - 2, width // 100))
+        end_x = max(start_x + 1, min(width - 1, width * 2 // 5))
+        y = max(1, min(height - 2, height // 2))
+        self.swipe(start_x, y, end_x, y, 300)
+
     # -- hierarchy selectors (T0/T1) --------------------------------------
     # `rid` is the spelling of the resource-id everywhere else in the vocabulary — the
     # `--rid` flag, the selector dict key, `_SELECTOR_FIELDS` — so `--by rid` is what a

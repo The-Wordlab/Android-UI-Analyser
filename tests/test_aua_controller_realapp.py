@@ -129,12 +129,19 @@ MCP_SCHEMAS = {
                                                         "with_image": {"type": "boolean"}}, "description": "Analyze."},
     "tap_and_analyze": {"type": "object", "properties": {"id": {"type": "string"}, "coords": {"type": "array"},
                                                          "phase_done": {"type": "string"}}, "description": "Tap."},
+    "long_press_and_analyze": {"type": "object", "properties": {"id": {"type": "string"},
+                                                                "ms": {"type": "integer"},
+                                                                "until": {"type": "string"}},
+                               "required": ["id"], "description": "Long press."},
     "input_and_analyze": {"type": "object", "properties": {"id": {"type": "string"}, "text": {"type": "string"},
                                                            "submit": {"type": "boolean"}}, "required": ["text"]},
     "swipe_and_analyze": {"type": "object", "properties": {"direction": {"type": "string"}}, "required": ["direction"]},
     "wait_and_analyze": {"type": "object", "properties": {"for_": {"type": "string"}, "idle": {"type": "boolean"},
                                                           "timeout": {"type": "integer"}}},
     "key_and_analyze": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
+    "back_gesture_and_analyze": {"type": "object", "properties": {"observe_fields": {"type": "string"},
+                                                                    "until": {"type": "string"}},
+                                 "description": "Edge back."},
     "session_progress": {"type": "object", "properties": {"session_id": {"type": "string"}}},
     "session_finish": {"type": "object", "properties": {"session_id": {"type": "string"}, "allow_incomplete": {"type": "boolean"},
                                                         "summary": {"type": "boolean"}}},
@@ -220,10 +227,34 @@ def test_realapp_tools_offer_compact_schemas_plus_an_outcome_claim():
     ]
     by_name = {tool["function"]["name"]: tool["function"]["parameters"] for tool in tools}
     assert set(by_name["tap_and_analyze"]["properties"]) == {"id"} and by_name["tap_and_analyze"]["required"] == ["id"]
+    assert set(by_name["long_press_and_analyze"]["properties"]) == {"id"}
+    assert by_name["long_press_and_analyze"]["required"] == ["id"]
+    assert by_name["back_gesture_and_analyze"]["properties"] == {}
+    assert by_name["back_gesture_and_analyze"]["additionalProperties"] is False
+    assert "coords" not in json.dumps(by_name)
     assert set(by_name["session_finish"]["properties"]) == {"outcome", "note"}
     assert "session_id" not in json.dumps(by_name)
     with pytest.raises(RunError):
         realapp_tools({name: schema for name, schema in MCP_SCHEMAS.items() if name != "session_finish"})
+
+
+def test_realapp_tools_accept_the_current_public_mcp_schemas():
+    from android_ui_analyser.mcp_server import _tool_definitions
+
+    schemas = {}
+    for tool in _tool_definitions():
+        schema = dict(tool.inputSchema)
+        schema.setdefault("description", tool.description)
+        schemas[tool.name] = schema
+
+    offered = {
+        tool["function"]["name"]: tool["function"]["parameters"]
+        for tool in realapp_tools(schemas)
+    }
+
+    assert set(offered["long_press_and_analyze"]["properties"]) == {"id"}
+    assert offered["long_press_and_analyze"]["required"] == ["id"]
+    assert offered["back_gesture_and_analyze"]["properties"] == {}
 
 
 def test_bare_element_uuid_is_repaired_without_rewriting_labels_or_stable_keys():
