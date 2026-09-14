@@ -108,7 +108,7 @@ def test_the_second_time_the_same_app_is_prepared_the_known_facts_are_not_re_ask
     assert "build" not in still_asked
     # The oracle is never inherited: what *this* claim looks like is not a fact about the app.
     assert {"success", "repeat", "scope"} <= still_asked
-    assert "signin" in again["already_known"]
+    assert again["reused_from_memory"]["signin"]["answer"].startswith("tap `Continue as guest`")
 
 
 def test_a_saved_scenario_is_listed_with_the_command_that_repeats_it(tmp_path) -> None:

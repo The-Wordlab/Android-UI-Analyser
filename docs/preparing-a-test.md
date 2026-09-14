@@ -24,12 +24,14 @@ agent → aua prepare start --goal "badge shows once on first open" --app com.ex
 aua   → knows already: how this app signs in, where its build is   (from the app map)
         needs to be told:
           1. what "first open" is, in terms the app stores
-          2. how to reach that state  →  AUA suggests: datastore
+          2. any feature flags that must be on for it to exist at all
+          3. how to reach that state  →  AUA suggests: datastore
                                          (reversible, ~1s; proves nothing about how the key
                                           gets its first value on a genuinely new install)
-          3. UI only, or through the backend?
-          4. what must be on screen when it works?
-          5. and what must be on screen the second time?
+          4. a saved flow that gets past sign-in, if there is one
+          5. UI only, or through the backend?
+          6. what must be on screen when it works?
+          7. and what must be on screen the second time?
 
 agent → reads its own source, answers
 
@@ -110,11 +112,20 @@ end-to-end run is for. Only `seeding=reinstall` ever wipes the app.
 
 ## What gets remembered, and what does not
 
-Facts about the **app** are written to the app map, so the next interview does not ask them:
-`build`, `signin`, `precondition`, `seeding`.
+Facts about the **app** are written to the app map under `prepare:<question>`, so the next
+interview reuses them instead of asking: `build`, `signin`, `precondition`, `seeding`. The reuse
+is stated in `reused_from_memory` with the knowledge id, never applied silently — a stale sign-in
+recipe should be correctable before the run, not discovered during it.
 
-Decisions about **this test** are not: `scope`, `success`, `repeat`. Remembering those would
-quietly answer a question the next agent has every right to answer differently.
+Decisions about **this test** are not remembered: `scope`, `success`, `repeat`. Remembering those
+would quietly answer a question the next agent has every right to answer differently.
+
+**Only a previous answer may skip a question.** Merely *related* knowledge — the kind
+`aua knowledge list` returns — is attached to the question as `related_knowledge` and shown to the
+agent, never substituted for an answer. Relevance and answering are different relations, and
+conflating them does not add a bad answer, it removes the question: found the first time this ran
+against a real app, where a note about forced dark theme stood in as the answer to *where is the
+build*, and the run would have started with no APK.
 
 `--no-remember` keeps everything out of the map.
 
@@ -188,3 +199,15 @@ it, and AUA does not pretend to have done that for you.
 | `aua prepare show <id> --app <pkg>` | The interview so far, unchanged |
 | `aua prepare list --app <pkg>` | Interviews in flight and scenarios already prepared |
 | `aua prepare run <scenario> --app <pkg>` | Run it, driven by AUA or by you |
+
+## Two answers that decide whether a run works at all
+
+`flags` — a flag-gated surface is simply **absent** without its flag, and an absent surface looks
+exactly like a broken one. `--answer flags='myFeatureExperiment=a, otherExperiment=b'`; they are
+applied and read back before the run.
+
+`setup_flow` — sign-in and onboarding are long, well known, and identical every run. Point at a
+saved AUA flow and it is replayed in seconds instead of rediscovered by the model every time:
+`--answer setup_flow=flows/common/enter-as-guest.yaml`.
+
+Both are optional, both are remembered per app, and `none` is a real answer to either.

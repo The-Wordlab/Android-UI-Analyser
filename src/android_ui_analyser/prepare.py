@@ -283,6 +283,32 @@ QUESTIONS: tuple[Question, ...] = (
         example="the DataStore key `hub_badge_seen` is absent or false",
     ),
     Question(
+        key="flags",
+        ask="Any feature flags that must be on for this to exist at all? `none` is fine.",
+        why=(
+            "A flag-gated surface is simply absent without them, and an absent surface looks "
+            "exactly like a broken one."
+        ),
+        aliases=("feature flag", "experiment", "treatment", "flag key"),
+        required=False,
+        durable=True,
+        knowledge_kind="note",
+        example="myFeatureExperiment=a",
+    ),
+    Question(
+        key="setup_flow",
+        ask="A saved AUA flow that gets to the starting screen? Path or name; `none` is fine.",
+        why=(
+            "Sign-in and onboarding are long, well-known and identical every run. Replaying a "
+            "proven flow is seconds; rediscovering it costs a minute of model time each time."
+        ),
+        aliases=("setup flow", "onboarding flow", "sign in flow"),
+        required=False,
+        durable=True,
+        knowledge_kind="recipe",
+        example="flows/common/enter-app-as-guest.yaml",
+    ),
+    Question(
         key="seeding",
         ask="How should AUA reach that state?",
         why="Each option fakes something different, and which substitution is acceptable is your call, not AUA's.",
@@ -426,8 +452,10 @@ class PrepareSession:
     goal: str
     created_at: str
     answers: dict[str, str] = field(default_factory=dict)
-    # question key -> the knowledge items that already answer it
-    known: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    # question key -> the id of the prior answer reused from the app map
+    reused: dict[str, str] = field(default_factory=dict)
+    # question key -> related knowledge, shown but never treated as an answer
+    context: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     schema_version: int = PREPARE_SCHEMA_VERSION
 
     def to_dict(self) -> dict[str, Any]:
@@ -438,7 +466,8 @@ class PrepareSession:
             "goal": self.goal,
             "created_at": self.created_at,
             "answers": dict(self.answers),
-            "known": {key: list(items) for key, items in self.known.items()},
+            "reused": dict(self.reused),
+            "context": {key: list(items) for key, items in self.context.items()},
         }
 
     @classmethod
@@ -454,16 +483,18 @@ class PrepareSession:
             if not isinstance(value.get(required), str) or not value[required].strip():
                 raise UsageError(f"prepare session is missing `{required}`")
         answers = value.get("answers") or {}
-        known = value.get("known") or {}
-        if not isinstance(answers, Mapping) or not isinstance(known, Mapping):
-            raise UsageError("prepare session `answers`/`known` must be mappings")
+        reused = value.get("reused") or {}
+        context = value.get("context") or {}
+        if not all(isinstance(part, Mapping) for part in (answers, reused, context)):
+            raise UsageError("prepare session `answers`/`reused`/`context` must be mappings")
         return cls(
             id=str(value["id"]),
             package=str(value["package"]),
             goal=str(value["goal"]),
             created_at=str(value["created_at"]),
             answers={str(k): str(v) for k, v in answers.items()},
-            known={str(k): list(v) for k, v in known.items() if isinstance(v, list)},
+            reused={str(k): str(v) for k, v in reused.items()},
+            context={str(k): list(v) for k, v in context.items() if isinstance(v, list)},
         )
 
 
@@ -499,8 +530,39 @@ def open_preparation(
         created_at=now or datetime.now(UTC).isoformat(),
     )
     if app_map is not None:
-        session.known = recall(app_map, context_id=context_id)
+        for key, item in answers_on_file(app_map).items():
+            try:
+                session.answers[key] = validate_answer(QUESTION_BY_KEY[key], item["text"])
+            except UsageError:
+                continue  # a stored answer the catalogue no longer accepts is simply re-asked
+            session.reused[key] = item["id"]
+        session.context = recall(app_map, context_id=context_id)
     return session
+
+
+PREPARE_KNOWLEDGE_PREFIX = "prepare:"
+
+
+def answers_on_file(app_map: AppMap) -> dict[str, dict[str, Any]]:
+    """Answers a previous interview saved for this app, by question key.
+
+    Only these may skip a question.  Merely *relevant* knowledge may not: relevance and answering
+    are different relations, and conflating them removes the question rather than answering it.
+    Every one of these was written by an agent that was asked this exact question about this exact
+    app, which is the only provenance strong enough to stop asking again.
+    """
+
+    out: dict[str, dict[str, Any]] = {}
+    for item in app_map.knowledge:
+        name = item.name or ""
+        if item.status != "accepted" or not name.startswith(PREPARE_KNOWLEDGE_PREFIX):
+            continue
+        key = name[len(PREPARE_KNOWLEDGE_PREFIX) :]
+        question = QUESTION_BY_KEY.get(key)
+        if question is None or not question.durable:
+            continue
+        out[key] = {"id": item.id, "text": item.text, "last_verified": item.last_verified}
+    return out
 
 
 # A question is only treated as already answered when the match is strong: the alias phrase
@@ -518,12 +580,12 @@ def recall(
     per_question: int = 3,
     threshold: int = KNOWLEDGE_ANSWERS_THRESHOLD,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Knowledge already on file that answers a question, keyed by question.
+    """Knowledge already on file that *bears on* a question, keyed by question.
 
-    Matching runs per question against that question's own aliases, never against the goal.
-    Matching on the goal looked helpful and was not: every item the goal touched attached itself
-    to every question, so one note about theme arrived as the answer to the build, the sign-in and
-    the pre-condition at once.
+    This is context handed to the agent beside the question, not an answer to it - see
+    :func:`answers_on_file` for the distinction and why it matters.  Matching runs per question
+    against that question's own aliases, never against the goal: matching on the goal looked
+    helpful and was not, because every item the goal touched attached itself to every question.
     """
 
     from .session import relevant_knowledge  # local: session.py is large and rarely needed here
@@ -551,14 +613,13 @@ def recall(
     return found
 
 
-def outstanding(session: PrepareSession, *, include_known: bool = False) -> list[Question]:
-    """Questions still unanswered.  A question the app map already answers is not asked again."""
+def outstanding(session: PrepareSession) -> list[Question]:
+    """Questions still unanswered.  An answer reused from the app map counts as answered."""
 
     return [
         question
         for question in applicable_questions(session.goal, session.answers)
         if question.key not in session.answers
-        and (include_known or question.key not in session.known)
     ]
 
 
@@ -597,11 +658,7 @@ def parse_answer_pairs(pairs: Iterable[str]) -> dict[str, str]:
 def missing_required(session: PrepareSession) -> list[str]:
     """Required questions with neither an answer nor prior knowledge."""
 
-    return [
-        question.key
-        for question in outstanding(session)
-        if question.required and question.key not in session.known
-    ]
+    return [question.key for question in outstanding(session) if question.required]
 
 
 def is_ready(session: PrepareSession) -> bool:
@@ -635,17 +692,23 @@ def interview(session: PrepareSession) -> dict[str, Any]:
         if question.key == "seeding":
             entry["aua_suggests"] = ranked[0]["strategy"] if ranked else None
             entry["options"] = ranked
+        related = session.context.get(question.key)
+        if related:
+            # Shown, never substituted. These bear on the question; they do not answer it, and the
+            # agent is the one who knows whether any of them still holds.
+            entry["related_knowledge"] = [
+                {"id": item["id"], "name": item.get("name"), "text": item["text"]}
+                for item in related
+            ]
         questions.append(entry)
     return {
         "ok": True,
         "prepare_id": session.id,
         "package": session.package,
         "goal": session.goal,
-        "already_known": {
-            key: [
-                {"id": item["id"], "name": item.get("name"), "text": item["text"]} for item in items
-            ]
-            for key, items in session.known.items()
+        "reused_from_memory": {
+            key: {"knowledge_id": knowledge_id, "answer": session.answers.get(key)}
+            for key, knowledge_id in session.reused.items()
         },
         "answers": dict(session.answers),
         "questions": questions,
@@ -746,6 +809,16 @@ def render_contract_yaml(session: PrepareSession) -> str:
     return render_session_contract_yaml(parse_session_contract_yaml(draft))
 
 
+_NOT_APPLICABLE = {"none", "not needed", "nothing", "n/a", "no", "-"}
+
+
+def listed_answer(value: str | None) -> list[str]:
+    """Comma-separated answer values, with the polite ways of saying `nothing` removed."""
+
+    items = [part.strip() for part in str(value or "").split(",")]
+    return [item for item in items if item and item.casefold() not in _NOT_APPLICABLE]
+
+
 def setup_plan(session: PrepareSession) -> list[dict[str, Any]]:
     """The ordered, concrete steps that put the device where the contract can be judged."""
 
@@ -757,6 +830,25 @@ def setup_plan(session: PrepareSession) -> list[dict[str, Any]]:
                 "step": "install",
                 "detail": f"install and launch {build}",
                 "from_answer": "build",
+            }
+        )
+    flows = listed_answer(session.answers.get("setup_flow"))
+    if flows:
+        steps.append(
+            {
+                "step": "replay setup flow",
+                "detail": ", ".join(flows),
+                "from_answer": "setup_flow",
+            }
+        )
+    flags = listed_answer(session.answers.get("flags"))
+    if flags:
+        steps.append(
+            {
+                "step": "apply flags",
+                "detail": ", ".join(flags),
+                "calls": ["aua flags apply"],
+                "from_answer": "flags",
             }
         )
     seeding = session.answers.get("seeding")
@@ -794,12 +886,12 @@ def knowledge_writes(session: PrepareSession) -> list[dict[str, Any]]:
     for question in QUESTIONS:
         if not question.durable or question.key not in session.answers:
             continue
-        if question.key in session.known:
-            continue  # already on file; re-adding would only duplicate it
+        if question.key in session.reused:
+            continue  # it came from the app map; re-adding would only duplicate it
         out.append(
             {
                 "kind": question.knowledge_kind,
-                "name": f"{question.key}_{session.package.rsplit('.', 1)[-1]}",
+                "name": f"{PREPARE_KNOWLEDGE_PREFIX}{question.key}",
                 "text": session.answers[question.key],
                 "aliases": list(question.aliases),
             }

@@ -115,6 +115,12 @@ def harness_command(
     ]
     for fallback in controller.judge_fallbacks:
         argv += ["--judge-fallback", str(fallback)]
+    from .prepare import listed_answer
+
+    for flag in listed_answer(answers.get("flags")):
+        argv += ["--flags", flag]
+    for flow in listed_answer(answers.get("setup_flow")):
+        argv += ["--setup-flow", flow]
     build = str(answers.get("build") or "").strip()
     if build:
         argv += ["--apk", build]

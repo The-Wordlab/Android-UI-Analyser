@@ -165,3 +165,30 @@ def test_the_manual_plan_matches_the_seeding_that_was_agreed(tmp_path, seeding: 
     plan = manual_plan(scenario, output=tmp_path, reason="no key")
     assert ("--fresh --yes" in plan["commands"][0]) == (seeding == "reinstall")
     assert plan["setup"] == SCENARIO["setup"]
+
+
+def test_a_flag_gated_surface_and_its_setup_flow_reach_the_invocation(tmp_path) -> None:
+    # A flag-gated surface is simply absent without its flag, and an absent surface looks exactly
+    # like a broken one. Found on the first real app: the tab under test did not exist at all.
+    scenario = {
+        **SCENARIO,
+        "answers": {
+            **SCENARIO["answers"],
+            "flags": "myFeatureExperiment=a, otherExperiment=b",
+            "setup_flow": "flows/common/enter-as-guest.yaml",
+        },
+    }
+    argv = harness_command(_cfg(), scenario, output=tmp_path, command=["python", "run.py"])
+
+    assert argv.count("--flags") == 2
+    assert "myFeatureExperiment=a" in argv and "otherExperiment=b" in argv
+    assert argv[argv.index("--setup-flow") + 1] == "flows/common/enter-as-guest.yaml"
+
+
+def test_saying_none_is_not_a_flag(tmp_path) -> None:
+    scenario = {
+        **SCENARIO,
+        "answers": {**SCENARIO["answers"], "flags": "none", "setup_flow": "none"},
+    }
+    argv = harness_command(_cfg(), scenario, output=tmp_path, command=["python", "run.py"])
+    assert "--flags" not in argv and "--setup-flow" not in argv
