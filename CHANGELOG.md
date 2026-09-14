@@ -28,6 +28,11 @@ notes, so you can check for a newer version — and read what changed — withou
   one never does. A lease whose record cannot be read still holds its port, and the refusal now
   names the holder and says its emulator is running, so nobody has to open the registry to find
   out why.
+- When PATH resolves `emulator` to the SDK's removed `tools/emulator`, the `emulator/emulator`
+  beside it is used instead. The legacy launcher hard-codes an Intel QEMU path that no longer
+  exists, so an Apple Silicon host whose PATH listed only `tools/` failed to boot any AVD with an
+  error about `darwin-x86_64` that AUA never composed (#11). `aua doctor` shows the launcher it
+  chose under `emulator bin=`.
 
 ## [0.21.1] - 2026-09-14
 

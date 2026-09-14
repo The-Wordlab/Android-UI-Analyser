@@ -94,7 +94,7 @@ def emulator_bin() -> str:
                 return str(candidate)
     which = shutil.which("emulator")
     if which:
-        return which
+        return _sdk_launcher_beside_legacy(which)
     root = sdk_root()
     if root is not None:
         candidate = root / "emulator" / "emulator"
@@ -105,6 +105,23 @@ def emulator_bin() -> str:
         hint="Install Android SDK emulator tools and put `emulator` on PATH "
         "(or set ANDROID_HOME). Create an AVD once with Android Studio / avdmanager.",
     )
+
+
+def _sdk_launcher_beside_legacy(found: str) -> str:
+    """Swap the SDK's removed ``tools/emulator`` for the ``emulator/emulator`` beside it.
+
+    The legacy launcher left the SDK years ago, but a stale copy on PATH still execs a
+    hard-coded ``qemu/darwin-x86_64/…`` path that no longer exists - so a host whose PATH
+    lists only ``tools/`` fails with an Intel QEMU error that nothing about the request
+    asked for (#11). When the real launcher sits next to it, that is the one meant.
+    """
+    path = Path(found)
+    if path.parent.name != "tools":
+        return found
+    sibling = path.parent.parent / "emulator" / "emulator"
+    if sibling.is_file() and os.access(sibling, os.X_OK):
+        return str(sibling)
+    return found
 
 
 def adb_bin() -> str:

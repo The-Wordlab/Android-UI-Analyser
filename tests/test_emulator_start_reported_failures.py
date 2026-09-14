@@ -67,3 +67,34 @@ def test_exited_launcher_reports_this_attempt_without_waiting_for_timeout(
     assert "OLD FAILURE" not in raised.value.hint
     assert not (em._pid_dir(tmp_path) / f"{instance}.json").exists()
     assert not (em._reservation_dir() / "5556.port").exists()
+
+
+def test_the_sdks_launcher_is_preferred_over_the_removed_tools_launcher_on_path(
+    tmp_path, monkeypatch
+):
+    """``tools/emulator`` left the SDK years ago and hard-codes an Intel QEMU path (#11)."""
+    sdk = tmp_path / "sdk"
+    legacy = sdk / "tools" / "emulator"
+    modern = sdk / "emulator" / "emulator"
+    for launcher in (legacy, modern):
+        launcher.parent.mkdir(parents=True)
+        launcher.write_text("#!/bin/sh\nexit 0\n")
+        launcher.chmod(0o755)
+    monkeypatch.delenv("ANDROID_HOME", raising=False)
+    monkeypatch.delenv("ANDROID_SDK_ROOT", raising=False)
+    monkeypatch.setattr(em.shutil, "which", lambda _name: str(legacy))
+
+    assert em.emulator_bin() == str(modern)
+
+
+def test_the_tools_launcher_is_kept_when_it_is_all_there_is(tmp_path, monkeypatch):
+    sdk = tmp_path / "sdk"
+    legacy = sdk / "tools" / "emulator"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("#!/bin/sh\nexit 0\n")
+    legacy.chmod(0o755)
+    monkeypatch.delenv("ANDROID_HOME", raising=False)
+    monkeypatch.delenv("ANDROID_SDK_ROOT", raising=False)
+    monkeypatch.setattr(em.shutil, "which", lambda _name: str(legacy))
+
+    assert em.emulator_bin() == str(legacy)
