@@ -100,6 +100,30 @@ def test_decide_repairs_once_then_fails(tmp_path):
             role="r", instructions="i", question="q", context={}, schema=OUTCOME_SCHEMA, name="record_verdict"))
 
 
+def test_decider_uses_its_fallback_when_the_tool_choice_route_stays_unavailable():
+    route_missing = RuntimeError(
+        "HTTP 404: No endpoints found that support the provided 'tool_choice' value"
+    )
+    sender = Sender([route_missing, tool_reply("record_verdict", verdict("pass"))])
+    judge = decider(sender, fallbacks=[("fictional/fallback", SETTINGS)])
+
+    result = asyncio.run(judge.decide(
+        role="outcome judge",
+        instructions="decide",
+        question="done?",
+        context={"goal": "g"},
+        schema=OUTCOME_SCHEMA,
+        name="record_verdict",
+    ))
+
+    assert result["result"]["verdict"] == "pass"
+    assert result["escalations"] == 1
+    assert [payload["model"] for payload in sender.payloads] == [
+        "fictional/model",
+        "fictional/fallback",
+    ]
+
+
 def test_decider_has_its_own_spend_stop():
     sender = Sender([tool_reply("record_verdict", verdict("pass"), cost=0.02),
                      tool_reply("record_verdict", verdict("pass"), cost=0.02)])
@@ -206,6 +230,9 @@ def test_contract_votes_report_each_exact_criterion_with_evidence():
     ]
     judge_prompt = sender.payloads[0]["messages"][1]["content"]
     assert "A negative criterion is verified by evidence that the forbidden state is absent" in judge_prompt
+    system_prompt = sender.payloads[0]["messages"][0]["content"]
+    assert "A detour through another screen is a route warning" in system_prompt
+    assert "conventional unlabeled controls" in system_prompt
     assert all(item["result"] == "verified" for item in result["criteria"])
     assert sender.payloads[0]["max_tokens"] == contract_max_tokens(512, contract)
     assert "neutral:" in result["criteria"][0]["evidence"]

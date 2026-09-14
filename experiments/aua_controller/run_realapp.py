@@ -17,13 +17,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import copy
 import json
 import os
+import re
 import sys
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -32,10 +34,12 @@ from experiments.aua_controller.compaction import FrameCompactor
 from experiments.aua_controller.hosted import BACKENDS, validate_endpoint, validate_request_config
 from experiments.aua_controller.hosted_projection import hosted_model_view
 from experiments.aua_controller.judgement import (
+    MAX_IMAGES,
     Decider,
     ScreenNamer,
     encode_image,
     frame_fingerprint,
+    image_frame_sample,
     judge_outcome_votes,
     judged_frame_sample,
     screenshot_for,
@@ -48,10 +52,11 @@ from experiments.aua_controller.run_live import (
     RunError,
     _error_text,
     compact_schema,
+    offered_schema,
     tool_result,
 )
 from experiments.aua_controller.session_state import observation_frame
-from experiments.aua_controller.transport import resilient_request
+from experiments.aua_controller.transport import resilient_request, retryable_http_status
 
 FORMAT = "aua-realapp-run-v1"
 CONTROLLER_TOOLS = (
@@ -67,6 +72,7 @@ CONTRACT_TOOL = "expect_and_analyze"
 #: One selector and one predicate is the whole vocabulary a checkpoint assertion needs, and
 #: every extra argument is another one a small model can get wrong.
 CONTRACT_TOOL_PROPERTIES = ("rid", "text", "desc", "exists", "absent", "text_contains")
+CONTROLLER_CAPABILITIES = frozenset({"network", "wall-clock-wait", "app-lifecycle"})
 FINISH_OUTCOMES = ("achieved", "already_satisfied", "blocked", "not_achievable")
 REALAPP_SYSTEM = """
 Real-application mode. There is no authored checklist; you decide when the goal is met.
@@ -90,6 +96,30 @@ call session_finish with outcome "achieved". If you cannot reach a checkpoint, f
 
 
 KNOWLEDGE_SHOWN = 5
+_BARE_ELEMENT_UUID = re.compile(r"^[0-9a-f]{32}$")
+
+
+def normalize_element_id_argument(arguments: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Restore the unambiguous ``el:`` namespace a hosted model occasionally drops."""
+
+    value = arguments.get("id")
+    if not isinstance(value, str) or _BARE_ELEMENT_UUID.fullmatch(value) is None:
+        return arguments, False
+    return {**arguments, "id": f"el:{value}"}, True
+
+
+def device_epoch_seconds(result: Mapping[str, Any]) -> int | None:
+    """Read an integer epoch from AUA's bounded read-only shell result."""
+    try:
+        return int(str(result.get("stdout") or "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def judge_intermediate_frame_limit(requested: int, *, vision: bool) -> int:
+    """Retain compact text evidence independently of the rendered-image window."""
+
+    return requested
 
 
 def host_knowledge(start: dict[str, Any]) -> list[dict[str, Any]]:
@@ -101,7 +131,11 @@ def host_knowledge(start: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def goal_prompt(
-    goal: str, knowledge: list[dict[str, Any]], setup_notes: Sequence[str] = ()
+    goal: str,
+    knowledge: list[dict[str, Any]],
+    setup_notes: Sequence[str] = (),
+    setup_facts: Sequence[str] = (),
+    authored_context: str | None = None,
 ) -> str:
     """The first user message: the goal, what the host already knows, what setup did not finish.
 
@@ -113,6 +147,22 @@ def goal_prompt(
     the precondition is missing.
     """
     lines = ["Goal: " + goal]
+    if setup_facts:
+        lines += [
+            "",
+            "Harness-owned setup already completed and verified before this controller turn. "
+            "Treat these as established facts; do not reopen host-only setup screens or block "
+            "because the compact controller has no infrastructure tools:",
+        ]
+        lines += [f"- {fact}" for fact in setup_facts]
+    if authored_context and authored_context.strip():
+        lines += [
+            "",
+            "Authored precondition context follows for classification and constraints. It is not "
+            "a list of additional session phases; host-owned checks named here are already covered "
+            "by the verified setup facts above:",
+            authored_context.strip(),
+        ]
     if setup_notes:
         lines += ["", "Setup did not finish as written. Establish the rest yourself before judging, "
                       "and say so if you cannot:"]
@@ -159,11 +209,17 @@ def contract_tool_schema(schema: dict[str, Any]) -> dict[str, Any]:
 
 
 def realapp_tools(
-    schemas: dict[str, dict[str, Any]], *, contract: bool = False
+    schemas: dict[str, dict[str, Any]],
+    *,
+    contract: bool = False,
+    capabilities: Sequence[str] = (),
 ) -> list[dict[str, Any]]:
     """compact-v1 tools, with session_finish carrying the model's outcome claim."""
     tools = []
-    for name in (*CONTROLLER_TOOLS, *((CONTRACT_TOOL,) if contract else ())):
+    names = CONTROLLER_TOOLS if contract else tuple(
+        name for name in CONTROLLER_TOOLS if name != "session_progress"
+    )
+    for name in (*names, *((CONTRACT_TOOL,) if contract else ())):
         if name not in schemas:
             raise RunError(f"AUA MCP does not offer {name}")
         if name == "session_finish":
@@ -177,6 +233,47 @@ def realapp_tools(
             description = "Claim the goal is finished (or blocked) with an outcome and a short note."
         tools.append({"type": "function", "function": {"name": name, "description": description,
                                                        "parameters": parameters}})
+    requested = set(capabilities)
+    unknown = requested - CONTROLLER_CAPABILITIES
+    if unknown:
+        raise RunError("unknown controller capabilities: " + ", ".join(sorted(unknown)))
+    if "network" in requested:
+        for name in ("network_offline", "network_restore"):
+            if name not in schemas:
+                raise RunError(f"AUA MCP does not offer {name}")
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": str(schemas[name].get("description") or "")[:300],
+                    "parameters": offered_schema(name, schemas[name]),
+                },
+            })
+    if "wall-clock-wait" in requested:
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "wait_uninterrupted_620_seconds",
+                "description": (
+                    "Wait exactly 620 uninterrupted seconds while the app is already backgrounded; "
+                    "records host-monotonic and device-clock boundary evidence."
+                ),
+                "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+        })
+    if "app-lifecycle" in requested:
+        for name, description in (
+            ("app_force_stop", "Force-stop only the package under test without clearing its data."),
+            ("app_relaunch_and_analyze", "Relaunch the pinned package/activity and return its screen."),
+        ):
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": description,
+                    "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+                },
+            })
     return tools
 
 
@@ -328,6 +425,13 @@ def _mark_cleanup_failure(result: dict[str, Any], message: str) -> None:
         }
 
 
+def _retryable_recording_stop_failure(value: Any) -> bool:
+    """A recorder stop is safe to retry after the Android transport only timed out reading."""
+
+    text = json.dumps(value, ensure_ascii=False, default=str).casefold()
+    return "adb read timeout" in text or "adb read timed out" in text
+
+
 SETUP_FLOW_RESUMES = 4
 """How often a setup flow may re-issue a wait the ceiling cut short.
 
@@ -379,24 +483,32 @@ async def run_realapp(
     list_tools: Callable[[], Awaitable[dict[str, dict[str, Any]]]],
     send: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]],
     goal: str,
+    session_goal: str | None = None,
     package: str,
     output: Path,
     model: str,
     request_config: dict[str, Any] | None = None,
     backend: str = "openrouter",
     launch: bool = False,
+    launch_app: bool = True,
     activity: str | None = None,
+    headed: bool = False,
     fresh_app: bool = False,
     apk: str | None = None,
     grant_permissions: bool = False,
+    forbidden_packages: Sequence[str] = (),
     record: bool = False,
+    recording_required: bool = True,
     lease_wait_s: float = 0,
     fallback_lease_wait_s: float = 600,
     provision_target: bool = True,
+    needs: Sequence[str] = (),
+    controller_capabilities: Sequence[str] = (),
     flags: dict[str, str] | None = None,
     prelaunch_setup_flows: Sequence[tuple[str, dict[str, str]]] = (),
     setup_flows: Sequence[tuple[str, dict[str, str]]] = (),
     contract: str | None = None,
+    authored_context: str | None = None,
     session_contract: str | None = None,
     vision: bool = False,
     judge_model: str | None = None,
@@ -418,18 +530,32 @@ async def run_realapp(
     no_progress_limit: int = 4,
     max_elements: int = 60,
     request_timeout_s: float = 90,
+    existing_session_id: str | None = None,
+    finish_session: bool = True,
+    inherited_setup_facts: Sequence[str] = (),
+    session_artifacts_dir: str | Path | None = None,
+    record_after_host_setup: bool = False,
 ) -> dict[str, Any]:
     """Return the run result; also written to ``<output>/result.json`` and ``verdict.md``."""
     if backend not in BACKENDS:
         raise RunError("unknown backend")
     if fresh_app and not apk:
         raise RunError("fresh_app needs --apk: a booted AVD has no app to clear")
+    if existing_session_id and (fresh_app or apk or prelaunch_setup_flows or flags):
+        raise RunError(
+            "an existing session cannot repeat fresh install, APK bootstrap, prelaunch flows, or flags"
+        )
     if lease_wait_s < 0 or fallback_lease_wait_s < 0:
         raise RunError("lease waits must be non-negative")
+    if any(not str(item).strip() for item in forbidden_packages):
+        raise RunError("forbidden package names must be non-empty")
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     if any(output.iterdir()):
         raise RunError("real-app output directory must be empty")
+    effective_session_goal = (session_goal or goal).strip()
+    if not effective_session_goal:
+        raise RunError("session_goal must be non-empty when supplied")
     settings = validate_request_config(request_config or {}) if backend == "openrouter" else copy.deepcopy(request_config or {})
     judging_model = judge_model or model
     judge_settings = (
@@ -439,12 +565,18 @@ async def run_realapp(
     )
     started = time.monotonic()
     result: dict[str, Any] = {
-        "format": FORMAT, "goal": goal, "package": package, "model": model, "backend": backend,
+        "format": FORMAT, "goal": goal, "session_goal": effective_session_goal,
+        "package": package, "model": model, "backend": backend,
         "request_config": settings, "judge_model": judging_model,
+        "judge_request_config": judge_settings,
         "judge_ladder": [judging_model, *(name for name, _ in judge_fallbacks)],
+        "judge_fallbacks": [
+            {"model": name, "request_config": copy.deepcopy(config or {})}
+            for name, config in judge_fallbacks
+        ],
         "session_id": None, "serial": None, "setup": [],
         "controller": None, "claim": None, "verdict": None, "screens": [], "route": None,
-        "recording": None,
+        "recording": None, "deferred_waits": [],
         "lifecycle": {"lease_strategy": "reuse_or_provision"},
         "cost": {"total_usd": 0.0}, "error": None, "warnings": [], "report_is_untrusted": True,
     }
@@ -469,67 +601,135 @@ async def run_realapp(
             with setup_log.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
 
+    async def stop_recording(actor: str) -> dict[str, Any]:
+        """Stop/export once, retrying one known transient device read timeout."""
+
+        attempts = 0
+        while True:
+            attempts += 1
+            try:
+                stopped = await call(
+                    "screen_record_stop", {"path": str(recording_path)}, actor
+                )
+                retryable = _retryable_recording_stop_failure(stopped)
+            except Exception as exc:
+                stopped = {"ok": False, "error": _error_text(exc)}
+                retryable = _retryable_recording_stop_failure(stopped)
+            if stopped.get("ok") is True or not retryable or attempts >= 2:
+                if result.get("recording") is not None:
+                    result["recording"]["stop_attempts"] = attempts
+                return stopped
+            result["warnings"].append(
+                "AUA recording stop hit an adb read timeout; retried once after the device settled."
+            )
+            await asyncio.sleep(1.0)
+
     session_id: str | None = None
     setup_notes: list[str] = []
+    setup_facts: list[str] = [str(item) for item in inherited_setup_facts]
     recording_started = False
     recording_path = (output / "journey.mp4").resolve()
+    aua_artifacts_dir = (
+        Path(session_artifacts_dir).resolve()
+        if session_artifacts_dir is not None
+        else (output / "aua").resolve()
+    )
 
     try:
-        start_arguments: dict[str, Any] = {
-            "goal": goal,
-            "package": package,
-            "headed": False,
-            "artifacts_dir": str((output / "aua").resolve()),
-            "evidence": "all",
-            "launch_app": False,
-            "grant_permissions": grant_permissions,
-            "wait_for_lease_s": lease_wait_s,
-            "provision_target": provision_target,
-        }
-        if session_contract:
-            # AUA's own checkpoints, not just the judge's reading material. With them the
-            # session can only be finished on fresh assertion proof, so the verdict comes back
-            # `aua_session_contract` / verified rather than a model reading frames. Without
-            # them AUA derives one phase from the goal sentence, with no assertions - which is
-            # what `aua prepare` writes a contract to avoid.
-            start_arguments["contract_yaml"] = session_contract
-        if activity:
-            start_arguments["activity"] = activity
-        if apk:
-            start_arguments["apk"] = apk
-        if fresh_app:
-            start_arguments.update({"fresh": True, "confirmed": True})
-        start = await call("session_start", start_arguments, "setup")
-        session_id = start.get("session_id")
-        if (
-            (not isinstance(session_id, str) or not session_id)
-            and provision_target
-            and fallback_lease_wait_s > 0
-            and _target_start_failed(start)
-        ):
-            retry_arguments = dict(start_arguments)
-            retry_arguments["provision_target"] = False
-            retry_arguments["wait_for_lease_s"] = fallback_lease_wait_s
-            result["lifecycle"]["lease_strategy"] = "waited_after_provision_failure"
-            start = await call("session_start", retry_arguments, "setup")
+        if existing_session_id:
+            session_id = existing_session_id
+            result["session_id"] = session_id
+            result["lifecycle"]["lease_strategy"] = "existing_session"
+            result["setup"].append({"session_bootstrap": False, "existing_session": True})
+            knowledge = []
+        else:
+            start_arguments: dict[str, Any] = {
+                "goal": effective_session_goal,
+                "package": package,
+                "headed": headed,
+                "artifacts_dir": str(aua_artifacts_dir),
+                "evidence": "all",
+                "launch_app": False,
+                "grant_permissions": grant_permissions,
+                "wait_for_lease_s": lease_wait_s,
+                "provision_target": provision_target,
+            }
+            if needs:
+                start_arguments["needs"] = [str(item) for item in needs]
+            if session_contract:
+                # AUA's own checkpoints, not just the judge's reading material. With them the
+                # session can only be finished on fresh assertion proof, so the verdict comes back
+                # `aua_session_contract` / verified rather than a model reading frames. Without
+                # them AUA derives one phase from the goal sentence, with no assertions - which is
+                # what `aua prepare` writes a contract to avoid.
+                start_arguments["contract_yaml"] = session_contract
+            if activity:
+                start_arguments["activity"] = activity
+            if apk:
+                start_arguments["apk"] = apk
+            if fresh_app:
+                start_arguments.update({"fresh": True, "confirmed": True})
+            start = await call("session_start", start_arguments, "setup")
             session_id = start.get("session_id")
-        if not isinstance(session_id, str) or not session_id:
-            raise RunError("session_start returned no session_id: " + json.dumps(start)[:500])
-        result["session_id"], result["serial"] = session_id, start.get("serial")
-        knowledge = host_knowledge(start)
-        result["knowledge_shown"] = [item.get("id") for item in knowledge]
-        result["setup"].append({
-            "session_bootstrap": True,
-            "fresh_app": fresh_app,
-            "apk": bool(apk),
-            "provision_target": provision_target,
-        })
-        if record:
+            if (
+                (not isinstance(session_id, str) or not session_id)
+                and provision_target
+                and fallback_lease_wait_s > 0
+                and _target_start_failed(start)
+            ):
+                retry_arguments = dict(start_arguments)
+                retry_arguments["provision_target"] = False
+                retry_arguments["wait_for_lease_s"] = fallback_lease_wait_s
+                result["lifecycle"]["lease_strategy"] = "waited_after_provision_failure"
+                start = await call("session_start", retry_arguments, "setup")
+                session_id = start.get("session_id")
+            if not isinstance(session_id, str) or not session_id:
+                raise RunError("session_start returned no session_id: " + json.dumps(start)[:500])
+            result["session_id"], result["serial"] = session_id, start.get("serial")
+            knowledge = host_knowledge(start)
+            result["knowledge_shown"] = [item.get("id") for item in knowledge]
+            result["setup"].append({
+                "session_bootstrap": True,
+                "fresh_app": fresh_app,
+                "apk": bool(apk),
+                "provision_target": provision_target,
+            })
+            if fresh_app and apk:
+                setup_facts.append("AUA completed the requested fresh APK bootstrap.")
+            for forbidden_package in forbidden_packages:
+                package_status = await call(
+                    "app_status", {"package": str(forbidden_package)}, "setup"
+                )
+                installed = package_status.get("installed")
+                result["setup"].append({
+                    "forbidden_package": str(forbidden_package),
+                    "installed": installed,
+                    "status_ok": package_status.get("ok"),
+                })
+                if package_status.get("ok") is not True or not isinstance(installed, bool):
+                    raise RunError(
+                        "forbidden package status could not be verified: "
+                        + json.dumps(package_status)[:400]
+                    )
+                if installed:
+                    raise RunError(
+                        f"forbidden package is installed on the leased target: {forbidden_package}"
+                    )
+                setup_facts.append(
+                    f"AUA verified forbidden package {forbidden_package} is not installed."
+                )
+        if record and not record_after_host_setup:
             started_recording = await call("screen_record_start", {}, "setup")
             if started_recording.get("ok") is not True:
-                raise RunError("screen recording failed to start: " + json.dumps(started_recording)[:400])
-            recording_started = True
-            result["recording"] = {"path": str(recording_path), "started": True, "stop_ok": None}
+                message = "screen recording failed to start: " + json.dumps(started_recording)[:400]
+                if recording_required:
+                    raise RunError(message)
+                result["recording"] = {"path": str(recording_path), "started": False, "stop_ok": False}
+                result["recording_warning"] = message
+                result["warnings"].append(message + "; continuing with AUA frame evidence.")
+            else:
+                recording_started = True
+                result["recording"] = {"path": str(recording_path), "started": True, "stop_ok": None}
         for index, (flow_yaml, flow_params) in enumerate(prelaunch_setup_flows):
             flow, resumes = await replay_setup_flow(call, flow_yaml, flow_params)
             result["setup"].append({"prelaunch_setup_flow": index,
@@ -540,6 +740,13 @@ async def run_realapp(
                 raise RunError(
                     f"prelaunch setup flow {index} failed: " + json.dumps(flow)[:400]
                 )
+            fact_params = ", ".join(
+                f"{key}={value}" for key, value in sorted((flow_params or {}).items())
+            )
+            setup_facts.append(
+                f"Prelaunch setup flow {index} completed"
+                + (f" with {fact_params}." if fact_params else ".")
+            )
         if flags:
             # Feature-flag context is part of the oracle: a scenario judged in the wrong arm is
             # a verdict about a different product. flags_apply verifies each key against the
@@ -560,12 +767,31 @@ async def run_realapp(
             result["flag_context"] = dict(flags)
             if applied.get("ok") is not True or applied.get("verified") is not True:
                 raise RunError("feature flags not applied and verified: " + json.dumps(applied)[:400])
-        launch_arguments: dict[str, Any] = {"package": package}
-        if activity:
-            launch_arguments["activity"] = activity
-        launched = await call("app_launch_and_analyze", launch_arguments, "setup")
-        if launched.get("ok") is not True:
-            raise RunError("app launch failed: " + json.dumps(launched)[:400])
+            setup_facts.append(
+                "AUA applied and read-back verified feature flags: "
+                + ", ".join(f"{key}={value}" for key, value in sorted(flags.items()))
+                + "."
+            )
+        if record and record_after_host_setup:
+            started_recording = await call("screen_record_start", {}, "setup")
+            if started_recording.get("ok") is not True:
+                message = "screen recording failed to start: " + json.dumps(started_recording)[:400]
+                if recording_required:
+                    raise RunError(message)
+                result["recording"] = {"path": str(recording_path), "started": False, "stop_ok": False}
+                result["recording_warning"] = message
+                result["warnings"].append(message + "; continuing with AUA frame evidence.")
+            else:
+                recording_started = True
+                result["recording"] = {"path": str(recording_path), "started": True, "stop_ok": None}
+        launched: dict[str, Any] | None = None
+        if launch_app:
+            launch_arguments: dict[str, Any] = {"package": package}
+            if activity:
+                launch_arguments["activity"] = activity
+            launched = await call("app_launch_and_analyze", launch_arguments, "setup")
+            if launched.get("ok") is not True:
+                raise RunError("app launch failed: " + json.dumps(launched)[:400])
         for index, (flow_yaml, flow_params) in enumerate(setup_flows):
             flow, resumes = await replay_setup_flow(call, flow_yaml, flow_params)
             result["setup"].append({"setup_flow": index, "params": dict(flow_params or {}),
@@ -620,10 +846,24 @@ async def run_realapp(
         if observation_frame(initial) is None:
             raise RunError("initial analyze_screen returned no fresh frame")
         schemas = await list_tools()
-        tools = realapp_tools(schemas, contract=bool(session_contract))
+        tools = realapp_tools(
+            schemas,
+            contract=bool(session_contract),
+            capabilities=controller_capabilities,
+        )
+        result["setup_facts"] = list(setup_facts)
         claims: list[dict[str, Any]] = []
 
         async def controller_call(name: str, arguments: dict[str, Any]) -> Any:
+            arguments, repaired_id = normalize_element_id_argument(arguments)
+            if repaired_id:
+                repair = (
+                    f"controller omitted the el: namespace for {name}; the harness restored it "
+                    "before AUA validation"
+                )
+                result.setdefault("controller_argument_repairs", []).append(repair)
+                if repair not in result["warnings"]:
+                    result["warnings"].append(repair)
             if name == "session_finish":
                 claims.append(copy.deepcopy(arguments))
                 # This is a model completion claim, not infrastructure authority. Keep the AUA
@@ -632,6 +872,114 @@ async def run_realapp(
                 return {"ok": False, "finished": False, "claim_recorded": True}
             if name == "session_progress":
                 arguments = {"session_id": session_id}
+            if name == "app_force_stop":
+                return await call(
+                    "app", {"action": "stop", "package": package}, "controller"
+                )
+            if name == "app_relaunch_and_analyze":
+                relaunch_arguments: dict[str, Any] = {"package": package}
+                if activity:
+                    relaunch_arguments["activity"] = activity
+                return await call(
+                    "app_launch_and_analyze", relaunch_arguments, "controller"
+                )
+            if name == "wait_uninterrupted_620_seconds":
+                before_host = time.monotonic()
+                before_device = await call(
+                    "shell_read_only", {"argv": ["date", "+%s"]}, "harness-wait-boundary"
+                )
+                started_job = await call(
+                    "job_start",
+                    {"operation": "idle-duration", "timeout_ms": 620_000, "observe": False},
+                    "harness-wait-start",
+                )
+                job_id = started_job.get("job_id")
+                if started_job.get("ok") is not True or not isinstance(job_id, str) or not job_id:
+                    raise RunError("AUA could not detach the inactivity timer: " + json.dumps(started_job)[:500])
+                wait_started_at = datetime.now().astimezone()
+                receipt: dict[str, Any] = {
+                    "job_id": job_id,
+                    "operation": "idle-duration",
+                    "requested_seconds": 620,
+                    "status": started_job.get("status"),
+                    "started_at": wait_started_at.isoformat(),
+                    "deadline_at": (wait_started_at + timedelta(seconds=620)).isoformat(),
+                    "device_clock_before": device_epoch_seconds(before_device),
+                    "model_calls_during_wait": 0,
+                    "device_reads_during_wait": 0,
+                    "reconnect": {"tool": "job_status", "arguments": {"job_id": job_id}},
+                }
+                result["deferred_waits"].append(receipt)
+
+                def persist_waits() -> None:
+                    (output / "deferred-waits.json").write_text(
+                        json.dumps(result["deferred_waits"], ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8",
+                    )
+
+                persist_waits()
+                try:
+                    while True:
+                        # No model turn and no device operation happens here. Yielding the event
+                        # loop keeps the harness available to supervise parallel lanes on their own
+                        # leases; this guarded target remains exclusively idle.
+                        await asyncio.sleep(30)
+                        status = await call(
+                            "job_status", {"job_id": job_id}, "harness-wait-status"
+                        )
+                        receipt["status"] = status.get("status")
+                        receipt["progress_percent"] = status.get("progress_percent")
+                        persist_waits()
+                        if status.get("terminal") is True:
+                            break
+                except BaseException:
+                    with contextlib.suppress(Exception):
+                        cancelled = await call(
+                            "job_cancel", {"job_id": job_id, "wait_ms": 1_000},
+                            "harness-wait-cancel",
+                        )
+                        receipt["status"] = cancelled.get("status")
+                        receipt["cancelled"] = True
+                        persist_waits()
+                    raise
+                if status.get("status") != "succeeded" or status.get("run_ok") is not True:
+                    raise RunError("AUA inactivity timer did not complete: " + json.dumps(status)[:500])
+                after_device = await call(
+                    "shell_read_only", {"argv": ["date", "+%s"]}, "harness-wait-boundary"
+                )
+                elapsed = time.monotonic() - before_host
+                before_epoch = device_epoch_seconds(before_device)
+                after_epoch = device_epoch_seconds(after_device)
+                device_elapsed = (
+                    after_epoch - before_epoch
+                    if before_epoch is not None and after_epoch is not None
+                    else None
+                )
+                receipt.update({
+                    "status": "succeeded",
+                    "finished_at": datetime.now().astimezone().isoformat(),
+                    "host_monotonic_elapsed_seconds": elapsed,
+                    "device_clock_after": after_epoch,
+                    "device_clock_elapsed_seconds": device_elapsed,
+                    "job_result": status.get("result"),
+                })
+                persist_waits()
+                return {
+                    "ok": elapsed > 600 and device_elapsed is not None and device_elapsed > 600,
+                    "action": "wait-uninterrupted",
+                    "requested_seconds": 620,
+                    "host_monotonic_elapsed_seconds": elapsed,
+                    "device_clock_before": before_epoch,
+                    "device_clock_after": after_epoch,
+                    "device_clock_elapsed_seconds": device_elapsed,
+                    "deferred_job_id": job_id,
+                    "model_calls_during_wait": 0,
+                    "device_reads_during_wait": 0,
+                    "note": (
+                        "AUA's detached idle-duration job guarded the leased device; no UI "
+                        "observation, screenshot, foreground action, or model call ran in the interval."
+                    ),
+                }
             return await call_tool(name, arguments)
 
         compactor = FrameCompactor(max_elements=max_elements)
@@ -640,7 +988,9 @@ async def run_realapp(
             system_prompt=SYSTEM + COMPACT_SYSTEM + (
                 CONTRACT_SYSTEM if session_contract else REALAPP_SYSTEM
             ),
-            user_prompt=goal_prompt(goal, knowledge, setup_notes),
+            user_prompt=goal_prompt(
+                goal, knowledge, setup_notes, setup_facts, authored_context
+            ),
             initial_observation=initial, model=model, output=output / "controller",
             request_config=settings, backend=backend, max_tokens=max_tokens, max_steps=max_steps,
             time_limit_s=time_limit_s, max_request_bytes=max_request_bytes,
@@ -660,6 +1010,10 @@ async def run_realapp(
         result["controller"]["prompt_tokens"] = [
             (usage or {}).get("prompt_tokens") for usage in report.get("usage", [])]
         result["controller"]["compaction"] = {"frames": compactor.frames_seen, "unchanged_hits": compactor.unchanged_hits}
+        for warning in report.get("warnings") or []:
+            message = "controller warning: " + str(warning)[:500]
+            if message not in result["warnings"]:
+                result["warnings"].append(message)
         result["claim"] = claims[-1] if claims else None
         result["cost"]["controller"] = {
             "model": (report.get("returned_models") or [model])[0],
@@ -679,6 +1033,28 @@ async def run_realapp(
             for call_record in _load_jsonl(output / "controller" / "tool-calls.jsonl")
             if call_record.get("executed") is True
         ]
+        # Recording is journey evidence, not judge latency evidence. Export it while the exact
+        # device boot is still unquestionably alive; a slow pair of hosted judges used to keep
+        # the encoder running long enough for a provisioned target failure to turn an otherwise
+        # valid row into recording_identity_mismatch.
+        if recording_started:
+            stopped_recording = await stop_recording("evidence")
+            stop_ok = stopped_recording.get("ok") is True and recording_path.is_file()
+            if result["recording"] is not None:
+                result["recording"]["stop_ok"] = stop_ok
+            if not stop_ok:
+                message = "recording cleanup failed: " + str(
+                    stopped_recording.get("error") or stopped_recording
+                )[:500]
+                if recording_required:
+                    result["recording_cleanup_error"] = message
+                else:
+                    result["recording_warning"] = message
+                    result["warnings"].append(
+                        message + "; product judgement continues from AUA frame evidence."
+                    )
+                recording_started = False
+            recording_started = False
         stop = report.get("stop_reason")
         contract_progress = None
         if session_contract:
@@ -702,7 +1078,9 @@ async def run_realapp(
                     "assertions; no model read the frames to decide this."
                 ],
             }
-        elif stop in ("terminal_claimed", "model_text", "no_progress") and judge:
+        elif stop in (
+            "terminal_claimed", "model_text", "no_progress", "conversation_budget", "step_budget"
+        ) and judge:
             decider = Decider(send, model=judging_model, backend=backend,
                               request_config=judge_settings, fallbacks=judge_fallbacks,
                               max_tokens=judge_max_tokens, cost_limit_usd=judge_cost_limit_usd,
@@ -713,20 +1091,30 @@ async def run_realapp(
             if result["claim"]:
                 context_actions.append({"step": len(actions), "tool": "session_finish",
                                         "arguments": {"controller_claim_untrusted": result["claim"]}})
-            judged_frames = judged_frame_sample([frame["raw"] for frame in frames], judge_frames)
+            judged_frames = judged_frame_sample(
+                [frame["raw"] for frame in frames],
+                judge_intermediate_frame_limit(judge_frames, vision=vision),
+            )
             images: list[str] = []
             if vision:
                 # Element text cannot answer a question about appearance. Pair each judged
                 # frame with the screenshot AUA already captured for it, oldest first, so the
                 # final screen is the last image the judge sees.
-                shot_index = screenshot_index((output / "aua" / "manifest.json").resolve())
-                for frame in [*judged_frames, final]:
+                shot_index = screenshot_index(aua_artifacts_dir / "manifest.json")
+                image_frames = image_frame_sample(judged_frames, MAX_IMAGES - 1)
+                for frame in image_frames:
                     shot = screenshot_for(shot_index, frame_fingerprint(frame))
                     encoded = encode_image(shot) if shot else None
                     if encoded:
                         images.append(encoded)
+                final_shot = screenshot_for(shot_index, frame_fingerprint(final))
+                final_image = encode_image(final_shot) if final_shot else None
+                if final_image:
+                    images.append(final_image)
                 result["vision"] = {"requested": True, "frames": len(judged_frames) + 1,
-                                    "images_attached": len(images)}
+                                    "image_frames_selected": len(image_frames) + 1,
+                                    "images_attached": len(images),
+                                    "final_image_attached": bool(final_image)}
             verdict = await judge_outcome_votes(
                 decider, votes=judge_votes, goal=goal, final_frame=final,
                 frames=judged_frames, actions=context_actions,
@@ -735,6 +1123,14 @@ async def run_realapp(
             if stop == "no_progress" and verdict["verdict"] == "pass":
                 verdict["verdict"] = "pass_with_warning"
                 verdict["reasons"].insert(0, "Controller stalled on an unchanged screen before finishing.")
+            if stop in {"conversation_budget", "step_budget"} and verdict["verdict"] == "pass":
+                verdict["verdict"] = "pass_with_warning"
+                verdict["reasons"].insert(
+                    0,
+                    "Controller reached its bounded "
+                    + ("conversation" if stop == "conversation_budget" else "step")
+                    + " budget; the saved frames nevertheless prove the contract.",
+                )
             verdict["controller_stop_reason"] = stop
             result["verdict"] = verdict
             result["cost"]["judge"] = {"model": judging_model, "provider": (verdict["votes"][0].get("provider") if verdict["votes"] else None),
@@ -743,6 +1139,8 @@ async def run_realapp(
             reason = report.get("error") or f"controller stopped with {stop}"
             result["verdict"] = {"oracle": "none", "verified": False, "verdict": "unverified",
                                  "reasons": [str(reason)[:300]], "controller_stop_reason": stop}
+        if result.get("recording_cleanup_error"):
+            _mark_cleanup_failure(result, str(result["recording_cleanup_error"]))
         if name_screens:
             namer_decider = Decider(send, model=model, backend=backend, request_config=settings,
                                     max_tokens=4096, cost_limit_usd=judge_cost_limit_usd, output=output / "map")
@@ -779,9 +1177,7 @@ async def run_realapp(
     finally:
         if recording_started:
             try:
-                stopped_recording = await call(
-                    "screen_record_stop", {"path": str(recording_path)}, "cleanup"
-                )
+                stopped_recording = await stop_recording("cleanup")
                 stop_ok = stopped_recording.get("ok") is True and recording_path.is_file()
                 if result["recording"] is not None:
                     result["recording"]["stop_ok"] = stop_ok
@@ -789,14 +1185,26 @@ async def run_realapp(
                     message = "recording cleanup failed: " + str(
                         stopped_recording.get("error") or stopped_recording
                     )[:500]
-                    result["recording_cleanup_error"] = message
-                    _mark_cleanup_failure(result, message)
+                    if recording_required:
+                        result["recording_cleanup_error"] = message
+                        _mark_cleanup_failure(result, message)
+                    else:
+                        result["recording_warning"] = message
+                        result["warnings"].append(
+                            message + "; product judgement continues from AUA frame evidence."
+                        )
                 recording_started = False
             except Exception as exc:
                 message = "recording cleanup failed: " + _error_text(exc)
-                result["recording_cleanup_error"] = message
-                _mark_cleanup_failure(result, message)
-        if session_id:
+                if recording_required:
+                    result["recording_cleanup_error"] = message
+                    _mark_cleanup_failure(result, message)
+                else:
+                    result["recording_warning"] = message
+                    result["warnings"].append(
+                        message + "; product judgement continues from AUA frame evidence."
+                    )
+        if session_id and finish_session:
             try:
                 finished_session = await call(
                     "session_finish",
@@ -885,7 +1293,18 @@ def main() -> int:
         action="store_true",
         help="Grant every declared runtime permission after install (off by default)",
     )
+    parser.add_argument(
+        "--forbid-package",
+        action="append",
+        default=[],
+        help="Fail before controller navigation when this package is installed; repeatable",
+    )
     parser.add_argument("--activity")
+    parser.add_argument(
+        "--headed",
+        action="store_true",
+        help="Expose the virtual Android device while the controller is running",
+    )
     parser.add_argument("--record", action="store_true", help="Record from the first app launch through judgement")
     parser.add_argument("--lease-wait", type=float, default=0,
                         help="Seconds to wait for a free device before provisioning another")
@@ -893,6 +1312,19 @@ def main() -> int:
                         help="Seconds to wait for an existing lease after provisioning fails")
     parser.add_argument("--no-provision", action="store_true",
                         help="Never create a new virtual target; only wait for an existing device")
+    parser.add_argument(
+        "--needs",
+        action="append",
+        default=[],
+        help="Required target capability passed to AUA session bootstrap; repeatable",
+    )
+    parser.add_argument(
+        "--controller-capability",
+        action="append",
+        default=[],
+        choices=sorted(CONTROLLER_CAPABILITIES),
+        help="Add a narrow scenario-declared controller capability; repeatable",
+    )
     parser.add_argument("--prelaunch-setup-flow", type=Path, action="append", default=[],
                         help="AUA flow YAML run before flags and the first product launch; repeatable")
     parser.add_argument("--prelaunch-setup-params", action="append", default=[],
@@ -905,6 +1337,11 @@ def main() -> int:
                         help="Feature flag K=V applied and verified before the setup flows; repeatable")
     parser.add_argument("--contract", type=Path,
                         help="Authored acceptance criteria the judge answers against")
+    parser.add_argument(
+        "--context",
+        type=Path,
+        help="Authored controller context that must not become session goal phases",
+    )
     parser.add_argument("--session-contract", type=Path,
                         help="Version-1 checkpoint YAML AUA itself holds the session to, so "
                              "session_finish is accepted on fresh assertion proof rather than "
@@ -990,7 +1427,10 @@ def main() -> int:
             def classify(exc: BaseException):
                 """(status, headers) for a transport failure; None for anything else."""
                 if isinstance(exc, httpx.HTTPStatusError):
-                    return exc.response.status_code, exc.response.headers
+                    return (
+                        retryable_http_status(exc.response.status_code, exc.response.text),
+                        exc.response.headers,
+                    )
                 if isinstance(exc, (httpx.TransportError, httpx.StreamError)):
                     return None, None  # Nothing was served, so nothing was charged.
                 return None
@@ -1042,14 +1482,22 @@ def main() -> int:
                     call_tool=call_tool, list_tools=list_tools, send=send, goal=args.goal,
                     package=args.package, output=args.output.resolve(), model=candidate["repository"],
                     request_config=request_config, launch=args.launch, activity=args.activity,
+                    headed=args.headed,
                     fresh_app=args.fresh, apk=args.apk,
-                    grant_permissions=args.grant_permissions, record=args.record,
+                    grant_permissions=args.grant_permissions,
+                    forbidden_packages=args.forbid_package,
+                    record=args.record,
                     lease_wait_s=args.lease_wait, fallback_lease_wait_s=args.fallback_lease_wait,
                     provision_target=not args.no_provision,
+                    needs=args.needs,
+                    controller_capabilities=args.controller_capability,
                     flags=parse_pairs(args.flags, what="--flags"),
                     prelaunch_setup_flows=prelaunch_setup_flows,
                     setup_flows=setup_flows,
                     contract=args.contract.read_text(encoding="utf-8") if args.contract else None,
+                    authored_context=(
+                        args.context.read_text(encoding="utf-8") if args.context else None
+                    ),
                     session_contract=(
                         args.session_contract.read_text(encoding="utf-8")
                         if args.session_contract

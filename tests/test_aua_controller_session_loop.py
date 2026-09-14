@@ -144,6 +144,8 @@ def test_managed_history_is_exact_append_only_prefix_through_guard_and_check_upd
 def test_managed_full_history_exceeding_byte_budget_stops_before_next_request(tmp_path):
     report, requests, calls, _, _ = run_managed(tmp_path, max_request_bytes=10_000)
     assert len(requests) == len(calls) == 1
-    assert report["error"] == "full conversation exceeds request byte budget; history was not truncated"
+    assert report["error"] is None
+    assert report["stop_reason"] == "conversation_budget"
+    assert "conversation reached its byte budget" in report["warnings"][0]
     assert len(report["evidence"]) == 2
     assert json.loads((tmp_path / "run/evidence/E0001.json").read_text())["earlier_detail"] == "x" * 20_000

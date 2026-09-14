@@ -92,6 +92,21 @@ def test_background_wait_returns_terminal_evidence() -> None:
     assert terminal["recommended_call"] is None
 
 
+def test_idle_duration_detaches_without_reading_or_capturing_the_device() -> None:
+    engine = _engine()
+    manager = manager_for(engine)
+    started = manager.start("idle-duration", {"timeout_ms": 40, "observe": False})
+
+    terminal = _wait_for_status(manager, str(started["job_id"]), {"succeeded"})
+
+    assert terminal["run_ok"] is True
+    assert terminal["result"]["action"] == "idle-duration"
+    assert terminal["result"]["host_monotonic_elapsed_ms"] >= 40
+    assert terminal["result"]["device_reads"] == 0
+    assert engine.device.calls == []
+    assert terminal["capture_evidence"] is None
+
+
 def test_daemon_dispatch_serializes_device_calls_behind_job() -> None:
     engine = _engine()
     started = dispatch(
@@ -165,6 +180,7 @@ def test_mcp_exposes_job_lifecycle_and_guard() -> None:
     assert {"job_start", "job_status", "job_wait", "job_cancel", "job_list"} <= tools.keys()
     assert tools["job_wait"].inputSchema["properties"]["timeout_ms"]["maximum"] == 10_000
     assert "recent_output" in tools["job_status"].inputSchema["properties"]
+    assert "idle-duration" in tools["job_start"].inputSchema["properties"]["operation"]["enum"]
 
     server = build_server(_engine())
 

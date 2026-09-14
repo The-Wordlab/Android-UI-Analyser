@@ -136,8 +136,8 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     Capability(
         "job",
-        "Run a long read-only wait in the warm process with reconnectable status and cancellation.",
-        ("wait", "long", "slow", "loading", "generate", "render", "background", "cancel"),
+        "Run a long read-only or no-device-touch duration wait with reconnectable status and cancellation.",
+        ("wait", "long", "slow", "loading", "generate", "render", "background", "duration", "cancel"),
         46,
         "aua job start await --predicate 'rid:<ready>,!text:Loading'",
         "job_start",
@@ -377,7 +377,8 @@ def render_mcp_instructions() -> str:
         "least one positive arrival term. Use back_until_and_analyze for nested "
         "returns; an unlabeled first Back requires its fresh back_id. Use network_offline, never airplane mode, "
         "to prove offline behavior and always call network_restore or session_finish. Use "
-        "job_start for a long read-only wait; reconnect with job_status, bound a poll with "
+        "job_start for a long read-only wait, or idle-duration for a guarded interval with no "
+        "device reads; reconnect with job_status, bound a poll with "
         "job_wait, or stop it with job_cancel. Do not issue another device tool while it runs. Use "
         "session_autopilot only when an authenticated advisory local policy is configured: the "
         "warm daemon then executes a bounded safe-tap stretch itself and returns the fresh handoff "

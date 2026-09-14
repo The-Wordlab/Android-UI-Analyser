@@ -211,13 +211,15 @@ def test_host_steps_are_bounded_and_byte_limit_blocks_only_the_next_model_reques
         return {"ok": True, "observation": observation(), "detail": "x" * 20_000}
     report, requests, _ = run(tmp_path, host_next, execute, max_steps=2, max_request_bytes=100)
     assert not requests and report["host_tool_calls_executed"] == report["steps_consumed"] == 2
-    assert report["error"] == "controller step budget exhausted"
+    assert report["error"] is None and report["stop_reason"] == "step_budget"
+    assert "reached its step budget" in report["warnings"][0]
     choices = iter([action(), action(), None])
     async def host_then_advice(_):
         return next(choices)
     report, requests, _ = run(tmp_path / "bytes", host_then_advice, execute, max_request_bytes=10_000)
     assert not requests and report["host_tool_calls_executed"] == 2
-    assert "history was not truncated" in report["error"]
+    assert report["error"] is None and report["stop_reason"] == "conversation_budget"
+    assert "conversation reached its byte budget" in report["warnings"][0]
 
 
 def test_inference_cost_limit_allows_host_resume_but_blocks_next_model_request(tmp_path):

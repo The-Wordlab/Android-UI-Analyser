@@ -4655,7 +4655,7 @@ def job_start_cmd(
     ctx: typer.Context,
     operation: str = typer.Argument(
         ...,
-        help="await|wait-stable|wait-changed|wait-after-change",
+        help="await|wait-stable|wait-changed|wait-after-change|idle-duration",
     ),
     predicate: str | None = typer.Option(
         None,
@@ -4683,6 +4683,7 @@ def job_start_cmd(
         "wait-stable": 30_000,
         "wait-changed": 15_000,
         "wait-after-change": 60_000,
+        "idle-duration": 0,
     }
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
@@ -4699,6 +4700,8 @@ def job_start_cmd(
             args["settle_ms"] = settle_ms
         if normalized == "wait-after-change":
             args["confirmation_ms"] = confirmation_ms
+        if normalized == "idle-duration" and timeout_ms is None:
+            raise UsageError("idle-duration needs an explicit --timeout-ms")
         _emit(_route(engine, "job_start", **args), fmt)
 
     _run(ctx, go)

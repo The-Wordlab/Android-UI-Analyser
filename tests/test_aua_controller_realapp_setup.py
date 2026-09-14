@@ -18,7 +18,12 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from experiments.aua_controller.judgement import encode_image, frame_fingerprint, screenshot_index
 from experiments.aua_controller.run_live import RunError
-from experiments.aua_controller.run_realapp import build_setup_flows, parse_pairs, run_realapp
+from experiments.aua_controller.run_realapp import (
+    build_setup_flows,
+    judge_intermediate_frame_limit,
+    parse_pairs,
+    run_realapp,
+)
 
 # The sibling is imported by its bare module name: pytest puts tests/ on sys.path, while a
 # dependency's stray top-level `tests` package in the venv shadows `tests.<module>`.
@@ -50,13 +55,17 @@ class SetupAua:
         evidence_colours=None,
         session_starts=None,
         record_stop_ok=True,
+        record_stop_results=None,
         finish_ok=True,
+        installed_packages=None,
     ):
         self.calls: list[tuple[str, dict]] = []
         self.flags_ok, self.flow_ok = flags_ok, flow_ok
         self.record_stop_ok, self.finish_ok = record_stop_ok, finish_ok
+        self.record_stop_results = list(record_stop_results or [])
         self.evidence_colours = evidence_colours or {}
         self.session_starts = list(session_starts or [])
+        self.installed_packages = set(installed_packages or [])
         self.screen = frame("fp-home", ("Chats", "Settings"))
 
     def _write_evidence(self, artifacts_dir):
@@ -85,16 +94,35 @@ class SetupAua:
         if name == "install_app":
             return {"ok": True, "app_install": {"installed": True, "uninstalled_first": True}}
         if name == "app":
-            return {"ok": True, "action": "app-grant"}
+            return {"ok": True, "action": f"app-{arguments.get('action')}"}
+        if name == "network_offline":
+            return {"ok": True, "action": "network-offline", "verified": True}
+        if name == "network_restore":
+            return {"ok": True, "action": "network-restore", "verified": True}
+        if name == "shell_read_only":
+            return {"ok": True, "stdout": "1789370000\n", "stderr": ""}
         if name == "screen_record_start":
             return {"ok": True, "action": "screen-record-start"}
         if name == "screen_record_stop":
+            if self.record_stop_results:
+                outcome = copy.deepcopy(self.record_stop_results.pop(0))
+                if outcome.get("ok") is True:
+                    Path(arguments["path"]).write_bytes(b"fake-mp4")
+                return outcome
             if not self.record_stop_ok:
                 return {"ok": False, "error": {"code": "record_stop_failed"}}
             Path(arguments["path"]).write_bytes(b"fake-mp4")
             return {"ok": True, "action": "screen-record-stop", "path": arguments["path"]}
         if name == "app_launch_and_analyze":
             return copy.deepcopy(self.screen)
+        if name == "app_status":
+            package = arguments["package"]
+            return {
+                "ok": True,
+                "package": package,
+                "installed": package in self.installed_packages,
+                "serial": "emulator-0000",
+            }
         if name == "flags_apply_and_analyze":
             return {"ok": True, "verified": True} if self.flags_ok else {"ok": False, "error": {"code": "flag_ignored"}}
         if name == "flow_run":
@@ -249,6 +277,214 @@ def test_session_bootstrap_owns_install_and_recording_wraps_launch_to_cleanup(tm
     assert Path(result["recording"]["path"]).read_bytes() == b"fake-mp4"
 
 
+def test_session_goal_can_describe_a_continuous_group_without_polluting_the_row_goal(tmp_path):
+    aua = SetupAua()
+    model = two_step_model()
+
+    result = run(
+        tmp_path,
+        aua,
+        model,
+        session_goal="Keep one session for the complete ordered QA group",
+    )
+
+    assert aua.named("session_start")[0]["goal"] == "Keep one session for the complete ordered QA group"
+    assert result["goal"] == "Switch the app theme to Light"
+    assert result["session_goal"] == "Keep one session for the complete ordered QA group"
+    assert "Goal: Switch the app theme to Light" in model.payloads[0]["messages"][-1]["content"]
+
+
+def test_group_row_reuses_session_without_launch_or_cleanup(tmp_path):
+    aua = SetupAua()
+
+    result = run(
+        tmp_path,
+        aua,
+        two_step_model(),
+        fresh_app=False,
+        apk=None,
+        existing_session_id="sess-group",
+        finish_session=False,
+        launch_app=False,
+        inherited_setup_facts=["Curie and the experiment flag were verified once."],
+    )
+
+    assert result["session_id"] == "sess-group"
+    assert result["lifecycle"]["lease_strategy"] == "existing_session"
+    assert aua.named("session_start") == []
+    assert aua.named("app_launch_and_analyze") == []
+    assert aua.named("session_finish") == []
+
+
+def test_group_recording_starts_after_host_setup_and_before_product_launch(tmp_path):
+    aua = SetupAua()
+
+    run(
+        tmp_path,
+        aua,
+        two_step_model(),
+        record=True,
+        record_after_host_setup=True,
+        prelaunch_setup_flows=[("name: environment", {"ENVIRONMENT": "Curie"})],
+        flags={"simplification_experiment": "a"},
+    )
+
+    order = [name for name, _ in aua.calls]
+    assert order.index("flow_run") < order.index("flags_apply_and_analyze")
+    assert order.index("flags_apply_and_analyze") < order.index("screen_record_start")
+    assert order.index("screen_record_start") < order.index("app_launch_and_analyze")
+
+
+def test_group_session_can_place_aua_evidence_outside_the_row_directory(tmp_path):
+    aua = SetupAua()
+    shared = tmp_path / "group" / "aua-session"
+
+    run(
+        tmp_path,
+        aua,
+        two_step_model(),
+        session_artifacts_dir=shared,
+    )
+
+    assert aua.named("session_start")[0]["artifacts_dir"] == str(shared.resolve())
+
+
+def test_reused_group_row_loads_judge_images_from_the_shared_session_directory(tmp_path):
+    pytest.importorskip("PIL")
+    aua = SetupAua(evidence_colours={"fp-home": (9, 9, 9), "fp-theme": (250, 250, 250)})
+    shared = tmp_path / "group" / "aua-session"
+    aua._write_evidence(shared)
+    model = two_step_model()
+
+    result = run(
+        tmp_path,
+        aua,
+        model,
+        fresh_app=False,
+        apk=None,
+        existing_session_id="sess-group",
+        finish_session=False,
+        launch_app=False,
+        session_artifacts_dir=shared,
+        vision=True,
+    )
+
+    assert aua.named("session_start") == []
+    assert result["vision"]["images_attached"] >= 1
+    judged = [p for p in model.payloads if isinstance(p.get("tool_choice"), dict)][0]
+    assert isinstance(judged["messages"][-1]["content"], list)
+
+
+def test_headed_request_reaches_session_bootstrap(tmp_path):
+    aua = SetupAua()
+
+    run(tmp_path, aua, two_step_model(), headed=True)
+
+    started = aua.named("session_start")
+    assert len(started) == 1
+    assert started[0]["headed"] is True
+
+
+def test_target_capability_requirements_reach_session_bootstrap(tmp_path):
+    aua = SetupAua()
+
+    run(tmp_path, aua, two_step_model(), needs=["root"])
+
+    started = aua.named("session_start")
+    assert len(started) == 1
+    assert started[0]["needs"] == ["root"]
+
+
+def test_forbidden_package_guard_blocks_before_recording_or_navigation(tmp_path):
+    aua = SetupAua(installed_packages={"com.example.production"})
+
+    result = run(
+        tmp_path,
+        aua,
+        two_step_model(),
+        forbidden_packages=["com.example.production"],
+        record=True,
+    )
+
+    assert "forbidden package is installed" in result["error"]
+    assert aua.named("screen_record_start") == []
+    assert aua.named("app_launch_and_analyze") == []
+    assert aua.named("session_finish"), "the leased session is still cleaned up"
+
+
+def test_package_pinned_app_lifecycle_capability_maps_to_safe_aua_calls(tmp_path):
+    aua = SetupAua()
+    neutral = verdict("pass", "state persisted")
+    skeptical = verdict("pass", "state persisted after relaunch")
+    model = FakeModel(
+        controller=[
+            model_call("app_force_stop", {}),
+            model_call("app_relaunch_and_analyze", {}),
+            model_call(
+                "session_finish",
+                {"outcome": "achieved", "note": "persisted"},
+                call_id="native-3",
+            ),
+        ],
+        judgements={"record_verdict": [neutral, skeptical]},
+    )
+
+    run(tmp_path, aua, model, controller_capabilities=["app-lifecycle"])
+
+    assert aua.named("app") == [
+        {"action": "stop", "package": "com.example.fictional"}
+    ]
+    launches = aua.named("app_launch_and_analyze")
+    assert len(launches) == 2
+    assert launches[-1] == {"package": "com.example.fictional"}
+
+
+def test_network_capability_maps_to_reversible_aua_calls(tmp_path):
+    aua = SetupAua()
+    neutral = verdict("pass", "retry worked")
+    skeptical = verdict("pass", "message preserved")
+    model = FakeModel(
+        controller=[
+            model_call("network_offline", {"verify": True}),
+            model_call("network_restore", {}),
+            model_call(
+                "session_finish",
+                {"outcome": "achieved", "note": "retried"},
+                call_id="native-3",
+            ),
+        ],
+        judgements={"record_verdict": [neutral, skeptical]},
+    )
+
+    run(tmp_path, aua, model, controller_capabilities=["network"])
+
+    assert aua.named("network_offline") == [{"verify": True}]
+    assert aua.named("network_restore") == [{}]
+
+
+def test_controller_is_told_which_host_owned_setup_facts_are_already_verified(tmp_path):
+    aua = SetupAua()
+    model = two_step_model()
+
+    run(
+        tmp_path,
+        aua,
+        model,
+        forbidden_packages=["com.example.production"],
+        prelaunch_setup_flows=[("name: environment", {"ENVIRONMENT": "Curie"})],
+        flags={"simplification_experiment": "a"},
+        authored_context="Curie is mandatory; a mismatch is BLOCKED.",
+    )
+
+    prompt = model.payloads[0]["messages"][1]["content"]
+    assert "Harness-owned setup already completed and verified" in prompt
+    assert "ENVIRONMENT=Curie" in prompt
+    assert "simplification_experiment=a" in prompt
+    assert "com.example.production is not installed" in prompt
+    assert "Authored precondition context" in prompt
+    assert "Curie is mandatory" in prompt
+
+
 def test_recording_cleanup_failure_forces_an_unverified_result(tmp_path):
     result = run(
         tmp_path,
@@ -262,6 +498,37 @@ def test_recording_cleanup_failure_forces_an_unverified_result(tmp_path):
     assert result["verdict"]["reasons"], "judge evidence survives cleanup invalidation"
     assert "recording cleanup" in (result["error"] or "")
     assert result["recording"]["stop_ok"] is False
+
+
+def test_optional_recording_failure_keeps_the_product_verdict_and_frame_evidence(tmp_path):
+    result = run(
+        tmp_path,
+        SetupAua(record_stop_ok=False),
+        two_step_model(),
+        record=True,
+        recording_required=False,
+    )
+
+    assert result["verdict"]["verdict"] == "pass"
+    assert result["recording"]["stop_ok"] is False
+    assert result["recording_warning"].startswith("recording cleanup failed")
+    assert result["error"] is None
+    assert "frame evidence" in " ".join(result["warnings"])
+
+
+def test_recording_stop_retries_one_adb_read_timeout(tmp_path):
+    aua = SetupAua(record_stop_results=[
+        {"ok": False, "error": {"code": "device", "message": "shell failed: adb read timeout"}},
+        {"ok": True, "action": "screen-record-stop"},
+    ])
+
+    result = run(tmp_path, aua, two_step_model(), record=True)
+
+    assert result["verdict"]["verdict"] == "pass"
+    assert result["recording"]["stop_ok"] is True
+    assert result["recording"]["stop_attempts"] == 2
+    assert len(aua.named("screen_record_stop")) == 2
+    assert "retried once" in " ".join(result["warnings"])
 
 
 def test_failed_extra_emulator_falls_back_to_waiting_for_a_released_lease(tmp_path):
@@ -316,6 +583,7 @@ def test_prelaunch_setup_runs_before_flags_and_product_launch(tmp_path):
 
 def test_the_judge_can_use_a_different_model_from_the_controller(tmp_path):
     aua, model = SetupAua(), two_step_model()
+    fallback_settings = VISION_SETTINGS
     result = run(
         tmp_path,
         aua,
@@ -323,8 +591,14 @@ def test_the_judge_can_use_a_different_model_from_the_controller(tmp_path):
         setup_flows=[],
         judge_model="vision/model",
         judge_request_config=VISION_SETTINGS,
+        judge_fallbacks=[("backup/vision-model", fallback_settings)],
     )
     assert result["judge_model"] == "vision/model"
+    assert result["judge_request_config"]["reasoning"] == VISION_SETTINGS["reasoning"]
+    assert result["judge_request_config"]["provider"] == VISION_SETTINGS["provider"]
+    assert result["judge_fallbacks"] == [
+        {"model": "backup/vision-model", "request_config": fallback_settings}
+    ]
     controller_turns = [p for p in model.payloads if not isinstance(p.get("tool_choice"), dict)]
     judge_turns = [p for p in model.payloads if isinstance(p.get("tool_choice"), dict)]
     assert {p["model"] for p in controller_turns} == {"fictional/model"}
@@ -483,6 +757,11 @@ def test_a_failing_prelaunch_flow_stops_before_flags_and_product_launch(tmp_path
 
 
 # --- authored contract and vision ------------------------------------------------------
+
+def test_vision_keeps_text_frames_independent_from_the_rendered_image_cap():
+    assert judge_intermediate_frame_limit(8, vision=True) == 8
+    assert judge_intermediate_frame_limit(2, vision=True) == 2
+    assert judge_intermediate_frame_limit(8, vision=False) == 8
 
 def test_the_authored_contract_reaches_the_judge_and_element_text_does_not_replace_it(tmp_path):
     aua = SetupAua()

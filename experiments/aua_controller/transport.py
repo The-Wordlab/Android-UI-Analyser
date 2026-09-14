@@ -16,6 +16,7 @@ from typing import Any
 
 # 408/409 are included because OpenRouter surfaces upstream queue conflicts as both.
 RETRY_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+_TOOL_CHOICE_ROUTE_MISSING = "no endpoints found that support the provided 'tool_choice' value"
 MAX_ATTEMPTS = 4
 BASE_DELAY_S = 1.0
 MAX_DELAY_S = 20.0
@@ -23,6 +24,30 @@ MAX_DELAY_S = 20.0
 
 class TransportError(RuntimeError):
     """A hosted request failed and the policy has stopped retrying it."""
+
+
+def retryable_http_status(status: int, body: str = "") -> int:
+    """Map a known transient routing refusal onto the ordinary retry policy.
+
+    OpenRouter reports an exhausted provider route for an otherwise supported model as
+    HTTP 404. Retrying every 404 would hide bad endpoints, but this exact response has
+    repeatedly cleared on the next provider selection. Treat only that message like 503.
+    """
+
+    if status == 404 and _TOOL_CHOICE_ROUTE_MISSING in body.casefold():
+        return 503
+    return status
+
+
+def tool_choice_route_missing(error: BaseException | str) -> bool:
+    """Whether OpenRouter exhausted providers that support a required native tool choice."""
+
+    parts = [str(error)]
+    response = getattr(error, "response", None)
+    response_text = getattr(response, "text", None)
+    if isinstance(response_text, str):
+        parts.append(response_text)
+    return _TOOL_CHOICE_ROUTE_MISSING in "\n".join(parts).casefold()
 
 
 def retry_after_seconds(headers: Mapping[str, str] | None) -> float | None:

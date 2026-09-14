@@ -304,10 +304,14 @@ def test_http_failure_preserves_bounded_diagnostic_and_redacts_auth(tmp_path):
 def test_byte_and_step_budgets_stop_without_truncating_history(tmp_path):
     report, requests, calls = run(tmp_path, [], max_request_bytes=100)
     assert not requests and not calls
-    assert "history was not truncated" in report["error"]
+    assert report["error"] is None
+    assert report["stop_reason"] == "conversation_budget"
+    assert "conversation reached its byte budget" in report["warnings"][0]
     report, requests, calls = run(tmp_path / "step", [response()], max_steps=1)
     assert len(requests) == len(calls) == 1
-    assert report["error"] == "controller step budget exhausted"
+    assert report["error"] is None
+    assert report["stop_reason"] == "step_budget"
+    assert "reached its step budget" in report["warnings"][0]
 
 
 def test_send_timeout_records_attempt_and_does_not_call_tools(tmp_path):

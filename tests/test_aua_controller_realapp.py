@@ -11,7 +11,12 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from experiments.aua_controller.agent_loop import run_agent
 from experiments.aua_controller.run_live import RunError
-from experiments.aua_controller.run_realapp import CONTROLLER_TOOLS, realapp_tools, run_realapp
+from experiments.aua_controller.run_realapp import (
+    CONTROLLER_TOOLS,
+    normalize_element_id_argument,
+    realapp_tools,
+    run_realapp,
+)
 
 SETTINGS = {"provider": {"only": ["fictional"], "allow_fallbacks": False,
                          "max_price": {"prompt": 0.3, "completion": 1.2}},
@@ -69,6 +74,25 @@ def test_terminal_claim_limit_stops_after_rejected_finishes(tmp_path):
     assert [name for name, _ in calls] == ["finish", "finish"], "the loop stopped before the third model turn"
 
 
+def test_realapp_judges_saved_frames_when_controller_reaches_step_budget(tmp_path):
+    aua = FakeAua()
+    model = FakeModel(
+        controller=[model_call("tap_and_analyze", {"id": "el:fp-home-1"})],
+        judgements={
+            "record_verdict": [
+                verdict("pass", "goal state is visible"),
+                verdict("pass", "goal state is independently visible"),
+            ]
+        },
+    )
+
+    result = run(tmp_path, aua, model, max_steps=1)
+
+    assert result["controller"]["stop_reason"] == "step_budget"
+    assert result["verdict"]["verdict"] == "pass_with_warning"
+    assert any("step budget" in warning for warning in result["warnings"])
+
+
 def test_accepted_terminal_result_still_wins_over_the_claim_limit(tmp_path):
     report, _ = run_loop(tmp_path, [model_call("finish", {})], [{"ok": True, "finished": True, "terminated": True}],
                          terminal_claim_limit=1)
@@ -82,7 +106,8 @@ def test_no_progress_limit_stops_on_a_frozen_fingerprint(tmp_path):
     assert report["stop_reason"] == "no_progress" and report["no_progress_streak"] == 3
     assert len(calls) == 4, "first fp-1 frame starts the streak; three repeats trip it"
     changing, _ = run_loop(tmp_path / "b", responses, [frame(f"fp-{i}") for i in range(6)], no_progress_limit=3, max_steps=6)
-    assert changing["stop_reason"] == "error" and "step budget" in changing["error"]
+    assert changing["stop_reason"] == "step_budget" and changing["error"] is None
+    assert "step budget" in changing["warnings"][0]
 
 
 @pytest.mark.parametrize("kwargs", [
@@ -114,6 +139,8 @@ MCP_SCHEMAS = {
                                                             "desc": {"type": "string"}, "exists": {"type": "boolean"},
                                                             "absent": {"type": "boolean"},
                                                             "text_contains": {"type": "string"}}},
+    "network_offline": {"type": "object", "properties": {"verify": {"type": "boolean"}}},
+    "network_restore": {"type": "object", "properties": {"timeout_ms": {"type": "integer"}}},
 }
 
 
@@ -185,13 +212,47 @@ def run(tmp_path, aua, model, **kwargs):
 
 def test_realapp_tools_offer_compact_schemas_plus_an_outcome_claim():
     tools = realapp_tools(MCP_SCHEMAS)
-    assert [tool["function"]["name"] for tool in tools] == list(CONTROLLER_TOOLS)
+    assert [tool["function"]["name"] for tool in tools] == [
+        name for name in CONTROLLER_TOOLS if name != "session_progress"
+    ]
     by_name = {tool["function"]["name"]: tool["function"]["parameters"] for tool in tools}
     assert set(by_name["tap_and_analyze"]["properties"]) == {"id"} and by_name["tap_and_analyze"]["required"] == ["id"]
     assert set(by_name["session_finish"]["properties"]) == {"outcome", "note"}
     assert "session_id" not in json.dumps(by_name)
     with pytest.raises(RunError):
         realapp_tools({name: schema for name, schema in MCP_SCHEMAS.items() if name != "session_finish"})
+
+
+def test_bare_element_uuid_is_repaired_without_rewriting_labels_or_stable_keys():
+    bare = "af09101646e54c9aaa2cd4538b65197e"
+
+    assert normalize_element_id_argument({"id": bare}) == ({"id": f"el:{bare}"}, True)
+    for value in ("Continue with limited access", "buttonContinueAsGuest", "rid:button", "el:abc"):
+        arguments = {"id": value}
+        assert normalize_element_id_argument(arguments) == (arguments, False)
+
+
+def test_contract_mode_keeps_session_progress_for_authored_checkpoints():
+    names = [tool["function"]["name"] for tool in realapp_tools(MCP_SCHEMAS, contract=True)]
+    assert "session_progress" in names
+    assert "expect_and_analyze" in names
+
+
+def test_realapp_tools_add_only_requested_resilience_capabilities():
+    tools = realapp_tools(
+        MCP_SCHEMAS,
+        capabilities=["network", "wall-clock-wait", "app-lifecycle"],
+    )
+    names = [tool["function"]["name"] for tool in tools]
+    assert names[-5:] == [
+        "network_offline",
+        "network_restore",
+        "wait_uninterrupted_620_seconds",
+        "app_force_stop",
+        "app_relaunch_and_analyze",
+    ]
+    with pytest.raises(RunError, match="unknown controller capabilities"):
+        realapp_tools(MCP_SCHEMAS, capabilities=["shell"])
 
 
 def test_realapp_claim_stops_the_loop_and_two_judges_decide(tmp_path):

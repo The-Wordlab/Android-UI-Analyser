@@ -155,5 +155,7 @@ def test_second_row_byte_budget_counts_prior_history_without_truncation(tmp_path
     asyncio.run(run_agent(**options(tmp_path / "first", holder, send, forbidden, user_prompt="x" * 20_000)))
     prior = holder.snapshot()
     second = asyncio.run(run_agent(**options(tmp_path / "second", holder, send, forbidden, max_request_bytes=10_000)))
-    assert len(requests) == 1 and "history was not truncated" in second["error"]
+    assert len(requests) == 1
+    assert second["error"] is None and second["stop_reason"] == "conversation_budget"
+    assert "conversation reached its byte budget" in second["warnings"][0]
     assert holder.snapshot()[:len(prior)] == prior

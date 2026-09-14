@@ -26,7 +26,30 @@ from experiments.aua_controller.transport import (
     resilient_request,
     retry_after_seconds,
     retry_delay,
+    retryable_http_status,
+    tool_choice_route_missing,
 )
+
+
+def test_openrouter_tool_choice_route_miss_is_the_only_retryable_404():
+    assert retryable_http_status(
+        404, "No endpoints found that support the provided 'tool_choice' value."
+    ) == 503
+    assert retryable_http_status(404, "Not found") == 404
+    assert tool_choice_route_missing(
+        RuntimeError("HTTP 404: No endpoints found that support the provided 'tool_choice' value")
+    )
+    assert not tool_choice_route_missing(RuntimeError("HTTP 404: Not found"))
+
+
+def test_tool_choice_route_miss_reads_the_http_response_body():
+    class Response:
+        text = "No endpoints found that support the provided 'tool_choice' value."
+
+    class HttpError(RuntimeError):
+        response = Response()
+
+    assert tool_choice_route_missing(HttpError("404 Not Found for /chat/completions"))
 
 NO_JITTER = lambda: 1.0  # noqa: E731 - a fixed jitter makes the backoff assertions exact
 

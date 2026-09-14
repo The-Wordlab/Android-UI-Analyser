@@ -746,7 +746,10 @@ def _tool_definitions() -> list[types.Tool]:
                 "properties": {
                     "operation": {
                         "type": "string",
-                        "enum": ["await", "wait-stable", "wait-changed", "wait-after-change"],
+                        "enum": [
+                            "await", "wait-stable", "wait-changed", "wait-after-change",
+                            "idle-duration",
+                        ],
                     },
                     "predicate": {
                         "type": "string",

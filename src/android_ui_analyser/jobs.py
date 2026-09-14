@@ -35,7 +35,9 @@ JobStatus = Literal[
     "interrupted",
 ]
 
-SUPPORTED_OPERATIONS = frozenset({"await", "wait-stable", "wait-changed", "wait-after-change"})
+SUPPORTED_OPERATIONS = frozenset({
+    "await", "wait-stable", "wait-changed", "wait-after-change", "idle-duration",
+})
 _TERMINAL = frozenset({"succeeded", "failed", "cancelled", "interrupted"})
 
 
@@ -127,6 +129,23 @@ def _complete_correlated_goal_phase(cache_dir: str | Path, job: JobState) -> Non
 
 def _execute(engine: Engine, operation: str, args: dict[str, Any]) -> Any:
     """Execute the small public job vocabulary on one already-owned Engine."""
+    if operation == "idle-duration":
+        # A duration contract is deliberately not a screen wait: it must not analyze, capture, or
+        # foreground the guarded app while it is backgrounded. The job thread owns only the timer
+        # and the device-operation exclusion lock, so the caller/model can disconnect and other
+        # workers can use other devices meanwhile.
+        requested_ms = int(args.get("timeout_ms", 0))
+        started = time.monotonic()
+        engine._job_sleep(requested_ms / 1000.0)
+        elapsed_ms = round((time.monotonic() - started) * 1000)
+        return {
+            "ok": elapsed_ms >= requested_ms,
+            "action": "idle-duration",
+            "requested_ms": requested_ms,
+            "host_monotonic_elapsed_ms": elapsed_ms,
+            "device_reads": 0,
+            "note": "The detached job performed no UI observation, screenshot, or foreground action.",
+        }
     if operation == "await":
         return _dump(
             engine.await_predicate(
@@ -248,7 +267,7 @@ class JobManager:
         if operation not in SUPPORTED_OPERATIONS:
             raise UsageError(
                 f"unsupported job operation {operation!r}",
-                hint="Use await, wait-stable, wait-changed, or wait-after-change.",
+                hint="Use await, wait-stable, wait-changed, wait-after-change, or idle-duration.",
             )
         if operation == "await":
             predicate = str(args.get("predicate") or "").strip()
@@ -280,7 +299,7 @@ class JobManager:
                 worker_pid=os.getpid(),
             )
             capture = getattr(self.engine, "_capture", None)
-            if capture is not None:
+            if capture is not None and operation != "idle-duration":
                 with contextlib.suppress(Exception):
                     state.capture_evidence = capture.begin_evidence(
                         f"job:{state.job_id}", session_id=state.session_id, owner=state.owner

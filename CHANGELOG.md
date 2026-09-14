@@ -11,6 +11,29 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Added
+
+- `aua helper model-run GOAL --checks FILE` runs the experimental DeepSeek V4.1 Flash control
+  loop inside the on-device helper with one host handoff, deterministic checks and an ephemeral
+  runtime credential.
+- `aua job start idle-duration --timeout-ms N` detaches a durable no-device-touch interval. It
+  keeps that leased target exclusively guarded, persists reconnectable timing evidence and leaves
+  other devices free for parallel work.
+- The real-app controller harness can reuse an existing AUA session across related rows, separate
+  the session goal from the current row, request headed mode and narrow network, app-lifecycle or
+  wall-clock capabilities, and reject forbidden packages before navigation.
+
+### Fixed
+
+- Controller byte and step budgets now preserve the frames already collected for independent
+  judgement instead of turning an otherwise usable run into an infrastructure error.
+- Visual judges retain the final frame while sampling the whole journey, can fall back when an
+  OpenRouter route cannot honor forced tool choice, and receive exact authored criteria without
+  treating safe route detours as product failures.
+- Best-effort recording failures no longer overwrite a valid product verdict; transient recording
+  stop timeouts are retried once, and bare opaque element UUIDs are repaired without rewriting
+  labels or stable selectors.
+
 ## [0.22.1] - 2026-09-14
 
 ### Fixed

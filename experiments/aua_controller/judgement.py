@@ -33,6 +33,7 @@ from experiments.aua_controller.hosted import (
     validate_request_config,
 )
 from experiments.aua_controller.run_live import RunError, completion
+from experiments.aua_controller.transport import tool_choice_route_missing
 
 ORACLE = "model_judgement_v1"
 VERDICTS = ("pass", "pass_with_warning", "fail", "blocked", "unverified")
@@ -166,7 +167,11 @@ CLAIM_NOTE = (
     "evidence and must not be cited as a reason. A goal names an end state, not a change: if the "
     "frames show that end state, the goal is achieved even when it already held before the first "
     "action; answer 'pass_with_warning' in that case and say it was already satisfied. Whether "
-    "the controller caused the state is not the question."
+    "the controller caused the state is not the question. A detour through another screen is a "
+    "route warning, not evidence against a criterion scoped to the requested end screen; only "
+    "wording such as 'never', 'throughout', or 'at any time' extends a criterion across the whole "
+    "journey. When screenshots are attached, they can prove conventional unlabeled controls and "
+    "empty layout regions that element text cannot name."
 )
 ROUTE_INSTRUCTIONS = (
     "Summarise this route for a durable map and memory entry: how a tester gets from the first "
@@ -239,6 +244,20 @@ def judged_frame_sample(frames: Sequence[Any], limit: int = 8) -> list[Any]:
     last = len(body) - 1
     picks = sorted({round(index * last / (limit - 1)) for index in range(limit)})
     return [body[index] for index in picks]
+
+
+def image_frame_sample(frames: Sequence[Any], limit: int = MAX_IMAGES - 1) -> list[Any]:
+    """Spread rendered evidence without consuming the separately captured final-image slot."""
+    items = list(frames)
+    if limit <= 0:
+        return []
+    if len(items) <= limit:
+        return items
+    if limit == 1:
+        return items[:1]
+    last = len(items) - 1
+    picks = sorted({round(index * last / (limit - 1)) for index in range(limit)})
+    return [items[index] for index in picks]
 
 
 def screenshot_index(manifest_path: Any) -> dict[str, str]:
@@ -414,7 +433,21 @@ class Decider:
                 payload.update(copy.deepcopy(rung_settings))
             tick = time.monotonic()
             self.requests += 1
-            response = await self.send(payload)
+            try:
+                response = await self.send(payload)
+            except BaseException as exc:  # noqa: BLE001 - preserve non-routing failures unchanged
+                # The request transport already gave the selected provider route its bounded
+                # retries. If no endpoint on that route can honour forced tool choice, asking it
+                # again cannot repair the schema; move immediately to the configured stronger
+                # judge. Controller calls do not use Decider and are unaffected.
+                if tool_choice_route_missing(exc) and rung + 1 < len(self.ladder):
+                    rung += 1
+                    self.escalations += 1
+                    record["escalations"] = rung
+                    record["escalated_to"] = self.ladder[rung][0]
+                    record.setdefault("route_failures", []).append(str(exc)[:400])
+                    continue
+                raise
             elapsed = (time.monotonic() - tick) * 1000
             self.request_ms.append(elapsed)
             if not isinstance(response, dict):
@@ -485,7 +518,9 @@ async def judge_outcome(
         # Judges never act, so element handles are removed from the action log as well.
         "action_log": [_strip_ids({key: value for key, value in action.items() if key in ("step", "tool", "arguments")})
                        for action in list(actions)[-30:]],
-        "intermediate_frames": [evidence_frame(frame) for frame in list(frames)[-3:]],
+        # The rendered-image cap is not a text-evidence cap. A long route may need more compact
+        # hierarchy frames to prove distinct screens while still sending only four screenshots.
+        "intermediate_frames": [evidence_frame(frame) for frame in list(frames)[:8]],
         "final_frame": evidence_frame(final_frame),
     }
     if progress is not None:
@@ -667,5 +702,5 @@ async def summarize_route(
 __all__ = [
     "Decider", "ScreenNamer", "ORACLE", "VERDICTS", "SCREEN_KINDS", "OUTCOME_SCHEMA",
     "SCREEN_SCHEMA", "ROUTE_SCHEMA", "HostedError", "evidence_frame", "judge_outcome",
-    "judge_outcome_votes", "combine_votes", "summarize_route",
+    "judge_outcome_votes", "combine_votes", "summarize_route", "image_frame_sample",
 ]

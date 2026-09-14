@@ -588,7 +588,10 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "whether it queued, ran, acknowledged cancellation, or was interrupted. "
         "The warm daemon remains responsive, but serializes every other device operation behind "
         "the job so no tap or analysis races it. `wait-stable`, `wait-changed`, and "
-        "`wait-after-change` are also supported. Jobs do not detach mutating actions.",
+        "`wait-after-change` are also supported. For an inactivity-duration contract, use "
+        "`job start idle-duration --timeout-ms N`: it performs no device read or capture, guards "
+        "that device from concurrent operations, and leaves other devices free for parallel lanes. "
+        "Jobs do not detach mutating actions.",
     ),
     (
         "Wait on the backend when the screen cannot tell you",
@@ -867,7 +870,8 @@ ORIENTATION: tuple[tuple[str, str], ...] = (
     ),
     (
         "aua job start await --predicate 'rid:<ready>,!text:Loading' --timeout-ms 180000",
-        "DETACH only a long read-only wait; reconnect with `aua job status <job_id>` instead of restarting it",
+        "DETACH only a long read-only wait; use `job start idle-duration --timeout-ms N` for a "
+        "no-device-touch interval, and reconnect by job id instead of restarting it",
     ),
     (
         'aua --answers <id>="<name>" <your next command>',
@@ -992,7 +996,8 @@ KEY_FLAGS: list[tuple[str, str]] = [
     (
         "job",
         "`job start await --predicate <terms> [--timeout-ms N] [--poll-ms N]` or start "
-        "`wait-stable|wait-changed|wait-after-change`; reconnect with `job status <id> "
+        "`wait-stable|wait-changed|wait-after-change`; `job start idle-duration --timeout-ms N` "
+        "guards an inactivity interval without device reads; reconnect with `job status <id> "
         "--recent-output`, make a "
         "bounded `job wait <id> --timeout-ms N` call (maximum 10000), `job cancel <id>`, or "
         "`job list`. Jobs are read-only and serialize other device calls while active.",

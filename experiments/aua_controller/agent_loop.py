@@ -381,7 +381,16 @@ async def run_agent(
                 else:
                     payload.update(copy.deepcopy(settings))
                 if len(json.dumps(payload).encode()) > max_request_bytes:
-                    raise RunError("full conversation exceeds request byte budget; history was not truncated")
+                    # The device evidence collected so far remains valid even when the hosted
+                    # conversation cannot safely grow again. Return a bounded stop so the caller
+                    # can judge that evidence; treating this as an infrastructure exception used
+                    # to suppress the judge and block every later consumer of an otherwise healthy
+                    # continuous session.
+                    report["stop_reason"] = "conversation_budget"
+                    report["warnings"].append(
+                        "controller conversation reached its byte budget before another model turn"
+                    )
+                    break
                 turn: dict[str, Any] = {"step": step, "actor": "model", "request": copy.deepcopy(payload)}
                 tick = time.monotonic()
                 report["model_requests"] += 1
@@ -533,7 +542,10 @@ async def run_agent(
                     report["stop_reason"] = "no_progress"
                     break
         else:
-            raise RunError("controller step budget exhausted")
+            # A step limit is a controller boundary, not proof that the product failed. Preserve
+            # the collected frames for the independent judge just like a no-progress stop.
+            report["stop_reason"] = "step_budget"
+            report["warnings"].append("controller reached its step budget before finishing")
     except asyncio.CancelledError:
         report["error"] = "CancelledError"
         report["stop_reason"] = "cancelled"
@@ -543,7 +555,10 @@ async def run_agent(
         report["stop_reason"] = "error"
     finally:
         if conversation_started:
-            conversation._finish(report["stop_reason"] in {"terminal_tool", "model_text", "terminal_claimed", "no_progress"})
+            conversation._finish(report["stop_reason"] in {
+                "terminal_tool", "model_text", "terminal_claimed", "no_progress",
+                "conversation_budget", "step_budget",
+            })
             report["conversation_messages"] = len(messages)
         if guard is not None:
             report["cost_accounting"] = guard.report()

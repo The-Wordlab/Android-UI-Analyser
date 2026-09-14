@@ -23,6 +23,7 @@ from pathlib import Path
 
 from experiments.aua_controller.judgement import (
     frame_fingerprint,
+    image_frame_sample,
     judged_frame_sample,
     screenshot_for,
     screenshot_index,
@@ -79,6 +80,14 @@ def test_the_sample_is_bounded_and_degenerate_limits_are_safe() -> None:
     assert judged_frame_sample(frames, limit=0) == frames[:-1]
     assert judged_frame_sample([], limit=8) == []
     assert judged_frame_sample([_frame("only")], limit=8) == []
+
+
+def test_rendered_image_sample_spans_the_text_journey_without_dropping_its_tail() -> None:
+    frames = [_frame(str(index)) for index in range(8)]
+
+    picked = image_frame_sample(frames, limit=3)
+
+    assert picked == [frames[0], frames[4], frames[7]]
 
 
 # --------------------------------------------------------------------------- image pairing
