@@ -11,6 +11,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-09-14
+
 ### Added
 
 - The controller harness can route a hosted model through any provider instead of one pinned
@@ -693,5 +695,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.19.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.19.0
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.19.1...HEAD
 [0.19.1]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.19.1
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.20.0...HEAD
+[0.20.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.20.0
