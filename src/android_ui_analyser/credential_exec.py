@@ -11,10 +11,12 @@ import codecs
 import contextlib
 import os
 import re
+import signal
 import subprocess
 import sys
+import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, BinaryIO, TextIO, cast
 
@@ -22,6 +24,49 @@ from . import credentials
 
 _EXIT_DRAIN_SECONDS = 1.0
 _PIPE_POLL_SECONDS = 0.01
+_SIGNAL_GRACE_SECONDS = 30.0
+_TERMINATE_GRACE_SECONDS = 5.0
+
+
+class _TerminationSignal(BaseException):
+    """A process signal translated into orderly child cancellation."""
+
+    def __init__(self, signum: int):
+        self.signum = signum
+        super().__init__(f"received signal {signum}")
+
+
+@contextlib.contextmanager
+def _termination_signal_boundary() -> Iterator[None]:
+    """Let the wrapper forward POSIX termination signals before it exits.
+
+    The configured command runs in its own session, so terminal Ctrl-C reaches this wrapper
+    exactly once. The handler turns that signal into normal control flow; ``_stream_consumer``
+    forwards the same signal to the direct child and gives its finally block time to finish.
+    Signal handlers can only be installed by the main thread, so embedded callers retain the
+    ordinary KeyboardInterrupt path.
+    """
+
+    if os.name != "posix" or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    signals = tuple(
+        getattr(signal, name)
+        for name in ("SIGHUP", "SIGINT", "SIGQUIT", "SIGTERM")
+        if hasattr(signal, name)
+    )
+    previous = {signum: signal.getsignal(signum) for signum in signals}
+
+    def interrupted(signum: int, _frame: Any) -> None:
+        raise _TerminationSignal(signum)
+
+    try:
+        for signum in signals:
+            signal.signal(signum, interrupted)
+        yield
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
 
 
 def _failure(code: str, message: str, *, started: bool = False) -> dict[str, Any]:
@@ -209,20 +254,37 @@ def _terminate_consumer(child: subprocess.Popen[bytes]) -> None:
         return
     child.terminate()
     try:
-        child.wait(timeout=5)
-    except (subprocess.TimeoutExpired, KeyboardInterrupt):
+        child.wait(timeout=_TERMINATE_GRACE_SECONDS)
+    except (subprocess.TimeoutExpired, KeyboardInterrupt, _TerminationSignal):
         child.kill()
         child.wait()
 
 
+def _cancel_consumer(child: subprocess.Popen[bytes], signum: int) -> None:
+    """Forward the caller's signal, then escalate only if the child cannot clean up."""
+
+    if child.poll() is not None:
+        return
+    try:
+        child.send_signal(signum)
+        child.wait(timeout=_SIGNAL_GRACE_SECONDS)
+        return
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        pass
+    except (KeyboardInterrupt, _TerminationSignal):
+        # A second signal means the caller no longer wants to wait through the grace period.
+        pass
+    _terminate_consumer(child)
+
+
 def _stream_consumer(
     child: subprocess.Popen[bytes], values: list[str],
-) -> tuple[int, bool, bool, bool]:
+) -> tuple[int, int | None, bool, bool]:
     """Drain both pipes without worker threads; bound inherited-pipe waits after exit."""
     assert child.stdout is not None and child.stderr is not None
     sources = [cast(BinaryIO, child.stdout), cast(BinaryIO, child.stderr)]
     outputs = [_Output(sys.stdout, values), _Output(sys.stderr, values)]
-    cancelled = False
+    cancelled_by: int | None = None
     failed = False
     try:
         readers = [_PipeReader(source) for source in sources]
@@ -248,22 +310,30 @@ def _stream_consumer(
                         active.remove(index)
                     progress = True
                 if exit_code is not None and not active:
-                    return exit_code, cancelled, failed or any(o.failed for o in outputs), False
+                    return exit_code, cancelled_by, failed or any(o.failed for o in outputs), False
                 if deadline is not None and time.monotonic() >= deadline:
                     # A descendant may still complete a secret prefix. Do not mark
                     # EOF or flush pending redactor/decoder bytes on forced cutoff.
-                    return exit_code or 0, cancelled, failed or any(o.failed for o in outputs), True
+                    return exit_code or 0, cancelled_by, failed or any(o.failed for o in outputs), True
                 if not progress:
                     time.sleep(_PIPE_POLL_SECONDS)
             except KeyboardInterrupt:
-                cancelled = True
-                _terminate_consumer(child)
+                cancelled_by = int(signal.SIGINT)
+                _cancel_consumer(child, cancelled_by)
+            except _TerminationSignal as interruption:
+                cancelled_by = interruption.signum
+                _cancel_consumer(child, cancelled_by)
     except KeyboardInterrupt:
-        _terminate_consumer(child)
-        return child.returncode or 0, True, False, False
+        cancelled_by = int(signal.SIGINT)
+        _cancel_consumer(child, cancelled_by)
+        return child.returncode or 0, cancelled_by, False, False
+    except _TerminationSignal as interruption:
+        cancelled_by = interruption.signum
+        _cancel_consumer(child, cancelled_by)
+        return child.returncode or 0, cancelled_by, False, False
     except (OSError, ValueError):
         _terminate_consumer(child)
-        return child.returncode or 0, cancelled, True, False
+        return child.returncode or 0, cancelled_by, True, False
     finally:
         # Reads are nonblocking/bounded and owned by this thread: close cannot wait
         # for a background reader and no output thread can run after return.
@@ -300,12 +370,14 @@ def run_with_credentials(
     try:
         child = subprocess.Popen(
             command, env=child_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=os.name == "posix",
         )
     except (OSError, ValueError):
         return _failure(
             "credential_command_failed", "The consumer could not start; check the executable and arguments."
         ), 1
-    exit_code, cancelled, failed, incomplete = _stream_consumer(child, values)
+    with _termination_signal_boundary():
+        exit_code, cancelled_by, failed, incomplete = _stream_consumer(child, values)
     if incomplete:
         return _failure(
             "credential_output_incomplete", "The consumer exited but inherited output pipes remained open. Output forwarding stopped; the command was not replayed.",
@@ -316,11 +388,11 @@ def run_with_credentials(
             "credential_output_failed", "The consumer's output could not be forwarded completely; the command was not replayed.",
             started=True,
         ), 1
-    if cancelled:
-        exit_code = 130
+    if cancelled_by is not None:
+        exit_code = 128 + cancelled_by
     if exit_code < 0:
         exit_code = 128 - exit_code
     return {
-        "ok": exit_code == 0, "status": "cancelled" if cancelled else "completed",
+        "ok": exit_code == 0, "status": "cancelled" if cancelled_by is not None else "completed",
         "started": True, "exit_code": exit_code,
     }, exit_code

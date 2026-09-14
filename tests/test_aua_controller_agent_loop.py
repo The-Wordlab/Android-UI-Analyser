@@ -334,6 +334,88 @@ def test_tool_timeout_is_an_unknown_outcome_for_caller_cleanup(tmp_path):
     assert report["error"] == "TimeoutError"
 
 
+def test_exact_tool_timeout_can_exceed_request_timeout_without_widening_model_calls(tmp_path):
+    calls = []
+
+    async def slow_tool(name, arguments):
+        calls.append((name, arguments))
+        await asyncio.sleep(0.03)
+        return {"ok": True, "observation": {"elements": []}}
+
+    report, requests, _ = run(
+        tmp_path,
+        [response(), response(content="Done")],
+        call_tool=slow_tool,
+        request_timeout_s=0.01,
+        tool_timeouts_s={"tap": 0.1},
+        time_limit_s=1,
+    )
+    assert len(requests) == 2 and len(calls) == 1
+    assert report["error"] is None and report["stop_reason"] == "model_text"
+    assert report["limits"]["request_seconds"] == 0.01
+    assert report["limits"]["tool_seconds"] == {"tap": 0.1}
+    call = records(tmp_path / "controller/tool-calls.jsonl")[0]
+    assert call["executed"] is True and 0.01 < call["timeout_s"] <= 0.1
+
+
+def test_model_request_failure_escalates_once_and_stays_on_ordered_fallback(tmp_path):
+    report, requests, calls = run(
+        tmp_path,
+        [TimeoutError(), response(), response(content="Done")],
+        model_fallbacks=[("fictional/fallback", SETTINGS)],
+    )
+    assert calls == [("tap", {"id": "el:1"})]
+    assert [payload["model"] for payload in requests] == [
+        "fictional/model",
+        "fictional/fallback",
+        "fictional/fallback",
+    ]
+    assert report["model_ladder"] == ["fictional/model", "fictional/fallback"]
+    assert report["model_escalations"] == 1
+    assert report["model_failures"] == [
+        {"model": "fictional/model", "error": "TimeoutError"}
+    ]
+    assert report["stop_reason"] == "model_text" and report["error"] is None
+    turns = records(tmp_path / "controller/model-turns.jsonl")
+    assert [turn["model_rung"] for turn in turns] == [0, 1, 1]
+
+
+def test_model_fallback_never_replays_a_tool_with_unknown_outcome(tmp_path):
+    async def slow_tool(name, arguments):
+        await asyncio.sleep(10)
+
+    report, requests, _ = run(
+        tmp_path,
+        [response()],
+        call_tool=slow_tool,
+        request_timeout_s=0.01,
+        model_fallbacks=[("fictional/fallback", SETTINGS)],
+    )
+    assert [payload["model"] for payload in requests] == ["fictional/model"]
+    assert report["model_escalations"] == 0
+    assert report["unknown_tool_outcomes"] == 1
+
+
+@pytest.mark.parametrize(
+    "tool_timeouts_s",
+    [[], {"unknown": 10}, {"tap": 0}, {"tap": True}, {"tap": float("inf")}],
+)
+def test_invalid_exact_tool_timeouts_fail_before_transport(tmp_path, tool_timeouts_s):
+    with pytest.raises(RunError):
+        run(tmp_path, [], tool_timeouts_s=tool_timeouts_s)
+    assert not (tmp_path / "controller").exists()
+
+
+@pytest.mark.parametrize(
+    "model_fallbacks",
+    ["fallback", [("", SETTINGS)], [("model", [])], [("model",)]],
+)
+def test_invalid_model_fallbacks_fail_before_transport(tmp_path, model_fallbacks):
+    with pytest.raises(RunError):
+        run(tmp_path, [], model_fallbacks=model_fallbacks)
+    assert not (tmp_path / "controller").exists()
+
+
 @pytest.mark.parametrize("kwargs", [{"max_steps": 0}, {"max_tokens": True}, {"time_limit_s": float("nan")},
                                    {"tools": [None]}, {"tools": []}, {"request_config": []},
                                    {"terminal_tools": frozenset({"unknown"})}])

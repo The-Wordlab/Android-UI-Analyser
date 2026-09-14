@@ -73,6 +73,12 @@ CONTRACT_TOOL = "expect_and_analyze"
 #: every extra argument is another one a small model can get wrong.
 CONTRACT_TOOL_PROPERTIES = ("rid", "text", "desc", "exists", "absent", "text_contains")
 CONTROLLER_CAPABILITIES = frozenset({"network", "wall-clock-wait", "app-lifecycle"})
+WALL_CLOCK_WAIT_TOOL = "wait_uninterrupted_620_seconds"
+WALL_CLOCK_WAIT_SECONDS = 620
+# Boundary clock reads, detached-job dispatch and the first/last status poll sit outside the
+# duration itself. This timeout applies only to the harness-owned wait tool; model calls and
+# ordinary UI tools retain the normal request timeout.
+WALL_CLOCK_WAIT_TOOL_TIMEOUT_S = WALL_CLOCK_WAIT_SECONDS + 120
 FINISH_OUTCOMES = ("achieved", "already_satisfied", "blocked", "not_achievable")
 REALAPP_SYSTEM = """
 Real-application mode. There is no authored checklist; you decide when the goal is met.
@@ -97,6 +103,16 @@ call session_finish with outcome "achieved". If you cannot reach a checkpoint, f
 
 KNOWLEDGE_SHOWN = 5
 _BARE_ELEMENT_UUID = re.compile(r"^[0-9a-f]{32}$")
+
+
+def controller_tool_timeouts(capabilities: Sequence[str]) -> dict[str, float]:
+    """Exact harness-owned tools allowed to outlive an ordinary request window."""
+
+    return (
+        {WALL_CLOCK_WAIT_TOOL: WALL_CLOCK_WAIT_TOOL_TIMEOUT_S}
+        if "wall-clock-wait" in capabilities
+        else {}
+    )
 
 
 def normalize_element_id_argument(arguments: dict[str, Any]) -> tuple[dict[str, Any], bool]:
@@ -253,7 +269,7 @@ def realapp_tools(
         tools.append({
             "type": "function",
             "function": {
-                "name": "wait_uninterrupted_620_seconds",
+                "name": WALL_CLOCK_WAIT_TOOL,
                 "description": (
                     "Wait exactly 620 uninterrupted seconds while the app is already backgrounded; "
                     "records host-monotonic and device-clock boundary evidence."
@@ -489,6 +505,7 @@ async def run_realapp(
     model: str,
     request_config: dict[str, Any] | None = None,
     backend: str = "openrouter",
+    controller_fallbacks: Sequence[tuple[str, dict[str, Any] | None]] = (),
     launch: bool = False,
     launch_app: bool = True,
     activity: str | None = None,
@@ -568,6 +585,7 @@ async def run_realapp(
         "format": FORMAT, "goal": goal, "session_goal": effective_session_goal,
         "package": package, "model": model, "backend": backend,
         "request_config": settings, "judge_model": judging_model,
+        "controller_ladder": [model, *(name for name, _ in controller_fallbacks)],
         "judge_request_config": judge_settings,
         "judge_ladder": [judging_model, *(name for name, _ in judge_fallbacks)],
         "judge_fallbacks": [
@@ -883,14 +901,18 @@ async def run_realapp(
                 return await call(
                     "app_launch_and_analyze", relaunch_arguments, "controller"
                 )
-            if name == "wait_uninterrupted_620_seconds":
+            if name == WALL_CLOCK_WAIT_TOOL:
                 before_host = time.monotonic()
                 before_device = await call(
                     "shell_read_only", {"argv": ["date", "+%s"]}, "harness-wait-boundary"
                 )
                 started_job = await call(
                     "job_start",
-                    {"operation": "idle-duration", "timeout_ms": 620_000, "observe": False},
+                    {
+                        "operation": "idle-duration",
+                        "timeout_ms": WALL_CLOCK_WAIT_SECONDS * 1_000,
+                        "observe": False,
+                    },
                     "harness-wait-start",
                 )
                 job_id = started_job.get("job_id")
@@ -900,10 +922,12 @@ async def run_realapp(
                 receipt: dict[str, Any] = {
                     "job_id": job_id,
                     "operation": "idle-duration",
-                    "requested_seconds": 620,
+                    "requested_seconds": WALL_CLOCK_WAIT_SECONDS,
                     "status": started_job.get("status"),
                     "started_at": wait_started_at.isoformat(),
-                    "deadline_at": (wait_started_at + timedelta(seconds=620)).isoformat(),
+                    "deadline_at": (
+                        wait_started_at + timedelta(seconds=WALL_CLOCK_WAIT_SECONDS)
+                    ).isoformat(),
                     "device_clock_before": device_epoch_seconds(before_device),
                     "model_calls_during_wait": 0,
                     "device_reads_during_wait": 0,
@@ -967,7 +991,7 @@ async def run_realapp(
                 return {
                     "ok": elapsed > 600 and device_elapsed is not None and device_elapsed > 600,
                     "action": "wait-uninterrupted",
-                    "requested_seconds": 620,
+                    "requested_seconds": WALL_CLOCK_WAIT_SECONDS,
                     "host_monotonic_elapsed_seconds": elapsed,
                     "device_clock_before": before_epoch,
                     "device_clock_after": after_epoch,
@@ -993,9 +1017,11 @@ async def run_realapp(
             ),
             initial_observation=initial, model=model, output=output / "controller",
             request_config=settings, backend=backend, max_tokens=max_tokens, max_steps=max_steps,
+            model_fallbacks=controller_fallbacks,
             time_limit_s=time_limit_s, max_request_bytes=max_request_bytes,
             cost_limit_usd=cost_limit_usd, observation_filter=hosted_model_view,
             model_observation_filter=compactor, request_timeout_s=request_timeout_s,
+            tool_timeouts_s=controller_tool_timeouts(controller_capabilities),
             terminal_tools=frozenset({"session_finish"}), terminal_claim_limit=terminal_claim_limit,
             no_progress_limit=no_progress_limit,
         )
@@ -1004,7 +1030,7 @@ async def run_realapp(
                 "stop_reason", "error", "steps_consumed", "model_requests", "tool_calls_executed",
                 "tool_errors", "schema_repairs", "terminal_claims", "no_progress_streak",
                 "returned_models", "providers", "model_http_seconds", "tool_seconds", "duration_seconds",
-                "final_model_text",
+                "final_model_text", "model_ladder", "model_escalations", "model_failures",
             )
         }
         result["controller"]["prompt_tokens"] = [
@@ -1350,6 +1376,16 @@ def main() -> int:
                         help="Show the judge the captured screenshots; needs an image-capable model")
     parser.add_argument("--judge-model",
                         help="Manifest candidate used only for judgement; defaults to --model")
+    parser.add_argument(
+        "--controller-fallback",
+        action="append",
+        default=[],
+        metavar="CANDIDATE",
+        help=(
+            "Ordered manifest candidate to continue controller inference after a model request "
+            "fails before returning a usable response; repeatable."
+        ),
+    )
     parser.add_argument("--judge-fallback", action="append", default=[], metavar="CANDIDATE",
                         help="Stronger manifest candidate to ask when the judge cannot produce "
                              "its schema. Repeatable; tried in the order given.")
@@ -1384,6 +1420,24 @@ def main() -> int:
         request_config.setdefault("provider", {})
         request_config["provider"]["only"] = [args.provider]
         request_config["provider"]["order"] = [args.provider]
+    controller_fallbacks: list[tuple[str, dict[str, Any]]] = []
+    for name in args.controller_fallback:
+        rung = next(
+            (
+                item
+                for item in manifest["models"]
+                if name in {item["id"], item["repository"]}
+            ),
+            None,
+        )
+        if rung is None:
+            parser.error(f"--controller-fallback {name} is not a candidate in the manifest")
+        controller_fallbacks.append(
+            (
+                rung["repository"],
+                validate_request_config(copy.deepcopy(rung.get("request_config", {}))),
+            )
+        )
     judge_candidate = candidate
     judge_config = None
     if args.judge_model:
@@ -1481,7 +1535,8 @@ def main() -> int:
                 outcome = await run_realapp(
                     call_tool=call_tool, list_tools=list_tools, send=send, goal=args.goal,
                     package=args.package, output=args.output.resolve(), model=candidate["repository"],
-                    request_config=request_config, launch=args.launch, activity=args.activity,
+                    request_config=request_config, controller_fallbacks=controller_fallbacks,
+                    launch=args.launch, activity=args.activity,
                     headed=args.headed,
                     fresh_app=args.fresh, apk=args.apk,
                     grant_permissions=args.grant_permissions,

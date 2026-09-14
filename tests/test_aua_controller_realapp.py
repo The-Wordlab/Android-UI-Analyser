@@ -13,6 +13,9 @@ from experiments.aua_controller.agent_loop import run_agent
 from experiments.aua_controller.run_live import RunError
 from experiments.aua_controller.run_realapp import (
     CONTROLLER_TOOLS,
+    WALL_CLOCK_WAIT_SECONDS,
+    WALL_CLOCK_WAIT_TOOL,
+    controller_tool_timeouts,
     normalize_element_id_argument,
     realapp_tools,
     run_realapp,
@@ -253,6 +256,13 @@ def test_realapp_tools_add_only_requested_resilience_capabilities():
     ]
     with pytest.raises(RunError, match="unknown controller capabilities"):
         realapp_tools(MCP_SCHEMAS, capabilities=["shell"])
+
+
+def test_only_wall_clock_wait_gets_a_long_controller_tool_timeout():
+    configured = controller_tool_timeouts(["network", "wall-clock-wait", "app-lifecycle"])
+    assert set(configured) == {WALL_CLOCK_WAIT_TOOL}
+    assert configured[WALL_CLOCK_WAIT_TOOL] > WALL_CLOCK_WAIT_SECONDS
+    assert controller_tool_timeouts(["network", "app-lifecycle"]) == {}
 
 
 def test_realapp_claim_stops_the_loop_and_two_judges_decide(tmp_path):

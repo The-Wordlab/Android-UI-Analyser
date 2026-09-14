@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import json
 import os
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,6 +17,86 @@ import pytest
 
 from android_ui_analyser import credential_exec as runner
 from android_ui_analyser import credentials
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX signal forwarding has process sessions")
+@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
+def test_wrapper_signal_reaches_consumer_cleanup_before_wrapper_exits(
+    tmp_path, signum
+):
+    """A wrapper interrupt must not TERM the harness while its finally block is running."""
+
+    name = "AUA_REVIEW_SIGNAL_TOKEN"
+    ready = tmp_path / "consumer-ready"
+    cleaned = tmp_path / "consumer-cleaned"
+    consumer_pid = tmp_path / "consumer-pid"
+    consumer = tmp_path / "consumer.py"
+    consumer.write_text(
+        "import pathlib, signal, sys, time\n"
+        "ready, cleaned, pid = map(pathlib.Path, sys.argv[1:])\n"
+        "received = None\n"
+        "def interrupt(signum, _frame):\n"
+        "    global received\n"
+        "    received = signum\n"
+        "    raise InterruptedError\n"
+        "signal.signal(signal.SIGINT, interrupt)\n"
+        "signal.signal(signal.SIGTERM, interrupt)\n"
+        "pid.write_text(str(__import__('os').getpid()))\n"
+        "ready.write_text('ready')\n"
+        "try:\n"
+        "    while True: time.sleep(1)\n"
+        "except InterruptedError:\n"
+        "    pass\n"
+        "finally:\n"
+        "    cleaned.write_text(signal.Signals(received).name)\n"
+    )
+    outer_script = """import json, sys
+sys.path.insert(0, sys.argv[1])
+from android_ui_analyser.credential_exec import run_with_credentials
+result, code = run_with_credentials(
+    [sys.executable, sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]],
+    required=[sys.argv[6]], env_file=sys.argv[7], prompt=False,
+)
+print(json.dumps(result), flush=True)
+raise SystemExit(code)
+"""
+    env = {**os.environ, name: "review-only-signal-token"}
+    outer = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            outer_script,
+            str(Path(runner.__file__).parents[1]),
+            str(consumer),
+            str(ready),
+            str(cleaned),
+            str(consumer_pid),
+            name,
+            str(tmp_path / ".env"),
+        ],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not ready.exists() and outer.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists(), "consumer did not reach its signal handler"
+        pid = int(consumer_pid.read_text())
+        os.kill(outer.pid, signum)
+        stdout, stderr = outer.communicate(timeout=10)
+        assert outer.returncode == 128 + signum
+        assert cleaned.read_text() == signal.Signals(signum).name
+        assert json.loads(stdout)["status"] == "cancelled"
+        assert stderr == b""
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(outer.pid, signal.SIGKILL)
+        outer.communicate(timeout=5)
 
 
 def test_keyboard_interrupt_during_setup_is_cancelled_without_a_consumer(tmp_path, monkeypatch):

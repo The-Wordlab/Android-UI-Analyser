@@ -13,7 +13,7 @@ import hashlib
 import json
 import math
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -159,6 +159,7 @@ async def run_agent(
     output: Path,
     request_config: dict[str, Any] | None = None,
     backend: str = "openrouter",
+    model_fallbacks: Sequence[tuple[str, dict[str, Any] | None]] = (),
     max_tokens: int = 32768,
     max_steps: int = 64,
     time_limit_s: float = 600,
@@ -167,6 +168,7 @@ async def run_agent(
     observation_filter: Callable[[Any], Any] = hosted_model_view,
     model_observation_filter: Callable[[Any], Any] | None = None,
     request_timeout_s: float = 60,
+    tool_timeouts_s: Mapping[str, float] | None = None,
     terminal_tools: frozenset[str] = frozenset(),
     session_state: Any = None,
     evidence_namespace: str = "",
@@ -195,6 +197,11 @@ async def run_agent(
     itself is the signal and the caller judges it afterwards. ``no_progress_limit`` stops
     with ``"no_progress"`` when that many consecutive executed calls return the same
     screen fingerprint. Both default to off and report their counters.
+    ``tool_timeouts_s`` lets the caller widen only a named, explicitly offered host-managed
+    tool. Model requests, host decisions and every other tool retain ``request_timeout_s``;
+    the whole invocation remains bounded by ``time_limit_s``.
+    ``model_fallbacks`` are ordered controller models tried only after a model request fails
+    before returning a usable response. Device calls are never replayed by this mechanism.
     """
     if backend not in BACKENDS:
         raise RunError("unknown controller backend")
@@ -210,6 +217,10 @@ async def run_agent(
         raise RunError("tools must be a list of native function schemas")
     if request_config is not None and not isinstance(request_config, dict):
         raise RunError("request_config must be an object")
+    if not isinstance(model_fallbacks, Sequence) or isinstance(model_fallbacks, (str, bytes)):
+        raise RunError("model_fallbacks must be a sequence")
+    if tool_timeouts_s is not None and not isinstance(tool_timeouts_s, Mapping):
+        raise RunError("tool_timeouts_s must be an object")
     if host_next is not None and not callable(host_next):
         raise RunError("host_next must be an asynchronous callable")
     if model_observation_filter is not None and not callable(model_observation_filter):
@@ -236,11 +247,46 @@ async def run_agent(
         schemas[name] = schema
     if not schemas or not set(terminal_tools) <= schemas.keys():
         raise RunError("terminal tools must belong to a nonempty offered tool set")
+    resolved_tool_timeouts: dict[str, float] = {}
+    for name, value in (tool_timeouts_s or {}).items():
+        if not isinstance(name, str) or not name or name not in schemas:
+            raise RunError("tool_timeouts_s must name only offered tools")
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(value)
+            or value <= 0
+        ):
+            raise RunError("tool timeout values must be positive finite numbers")
+        resolved_tool_timeouts[name] = float(value)
     hosted = backend == "openrouter"
     settings = validate_request_config(request_config or {}) if hosted else copy.deepcopy(request_config or {})
     if not hosted and set(settings) - {"temperature", "chat_template_kwargs"}:
         raise RunError("local request_config supports only temperature and chat_template_kwargs")
-    binding = {"system_prompt": system_prompt, "model": model, "backend": backend, "request_config": settings}
+    model_ladder: list[tuple[str, dict[str, Any]]] = [(model, settings)]
+    for entry in model_fallbacks:
+        if not isinstance(entry, (tuple, list)) or len(entry) != 2:
+            raise RunError("each model fallback must contain a model id and request config")
+        fallback_model, fallback_config = entry
+        if not isinstance(fallback_model, str) or not fallback_model.strip():
+            raise RunError("each model fallback needs a model id")
+        if fallback_config is not None and not isinstance(fallback_config, dict):
+            raise RunError("each model fallback request config must be an object")
+        fallback_settings = (
+            validate_request_config(fallback_config or request_config or {})
+            if hosted
+            else copy.deepcopy(fallback_config or request_config or {})
+        )
+        if not hosted and set(fallback_settings) - {"temperature", "chat_template_kwargs"}:
+            raise RunError(
+                "local fallback request_config supports only temperature and chat_template_kwargs"
+            )
+        model_ladder.append((fallback_model, fallback_settings))
+    binding = {
+        "system_prompt": system_prompt,
+        "model_ladder": model_ladder,
+        "backend": backend,
+    }
     if conversation is not None:
         conversation._validate(binding)
     guard = CostGuard(cost_limit_usd) if hosted else None
@@ -254,8 +300,11 @@ async def run_agent(
     deadline = started + time_limit_s
     report: dict[str, Any] = {
         "format": "aua-generic-controller-v1", "model_requested": model, "backend": backend,
+        "model_ladder": [name for name, _ in model_ladder],
+        "model_escalations": 0, "model_failures": [],
         "request_config": settings,
         "limits": {"steps": max_steps, "seconds": time_limit_s, "request_seconds": request_timeout_s,
+                   "tool_seconds": resolved_tool_timeouts,
                    "max_tokens": max_tokens, "request_bytes": max_request_bytes},
         "schema_repair_budget": SCHEMA_REPAIR_BUDGET, "schema_repairs": 0,
         "repair_budget": SCHEMA_REPAIR_BUDGET, "repair_count": 0, "protocol_repairs": 0,
@@ -289,8 +338,8 @@ async def run_agent(
         return {**projected, "evidence_ref": ref, "citable_observation": citable,
                 "evidence_kind": "observation" if citable else "receipt"}
 
-    def remaining() -> float:
-        available = min(request_timeout_s, deadline - time.monotonic())
+    def remaining(limit_s: float = request_timeout_s) -> float:
+        available = min(limit_s, deadline - time.monotonic())
         if available <= 0:
             raise RunError("controller elapsed time budget exhausted")
         return available
@@ -313,6 +362,7 @@ async def run_agent(
                              "content": json.dumps(visible, ensure_ascii=False)})
 
     conversation_started = False
+    active_model_rung = 0
     try:
         messages = conversation._start(binding) if conversation is not None else []
         conversation_started = conversation is not None
@@ -372,50 +422,79 @@ async def run_agent(
             if action is not None:
                 name, arguments = action["tool"], action["arguments"]
             else:
-                payload = {"model": model, "messages": copy.deepcopy(messages), "tools": offered,
-                           "tool_choice": "auto", "parallel_tool_calls": False, "stream": False,
-                           "max_tokens": max_tokens, "temperature": 0}
-                if hosted:
-                    payload = configure_payload(payload, settings)
-                    guard.before_request()
-                else:
-                    payload.update(copy.deepcopy(settings))
-                if len(json.dumps(payload).encode()) > max_request_bytes:
-                    # The device evidence collected so far remains valid even when the hosted
-                    # conversation cannot safely grow again. Return a bounded stop so the caller
-                    # can judge that evidence; treating this as an infrastructure exception used
-                    # to suppress the judge and block every later consumer of an otherwise healthy
-                    # continuous session.
-                    report["stop_reason"] = "conversation_budget"
-                    report["warnings"].append(
-                        "controller conversation reached its byte budget before another model turn"
-                    )
+                response = None
+                while response is None:
+                    rung_model, rung_settings = model_ladder[active_model_rung]
+                    payload = {
+                        "model": rung_model,
+                        "messages": copy.deepcopy(messages),
+                        "tools": offered,
+                        "tool_choice": "auto",
+                        "parallel_tool_calls": False,
+                        "stream": False,
+                        "max_tokens": max_tokens,
+                        "temperature": 0,
+                    }
+                    if hosted:
+                        payload = configure_payload(payload, rung_settings)
+                        guard.before_request()
+                    else:
+                        payload.update(copy.deepcopy(rung_settings))
+                    if len(json.dumps(payload).encode()) > max_request_bytes:
+                        # The device evidence collected so far remains valid even when the hosted
+                        # conversation cannot safely grow again. Return a bounded stop so the caller
+                        # can judge that evidence; treating this as an infrastructure exception used
+                        # to suppress the judge and block every later consumer of an otherwise healthy
+                        # continuous session.
+                        report["stop_reason"] = "conversation_budget"
+                        report["warnings"].append(
+                            "controller conversation reached its byte budget before another model turn"
+                        )
+                        break
+                    turn: dict[str, Any] = {
+                        "step": step,
+                        "actor": "model",
+                        "model_rung": active_model_rung,
+                        "request": copy.deepcopy(payload),
+                    }
+                    tick = time.monotonic()
+                    report["model_requests"] += 1
+                    try:
+                        candidate_response = await asyncio.wait_for(send(payload), remaining())
+                        if not isinstance(candidate_response, dict):
+                            raise RunError("model response must be a JSON object")
+                        response = candidate_response
+                        turn["response"] = response
+                    except Exception as exc:
+                        error = _error_text(exc)
+                        turn["error"] = error
+                        if active_model_rung + 1 >= len(model_ladder):
+                            raise
+                        report["model_failures"].append(
+                            {"model": rung_model, "error": error[:400]}
+                        )
+                        active_model_rung += 1
+                        report["model_escalations"] += 1
+                        report["warnings"].append(
+                            "controller model request failed before a usable response; "
+                            f"continued with fallback {model_ladder[active_model_rung][0]}"
+                        )
+                    finally:
+                        turn["request_ms"] = (time.monotonic() - tick) * 1000
+                        report["model_request_ms"].append(turn["request_ms"])
+                        _append(output / "model-turns.jsonl", turn)
+                if response is None:
                     break
-                turn: dict[str, Any] = {"step": step, "actor": "model", "request": copy.deepcopy(payload)}
-                tick = time.monotonic()
-                report["model_requests"] += 1
-                try:
-                    response = await asyncio.wait_for(send(payload), remaining())
-                    if not isinstance(response, dict):
-                        raise RunError("model response must be a JSON object")
-                    turn["response"] = response
-                    report["model_responses"] += 1
-                    report["usage"].append(response.get("usage"))
-                    for field, collection in (("model", "returned_models"), ("provider", "providers")):
-                        value = response.get(field)
-                        if isinstance(value, str) and value not in report[collection]:
-                            report[collection].append(value)
-                    if response.get("warnings"):
-                        report["warnings"].append(response["warnings"])
-                    if guard is not None:
-                        guard.consume(response)
-                except Exception as exc:
-                    turn["error"] = _error_text(exc)
-                    raise
-                finally:
-                    turn["request_ms"] = (time.monotonic() - tick) * 1000
-                    report["model_request_ms"].append(turn["request_ms"])
-                    _append(output / "model-turns.jsonl", turn)
+                report["model_responses"] += 1
+                report["usage"].append(response.get("usage"))
+                for field, collection in (("model", "returned_models"), ("provider", "providers")):
+                    value = response.get(field)
+                    if isinstance(value, str) and value not in report[collection]:
+                        report[collection].append(value)
+                if response.get("warnings"):
+                    report["warnings"].append(response["warnings"])
+                if guard is not None:
+                    guard.consume(response)
                 multiple = _multiple_calls(response)
                 if multiple is not None:
                     message, native_calls = multiple
@@ -475,7 +554,8 @@ async def run_agent(
                 call["reason"] = action["reason"]
             tick = time.monotonic()
             try:
-                timeout = remaining()
+                timeout = remaining(resolved_tool_timeouts.get(name, request_timeout_s))
+                call["timeout_s"] = timeout
                 refusal = session_state.rejection(name, arguments) if session_state is not None and invalid is None else None
                 if invalid is not None:
                     result = feedback

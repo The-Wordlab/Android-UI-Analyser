@@ -11,6 +11,18 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Fixed
+
+- The experimental real-app controller gives only its explicit detached wall-clock wait a longer
+  tool deadline, so a 620-second inactivity proof is no longer cancelled by the ordinary
+  90-second model/tool request timeout.
+- The experimental controller accepts an ordered model fallback ladder for inference failures;
+  escalation continues from the existing live evidence and never retries a device call whose
+  outcome is unknown.
+- `aua config exec` forwards SIGINT, SIGTERM, SIGHUP and SIGQUIT to its configured command and
+  waits for orderly cleanup before escalating, preventing an interrupted harness from being
+  terminated while it is releasing its session, emulator and lease.
+
 ## [0.23.0] - 2026-09-14
 
 ### Added
