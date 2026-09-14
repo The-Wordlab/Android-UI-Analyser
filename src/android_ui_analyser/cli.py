@@ -8902,6 +8902,37 @@ def prepare_show_cmd(
     _run(ctx, go)
 
 
+@prepare_app.command("run")
+def prepare_run_cmd(
+    ctx: typer.Context,
+    scenario: str = typer.Argument(..., help="Scenario name from `aua prepare list`."),
+    app_pkg: str = typer.Option(..., "--app", "--package", help="Package under test."),
+    output: Path | None = typer.Option(
+        None, "--output", help="Where this run's evidence goes (default: ./.aua-runs/<scenario>)."
+    ),
+    timeout: float | None = typer.Option(
+        None, "--timeout", help="Give up on the controller after this many seconds."
+    ),
+) -> None:
+    """Run a prepared scenario. AUA drives it when a controller is configured, else you do."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        import json
+
+        from .prepare_run import default_output, run_scenario
+        from .prepare_store import PrepareStore
+
+        store = _prepare_store(ctx)
+        record = PrepareStore(store).load_scenario(app_pkg, scenario)
+        target = output or default_output(str(record["name"]))
+        result = run_scenario(_opts(ctx).load(), record, output=target, timeout_s=timeout)
+        typer.echo(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+        if result.get("driven_by") == "aua" and not result.get("ok"):
+            raise typer.Exit(1)
+
+    _run(ctx, go)
+
+
 @prepare_app.command("list")
 def prepare_list_cmd(
     ctx: typer.Context,

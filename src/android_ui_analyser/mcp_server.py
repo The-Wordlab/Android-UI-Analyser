@@ -2498,6 +2498,27 @@ def _tool_definitions() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="prepare_run",
+            description=(
+                "Run a prepared scenario end to end and return the verdict with every screenshot, "
+                "video and report it produced. AUA drives the device itself when a controller "
+                "model is configured; otherwise the exact commands to drive it come back instead. "
+                "The result always says which, and which files a person must read before the "
+                "bundle is shared."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "package": {"type": "string"},
+                    "scenario": {"type": "string"},
+                    "output": {"type": "string"},
+                    "timeout_s": {"type": "number"},
+                },
+                "required": ["package", "scenario"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
             name="prepare_show",
             description="Show one interview without changing it.",
             inputSchema={
@@ -3965,7 +3986,13 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 verify=args.get("verify", True),
             )
         )
-    if name in {"prepare_start", "prepare_answer", "prepare_show", "prepare_list"}:
+    if name in {
+        "prepare_start",
+        "prepare_answer",
+        "prepare_show",
+        "prepare_list",
+        "prepare_run",
+    }:
         # Preparation is a conversation about an app, not a run on a device: it needs the app map
         # and nothing else, which is why these are lease-free.
         from . import prepare_store
@@ -3982,6 +4009,17 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
             return prepare_store.show(store, package=package, prepare_id=str(args["prepare_id"]))
         if name == "prepare_list":
             return prepare_store.catalogue(store, package=package)
+        if name == "prepare_run":
+            from .prepare_run import default_output, run_scenario
+
+            record = prepare_store.PrepareStore(store).load_scenario(package, str(args["scenario"]))
+            target = args.get("output") or default_output(str(record["name"]))
+            return run_scenario(
+                engine.config,
+                record,
+                output=target,
+                timeout_s=args.get("timeout_s"),
+            )
         answers = args.get("answers") or {}
         if not isinstance(answers, dict) or not answers:
             raise AuaError("prepare_answer needs a non-empty `answers` object", code="usage")

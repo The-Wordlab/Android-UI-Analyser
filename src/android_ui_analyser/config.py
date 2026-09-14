@@ -724,6 +724,37 @@ class DashboardCfg(BaseModel):
     port: int | None = None
 
 
+class ControllerCfg(BaseModel):
+    """An optional hosted model that drives a prepared scenario instead of the calling agent.
+
+    Off by default, and off in practice unless ``api_key_env`` actually names a set variable: a
+    driver that half-exists is worse than none, because the caller cannot tell from the result
+    whether the run it got was driven or merely described.
+
+    The point of turning it on is cost.  Without it every tap, every screen read and every
+    judgement crosses back into the calling agent's context; with it AUA runs the loop on a cheap
+    model and the caller pays for one question and one answer.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    # Left empty, AUA looks for the controller shipped beside it (``experiments/aua_controller``).
+    command: list[str] = Field(default_factory=list)
+    model: str = "or-deepseek-v4-flash-0731-low-open"
+    judge_model: str = "or-deepseek-v4p1-flash-low-open"
+    judge_fallbacks: list[str] = Field(default_factory=lambda: ["or-gemma4-26b-thinking"])
+    api_key_env: str = "OPEN_ROUTER_API_KEY"
+    base_url: str = "https://openrouter.ai/api/v1"
+    max_steps: int = 24
+    time_limit_s: float = 300.0
+    # The real money stop is the budget, checked before every request; `max_tokens` only ever
+    # truncates a working model mid-thought. See docs/RELEASING.md and the v0.20.0 notes.
+    cost_limit_usd: float = 0.15
+    judge_cost_limit_usd: float = 0.10
+    record: bool = True
+
+
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -754,6 +785,7 @@ class Config(BaseModel):
     lease: LeaseCfg = Field(default_factory=LeaseCfg)
     teardown: TeardownCfg = Field(default_factory=TeardownCfg)
     flags: FlagsCfg = Field(default_factory=FlagsCfg)
+    controller: ControllerCfg = Field(default_factory=ControllerCfg)
     profiles: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
     @field_validator("platforms")
