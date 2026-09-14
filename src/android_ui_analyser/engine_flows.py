@@ -96,6 +96,28 @@ class StepFailure(NamedTuple):
     detail: str | None = None
 
 
+def _shortened_wait_detail(waited: Any) -> str | None:
+    """One sentence when the ceiling, not the screen, ended a flow's wait.
+
+    A flow that writes ``timeout_ms: 60000`` still only gets ``perf.max_wait_ms``, so a late
+    screen and an absent one both arrive at the caller as the same ``wait_timeout``. The two
+    have opposite remedies - ask again, or stop believing the marker is there - and
+    ``docs/lessons.md`` records a lane reporting a healthy app as broken on exactly this
+    confusion. The clamp is already on the wait result; this only carries it out to the
+    failure, beside the ``resume_from_step`` that acts on it.
+    """
+    clamped_from = getattr(waited, "wait_clamped_from_ms", None)
+    if not clamped_from:
+        return None
+    ceiling = getattr(waited, "wait_ceiling_ms", None)
+    ceiling_text = f"{int(ceiling)}ms" if ceiling else "the ceiling"
+    return (
+        f"the wait asked for {int(clamped_from)}ms and got {ceiling_text}: perf.max_wait_ms "
+        "ends every observation wait, so this is the budget rather than the app. Re-run from "
+        "this step before reading it as absence."
+    )
+
+
 def _flows_for(self: Engine, package: str | None) -> list[str]:
     """Saved journeys for *package*, as ``name(PARAM, …)``.
 
@@ -938,10 +960,13 @@ def _run_steps(
         elif kind == "wait-for":
             if not s.arg:
                 return StepFailure("unsupported_action", i, s), res
-            if not self.wait(
+            waited = self.wait(
                 for_=s.arg, timeout_ms=s.timeout_ms or 10000, by=s.by or "text"
-            ).ok:
-                return StepFailure("wait_timeout", i, s), res
+            )
+            if not waited.ok:
+                return StepFailure(
+                    "wait_timeout", i, s, _shortened_wait_detail(waited)
+                ), res
             settle = False  # the wait already absorbed the transition
         elif kind == "wait-stable":
             try:
