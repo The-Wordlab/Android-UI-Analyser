@@ -1660,6 +1660,17 @@ class Engine:
                 raise _HandoverRefused("capture_would_not_settle", serial)
             agent.release_uiautomation(serial)
 
+            # ``pkill`` can return before Android observes the UiAutomation binder owner's
+            # death. During that gap dumpsys may briefly list the helper as bound even though
+            # the old automation owner is about to detach it again. A real comparison run
+            # measured 11.5s from the kill request to ``UiAutomation service owner died``;
+            # opening the helper channel inside that false-ready window made its first request
+            # fail after the host had already handed over. Wait on the adapter's explicit
+            # ownership probe, not a fixed sleep, so the normal no-owner path remains free.
+            slot_deadline = time.monotonic() + 15.0
+            while agent.uiautomation_held(serial) and time.monotonic() < slot_deadline:
+                time.sleep(0.25)
+
             if not agent.is_bound(serial):
                 # Record whether the slot is *still* held. "Not bound" has two very
                 # different causes — a helper that will not start, and a uiautomator2
@@ -2458,6 +2469,7 @@ class Engine:
 
     # engine_navigation: Getting somewhere in the app: goto over the learned map with its planner fallback, navigate and reach, the goal-driven drive lanes, back_until with map-screen recognition, open_link deeplinks with chooser handling, and map_find route previews.
     drive_on_device = engine_navigation.drive_on_device
+    run_model_on_device = engine_navigation.run_model_on_device
     _goal_in_the_apps_words = engine_navigation._goal_in_the_apps_words
     drive_on_host = engine_navigation.drive_on_host
     _mid_edge_path = engine_navigation._mid_edge_path

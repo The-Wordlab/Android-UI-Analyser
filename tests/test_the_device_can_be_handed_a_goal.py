@@ -130,6 +130,67 @@ def test_a_goal_reaches_the_device_as_drive_run(tmp_path: Path) -> None:
     assert got["steps"][0]["decision"] == "tap"
 
 
+def test_a_model_goal_and_checks_reach_the_device_once_without_journalling_the_key(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The host lends the device once; intermediate model/action turns never return here."""
+
+    agent = _Agent(
+        reply={
+            "ok": True,
+            "verified": True,
+            "ran_on": "device",
+            "model": "deepseek/deepseek-v4.1-flash",
+            "stop_reason": "verified",
+            "checks": [{"id": "home", "passed": True}],
+            "metrics": {"reported_usd": 0.001, "requests": 2},
+        }
+    )
+    monkeypatch.setenv("OPEN_ROUTER_API_KEY", "test-secret-never-journalled")
+    engine = _engine(tmp_path, agent)
+    checks = [
+        {"id": "home", "kind": "final_visible", "selector": "rid", "value": "home"}
+    ]
+
+    got = engine.run_model_on_device("reach guest home", checks, max_steps=7)
+
+    assert got["ok"] is True
+    assert got["ran_on"] == "device"
+    assert [request["method"] for request in agent.requests] == ["model.run"]
+    sent = agent.requests[0]["params"]
+    assert sent["goal"] == "reach guest home"
+    assert sent["checks"] == checks
+    assert sent["api_key"] == "test-secret-never-journalled"
+    journal_blob = str(_journal_events(engine, got["serial"]))
+    assert "test-secret-never-journalled" not in journal_blob
+
+
+def test_a_model_run_refuses_before_handoff_when_the_key_is_missing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    agent = _Agent()
+    monkeypatch.delenv("OPEN_ROUTER_API_KEY", raising=False)
+    with pytest.raises(UsageError, match="OPEN_ROUTER_API_KEY is not set"):
+        _engine(tmp_path, agent).run_model_on_device(
+            "reach guest home",
+            [{"id": "home", "kind": "final_visible", "selector": "rid", "value": "home"}],
+        )
+    assert agent.requests == []
+
+
+def test_a_model_run_rejects_an_unverifiable_contract_before_handoff(
+    tmp_path: Path, monkeypatch
+) -> None:
+    agent = _Agent()
+    monkeypatch.setenv("OPEN_ROUTER_API_KEY", "test-key")
+    with pytest.raises(UsageError, match="unsupported kind"):
+        _engine(tmp_path, agent).run_model_on_device(
+            "reach guest home",
+            [{"id": "home", "kind": "model_says_yes", "selector": "rid", "value": "home"}],
+        )
+    assert agent.requests == []
+
+
 def test_the_channel_is_always_closed(tmp_path: Path) -> None:
     agent = _Agent()
     _engine(tmp_path, agent).drive_on_device("open Display")
@@ -256,12 +317,13 @@ def test_the_drive_and_the_offload_share_one_slot_handover(tmp_path: Path) -> No
         "_device_is_spoken_for",
         "_device_stood_down",
         "release_uiautomation",
+        "uiautomation_held",
         "is_bound",
         "open_channel",
     ):
         assert step in borrow, f"the borrow lost {step}"
 
-    for caller in (E.drive_on_device, E._offload_steps_to_device):
+    for caller in (E.drive_on_device, E._offload_steps_to_device, E.run_model_on_device):
         src = inspect.getsource(caller)
         assert "_device_agent_borrowed" in src, f"{caller.__name__} bypasses the shared handover"
         assert "open_channel" not in src, f"{caller.__name__} opens its own channel"
@@ -307,7 +369,49 @@ def test_the_bundled_apk_and_the_host_agree_on_the_protocol() -> None:
     assert f"PROTOCOL = {device_agent.PROTOCOL};" in java, (
         "InfoFeature.PROTOCOL and device_agent.PROTOCOL must be bumped together"
     )
-    assert device_agent.PROTOCOL >= 2
+    assert device_agent.PROTOCOL >= 3
+
+
+def test_the_helper_registers_the_model_loop_and_never_compiles_a_key() -> None:
+    service = Path("helper/app/src/main/java/dev/aua/helper/HelperService.java").read_text()
+    model = Path("helper/app/src/main/java/dev/aua/helper/ModelFeature.java").read_text()
+
+    assert "register(new ModelFeature" in service
+    assert 'return "model"' in model
+    assert "https://openrouter.ai/api/v1/chat/completions" in model
+    assert "SharedPreferences" not in model
+    assert "BuildConfig." not in model
+    assert 'params.remove("api_key")' in model
+
+
+def test_the_model_cli_routes_through_the_session_daemon() -> None:
+    source = (Path(__file__).parents[1] / "src/android_ui_analyser/cli.py").read_text()
+    command = source[
+        source.index("def helper_model_run_cmd(") : source.index('@helper_app.command("tree")')
+    ]
+
+    assert "_route(" in command
+    assert '"run_model_on_device"' in command
+    assert "engine.run_model_on_device(" not in command
+    assert '_HELPER_HANDOFF_ROUTE_METHODS = frozenset({"run_model_on_device"})' in source
+
+
+def test_the_model_handoff_does_not_connect_uiautomator_for_optional_vocabulary() -> None:
+    import inspect
+
+    from android_ui_analyser.engine import Engine as E
+
+    source = inspect.getsource(E.run_model_on_device)
+    assert "self._goal_in_the_apps_words(" not in source
+
+
+def test_mcp_exposes_the_same_engine_model_path_without_accepting_a_secret_argument() -> None:
+    from android_ui_analyser.mcp_server import _tool_definitions
+
+    tool = next(tool for tool in _tool_definitions() if tool.name == "helper_model_run")
+    assert tool.inputSchema["required"] == ["goal", "checks"]
+    assert "api_key" not in tool.inputSchema["properties"]
+    assert tool.inputSchema["properties"]["api_key_env"]["default"] == "OPEN_ROUTER_API_KEY"
 
 
 # --------------------------------------------------------------------------- what a reader sees

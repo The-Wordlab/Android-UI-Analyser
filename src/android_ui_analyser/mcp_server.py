@@ -2889,6 +2889,53 @@ def _tool_definitions() -> list[types.Tool]:
             inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
         ),
         types.Tool(
+            name="helper_model_run",
+            description=(
+                "After one platform-neutral helper handoff, run DeepSeek V4.1 Flash's complete "
+                "observe/act/verify loop on the target. The server reads the provider key from "
+                "its environment; credentials are never accepted as tool arguments."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "goal": {"type": "string", "minLength": 1},
+                    "checks": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string", "minLength": 1},
+                                "kind": {
+                                    "type": "string",
+                                    "enum": [
+                                        "first_visible", "ever_visible", "final_visible",
+                                        "final_absent", "never_visible",
+                                    ],
+                                },
+                                "selector": {
+                                    "type": "string", "enum": ["rid", "text", "desc", "package"]
+                                },
+                                "value": {"type": "string", "minLength": 1},
+                            },
+                            "required": ["id", "kind", "selector", "value"],
+                            "additionalProperties": False,
+                        },
+                    },
+                    "max_steps": {"type": "integer", "minimum": 1, "maximum": 32, "default": 16},
+                    "time_limit_s": {
+                        "type": "number", "minimum": 10, "maximum": 600, "default": 180
+                    },
+                    "cost_limit_usd": {
+                        "type": "number", "exclusiveMinimum": 0, "maximum": 1, "default": 0.05
+                    },
+                    "api_key_env": {"type": "string", "default": "OPEN_ROUTER_API_KEY"},
+                },
+                "required": ["goal", "checks"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
             name="helper_disable",
             description="Disable the optional device helper and restore its saved setup state.",
             inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
@@ -4264,6 +4311,17 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         )
     if name == "helper_enable":
         return _dump(engine.helper_enable())
+    if name == "helper_model_run":
+        return _dump(
+            engine.run_model_on_device(
+                args["goal"],
+                args["checks"],
+                max_steps=int(args.get("max_steps", 16)),
+                time_limit_s=float(args.get("time_limit_s", 180.0)),
+                cost_limit_usd=float(args.get("cost_limit_usd", 0.05)),
+                api_key_env=str(args.get("api_key_env", "OPEN_ROUTER_API_KEY")),
+            )
+        )
     if name == "helper_disable":
         return _dump(engine.helper_disable())
     if name == "helper_remove":

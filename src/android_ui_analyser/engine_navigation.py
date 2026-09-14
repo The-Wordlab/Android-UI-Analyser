@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import os
 import re
 import time
 from typing import TYPE_CHECKING, Any
@@ -236,6 +237,151 @@ def drive_on_device(self: Engine, goal: str, *, budget: int = 8) -> dict[str, An
     )
     # The same object the journal recorded, so what the dashboard shows and what the caller
     # receives cannot drift apart.
+    return payload
+
+
+_MODEL_CHECK_KINDS = frozenset(
+    {"first_visible", "ever_visible", "final_visible", "final_absent", "never_visible"}
+)
+_MODEL_CHECK_SELECTORS = frozenset({"rid", "text", "desc", "package"})
+_ON_DEVICE_MODEL = "deepseek/deepseek-v4.1-flash"
+
+
+def run_model_on_device(
+    self: Engine,
+    goal: str,
+    checks: list[dict[str, Any]],
+    *,
+    max_steps: int = 16,
+    time_limit_s: float = 180.0,
+    cost_limit_usd: float = 0.05,
+    api_key_env: str = "OPEN_ROUTER_API_KEY",
+) -> dict[str, Any]:
+    """Run DeepSeek's complete UI loop inside the optional device helper.
+
+    The host lends the device once and waits. It does not observe or execute intermediate steps.
+    The provider credential is read from *api_key_env*, sent only in that one loopback/adb-forwarded
+    request, and never included in the returned payload or journal. The helper keeps it in memory for
+    this run only; this is intentionally not an APK secret store.
+
+    ``checks`` is the platform-neutral verification contract. The Android helper currently supports
+    hierarchy predicates; a future platform-side agent can implement the same request and reply shape
+    without exposing Android tooling to this core method.
+    """
+
+    goal = (goal or "").strip()
+    if not goal:
+        raise UsageError(
+            "on-device model run needs a goal",
+            hint="Say what the model must reach and supply at least one deterministic check.",
+        )
+    if not isinstance(checks, list) or not checks:
+        raise UsageError("on-device model run needs at least one deterministic check")
+    clean_checks: list[dict[str, str]] = []
+    for index, item in enumerate(checks):
+        if not isinstance(item, dict):
+            raise UsageError(f"model check {index + 1} must be an object")
+        check = {name: str(item.get(name) or "").strip() for name in ("id", "kind", "selector", "value")}
+        if not check["id"] or not check["value"]:
+            raise UsageError(f"model check {index + 1} needs non-empty id and value")
+        if check["kind"] not in _MODEL_CHECK_KINDS:
+            raise UsageError(
+                f"model check {check['id']!r} has unsupported kind {check['kind']!r}",
+                hint="Use first_visible, ever_visible, final_visible, final_absent, or never_visible.",
+            )
+        if check["selector"] not in _MODEL_CHECK_SELECTORS:
+            raise UsageError(
+                f"model check {check['id']!r} has unsupported selector {check['selector']!r}",
+                hint="Use rid, text, desc, or package.",
+            )
+        clean_checks.append(check)
+    max_steps = max(1, min(32, int(max_steps)))
+    time_limit_s = float(time_limit_s)
+    cost_limit_usd = float(cost_limit_usd)
+    if not 10.0 <= time_limit_s <= 600.0:
+        raise UsageError("--time-limit must be between 10 and 600 seconds")
+    if not 0.0 < cost_limit_usd <= 1.0:
+        raise UsageError("--cost-limit-usd must be greater than 0 and at most 1")
+    env_name = (api_key_env or "").strip()
+    api_key = os.environ.get(env_name, "") if env_name else ""
+    if not api_key.strip():
+        raise UsageError(
+            f"{env_name or 'provider API key'} is not set",
+            hint=(
+                "Load it without shell-sourcing the file: `aua config exec --env-file "
+                "/absolute/project/.env --require OPEN_ROUTER_API_KEY -- aua helper model-run …`."
+            ),
+        )
+
+    began = time.perf_counter()
+    try:
+        with self._device_agent_borrowed(purpose="model.run") as loan:
+            result = loan.channel.request(
+                "model.run",
+                {
+                    # Do not call ``_goal_in_the_apps_words`` here: it reads the foreground
+                    # package through ``self.device`` and attaches uiautomator2 immediately
+                    # before the helper handoff. The hosted model understands the authored
+                    # goal directly; avoiding that optional vocabulary lookup keeps the
+                    # accessibility service attached and the one-handoff path genuinely cold.
+                    "goal": goal,
+                    "checks": clean_checks,
+                    "model": _ON_DEVICE_MODEL,
+                    "max_steps": max_steps,
+                    "time_limit_ms": round(time_limit_s * 1000),
+                    "cost_limit_usd": cost_limit_usd,
+                    "api_key": api_key,
+                },
+                timeout=time_limit_s + 150.0,
+            )
+            serial = loan.serial
+            was_connected = loan.u2_was_connected
+    except _HandoverRefused as refused:
+        self._journal_helper(
+            "refused",
+            refused.serial,
+            cmd="helper.model-run",
+            ok=False,
+            args={"goal": goal, "checks": clean_checks, "max_steps": max_steps},
+            result={"ok": False, "reason": refused.reason, "detail": refused.detail},
+            reason=refused.reason,
+            detail=refused.detail,
+            ms=round((time.perf_counter() - began) * 1000, 1),
+        )
+        raise DeviceError(
+            f"the device could not be handed the model run ({refused.reason})",
+            hint=_HANDOVER_HINTS.get(
+                refused.reason,
+                "Run `aua helper status` to see whether the helper is installed and bound.",
+            ),
+        ) from refused
+    finally:
+        # Do not retain the credential beyond this call in the generic engine.
+        api_key = ""
+
+    payload = {
+        "action": "helper-model-run",
+        "serial": serial,
+        "ran_on": "device",
+        **result,
+    }
+    self._journal_helper(
+        "model-ran",
+        serial,
+        cmd="helper.model-run",
+        ok=bool(payload.get("ok")),
+        args={
+            "goal": goal,
+            "checks": clean_checks,
+            "model": _ON_DEVICE_MODEL,
+            "max_steps": max_steps,
+            "time_limit_s": time_limit_s,
+            "cost_limit_usd": cost_limit_usd,
+        },
+        result=payload,
+        ms=round((time.perf_counter() - began) * 1000, 1),
+        u2_was_connected=was_connected,
+    )
     return payload
 
 

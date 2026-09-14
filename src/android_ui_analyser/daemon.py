@@ -924,6 +924,9 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
         elif cmd == "helper_enable":
             return _result_ok(engine.helper_enable())
 
+        elif cmd == "run_model_on_device":
+            return _result_ok(engine.run_model_on_device(**args))
+
         elif cmd == "helper_disable":
             return _result_ok(engine.helper_disable())
 
@@ -1424,6 +1427,7 @@ _LONG_POLL_COMMANDS = frozenset(
         "install_app",
         "helper_install",
         "helper_enable",
+        "run_model_on_device",
         "helper_remove",
     }
 )

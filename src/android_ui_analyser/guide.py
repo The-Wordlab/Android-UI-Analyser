@@ -1741,6 +1741,7 @@ def render_markdown(*, brief: bool = False) -> str:
         "aua helper tree                      # read the hierarchy without an adb dump\n"
         "aua helper watch --timeout-ms 5000   # stream screen-change events (with their text)\n"
         'aua helper drive "open display settings"  # device picks its own steps (experimental)\n'
+        "aua helper model-run GOAL --checks checks.json  # DeepSeek loop runs in the APK\n"
         "aua helper remove                    # switch off and uninstall\n"
         "```\n"
         "`helper drive` is the odd one out: instead of replaying steps you planned, the device "
@@ -1772,6 +1773,13 @@ def render_markdown(*, brief: bool = False) -> str:
         "Needs `adb root`, so a **Google APIs** AVD, not a Play Store image or a retail phone. "
         "On a target that cannot root, enable *AUA Helper* by hand once under "
         "Settings > Accessibility, or simply leave it off."
+    )
+    p.append(
+        "`helper model-run` is the hosted-model experiment: after one handoff the APK performs "
+        "every observe/decide/act/check turn and reports provider usage and latency. Its JSON "
+        "checks are the oracle; a model finish claim cannot override them. The provider key is "
+        "ephemeral runtime input, never compiled into or persisted by the APK. See "
+        "`docs/on-device-model.md` for the check schema, credential boundary and example."
     )
 
     p.append("")

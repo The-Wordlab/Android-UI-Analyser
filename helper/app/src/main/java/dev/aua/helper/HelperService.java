@@ -56,6 +56,8 @@ public final class HelperService extends AccessibilityService {
                 c.register(flowFeature);
                 // `drive.run` decides its own steps instead of replaying the host's.
                 c.register(new DriveFeature(flowFeature));
+                // `model.run` owns the complete hosted-model loop after one bounded handoff.
+                c.register(new ModelFeature(flowFeature));
                 RecordFeature rec = new RecordFeature();
                 c.register(rec);
                 recorder = rec;

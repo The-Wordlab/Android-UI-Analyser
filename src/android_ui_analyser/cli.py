@@ -1629,14 +1629,20 @@ def _warm(engine: Engine) -> None:
     _ = engine.device
 
 
-# Engine method name → daemon command name (they differ only for ``input``).
-_DAEMON_CMD = {"input_text": "input"}
+# Engine method name → daemon command name when the public transport spelling differs.
+_DAEMON_CMD = {
+    "input_text": "input",
+}
 _HOST_ONLY_ROUTE_METHODS = frozenset(
     # Nothing here touches a device. Routing them like device calls made a preference file
     # read demand a lease — and refuse with "no device found" — while the same call over MCP
     # needed nothing attached.
     {"flow_delete", "app_log_prefs", "app_log_prefs_set"}
 )
+# These methods deliberately resolve only the leased serial before releasing Android's
+# UiAutomation slot. Warming a Device here attaches uiautomator2 immediately before the
+# handoff and creates the exact accessibility-service rebind race the helper path avoids.
+_HELPER_HANDOFF_ROUTE_METHODS = frozenset({"run_model_on_device"})
 _CAPTURE_READ_METHODS = frozenset(
     {"capture_status", "capture_last", "capture_export", "capture_explain"}
 )
@@ -2118,7 +2124,11 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
         with contextlib.suppress(Exception):
             serial = engine.device.serial
     try:
-        if not host_only and not bootstrap_session:
+        if (
+            not host_only
+            and not bootstrap_session
+            and method not in _HELPER_HANDOFF_ROUTE_METHODS
+        ):
             _warm(engine)
         result = getattr(engine, method)(**kwargs)
         if bootstrap_session and isinstance(result, dict):
@@ -10376,6 +10386,53 @@ def helper_drive_cmd(
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
         _emit(engine.drive_on_device(goal, budget=budget), fmt)
+
+    _run(ctx, go)
+
+
+@helper_app.command("model-run")
+def helper_model_run_cmd(
+    ctx: typer.Context,
+    goal: str = typer.Argument(..., help="What the on-device model must achieve."),
+    checks_file: Path = typer.Option(
+        ..., "--checks", exists=True, dir_okay=False, readable=True,
+        help="JSON array of deterministic hierarchy checks that must pass.",
+    ),
+    max_steps: int = typer.Option(16, "--max-steps", min=1, max=32),
+    time_limit_s: float = typer.Option(180.0, "--time-limit", min=10.0, max=600.0),
+    cost_limit_usd: float = typer.Option(0.05, "--cost-limit-usd", min=0.000001, max=1.0),
+    api_key_env: str = typer.Option(
+        "OPEN_ROUTER_API_KEY", "--api-key-env",
+        help="Environment variable read once for the ephemeral provider credential.",
+    ),
+) -> None:
+    """Run the DeepSeek V4.1 Flash loop inside the helper after one host handoff.
+
+    The APK performs every intermediate observation, model request, action, settle and check.
+    The provider key is read from the named host environment variable for this run; it is never
+    stored in the APK or included in the output.
+    """
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        import json
+
+        try:
+            checks = json.loads(checks_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise UsageError(f"could not read model checks from {checks_file}: {exc}") from exc
+        result = _route(
+            engine,
+            "run_model_on_device",
+            goal=goal,
+            checks=checks,
+            max_steps=max_steps,
+            time_limit_s=time_limit_s,
+            cost_limit_usd=cost_limit_usd,
+            api_key_env=api_key_env,
+        )
+        _emit(result, fmt)
+        if not result.get("ok"):
+            raise typer.Exit(1)
 
     _run(ctx, go)
 
