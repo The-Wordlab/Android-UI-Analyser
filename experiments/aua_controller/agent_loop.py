@@ -159,7 +159,7 @@ async def run_agent(
     output: Path,
     request_config: dict[str, Any] | None = None,
     backend: str = "openrouter",
-    max_tokens: int = 4096,
+    max_tokens: int = 32768,
     max_steps: int = 64,
     time_limit_s: float = 600,
     max_request_bytes: int = 200_000,

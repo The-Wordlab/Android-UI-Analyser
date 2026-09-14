@@ -248,11 +248,11 @@ async def run_realapp(
     max_named_screens: int = 8,
     max_steps: int = 24,
     time_limit_s: float = 300,
-    max_tokens: int = 4096,
+    max_tokens: int = 32768,
     max_request_bytes: int = 200_000,
-    cost_limit_usd: float = 0.05,
-    judge_cost_limit_usd: float = 0.02,
-    judge_max_tokens: int = 1024,
+    cost_limit_usd: float = 0.15,
+    judge_cost_limit_usd: float = 0.10,
+    judge_max_tokens: int = 8192,
     terminal_claim_limit: int = 1,
     no_progress_limit: int = 4,
     max_elements: int = 60,
@@ -520,7 +520,7 @@ async def run_realapp(
                                  "reasons": [str(reason)[:300]], "controller_stop_reason": stop}
         if name_screens:
             namer_decider = Decider(send, model=model, backend=backend, request_config=settings,
-                                    max_tokens=512, cost_limit_usd=judge_cost_limit_usd, output=output / "map")
+                                    max_tokens=4096, cost_limit_usd=judge_cost_limit_usd, output=output / "map")
             namer = ScreenNamer(namer_decider)
             ordered = [{"ref": "initial", "tool": None, "raw": initial}] + frames + [{"ref": "final", "tool": None, "raw": final}]
             transitions: list[dict[str, Any]] = []
@@ -696,10 +696,10 @@ def main() -> int:
     parser.add_argument("--map", action="store_true", help="Name screens and summarise the route (paid)")
     parser.add_argument("--max-steps", type=int, default=24)
     parser.add_argument("--time-limit", type=float, default=300)
-    parser.add_argument("--max-tokens", type=int, default=4096)
+    parser.add_argument("--max-tokens", type=int, default=32768)
     parser.add_argument("--cost-limit-usd", type=float, default=0.05)
     parser.add_argument("--judge-cost-limit-usd", type=float, default=0.02)
-    parser.add_argument("--judge-max-tokens", type=int, default=1024)
+    parser.add_argument("--judge-max-tokens", type=int, default=8192)
     parser.add_argument("--terminal-claim-limit", type=int, default=1)
     parser.add_argument("--no-progress-limit", type=int, default=4)
     parser.add_argument("--max-elements", type=int, default=60)
