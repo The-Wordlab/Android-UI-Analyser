@@ -11,6 +11,14 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.22.1] - 2026-09-14
+
+### Fixed
+
+- The macOS release suite no longer depends on a low process id being free on the runner. The
+  emulator stop tests record a pid above any host's pid_max, so the exit probe a stop performs
+  answers "gone" everywhere; v0.22.0's release run failed on this alone and published nothing.
+
 ## [0.22.0] - 2026-09-14
 
 ### Fixed
@@ -832,5 +840,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.21.1]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.21.1
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.22.0...HEAD
 [0.22.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.22.0
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.22.1...HEAD
+[0.22.1]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.22.1
