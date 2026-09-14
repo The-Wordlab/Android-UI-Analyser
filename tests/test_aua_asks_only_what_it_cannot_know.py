@@ -239,3 +239,21 @@ def test_a_selector_with_no_value_is_refused_rather_than_read_as_text(terms: str
     # that passes on the wrong screen and never explains itself.
     with pytest.raises(UsageError, match="selector with no value"):
         parse_predicate_terms(terms, where="`success`")
+
+
+def test_a_label_with_a_comma_in_it_stays_one_assertion() -> None:
+    # Found the first time this ran against a real app: the badged tab's accessibility
+    # description was `Create, New`, and a bare comma split turned one assertion into two - the
+    # second of them asserting the word "New" somewhere, anywhere, on the screen.
+    assert parse_predicate_terms('desc:"Create, New"', where="`success`") == [
+        {"assert": {"desc": "Create, New", "exists": True}}
+    ]
+    assert parse_predicate_terms("rid:bottomBarAppsHub, !desc:'Create, New'", where="`repeat`") == [
+        {"assert": {"rid": "bottomBarAppsHub", "exists": True}},
+        {"assert": {"desc": "Create, New", "absent": True}},
+    ]
+
+
+def test_a_predicate_that_never_closes_its_quote_is_refused() -> None:
+    with pytest.raises(UsageError, match="unbalanced"):
+        parse_predicate_terms('desc:"Create, New', where="`success`")

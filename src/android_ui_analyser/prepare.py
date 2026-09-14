@@ -337,6 +337,37 @@ QUESTION_BY_KEY = {question.key: question for question in QUESTIONS}
 _SELECTORS = {"rid": "rid", "id": "rid", "text": "text", "desc": "desc"}
 
 
+def split_predicate_terms(value: str) -> list[str]:
+    """Split on commas, except inside quotes.
+
+    Real labels contain commas - the first app this was used on had an accessibility description
+    of `Create, New` - so a bare split silently turned one assertion into two, the second of them
+    asserting the word "New" somewhere on screen. Quoting the value is the escape hatch:
+    `desc:"Create, New"`.
+    """
+
+    terms: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    for char in str(value or ""):
+        if quote is not None:
+            if char == quote:
+                quote = None
+            else:
+                current.append(char)
+        elif char in "\"'":
+            quote = char
+        elif char == ",":
+            terms.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+    if quote is not None:
+        raise UsageError(f"unbalanced {quote} in predicate {value!r}")
+    terms.append("".join(current).strip())
+    return [term for term in terms if term]
+
+
 def parse_predicate_terms(value: str, *, where: str) -> list[dict[str, Any]]:
     """Turn `rid:hubBadge,!text:New` into assert mappings, with no interpretation.
 
@@ -344,8 +375,7 @@ def parse_predicate_terms(value: str, *, where: str) -> list[dict[str, Any]]:
     has learned one predicate grammar has learned this one.  ``!`` asserts absence.
     """
 
-    terms = [term.strip() for term in str(value or "").split(",")]
-    terms = [term for term in terms if term]
+    terms = split_predicate_terms(value)
     if not terms:
         raise UsageError(f"{where} needs at least one predicate term, e.g. `rid:hubBadge`")
     out: list[dict[str, Any]] = []

@@ -75,6 +75,7 @@ These two become the contract, so they are written in the predicate grammar AUA 
 | `desc:Badge` | that content description exists |
 | `New` | visible text `New` exists |
 | `!rid:hubBadge` | that element is **absent** |
+| `desc:"Create, New"` | a value containing a comma — quote it, or the comma splits it in two |
 
 **AUA will not translate a sentence into an assertion.** A generated oracle that looks right and
 asserts the wrong thing is worse than no contract, so the translation stays mechanical and the
