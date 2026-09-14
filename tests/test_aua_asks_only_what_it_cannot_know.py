@@ -257,3 +257,33 @@ def test_a_label_with_a_comma_in_it_stays_one_assertion() -> None:
 def test_a_predicate_that_never_closes_its_quote_is_refused() -> None:
     with pytest.raises(UsageError, match="unbalanced"):
         parse_predicate_terms('desc:"Create, New', where="`success`")
+
+
+def test_a_loosely_related_note_does_not_stand_in_for_an_answer(tmp_path) -> None:
+    # The first real app this ran against had a note about forced dark theme. A permissive match
+    # let it answer "where is the build", "how do you sign in" and "what is the pre-condition" at
+    # once - which does not merely add noise, it REMOVES those questions, so the run would start
+    # with no APK and nobody would ever have been asked for one.
+    store = AppMemoryStore(make_config(memory={"dir": str(tmp_path)}).memory)
+    store.remember_knowledge(
+        "com.example.app",
+        kind="note",
+        text=(
+            "A fresh install is forced to dark theme on every launch where the session is null. "
+            "Set the theme only after a session exists."
+        ),
+        source="agent",
+    )
+    app_map = store.load("com.example.app") or AppMap(package="com.example.app")
+
+    session = open_preparation(
+        package="com.example.app",
+        goal="the badge shows once on first open after a fresh install",
+        app_map=app_map,
+        session_id="prep-loose",
+    )
+
+    assert session.known == {}
+    assert {"build", "signin", "precondition", "seeding"} <= {
+        question.key for question in outstanding(session)
+    }

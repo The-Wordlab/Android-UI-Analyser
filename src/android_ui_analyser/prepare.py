@@ -499,19 +499,31 @@ def open_preparation(
         created_at=now or datetime.now(UTC).isoformat(),
     )
     if app_map is not None:
-        session.known = recall(app_map, goal=session.goal, context_id=context_id)
+        session.known = recall(app_map, context_id=context_id)
     return session
 
 
+# A question is only treated as already answered when the match is strong: the alias phrase
+# appears verbatim in the item, or every one of its terms does. The first real app this ran
+# against had a note about forced dark theme, and a permissive threshold let it stand as the
+# answer to "where is the build" - which does not merely add noise, it *removes* the question, so
+# the run starts with no APK and nobody was ever asked for one.
+KNOWLEDGE_ANSWERS_THRESHOLD = 40
+
+
 def recall(
-    app_map: AppMap, *, goal: str, context_id: str | None = None, per_question: int = 3
+    app_map: AppMap,
+    *,
+    context_id: str | None = None,
+    per_question: int = 3,
+    threshold: int = KNOWLEDGE_ANSWERS_THRESHOLD,
 ) -> dict[str, list[dict[str, Any]]]:
     """Knowledge already on file that answers a question, keyed by question.
 
-    Matching runs per question rather than once against the goal, because a goal phrase and a
-    question are looking for different things: "badge on first open" should surface the *first
-    open* note whatever else it matches, and should surface the sign-in recipe even though the word
-    never appears in it.
+    Matching runs per question against that question's own aliases, never against the goal.
+    Matching on the goal looked helpful and was not: every item the goal touched attached itself
+    to every question, so one note about theme arrived as the answer to the build, the sign-in and
+    the pre-condition at once.
     """
 
     from .session import relevant_knowledge  # local: session.py is large and rarely needed here
@@ -522,9 +534,13 @@ def recall(
             continue
         hits: list[dict[str, Any]] = []
         seen: set[str] = set()
-        for phrase in (*question.aliases, goal):
+        for phrase in question.aliases:
             for item in relevant_knowledge(
-                app_map, phrase, context_id=context_id, limit=per_question
+                app_map,
+                phrase,
+                context_id=context_id,
+                limit=per_question,
+                threshold=threshold,
             ):
                 if item["id"] in seen:
                     continue
