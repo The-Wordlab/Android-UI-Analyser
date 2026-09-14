@@ -11,6 +11,14 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.21.1] - 2026-09-14
+
+### Fixed
+
+- The Linux release suite no longer assumes delivery order between messages written to one
+  multiprocessing queue by different worker processes. The lock-order regression still proves
+  recovery completes without deadlocking before the ordinary worker is released.
+
 ## [0.21.0] - 2026-09-14
 
 ### Added
@@ -795,5 +803,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.20.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.20.0
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.21.0...HEAD
 [0.21.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.21.0
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.21.1...HEAD
+[0.21.1]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.21.1
