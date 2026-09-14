@@ -95,7 +95,7 @@ class SetupAua:
             return {"ok": True, "action": "screen-record-stop", "path": arguments["path"]}
         if name == "app_launch_and_analyze":
             return copy.deepcopy(self.screen)
-        if name == "flags_apply":
+        if name == "flags_apply_and_analyze":
             return {"ok": True, "verified": True} if self.flags_ok else {"ok": False, "error": {"code": "flag_ignored"}}
         if name == "flow_run":
             return {"ok": True} if self.flow_ok else {"ok": False, "error": {"code": "flow_step_failed"}}
@@ -304,11 +304,11 @@ def test_prelaunch_setup_runs_before_flags_and_product_launch(tmp_path):
     ordered = [
         (name, arguments.get("yaml"))
         for name, arguments in aua.calls
-        if name in {"flow_run", "flags_apply", "app_launch_and_analyze"}
+        if name in {"flow_run", "flags_apply_and_analyze", "app_launch_and_analyze"}
     ]
     assert ordered == [
         ("flow_run", "name: environment"),
-        ("flags_apply", None),
+        ("flags_apply_and_analyze", None),
         ("app_launch_and_analyze", None),
         ("flow_run", "name: login"),
     ]
@@ -334,7 +334,7 @@ def test_the_judge_can_use_a_different_model_from_the_controller(tmp_path):
 def test_unverified_flag_readback_stops_before_product_journey(tmp_path):
     class UnverifiedFlagsAua(SetupAua):
         async def call_tool(self, name: str, arguments: dict):
-            if name == "flags_apply":
+            if name == "flags_apply_and_analyze":
                 self.calls.append((name, arguments))
                 return {"ok": True, "verified": False, "verification_error": "prefs unreadable"}
             return await SetupAua.call_tool(self, name, arguments)
@@ -357,14 +357,14 @@ def test_flags_are_written_verified_and_recorded_before_the_setup_flow(tmp_path)
     result = run(tmp_path, aua, two_step_model(),
                  flags={"simplification_experiment": "a"}, setup_flows=flows)
 
-    applied = aua.named("flags_apply")
+    applied = aua.named("flags_apply_and_analyze")
     assert len(applied) == 1 and applied[0]["verify"] is True and applied[0]["restart"] is True
     written = Path(applied[0]["path"]).read_text(encoding="utf-8")
     assert "app: com.example.fictional" in written
     assert "simplification_experiment: a" in written
     assert result["flag_context"] == {"simplification_experiment": "a"}
     order = [name for name, _ in aua.calls]
-    assert order.index("session_start") < order.index("flags_apply") < order.index("flow_run"), (
+    assert order.index("session_start") < order.index("flags_apply_and_analyze") < order.index("flow_run"), (
         "session bootstrap needs to install the app before flags, and setup needs the flag arm")
 
 
@@ -379,7 +379,7 @@ def test_an_ignored_flag_fails_the_run_instead_of_judging_the_wrong_arm(tmp_path
 def test_no_flags_means_no_flag_call_at_all(tmp_path):
     aua = SetupAua()
     result = run(tmp_path, aua, two_step_model(), setup_flows=[("steps: [login]", {})])
-    assert aua.named("flags_apply") == [] and "flag_context" not in result
+    assert aua.named("flags_apply_and_analyze") == [] and "flag_context" not in result
 
 
 # --- chained setup flows --------------------------------------------------------------
@@ -423,7 +423,7 @@ def test_a_failing_prelaunch_flow_stops_before_flags_and_product_launch(tmp_path
     )
 
     assert "prelaunch setup flow 0 failed" in result["error"]
-    assert all(name not in {"flags_apply", "app_launch_and_analyze"} for name, _ in aua.calls)
+    assert all(name not in {"flags_apply_and_analyze", "app_launch_and_analyze"} for name, _ in aua.calls)
 
 
 # --- authored contract and vision ------------------------------------------------------

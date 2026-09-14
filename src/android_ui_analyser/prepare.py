@@ -852,6 +852,15 @@ def setup_plan(session: PrepareSession) -> list[dict[str, Any]]:
             }
         )
     seeding = session.answers.get("seeding")
+    if seeding == "reinstall":
+        steps.append(
+            {
+                "step": "grant permissions",
+                "detail": "a fresh install has none, and the system dialog reads as a product bug",
+                "calls": ["aua session start --grant-permissions"],
+                "from_answer": "seeding",
+            }
+        )
     if seeding:
         strategy = _STRATEGY_BY_KEY[seeding]
         steps.append(

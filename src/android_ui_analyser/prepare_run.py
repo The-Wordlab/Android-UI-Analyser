@@ -130,11 +130,25 @@ def harness_command(
         argv.append("--fresh")
     if controller.record:
         argv.append("--record")
+    if answers.get("seeding") == "reinstall":
+        # A fresh install has no runtime permissions, and the system dialog that follows looks
+        # exactly like a product failure to anything judging the screen. Granting is reversible
+        # and AUA undoes it; the setup plan says so rather than doing it invisibly.
+        argv.append("--grant-permissions")
     return argv
 
 
-def child_environment(command: Sequence[str], environ: Mapping[str, str]) -> dict[str, str]:
-    """Let the controller import this AUA, not whichever one happens to be on the path."""
+def child_environment(
+    command: Sequence[str], environ: Mapping[str, str], *, output: Path | None = None
+) -> dict[str, str]:
+    """Let the controller import this AUA, and give the run its own cache.
+
+    The cache is where an in-flight screen recording is noted, keyed by serial. Sharing it across
+    runs meant a run that died mid-recording left a marker behind, and the *next* run on a serial
+    from the same small pool was refused with "a screen recording is already in progress" - a
+    healthy run blocked by a dead one. Leases stay host-wide on purpose: they are what stops two
+    workers driving one device, which is exactly the thing that must not be per-run.
+    """
 
     env = dict(environ)
     root = Path(command[-1]).resolve().parents[2] if len(command) > 1 else None
@@ -142,6 +156,8 @@ def child_environment(command: Sequence[str], environ: Mapping[str, str]) -> dic
         existing = env.get("PYTHONPATH", "")
         paths = [str(root / "src"), str(root)]
         env["PYTHONPATH"] = os.pathsep.join([*paths, existing] if existing else paths)
+    if output is not None:
+        env["AUA_CACHE__DIR"] = str((output / ".aua-cache").resolve())
     return env
 
 
@@ -224,7 +240,7 @@ def run_scenario(
     completed = execute(
         argv,
         cwd=str(target),
-        env=child_environment(state["command"], env),
+        env=child_environment(state["command"], env, output=target),
         capture_output=True,
         text=True,
         timeout=timeout_s,

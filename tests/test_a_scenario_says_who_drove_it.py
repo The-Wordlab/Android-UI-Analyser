@@ -160,6 +160,30 @@ def test_the_child_imports_this_aua_rather_than_whichever_is_on_the_path() -> No
     assert env["PYTHONPATH"].split(":")[0].endswith("/src")
 
 
+def test_each_run_gets_its_own_cache_so_a_dead_run_cannot_block_a_healthy_one(tmp_path) -> None:
+    # The cache holds the in-flight screen-recording marker, keyed by serial. Shared, a run that
+    # died mid-recording left one behind and the next run on a recycled serial was refused with
+    # "a screen recording is already in progress" - a healthy run blocked by a dead one.
+    env = child_environment(["python", "run.py"], {}, output=tmp_path / "run-a")
+    assert env["AUA_CACHE__DIR"] == str((tmp_path / "run-a" / ".aua-cache").resolve())
+
+    other = child_environment(["python", "run.py"], {}, output=tmp_path / "run-b")
+    assert other["AUA_CACHE__DIR"] != env["AUA_CACHE__DIR"]
+
+    # Leases are deliberately NOT redirected: host-wide is what stops two workers on one device.
+    assert "AUA_LEASE__REGISTRY_DIR" not in env
+
+
+def test_a_fresh_install_is_granted_its_permissions(tmp_path) -> None:
+    wiped = {**SCENARIO, "answers": {**SCENARIO["answers"], "seeding": "reinstall"}}
+    argv = harness_command(_cfg(), wiped, output=tmp_path, command=["python", "run.py"])
+    assert "--grant-permissions" in argv
+
+    # Seeded in place, the app keeps whatever it had; granting would be an unasked-for change.
+    kept = harness_command(_cfg(), SCENARIO, output=tmp_path, command=["python", "run.py"])
+    assert "--grant-permissions" not in kept
+
+
 @pytest.mark.parametrize("seeding", ["datastore", "reinstall"])
 def test_the_manual_plan_matches_the_seeding_that_was_agreed(tmp_path, seeding: str) -> None:
     scenario = {**SCENARIO, "answers": {**SCENARIO["answers"], "seeding": seeding}}
