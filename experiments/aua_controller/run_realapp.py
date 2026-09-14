@@ -385,8 +385,12 @@ async def run_realapp(
                 "app: " + package + "\nflags:\n"
                 + "".join(f"  {key}: {value}\n" for key, value in flags.items()),
                 encoding="utf-8")
-            applied = await call("flags_apply", {"path": str(flag_file.resolve()), "package": package,
-                                                 "restart": True, "verify": True}, "setup")
+            # The tool is `flags_apply_and_analyze`; `flags_apply` was its name before the rename
+            # and now fails with a usage error, which arrives here as "flags not applied and
+            # verified" - a precondition failure that reads like a product one.
+            applied = await call("flags_apply_and_analyze",
+                                 {"path": str(flag_file.resolve()), "package": package,
+                                  "restart": True, "verify": True}, "setup")
             result["setup"].append({"flags": dict(flags), "flags_ok": applied.get("ok")})
             result["flag_context"] = dict(flags)
             if applied.get("ok") is not True or applied.get("verified") is not True:

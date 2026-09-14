@@ -21,6 +21,7 @@ from android_ui_analyser.prepare_run import (
     harness_command,
     manual_plan,
     run_scenario,
+    verdict_of,
 )
 from conftest import make_config
 
@@ -192,3 +193,65 @@ def test_saying_none_is_not_a_flag(tmp_path) -> None:
     }
     argv = harness_command(_cfg(), scenario, output=tmp_path, command=["python", "run.py"])
     assert "--flags" not in argv and "--setup-flow" not in argv
+
+
+def _drive(tmp_path, result_payload: Any) -> dict[str, Any]:
+    def fake_execute(argv, **kwargs):
+        output = Path(kwargs["cwd"])
+        (output / "result.json").write_text(json.dumps(result_payload))
+
+        class Done:
+            returncode = 0
+            stderr = ""
+
+        return Done()
+
+    return run_scenario(
+        _cfg(),
+        SCENARIO,
+        output=tmp_path / "run",
+        environ={"OPEN_ROUTER_API_KEY": "sk-test"},
+        execute=fake_execute,
+    )
+
+
+def test_the_controllers_own_verdict_shape_is_read_not_crashed_on(tmp_path) -> None:
+    # The controller reports `{"oracle": ..., "verified": ..., "verdict": "pass", "reasons": [...]}`.
+    # Reading that as a bare string threw `unhashable type: 'dict'` AFTER a full, successful device
+    # run - the worst possible place to lose a result.
+    passed = _drive(
+        tmp_path / "a",
+        {"verdict": {"oracle": "aua_session_contract", "verified": True, "verdict": "pass"}},
+    )
+    assert passed["verdict"] == "pass" and passed["ok"]
+
+    unverified = _drive(
+        tmp_path / "b",
+        {
+            "verdict": {
+                "oracle": "none",
+                "verified": False,
+                "verdict": "unverified",
+                "reasons": ["feature flags not applied and verified"],
+            }
+        },
+    )
+    assert unverified["verdict"] == "unverified" and not unverified["ok"]
+    assert unverified["reasons"] == ["feature flags not applied and verified"]
+
+
+def test_a_plain_string_verdict_still_works(tmp_path) -> None:
+    assert _drive(tmp_path, {"verdict": "pass_with_warning"})["ok"]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ({"verdict": "pass"}, "pass"),
+        ({"verdict": {"verdict": "fail", "reasons": ["x"]}}, "fail"),
+        ({"verdict": {"verified": False}}, "unverified"),
+        ({}, "unverified"),
+    ],
+)
+def test_every_verdict_shape_reduces_to_a_word(raw, expected) -> None:
+    assert verdict_of(raw)[0] == expected

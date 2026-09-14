@@ -180,6 +180,26 @@ def manual_plan(scenario: Mapping[str, Any], *, output: Path, reason: str) -> di
     }
 
 
+# The controller reports its verdict as a small object - `{"oracle": ..., "verified": ...,
+# "verdict": "pass", "reasons": [...]}` - not a bare string. Reading it as one crashed the handback
+# with `unhashable type: 'dict'` after a full, successful device run, which is the worst possible
+# place to lose a result.
+PASSING_VERDICTS = frozenset({"pass", "passed", "pass_with_warning", "passed_with_warning"})
+
+
+def verdict_of(result: Mapping[str, Any]) -> tuple[str, list[str]]:
+    """The verdict word and the reasons behind it, whichever shape the controller used."""
+
+    raw = result.get("verdict")
+    if isinstance(raw, Mapping):
+        reasons = raw.get("reasons")
+        return (
+            str(raw.get("verdict") or "unverified"),
+            [str(reason) for reason in reasons] if isinstance(reasons, list) else [],
+        )
+    return (str(raw or "unverified"), [])
+
+
 def run_scenario(
     cfg: Config,
     scenario: Mapping[str, Any],
@@ -231,7 +251,11 @@ def run_scenario(
         extra=[target / "journey.mp4"],
         report=target / "verdict.md",
     )
-    payload["ok"] = payload.get("verdict") in {"passed", "pass", "passed_with_warning"}
+    verdict, reasons = verdict_of(result)
+    payload["verdict"] = verdict
+    payload["ok"] = verdict in PASSING_VERDICTS
+    if reasons:
+        payload["reasons"] = reasons
     payload["driven_by"] = "aua"
     payload["model"] = cfg.controller.model
     payload["scenario"] = scenario.get("name")
