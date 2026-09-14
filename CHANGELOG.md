@@ -11,6 +11,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-09-14
+
 ### Added
 
 - The experimental real-app controller has an opt-in `async-ui-wait` capability. Its bounded
@@ -915,5 +917,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.24.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.24.0
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.24.1...HEAD
 [0.24.1]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.24.1
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.25.0...HEAD
+[0.25.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.25.0
