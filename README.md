@@ -1842,6 +1842,7 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 | `aua proxy start\|stop` / `aua mock …` | HTTPS mitm record/map/replay (`[proxy]` extra) |
 | `aua capture …` | Session capture / export / explain |
 | `aua helper status\|enable\|remove` | Optional on-device helper APK — runs a long flow on the device (rootable targets, off by default) |
+| `aua session start --goal GOAL --contract FILE --apk APP --helper` | One-call DeepSeek helper session: prepare, run ordered checks, apply proof, clean up, return pass/fail; never falls back |
 | `aua helper model-run GOAL --checks FILE` | Experimental DeepSeek V4.1 Flash loop inside the helper; one host handoff, deterministic checks, ephemeral runtime key |
 | `aua dashboard start|status|open|qr|stop|run` | Persistent browser grid, by default open on your network at `http://aua.local/`; narrow it with `--auth`, `--local`, or `--name ""`; QR for phones |
 | `aua logcat` / `aua suite` | Device-clock log windows / scripted suites |

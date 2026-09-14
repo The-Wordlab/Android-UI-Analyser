@@ -195,6 +195,7 @@ PUBLIC_AUA_ARGUMENTS: dict[str, frozenset[str]] = {
             "confirmed",
             "grant_permissions",
             "launch_app",
+            "helper",
         }
     ),
     "session_progress": frozenset({"session_id", "phase_done", "expect_error"}),

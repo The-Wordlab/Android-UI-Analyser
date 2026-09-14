@@ -1,5 +1,27 @@
 # On-device hosted-model runner
 
+The simplest interface is the normal session command with one additional flag:
+
+```bash
+aua config exec --env-file /absolute/project/.env.local --require OPEN_ROUTER_API_KEY -- \
+  aua session start --goal "Reach guest Home and return there" \
+  --contract /absolute/path/scenario.yaml --apk /absolute/path/app.apk --helper
+```
+
+That one call selects and prepares a rootable target, installs and launches the requested APK,
+enables the AUA helper, compiles the authored contract into ordered device-side checks, runs the
+DeepSeek loop, applies its deterministic proof to the normal session phases, restores helper and
+session-owned state, releases the lease, and returns an ordinary pass/fail verdict. MCP callers use
+`session_start(..., contract_yaml: "...", helper: true)` and reach the same Engine implementation.
+There is no fallback to a host agent when the helper run fails.
+
+Helper mode intentionally requires an authored contract. It currently supports checkpoints made
+only from `rid`, `text`, or `desc` assertions with implicit existence, `exists: true`, or
+`absent: true`. Every assertion in a checkpoint must pass on the same helper observation, and
+ordered checkpoints require distinct hierarchy signatures. Counts, indexes, enabled/checked state,
+structural predicates, per-assertion timeouts, and `assert_order` fail before target selection with
+`helper_unsupported_contract`; use the normal harness for those richer proofs.
+
 `aua helper model-run` is an experimental comparison lane for a rootable Android target. After the
 normal AUA session selects, leases and prepares the target, the host performs one helper handoff. The
 helper APK then owns every hierarchy observation, DeepSeek V4.1 Flash request, UI action, settle and

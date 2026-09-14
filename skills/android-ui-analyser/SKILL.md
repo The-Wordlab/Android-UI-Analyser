@@ -29,10 +29,10 @@ Check provenance; it returns AUA's contract verdict, evidence, and `flow_repair`
 1. Start with MCP `session_start(goal="<what must be verified>")`, or
    `aua session start --goal "<goal>"`. It leaves leased targets alone and
    provisions a free instance. `--app` selects; `--apk` installs. Reuse observation
-   and `recommended_call`; `--contract` requires proof.
-2. Prefer verified `goto`, saved `flow`, proven deeplink, then manual action. Arrival requires
-   matching mapped `logical_name`, state and surface. Preview risky routes; goals never
-   authorize destructive, external, settings, data, payment, send or sign-out effects.
+   and `recommended_call`; `--contract` requires proof. Add `--helper` (MCP `helper:true`)
+   for one-call device run+finish with cleanup and no fallback.
+2. Prefer verified `goto`, saved `flow`, proven deeplink, then manual action. Arrival needs
+   matching `logical_name`, state and surface. Goals do not authorize side effects.
 3. Reuse observations; `--no-observe` is rejected. Send reusable `el:` IDs back directly.
    For `id_reusable: false`, pass `selector` fields; `index` selects current position (`aua guide`).
    Filter elements by `clickable`. `--submit` is IME-only:

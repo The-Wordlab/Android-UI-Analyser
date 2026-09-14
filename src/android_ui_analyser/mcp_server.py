@@ -626,6 +626,15 @@ def _tool_definitions() -> list[types.Tool]:
                         "default": True,
                         "description": "Launch the selected package during bootstrap.",
                     },
+                    "helper": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "Run the authored contract end-to-end inside the device helper, "
+                            "then finish the session and restore helper/session state. Requires "
+                            "contract_yaml and never falls back to host-agent execution."
+                        ),
+                    },
                 },
                 "required": ["goal"],
                 "additionalProperties": False,
@@ -3405,6 +3414,8 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
             start_kwargs["provision_target"] = bool(args["provision_target"])
         if "virtual_target" in args:
             start_kwargs["virtual_target"] = args["virtual_target"]
+        if "helper" in args:
+            start_kwargs["helper"] = bool(args["helper"])
         for key in ("contract_yaml", "artifacts_dir", "evidence", "junit", "wait_for_lease_s"):
             if key in args:
                 start_kwargs[key] = args[key]
@@ -3414,7 +3425,8 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 **start_kwargs,
             )
         )
-        engine.capture_service_start(restart=True)
+        if not bool(args.get("helper", False)):
+            engine.capture_service_start(restart=True)
         if isinstance(started, dict) and (
             started.get("virtual_target_started") or started.get("emulator_started")
         ):

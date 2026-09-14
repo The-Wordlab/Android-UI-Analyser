@@ -209,6 +209,7 @@ def _session_start_impl(
     confirmed: bool = False,
     grant_permissions: bool = False,
     launch_app: bool = True,
+    helper: bool = False,
 ) -> dict[str, Any]:
     """Observe once and return the safest goal-specific CLI and MCP next call.
 
@@ -230,6 +231,20 @@ def _session_start_impl(
         if contract_file is not None or contract_yaml is not None
         else None
     )
+    if helper:
+        if contract is None:
+            raise UsageError(
+                "--helper needs an authored session contract",
+                code="helper_unsupported_contract",
+                hint=(
+                    "Pass --contract <scenario.yaml> (or contract_yaml over MCP). A goal alone "
+                    "is not deterministic proof."
+                ),
+            )
+        # Preflight the entire contract before selecting, leasing, provisioning, installing, or
+        # otherwise touching a target. Helper mode is deliberately strict: it never weakens a
+        # rich host assertion into a looser device-side presence check.
+        _helper_contract_checkpoints(contract)
     canonical_contract_yaml = render_session_contract_yaml(contract) if contract else None
     try:
         evidence = validate_session_evidence_mode(evidence)
@@ -256,6 +271,11 @@ def _session_start_impl(
         if needs is not None
         else list(self._lease_needs or [])
     )
+    if helper and "root" not in normalized_needs:
+        # Auto-setup needs a rootable target. Keeping this in the normal target selection input
+        # means every platform adapter gets the same neutral capability request; core never
+        # reaches around it for Android tooling.
+        normalized_needs.append("root")
     animations_requested = bool(
         animations or "animations" in normalized_needs or _ANIMATION_GOAL_RE.search(goal)
     )
@@ -709,6 +729,8 @@ def session_start(self: Engine, *args: Any, **kwargs: Any) -> dict[str, Any]:
         result = _session_start_impl(self, *args, **kwargs)
         self._session_bootstrap_prepared = None
         self._session_bootstrap_animation = None
+        if bool(kwargs.get("helper", False)):
+            return _finish_session_with_helper(self, result)
         return result
     except Exception:
         current_session_id = getattr(self, "_session_id", None)
@@ -728,6 +750,342 @@ def session_start(self: Engine, *args: Any, **kwargs: Any) -> dict[str, Any]:
                 finish_session_state(self.config.cache.dir, state)
             self._session_id = previous_session_id
         raise
+
+
+def _helper_contract_checkpoints(contract: Any) -> list[dict[str, Any]]:
+    """Compile the exact subset of authored assertions the helper can prove.
+
+    Each checkpoint remains ordered and atomic: every assertion in it must hold on the same
+    helper observation, and two ordered checkpoints cannot reuse an unchanged hierarchy. The
+    helper does not currently expose normalized element state or ancestry, so accepting those
+    predicates here would turn a strict authored contract into a different test.
+    """
+
+    compiled: list[dict[str, Any]] = []
+    authored = [*contract.checkpoints]
+    if contract.cleanup is not None:
+        authored.append(contract.cleanup)
+    used_ids: set[str] = set()
+    for checkpoint_index, checkpoint in enumerate(authored):
+        checkpoint_id = getattr(checkpoint, "id", None) or "cleanup"
+        if checkpoint_id in used_ids:
+            suffix = 2
+            while f"{checkpoint_id}_{suffix}" in used_ids:
+                suffix += 1
+            checkpoint_id = f"{checkpoint_id}_{suffix}"
+        used_ids.add(checkpoint_id)
+        checks: list[dict[str, Any]] = []
+        for assertion_index, assertion in enumerate(checkpoint.assertions):
+            if assertion.kind != "assert":
+                raise UsageError(
+                    f"checkpoint {checkpoint_id!r} assertion {assertion_index + 1} uses "
+                    f"unsupported {assertion.kind!r}",
+                    code="helper_unsupported_contract",
+                    hint=(
+                        "Helper sessions currently support only present/absent assertions by "
+                        "rid, text, or desc. Run the contract with the normal harness for richer proof."
+                    ),
+                )
+            selector_values = {
+                "rid": assertion.resource_id,
+                "text": assertion.label,
+                "desc": assertion.content_desc,
+            }
+            selected = [(name, value) for name, value in selector_values.items() if value]
+            predicates = dict(assertion.assertion)
+            unsupported = sorted(set(predicates) - {"exists", "absent"})
+            if (
+                len(selected) != 1
+                or assertion.index is not None
+                or assertion.timeout_ms is not None
+                or unsupported
+            ):
+                details: list[str] = []
+                if len(selected) != 1:
+                    details.append("exactly one rid/text/desc selector is required")
+                if assertion.index is not None:
+                    details.append("index is not supported")
+                if assertion.timeout_ms is not None:
+                    details.append("per-assertion timeout is not supported")
+                if unsupported:
+                    details.append("unsupported predicates: " + ", ".join(unsupported))
+                raise UsageError(
+                    f"checkpoint {checkpoint_id!r} assertion {assertion_index + 1} cannot run "
+                    "inside the helper: " + "; ".join(details),
+                    code="helper_unsupported_contract",
+                    hint=(
+                        "Use only exists:true, absent:true, or an implicit existence assertion; "
+                        "otherwise run the contract with the normal harness."
+                    ),
+                )
+            present = not bool(predicates.get("absent"))
+            selector, value = selected[0]
+            checks.append(
+                {
+                    "id": f"{checkpoint_id}:{assertion_index + 1}",
+                    "selector": selector,
+                    "value": str(value),
+                    "present": present,
+                }
+            )
+        compiled.append(
+            {
+                "id": checkpoint_id,
+                "order": checkpoint_index,
+                "description": checkpoint.description,
+                "checks": checks,
+            }
+        )
+    return compiled
+
+
+def _remaining_helper_checkpoints(state: Any) -> list[dict[str, Any]]:
+    """Return compiled checkpoints from the current incomplete phase onward."""
+
+    all_checkpoints = _helper_contract_checkpoints(state.contract)
+    completed = {phase.id for phase in state.phases if phase.status == "completed"}
+    remaining = [
+        checkpoint for checkpoint in all_checkpoints if checkpoint["id"] not in completed
+    ]
+    # The device receives a self-contained suffix. Its sequence order is local to that payload,
+    # not the original contract index (bootstrap may already have proven one or more phases).
+    return [{**checkpoint, "order": index} for index, checkpoint in enumerate(remaining)]
+
+
+def _apply_helper_checkpoint_proof(
+    self: Engine,
+    state: Any,
+    helper_result: dict[str, Any],
+) -> Any:
+    """Persist ordered device-side deterministic verdicts as session phase proof."""
+
+    from .session import ObservationProvenance, PhaseProof, mark_phase_complete
+
+    raw_results = helper_result.get("checkpoints")
+    if not isinstance(raw_results, list):
+        return state
+    expected_by_id = {
+        checkpoint["id"]: checkpoint for checkpoint in _remaining_helper_checkpoints(state)
+    }
+    by_id = {
+        str(item.get("id")): item
+        for item in raw_results
+        if isinstance(item, dict) and item.get("id")
+    }
+    for phase in state.phases:
+        if phase.status == "completed":
+            continue
+        result = by_id.get(phase.id)
+        expected = expected_by_id.get(phase.id)
+        if not isinstance(result, dict) or result.get("passed") is not True:
+            break
+        assertions = result.get("checks")
+        signature = str(result.get("evidence_signature") or "").strip()
+        package = str(result.get("package") or "").strip()
+        frame = result.get("evidence_frame")
+        if (
+            not isinstance(assertions, list)
+            or len(assertions) != len(phase.assertions)
+            or not all(isinstance(item, dict) and item.get("passed") is True for item in assertions)
+            or not signature
+            or not package
+            or isinstance(frame, bool)
+            or not isinstance(frame, int)
+            or frame < 0
+            or not isinstance(expected, dict)
+            or result.get("order") != expected.get("order")
+        ):
+            break
+        expected_checks = expected.get("checks") or []
+        check_shape_matches = all(
+            actual.get("id") == authored.get("id")
+            and actual.get("selector") == authored.get("selector")
+            and actual.get("value") == authored.get("value")
+            and actual.get("required")
+            == ("present" if authored.get("present") is True else "absent")
+            for actual, authored in zip(assertions, expected_checks, strict=True)
+        )
+        if not check_shape_matches:
+            break
+        proof = PhaseProof(
+            source="helper_contract_checks",
+            command="helper.model-run",
+            verified=True,
+            observation=ObservationProvenance(
+                fingerprint=f"helper:{signature}",
+                source="hierarchy",
+                via="device_agent",
+                device_serial=state.serial,
+                package=package,
+            ),
+            evidence_id=(
+                f"session-{state.session_id}:helper-observation:{frame}:{signature}"
+            ),
+            assertions_verified=len(assertions),
+        )
+        try:
+            state = mark_phase_complete(
+                self.config.cache.dir,
+                state,
+                phase_id=phase.id,
+                evidence=(
+                    f"all {len(assertions)} authored assertions passed inside the helper "
+                    f"on frame {frame} ({signature})"
+                ),
+                _proof=proof,
+            )
+        except ValueError:
+            break
+    return state
+
+
+def _restore_helper_after_session_run(
+    self: Engine,
+    *,
+    serial: str,
+    service_was_pending: bool,
+    package_was_pending: bool,
+) -> list[dict[str, Any]]:
+    """Undo only helper state this one-call session introduced."""
+
+    cleanup: list[dict[str, Any]] = []
+    package_now_pending = self._pending_device_change(
+        "automatic_device_agent_package", serial=serial
+    ) is not None
+    service_now_pending = self._pending_device_change(
+        "device_agent_service", serial=serial
+    ) is not None
+    if package_now_pending and not package_was_pending:
+        result = self.helper_remove()
+        cleanup.append({"action": "helper_remove", "ok": bool(result.get("ok")), "result": result})
+    elif service_now_pending and not service_was_pending:
+        result = self.helper_disable()
+        cleanup.append(
+            {"action": "helper_disable", "ok": bool(result.get("ok")), "result": result}
+        )
+    return cleanup
+
+
+def _finish_session_with_helper(self: Engine, started: dict[str, Any]) -> dict[str, Any]:
+    """Run and finish one strict authored contract through the on-device model helper."""
+
+    session_id = str(started["session_id"])
+    state = self._session_state(session_id)
+    checkpoints = _remaining_helper_checkpoints(state)
+    helper_result: dict[str, Any]
+    helper_cleanup: list[dict[str, Any]] = []
+    cleanup_errors: list[dict[str, str]] = []
+    serial = state.serial
+    service_was_pending = self._pending_device_change(
+        "device_agent_service", serial=serial
+    ) is not None
+    package_was_pending = self._pending_device_change(
+        "automatic_device_agent_package", serial=serial
+    ) is not None
+    try:
+        if checkpoints:
+            # This is an explicit request, so enable/setup is mandatory even when opportunistic
+            # flow offload is disabled in config. The shared device-agent capability owns the
+            # Android implementation and the write-ahead undo records.
+            self.helper_enable()
+            helper_result = self.run_model_on_device(
+                state.goal,
+                [],
+                checkpoints=checkpoints,
+            )
+            state = _apply_helper_checkpoint_proof(self, state, helper_result)
+        else:
+            helper_result = {
+                "ok": True,
+                "verified": True,
+                "ran_on": "device",
+                "stop_reason": "contract_already_satisfied",
+                "checkpoints": [],
+                "metrics": {
+                    "requests": 0,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "reported_usd": 0.0,
+                },
+            }
+    except Exception:
+        with contextlib.suppress(Exception):
+            _restore_helper_after_session_run(
+                self,
+                serial=serial,
+                service_was_pending=service_was_pending,
+                package_was_pending=package_was_pending,
+            )
+        with contextlib.suppress(Exception):
+            self.session_finish(session_id, allow_incomplete=True)
+        raise
+    try:
+        helper_cleanup = _restore_helper_after_session_run(
+            self,
+            serial=serial,
+            service_was_pending=service_was_pending,
+            package_was_pending=package_was_pending,
+        )
+    except Exception as exc:  # the ledger remains for the teardown watchdog
+        cleanup_errors.append({"action": "helper_restore", "message": str(exc)[:300]})
+
+    model_ok = helper_result.get("ok") is True
+    state = self._session_state(session_id)
+    contract_complete = all(phase.status == "completed" for phase in state.phases)
+    finished = self.session_finish(
+        session_id,
+        allow_incomplete=not model_ok or not contract_complete,
+        summary=False,
+    )
+    finish_errors = [
+        item
+        for item in (finished.get("errors") or [])
+        if isinstance(item, dict)
+    ]
+    errors = [*cleanup_errors, *finish_errors]
+    passed = bool(
+        model_ok
+        and contract_complete
+        and finished.get("ok") is True
+        and finished.get("finished") is True
+        and not cleanup_errors
+    )
+    out: dict[str, Any] = {
+        "ok": passed,
+        "action": "session-helper-run",
+        "mode": "helper",
+        "ran_on": "device",
+        "session_id": session_id,
+        "finished": bool(finished.get("finished")) and not cleanup_errors,
+        "terminated": bool(finished.get("terminated")),
+        "verdict": "passed" if passed else "cleanup_failed" if cleanup_errors else "failed",
+        "helper_run": helper_result,
+        "goal_progress": finished.get("goal_progress"),
+        "cleanup": [*helper_cleanup, *(finished.get("cleanup") or [])],
+        "errors": errors,
+        "review": finished.get("review"),
+    }
+    for key in (
+        "app_install",
+        "artifacts_dir",
+        "virtual_target_started",
+        "virtual_target_definition_id",
+        "virtual_target_instance_token",
+    ):
+        if key in started:
+            out[key] = started[key]
+    if not passed:
+        out["code"] = (
+            "helper_cleanup_failed" if cleanup_errors else "helper_contract_failed"
+        )
+        out["hint"] = (
+            "The helper run did not satisfy every authored checkpoint. Inspect helper_run and "
+            "goal_progress; no host-agent fallback was attempted."
+            if not cleanup_errors
+            else "Helper restoration failed; the teardown ledger retained the pending undo."
+        )
+    return out
 
 
 def _phase_recommended_call(

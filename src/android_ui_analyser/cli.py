@@ -4486,6 +4486,13 @@ def session_start_cmd(
         "--launch-app/--no-launch-app",
         help="Launch the selected package during bootstrap.",
     ),
+    helper: bool = typer.Option(
+        False,
+        "--helper",
+        help=(
+            "Run the authored contract end-to-end inside the helper, then finish and clean up."
+        ),
+    ),
 ) -> None:
     """Observe once and return the safest exact CLI and MCP next call.
 
@@ -4529,10 +4536,13 @@ def session_start_cmd(
             confirmed=yes,
             grant_permissions=grant_permissions,
             launch_app=launch_app,
+            helper=helper,
         )
         if isinstance(result, dict) and _OBSERVATION_VIEW is not None:
             result = trim_observation_payload(result, _OBSERVATION_VIEW, fmt=fmt)
         _emit(result, fmt)
+        if helper and isinstance(result, dict) and result.get("ok") is False:
+            raise typer.Exit(1)
 
     _run(ctx, go)
 

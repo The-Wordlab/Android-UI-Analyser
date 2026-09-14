@@ -16,13 +16,15 @@ final class InfoFeature implements Feature {
     /**
      * Bump on any wire-visible change. The host checks it against its own expectation.
      *
+     * <p>4: {@code model.run} added ordered, same-frame authored contract checkpoints.
+     *
      * <p>3: {@code model.run} added the bounded DeepSeek observe/act/verify loop.
      *
      * <p>2: {@code drive.run} became reachable from the host, and its per-step reply gained
      * {@code tried}, {@code last} and {@code outcome}, plus the {@code needs_host} and
      * {@code needs_auth} refusal reasons.
      */
-    static final int PROTOCOL = 3;
+    static final int PROTOCOL = 4;
 
     private final HelperChannel channel;
     private final String versionName;

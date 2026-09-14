@@ -192,6 +192,7 @@ def test_mcp_accepts_intuitive_session_and_network_verification_options() -> Non
 
     assert tools["session_start"].inputSchema["properties"]["headed"]["default"] is False
     assert tools["session_start"].inputSchema["properties"]["animations"]["default"] is False
+    assert tools["session_start"].inputSchema["properties"]["helper"]["default"] is False
     assert tools["session_autopilot"].inputSchema["properties"]["max_steps"]["default"] == 6
     assert tools["session_finish"].inputSchema["properties"]["summary"]["default"] is True
     assert tools["network_status"].inputSchema["properties"]["verify"]["default"] is True

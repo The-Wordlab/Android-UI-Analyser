@@ -206,6 +206,7 @@ class PhaseProof(BaseModel):
         "observation",
         "job_result",
         "contract_assertions",
+        "helper_contract_checks",
     ]
     matched_terms: list[str] = Field(default_factory=list)
     satisfied_requirements: list[PhaseRequirement] = Field(default_factory=list)
@@ -1740,6 +1741,20 @@ def _completion_proof(
         and bool(phase.assertions)
         and structured.assertions_verified == len(phase.assertions)
     )
+    valid_helper_contract_checks = (
+        satisfaction == "fresh_assertions"
+        and phase.proof_mode == "fresh_assertions"
+        and phase.manual_completion_allowed is False
+        and structured.source == "helper_contract_checks"
+        and structured.command == "helper.model-run"
+        and structured.verified is True
+        and structured.observation is not None
+        and bool((structured.observation.fingerprint or "").startswith("helper:"))
+        and structured.observation.via == "device_agent"
+        and bool((structured.evidence_id or "").strip())
+        and bool(phase.assertions)
+        and structured.assertions_verified == len(phase.assertions)
+    )
     required_keys = {_requirement_key(requirement) for requirement in phase.requirements}
     proven_keys = {
         _requirement_key(requirement) for requirement in structured.satisfied_requirements
@@ -1773,6 +1788,7 @@ def _completion_proof(
         or valid_cleanup
         or valid_ui_observation
         or valid_contract_assertions
+        or valid_helper_contract_checks
     ):
         raise ValueError(f"structured proof does not satisfy {phase.id!r}")
     return structured
@@ -1805,11 +1821,16 @@ def mark_phase_complete(
         )
     proof = _completion_proof(current, evidence, _proof)
     contract_fingerprint: str | None = None
-    if proof.source == "contract_assertions":
+    if proof.source in {"contract_assertions", "helper_contract_checks"}:
         assert proof.observation is not None  # established by `_completion_proof`
         if proof.observation.device_serial != state.serial:
             raise ValueError("contract proof belongs to a different session device")
-        evidence_prefix = f"session-{state.session_id}:observation:"
+        evidence_kind = (
+            "helper-observation"
+            if proof.source == "helper_contract_checks"
+            else "observation"
+        )
+        evidence_prefix = f"session-{state.session_id}:{evidence_kind}:"
         if not str(proof.evidence_id).startswith(evidence_prefix):
             raise ValueError("contract proof evidence belongs to a different session")
         contract_fingerprint = proof.observation.fingerprint

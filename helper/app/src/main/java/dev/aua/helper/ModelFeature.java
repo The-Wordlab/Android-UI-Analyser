@@ -16,9 +16,13 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 /**
  * {@code model.run} — keep the complete observe/decide/act/verify loop in the helper process.
@@ -84,8 +88,14 @@ final class ModelFeature implements Feature {
             throw new IllegalArgumentException("this runner is pinned to " + MODEL);
         }
         JSONArray definitions = params.optJSONArray("checks");
-        if (definitions == null || definitions.length() == 0) {
+        JSONArray checkpointDefinitions = params.optJSONArray("checkpoints");
+        if ((definitions == null || definitions.length() == 0)
+                && (checkpointDefinitions == null || checkpointDefinitions.length() == 0)) {
             throw new IllegalArgumentException("model.run needs at least one deterministic check");
+        }
+        if (definitions != null && definitions.length() > 0
+                && checkpointDefinitions != null && checkpointDefinitions.length() > 0) {
+            throw new IllegalArgumentException("model.run accepts checks or checkpoints, not both");
         }
         int maxSteps = clamp(params.optInt("max_steps", DEFAULT_MAX_STEPS), 1, 32);
         long timeLimitMs = clampLong(
@@ -97,7 +107,10 @@ final class ModelFeature implements Feature {
 
         long began = System.currentTimeMillis();
         Metrics metrics = new Metrics(costLimit);
-        List<Check> checks = Check.parse(definitions);
+        List<Check> checks = definitions == null
+                ? new ArrayList<>() : Check.parse(definitions);
+        CheckpointSequence checkpoints = checkpointDefinitions == null
+                ? null : CheckpointSequence.parse(checkpointDefinitions);
         JSONArray actions = new JSONArray();
         JSONArray frames = new JSONArray();
         JSONObject result = new JSONObject()
@@ -110,14 +123,18 @@ final class ModelFeature implements Feature {
         try {
             JSONArray messages = new JSONArray().put(
                     new JSONObject().put("role", "system").put("content", SYSTEM));
-            Observation observation = observe(0, checks);
+            Observation observation = observe(0, checks, checkpoints);
             frames.put(observation.summary);
-            messages.put(new JSONObject().put("role", "user").put(
-                    "content", new JSONObject()
-                            .put("goal", goal)
-                            .put("checks", publicChecks(checks, observation))
-                            .put("observation", observation.modelView)
-                            .toString()));
+            JSONObject initialPrompt = new JSONObject()
+                    .put("goal", goal)
+                    .put("observation", observation.modelView);
+            if (checkpoints == null) {
+                initialPrompt.put("checks", publicChecks(checks, observation));
+            } else {
+                initialPrompt.put("checkpoints", checkpoints.publicState());
+            }
+            messages.put(new JSONObject().put("role", "user")
+                    .put("content", initialPrompt.toString()));
 
             String stopReason = "step_limit";
             String claim = null;
@@ -160,11 +177,12 @@ final class ModelFeature implements Feature {
                         .put("arguments", arguments);
 
                 if ("finish".equals(name)) {
-                    Observation finalObservation = observe(step + 1, checks);
+                    Observation finalObservation = observe(step + 1, checks, checkpoints);
                     observation = finalObservation;
                     frames.put(finalObservation.summary);
                     JSONArray checkResults = checkResults(checks, finalObservation);
-                    boolean verified = allPassed(checkResults);
+                    boolean verified = checkpoints == null
+                            ? allPassed(checkResults) : checkpoints.allPassed();
                     String outcome = arguments.optString("outcome", "");
                     claim = arguments.optString("note", "");
                     action.put("ok", verified).put("outcome", outcome);
@@ -179,8 +197,12 @@ final class ModelFeature implements Feature {
                         break;
                     }
                     toolResult.put("error", "finish_rejected")
-                            .put("checks", checkResults)
                             .put("observation", finalObservation.modelView);
+                    if (checkpoints == null) {
+                        toolResult.put("checks", checkResults);
+                    } else {
+                        toolResult.put("checkpoints", checkpoints.publicState());
+                    }
                 } else {
                     // A model response can take seconds. Refuse a node action when Android changed
                     // underneath it rather than applying an expired n-id to a different screen.
@@ -200,10 +222,14 @@ final class ModelFeature implements Feature {
                         }
                     }
                     metrics.actionMs.put(System.currentTimeMillis() - actionBegan);
-                    observation = observe(step + 1, checks);
+                    observation = observe(step + 1, checks, checkpoints);
                     frames.put(observation.summary);
-                    toolResult.put("observation", observation.modelView)
-                            .put("checks", publicChecks(checks, observation));
+                    toolResult.put("observation", observation.modelView);
+                    if (checkpoints == null) {
+                        toolResult.put("checks", publicChecks(checks, observation));
+                    } else {
+                        toolResult.put("checkpoints", checkpoints.publicState());
+                    }
                     actions.put(action);
                 }
 
@@ -213,9 +239,10 @@ final class ModelFeature implements Feature {
                         .put("content", toolResult.toString()));
             }
 
-            Observation finalObservation = observe(frames.length(), checks);
+            Observation finalObservation = observe(frames.length(), checks, checkpoints);
             JSONArray finalChecks = checkResults(checks, finalObservation);
-            boolean verified = allPassed(finalChecks);
+            boolean verified = checkpoints == null
+                    ? allPassed(finalChecks) : checkpoints.allPassed();
             result.put("ok", verified)
                     .put("verified", verified)
                     .put("stop_reason", stopReason)
@@ -224,6 +251,9 @@ final class ModelFeature implements Feature {
                     .put("actions", actions)
                     .put("frames", frames)
                     .put("final_observation", finalObservation.summary);
+            if (checkpoints != null) {
+                result.put("checkpoints", checkpoints.results());
+            }
         } catch (Exception e) {
             result.put("ok", false)
                     .put("verified", false)
@@ -240,7 +270,8 @@ final class ModelFeature implements Feature {
         return result;
     }
 
-    private Observation observe(int step, List<Check> checks) throws JSONException {
+    private Observation observe(int step, List<Check> checks, CheckpointSequence checkpoints)
+            throws JSONException {
         AccessibilityService service = service();
         AccessibilityNodeInfo root = service.getRootInActiveWindow();
         Projection projection = root == null ? Projection.of(null) : Projection.of(root);
@@ -270,12 +301,30 @@ final class ModelFeature implements Feature {
         for (Check check : checks) {
             check.observe(root, packageName, step);
         }
+        String signatureDigest = digest(signature);
+        if (checkpoints != null) {
+            checkpoints.observe(root, packageName, step, signatureDigest);
+        }
         JSONObject summary = new JSONObject()
                 .put("frame", step)
                 .put("package", packageName)
-                .put("signature", Integer.toHexString(signature.hashCode()))
+                .put("signature", signatureDigest)
                 .put("nodes", nodes.length());
         return new Observation(projection, signature, modelView, summary);
+    }
+
+    private static String digest(String value) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] bytes = digest.digest(value.getBytes(StandardCharsets.UTF_8));
+            StringBuilder out = new StringBuilder(bytes.length * 2);
+            for (byte item : bytes) {
+                out.append(String.format(Locale.ROOT, "%02x", item & 0xff));
+            }
+            return out.toString();
+        } catch (NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException("SHA-256 is unavailable", impossible);
+        }
     }
 
     private JSONObject execute(String name, JSONObject args, Projection projection)
@@ -611,6 +660,7 @@ final class ModelFeature implements Feature {
         boolean everMatched;
         boolean firstMatched;
         boolean violated;
+        boolean currentMatched;
         int evidenceFrame = -1;
         int observations;
 
@@ -648,6 +698,7 @@ final class ModelFeature implements Feature {
 
         void observe(AccessibilityNodeInfo root, String packageName, int frame) {
             boolean matched = matches(root, packageName);
+            currentMatched = matched;
             if (observations == 0) {
                 firstMatched = matched;
             }
@@ -759,6 +810,207 @@ final class ModelFeature implements Feature {
 
         private static String normal(CharSequence value) {
             return value == null ? "" : value.toString().trim().toLowerCase(Locale.ROOT);
+        }
+    }
+
+    /** Ordered authored checkpoints: one full assertion set per distinct hierarchy frame. */
+    private static final class CheckpointSequence {
+        final List<Checkpoint> checkpoints;
+        int active;
+        String lastEvidenceSignature = "";
+
+        CheckpointSequence(List<Checkpoint> checkpoints) {
+            this.checkpoints = checkpoints;
+        }
+
+        static CheckpointSequence parse(JSONArray raw) throws JSONException {
+            List<Checkpoint> parsed = new ArrayList<>();
+            Set<String> checkpointIds = new HashSet<>();
+            Set<String> checkIds = new HashSet<>();
+            for (int i = 0; i < raw.length(); i++) {
+                JSONObject item = raw.getJSONObject(i);
+                String id = item.optString("id", "").trim();
+                String description = item.optString("description", "").trim();
+                int order = item.optInt("order", -1);
+                JSONArray definitions = item.optJSONArray("checks");
+                if (id.isEmpty() || description.isEmpty()) {
+                    throw new JSONException("every checkpoint needs non-empty id and description");
+                }
+                if (order != i) {
+                    throw new JSONException("checkpoint " + id + " has non-contiguous order");
+                }
+                if (!checkpointIds.add(id)) {
+                    throw new JSONException("duplicate checkpoint id " + id);
+                }
+                if (definitions == null || definitions.length() == 0) {
+                    throw new JSONException("checkpoint " + id + " needs at least one check");
+                }
+                List<CheckpointAssertion> assertions = new ArrayList<>();
+                for (int checkIndex = 0; checkIndex < definitions.length(); checkIndex++) {
+                    JSONObject definition = definitions.getJSONObject(checkIndex);
+                    String checkId = definition.optString("id", "").trim();
+                    String selector = definition.optString("selector", "").trim();
+                    String value = definition.optString("value", "").trim();
+                    if (checkId.isEmpty() || value.isEmpty() || !definition.has("present")) {
+                        throw new JSONException(
+                                "every checkpoint check needs non-empty id/value and present");
+                    }
+                    if (!(selector.equals("rid") || selector.equals("text")
+                            || selector.equals("desc") || selector.equals("package"))) {
+                        throw new JSONException("unsupported check selector " + selector);
+                    }
+                    if (!checkIds.add(checkId)) {
+                        throw new JSONException("duplicate checkpoint check id " + checkId);
+                    }
+                    assertions.add(new CheckpointAssertion(
+                            checkId, selector, value, definition.getBoolean("present")));
+                }
+                parsed.add(new Checkpoint(id, order, description, assertions));
+            }
+            return new CheckpointSequence(parsed);
+        }
+
+        void observe(AccessibilityNodeInfo root, String packageName, int frame, String signature) {
+            if (active >= checkpoints.size()) {
+                return;
+            }
+            Checkpoint checkpoint = checkpoints.get(active);
+            boolean completed = checkpoint.observe(
+                    root,
+                    packageName,
+                    frame,
+                    signature,
+                    !signature.equals(lastEvidenceSignature));
+            if (completed) {
+                lastEvidenceSignature = signature;
+                active++;
+            }
+        }
+
+        boolean allPassed() {
+            return active == checkpoints.size();
+        }
+
+        JSONArray publicState() throws JSONException {
+            JSONArray out = new JSONArray();
+            for (int i = 0; i < checkpoints.size(); i++) {
+                out.put(checkpoints.get(i).publicState(i == active));
+            }
+            return out;
+        }
+
+        JSONArray results() throws JSONException {
+            JSONArray out = new JSONArray();
+            for (Checkpoint checkpoint : checkpoints) {
+                out.put(checkpoint.result());
+            }
+            return out;
+        }
+    }
+
+    private static final class Checkpoint {
+        final String id;
+        final int order;
+        final String description;
+        final List<CheckpointAssertion> assertions;
+        boolean passed;
+        int evidenceFrame = -1;
+        String evidenceSignature = "";
+        String packageName = "";
+
+        Checkpoint(String id, int order, String description,
+                List<CheckpointAssertion> assertions) {
+            this.id = id;
+            this.order = order;
+            this.description = description;
+            this.assertions = assertions;
+        }
+
+        boolean observe(AccessibilityNodeInfo root, String observedPackage, int frame,
+                String signature, boolean distinctFrame) {
+            if (passed) {
+                return false;
+            }
+            boolean all = true;
+            for (CheckpointAssertion assertion : assertions) {
+                assertion.observe(root, observedPackage);
+                all &= assertion.currentlyPassed();
+            }
+            if (!all || !distinctFrame) {
+                return false;
+            }
+            passed = true;
+            evidenceFrame = frame;
+            evidenceSignature = signature;
+            packageName = observedPackage;
+            return true;
+        }
+
+        JSONObject publicState(boolean active) throws JSONException {
+            JSONArray checks = new JSONArray();
+            for (CheckpointAssertion assertion : assertions) {
+                checks.put(assertion.publicState());
+            }
+            return new JSONObject()
+                    .put("id", id)
+                    .put("order", order)
+                    .put("description", description)
+                    .put("status", passed ? "completed" : active ? "active" : "pending")
+                    .put("checks", checks);
+        }
+
+        JSONObject result() throws JSONException {
+            JSONArray checks = new JSONArray();
+            for (CheckpointAssertion assertion : assertions) {
+                checks.put(assertion.result(passed));
+            }
+            return new JSONObject()
+                    .put("id", id)
+                    .put("order", order)
+                    .put("passed", passed)
+                    .put("evidence_frame", evidenceFrame < 0 ? JSONObject.NULL : evidenceFrame)
+                    .put("evidence_signature",
+                            evidenceSignature.isEmpty() ? JSONObject.NULL : evidenceSignature)
+                    .put("package", packageName.isEmpty() ? JSONObject.NULL : packageName)
+                    .put("checks", checks);
+        }
+    }
+
+    private static final class CheckpointAssertion {
+        final Check matcher;
+        final boolean present;
+
+        CheckpointAssertion(String id, String selector, String value, boolean present) {
+            this.matcher = new Check(
+                    id, present ? "final_visible" : "final_absent", selector, value);
+            this.present = present;
+        }
+
+        void observe(AccessibilityNodeInfo root, String packageName) {
+            matcher.currentMatched = matcher.matches(root, packageName);
+        }
+
+        boolean currentlyPassed() {
+            return present == matcher.currentMatched;
+        }
+
+        JSONObject publicState() throws JSONException {
+            return new JSONObject()
+                    .put("id", matcher.id)
+                    .put("selector", matcher.selector)
+                    .put("value", matcher.value)
+                    .put("required", present ? "present" : "absent")
+                    .put("currently_matches", matcher.currentMatched)
+                    .put("currently_passes", currentlyPassed());
+        }
+
+        JSONObject result(boolean checkpointPassed) throws JSONException {
+            return new JSONObject()
+                    .put("id", matcher.id)
+                    .put("selector", matcher.selector)
+                    .put("value", matcher.value)
+                    .put("required", present ? "present" : "absent")
+                    .put("passed", checkpointPassed && currentlyPassed());
         }
     }
 }

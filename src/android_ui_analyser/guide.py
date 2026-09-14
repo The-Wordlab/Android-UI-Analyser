@@ -1749,7 +1749,8 @@ def render_markdown(*, brief: bool = False) -> str:
         "aua helper tree                      # read the hierarchy without an adb dump\n"
         "aua helper watch --timeout-ms 5000   # stream screen-change events (with their text)\n"
         'aua helper drive "open display settings"  # device picks its own steps (experimental)\n'
-        "aua helper model-run GOAL --checks checks.json  # DeepSeek loop runs in the APK\n"
+        "aua session start --goal GOAL --contract scenario.yaml --apk app.apk --helper\n"
+        "aua helper model-run GOAL --checks checks.json  # lower-level comparison lane\n"
         "aua helper remove                    # switch off and uninstall\n"
         "```\n"
         "`helper drive` is the odd one out: instead of replaying steps you planned, the device "
@@ -1783,7 +1784,10 @@ def render_markdown(*, brief: bool = False) -> str:
         "Settings > Accessibility, or simply leave it off."
     )
     p.append(
-        "`helper model-run` is the hosted-model experiment: after one handoff the APK performs "
+        "`session start --helper` is the one-call hosted-model path for authored presence/absence "
+        "contracts: it prepares the target, runs the APK loop, applies proof, finishes, and cleans "
+        "up without a host-agent fallback. `helper model-run` is the lower-level comparison lane: "
+        "after one handoff the APK performs "
         "every observe/decide/act/check turn and reports provider usage and latency. Its JSON "
         "checks are the oracle; a model finish claim cannot override them. The provider key is "
         "ephemeral runtime input, never compiled into or persisted by the APK. See "
@@ -2168,10 +2172,10 @@ Check provenance; it returns AUA's contract verdict, evidence, and `flow_repair`
 1. Start with MCP `session_start(goal="<what must be verified>")`, or
    `aua session start --goal "<goal>"`. It leaves leased targets alone and
    provisions a free instance. `--app` selects; `--apk` installs. Reuse observation
-   and `recommended_call`; `--contract` requires proof.
-2. Prefer verified `goto`, saved `flow`, proven deeplink, then manual action. Arrival requires
-   matching mapped `logical_name`, state and surface. Preview risky routes; goals never
-   authorize destructive, external, settings, data, payment, send or sign-out effects.
+   and `recommended_call`; `--contract` requires proof. Add `--helper` (MCP `helper:true`)
+   for one-call device run+finish with cleanup and no fallback.
+2. Prefer verified `goto`, saved `flow`, proven deeplink, then manual action. Arrival needs
+   matching `logical_name`, state and surface. Goals do not authorize side effects.
 3. Reuse observations; `--no-observe` is rejected. Send reusable `el:` IDs back directly.
    For `id_reusable: false`, pass `selector` fields; `index` selects current position (`aua guide`).
    Filter elements by `clickable`. `--submit` is IME-only:

@@ -250,8 +250,9 @@ _ON_DEVICE_MODEL = "deepseek/deepseek-v4.1-flash"
 def run_model_on_device(
     self: Engine,
     goal: str,
-    checks: list[dict[str, Any]],
+    checks: list[dict[str, Any]] | None,
     *,
+    checkpoints: list[dict[str, Any]] | None = None,
     max_steps: int = 16,
     time_limit_s: float = 180.0,
     cost_limit_usd: float = 0.05,
@@ -275,10 +276,12 @@ def run_model_on_device(
             "on-device model run needs a goal",
             hint="Say what the model must reach and supply at least one deterministic check.",
         )
-    if not isinstance(checks, list) or not checks:
+    if checkpoints and checks:
+        raise UsageError("on-device model run accepts checks or checkpoints, not both")
+    if not checkpoints and (not isinstance(checks, list) or not checks):
         raise UsageError("on-device model run needs at least one deterministic check")
     clean_checks: list[dict[str, str]] = []
-    for index, item in enumerate(checks):
+    for index, item in enumerate(checks or []):
         if not isinstance(item, dict):
             raise UsageError(f"model check {index + 1} must be an object")
         check = {name: str(item.get(name) or "").strip() for name in ("id", "kind", "selector", "value")}
@@ -295,6 +298,68 @@ def run_model_on_device(
                 hint="Use rid, text, desc, or package.",
             )
         clean_checks.append(check)
+    clean_checkpoints: list[dict[str, Any]] = []
+    checkpoint_ids: set[str] = set()
+    check_ids: set[str] = set()
+    for checkpoint_index, item in enumerate(checkpoints or []):
+        if not isinstance(item, dict):
+            raise UsageError(f"model checkpoint {checkpoint_index + 1} must be an object")
+        checkpoint_id = str(item.get("id") or "").strip()
+        description = str(item.get("description") or "").strip()
+        order = item.get("order")
+        raw_checks = item.get("checks")
+        if not checkpoint_id or not description:
+            raise UsageError(
+                f"model checkpoint {checkpoint_index + 1} needs non-empty id and description"
+            )
+        if checkpoint_id in checkpoint_ids:
+            raise UsageError(f"duplicate model checkpoint id {checkpoint_id!r}")
+        if isinstance(order, bool) or not isinstance(order, int) or order != checkpoint_index:
+            raise UsageError(
+                f"model checkpoint {checkpoint_id!r} must have contiguous order {checkpoint_index}"
+            )
+        if not isinstance(raw_checks, list) or not raw_checks:
+            raise UsageError(f"model checkpoint {checkpoint_id!r} needs at least one check")
+        checkpoint_ids.add(checkpoint_id)
+        normalized: list[dict[str, Any]] = []
+        for check_index, raw_check in enumerate(raw_checks):
+            if not isinstance(raw_check, dict):
+                raise UsageError(
+                    f"model checkpoint {checkpoint_id!r} check {check_index + 1} must be an object"
+                )
+            check_id = str(raw_check.get("id") or "").strip()
+            selector = str(raw_check.get("selector") or "").strip()
+            value = str(raw_check.get("value") or "").strip()
+            present = raw_check.get("present")
+            if not check_id or not value or not isinstance(present, bool):
+                raise UsageError(
+                    f"model checkpoint {checkpoint_id!r} check {check_index + 1} needs "
+                    "non-empty id/value and boolean present"
+                )
+            if check_id in check_ids:
+                raise UsageError(f"duplicate model checkpoint check id {check_id!r}")
+            if selector not in _MODEL_CHECK_SELECTORS:
+                raise UsageError(
+                    f"model checkpoint check {check_id!r} has unsupported selector {selector!r}",
+                    hint="Use rid, text, desc, or package.",
+                )
+            check_ids.add(check_id)
+            normalized.append(
+                {
+                    "id": check_id,
+                    "selector": selector,
+                    "value": value,
+                    "present": present,
+                }
+            )
+        clean_checkpoints.append(
+            {
+                "id": checkpoint_id,
+                "order": order,
+                "description": description,
+                "checks": normalized,
+            }
+        )
     max_steps = max(1, min(32, int(max_steps)))
     time_limit_s = float(time_limit_s)
     cost_limit_usd = float(cost_limit_usd)
@@ -316,22 +381,26 @@ def run_model_on_device(
     began = time.perf_counter()
     try:
         with self._device_agent_borrowed(purpose="model.run") as loan:
+            request_payload: dict[str, Any] = {
+                # Do not call ``_goal_in_the_apps_words`` here: it reads the foreground
+                # package through ``self.device`` and attaches uiautomator2 immediately
+                # before the helper handoff. The hosted model understands the authored
+                # goal directly; avoiding that optional vocabulary lookup keeps the
+                # accessibility service attached and the one-handoff path genuinely cold.
+                "goal": goal,
+                "model": _ON_DEVICE_MODEL,
+                "max_steps": max_steps,
+                "time_limit_ms": round(time_limit_s * 1000),
+                "cost_limit_usd": cost_limit_usd,
+                "api_key": api_key,
+            }
+            if clean_checkpoints:
+                request_payload["checkpoints"] = clean_checkpoints
+            else:
+                request_payload["checks"] = clean_checks
             result = loan.channel.request(
                 "model.run",
-                {
-                    # Do not call ``_goal_in_the_apps_words`` here: it reads the foreground
-                    # package through ``self.device`` and attaches uiautomator2 immediately
-                    # before the helper handoff. The hosted model understands the authored
-                    # goal directly; avoiding that optional vocabulary lookup keeps the
-                    # accessibility service attached and the one-handoff path genuinely cold.
-                    "goal": goal,
-                    "checks": clean_checks,
-                    "model": _ON_DEVICE_MODEL,
-                    "max_steps": max_steps,
-                    "time_limit_ms": round(time_limit_s * 1000),
-                    "cost_limit_usd": cost_limit_usd,
-                    "api_key": api_key,
-                },
+                request_payload,
                 timeout=time_limit_s + 150.0,
             )
             serial = loan.serial
@@ -342,7 +411,12 @@ def run_model_on_device(
             refused.serial,
             cmd="helper.model-run",
             ok=False,
-            args={"goal": goal, "checks": clean_checks, "max_steps": max_steps},
+            args={
+                "goal": goal,
+                "checks": clean_checks,
+                "checkpoints": clean_checkpoints,
+                "max_steps": max_steps,
+            },
             result={"ok": False, "reason": refused.reason, "detail": refused.detail},
             reason=refused.reason,
             detail=refused.detail,
@@ -373,6 +447,7 @@ def run_model_on_device(
         args={
             "goal": goal,
             "checks": clean_checks,
+            "checkpoints": clean_checkpoints,
             "model": _ON_DEVICE_MODEL,
             "max_steps": max_steps,
             "time_limit_s": time_limit_s,

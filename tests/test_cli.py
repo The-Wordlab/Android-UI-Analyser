@@ -89,6 +89,7 @@ def test_session_start_help_exposes_deterministic_app_bootstrap() -> None:
 
     assert "--grant-permissions" in names
     assert "--no-launch-app" in names
+    assert "--helper" in names
     assert all(param.help for param in start.params if param.opts != ["--help"]), (
         "an undocumented flag is invisible to an agent reading --help"
     )
