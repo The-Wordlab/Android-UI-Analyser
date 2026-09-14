@@ -93,6 +93,12 @@ them cost a complete device run.
 - A contract run that proved nothing now says which checkpoint stayed open, and that an assertion
   whose selector the app never publishes can never match. An unsatisfiable contract and a broken
   feature are the same `unverified` otherwise; finding out which took two device runs.
+- A setup flow the app has outgrown is now a question rather than a silent workaround. `prepare run`
+  returns `flow_repair`: the step that stopped, the screen the app reached instead, the markers that
+  screen does publish, and what to do under each answer - AUA asks whether the change was intended,
+  because a stale flow and a broken feature look identical from here and only the caller knows.
+  It writes nothing: a flow is replayed by every later run, and one rewritten on a guess is worse
+  than one that diverges loudly.
 
 ## [0.20.0] - 2026-09-14
 

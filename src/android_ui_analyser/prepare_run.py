@@ -24,6 +24,7 @@ from typing import Any
 from .config import Config
 from .errors import UsageError
 from .evidence import handback
+from .prepare import flow_repair
 
 CONTROLLER_RELATIVE = Path("experiments") / "aua_controller" / "run_realapp.py"
 
@@ -283,6 +284,18 @@ def run_scenario(
         # from here. Naming the checkpoint that stayed open is what tells the agent whether to
         # re-run or to fix what it wrote.
         payload["checkpoint_not_met"] = dict(unmet)
+    divergences = result.get("setup_divergences")
+    if isinstance(divergences, list) and divergences:
+        # The run worked around a flow that no longer matches the app. Ask the caller which it
+        # was - an intended change, or a defect the flow caught - because only it knows, and
+        # the next run pays for the same divergence until someone answers.
+        answered = scenario.get("answers") or {}
+        path = str(answered.get("setup_flow") or "") or None
+        payload["flow_repair"] = [
+            flow_repair(item, flow_path=path)
+            for item in divergences
+            if isinstance(item, Mapping)
+        ]
     warnings = result.get("warnings")
     if isinstance(warnings, list) and warnings:
         # A run that adapted around a stale precondition reached its verdict by a different

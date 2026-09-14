@@ -230,3 +230,11 @@ handback as `adapted`, and it is in the verdict: a run that worked around a stal
 reach its answer the same way as one that did not, and the agent deciding whether to trust the
 verdict has to see that. What still ends a run before the model is spent: a flag that would not
 apply, and a **prelaunch** flow, which sets up state nothing downstream can observe.
+
+**And the run asks about it.** `flow_repair` comes back beside `adapted`: the step that stopped,
+the screen the app reached instead, the markers that screen *does* publish, and the two answers.
+AUA cannot tell an intended change from a defect — both are "a step did not land" — so it asks the
+agent that wrote the change, and hands over what it would otherwise spend another device run
+rediscovering. Answer it: a divergence nobody answers is paid for again on every later run.
+Nothing is written for you, because a shared flow rewritten on a guess is worse than one that
+diverges loudly.

@@ -592,6 +592,26 @@ async def run_realapp(
                 result.setdefault("warnings", []).append(
                     f"setup flow {index} diverged: " + json.dumps(flow)[:400]
                 )
+                # Keep the divergence in a shape something can act on, not only prose. A stale
+                # flow and a broken app are the same "a step did not land" from here, and the
+                # caller is the only one who knows which - so record what it needs to decide:
+                # the step that stopped, where the app went instead, and what that screen does
+                # publish.
+                failed = flow.get("failed_step")
+                result.setdefault("setup_divergences", []).append({
+                    "setup_flow": index,
+                    "flow": flow.get("flow"),
+                    "code": flow.get("code"),
+                    "step_index": flow.get("step_index"),
+                    "step": (failed or {}).get("display") if isinstance(failed, dict) else None,
+                    "reached_screen": flow.get("current_screen"),
+                    "remaining_steps": [str(s) for s in flow.get("remaining_steps") or []],
+                    "markers_on_the_screen_reached": [
+                        str(e.get("id"))
+                        for e in (flow.get("elements") or [])
+                        if isinstance(e, Mapping) and e.get("id")
+                    ][:12],
+                })
         if flags or setup_flows or observation_frame(launched) is None:
             initial = await call("analyze_screen", {"source": "hierarchy", "no_cache": True}, "setup")
         else:

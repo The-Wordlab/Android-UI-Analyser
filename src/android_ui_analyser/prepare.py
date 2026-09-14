@@ -947,3 +947,47 @@ def prepared(
             "weaken or widen an assertion for you."
         ),
     }
+
+
+def flow_repair(
+    divergence: Mapping[str, Any], *, flow_path: str | None = None
+) -> dict[str, Any]:
+    """What to ask the agent when a setup flow stopped where the app no longer goes.
+
+    A stale flow and a broken feature are the same thing from here - a step that did not land -
+    and only the agent that wrote the change knows which. So AUA asks, with the evidence
+    attached: the step that stopped, the screen the app reached instead, and the markers that
+    screen does publish. Answering "yes, on purpose" is what turns a divergence the next run
+    would pay for again into a flow that replays in seconds.
+
+    Nothing is written here on purpose. A flow is shared by every later run, and one rewritten
+    on a guess is worse than one that keeps diverging loudly: the divergence is at least
+    visible. `docs/lessons.md` records two sessions that concluded a marker was gone when it
+    was not, and the committed flow library came within one edit of being rewritten on it.
+    """
+    step = divergence.get("step")
+    reached = divergence.get("reached_screen") or "a screen it did not name"
+    markers = [str(m) for m in divergence.get("markers_on_the_screen_reached") or []]
+    return {
+        "flow": flow_path or divergence.get("flow"),
+        "stopped_at_step": divergence.get("step_index"),
+        "step": step,
+        "code": divergence.get("code"),
+        "reached_instead": reached,
+        "markers_on_the_screen_reached": markers,
+        "ask": (
+            f"`{step}` did not land; the app was on {reached} instead. Did that change on "
+            "purpose in this build?"
+        ),
+        "if_it_changed_on_purpose": (
+            "update the flow so the next run replays it in seconds instead of paying for the "
+            "divergence again: re-point the step at a marker the new screen publishes (see "
+            "`markers_on_the_screen_reached`), or add the step the app now needs before it. "
+            "Confirm the replacement on a device before saving - a shared flow is replayed by "
+            "every later run."
+        ),
+        "if_it_did_not": (
+            "leave the flow alone: the step that stopped names exactly what the app no longer "
+            "does, which is a defect the flow just caught."
+        ),
+    }
