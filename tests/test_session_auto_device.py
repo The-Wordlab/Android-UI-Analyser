@@ -512,6 +512,110 @@ def test_session_finish_releases_the_automatic_process_lease(
     assert release["ok"] is True
 
 
+def test_session_finish_can_stop_only_the_exact_target_it_started(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    cfg = make_config(
+        cache={"dir": str(tmp_path / "run")},
+        lease={"registry_dir": str(tmp_path / "coordination")},
+    )
+    engine = Engine(cfg)
+    owner = leases.resolve_owner("unattended-runner")
+    serial = "emulator-5554"
+    token = "Pixel_7.p5554@" + "a" * 32
+    assert leases.acquire(cfg.lease.registry_dir, serial, owner=owner)
+    engine._lease_owner = owner
+    engine._lease_owner_resolved = owner
+    engine._lease_serial = serial
+    engine._leased_serial_resolved = (True, serial)
+    state = create_session_state(
+        cfg.cache.dir,
+        owner=str(owner),
+        serial=serial,
+        goal="finish and retire exact target",
+        recommended_kind="manual_action",
+        recommended_cli="aua analyze",
+        network_backup_preexisting=False,
+        network_profile_preexisting=False,
+        virtual_target_started=True,
+        virtual_target_definition_id="Pixel_7",
+        virtual_target_instance_token=token,
+        emulator_started=True,
+    )
+    stopped: list[dict[str, Any]] = []
+
+    def stop_instance(instance_token: str, **kwargs: Any) -> dict[str, Any]:
+        stopped.append({"instance_token": instance_token, **kwargs})
+        return {"ok": True, "stopped_target_ids": [serial]}
+
+    monkeypatch.setattr(engine, "virtual_target_stop_instance", stop_instance)
+    monkeypatch.setattr(engine, "session_review", lambda _session_id: {"ok": True})
+
+    finished = engine.session_finish(
+        state.session_id,
+        allow_incomplete=True,
+        retain_started_target=False,
+    )
+
+    assert finished["ok"] is True
+    assert leases.read_lease(cfg.lease.registry_dir, serial) is None
+    assert stopped == [{
+        "instance_token": token,
+        "owner": owner,
+        "requested_by": "session-finish",
+    }]
+    assert [item["action"] for item in finished["cleanup"]] == [
+        "owned_virtual_target_stop",
+        "lease_release",
+    ]
+    assert finished["cleanup"][0]["virtual_target"]["instance_token"] == token
+
+
+def test_stop_started_target_never_stops_a_reused_target(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    cfg = make_config(
+        cache={"dir": str(tmp_path / "run")},
+        lease={"registry_dir": str(tmp_path / "coordination")},
+    )
+    engine = Engine(cfg)
+    owner = leases.resolve_owner("unattended-runner")
+    serial = "emulator-5554"
+    assert leases.acquire(cfg.lease.registry_dir, serial, owner=owner)
+    engine._lease_owner = owner
+    engine._lease_owner_resolved = owner
+    engine._lease_serial = serial
+    engine._leased_serial_resolved = (True, serial)
+    state = create_session_state(
+        cfg.cache.dir,
+        owner=str(owner),
+        serial=serial,
+        goal="finish reused target",
+        recommended_kind="manual_action",
+        recommended_cli="aua analyze",
+        network_backup_preexisting=False,
+        network_profile_preexisting=False,
+        virtual_target_started=False,
+        emulator_started=False,
+    )
+    monkeypatch.setattr(
+        engine,
+        "virtual_target_stop_instance",
+        lambda *_args, **_kwargs: pytest.fail("a reused target must never be stopped"),
+    )
+    monkeypatch.setattr(engine, "session_review", lambda _session_id: {"ok": True})
+
+    finished = engine.session_finish(
+        state.session_id,
+        allow_incomplete=True,
+        retain_started_target=False,
+    )
+
+    assert finished["ok"] is True
+    assert leases.read_lease(cfg.lease.registry_dir, serial) is None
+    assert all(item["action"] != "owned_virtual_target_stop" for item in finished["cleanup"])
+
+
 def test_daemon_refuses_an_old_runs_cache_before_touching_its_engine(tmp_path: Path) -> None:
     old = Config()
     old.cache.dir = str(tmp_path / "old-run")

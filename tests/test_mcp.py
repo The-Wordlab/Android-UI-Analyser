@@ -195,6 +195,10 @@ def test_mcp_accepts_intuitive_session_and_network_verification_options() -> Non
     assert tools["session_start"].inputSchema["properties"]["helper"]["default"] is False
     assert tools["session_autopilot"].inputSchema["properties"]["max_steps"]["default"] == 6
     assert tools["session_finish"].inputSchema["properties"]["summary"]["default"] is True
+    assert (
+        tools["session_finish"].inputSchema["properties"]["retain_started_target"]["default"]
+        is True
+    )
     assert tools["network_status"].inputSchema["properties"]["verify"]["default"] is True
     assert tools["analyze_screen"].inputSchema["properties"]["no_cache"] == {
         "type": "boolean",
@@ -466,6 +470,50 @@ def test_mcp_finish_keeps_a_warm_handoff_tracked_for_process_exit_cleanup(
         assert {item.target.target_id for item in tracked.values()} == {
             "emulator-5592", "emulator-5594",
         }
+    finally:
+        tracked.clear()
+        tracked.update(previous)
+
+
+def test_mcp_finish_forgets_a_target_that_the_session_stopped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _engine()
+    monkeypatch.setattr(
+        engine,
+        "session_finish",
+        lambda **_kwargs: {
+            "ok": True,
+            "cleanup": [
+                {
+                    "action": "owned_virtual_target_stop",
+                    "virtual_target": {"target_id": "emulator-5592"},
+                    "ok": True,
+                    "result": {"ok": True, "stopped_target_ids": ["emulator-5592"]},
+                }
+            ],
+            "errors": [],
+        },
+    )
+    tracked = _MCP_STARTED_TARGETS
+    previous = dict(tracked)
+    tracked.clear()
+    for serial in ("emulator-5592", "emulator-5594"):
+        _track_mcp_target(engine, {"serial": serial, "instance": f"boot-{serial}"})
+
+    async def run() -> dict[str, object]:
+        server = build_server(engine)
+        async with create_connected_server_and_client_session(server) as client:
+            result = await client.call_tool(
+                "session_finish",
+                {"session_id": "session-1", "retain_started_target": False},
+            )
+            return json.loads(_first_text(result))
+
+    try:
+        output = anyio.run(run)
+        assert output["ok"] is True
+        assert {item.target.target_id for item in tracked.values()} == {"emulator-5594"}
     finally:
         tracked.clear()
         tracked.update(previous)

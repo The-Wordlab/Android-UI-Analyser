@@ -699,9 +699,10 @@ def _tool_definitions() -> list[types.Tool]:
             name="session_finish",
             description=(
                 "Finish the session, restore session-owned reversible state, release its lease, "
-                "keep an AUA-started emulator warm until the lease-gated idle timeout, and return "
-                "a compact final verdict. Set summary=false only when the full review/evidence "
-                "payload is needed."
+                "and return a compact final verdict. By default an AUA-started target remains warm "
+                "until the lease-gated idle timeout; set retain_started_target=false for unattended "
+                "runs that must stop that exact boot at cleanup. Set summary=false only when the "
+                "full review/evidence payload is needed."
             ),
             inputSchema={
                 "type": "object",
@@ -718,6 +719,14 @@ def _tool_definitions() -> list[types.Tool]:
                         "type": "boolean",
                         "default": True,
                         "description": "Compact verdict/cleanup/accounting instead of full detail.",
+                    },
+                    "retain_started_target": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": (
+                            "Keep an AUA-started target warm; false stops only this session's exact "
+                            "boot token after reversible cleanup."
+                        ),
                     },
                 },
                 "additionalProperties": False,
@@ -3451,7 +3460,20 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         }
         if "allow_incomplete" in args:
             finish_kwargs["allow_incomplete"] = bool(args["allow_incomplete"])
-        return _dump(_engine_method(engine, "session_finish")(**finish_kwargs))
+        if "retain_started_target" in args:
+            finish_kwargs["retain_started_target"] = bool(args["retain_started_target"])
+        finished = _engine_method(engine, "session_finish")(**finish_kwargs)
+        if isinstance(finished, dict):
+            stopped_ids = [
+                item.get("virtual_target", {}).get("target_id")
+                for item in finished.get("cleanup") or []
+                if isinstance(item, dict)
+                and item.get("action") == "owned_virtual_target_stop"
+                and item.get("ok") is True
+                and isinstance(item.get("virtual_target"), dict)
+            ]
+            _forget_mcp_targets(engine, [target_id for target_id in stopped_ids if target_id])
+        return _dump(finished)
     if name == "session_candidate_flow":
         return _dump(
             _engine_method(engine, "session_candidate_flow")(

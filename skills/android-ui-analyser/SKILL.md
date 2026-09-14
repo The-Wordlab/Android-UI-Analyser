@@ -15,14 +15,12 @@ description: >-
 Use AUA MCP or CLI (plugin adds no `aua` to `PATH`). Act by ID, never raw `adb`.
 
 Secrets: CLI `aua config exec --env-file PATH --require NAME -- COMMAND ARGS`; MCP
-`credential_request`. Both use private Save/Cancel; never put values in chat or shell-source
-.env. See `docs/credentials.md`.
+`credential_request`. Use private Save/Cancel; never expose values or shell-source .env.
 
 ## Prepare new behavior
 
-For a new claim with no scenario, use MCP `prepare_start` →
-`prepare_answer` → `prepare_run`, or CLI `aua prepare start` → `answer` → `run`.
-Check provenance; it returns AUA's contract verdict, evidence, and `flow_repair`.
+No scenario: MCP `prepare_start` → `prepare_answer` → `prepare_run`; CLI
+`aua prepare start` → `answer` → `run`. Returns contract verdict, evidence and `flow_repair`.
 
 ## Operating loop
 
@@ -48,6 +46,7 @@ Check provenance; it returns AUA's contract verdict, evidence, and `flow_repair`
    On `daemon_outcome_unknown`, wait and inspect; never repeat the action.
 7. End with MCP `session_finish` or CLI `aua session finish` (compact), attaching final
    `phase_done` / `--phase-done` facts; never analyze for bookkeeping.
+   Unattended cleanup: `retain_started_target=false` or `--stop-started-target` stops its exact boot.
    Incomplete finish stays active; `--allow-incomplete` abandons; `--full` gives evidence.
    Use `review.accounting`, not estimates: `top_level_calls` counts caller-visible invocations =
    `lifecycle_calls` + `task_calls`; `journal_events` adds `folded_internal_events` (action-bound wait).

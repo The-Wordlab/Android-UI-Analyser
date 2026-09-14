@@ -678,7 +678,13 @@ def test_realapp_records_setup_failures_and_still_cleans_up(tmp_path):
             return await super().call_tool(name, arguments)
 
     aua = BrokenAua()
-    result = run(tmp_path, aua, FakeModel([], {}), setup_flows=[("steps: []", {})])
+    result = run(
+        tmp_path,
+        aua,
+        FakeModel([], {}),
+        setup_flows=[("steps: []", {})],
+        retain_started_target=False,
+    )
     # The model here answers nothing, so there is no verdict to reach; what this pins is that a
     # diverged setup flow is recorded as an adaptation rather than swallowing the run, and that
     # cleanup still happens either way.
@@ -688,6 +694,7 @@ def test_realapp_records_setup_failures_and_still_cleans_up(tmp_path):
     assert any(item.get("flow_run_ok") is False for item in result["setup"])
     assert aua.calls[-1][0] == "session_finish"
     assert aua.calls[-1][1]["allow_incomplete"] is True
+    assert aua.calls[-1][1]["retain_started_target"] is False
     assert (tmp_path / "run" / "result.json").exists()
 
 

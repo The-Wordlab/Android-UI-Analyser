@@ -786,6 +786,7 @@ async def run_realapp(
     request_timeout_s: float = 90,
     existing_session_id: str | None = None,
     finish_session: bool = True,
+    retain_started_target: bool = True,
     inherited_setup_facts: Sequence[str] = (),
     session_artifacts_dir: str | Path | None = None,
     record_after_host_setup: bool = False,
@@ -1476,11 +1477,14 @@ async def run_realapp(
                     )
         if session_id and finish_session:
             try:
-                finished_session = await call(
-                    "session_finish",
-                    {"session_id": session_id, "allow_incomplete": True, "summary": False},
-                    "cleanup",
-                )
+                finish_arguments: dict[str, Any] = {
+                    "session_id": session_id,
+                    "allow_incomplete": True,
+                    "summary": False,
+                }
+                if not retain_started_target:
+                    finish_arguments["retain_started_target"] = False
+                finished_session = await call("session_finish", finish_arguments, "cleanup")
                 finish_ok = finished_session.get("ok") is True and (
                     finished_session.get("finished") is True
                     or finished_session.get("terminated") is True
@@ -1582,6 +1586,11 @@ def main() -> int:
                         help="Seconds to wait for an existing lease after provisioning fails")
     parser.add_argument("--no-provision", action="store_true",
                         help="Never create a new virtual target; only wait for an existing device")
+    parser.add_argument(
+        "--stop-started-target",
+        action="store_true",
+        help="After cleanup, stop only the exact virtual target boot this run started.",
+    )
     parser.add_argument(
         "--needs",
         action="append",
@@ -1813,6 +1822,7 @@ def main() -> int:
                     judge_max_tokens=args.judge_max_tokens,
                     terminal_claim_limit=args.terminal_claim_limit, no_progress_limit=args.no_progress_limit,
                     max_elements=args.max_elements,
+                    retain_started_target=not args.stop_started_target,
                 )
                 # A run that needed four retries to finish is healthy but degrading, and the
                 # only place that shows is here.

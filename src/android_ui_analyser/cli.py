@@ -4623,6 +4623,14 @@ def session_finish_cmd(
         "--summary/--full",
         help="Return the compact closure verdict (default), or the complete review and evidence.",
     ),
+    retain_started_target: bool = typer.Option(
+        True,
+        "--retain-started-target/--stop-started-target",
+        help=(
+            "Keep an AUA-started target in the warm pool (default), or stop that exact boot after "
+            "cleanup. Reused/pre-existing targets are never stopped."
+        ),
+    ),
 ) -> None:
     """Restore session-owned state and return a compact final verdict; use --full for detail."""
 
@@ -4633,6 +4641,7 @@ def session_finish_cmd(
             session_id=session_id,
             allow_incomplete=allow_incomplete,
             summary=summary,
+            retain_started_target=retain_started_target,
         )
         _emit(result, fmt)
         if isinstance(result, dict) and not result.get("ok", False):

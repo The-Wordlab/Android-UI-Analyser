@@ -201,7 +201,14 @@ PUBLIC_AUA_ARGUMENTS: dict[str, frozenset[str]] = {
     "session_progress": frozenset({"session_id", "phase_done", "expect_error"}),
     "session_review": frozenset({"session_id", "phase_done", "expect_error"}),
     "session_finish": frozenset(
-        {"session_id", "allow_incomplete", "summary", "phase_done", "expect_error"}
+        {
+            "session_id",
+            "allow_incomplete",
+            "summary",
+            "retain_started_target",
+            "phase_done",
+            "expect_error",
+        }
     ),
     "analyze_screen": frozenset(
         {

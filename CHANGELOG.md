@@ -11,6 +11,14 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Added
+
+- `session_finish` can now stop only the exact virtual-target boot created by its session via
+  CLI `--stop-started-target` or MCP `retain_started_target=false`. Reused and pre-existing
+  targets are never stopped, and an unconfirmed stop keeps cleanup unsuccessful.
+- The experimental real-app controller exposes the same opt-in cleanup policy so unattended QA
+  harnesses can guarantee that a run does not leave its AUA-started emulator open.
+
 ## [0.25.0] - 2026-09-14
 
 ### Added

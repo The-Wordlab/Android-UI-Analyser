@@ -173,6 +173,13 @@ retry safely; it does not publish a warm target with dirty state. A failed `sess
 stops only the exact emulator instance that bootstrap created, and explicit emulator-stop or MCP
 process-exit cleanup remain immediate ownership boundaries.
 
+Unattended harnesses that must leave no target open use
+`session finish --stop-started-target` (MCP `retain_started_target=false`). After reversible cleanup,
+AUA stops the exact opaque instance token recorded by that session inside the lease transaction and
+then releases ownership. A reused or pre-existing target has no session-owned boot token and is never
+stopped by this option. Failure to confirm the exact stop keeps cleanup unsuccessful instead of
+reporting a clean finish with a hidden process.
+
 ## Adding a mutation
 
 1. Add to `device_ledger.MUTATION_CATALOGUE`: the kind, the `module.py:function` that performs it,

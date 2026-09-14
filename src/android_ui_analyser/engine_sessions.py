@@ -2008,6 +2008,7 @@ def session_finish(
     *,
     allow_incomplete: bool = False,
     summary: bool = False,
+    retain_started_target: bool = True,
 ) -> dict[str, Any]:
     """Restore only reversible state created after this session started, then review it."""
     from .session import (
@@ -2158,19 +2159,64 @@ def session_finish(
     # A completed session is also the ownership boundary. Release after every device cleanup
     # action, and drop the command fence first so the lease transition can take its exclusive
     # lock. Failed cleanup deliberately keeps the lease, allowing the same process to retry.
-    # A healthy AUA-started virtual target is handed to the warm pool rather than stopped here; its
-    # detached, lease-gated idle watchdog owns eventual retirement.
+    # Interactive/default sessions hand an AUA-started target to the warm pool. Unattended harnesses
+    # can instead retire the exact boot token before releasing ownership; this never targets a
+    # reused device and cannot race a new claimant inside the device transaction.
     lease_serial = getattr(self, "_lease_serial", None)
     if not errors and lease_serial == state.serial and lease_owner:
         from . import leases
 
         self.release_device_use()
-        released = leases.release(
-            self._lease_registry_dir,
-            state.serial,
-            owner=lease_owner,
-            platform=state.platform,
-        )
+        started_target = bool(state.virtual_target_started or state.emulator_started)
+        retired = False
+        released = False
+        if started_target and not retain_started_target:
+            token = state.virtual_target_instance_token
+            if not token:
+                errors.append({
+                    "action": "owned_virtual_target_stop",
+                    "message": "session did not retain the exact started-target instance token",
+                })
+            else:
+                target = TargetRef(state.platform, state.serial)
+                try:
+                    with leases.device_transaction(self._lease_registry_dir, target):
+                        stopped = self.virtual_target_stop_instance(
+                            token,
+                            owner=lease_owner,
+                            requested_by="session-finish",
+                        )
+                        retired = state.serial in stopped.get("stopped_target_ids", [])
+                        if retired:
+                            released = leases.release(
+                                self._lease_registry_dir,
+                                target,
+                                owner=lease_owner,
+                            )
+                    cleanup.append({
+                        "action": "owned_virtual_target_stop",
+                        "virtual_target": {
+                            "target_id": state.serial,
+                            "definition_id": state.virtual_target_definition_id,
+                            "instance_token": token,
+                        },
+                        "ok": retired,
+                        "result": stopped,
+                    })
+                    if not retired:
+                        errors.append({
+                            "action": "owned_virtual_target_stop",
+                            "message": "the exact AUA-started virtual target was not stopped",
+                        })
+                except AuaError as exc:
+                    errors.append({"action": "owned_virtual_target_stop", "message": exc.message})
+        else:
+            released = leases.release(
+                self._lease_registry_dir,
+                state.serial,
+                owner=lease_owner,
+                platform=state.platform,
+            )
         cleanup.append(
             {
                 "action": "lease_release",
@@ -2183,7 +2229,7 @@ def session_finish(
             self._leased_serial_resolved = None
             self._lease_owner_resolved = None
             self._lease_generation_resolved = None
-            if state.virtual_target_started or state.emulator_started:
+            if started_target and retain_started_target:
                 idle_stop_s = self.config.teardown.effective_virtual_target_idle_stop_s()
                 cleanup.append(
                     {
@@ -2205,7 +2251,7 @@ def session_finish(
                         },
                     }
                 )
-        else:
+        elif not errors:
             errors.append(
                 {"action": "lease_release", "message": "session lease was not released"}
             )
@@ -2214,6 +2260,10 @@ def session_finish(
         state = finish_session_state(self.config.cache.dir, state)
     progress = phase_progress(state)
     review = self.session_review(state.session_id)
+    retired_started_target = any(
+        item.get("action") == "owned_virtual_target_stop" and item.get("ok") is True
+        for item in cleanup
+    )
     result = {
         "ok": not errors,
         "session_id": state.session_id,
@@ -2235,8 +2285,12 @@ def session_finish(
         "review": review,
         "hint": (
             (
-                "session completed; session-owned state was restored, the lease was "
-                "released, and any AUA-started virtual target was handed to the warm pool"
+                "session completed; session-owned state was restored, the lease was released, "
+                + (
+                    "and the exact AUA-started virtual target was stopped"
+                    if retired_started_target
+                    else "and any AUA-started virtual target was handed to the warm pool"
+                )
                 if progress["done"]
                 else "session terminated, cleanup completed, and the lease was released; "
                 "unfinished goal phases remain incomplete"

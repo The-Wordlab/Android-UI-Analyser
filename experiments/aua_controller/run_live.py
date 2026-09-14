@@ -278,6 +278,8 @@ def offered_schema(name: str, actual: dict[str, Any]) -> dict[str, Any]:
     omitted = {"phase_done", "expect_error", "with_image", "coords", "observe"}
     if name in {"session_progress", "session_finish"}:
         omitted.update({"session_id", "allow_incomplete", "summary"})
+    if name == "session_finish":
+        omitted.add("retain_started_target")
     schema["properties"] = {
         key: value for key, value in schema.get("properties", {}).items() if key not in omitted
     }
