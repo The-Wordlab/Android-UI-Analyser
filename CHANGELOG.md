@@ -19,8 +19,9 @@ notes, so you can check for a newer version — and read what changed — withou
   end-to-end, and what must be on screen); questions the app map already answers are not asked.
   `prepare answer` records answers across processes, and the last one writes a proof contract,
   saves the scenario, and returns the run command. `prepare show`, `prepare list`, and
-  `prepare run` complete the surface, with matching MCP tools — the first four lease-free, because
-  a conversation about an app should not queue behind a device it does not use yet.
+  `prepare run` complete the surface, with matching MCP tools. Every operation except the run is
+  lease-free because a conversation about an app should not queue behind a device it does not use
+  yet.
 - Every generated checkpoint is a literal translation of exactly one answer, and the `provenance`
   beside it quotes what was said. `success`/`repeat` are AUA predicate terms (`rid:hubBadge`,
   `!text:New`), never prose: a generated oracle that looks right and asserts the wrong thing is
@@ -40,8 +41,12 @@ notes, so you can check for a newer version — and read what changed — withou
   that AUA has not read them for you.
 - New `controller` configuration section (disabled by default) naming the model, judge ladder,
   budget and recording for driven runs.
-- `aua prepare discard <id>` drops an interview that was never finished; saved scenarios are
-  untouched.
+- `aua prepare discard <id>` and MCP `prepare_discard` drop an interview that was never finished;
+  saved scenarios are untouched.
+- New-feature preparation is now visible in the generated Claude/Codex skill, brief guide, root
+  CLI orientation, and MCP initialization instructions. Goal discovery recognizes natural variants
+  such as "newly implemented feature", "appears once", and "stops appearing" instead of requiring
+  one exact trigger phrase.
 
 ### Fixed
 

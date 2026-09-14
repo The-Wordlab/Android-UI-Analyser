@@ -52,11 +52,16 @@ CAPABILITIES: tuple[Capability, ...] = (
         "contract whose every checkpoint quotes the answer it came from, and runs it on request.",
         (
             "prepare",
+            "feature",
             "new feature",
             "just implemented",
             "first run",
             "first open",
             "shows once",
+            "appears once",
+            "appear once",
+            "stops appearing",
+            "not shown again",
             "what should i test",
             "how do i test",
             "scenario",
@@ -359,6 +364,9 @@ def capabilities_for_goal(goal: str, *, limit: int = 8) -> list[dict[str, Any]]:
 def render_mcp_instructions() -> str:
     """Short initialization contract for agents that never see shell help or a skill."""
     return (
+        "For new or just-implemented user-visible behavior with no prepared scenario, call "
+        "prepare_start before leasing a device, answer with prepare_answer, then use prepare_run "
+        "for AUA's contract verdict and evidence. Use prepare_list to reuse an existing scenario. "
         "Start Android work with session_start(goal). It observes once and ranks a verified "
         "goto, matching saved flow, proven deeplink, or manual analyzed action in that order. "
         "Use the returned recommended_call. For multi-phase goals, every result carries "

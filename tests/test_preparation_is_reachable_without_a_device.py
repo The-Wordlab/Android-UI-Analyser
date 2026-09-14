@@ -20,7 +20,13 @@ _HIERARCHY = (
     "</hierarchy>"
 )
 PACKAGE = "com.example.app"
-PREPARE_TOOLS = ("prepare_start", "prepare_answer", "prepare_show", "prepare_list")
+PREPARE_TOOLS = (
+    "prepare_start",
+    "prepare_answer",
+    "prepare_show",
+    "prepare_discard",
+    "prepare_list",
+)
 
 
 def _engine() -> Engine:
@@ -37,6 +43,7 @@ def test_every_step_of_the_conversation_is_published_and_needs_no_lease() -> Non
         "prepare_id",
         "answers",
     }
+    assert set(tools["prepare_discard"].inputSchema["required"]) == {"package", "prepare_id"}
 
 
 def test_the_whole_interview_runs_over_mcp_and_ends_in_a_contract() -> None:
@@ -83,6 +90,18 @@ def test_the_whole_interview_runs_over_mcp_and_ends_in_a_contract() -> None:
     listed = _dispatch(engine, "prepare_list", {"package": PACKAGE})
     assert listed["scenarios"][0]["scenario"] == "the-hub-badge-shows-once-on-first-open"
     assert listed["in_progress"] == []
+
+    abandoned = _dispatch(
+        engine,
+        "prepare_start",
+        {"package": PACKAGE, "goal": "a different unfinished claim"},
+    )
+    dropped = _dispatch(
+        engine,
+        "prepare_discard",
+        {"package": PACKAGE, "prepare_id": abandoned["prepare_id"]},
+    )
+    assert dropped == {"ok": True, "prepare_id": abandoned["prepare_id"], "discarded": True}
 
 
 def test_an_answer_call_with_nothing_in_it_is_refused(monkeypatch: Any) -> None:

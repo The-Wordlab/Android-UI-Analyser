@@ -147,6 +147,12 @@ def test_mcp_lists_core_tools() -> None:
         "knowledge_list",
         "knowledge_add",
         "knowledge_stale",
+        "prepare_start",
+        "prepare_answer",
+        "prepare_show",
+        "prepare_discard",
+        "prepare_list",
+        "prepare_run",
         "capabilities",
         "session_start",
         "session_autopilot",
@@ -263,6 +269,8 @@ def test_mcp_initialization_teaches_goal_first_protocol() -> None:
     instructions = build_server(_engine()).create_initialization_options().instructions
 
     assert instructions is not None
+    assert "prepare_start" in instructions and "prepare_run" in instructions
+    assert instructions.index("prepare_start") < instructions.index("session_start")
     assert "session_start(goal)" in instructions
     assert "goto" in instructions and "matching saved flow" in instructions
     assert "network_offline" in instructions and "never airplane mode" in instructions

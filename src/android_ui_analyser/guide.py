@@ -695,6 +695,12 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
 # feature and exception. The generated skill is smaller again and links here progressively.
 BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
     (
+        "Prepare new user-visible behavior before leasing a device",
+        "New/changed behavior with no scenario: `aua prepare start` or MCP "
+        "`prepare_start`; then `prepare_answer` and `prepare_run`. Returns AUA's contract "
+        "verdict, evidence, and `flow_repair`; list first to reuse. No device before run.",
+    ),
+    (
         "Start from the user's goal",
         'Run `aua session start --goal "<what you must verify>"`. It attaches and leases '
         "automatically, starts/reuses the warm transport, observes once, ranks a verified "
@@ -709,12 +715,9 @@ BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
         "`aua session finish`. It returns a compact verdict by default; incomplete closure exits "
         "nonzero and stays active with an exact next call. Use `--allow-incomplete` only to abandon "
         "the goal, and `--full` or `full_review_call` only for the full timeline. In its review, "
-        "`top_level_calls` counts caller-visible invocations and "
-        "equals `lifecycle_calls` + `task_calls`; `journal_events` additionally includes "
-        "`folded_internal_events` such as an action-bound wait. The embedded snapshot precedes "
-        "the current review/finish "
-        "call, so `reporting_call_included` is false and "
-        "`top_level_calls_including_reporting_call` adds it.",
+        "`top_level_calls` counts caller-visible invocations = `lifecycle_calls` + `task_calls`; "
+        "`journal_events` adds `folded_internal_events` such as an action-bound wait. "
+        "`reporting_call_included` is false; `top_level_calls_including_reporting_call` adds it.",
     ),
     (
         "Attach automatically and clean up only what you started",
@@ -731,9 +734,7 @@ BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
         "Reuse the compact observation returned by session start. Without a goal session, use "
         "`aua --format tsv analyze --fields id,text,rid,clickable`. Each `id` is a stable "
         "handle (`el:...`) you can act on directly; `--rid <resource-id>` still works. "
-        "Handles survive CLI/daemon restarts when the adapter can attest the same target boot. "
-        "Without boot evidence their lifetime is the connected runtime; identical unlabelled "
-        "items may be unresolvable. After state changes, consume the returned observation or use "
+        "After state changes, consume the returned observation or use "
         "`aua resolve <id>`; never replay an old numeric id. Numeric taps and long-presses "
         "refuse to redirect "
         "a caption into a sibling control subtree; name the actual acting control instead. "
@@ -823,6 +824,11 @@ EXIT_CODES: list[tuple[str, str]] = [
 #: the unknown-command error so that one wrong guess produces the orientation the guide would
 #: have given — an agent that never read the manual reads this instead, once, and then knows.
 ORIENTATION: tuple[tuple[str, str], ...] = (
+    (
+        'aua prepare start --goal "<new behavior to prove>" --app <package>',
+        "for a new or just-implemented claim with no prepared scenario; answer once, then run "
+        "AUA's saved contract and evidence",
+    ),
     (
         'aua session start --goal "<what you must verify>"',
         "attach, observe once, and receive the safest exact next call plus cleanup",
@@ -2131,9 +2137,15 @@ def render_skill_markdown() -> str:
 
 Use AUA MCP or CLI (plugin adds no `aua` to `PATH`). Act by ID, never raw `adb`.
 
-Keys: `aua config exec --env-file PATH --require NAME -- COMMAND ARGS` opens a private dialog;
-Save launches once, cancel stops. `config secret` / MCP `credential_request` only saves.
-Never read keys in chat or shell-source .env. See `docs/credentials.md`.
+Secrets: CLI `aua config exec --env-file PATH --require NAME -- COMMAND ARGS`; MCP
+`credential_request`. Both use private Save/Cancel; never put values in chat or shell-source
+.env. See `docs/credentials.md`.
+
+## Prepare new behavior
+
+For a new claim with no scenario, use MCP `prepare_start` →
+`prepare_answer` → `prepare_run`, or CLI `aua prepare start` → `answer` → `run`.
+Check provenance; it returns AUA's contract verdict, evidence, and `flow_repair`.
 
 ## Operating loop
 
@@ -2146,12 +2158,10 @@ Never read keys in chat or shell-source .env. See `docs/credentials.md`.
    authorize destructive, external, settings, data, payment, send or sign-out effects.
 3. Reuse observations; `--no-observe` is rejected. Send reusable `el:` IDs back directly.
    For `id_reusable: false`, pass `selector` fields; `index` selects current position (`aua guide`).
-   Filter `observation.elements` by `clickable`, `checked` or `scrollable`. `--submit` is IME-only:
+   Filter elements by `clickable`. `--submit` is IME-only:
    check `submitted`; if false, use its `recommended_call` or `--send rid:<control>`, never retype.
    Check `observation_contract`: `action_succeeded`, `evidence_fresh`, `elements_available`,
    `readiness`. Only `ready` confirms arrival; `not_checked` proves none.
-   Inspect `unconfirmed`/`unmet`; check `reusable` before using controls.
-   Inspect `image_path`/`meta.raw_image`; don't recapture. Actions/waits share `--with-image [PATH]`.
 4. Fold arrival into actions: `--until 'rid:resultCard,!text:Loading'`. On `settled-unmet`,
    inspect evidence and correct the predicate; never repeat the action.
    `await-and-analyze` for absence-only checks; `back-until-and-analyze` for nested returns.

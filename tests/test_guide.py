@@ -331,6 +331,19 @@ def test_compact_skill_works_with_plugin_mcp_without_a_global_cli() -> None:
     assert "plugin adds no `aua` to `PATH`" in skill
 
 
+def test_new_feature_preparation_is_visible_before_device_work() -> None:
+    brief = guide.render_brief()
+    skill = guide.render_skill_markdown()
+    cli_help = runner.invoke(app, ["--help"])
+
+    for text in (brief, skill):
+        assert "prepare_start" in text
+        assert "prepare_run" in text
+        assert "contract verdict" in text
+    assert cli_help.exit_code == 0
+    assert "aua prepare start" in cli_help.stdout
+
+
 def test_codex_metadata_and_bundle_share_the_canonical_skill(tmp_path: Path) -> None:
     root = tmp_path / "android-ui-analyser"
     written = guide.emit_skill_bundle(root)

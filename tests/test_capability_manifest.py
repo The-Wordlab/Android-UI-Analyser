@@ -36,6 +36,10 @@ def test_first_manifest_cli_namespace_exists_in_help() -> None:
 
 def test_mcp_initialization_teaches_the_same_priority_and_cleanup() -> None:
     instructions = render_mcp_instructions()
+    assert "prepare_start" in instructions
+    assert "prepare_answer" in instructions
+    assert "prepare_run" in instructions
+    assert instructions.index("prepare_start") < instructions.index("session_start")
     assert instructions.index("goto") < instructions.index("matching saved flow")
     assert instructions.index("matching saved flow") < instructions.index("deeplink")
     assert "network_restore or session_finish" in instructions

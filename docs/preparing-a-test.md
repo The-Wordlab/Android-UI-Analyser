@@ -41,8 +41,9 @@ aua   → writes the contract, saves the scenario, remembers the durable facts,
 next time → aua prepare run badge-shows-once --app com.example.app
 ```
 
-Over MCP the same five steps are `prepare_start`, `prepare_answer`, `prepare_show`,
-`prepare_list`, `prepare_run`. The first four need no device.
+Over MCP the same six operations are `prepare_start`, `prepare_answer`, `prepare_show`,
+`prepare_discard`, `prepare_list`, and `prepare_run`. Every operation except `prepare_run` needs
+no device.
 
 ---
 
@@ -208,6 +209,9 @@ it, and AUA does not pretend to have done that for you.
 | `aua prepare list --app <pkg>` | Interviews in flight and scenarios already prepared |
 | `aua prepare discard <id> --app <pkg>` | Drop an unfinished interview; saved scenarios are untouched |
 | `aua prepare run <scenario> --app <pkg>` | Run it, driven by AUA or by you |
+
+The MCP names match each row: `prepare_start`, `prepare_answer`, `prepare_show`,
+`prepare_discard`, `prepare_list`, and `prepare_run`.
 
 ## Two answers that decide whether a run works at all
 

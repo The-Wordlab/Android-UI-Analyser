@@ -2529,6 +2529,22 @@ def _tool_definitions() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="prepare_discard",
+            description=(
+                "Drop an unfinished preparation interview. Saved scenarios are untouched; "
+                "returns whether an in-progress interview was removed."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "package": {"type": "string"},
+                    "prepare_id": {"type": "string"},
+                },
+                "required": ["package", "prepare_id"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
             name="prepare_list",
             description="Interviews in flight and scenarios already prepared for this app.",
             inputSchema={
@@ -3990,6 +4006,7 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         "prepare_start",
         "prepare_answer",
         "prepare_show",
+        "prepare_discard",
         "prepare_list",
         "prepare_run",
     }:
@@ -4007,6 +4024,10 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
             )
         if name == "prepare_show":
             return prepare_store.show(store, package=package, prepare_id=str(args["prepare_id"]))
+        if name == "prepare_discard":
+            prepare_id = str(args["prepare_id"])
+            dropped = prepare_store.PrepareStore(store).discard_session(package, prepare_id)
+            return {"ok": True, "prepare_id": prepare_id, "discarded": dropped}
         if name == "prepare_list":
             return prepare_store.catalogue(store, package=package)
         if name == "prepare_run":
@@ -4491,6 +4512,7 @@ _LEASE_FREE_TOOLS = frozenset(
         "knowledge_list",
         "knowledge_stale",
         "prepare_answer",
+        "prepare_discard",
         "prepare_list",
         "prepare_show",
         "prepare_start",

@@ -14,9 +14,15 @@ description: >-
 
 Use AUA MCP or CLI (plugin adds no `aua` to `PATH`). Act by ID, never raw `adb`.
 
-Keys: `aua config exec --env-file PATH --require NAME -- COMMAND ARGS` opens a private dialog;
-Save launches once, cancel stops. `config secret` / MCP `credential_request` only saves.
-Never read keys in chat or shell-source .env. See `docs/credentials.md`.
+Secrets: CLI `aua config exec --env-file PATH --require NAME -- COMMAND ARGS`; MCP
+`credential_request`. Both use private Save/Cancel; never put values in chat or shell-source
+.env. See `docs/credentials.md`.
+
+## Prepare new behavior
+
+For a new claim with no scenario, use MCP `prepare_start` →
+`prepare_answer` → `prepare_run`, or CLI `aua prepare start` → `answer` → `run`.
+Check provenance; it returns AUA's contract verdict, evidence, and `flow_repair`.
 
 ## Operating loop
 
@@ -29,12 +35,10 @@ Never read keys in chat or shell-source .env. See `docs/credentials.md`.
    authorize destructive, external, settings, data, payment, send or sign-out effects.
 3. Reuse observations; `--no-observe` is rejected. Send reusable `el:` IDs back directly.
    For `id_reusable: false`, pass `selector` fields; `index` selects current position (`aua guide`).
-   Filter `observation.elements` by `clickable`, `checked` or `scrollable`. `--submit` is IME-only:
+   Filter elements by `clickable`. `--submit` is IME-only:
    check `submitted`; if false, use its `recommended_call` or `--send rid:<control>`, never retype.
    Check `observation_contract`: `action_succeeded`, `evidence_fresh`, `elements_available`,
    `readiness`. Only `ready` confirms arrival; `not_checked` proves none.
-   Inspect `unconfirmed`/`unmet`; check `reusable` before using controls.
-   Inspect `image_path`/`meta.raw_image`; don't recapture. Actions/waits share `--with-image [PATH]`.
 4. Fold arrival into actions: `--until 'rid:resultCard,!text:Loading'`. On `settled-unmet`,
    inspect evidence and correct the predicate; never repeat the action.
    `await-and-analyze` for absence-only checks; `back-until-and-analyze` for nested returns.
