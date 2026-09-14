@@ -334,7 +334,7 @@ QUESTION_BY_KEY = {question.key: question for question in QUESTIONS}
 # --------------------------------------------------------------------------- answer validation
 
 
-_PREDICATE_TERM = re.compile(r"\A(!?)(?:(rid|id|text|desc):)?(.+)\Z", re.DOTALL)
+_SELECTORS = {"rid": "rid", "id": "rid", "text": "text", "desc": "desc"}
 
 
 def parse_predicate_terms(value: str, *, where: str) -> list[dict[str, Any]]:
@@ -350,14 +350,20 @@ def parse_predicate_terms(value: str, *, where: str) -> list[dict[str, Any]]:
         raise UsageError(f"{where} needs at least one predicate term, e.g. `rid:hubBadge`")
     out: list[dict[str, Any]] = []
     for term in terms:
-        match = _PREDICATE_TERM.fullmatch(term)
-        if match is None:  # pragma: no cover - the pattern accepts any non-empty term
-            raise UsageError(f"{where} could not read the term {term!r}")
-        negated, selector, body = match.group(1), match.group(2) or "text", match.group(3).strip()
-        if not body:
-            raise UsageError(f"{where} term {term!r} has no selector value")
-        key = "rid" if selector in {"rid", "id"} else selector
-        assertion: dict[str, Any] = {key: body}
+        negated = term.startswith("!")
+        body = term[1:].strip() if negated else term
+        head, sep, tail = body.partition(":")
+        selector = _SELECTORS.get(head.strip().casefold()) if sep else None
+        if selector is not None:
+            # `rid:` with nothing after it used to fall through to "text matching the literal
+            # string rid:", which is a contract that passes on the wrong screen and never says why.
+            if not tail.strip():
+                raise UsageError(f"{where} term {term!r} names a selector with no value")
+            assertion: dict[str, Any] = {selector: tail.strip()}
+        else:
+            if not body.strip():
+                raise UsageError(f"{where} term {term!r} has no selector value")
+            assertion = {"text": body.strip()}
         assertion["absent" if negated else "exists"] = True
         out.append({"assert": assertion})
     return out
@@ -607,4 +613,190 @@ def interview(session: PrepareSession) -> dict[str, Any]:
         ).strip()
         if pending
         else None,
+    }
+
+
+# --------------------------------------------------------------------------- what comes out
+
+
+_SLUG = re.compile(r"[^a-z0-9]+")
+
+
+def scenario_name(goal: str, *, limit: int = 48) -> str:
+    """A stable file-safe name for this claim, so re-running it is a lookup rather than a rewrite."""
+
+    slug = _SLUG.sub("-", str(goal or "").casefold()).strip("-")[:limit].strip("-")
+    return slug or "scenario"
+
+
+def _checkpoint(
+    *, ident: str, description: str, answer_key: str, terms: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    assertions = parse_predicate_terms(terms, where=f"`{answer_key}`")
+    checkpoint = {"id": ident, "description": description, "assertions": assertions}
+    trace = {
+        "checkpoint": ident,
+        "from_answer": answer_key,
+        "you_said": terms,
+        "asserts": assertions,
+    }
+    return checkpoint, trace
+
+
+def build_contract_document(session: PrepareSession) -> dict[str, Any]:
+    """The contract YAML document, as a plain mapping, with nothing inferred.
+
+    Every checkpoint comes from exactly one answer, and the provenance returned beside it names
+    which.  That pairing is the whole safety story here: a generated contract that looks right and
+    asserts the wrong thing is worse than no contract, so the caller is always shown the
+    translation and can reject it before a device is touched.
+    """
+
+    if "success" not in session.answers:
+        raise UsageError(
+            "no contract yet: `success` is unanswered",
+            hint="Answer it with predicate terms, e.g. --answer success=rid:hubBadge,text:New",
+        )
+    checkpoints: list[dict[str, Any]] = []
+    provenance: list[dict[str, Any]] = []
+
+    first, trace = _checkpoint(
+        ident="observed",
+        description=session.goal,
+        answer_key="success",
+        terms=session.answers["success"],
+    )
+    checkpoints.append(first)
+    provenance.append(trace)
+
+    if "repeat" in session.answers:
+        second, trace = _checkpoint(
+            ident="not_repeated",
+            description=f"After the first time: {session.goal}",
+            answer_key="repeat",
+            terms=session.answers["repeat"],
+        )
+        checkpoints.append(second)
+        provenance.append(trace)
+
+    return {
+        "document": {"version": 1, "checkpoints": checkpoints},
+        "provenance": provenance,
+    }
+
+
+def render_contract_yaml(session: PrepareSession) -> str:
+    """Canonical contract YAML, parsed back through the authored schema before it is returned."""
+
+    import yaml as yaml_lib
+
+    from .session_contracts import parse_session_contract_yaml, render_session_contract_yaml
+
+    document = build_contract_document(session)["document"]
+    draft = yaml_lib.safe_dump(document, sort_keys=False, allow_unicode=True, width=100)
+    # Round-trip through the real parser rather than trusting the mapping we just built: the
+    # contract schema is the authority on what an assertion may say, and a generator that emits
+    # something it would reject should fail here, not at session start with a device leased.
+    return render_session_contract_yaml(parse_session_contract_yaml(draft))
+
+
+def setup_plan(session: PrepareSession) -> list[dict[str, Any]]:
+    """The ordered, concrete steps that put the device where the contract can be judged."""
+
+    steps: list[dict[str, Any]] = []
+    build = session.answers.get("build")
+    if build:
+        steps.append(
+            {
+                "step": "install",
+                "detail": f"install and launch {build}",
+                "from_answer": "build",
+            }
+        )
+    seeding = session.answers.get("seeding")
+    if seeding:
+        strategy = _STRATEGY_BY_KEY[seeding]
+        steps.append(
+            {
+                "step": "seed",
+                "detail": strategy.summary,
+                "calls": list(strategy.calls),
+                "precondition": session.answers.get("precondition"),
+                "reversible": strategy.reversible,
+                "proves_nothing_about": strategy.proves_nothing_about,
+                "from_answer": "seeding",
+            }
+        )
+    signin = session.answers.get("signin", "").strip()
+    if signin and signin.lower() not in {"none", "not needed", "n/a"}:
+        steps.append({"step": "sign in", "detail": signin, "from_answer": "signin"})
+    restore = session.answers.get("restore", "").strip()
+    if restore and restore.lower() not in {"none", "nothing", "n/a"}:
+        steps.append({"step": "restore", "detail": restore, "from_answer": "restore"})
+    return steps
+
+
+def knowledge_writes(session: PrepareSession) -> list[dict[str, Any]]:
+    """Answers worth keeping about the app, so the next agent is not asked them again.
+
+    Only facts about the app are durable.  The scope of one test and its expected screen are not
+    facts about the app, and remembering them would quietly answer a question the next agent has
+    every right to answer differently.
+    """
+
+    out: list[dict[str, Any]] = []
+    for question in QUESTIONS:
+        if not question.durable or question.key not in session.answers:
+            continue
+        if question.key in session.known:
+            continue  # already on file; re-adding would only duplicate it
+        out.append(
+            {
+                "kind": question.knowledge_kind,
+                "name": f"{question.key}_{session.package.rsplit('.', 1)[-1]}",
+                "text": session.answers[question.key],
+                "aliases": list(question.aliases),
+            }
+        )
+    return out
+
+
+def prepared(
+    session: PrepareSession,
+    *,
+    contract_path: str | None = None,
+    artifacts_dir: str | None = None,
+) -> dict[str, Any]:
+    """Everything the calling agent needs to run this claim, and to run it again later."""
+
+    built = build_contract_document(session)
+    name = scenario_name(session.goal)
+    apk = session.answers.get("build")
+    command = ["aua session start", f"--goal {session.goal!r}"]
+    if contract_path:
+        command.append(f"--contract {contract_path}")
+    if apk:
+        command.append(f"--apk {apk}")
+    command.append("--fresh --yes" if session.answers.get("seeding") == "reinstall" else "")
+    if artifacts_dir:
+        command.append(f"--artifacts-dir {artifacts_dir} --evidence all")
+    return {
+        "ok": True,
+        "prepare_id": session.id,
+        "scenario": name,
+        "package": session.package,
+        "goal": session.goal,
+        "scope": session.answers.get("scope", "ui"),
+        "contract_yaml": render_contract_yaml(session),
+        "contract_path": contract_path,
+        "provenance": built["provenance"],
+        "setup": setup_plan(session),
+        "remembering": knowledge_writes(session),
+        "run": " ".join(part for part in command if part),
+        "run_again": f"aua prepare run {name} --app {session.package}",
+        "confirm": (
+            "Read `provenance`: every checkpoint is a literal translation of one answer. "
+            "If a checkpoint does not say what you meant, re-answer that question - AUA will not "
+            "weaken or widen an assertion for you."
+        ),
     }

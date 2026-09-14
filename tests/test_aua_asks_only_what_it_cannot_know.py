@@ -231,3 +231,11 @@ def test_a_prepare_session_survives_a_round_trip_and_rejects_a_foreign_version()
     assert restored.to_dict() == session.to_dict()
     with pytest.raises(UsageError, match="unsupported prepare session version"):
         PrepareSession.from_dict({**session.to_dict(), "schema_version": 99})
+
+
+@pytest.mark.parametrize("terms", ["rid:", "!text:  ", "desc:,text:New"])
+def test_a_selector_with_no_value_is_refused_rather_than_read_as_text(terms: str) -> None:
+    # `rid:` once fell through to "text matching the literal string rid:", which is an assertion
+    # that passes on the wrong screen and never explains itself.
+    with pytest.raises(UsageError, match="selector with no value"):
+        parse_predicate_terms(terms, where="`success`")
