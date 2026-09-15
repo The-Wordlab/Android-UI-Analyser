@@ -104,3 +104,54 @@ def test_no_serial_still_works_for_a_single_target_host(monkeypatch):
     _logcat(monkeypatch, lines=["D/Net: " + SECRET])
     assert capture_setup_proof("aua", PROOF)["verified"] is True
     assert "--serial" not in seen_argv[0]
+
+
+def test_evidence_that_arrives_a_moment_late_is_still_caught(monkeypatch):
+    """The proving line is written once, moments after the step that caused it.
+
+    A one-shot look taken the instant a setup flow returns can miss it while the response is
+    still in flight -- observed 2026-09-15, where the line was present and stable when read by
+    hand but absent to the capture.
+    """
+    from experiments.aua_controller import run_realapp
+
+    calls = {"n": 0}
+
+    def fake_run(argv, **kwargs):
+        calls["n"] += 1
+        lines = ["D/Net: " + SECRET] if calls["n"] >= 3 else []
+        return subprocess.CompletedProcess(argv, 0, json.dumps({"lines": lines}), "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(run_realapp.time, "sleep", lambda _s: None)
+
+    assert capture_setup_proof("aua", PROOF)["verified"] is True
+    assert calls["n"] == 3, "it must keep looking until the evidence appears"
+
+
+def test_polling_stops_once_it_is_proved(monkeypatch):
+    from experiments.aua_controller import run_realapp
+    calls = {"n": 0}
+
+    def fake_run(argv, **kwargs):
+        calls["n"] += 1
+        return subprocess.CompletedProcess(argv, 0, json.dumps({"lines": ["D/Net: " + SECRET]}), "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(run_realapp.time, "sleep", lambda _s: None)
+    capture_setup_proof("aua", PROOF)
+    assert calls["n"] == 1, "a proved precondition must not be re-read"
+
+
+def test_an_unreadable_log_does_not_spin(monkeypatch):
+    from experiments.aua_controller import run_realapp
+    calls = {"n": 0}
+
+    def fake_run(argv, **kwargs):
+        calls["n"] += 1
+        raise OSError("aua is not installed")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(run_realapp.time, "sleep", lambda _s: None)
+    assert capture_setup_proof("aua", PROOF) is None
+    assert calls["n"] == 1, "an unreadable log is terminal, not something to retry"

@@ -728,6 +728,22 @@ def capture_setup_proof(
     must never be mistaken for a precondition that failed, and must never invent one that held.
     """
     _, pattern, value = setup_proof
+    # The evidence is usually a single line, written once, moments after the step that caused it.
+    # A single immediate look can miss it by a second while the response is still in flight --
+    # measured on 2026-09-15, where the line was present and stable when read by hand but absent
+    # to a one-shot capture taken the instant a login flow returned. Poll briefly instead.
+    deadline = time.monotonic() + 12
+    outcome: dict[str, Any] | None = None
+    while True:
+        outcome = _read_setup_proof(aua_command, pattern, value, serial)
+        if outcome is None or outcome.get("verified") or time.monotonic() >= deadline:
+            return outcome
+        time.sleep(2)
+
+
+def _read_setup_proof(
+    aua_command: str, pattern: str, value: str, serial: str | None
+) -> dict[str, Any] | None:
     try:
         # Filter on the device. Pulling the whole buffer and searching here timed out on a
         # longer run -- an 11-criterion scenario produced enough log to exceed the budget, and
