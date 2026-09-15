@@ -64,6 +64,12 @@ from android_ui_analyser.errors import UsageError
 FORMAT = "aua-realapp-run-v1"
 CONTROLLER_TOOLS = (
     "analyze_screen", "tap_and_analyze", "long_press_and_analyze", "input_and_analyze",
+    # scroll sits beside swipe because the engine refuses to save a flow containing a raw swipe:
+    # "swipe capture omits coordinates/container/percentage; author `scroll: up` by hand instead -
+    # a scroll names its container and replays, where a raw swipe is positional" (flows.py). With
+    # swipe as the only way to move the screen, a controller could only produce routes this engine
+    # would not save, so any journey needing to scroll could never leave a replayable flow behind.
+    "scroll_and_analyze",
     "swipe_and_analyze", "back_gesture_and_analyze", "wait_and_analyze",
     "key_and_analyze", "session_progress", "session_finish",
 )
