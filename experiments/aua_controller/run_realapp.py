@@ -22,6 +22,7 @@ import copy
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -708,6 +709,44 @@ seven seconds is a verdict about the harness rather than about the product.
 """
 
 
+
+def capture_setup_proof(
+    aua_command: str, setup_proof: tuple[str, str, str]
+) -> dict[str, Any] | None:
+    """Whether a caller-supplied pattern appears in the device log right now.
+
+    A precondition a caller must be able to *prove* rather than infer from the screen. The
+    pattern and the value it stands for belong to the caller: this engine is app-agnostic and
+    must not know what any product calls its account tiers or entitlements.
+
+    Only the boolean and the caller's own label come back. **The matching line is never
+    returned or stored** -- a response body carrying this kind of field usually carries the
+    account address beside it, and setup evidence is copied into published reports.
+
+    Returns ``None`` when the log could not be read at all, so the caller records nothing and
+    keeps whatever it already does about an unproved precondition. A capture that cannot run
+    must never be mistaken for a precondition that failed, and must never invent one that held.
+    """
+    _, pattern, value = setup_proof
+    try:
+        completed = subprocess.run(
+            [aua_command, "logcat", "--since", "1", "--json"],
+            capture_output=True, text=True, timeout=90, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    try:
+        lines = json.loads(completed.stdout).get("lines")
+    except ValueError:
+        return None
+    if not isinstance(lines, list):
+        return None
+    matched = any(pattern in str(line) for line in lines)
+    return {"verified": matched, "actual": value if matched else None, "source": "logcat"}
+
+
 async def replay_setup_flow(
     call: Callable[[str, dict[str, Any], str], Awaitable[dict[str, Any]]],
     flow_yaml: str,
@@ -772,6 +811,8 @@ async def run_realapp(
     flags: dict[str, str] | None = None,
     prelaunch_setup_flows: Sequence[tuple[str, dict[str, str]]] = (),
     setup_flows: Sequence[tuple[str, dict[str, str]]] = (),
+    aua_command: str = "aua",
+    setup_proof: tuple[str, str, str] | None = None,
     contract: str | None = None,
     authored_context: str | None = None,
     session_contract: str | None = None,
@@ -1105,6 +1146,12 @@ async def run_realapp(
                         if isinstance(e, Mapping) and e.get("id")
                     ][:12],
                 })
+        # After every setup flow, while the session is still live: a precondition the caller
+        # must be able to prove rather than infer from the screen.
+        if setup_proof is not None:
+            proved = capture_setup_proof(aua_command, setup_proof)
+            if proved is not None:
+                result[setup_proof[0]] = proved
         if flags or setup_flows or observation_frame(launched) is None:
             initial = await call("analyze_screen", {"source": "hierarchy", "no_cache": True}, "setup")
         else:
@@ -1625,6 +1672,16 @@ def main() -> int:
                         help="K=V[,K=V] for the --setup-flow at the same position; use '' to skip one")
     parser.add_argument("--flags", action="append", default=[],
                         help="Feature flag K=V applied and verified before the setup flows; repeatable")
+    parser.add_argument("--setup-proof-name",
+                        help="Result key to record a proved setup precondition under "
+                             "(e.g. a persona tier). Requires --setup-proof-grep and "
+                             "--setup-proof-value.")
+    parser.add_argument("--setup-proof-grep",
+                        help="Substring searched in the device log after the setup flows. Only "
+                             "whether it matched is recorded -- never the matching line, which "
+                             "may carry account data.")
+    parser.add_argument("--setup-proof-value",
+                        help="Value recorded as `actual` when --setup-proof-grep matches.")
     parser.add_argument("--contract", type=Path,
                         help="Authored acceptance criteria the judge answers against")
     parser.add_argument(
@@ -1675,6 +1732,10 @@ def main() -> int:
         args.prelaunch_setup_flow, args.prelaunch_setup_params
     )
     setup_flows = build_setup_flows(args.setup_flow, args.setup_params)
+    proof_parts = (args.setup_proof_name, args.setup_proof_grep, args.setup_proof_value)
+    if any(proof_parts) and not all(proof_parts):
+        parser.error("--setup-proof-name, --setup-proof-grep and --setup-proof-value go together")
+    setup_proof = tuple(proof_parts) if all(proof_parts) else None
     manifest = json.loads(args.manifest.read_text())
     candidate = next((item for item in manifest["models"] if args.model in {item["id"], item["repository"]}), None)
     if candidate is None:
@@ -1813,6 +1874,8 @@ def main() -> int:
                     flags=parse_pairs(args.flags, what="--flags"),
                     prelaunch_setup_flows=prelaunch_setup_flows,
                     setup_flows=setup_flows,
+                    aua_command=args.aua_command,
+                    setup_proof=setup_proof,
                     contract=args.contract.read_text(encoding="utf-8") if args.contract else None,
                     authored_context=(
                         args.context.read_text(encoding="utf-8") if args.context else None
