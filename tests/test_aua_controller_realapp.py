@@ -147,6 +147,13 @@ MCP_SCHEMAS = {
                                                         "enum": ["up", "down", "left", "right"]},
                                           "percent": {"type": "integer"}},
                            "required": ["direction"]},
+    # Mirrors the server's `open_link`: a URI, with package pinning left at its default so the
+    # VIEW intent stays on the app under test.
+    "open_link_and_analyze": {"type": "object",
+                              "properties": {"uri": {"type": "string"},
+                                             "package": {"type": "string"},
+                                             "pin_package": {"type": "boolean"}},
+                              "required": ["uri"]},
     "wait_and_analyze": {"type": "object", "properties": {"for_": {"type": "string"}, "idle": {"type": "boolean"},
                                                           "timeout": {"type": "integer"}}},
     "key_and_analyze": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},

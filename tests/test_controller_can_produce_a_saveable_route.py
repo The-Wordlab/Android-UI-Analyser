@@ -26,3 +26,27 @@ def test_the_controller_keeps_its_essential_verbs() -> None:
 
 def test_tool_names_are_unique() -> None:
     assert len(CONTROLLER_TOOLS) == len(set(CONTROLLER_TOOLS))
+
+
+def test_a_contract_naming_a_deeplink_can_actually_follow_one():
+    """A bullet about a deeplink is unjudgeable by a controller that cannot open one.
+
+    Measured 2026-09-15: a tools scenario asserting that a tool's deeplink opens the same
+    launchpad as the tap route left three criteria unverifiable, and the judge said exactly why --
+    "there was no OS intent/URL-launch tool available, so the URI was never triggered". The engine
+    has always exposed `open_link`; only the controller's list left it out, the same shape as the
+    scroll gap this file already guards.
+    """
+    from experiments.aua_controller.run_realapp import (
+        CONTROLLER_TOOLS,
+        REALAPP_COMPACT_PROPERTIES,
+    )
+
+    assert "open_link_and_analyze" in CONTROLLER_TOOLS, (
+        "a contract that names a deeplink needs a controller that can follow it"
+    )
+    kept = REALAPP_COMPACT_PROPERTIES.get("open_link_and_analyze", frozenset())
+    assert "uri" in kept, "which link was followed is the evidence the bullet is judged on"
+    assert "package" not in kept and "prefer" not in kept, (
+        "routing detail describes this host, not the journey"
+    )

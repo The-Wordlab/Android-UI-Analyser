@@ -71,6 +71,15 @@ CONTROLLER_TOOLS = (
     # would not save, so any journey needing to scroll could never leave a replayable flow behind.
     "scroll_and_analyze",
     "swipe_and_analyze", "back_gesture_and_analyze", "wait_and_analyze",
+    # A contract that names a deeplink cannot be judged by a controller with no way to follow one.
+    # Measured 2026-09-15: a tools scenario asserting "the tool's deeplink opens the same launchpad
+    # as the tap route" left three criteria unverifiable, and the judge said why in its own words --
+    # "there was no OS intent/URL-launch tool available, so the URI was never triggered". The
+    # engine has always exposed `open_link`; only the controller's list left it out.
+    #
+    # `pin_package` defaults true, so the VIEW intent stays on the app under test rather than
+    # wandering into a chooser or another product.
+    "open_link_and_analyze",
     "key_and_analyze", "session_progress", "session_finish",
 )
 # Real-app-only additions to compact-v1. Keep them here rather than widening run_live's fixed
@@ -84,6 +93,10 @@ REALAPP_COMPACT_PROPERTIES = {
     # is the same positional trap that makes a raw swipe unsaveable -- and the promoter has already
     # refused flows carrying a fixed scroll distance (the same carousel needed 7, then 12, then 17).
     "scroll_and_analyze": frozenset({"direction"}),
+    # The URI is the whole action: which link was followed is the evidence a deeplink bullet is
+    # judged on. `package`/`prefer` stay out -- they are routing detail, and a flow that bakes a
+    # chooser preference is describing this host rather than the journey.
+    "open_link_and_analyze": frozenset({"uri"}),
 }
 #: The one extra tool a contract-driven run needs. A checkpoint completes only on fresh
 #: assertion proof, so without a way to assert, a loaded contract can never be satisfied and
